@@ -1,0 +1,22 @@
+[project]
+name = "legion"
+version = "0.1.0"
+description = "Autonomous development swarm using Claude Code agents"
+requires-python = ">=3.11"
+dependencies = [
+    "anyio>=4.0",
+    "click>=8.0",
+]
+
+[project.scripts]
+legion = "legion.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-anyio>=0.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10"]
+build-backend = "uv_build"

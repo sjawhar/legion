@@ -166,9 +166,11 @@ Rate limits are generous: 5,000 req/hr, 250,000 complexity points/hr.
 
 3. Identify ALL dispatchable work:
    ┌─────────────────────────────────────────────────────────┐
-   │  EXECUTE pool: Unblocked tasks ready to implement       │
+   │  EXECUTE pool: Active issues ready to implement         │
+   │                (state.type: started, unstarted)         │
    │  PLAN pool: Phases that need breakdown into tasks       │
-   │  GROOM pool: Roadmap gaps, reprioritization needs       │
+   │  GROOM pool: Backlog issues needing refinement          │
+   │              (state.type: backlog) — handled by groomer │
    │  RESEARCH pool: Open questions needing investigation    │
    └─────────────────────────────────────────────────────────┘
 
@@ -393,6 +395,7 @@ Daemon starts
 | `ralph-dev-review` | Code review |
 | `ralph-dev-resolve` | Handle merge conflicts |
 | `ralph-dev-research` | Investigate open questions |
+| `ralph-dev-groom` | Refine backlog issues before they're ready to work |
 
 ## Dependencies
 
@@ -460,8 +463,62 @@ Controller assigns one of these skills when spawning a worker:
 | `ralph-dev-review` | Code review |
 | `ralph-dev-resolve` | Handle merge conflicts |
 | `ralph-dev-research` | Investigate open questions |
+| `ralph-dev-groom` | Refine backlog issues (see below) |
 
 (Extensible — add more skills as needed)
+
+### Backlog Groomer (Future)
+
+The backlog groomer handles the "refinement" phase before issues are ready to work:
+
+```
+Backlog ──► (groomer refines) ──► Todo ──► (worker implements) ──► In Review ──► Done
+```
+
+**Groomer responsibilities:**
+
+1. Poll for `backlog` type issues (Backlog, Icebox statuses)
+2. For each unrefined issue:
+   - Analyze requirements and acceptance criteria
+   - Write implementation plan
+   - Identify unknowns, blockers, dependencies
+   - Ask clarifying questions via Linear comments
+   - Estimate complexity
+3. When refined, move issue to "Todo" status
+
+**Refinement criteria:**
+
+An issue is "refined" when it has:
+- Clear acceptance criteria
+- Implementation approach documented
+- Dependencies identified and linked
+- No outstanding questions (or questions posted and waiting)
+
+**Groomer workflow:**
+
+```
+1. Get backlog issues (state.type == "backlog")
+2. Filter to issues without "refined" label
+3. For each issue:
+   a. Read issue description and comments
+   b. Research codebase for relevant context
+   c. Write implementation plan as comment
+   d. If questions exist:
+      - Post questions as comment
+      - Add "needs-input" label
+      - Leave in backlog
+   e. If ready:
+      - Add "refined" label
+      - Move to "Todo" status
+4. Exit (controller will restart for next iteration)
+```
+
+**Why separate from Controller:**
+
+- Grooming is CPU-intensive (research, planning)
+- Doesn't block active workers
+- Can run at lower priority/frequency
+- Keeps Controller focused on dispatching ready work
 
 ### Hooks
 
