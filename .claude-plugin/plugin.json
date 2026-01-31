@@ -1,0 +1,10 @@
+{
+  "name": "legion",
+  "version": "0.1.0",
+  "description": "Claude Code orchestration for Linear-driven autonomous development",
+  "author": {
+    "name": "Sami Jawhar"
+  },
+  "repository": "https://github.com/sjawhar/legion",
+  "license": "MIT"
+}

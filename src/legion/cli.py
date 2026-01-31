@@ -5,7 +5,7 @@ from pathlib import Path
 import anyio
 import click
 
-from . import daemon
+from legion import daemon
 
 
 @click.group()
@@ -71,44 +71,6 @@ def status(project_id: str, state_dir: Path | None) -> None:
         state_dir = Path.home() / ".legion" / project_id
 
     anyio.run(daemon.status, project_id, state_dir)
-
-
-@cli.command()
-@click.option(
-    "--workspace",
-    "-w",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Workspace to install hooks into (optional)",
-)
-@click.option(
-    "--skills-only",
-    is_flag=True,
-    help="Only install skills, skip hooks",
-)
-def setup(workspace: Path | None, skills_only: bool) -> None:
-    """Install Legion skills and hooks.
-
-    Skills are installed to ~/.claude/skills/.
-    Hooks are installed to WORKSPACE/.claude/hooks/ if --workspace is provided.
-    """
-    from . import setup as setup_module
-
-    # Install skills
-    installed_skills = setup_module.install_skills()
-    for skill in installed_skills:
-        click.echo(f"Installed skill: {skill}")
-
-    # Install hooks if workspace provided
-    if workspace and not skills_only:
-        installed_hooks = setup_module.install_hooks(workspace)
-        for hook in installed_hooks:
-            click.echo(f"Installed hook: {hook}")
-
-        setup_module.install_settings(workspace)
-        click.echo(f"Updated settings: {workspace}/.claude/settings.json")
-
-    click.echo("\nSetup complete!")
 
 
 def main() -> None:

@@ -1,6 +1,6 @@
 """Tests for session naming conventions."""
 
-from legion.daemon import short_id, controller_session_name
+from legion import daemon
 
 
 def worker_session_name(short: str, issue_id: str) -> str:
@@ -13,7 +13,7 @@ def worker_session_name(short: str, issue_id: str) -> str:
 
 class TestSessionNaming:
     def test_controller_session_format(self) -> None:
-        session = controller_session_name("abc123")
+        session = daemon.controller_session_name("abc123")
         assert session == "legion-abc123-controller"
 
     def test_worker_session_format(self) -> None:
@@ -33,9 +33,9 @@ class TestSessionNaming:
     def test_full_workflow(self) -> None:
         # Simulate full workflow from UUID to session names
         project_id = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
-        short = short_id(project_id)
+        short = daemon.get_short_id(project_id)
 
-        controller = controller_session_name(short)
+        controller = daemon.controller_session_name(short)
         worker = worker_session_name(short, "ENG-523")
 
         # Both should start with the same prefix
