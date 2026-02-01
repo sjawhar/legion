@@ -77,6 +77,7 @@ For each issue, execute the `suggested_action`:
 | `resume_implementer_for_retro` | Resume worker session, prompt to run retro |
 | `transition_to_in_progress` | Remove `worker-done`, update status to In Progress, dispatch implementer |
 | `transition_to_retro` | Remove `worker-done`, update status to Retro, resume implementer for retro |
+| `relay_user_feedback` | Prompt blocked worker to read Linear comments |
 | `escalate_blocked` | See step 3 |
 
 **Dispatch worker:**
@@ -111,6 +112,23 @@ tmux send-keys -t "$SESSION:main" \
 tmux send-keys -t "$SESSION:main" \
   "claude --dangerously-skip-permissions --resume '$SESSION_ID' \
    -p 'Continue: address PR comments'" Enter
+```
+
+**Relay user feedback:**
+```bash
+# When user-feedback-given label is present
+ISSUE_ID="ENG-21"
+ISSUE_ID_LOWER=$(echo "$ISSUE_ID" | tr '[:upper:]' '[:lower:]')
+SESSION="legion-$LEGION_SHORT_ID-worker-$ISSUE_ID_LOWER"
+
+# Prompt worker to read comments (safe - no user content injected)
+tmux send-keys -t "$SESSION:main" -l "User answered on Linear. Read the comments on your issue."
+tmux send-keys -t "$SESSION:main" Enter
+
+# Remove the user-feedback-given label
+mcp__linear__update_issue with:
+  id: <issue_id>
+  labelIds: [<all labels except user-feedback-given>]
 ```
 
 **Update Linear status:**

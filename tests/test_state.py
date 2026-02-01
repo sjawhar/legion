@@ -3,7 +3,7 @@
 import json
 import uuid
 from pathlib import Path
-from unittest.mock import patch, AsyncMock
+from unittest import mock
 
 import pytest
 
@@ -61,8 +61,8 @@ class TestGetLiveWorkers:
 
     @pytest.mark.anyio
     async def test_returns_issue_ids_from_worker_sessions(self) -> None:
-        with patch("legion.state.fetch.get_tmux_sessions", new_callable=AsyncMock) as mock:
-            mock.return_value = [
+        with mock.patch("legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock) as mock_sessions:
+            mock_sessions.return_value = [
                 "legion-abc123-worker-ENG-21",
                 "legion-abc123-worker-ENG-22",
             ]
@@ -71,8 +71,8 @@ class TestGetLiveWorkers:
 
     @pytest.mark.anyio
     async def test_ignores_other_sessions(self) -> None:
-        with patch("legion.state.fetch.get_tmux_sessions", new_callable=AsyncMock) as mock:
-            mock.return_value = [
+        with mock.patch("legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock) as mock_sessions:
+            mock_sessions.return_value = [
                 "legion-abc123-controller",
                 "legion-abc123-worker-ENG-21",
                 "other-session",
@@ -82,8 +82,8 @@ class TestGetLiveWorkers:
 
     @pytest.mark.anyio
     async def test_normalizes_lowercase_to_uppercase(self) -> None:
-        with patch("legion.state.fetch.get_tmux_sessions", new_callable=AsyncMock) as mock:
-            mock.return_value = [
+        with mock.patch("legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock) as mock_sessions:
+            mock_sessions.return_value = [
                 "legion-abc123-worker-eng-21",
                 "legion-abc123-worker-Eng-22",
             ]
@@ -512,6 +512,176 @@ class TestBuildIssueState:
         )
         state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
         assert state.suggested_action == "skip"
+    def test_relay_user_feedback_when_blocked_with_feedback(self) -> None:
+        """When worker is blocked and user gave feedback, relay it."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Which approach should I use?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+
+        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+
+        assert state.suggested_action == "relay_user_feedback"
+
+    def test_blocked_without_feedback_skips(self) -> None:
+        """Blocked worker without user feedback still skips."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["user-input-needed"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Which approach?",
+            has_user_feedback=False,
+            has_user_input_needed=True,
+        )
+
+        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+
+        assert state.suggested_action == "skip"
+
+    def test_blocked_with_feedback_but_no_live_worker_redispatches(self) -> None:
+        """When worker died but feedback was given, redispatch rather than relay."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=False,  # Worker crashed/terminated
+            is_blocked=True,  # Session file still shows blocked state
+            blocked_question="Which approach should I use?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+
+        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+
+        # Should dispatch a new implementer, not try to relay to dead worker
+        assert state.suggested_action == "dispatch_implementer"
+
+    def test_feedback_but_not_blocked_follows_normal_flow(self) -> None:
+        """Feedback given but worker not blocked follows normal transition logic."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["user-feedback-given", "worker-done"],
+            pr_is_draft=None,
+            has_live_worker=False,
+            is_blocked=False,  # Not blocked
+            blocked_question=None,
+            has_user_feedback=True,
+            has_user_input_needed=False,
+        )
+
+        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+
+        # Should follow normal flow: In Progress + worker-done → dispatch_reviewer
+        assert state.suggested_action == "dispatch_reviewer"
+
+    def test_relay_feedback_computes_correct_session_id(self) -> None:
+        """relay_user_feedback action computes session ID for implement mode."""
+        team_id = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Which approach?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+
+        state = decision.build_issue_state(data, team_id)
+
+        # relay_user_feedback should use implement mode
+        expected_session_id = types.compute_session_id(team_id, "ENG-21", "implement")
+        assert state.session_id == expected_session_id
+        assert state.suggested_action == "relay_user_feedback"
+
+    def test_relay_feedback_in_different_statuses(self) -> None:
+        """relay_user_feedback works regardless of issue status."""
+        team_id = "00000000-0000-0000-0000-000000000000"
+        
+        # Test in Todo status
+        data_todo = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="Todo",
+            labels=["user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Should I start?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+        state_todo = decision.build_issue_state(data_todo, team_id)
+        assert state_todo.suggested_action == "relay_user_feedback"
+
+        # Test in Needs Review status
+        data_review = types.FetchedIssueData(
+            issue_id="ENG-22",
+            status="Needs Review",
+            labels=["user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Should I merge?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+        state_review = decision.build_issue_state(data_review, team_id)
+        assert state_review.suggested_action == "relay_user_feedback"
+
+    def test_relay_feedback_preserves_blocked_question(self) -> None:
+        """Blocked question is preserved in state when relaying feedback."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Should I use approach A or B?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+
+        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+
+        assert state.suggested_action == "relay_user_feedback"
+        assert state.blocked_question == "Should I use approach A or B?"
+        assert state.has_user_feedback is True
+
+    def test_all_labels_present_relay_takes_precedence(self) -> None:
+        """When worker-done, user-input-needed, and user-feedback-given all present, relay wins."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status="In Progress",
+            labels=["worker-done", "user-input-needed", "user-feedback-given"],
+            pr_is_draft=None,
+            has_live_worker=True,
+            is_blocked=True,
+            blocked_question="Final question before completion?",
+            has_user_feedback=True,
+            has_user_input_needed=True,
+        )
+
+        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+
+        # relay_user_feedback takes precedence over normal state transitions
+        assert state.suggested_action == "relay_user_feedback"
+
+
 
 
 class TestFetchAllIssueData:
@@ -520,8 +690,8 @@ class TestFetchAllIssueData:
     @pytest.mark.anyio
     async def test_fetches_data_for_issues(self) -> None:
         with (
-            patch("legion.state.fetch.get_live_workers", new_callable=AsyncMock) as mock_workers,
-            patch("legion.state.fetch.get_pr_draft_status_batch", new_callable=AsyncMock) as mock_draft,
+            mock.patch("legion.state.fetch.get_live_workers", new_callable=mock.AsyncMock) as mock_workers,
+            mock.patch("legion.state.fetch.get_pr_draft_status_batch", new_callable=mock.AsyncMock) as mock_draft,
         ):
             mock_workers.return_value = {"ENG-21"}
             mock_draft.return_value = {}
@@ -602,3 +772,55 @@ class TestBuildCollectedState:
         assert "issues" in result
         assert "ENG-21" in result["issues"]
         assert result["issues"]["ENG-21"]["suggested_action"] == "dispatch_planner"
+
+    def test_relay_feedback_with_multiple_issues(self) -> None:
+        """Integration test: relay_user_feedback works with multiple issues."""
+        team_id = "00000000-0000-0000-0000-000000000000"
+        issues_data = [
+            # Normal issue - dispatch planner
+            types.FetchedIssueData(
+                issue_id="ENG-21",
+                status="Todo",
+                labels=[],
+                pr_is_draft=None,
+                has_live_worker=False,
+                is_blocked=False,
+                blocked_question=None,
+                has_user_feedback=False,
+                has_user_input_needed=False,
+            ),
+            # Blocked with feedback - relay
+            types.FetchedIssueData(
+                issue_id="ENG-22",
+                status="In Progress",
+                labels=["user-input-needed", "user-feedback-given"],
+                pr_is_draft=None,
+                has_live_worker=True,
+                is_blocked=True,
+                blocked_question="How should I proceed?",
+                has_user_feedback=True,
+                has_user_input_needed=True,
+            ),
+            # Blocked without feedback - skip
+            types.FetchedIssueData(
+                issue_id="ENG-23",
+                status="In Progress",
+                labels=["user-input-needed"],
+                pr_is_draft=None,
+                has_live_worker=True,
+                is_blocked=True,
+                blocked_question="Waiting for input",
+                has_user_feedback=False,
+                has_user_input_needed=True,
+            ),
+        ]
+
+        state = decision.build_collected_state(issues_data, team_id)
+
+        assert len(state.issues) == 3
+        assert state.issues["ENG-21"].suggested_action == "dispatch_planner"
+        assert state.issues["ENG-22"].suggested_action == "relay_user_feedback"
+        assert state.issues["ENG-22"].blocked_question == "How should I proceed?"
+        assert state.issues["ENG-23"].suggested_action == "skip"
+
+
