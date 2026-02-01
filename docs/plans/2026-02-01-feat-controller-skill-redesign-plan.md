@@ -220,7 +220,7 @@ The controller runs a Python script that consolidates all state checking:
     "ENG-21": {
       "status": "Needs Review",
       "labels": ["worker-done"],
-      "pr_labels": ["worker-approved"],
+      "pr_is_draft": false,
       "has_live_worker": false,
       "suggested_action": "transition_to_retro"
     },

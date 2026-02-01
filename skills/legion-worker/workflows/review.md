@@ -5,7 +5,7 @@ Deep PR review with line-level comments. Code is already local in the workspace.
 ## Constraint
 
 **Cannot approve/request changes via GitHub API** - same user as PR author.
-Signal outcome via GitHub PR labels instead.
+Signal outcome via PR draft status instead (draft = changes requested, ready = approved).
 
 ## Workflow
 
@@ -70,16 +70,16 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
 
 Group related issues when they affect the same area.
 
-### 5. Add GitHub PR Label
+### 5. Set PR Draft Status
 
-**Order matters:** Add PR label BEFORE `worker-done` to avoid race condition with controller.
+**Order matters:** Set draft status BEFORE `worker-done` to avoid race condition with controller.
 
 ```bash
-# If any CRITICAL/P1 issues found:
-gh pr edit "$LINEAR_ISSUE_ID" --add-label "worker-changes-requested"
+# If any CRITICAL/P1 issues found - convert to draft:
+gh pr ready "$LINEAR_ISSUE_ID" --undo
 
-# If no CRITICAL issues:
-gh pr edit "$LINEAR_ISSUE_ID" --add-label "worker-approved"
+# If no CRITICAL issues - mark ready for merge:
+gh pr ready "$LINEAR_ISSUE_ID"
 ```
 
 ### 6. Signal Completion

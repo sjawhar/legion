@@ -91,59 +91,180 @@ class TestGetLiveWorkers:
             assert result == {"ENG-21", "ENG-22"}
 
 
-class TestGetPrLabelsBatch:
-    """Test GitHub PR label batch fetching."""
+class TestGetPrDraftStatusBatch:
+    """Test GitHub PR draft status batch fetching."""
 
     @pytest.mark.anyio
-    async def test_returns_labels_for_multiple_issues(self) -> None:
+    async def test_returns_draft_status_for_multiple_issues(self) -> None:
+        """Multiple PRs in same repo are fetched in single query."""
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+            # Single repo uses repo0 alias
             response = {
                 "data": {
-                    "repository": {
-                        "pr0": {"labels": {"nodes": [{"name": "worker-approved"}]}},
-                        "pr1": {"labels": {"nodes": [{"name": "bug"}]}},
+                    "repo0": {
+                        "pr0": {"isDraft": True},
+                        "pr1": {"isDraft": False},
                     }
                 }
             }
             return json.dumps(response), "", 0
 
-        result = await fetch.get_pr_labels_batch(
+        result = await fetch.get_pr_draft_status_batch(
             {
                 "ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1),
                 "ENG-22": types.GitHubPRRef(owner="owner", repo="repo", number=2),
             },
             runner=mock_runner,
         )
-        assert result == {"ENG-21": ["worker-approved"], "ENG-22": ["bug"]}
+        assert result == {"ENG-21": True, "ENG-22": False}
 
     @pytest.mark.anyio
-    async def test_returns_empty_for_issues_without_pr(self) -> None:
+    async def test_returns_none_for_missing_pr(self) -> None:
+        """PR not found returns None (not omitted from results)."""
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             response = {
                 "data": {
-                    "repository": {
+                    "repo0": {
                         "pr0": None,  # PR not found
                     }
                 }
             }
             return json.dumps(response), "", 0
 
-        result = await fetch.get_pr_labels_batch(
+        result = await fetch.get_pr_draft_status_batch(
             {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=999)},
             runner=mock_runner,
         )
-        assert result == {"ENG-21": []}
+        assert result == {"ENG-21": None}
 
     @pytest.mark.anyio
-    async def test_handles_command_failure(self) -> None:
+    async def test_handles_null_is_draft_value(self) -> None:
+        """isDraft: null in response is treated as False (not draft)."""
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
-            return "", "error", 1
+            response = {
+                "data": {
+                    "repo0": {
+                        "pr0": {"isDraft": None},  # Malformed response
+                    }
+                }
+            }
+            return json.dumps(response), "", 0
 
-        result = await fetch.get_pr_labels_batch(
+        result = await fetch.get_pr_draft_status_batch(
             {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
             runner=mock_runner,
         )
-        assert result == {}
+        assert result == {"ENG-21": False}
+
+    @pytest.mark.anyio
+    async def test_raises_on_command_failure_after_retries(self) -> None:
+        """GraphQL failure raises GitHubAPIError after retries."""
+        call_count = 0
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+            nonlocal call_count
+            call_count += 1
+            return "", "rate limited", 1
+
+        with pytest.raises(fetch.GitHubAPIError, match="GraphQL query failed"):
+            await fetch.get_pr_draft_status_batch(
+                {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+                runner=mock_runner,
+            )
+
+        # Verify retries happened (3 attempts)
+        assert call_count == 3
+
+    @pytest.mark.anyio
+    async def test_raises_on_malformed_json_after_retries(self) -> None:
+        """Malformed JSON raises GitHubAPIError after retries."""
+        call_count = 0
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+            nonlocal call_count
+            call_count += 1
+            return "not valid json {[", "", 0  # Success exit but bad JSON
+
+        with pytest.raises(fetch.GitHubAPIError, match="Failed to parse GraphQL response"):
+            await fetch.get_pr_draft_status_batch(
+                {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+                runner=mock_runner,
+            )
+
+        # Verify retries happened (3 attempts)
+        assert call_count == 3
+
+    @pytest.mark.anyio
+    async def test_succeeds_after_transient_failures(self) -> None:
+        """API succeeds after transient failures - retries work correctly."""
+        call_count = 0
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return "", "temporary network error", 1
+            # Succeed on third attempt
+            response = {"data": {"repo0": {"pr0": {"isDraft": False}}}}
+            return json.dumps(response), "", 0
+
+        result = await fetch.get_pr_draft_status_batch(
+            {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+            runner=mock_runner,
+        )
+
+        assert result == {"ENG-21": False}
+        assert call_count == 3  # Two failures, one success
+
+    @pytest.mark.anyio
+    async def test_handles_null_data_in_response(self) -> None:
+        """GitHub returning null data field is handled gracefully."""
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+            # GitHub can return {"data": null, "errors": [...]} for invalid repos
+            response = {"data": None, "errors": [{"message": "Not found"}]}
+            return json.dumps(response), "", 0
+
+        result = await fetch.get_pr_draft_status_batch(
+            {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+            runner=mock_runner,
+        )
+
+        # Should return None for the PR (not found), not crash
+        assert result == {"ENG-21": None}
+
+    @pytest.mark.anyio
+    async def test_batches_multiple_repos_in_single_query(self) -> None:
+        """PRs from different repos are batched into a single GraphQL query."""
+        queries_received: list[str] = []
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+            # Extract query from command
+            query = cmd[-1]  # "query=..."
+            queries_received.append(query)
+
+            # Both repos in one response
+            response = {
+                "data": {
+                    "repo0": {"pr0": {"isDraft": True}},
+                    "repo1": {"pr0": {"isDraft": False}},
+                }
+            }
+            return json.dumps(response), "", 0
+
+        result = await fetch.get_pr_draft_status_batch(
+            {
+                "ENG-21": types.GitHubPRRef(owner="org", repo="repo1", number=1),
+                "ENG-22": types.GitHubPRRef(owner="org", repo="repo2", number=2),
+            },
+            runner=mock_runner,
+        )
+
+        # Single query containing both repos
+        assert len(queries_received) == 1
+        assert "repo1" in queries_received[0]
+        assert "repo2" in queries_received[0]
+        assert result == {"ENG-21": True, "ENG-22": False}
 
 
 class TestCheckWorkerBlocked:
@@ -236,7 +357,7 @@ class TestSuggestAction:
             status=types.IssueStatus.TODO,
             has_worker_done=False,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "dispatch_planner"
@@ -246,7 +367,7 @@ class TestSuggestAction:
             status=types.IssueStatus.TODO,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "transition_to_in_progress"
@@ -256,7 +377,7 @@ class TestSuggestAction:
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=False,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "dispatch_implementer"
@@ -266,7 +387,7 @@ class TestSuggestAction:
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "dispatch_reviewer"
@@ -276,37 +397,84 @@ class TestSuggestAction:
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=False,
             has_live_worker=True,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "skip"
 
     def test_needs_review_approved(self) -> None:
+        """PR is ready (not draft) = approved."""
         action = decision.suggest_action(
             status=types.IssueStatus.NEEDS_REVIEW,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=["worker-approved"],
+            pr_is_draft=False,  # PR is ready = approved
             is_blocked=False,
         )
         assert action == "transition_to_retro"
 
     def test_needs_review_changes_requested(self) -> None:
+        """PR is draft = changes requested."""
         action = decision.suggest_action(
             status=types.IssueStatus.NEEDS_REVIEW,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=["worker-changes-requested"],
+            pr_is_draft=True,  # PR is draft = changes requested
             is_blocked=False,
         )
         assert action == "resume_implementer_for_changes"
+
+    def test_needs_review_no_pr_skips(self) -> None:
+        """No PR yet = wait."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=None,  # No PR
+            is_blocked=False,
+        )
+        assert action == "skip"
+
+    def test_needs_review_no_worker_done_dispatches_reviewer(self) -> None:
+        """Issue in Needs Review without worker-done = dispatch reviewer."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+            is_blocked=False,
+        )
+        assert action == "dispatch_reviewer"
+
+    def test_needs_review_with_live_worker_no_done_skips(self) -> None:
+        """Active reviewer session without worker-done = skip."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=False,
+            has_live_worker=True,
+            pr_is_draft=None,
+            is_blocked=False,
+        )
+        assert action == "skip"
+
+    def test_needs_review_worker_done_ignores_live_worker(self) -> None:
+        """worker-done label takes precedence over live worker check."""
+        # When worker-done is set, we trust it and proceed with PR status
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=True,
+            has_live_worker=True,  # Stale session still running
+            pr_is_draft=False,
+            is_blocked=False,
+        )
+        assert action == "transition_to_retro"
 
     def test_blocked_escalates(self) -> None:
         action = decision.suggest_action(
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=False,
             has_live_worker=True,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=True,
         )
         assert action == "escalate_blocked"
@@ -320,7 +488,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=[],
-            pr_labels=[],
+            pr_is_draft=None,
             has_live_worker=False,
             is_blocked=False,
             blocked_question=None,
@@ -335,7 +503,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=["user-input-needed"],
-            pr_labels=[],
+            pr_is_draft=None,
             has_live_worker=False,
             is_blocked=False,
             blocked_question=None,
@@ -353,10 +521,10 @@ class TestFetchAllIssueData:
     async def test_fetches_data_for_issues(self) -> None:
         with (
             patch("legion.state.fetch.get_live_workers", new_callable=AsyncMock) as mock_workers,
-            patch("legion.state.fetch.get_pr_labels_batch", new_callable=AsyncMock) as mock_labels,
+            patch("legion.state.fetch.get_pr_draft_status_batch", new_callable=AsyncMock) as mock_draft,
         ):
             mock_workers.return_value = {"ENG-21"}
-            mock_labels.return_value = {}
+            mock_draft.return_value = {}
 
             linear_issues = [
                 {
@@ -386,7 +554,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
-                pr_labels=[],
+                pr_is_draft=None,
                 has_live_worker=False,
                 is_blocked=False,
                 blocked_question=None,
@@ -397,7 +565,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-22",
                 status="In Progress",
                 labels=["worker-done"],
-                pr_labels=[],
+                pr_is_draft=None,
                 has_live_worker=False,
                 is_blocked=False,
                 blocked_question=None,
@@ -419,7 +587,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
-                pr_labels=[],
+                pr_is_draft=None,
                 has_live_worker=False,
                 is_blocked=False,
                 blocked_question=None,

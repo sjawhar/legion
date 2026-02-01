@@ -18,15 +18,16 @@ from typing import Any, Protocol
 import aiofiles
 import anyio
 from async_lru import alru_cache
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from legion import tmux
 from legion.state.types import (
     FetchedIssueData,
-    GitHubPR,
     GitHubPRRef,
     IssueStatus,
     ParsedIssue,
     SessionEntry,
+    WorkerMode,
     compute_session_id,
 )
 
@@ -93,30 +94,48 @@ async def get_live_workers(
 
 
 # =============================================================================
-# GitHub PR Label Fetching
+# GitHub PR Draft Status Fetching
 # =============================================================================
 
 
-async def get_pr_labels_batch(
+class GitHubAPIError(Exception):
+    """Raised when GitHub API calls fail after retries."""
+
+    pass
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(GitHubAPIError),
+    reraise=True,
+)
+async def get_pr_draft_status_batch(
     pr_refs: dict[str, GitHubPRRef],
     *,
     runner: CommandRunner = default_runner,
-) -> dict[str, list[str]]:
-    """Fetch PR labels for multiple issues using their PR references.
+) -> dict[str, bool | None]:
+    """Fetch PR draft status for multiple issues in a single GraphQL query.
 
-    Groups PRs by repository and fetches labels via GraphQL.
+    Batches all PRs across all repositories into one API call.
 
     Args:
         pr_refs: Dict mapping issue_id to GitHubPRRef
         runner: Command runner for testing
 
     Returns:
-        Dict mapping issue_id to list of label names
+        Dict mapping issue_id to:
+        - True: PR is draft (changes requested)
+        - False: PR is ready (approved)
+        - None: PR not found
+
+    Raises:
+        GitHubAPIError: If GraphQL query fails after retries
     """
     if not pr_refs:
         return {}
 
-    # Group by repository
+    # Group by repository for query structure
     by_repo: dict[tuple[str, str], list[tuple[str, int]]] = {}
     for issue_id, ref in pr_refs.items():
         key = (ref.owner, ref.repo)
@@ -124,55 +143,59 @@ async def get_pr_labels_batch(
             by_repo[key] = []
         by_repo[key].append((issue_id, ref.number))
 
-    result: dict[str, list[str]] = {}
+    # Build single GraphQL query for all repos and PRs
+    # Maps: repo_alias -> (owner, repo), pr_alias -> issue_id
+    repo_alias_map: dict[str, tuple[str, str]] = {}
+    pr_alias_map: dict[str, dict[str, tuple[str, int]]] = {}  # repo_alias -> {pr_alias -> (issue_id, pr_number)}
 
-    # Fetch labels for each repository
-    for (owner, repo), issue_prs in by_repo.items():
-        # Build GraphQL query for all PRs in this repo
-        query_parts = []
-        for i, (issue_id, pr_number) in enumerate(issue_prs):
-            query_parts.append(f'''
-                pr{i}: pullRequest(number: {pr_number}) {{
-                    labels(first: 20) {{
-                        nodes {{ name }}
-                    }}
-                }}
-            ''')
+    query_parts = []
+    for repo_idx, ((owner, repo), issue_prs) in enumerate(by_repo.items()):
+        repo_alias = f"repo{repo_idx}"
+        repo_alias_map[repo_alias] = (owner, repo)
+        pr_alias_map[repo_alias] = {}
 
-        query = f'''
-            query {{
-                repository(owner: "{owner}", name: "{repo}") {{
-                    {" ".join(query_parts)}
-                }}
-            }}
-        '''
+        pr_parts = []
+        for pr_idx, (issue_id, pr_number) in enumerate(issue_prs):
+            pr_alias = f"pr{pr_idx}"
+            pr_alias_map[repo_alias][pr_alias] = (issue_id, pr_number)
+            pr_parts.append(f'{pr_alias}: pullRequest(number: {pr_number}) {{ isDraft }}')
 
-        logger.debug("Fetching PR labels for %d issues from %s/%s", len(issue_prs), owner, repo)
+        query_parts.append(f'{repo_alias}: repository(owner: "{owner}", name: "{repo}") {{ {" ".join(pr_parts)} }}')
 
-        stdout, stderr, rc = await runner([
-            "gh", "api", "graphql", "-f", f"query={query}"
-        ])
+    query = f"query {{ {' '.join(query_parts)} }}"
 
-        if rc != 0:
-            logger.warning("GraphQL query failed for %s/%s: %s", owner, repo, stderr)
-            continue
+    logger.debug("Fetching PR draft status for %d issues across %d repos", len(pr_refs), len(by_repo))
 
-        try:
-            data = json.loads(stdout)
-            repo_data = data.get("data", {}).get("repository", {})
+    stdout, stderr, rc = await runner([
+        "gh", "api", "graphql", "-f", f"query={query}"
+    ])
 
-            for i, (issue_id, _) in enumerate(issue_prs):
-                pr_data = repo_data.get(f"pr{i}")
-                if pr_data:
-                    labels = pr_data.get("labels", {}).get("nodes", [])
-                    result[issue_id] = [lbl["name"] for lbl in labels if "name" in lbl]
-                    logger.debug("Issue %s has PR labels: %s", issue_id, result[issue_id])
-                else:
-                    result[issue_id] = []
-                    logger.debug("Issue %s PR not found", issue_id)
+    if rc != 0:
+        logger.error("GraphQL query failed: %s", stderr)
+        raise GitHubAPIError(f"GraphQL query failed: {stderr}")
 
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning("Failed to parse GraphQL response for %s/%s: %s", owner, repo, e)
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse GraphQL response: %s", e)
+        raise GitHubAPIError(f"Failed to parse GraphQL response: {e}") from e
+
+    data_obj = data.get("data") or {}
+    result: dict[str, bool | None] = {}
+
+    # Parse response using alias maps
+    for repo_alias, (owner, repo) in repo_alias_map.items():
+        repo_data = data_obj.get(repo_alias) or {}
+
+        for pr_alias, (issue_id, pr_number) in pr_alias_map[repo_alias].items():
+            pr_data = repo_data.get(pr_alias)
+            if pr_data and "isDraft" in pr_data:
+                is_draft = pr_data["isDraft"]
+                result[issue_id] = bool(is_draft) if is_draft is not None else False
+                logger.debug("Issue %s PR #%d isDraft: %s", issue_id, pr_number, result[issue_id])
+            else:
+                result[issue_id] = None
+                logger.warning("Issue %s PR #%d not found in %s/%s", issue_id, pr_number, owner, repo)
 
     return result
 
@@ -305,7 +328,7 @@ async def check_worker_blocked_any_mode(
     Returns:
         Tuple of (is_blocked, question_text)
     """
-    for mode in ("implement", "review", "finish"):
+    for mode in (WorkerMode.IMPLEMENT, WorkerMode.REVIEW, WorkerMode.FINISH):
         session_id = compute_session_id(team_id, issue_id, mode)
         session_file = session_dir / f"{session_id}.jsonl"
         blocked, question = await check_worker_blocked(session_file)
@@ -421,26 +444,26 @@ async def fetch_all_issue_data(
     # Phase 1: Parse issues (sync, fast)
     parsed_issues = parse_linear_issues(linear_issues)
 
-    # Identify PRs that need label lookup (issues with PR refs and needs_pr_labels)
-    pr_refs_for_labels: dict[str, GitHubPRRef] = {
+    # Identify PRs that need draft status lookup
+    pr_refs_for_status: dict[str, GitHubPRRef] = {
         p.issue_id: p.pr_ref
         for p in parsed_issues
-        if p.needs_pr_labels and p.pr_ref is not None
+        if p.needs_pr_status and p.pr_ref is not None
     }
 
     # Phase 2: Fetch everything in parallel
     live_workers: set[str] = set()
-    pr_labels_map: dict[str, list[str]] = {}
+    pr_draft_map: dict[str, bool | None] = {}
     blocked_map: dict[str, tuple[bool, str | None]] = {}
 
     async def fetch_workers() -> None:
         nonlocal live_workers
         live_workers = await get_live_workers(short_id, runner=runner)
 
-    async def fetch_pr_labels() -> None:
-        nonlocal pr_labels_map
-        if pr_refs_for_labels:
-            pr_labels_map = await get_pr_labels_batch(pr_refs_for_labels, runner=runner)
+    async def fetch_pr_draft_status() -> None:
+        nonlocal pr_draft_map
+        if pr_refs_for_status:
+            pr_draft_map = await get_pr_draft_status_batch(pr_refs_for_status, runner=runner)
 
     async def check_blocked(issue: ParsedIssue) -> None:
         if session_dir:
@@ -452,7 +475,7 @@ async def fetch_all_issue_data(
     async with anyio.create_task_group() as tg:
         # Start all fetches concurrently
         tg.start_soon(fetch_workers)
-        tg.start_soon(fetch_pr_labels)
+        tg.start_soon(fetch_pr_draft_status)
 
         # Note: We can't check blocked status until we know live workers
         # But we can start preparing session IDs
@@ -474,11 +497,14 @@ async def fetch_all_issue_data(
         has_live_worker = issue.issue_id.upper() in live_workers
         blocked, blocked_question = blocked_map.get(issue.issue_id, (False, None))
 
+        # PR draft status: None if no PR, True/False if PR exists
+        pr_is_draft: bool | None = pr_draft_map.get(issue.issue_id)
+
         results.append(FetchedIssueData(
             issue_id=issue.issue_id,
             status=issue.status,
             labels=issue.labels,
-            pr_labels=pr_labels_map.get(issue.issue_id, []),
+            pr_is_draft=pr_is_draft,
             has_live_worker=has_live_worker,
             is_blocked=blocked,
             blocked_question=blocked_question,
