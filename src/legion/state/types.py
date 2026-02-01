@@ -8,6 +8,7 @@ Contains:
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
@@ -17,18 +18,22 @@ from typing import Any, Literal, TypedDict
 # Status Constants and Normalization
 # =============================================================================
 
+# Literal types for compile-time safety
+IssueStatusLiteral = Literal["Todo", "In Progress", "Needs Review", "Retro", "Done"]
+WorkerModeLiteral = Literal["plan", "implement", "review", "finish"]
+
 
 class IssueStatus:
     """Canonical issue status values with normalization."""
 
-    TODO = "Todo"
-    IN_PROGRESS = "In Progress"
-    NEEDS_REVIEW = "Needs Review"
-    RETRO = "Retro"
-    DONE = "Done"
+    TODO: IssueStatusLiteral = "Todo"
+    IN_PROGRESS: IssueStatusLiteral = "In Progress"
+    NEEDS_REVIEW: IssueStatusLiteral = "Needs Review"
+    RETRO: IssueStatusLiteral = "Retro"
+    DONE: IssueStatusLiteral = "Done"
 
     # Map Linear's status names to our canonical names
-    ALIASES: dict[str, str] = {
+    ALIASES: dict[str, IssueStatusLiteral] = {
         "In Review": NEEDS_REVIEW,
     }
 
@@ -41,10 +46,10 @@ class IssueStatus:
 class WorkerMode:
     """Worker mode constants for session ID computation."""
 
-    PLAN: str = "plan"
-    IMPLEMENT: str = "implement"
-    REVIEW: str = "review"
-    FINISH: str = "finish"
+    PLAN: WorkerModeLiteral = "plan"
+    IMPLEMENT: WorkerModeLiteral = "implement"
+    REVIEW: WorkerModeLiteral = "review"
+    FINISH: WorkerModeLiteral = "finish"
 
 
 # =============================================================================
@@ -145,9 +150,9 @@ class SessionEntry(TypedDict):
 # =============================================================================
 
 
-@dataclass
+@dataclass(frozen=True)
 class GitHubPRRef:
-    """Parsed GitHub PR reference from URL."""
+    """Parsed GitHub PR reference from URL (immutable value object)."""
 
     owner: str
     repo: str
@@ -163,11 +168,14 @@ class GitHubPRRef:
         Returns:
             GitHubPRRef or None if URL doesn't match expected format
         """
-        import re
         match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
-        if match:
-            return cls(owner=match.group(1), repo=match.group(2), number=int(match.group(3)))
-        return None
+        if not match:
+            return None
+        owner, repo = match.group(1), match.group(2)
+        # Validate owner/repo contain only safe characters (alphanumeric, hyphen, underscore, dot)
+        if not re.match(r"^[\w.-]+$", owner) or not re.match(r"^[\w.-]+$", repo):
+            return None
+        return cls(owner=owner, repo=repo, number=int(match.group(3)))
 
 
 @dataclass
@@ -183,8 +191,8 @@ class ParsedIssue:
     pr_ref: GitHubPRRef | None = None
 
     @property
-    def needs_pr_labels(self) -> bool:
-        """Whether this issue needs PR label lookup."""
+    def needs_pr_status(self) -> bool:
+        """Whether this issue needs PR draft status lookup."""
         return (
             self.status == IssueStatus.NEEDS_REVIEW
             and self.has_worker_done
@@ -199,7 +207,7 @@ class FetchedIssueData:
     issue_id: str
     status: str
     labels: list[str]
-    pr_labels: list[str]
+    pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
     has_live_worker: bool
     is_blocked: bool
     blocked_question: str | None
@@ -213,7 +221,7 @@ class IssueState:
 
     status: str
     labels: list[str]
-    pr_labels: list[str]
+    pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
     has_live_worker: bool
     suggested_action: ActionType
     session_id: str
@@ -225,7 +233,7 @@ class IssueState:
         return {
             "status": self.status,
             "labels": self.labels,
-            "pr_labels": self.pr_labels,
+            "pr_is_draft": self.pr_is_draft,
             "has_live_worker": self.has_live_worker,
             "suggested_action": self.suggested_action,
             "session_id": self.session_id,
@@ -252,7 +260,7 @@ class CollectedState:
 # =============================================================================
 
 
-def compute_session_id(team_id: str, issue_id: str, mode: str) -> str:
+def compute_session_id(team_id: str, issue_id: str, mode: WorkerModeLiteral) -> str:
     """Compute deterministic session ID using UUIDv5.
 
     Args:

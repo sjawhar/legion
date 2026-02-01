@@ -14,17 +14,18 @@ Preserve existing labels when adding:
 3. mcp__linear__update_issue(id: ISSUE_ID, labelIds: [...existing, workerDoneId])
 ```
 
-## GitHub PR Labels (Not Linear)
+## GitHub PR Draft Status (Not Linear)
 
-Review outcomes go on the **GitHub PR**, not Linear:
+Review outcomes signaled via **PR draft status**, not labels:
 
-| Label | Meaning |
-|-------|---------|
-| `worker-approved` | PR passes review |
-| `worker-changes-requested` | PR needs work |
+| Status | Meaning |
+|--------|---------|
+| Ready (not draft) | PR passes review |
+| Draft | PR needs work |
 
 ```bash
-gh pr edit --add-label <label>
+gh pr ready "$LINEAR_ISSUE_ID"        # Mark approved
+gh pr ready "$LINEAR_ISSUE_ID" --undo # Mark changes requested
 ```
 
-**Critical ordering for reviewers:** Add PR label BEFORE `worker-done` on Linear.
+**Critical ordering for reviewers:** Set draft status BEFORE `worker-done` on Linear.
