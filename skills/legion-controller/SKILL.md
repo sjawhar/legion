@@ -52,7 +52,7 @@ Output:
     "ENG-21": {
       "status": "Needs Review",
       "labels": ["worker-done"],
-      "pr_labels": ["worker-approved"],
+      "pr_is_draft": false,
       "has_live_worker": false,
       "suggested_action": "transition_to_retro",
       "session_id": "uuid-for-implement-mode",
@@ -107,9 +107,9 @@ tmux send-keys -t "$SESSION:main" \
 
 **Resume worker:**
 ```bash
-# Same session ID computation - resumes existing session
+# Use --resume to continue existing session (not --session-id)
 tmux send-keys -t "$SESSION:main" \
-  "claude --dangerously-skip-permissions --session-id '$SESSION_ID' \
+  "claude --dangerously-skip-permissions --resume '$SESSION_ID' \
    -p 'Continue: address PR comments'" Enter
 ```
 
@@ -158,7 +158,7 @@ Todo → In Progress → Needs Review → Retro → Done
 |--------|-------------|----------------|
 | Todo | plan | Plan posted to Linear |
 | In Progress | implement | PR opened |
-| Needs Review | review | PR labeled + `worker-done` |
+| Needs Review | review | PR marked ready/draft + `worker-done` |
 | Retro | implement (retro) | Learnings documented |
 | Done | finish | PR merged, workspace cleaned |
 
@@ -169,9 +169,9 @@ Todo → In Progress → Needs Review → Retro → Done
 - `user-input-needed` - Waiting for human (controller skips)
 - `user-feedback-given` - Human answered (controller relays to worker)
 
-**GitHub PR:**
-- `worker-approved` - Review passed
-- `worker-changes-requested` - Review found issues
+**GitHub PR (via draft status):**
+- PR ready (not draft) = Review approved → transition to Retro
+- PR draft = Changes requested → resume implementer
 
 ## Important
 

@@ -91,33 +91,33 @@ class TestGetLiveWorkers:
             assert result == {"ENG-21", "ENG-22"}
 
 
-class TestGetPrLabelsBatch:
-    """Test GitHub PR label batch fetching."""
+class TestGetPrDraftStatusBatch:
+    """Test GitHub PR draft status batch fetching."""
 
     @pytest.mark.anyio
-    async def test_returns_labels_for_multiple_issues(self) -> None:
+    async def test_returns_draft_status_for_multiple_issues(self) -> None:
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             response = {
                 "data": {
                     "repository": {
-                        "pr0": {"labels": {"nodes": [{"name": "worker-approved"}]}},
-                        "pr1": {"labels": {"nodes": [{"name": "bug"}]}},
+                        "pr0": {"isDraft": True},
+                        "pr1": {"isDraft": False},
                     }
                 }
             }
             return json.dumps(response), "", 0
 
-        result = await fetch.get_pr_labels_batch(
+        result = await fetch.get_pr_draft_status_batch(
             {
                 "ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1),
                 "ENG-22": types.GitHubPRRef(owner="owner", repo="repo", number=2),
             },
             runner=mock_runner,
         )
-        assert result == {"ENG-21": ["worker-approved"], "ENG-22": ["bug"]}
+        assert result == {"ENG-21": True, "ENG-22": False}
 
     @pytest.mark.anyio
-    async def test_returns_empty_for_issues_without_pr(self) -> None:
+    async def test_skips_issues_with_missing_pr(self) -> None:
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             response = {
                 "data": {
@@ -128,18 +128,18 @@ class TestGetPrLabelsBatch:
             }
             return json.dumps(response), "", 0
 
-        result = await fetch.get_pr_labels_batch(
+        result = await fetch.get_pr_draft_status_batch(
             {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=999)},
             runner=mock_runner,
         )
-        assert result == {"ENG-21": []}
+        assert result == {}
 
     @pytest.mark.anyio
     async def test_handles_command_failure(self) -> None:
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             return "", "error", 1
 
-        result = await fetch.get_pr_labels_batch(
+        result = await fetch.get_pr_draft_status_batch(
             {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
             runner=mock_runner,
         )
@@ -236,7 +236,7 @@ class TestSuggestAction:
             status=types.IssueStatus.TODO,
             has_worker_done=False,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "dispatch_planner"
@@ -246,7 +246,7 @@ class TestSuggestAction:
             status=types.IssueStatus.TODO,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "transition_to_in_progress"
@@ -256,7 +256,7 @@ class TestSuggestAction:
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=False,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "dispatch_implementer"
@@ -266,7 +266,7 @@ class TestSuggestAction:
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "dispatch_reviewer"
@@ -276,37 +276,50 @@ class TestSuggestAction:
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=False,
             has_live_worker=True,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=False,
         )
         assert action == "skip"
 
     def test_needs_review_approved(self) -> None:
+        """PR is ready (not draft) = approved."""
         action = decision.suggest_action(
             status=types.IssueStatus.NEEDS_REVIEW,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=["worker-approved"],
+            pr_is_draft=False,  # PR is ready = approved
             is_blocked=False,
         )
         assert action == "transition_to_retro"
 
     def test_needs_review_changes_requested(self) -> None:
+        """PR is draft = changes requested."""
         action = decision.suggest_action(
             status=types.IssueStatus.NEEDS_REVIEW,
             has_worker_done=True,
             has_live_worker=False,
-            pr_labels=["worker-changes-requested"],
+            pr_is_draft=True,  # PR is draft = changes requested
             is_blocked=False,
         )
         assert action == "resume_implementer_for_changes"
+
+    def test_needs_review_no_pr_skips(self) -> None:
+        """No PR yet = wait."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=None,  # No PR
+            is_blocked=False,
+        )
+        assert action == "skip"
 
     def test_blocked_escalates(self) -> None:
         action = decision.suggest_action(
             status=types.IssueStatus.IN_PROGRESS,
             has_worker_done=False,
             has_live_worker=True,
-            pr_labels=[],
+            pr_is_draft=None,
             is_blocked=True,
         )
         assert action == "escalate_blocked"
@@ -320,7 +333,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=[],
-            pr_labels=[],
+            pr_is_draft=None,
             has_live_worker=False,
             is_blocked=False,
             blocked_question=None,
@@ -335,7 +348,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=["user-input-needed"],
-            pr_labels=[],
+            pr_is_draft=None,
             has_live_worker=False,
             is_blocked=False,
             blocked_question=None,
@@ -353,10 +366,10 @@ class TestFetchAllIssueData:
     async def test_fetches_data_for_issues(self) -> None:
         with (
             patch("legion.state.fetch.get_live_workers", new_callable=AsyncMock) as mock_workers,
-            patch("legion.state.fetch.get_pr_labels_batch", new_callable=AsyncMock) as mock_labels,
+            patch("legion.state.fetch.get_pr_draft_status_batch", new_callable=AsyncMock) as mock_draft,
         ):
             mock_workers.return_value = {"ENG-21"}
-            mock_labels.return_value = {}
+            mock_draft.return_value = {}
 
             linear_issues = [
                 {
@@ -386,7 +399,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
-                pr_labels=[],
+                pr_is_draft=None,
                 has_live_worker=False,
                 is_blocked=False,
                 blocked_question=None,
@@ -397,7 +410,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-22",
                 status="In Progress",
                 labels=["worker-done"],
-                pr_labels=[],
+                pr_is_draft=None,
                 has_live_worker=False,
                 is_blocked=False,
                 blocked_question=None,
@@ -419,7 +432,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
-                pr_labels=[],
+                pr_is_draft=None,
                 has_live_worker=False,
                 is_blocked=False,
                 blocked_question=None,

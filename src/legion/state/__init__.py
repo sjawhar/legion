@@ -18,7 +18,7 @@ from legion.state.fetch import (
     check_worker_blocked,
     fetch_all_issue_data,
     get_live_workers,
-    get_pr_labels_batch,
+    get_pr_draft_status_batch,
     parse_linear_issues,
 )
 from legion.state.types import (
@@ -49,7 +49,7 @@ __all__ = [
     "compute_session_id",
     "fetch_all_issue_data",
     "get_live_workers",
-    "get_pr_labels_batch",
+    "get_pr_draft_status_batch",
     "parse_linear_issues",
     "suggest_action",
 ]

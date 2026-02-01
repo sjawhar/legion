@@ -35,11 +35,11 @@ Required:
 
 Note: `retro` runs before `finish` because retro adds learnings to the workspace, and finish deletes it.
 
-## Review Mode Labels
+## Review Mode Signaling
 
-Review adds a GitHub PR label BEFORE `worker-done`:
-- `worker-approved` - no blocking issues
-- `worker-changes-requested` - blocking issues found
+Review signals outcome via PR draft status BEFORE `worker-done`:
+- **PR ready** (not draft) - no blocking issues, approved
+- **PR draft** - blocking issues found, changes requested
 
 ## Reference
 

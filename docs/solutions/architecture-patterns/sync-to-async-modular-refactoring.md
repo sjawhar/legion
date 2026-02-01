@@ -66,7 +66,7 @@ All independent I/O operations run concurrently using `anyio.create_task_group()
 ```python
 async with anyio.create_task_group() as tg:
     tg.start_soon(fetch_workers)      # tmux session list
-    tg.start_soon(fetch_pr_labels)    # single GraphQL query
+    tg.start_soon(fetch_pr_draft_status)  # single GraphQL query
 
 # Phase 2: Check blocked status (depends on live workers)
 if session_dir and live_worker_issues:
@@ -80,24 +80,17 @@ if session_dir and live_worker_issues:
 Replaced N individual `gh pr view` calls with a single GraphQL query using aliases:
 
 ```python
-async def get_pr_labels_batch(
-    issue_ids: list[str],
-    owner: str,
-    repo: str,
+async def get_pr_draft_status_batch(
+    pr_refs: dict[str, GitHubPRRef],
     *,
     runner: CommandRunner = default_runner,
-) -> dict[str, list[str]]:
-    # Build GraphQL query for all branches at once
+) -> dict[str, bool]:
+    # Build GraphQL query for all PRs at once
     query_parts = []
-    for i, issue_id in enumerate(issue_ids):
-        branch = issue_id.lower()
+    for i, (issue_id, ref) in enumerate(pr_refs.items()):
         query_parts.append(f'''
-            pr{i}: pullRequests(headRefName: "{branch}", first: 1, states: OPEN) {{
-                nodes {{
-                    labels(first: 20) {{
-                        nodes {{ name }}
-                    }}
-                }}
+            pr{i}: pullRequest(number: {ref.number}) {{
+                isDraft
             }}
         ''')
 
@@ -224,10 +217,10 @@ When querying external services (APIs, databases), prefer batch operations:
 ```python
 # BAD: N+1 queries
 for issue_id in issue_ids:
-    labels = await get_pr_labels(issue_id)  # 1 API call per issue
+    is_draft = await get_pr_draft_status(issue_id)  # 1 API call per issue
 
 # GOOD: Single batch query
-labels_map = await get_pr_labels_batch(issue_ids)  # 1 GraphQL query
+draft_map = await get_pr_draft_status_batch(pr_refs)  # 1 GraphQL query
 ```
 
 ### 4. Separate Fetch from Decision
@@ -283,22 +276,22 @@ async def get_data(*, runner: CommandRunner = default_runner):
 async def fetch_all():
     # Results stored via closure
     workers: set[str] = set()
-    labels: dict[str, list[str]] = {}
+    draft_map: dict[str, bool] = {}
 
     async def fetch_workers():
         nonlocal workers
         workers = await get_live_workers()
 
-    async def fetch_labels():
-        nonlocal labels
-        labels = await get_pr_labels_batch(issue_ids)
+    async def fetch_draft_status():
+        nonlocal draft_map
+        draft_map = await get_pr_draft_status_batch(pr_refs)
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(fetch_workers)
-        tg.start_soon(fetch_labels)
+        tg.start_soon(fetch_draft_status)
 
     # Both complete before we reach here
-    return workers, labels
+    return workers, draft_map
 ```
 
 ### Caching Strategy
@@ -323,14 +316,14 @@ The `Protocol`-based dependency injection pattern allows tests to run without re
 
 ```python
 # Production: uses real command runner
-result = await get_pr_labels_batch(issue_ids, owner, repo)
+result = await get_pr_draft_status_batch(pr_refs)
 
 # Test: inject mock runner
 async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
     return json.dumps({"data": {...}}), "", 0
 
-result = await get_pr_labels_batch(
-    issue_ids, owner, repo,
+result = await get_pr_draft_status_batch(
+    pr_refs,
     runner=mock_runner  # No subprocess spawned
 )
 ```
@@ -341,21 +334,22 @@ result = await get_pr_labels_batch(
 
 ```python
 @pytest.mark.anyio
-async def test_returns_labels_for_multiple_issues():
+async def test_returns_draft_status_for_multiple_issues():
     async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
         response = {
             "data": {
                 "repository": {
-                    "pr0": {"nodes": [{"labels": {"nodes": [{"name": "approved"}]}}]},
+                    "pr0": {"isDraft": False},
                 }
             }
         }
         return json.dumps(response), "", 0
 
-    result = await get_pr_labels_batch(
-        ["ENG-21"], "owner", "repo", runner=mock_runner
+    result = await get_pr_draft_status_batch(
+        {"ENG-21": GitHubPRRef(owner="owner", repo="repo", number=1)},
+        runner=mock_runner
     )
-    assert result == {"ENG-21": ["approved"]}
+    assert result == {"ENG-21": False}
 ```
 
 **2. Use `tmp_path` Fixture for File Tests**
@@ -383,13 +377,12 @@ def test_builds_state_with_action():
         issue_id="ENG-21",
         status="Todo",
         labels=[],
-        pr_labels=[],
+        pr_is_draft=None,
         has_live_worker=False,
         is_blocked=False,
         blocked_question=None,
         has_user_feedback=False,
         has_user_input_needed=False,
-        session_id="test-session-id",
     )
 
     state = build_issue_state(data, project_id)

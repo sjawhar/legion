@@ -21,7 +21,7 @@ def suggest_action(
     status: str,
     has_worker_done: bool,
     has_live_worker: bool,
-    pr_labels: list[str],
+    pr_is_draft: bool | None,
     is_blocked: bool,
 ) -> ActionType:
     """Suggest action based on issue state.
@@ -30,7 +30,7 @@ def suggest_action(
         status: Normalized issue status
         has_worker_done: Whether issue has worker-done label
         has_live_worker: Whether a tmux worker session is running
-        pr_labels: Labels on the associated PR
+        pr_is_draft: PR draft status (None if no PR, True if draft, False if ready)
         is_blocked: Whether the worker is blocked on user input
 
     Returns:
@@ -60,19 +60,18 @@ def suggest_action(
 
         case IssueStatus.NEEDS_REVIEW:
             if has_worker_done:
-                has_changes_requested = "worker-changes-requested" in pr_labels
-                has_approved = "worker-approved" in pr_labels
-
-                # Handle conflicting labels: treat as changes requested
-                # (controller will remove both labels, implementer will re-evaluate)
-                if has_changes_requested and has_approved:
+                # Review outcome is signaled by PR draft status:
+                # - PR ready (not draft) = approved → transition to retro
+                # - PR still draft = changes requested → resume implementer
+                # - No PR = wait for PR to be created
+                if pr_is_draft is None:
+                    # No PR yet - wait for it
+                    return "skip"
+                if pr_is_draft:
+                    # PR is draft = changes requested
                     return "resume_implementer_for_changes"
-                if has_changes_requested:
-                    return "resume_implementer_for_changes"
-                if has_approved:
-                    return "transition_to_retro"
-                # No PR label yet - wait for propagation
-                return "skip"
+                # PR is ready (not draft) = approved
+                return "transition_to_retro"
             if has_live_worker:
                 return "skip"
             return "dispatch_reviewer"
@@ -121,7 +120,7 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
             status=data.status,
             has_worker_done="worker-done" in data.labels,
             has_live_worker=data.has_live_worker,
-            pr_labels=data.pr_labels,
+            pr_is_draft=data.pr_is_draft,
             is_blocked=data.is_blocked,
         )
 
@@ -132,7 +131,7 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
     return IssueState(
         status=data.status,
         labels=data.labels,
-        pr_labels=data.pr_labels,
+        pr_is_draft=data.pr_is_draft,
         has_live_worker=data.has_live_worker,
         suggested_action=action,
         session_id=session_id,

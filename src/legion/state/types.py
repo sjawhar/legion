@@ -183,8 +183,8 @@ class ParsedIssue:
     pr_ref: GitHubPRRef | None = None
 
     @property
-    def needs_pr_labels(self) -> bool:
-        """Whether this issue needs PR label lookup."""
+    def needs_pr_status(self) -> bool:
+        """Whether this issue needs PR draft status lookup."""
         return (
             self.status == IssueStatus.NEEDS_REVIEW
             and self.has_worker_done
@@ -199,7 +199,7 @@ class FetchedIssueData:
     issue_id: str
     status: str
     labels: list[str]
-    pr_labels: list[str]
+    pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
     has_live_worker: bool
     is_blocked: bool
     blocked_question: str | None
@@ -213,7 +213,7 @@ class IssueState:
 
     status: str
     labels: list[str]
-    pr_labels: list[str]
+    pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
     has_live_worker: bool
     suggested_action: ActionType
     session_id: str
@@ -225,7 +225,7 @@ class IssueState:
         return {
             "status": self.status,
             "labels": self.labels,
-            "pr_labels": self.pr_labels,
+            "pr_is_draft": self.pr_is_draft,
             "has_live_worker": self.has_live_worker,
             "suggested_action": self.suggested_action,
             "session_id": self.session_id,
