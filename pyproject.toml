@@ -2,9 +2,11 @@
 name = "legion"
 version = "0.1.0"
 description = "Autonomous development swarm using Claude Code agents"
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.14"
 dependencies = [
+    "aiofiles>=24.0",
     "anyio>=4.0",
+    "async-lru>=2.0",
     "click>=8.0",
 ]
 

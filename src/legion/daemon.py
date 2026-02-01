@@ -5,18 +5,18 @@ from pathlib import Path
 
 import anyio
 
-from . import tmux
-from .short_id import uuid_to_short
+from legion import short_id as short_id_mod
+from legion import tmux
 
 
-def short_id(project_id: str) -> str:
+def get_short_id(project_id: str) -> str:
     """Get short ID from project ID.
 
     If project_id looks like a UUID, shorten it. Otherwise use as-is.
     """
     clean = project_id.replace("-", "")
     if len(clean) == 32 and all(c in "0123456789abcdefABCDEF" for c in clean):
-        return uuid_to_short(project_id)
+        return short_id_mod.uuid_to_short(project_id)
     return project_id
 
 
@@ -98,7 +98,7 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
     validate_project_id(project_id)
     await validate_workspace(workspace)
 
-    short = short_id(project_id)
+    short = get_short_id(project_id)
     session = controller_session_name(short)
 
     if await tmux.session_exists(session):
@@ -134,7 +134,7 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
 async def stop(project_id: str, state_dir: Path) -> None:
     """Stop the Legion swarm."""
     validate_project_id(project_id)
-    short = short_id(project_id)
+    short = get_short_id(project_id)
     session = controller_session_name(short)
 
     print(f"Stopping Legion for project: {project_id}")
@@ -158,7 +158,7 @@ async def stop(project_id: str, state_dir: Path) -> None:
 async def status(project_id: str, state_dir: Path) -> None:
     """Show Legion swarm status."""
     validate_project_id(project_id)
-    short = short_id(project_id)
+    short = get_short_id(project_id)
     session = controller_session_name(short)
 
     print(f"Legion Status: {project_id}")

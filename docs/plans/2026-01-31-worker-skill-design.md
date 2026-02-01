@@ -14,6 +14,94 @@ Pure Compound Engineering is too lenient for autonomous workers (review is optio
 
 ---
 
+## Issue State Transitions
+
+The controller coordinates issue lifecycle through Linear statuses. Transitions happen via three mechanisms:
+
+1. **Controller actions** — triggered by `worker-done` label detection
+2. **Linear automation** — triggered by GitHub PR events
+3. **Manual** — human intervention
+
+### Transition Table
+
+| From | To | Trigger | Who |
+|------|----|---------|-----|
+| **Todo** | In Progress | `worker-done` label (planner finished) | Controller |
+| **In Progress** | In Review | Draft PR opened | Linear (auto) |
+| **In Review** | Retro | PR marked "ready for review" | Linear (auto) |
+| **In Review** | *(stays)* | `worker-done` label (changes needed) | Controller resumes implementer |
+| **Retro** | *(dispatch finisher)* | `worker-done` label | Controller |
+| **Retro** | Done | PR merged | Linear (auto) |
+
+### `worker-done` Label Semantics by Status
+
+| Status | `worker-done` Means | Controller Action |
+|--------|---------------------|-------------------|
+| Todo | Planner finished | Transition to In Progress, dispatch implementer |
+| In Review | Reviewer finished, changes needed | Resume implementer with review feedback |
+| Retro | Retro complete | Dispatch finisher to merge PR |
+
+### State Flow Diagram
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │                                         │
+                    ▼                                         │
+              ┌──────────┐                                    │
+              │   Todo   │                                    │
+              └────┬─────┘                                    │
+                   │ worker-done (planner)                    │
+                   │ → Controller transitions                 │
+                   ▼                                          │
+           ┌─────────────────┐                                │
+           │  In Progress    │                                │
+           └────────┬────────┘                                │
+                    │ draft PR opened                         │
+                    │ → Linear auto-transition                │
+                    ▼                                         │
+             ┌─────────────┐                                  │
+             │  In Review  │◄────────────────────┐            │
+             └──────┬──────┘                     │            │
+                    │                            │            │
+         ┌──────────┴──────────┐                 │            │
+         │                     │                 │            │
+         ▼                     ▼                 │            │
+  PR ready for review   worker-done              │            │
+  → Linear auto         (changes needed)         │            │
+         │              → Controller resumes     │            │
+         │                implementer ───────────┘            │
+         ▼                                                    │
+    ┌──────────┐                                              │
+    │  Retro   │                                              │
+    └────┬─────┘                                              │
+         │                                                    │
+    ┌────┴────┐                                               │
+    │         │                                               │
+    ▼         ▼                                               │
+worker-done  PR merged                                        │
+(finisher)   → Linear auto                                    │
+    │              │                                          │
+    │              ▼                                          │
+    │        ┌──────────┐                                     │
+    │        │   Done   │                                     │
+    │        └──────────┘                                     │
+    │                                                         │
+    └─────────────────────────────────────────────────────────┘
+                    (finisher merges PR)
+```
+
+### Key Design Decisions
+
+1. **Draft PRs for review isolation** — Implementer opens draft PR to signal work is ready for review without triggering CI merge gates. Linear automation moves issue to "In Review" on draft PR creation.
+
+2. **"Ready for review" means approved** — Reviewer marks PR as ready for review (removes draft status) only when approving. Linear automation moves issue to "Retro". Changes-needed feedback uses `worker-done` label instead.
+
+3. **`worker-done` is the universal worker signal** — Workers don't directly transition statuses. They add `worker-done` label and exit. Controller interprets this based on current status.
+
+4. **Retro as integration gate** — Before Done, the retro worker reviews the PR and creates a brief retrospective. Finisher then merges.
+
+---
+
 ## Background
 
 ### The Question

@@ -13,6 +13,14 @@ async def run(cmd: list[str]) -> tuple[str, str, int]:
     )
 
 
+async def list_sessions() -> list[str]:
+    """List all tmux session names."""
+    stdout, _, rc = await run(["tmux", "list-sessions", "-F", "#{session_name}"])
+    if rc != 0:
+        return []
+    return [s for s in stdout.split("\n") if s]
+
+
 async def session_exists(session: str) -> bool:
     """Check if a tmux session exists."""
     _, _, rc = await run(["tmux", "has-session", "-t", session])
