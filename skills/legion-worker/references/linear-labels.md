@@ -1,17 +1,25 @@
 # Linear Labels
 
-## The Only Linear Label
+## Worker Signal Labels
 
-**`worker-done`** - Signals worker completion. Controller removes after processing.
+| Label | Meaning | Added by | Removed by |
+|-------|---------|----------|------------|
+| `worker-done` | Worker finished, controller should act | Worker | Controller |
+| `user-input-needed` | Blocked on human input | Worker | Controller |
+| `user-feedback-given` | Human answered | Human | Controller |
 
-### Adding via MCP
+### Adding Labels via MCP
 
-Preserve existing labels when adding:
+Labels array **replaces all labels**. Fetch current first:
 
 ```
-1. mcp__linear__get_issue(id: ISSUE_ID) → extract labelIds array
-2. mcp__linear__list_labels(teamId: TEAM_ID) → find "worker-done" ID
-3. mcp__linear__update_issue(id: ISSUE_ID, labelIds: [...existing, workerDoneId])
+issue = mcp__linear__get_issue(id: ISSUE_ID)
+current_labels = [label.name for label in issue.labels]
+
+mcp__linear__update_issue(
+  id: ISSUE_ID,
+  labels: current_labels + ["worker-done"]
+)
 ```
 
 ## GitHub PR Draft Status (Not Linear)
