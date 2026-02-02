@@ -13,37 +13,43 @@ from legion.state.types import (
     FetchedIssueData,
     IssueState,
     IssueStatus,
+    IssueStatusLiteral,
     WorkerMode,
     WorkerModeLiteral,
 )
 
 
 def suggest_action(
-    status: str,
+    status: IssueStatusLiteral | str,
     has_worker_done: bool,
     has_live_worker: bool,
     pr_is_draft: bool | None,
-    is_blocked: bool,
 ) -> ActionType:
     """Suggest action based on issue state.
 
     Args:
-        status: Normalized issue status
+        status: Normalized issue status (IssueStatusLiteral or unknown raw value)
         has_worker_done: Whether issue has worker-done label
         has_live_worker: Whether a tmux worker session is running
         pr_is_draft: PR draft status (None if no PR, True if draft, False if ready)
-        is_blocked: Whether the worker is blocked on user input
 
     Returns:
         Action to take for this issue
     """
-    # Blocked workers always escalate (highest priority)
-    if is_blocked:
-        return "escalate_blocked"
-
     match status:
         case IssueStatus.DONE:
             return "skip"
+
+        case IssueStatus.TRIAGE | IssueStatus.ICEBOX:
+            # Controller handles triage routing and Icebox pulls directly
+            return "skip"
+
+        case IssueStatus.BACKLOG:
+            if has_worker_done:
+                return "transition_to_todo"
+            if has_live_worker:
+                return "skip"
+            return "dispatch_architect"
 
         case IssueStatus.TODO:
             if has_worker_done:
@@ -54,7 +60,7 @@ def suggest_action(
 
         case IssueStatus.IN_PROGRESS:
             if has_worker_done:
-                return "dispatch_reviewer"
+                return "transition_to_needs_review"
             if has_live_worker:
                 return "skip"
             return "dispatch_implementer"
@@ -79,7 +85,7 @@ def suggest_action(
 
         case IssueStatus.RETRO:
             if has_worker_done:
-                return "dispatch_finisher"
+                return "dispatch_merger"
             if has_live_worker:
                 return "skip"
             return "resume_implementer_for_retro"
@@ -91,15 +97,17 @@ def suggest_action(
 # Direct mapping from action to worker mode
 ACTION_TO_MODE: dict[ActionType, WorkerModeLiteral] = {
     "skip": WorkerMode.IMPLEMENT,  # default
+    "dispatch_architect": WorkerMode.ARCHITECT,
     "dispatch_planner": WorkerMode.PLAN,
     "dispatch_implementer": WorkerMode.IMPLEMENT,
     "dispatch_reviewer": WorkerMode.REVIEW,
-    "dispatch_finisher": WorkerMode.FINISH,
+    "dispatch_merger": WorkerMode.MERGE,
     "resume_implementer_for_changes": WorkerMode.IMPLEMENT,
     "resume_implementer_for_retro": WorkerMode.IMPLEMENT,
     "transition_to_in_progress": WorkerMode.IMPLEMENT,
+    "transition_to_needs_review": WorkerMode.REVIEW,
+    "transition_to_todo": WorkerMode.PLAN,
     "transition_to_retro": WorkerMode.IMPLEMENT,
-    "escalate_blocked": WorkerMode.IMPLEMENT,
     "relay_user_feedback": WorkerMode.IMPLEMENT,
 }
 
@@ -115,24 +123,20 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
         Issue state with suggested action
     """
     # Determine action based on state
-    # If worker is blocked AND user gave feedback AND worker is still alive, relay it
-    # Without a live worker, we can't relay feedback - need to re-dispatch
-    if data.is_blocked and data.has_user_feedback and data.has_live_worker:
+    # Workers self-escalate: they post to Linear, add user-input-needed label, then exit.
+    # When user responds, user-feedback-given label is added.
+    if data.has_user_input_needed and data.has_user_feedback:
+        # Worker asked for input and user responded - resume worker to check Linear comments
         action: ActionType = "relay_user_feedback"
-    elif data.has_user_input_needed and not data.has_user_feedback:
-        # Waiting for user to provide feedback - skip until they respond
+    elif data.has_user_input_needed:
+        # Worker asked for input but user hasn't responded yet - skip until they respond
         action = "skip"
     else:
-        # Only consider "blocked" state for live workers.
-        # If worker died but session file shows blocked, that's stale state -
-        # a new worker will pick up from the feedback when dispatched.
-        effective_is_blocked = data.is_blocked and data.has_live_worker
         action = suggest_action(
             status=data.status,
             has_worker_done="worker-done" in data.labels,
             has_live_worker=data.has_live_worker,
             pr_is_draft=data.pr_is_draft,
-            is_blocked=effective_is_blocked,
         )
 
     # Compute session_id based on the action's mode
@@ -147,11 +151,12 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
         suggested_action=action,
         session_id=session_id,
         has_user_feedback=data.has_user_feedback,
-        blocked_question=data.blocked_question,
     )
 
 
-def build_collected_state(issues_data: list[FetchedIssueData], team_id: str) -> CollectedState:
+def build_collected_state(
+    issues_data: list[FetchedIssueData], team_id: str
+) -> CollectedState:
     """Build complete collected state from fetched data.
 
     Args:

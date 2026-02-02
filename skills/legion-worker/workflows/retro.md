@@ -54,7 +54,7 @@ Check subagent completion before proceeding (you will be notified when backgroun
 ### 5. Push
 
 ```bash
-jj git push --repository "$WORKSPACE_DIR"
+jj git push
 ```
 
 ### 6. Signal Completion

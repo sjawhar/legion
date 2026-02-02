@@ -16,10 +16,30 @@ legion = "legion.cli:main"
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.29",
     "pytest>=8.0",
     "pytest-anyio>=0.0.0",
+    "ruff>=0.11",
 ]
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10"]
 build-backend = "uv_build"
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+failOnWarnings = false
+exclude = [
+  "**/.pytest_cache/**",
+  "**/.ruff_cache/**",
+  "**/.venv/**",
+  "docs",
+]
+reportAny = false
+reportExplicitAny = false
+reportUnusedCallResult = false
+reportImplicitStringConcatenation = false
+
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["."]

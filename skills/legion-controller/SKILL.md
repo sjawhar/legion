@@ -1,199 +1,188 @@
 ---
 name: legion-controller
-description: Use when woken by daemon to coordinate Legion workers - polls state, dispatches workers, handles phase transitions
+description: Use when coordinating Legion workers across Linear issues - invoked with LINEAR_TEAM_ID, LEGION_DIR, and LEGION_SHORT_ID environment variables set
 ---
 
 # Legion Controller
 
-Coordinate workers implementing Linear issues. Run state script, process suggested actions, exit.
+Persistent coordinator that loops forever, dispatching and resuming workers based on Linear issue state.
 
 ## Environment
 
 Required:
-- `LINEAR_TEAM_ID` - Linear team UUID (not project - teams contain issues)
+- `LINEAR_TEAM_ID` - Linear team UUID
 - `LEGION_DIR` - path to default jj workspace
 - `LEGION_SHORT_ID` - short ID for tmux sessions
+
+## Core Principle
+
+**Keep work moving forward.** Priority order:
+1. Unblock in-progress work (relay user feedback)
+2. Advance completed work (process worker-done)
+3. Start new work (triage, pull from Icebox)
 
 ## Algorithm
 
 ```dot
 digraph controller {
     rankdir=TB;
-
-    run_state [label="1. Run State Script"];
-    process [label="2. Process Issues"];
-    escalate [label="3. Escalate Blocked"];
-    heartbeat [label="4. Write Heartbeat"];
-    exit [label="5. Exit"];
-
-    run_state -> process -> escalate -> heartbeat -> exit;
+    start [label="Start Loop"];
+    fetch [label="1. Fetch Issues"];
+    feedback [label="2. Relay Feedback"];
+    worker_done [label="3. Process worker-done"];
+    triage [label="4. Route Triage"];
+    icebox [label="5. Pull Icebox"];
+    cleanup [label="6. Cleanup Done"];
+    heartbeat [label="7. Heartbeat"];
+    todo [label="8. Update To-Do"];
+    sleep [label="9. Sleep 30s"];
+    start -> fetch -> feedback -> worker_done -> triage -> icebox -> cleanup -> heartbeat -> todo -> sleep -> fetch;
 }
 ```
 
-### 1. Run State Script
+**Do not exit.** Loop continuously.
 
-Get Linear issues via MCP, pipe to state script:
+### 1. Fetch Issues
 
 ```bash
-# Get issues as JSON (use mcp__linear__list_issues with team: parameter)
-# IMPORTANT: Use team: not project: - the ID is a team ID
-LINEAR_JSON=$(mcp__linear__list_issues team="$LINEAR_TEAM_ID" limit=50)
-
-# Run state script
-echo "$LINEAR_JSON" | python -m legion.state \
-  --team-id "$LINEAR_TEAM_ID" \
-  --short-id "$LEGION_SHORT_ID"
+LINEAR_JSON=$(mcp__linear__list_issues team="$LINEAR_TEAM_ID" limit=100)
+ACTIVE_WORKERS=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "legion-$LEGION_SHORT_ID-worker-" | wc -l)
 ```
 
-Output:
-```json
-{
-  "issues": {
-    "ENG-21": {
-      "status": "Needs Review",
-      "labels": ["worker-done"],
-      "pr_is_draft": false,
-      "has_live_worker": false,
-      "suggested_action": "transition_to_retro",
-      "session_id": "uuid-for-implement-mode",
-      "has_user_feedback": false,
-      "blocked_question": null
-    }
-  }
-}
-```
+### 2. Relay User Feedback (Highest Priority)
 
-### 2. Process Issues
+When both `user-input-needed` AND `user-feedback-given` labels present:
+1. Remove both labels
+2. **Resume** (not spawn) worker session with prompt to check Linear comments
 
-For each issue, execute the `suggested_action`:
+### 3. Process worker-done
 
-| Action | Steps |
-|--------|-------|
-| `skip` | Do nothing |
-| `dispatch_planner` | Create workspace, spawn worker in plan mode |
-| `dispatch_reviewer` | Spawn worker in review mode |
-| `dispatch_finisher` | Spawn worker in finish mode |
-| `resume_implementer_for_changes` | Resume worker session, prompt to address PR comments |
-| `resume_implementer_for_retro` | Resume worker session, prompt to run retro |
-| `transition_to_in_progress` | Remove `worker-done`, update status to In Progress, dispatch implementer |
-| `transition_to_retro` | Remove `worker-done`, update status to Retro, resume implementer for retro |
-| `relay_user_feedback` | Prompt blocked worker to read Linear comments |
-| `escalate_blocked` | See step 3 |
-
-**Dispatch worker:**
+Run state script:
 ```bash
-ISSUE_ID="ENG-21"
-ISSUE_ID_LOWER=$(echo "$ISSUE_ID" | tr '[:upper:]' '[:lower:]')
-SESSION="legion-$LEGION_SHORT_ID-worker-$ISSUE_ID_LOWER"
-MODE="implement"  # or plan, review, finish
+echo "$LINEAR_JSON" | python -m legion.state --team-id "$LINEAR_TEAM_ID" --short-id "$LEGION_SHORT_ID"
+```
 
-# Compute session ID (deterministic)
+State transitions (always remove `worker-done` after):
+
+| Current Status | Action |
+|----------------|--------|
+| Backlog + worker-done | → Todo, dispatch planner |
+| Todo + worker-done | → In Progress, dispatch implementer |
+| In Progress + worker-done | → Needs Review, dispatch reviewer |
+| Needs Review + worker-done (PR ready) | → Retro, resume implementer |
+| Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
+| Retro + worker-done | Dispatch merger |
+
+### 4. Route Triage
+
+Controller routes Triage issues directly (no worker needed):
+
+| Assessment | Route To |
+|------------|----------|
+| Urgent AND clear requirements | Todo (dispatch planner) |
+| Clear but not urgent | Backlog |
+| Vague OR large OR needs breakdown | Icebox |
+
+### 5. Pull from Icebox
+
+**If active workers < 10:**
+1. Get oldest Icebox item (FIFO)
+2. Move to Backlog
+3. Dispatch architect
+
+### 6. Cleanup Done
+
+For Done issues without live workers:
+```bash
+jj workspace forget "$ISSUE_ID" -R "$LEGION_DIR"
+rm -rf "$LEGION_DIR/$ISSUE_ID"
+```
+
+### 7. Write Heartbeat
+
+```bash
+mkdir -p ~/.legion/$LEGION_SHORT_ID && touch ~/.legion/$LEGION_SHORT_ID/heartbeat
+```
+
+### 8. Update To-Do List
+
+Maintain in context:
+```markdown
+## Controller State
+**Active workers:** [count] / 10 max
+### Priority Queue
+- [ENG-XX] description
+### In Progress
+- [ENG-YY] mode - worker running
+### Blocked
+- [ENG-ZZ] user-input-needed
+```
+
+### 9. Sleep and Loop
+
+```bash
+sleep 30
+```
+
+Then return to step 1.
+
+## Dispatch vs Resume
+
+**Dispatch** = new worker session:
+```bash
 SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid5(uuid.UUID('$LINEAR_TEAM_ID'), '$ISSUE_ID:$MODE'))")
-
-# Create workspace if needed (plan mode only)
-if [ "$MODE" = "plan" ]; then
-  jj workspace add "$LEGION_DIR/$ISSUE_ID" --name "$ISSUE_ID" -R "$LEGION_DIR"
-fi
-
-# Spawn worker
-tmux new-session -d -s "$SESSION" -n "main"
-tmux send-keys -t "$SESSION:main" \
-  "cd '$LEGION_DIR' && \
-   LEGION_DIR='$LEGION_DIR' \
-   WORKSPACE_DIR='$LEGION_DIR/$ISSUE_ID' \
-   LINEAR_ISSUE_ID='$ISSUE_ID' \
-   claude --dangerously-skip-permissions --session-id '$SESSION_ID' \
-   -p 'Use legion-worker skill in $MODE mode for $ISSUE_ID'" Enter
+[ ! -d "$LEGION_DIR/$ISSUE_ID" ] && jj workspace add "$LEGION_DIR/$ISSUE_ID" --name "$ISSUE_ID" -R "$LEGION_DIR"
+tmux new-session -d -s "legion-$LEGION_SHORT_ID-worker-$(echo $ISSUE_ID | tr '[:upper:]' '[:lower:]')" -n "main"
+tmux send-keys -t "$SESSION:main" "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --session-id '$SESSION_ID' -p 'Use legion-worker skill in $MODE mode for $ISSUE_ID'" Enter
 ```
 
-**Resume worker:**
+**Resume** = continue existing session:
 ```bash
-# Use --resume to continue existing session (not --session-id)
-tmux send-keys -t "$SESSION:main" \
-  "claude --dangerously-skip-permissions --resume '$SESSION_ID' \
-   -p 'Continue: address PR comments'" Enter
+tmux send-keys -t "$SESSION:main" "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --resume '$SESSION_ID' -p '$PROMPT'" Enter
 ```
 
-**Relay user feedback:**
-```bash
-# When user-feedback-given label is present
-ISSUE_ID="ENG-21"
-ISSUE_ID_LOWER=$(echo "$ISSUE_ID" | tr '[:upper:]' '[:lower:]')
-SESSION="legion-$LEGION_SHORT_ID-worker-$ISSUE_ID_LOWER"
+Use resume for: user feedback relay, PR changes requested, retro after review approval.
 
-# Prompt worker to read comments (safe - no user content injected)
-tmux send-keys -t "$SESSION:main" -l "User answered on Linear. Read the comments on your issue."
-tmux send-keys -t "$SESSION:main" Enter
+## Worker Inspection
 
-# Remove the user-feedback-given label
-mcp__linear__update_issue with:
-  id: <issue_id>
-  labelIds: [<all labels except user-feedback-given>]
-```
-
-**Update Linear status:**
-```
-mcp__linear__update_issue with:
-  id: <issue_id>
-  stateId: <status_id>  # Get from mcp__linear__list_issue_statuses
-```
-
-**Remove label:**
-```
-mcp__linear__update_issue with:
-  id: <issue_id>
-  labelIds: [<all labels except worker-done>]
-```
-
-### 3. Escalate Blocked Workers
-
-For issues where `blocked_question` is not null:
-
-1. Post question to Linear: `mcp__linear__create_comment`
-2. Add `user-input-needed` label: `mcp__linear__update_issue`
-
-### 4. Write Heartbeat
+Available when needed (debugging, intervention):
 
 ```bash
-mkdir -p ~/.legion/$LEGION_SHORT_ID
-touch ~/.legion/$LEGION_SHORT_ID/heartbeat
+# List sessions
+tmux list-sessions -F '#{session_name}' | grep "legion-$LEGION_SHORT_ID-worker-"
+
+# Capture pane output
+tmux capture-pane -t "$SESSION:main" -p
+
+# Read session file
+cat ~/.claude/projects/*/SESSION_ID.jsonl | tail -20
+
+# Send input (use sparingly)
+tmux send-keys -t "$SESSION:main" "message" Enter
 ```
 
-### 5. Exit
+## Labels
 
-Stop. Daemon will restart for next iteration.
+| Label | Meaning |
+|-------|---------|
+| `worker-done` | Worker finished phase, controller acts |
+| `user-input-needed` | Blocked on human, controller skips |
+| `user-feedback-given` | Human responded, controller resumes |
+
+## Common Mistakes
+
+| Mistake | Correction |
+|---------|------------|
+| Spawn new worker for user feedback | **Resume** existing session with `--resume` |
+| Skip Icebox when capacity exists | Pull oldest Icebox item if workers < 10 |
+| Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
+| Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
+| Process issue with live worker | Skip it - worker is already handling |
 
 ## Status Flow
 
 ```
-Todo → In Progress → Needs Review → Retro → Done
-         ↑              │
-         └──────────────┘
-         (changes requested)
+Triage ─┬─► Icebox ─► Backlog ─► Todo ─► In Progress ─► Needs Review ─► Retro ─► Done
+        ├─► Backlog ──────────────┘                          │
+        └─► Todo ─────────────────────────────────────────────┘
 ```
-
-| Status | Worker Mode | Completes When |
-|--------|-------------|----------------|
-| Todo | plan | Plan posted to Linear |
-| In Progress | implement | PR opened |
-| Needs Review | review | PR marked ready/draft + `worker-done` |
-| Retro | implement (retro) | Learnings documented |
-| Done | finish | PR merged, workspace cleaned |
-
-## Labels
-
-**Linear:**
-- `worker-done` - Worker signals completion (controller removes after processing)
-- `user-input-needed` - Waiting for human (controller skips)
-- `user-feedback-given` - Human answered (controller relays to worker)
-
-**GitHub PR (via draft status):**
-- PR ready (not draft) = Review approved → transition to Retro
-- PR draft = Changes requested → resume implementer
-
-## Important
-
-- **One iteration**: Process all issues once, then exit
-- **Idempotent**: Safe to run multiple times
-- **Non-blocking**: Spawn workers, don't wait
-- **Skip live workers**: If `has_live_worker` is true, action is already `skip`

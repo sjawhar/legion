@@ -39,9 +39,9 @@ async def kill_session(session: str) -> None:
 
 async def list_windows(session: str) -> list[str]:
     """List window names in a session."""
-    stdout, _, rc = await run([
-        "tmux", "list-windows", "-t", session, "-F", "#{window_name}"
-    ])
+    stdout, _, rc = await run(
+        ["tmux", "list-windows", "-t", session, "-F", "#{window_name}"]
+    )
     if rc != 0:
         return []
     return [w for w in stdout.split("\n") if w]

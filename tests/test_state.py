@@ -2,7 +2,6 @@
 
 import json
 import uuid
-from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -61,7 +60,9 @@ class TestGetLiveWorkers:
 
     @pytest.mark.anyio
     async def test_returns_issue_ids_from_worker_sessions(self) -> None:
-        with mock.patch("legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock) as mock_sessions:
+        with mock.patch(
+            "legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock
+        ) as mock_sessions:
             mock_sessions.return_value = [
                 "legion-abc123-worker-ENG-21",
                 "legion-abc123-worker-ENG-22",
@@ -71,7 +72,9 @@ class TestGetLiveWorkers:
 
     @pytest.mark.anyio
     async def test_ignores_other_sessions(self) -> None:
-        with mock.patch("legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock) as mock_sessions:
+        with mock.patch(
+            "legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock
+        ) as mock_sessions:
             mock_sessions.return_value = [
                 "legion-abc123-controller",
                 "legion-abc123-worker-ENG-21",
@@ -82,7 +85,9 @@ class TestGetLiveWorkers:
 
     @pytest.mark.anyio
     async def test_normalizes_lowercase_to_uppercase(self) -> None:
-        with mock.patch("legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock) as mock_sessions:
+        with mock.patch(
+            "legion.state.fetch.get_tmux_sessions", new_callable=mock.AsyncMock
+        ) as mock_sessions:
             mock_sessions.return_value = [
                 "legion-abc123-worker-eng-21",
                 "legion-abc123-worker-Eng-22",
@@ -97,6 +102,7 @@ class TestGetPrDraftStatusBatch:
     @pytest.mark.anyio
     async def test_returns_draft_status_for_multiple_issues(self) -> None:
         """Multiple PRs in same repo are fetched in single query."""
+
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             # Single repo uses repo0 alias
             response = {
@@ -121,6 +127,7 @@ class TestGetPrDraftStatusBatch:
     @pytest.mark.anyio
     async def test_returns_none_for_missing_pr(self) -> None:
         """PR not found returns None (not omitted from results)."""
+
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             response = {
                 "data": {
@@ -140,6 +147,7 @@ class TestGetPrDraftStatusBatch:
     @pytest.mark.anyio
     async def test_handles_null_is_draft_value(self) -> None:
         """isDraft: null in response is treated as False (not draft)."""
+
         async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
             response = {
                 "data": {
@@ -185,7 +193,9 @@ class TestGetPrDraftStatusBatch:
             call_count += 1
             return "not valid json {[", "", 0  # Success exit but bad JSON
 
-        with pytest.raises(fetch.GitHubAPIError, match="Failed to parse GraphQL response"):
+        with pytest.raises(
+            fetch.GitHubAPIError, match="Failed to parse GraphQL response"
+        ):
             await fetch.get_pr_draft_status_batch(
                 {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
                 runner=mock_runner,
@@ -267,47 +277,6 @@ class TestGetPrDraftStatusBatch:
         assert result == {"ENG-21": True, "ENG-22": False}
 
 
-class TestCheckWorkerBlocked:
-    """Test detecting blocked workers from session files."""
-
-    @pytest.mark.anyio
-    async def test_not_blocked_when_no_ask_user_question(self, tmp_path: Path) -> None:
-        session_file = tmp_path / "session.jsonl"
-        session_file.write_text(
-            '{"type":"assistant","message":{"content":"Hello"}}\n'
-            '{"type":"user","message":{"content":"Hi"}}\n'
-        )
-        blocked, question = await fetch.check_worker_blocked(session_file)
-        assert blocked is False
-        assert question is None
-
-    @pytest.mark.anyio
-    async def test_blocked_when_ask_user_question_pending(self, tmp_path: Path) -> None:
-        session_file = tmp_path / "session.jsonl"
-        session_file.write_text(
-            '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"question":"Should I proceed?"}}]}}\n'
-        )
-        blocked, question = await fetch.check_worker_blocked(session_file)
-        assert blocked is True
-        assert question == "Should I proceed?"
-
-    @pytest.mark.anyio
-    async def test_not_blocked_when_answered(self, tmp_path: Path) -> None:
-        session_file = tmp_path / "session.jsonl"
-        session_file.write_text(
-            '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"question":"Should I proceed?"}}]}}\n'
-            '{"type":"user","message":{"content":"Yes"}}\n'
-        )
-        blocked, question = await fetch.check_worker_blocked(session_file)
-        assert blocked is False
-
-    @pytest.mark.anyio
-    async def test_returns_false_for_nonexistent_file(self, tmp_path: Path) -> None:
-        session_file = tmp_path / "nonexistent.jsonl"
-        blocked, question = await fetch.check_worker_blocked(session_file)
-        assert blocked is False
-
-
 class TestParseLinearIssues:
     """Test Linear issue parsing."""
 
@@ -326,14 +295,24 @@ class TestParseLinearIssues:
         assert result[0].has_worker_done is True
 
     def test_normalizes_status(self) -> None:
-        issues = [{"identifier": "ENG-21", "state": {"name": "In Review"}, "labels": {"nodes": []}}]
+        issues = [
+            {
+                "identifier": "ENG-21",
+                "state": {"name": "In Review"},
+                "labels": {"nodes": []},
+            }
+        ]
         result = fetch.parse_linear_issues(issues)
         assert result[0].status == "Needs Review"
 
     def test_skips_issues_without_identifier(self) -> None:
         issues = [
             {"state": {"name": "Todo"}, "labels": {"nodes": []}},
-            {"identifier": "ENG-21", "state": {"name": "Todo"}, "labels": {"nodes": []}},
+            {
+                "identifier": "ENG-21",
+                "state": {"name": "Todo"},
+                "labels": {"nodes": []},
+            },
         ]
         result = fetch.parse_linear_issues(issues)
         assert len(result) == 1
@@ -358,7 +337,6 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
-            is_blocked=False,
         )
         assert action == "dispatch_planner"
 
@@ -368,7 +346,6 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,
-            is_blocked=False,
         )
         assert action == "transition_to_in_progress"
 
@@ -378,7 +355,6 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
-            is_blocked=False,
         )
         assert action == "dispatch_implementer"
 
@@ -388,9 +364,8 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,
-            is_blocked=False,
         )
-        assert action == "dispatch_reviewer"
+        assert action == "transition_to_needs_review"
 
     def test_in_progress_with_live_worker(self) -> None:
         action = decision.suggest_action(
@@ -398,7 +373,6 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
-            is_blocked=False,
         )
         assert action == "skip"
 
@@ -409,7 +383,6 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=False,  # PR is ready = approved
-            is_blocked=False,
         )
         assert action == "transition_to_retro"
 
@@ -420,7 +393,6 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=True,  # PR is draft = changes requested
-            is_blocked=False,
         )
         assert action == "resume_implementer_for_changes"
 
@@ -431,7 +403,6 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,  # No PR
-            is_blocked=False,
         )
         assert action == "skip"
 
@@ -442,7 +413,6 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
-            is_blocked=False,
         )
         assert action == "dispatch_reviewer"
 
@@ -453,7 +423,6 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
-            is_blocked=False,
         )
         assert action == "skip"
 
@@ -465,19 +434,108 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=True,  # Stale session still running
             pr_is_draft=False,
-            is_blocked=False,
         )
         assert action == "transition_to_retro"
 
-    def test_blocked_escalates(self) -> None:
+    def test_backlog_no_worker_done_dispatches_architect(self) -> None:
+        """Backlog without worker-done dispatches architect."""
         action = decision.suggest_action(
-            status=types.IssueStatus.IN_PROGRESS,
+            status=types.IssueStatus.BACKLOG,
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "dispatch_architect"
+
+    def test_backlog_worker_done_transitions_to_todo(self) -> None:
+        """Backlog with worker-done transitions to Todo."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.BACKLOG,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "transition_to_todo"
+
+    def test_backlog_with_live_worker_skips(self) -> None:
+        """Backlog with active architect session skips."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.BACKLOG,
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
-            is_blocked=True,
         )
-        assert action == "escalate_blocked"
+        assert action == "skip"
+
+    def test_triage_skips(self) -> None:
+        """Triage status is handled by controller directly, state script skips."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.TRIAGE,
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "skip"
+
+    def test_icebox_skips(self) -> None:
+        """Icebox status is handled by controller directly, state script skips."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.ICEBOX,
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "skip"
+
+    def test_retro_worker_done_dispatches_merger(self) -> None:
+        """Retro with worker-done dispatches merger."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.RETRO,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "dispatch_merger"
+
+    def test_retro_no_worker_done_resumes_implementer(self) -> None:
+        """Retro without worker-done resumes implementer for retro workflow."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.RETRO,
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "resume_implementer_for_retro"
+
+    def test_retro_with_live_worker_skips(self) -> None:
+        """Retro with active worker session skips."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.RETRO,
+            has_worker_done=False,
+            has_live_worker=True,
+            pr_is_draft=None,
+        )
+        assert action == "skip"
+
+    def test_done_always_skips(self) -> None:
+        """Done status always skips."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.DONE,
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "skip"
+
+    def test_unknown_status_skips(self) -> None:
+        """Unknown/unrecognized status skips."""
+        action = decision.suggest_action(
+            status="SomeUnknownStatus",
+            has_worker_done=False,
+            has_live_worker=False,
+            pr_is_draft=None,
+        )
+        assert action == "skip"
 
 
 class TestBuildIssueState:
@@ -490,8 +548,6 @@ class TestBuildIssueState:
             labels=[],
             pr_is_draft=None,
             has_live_worker=False,
-            is_blocked=False,
-            blocked_question=None,
             has_user_feedback=False,
             has_user_input_needed=False,
         )
@@ -499,29 +555,27 @@ class TestBuildIssueState:
         assert state.suggested_action == "dispatch_planner"
 
     def test_skips_when_user_input_needed(self) -> None:
+        """Worker asked for input but user hasn't responded - skip."""
         data = types.FetchedIssueData(
             issue_id="ENG-21",
             status="Todo",
             labels=["user-input-needed"],
             pr_is_draft=None,
             has_live_worker=False,
-            is_blocked=False,
-            blocked_question=None,
             has_user_feedback=False,
             has_user_input_needed=True,
         )
         state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
         assert state.suggested_action == "skip"
-    def test_relay_user_feedback_when_blocked_with_feedback(self) -> None:
-        """When worker is blocked and user gave feedback, relay it."""
+
+    def test_relay_user_feedback_when_user_responded(self) -> None:
+        """When worker asked for input and user responded, relay it."""
         data = types.FetchedIssueData(
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-input-needed", "user-feedback-given"],
             pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Which approach should I use?",
+            has_live_worker=False,  # Worker exited after asking
             has_user_feedback=True,
             has_user_input_needed=True,
         )
@@ -530,16 +584,14 @@ class TestBuildIssueState:
 
         assert state.suggested_action == "relay_user_feedback"
 
-    def test_blocked_without_feedback_skips(self) -> None:
-        """Blocked worker without user feedback still skips."""
+    def test_waiting_for_feedback_skips(self) -> None:
+        """Worker asked for input, waiting for user response - skip."""
         data = types.FetchedIssueData(
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-input-needed"],
             pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Which approach?",
+            has_live_worker=False,
             has_user_feedback=False,
             has_user_input_needed=True,
         )
@@ -548,43 +600,25 @@ class TestBuildIssueState:
 
         assert state.suggested_action == "skip"
 
-    def test_blocked_with_feedback_but_no_live_worker_redispatches(self) -> None:
-        """When worker died but feedback was given, redispatch rather than relay."""
-        data = types.FetchedIssueData(
-            issue_id="ENG-21",
-            status="In Progress",
-            labels=["user-input-needed", "user-feedback-given"],
-            pr_is_draft=None,
-            has_live_worker=False,  # Worker crashed/terminated
-            is_blocked=True,  # Session file still shows blocked state
-            blocked_question="Which approach should I use?",
-            has_user_feedback=True,
-            has_user_input_needed=True,
-        )
-
-        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
-
-        # Should dispatch a new implementer, not try to relay to dead worker
-        assert state.suggested_action == "dispatch_implementer"
-
-    def test_feedback_but_not_blocked_follows_normal_flow(self) -> None:
-        """Feedback given but worker not blocked follows normal transition logic."""
+    def test_feedback_without_input_needed_follows_normal_flow(self) -> None:
+        """Feedback-given label without input-needed follows normal flow."""
+        team_id = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
         data = types.FetchedIssueData(
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-feedback-given", "worker-done"],
             pr_is_draft=None,
             has_live_worker=False,
-            is_blocked=False,  # Not blocked
-            blocked_question=None,
             has_user_feedback=True,
-            has_user_input_needed=False,
+            has_user_input_needed=False,  # No input was requested
         )
 
-        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
+        state = decision.build_issue_state(data, team_id)
 
-        # Should follow normal flow: In Progress + worker-done → dispatch_reviewer
-        assert state.suggested_action == "dispatch_reviewer"
+        # Should follow normal flow: In Progress + worker-done → transition_to_needs_review
+        assert state.suggested_action == "transition_to_needs_review"
+        expected_session_id = types.compute_session_id(team_id, "ENG-21", "review")
+        assert state.session_id == expected_session_id
 
     def test_relay_feedback_computes_correct_session_id(self) -> None:
         """relay_user_feedback action computes session ID for implement mode."""
@@ -594,9 +628,7 @@ class TestBuildIssueState:
             status="In Progress",
             labels=["user-input-needed", "user-feedback-given"],
             pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Which approach?",
+            has_live_worker=False,
             has_user_feedback=True,
             has_user_input_needed=True,
         )
@@ -611,16 +643,14 @@ class TestBuildIssueState:
     def test_relay_feedback_in_different_statuses(self) -> None:
         """relay_user_feedback works regardless of issue status."""
         team_id = "00000000-0000-0000-0000-000000000000"
-        
+
         # Test in Todo status
         data_todo = types.FetchedIssueData(
             issue_id="ENG-21",
             status="Todo",
             labels=["user-input-needed", "user-feedback-given"],
             pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Should I start?",
+            has_live_worker=False,
             has_user_feedback=True,
             has_user_input_needed=True,
         )
@@ -633,34 +663,12 @@ class TestBuildIssueState:
             status="Needs Review",
             labels=["user-input-needed", "user-feedback-given"],
             pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Should I merge?",
+            has_live_worker=False,
             has_user_feedback=True,
             has_user_input_needed=True,
         )
         state_review = decision.build_issue_state(data_review, team_id)
         assert state_review.suggested_action == "relay_user_feedback"
-
-    def test_relay_feedback_preserves_blocked_question(self) -> None:
-        """Blocked question is preserved in state when relaying feedback."""
-        data = types.FetchedIssueData(
-            issue_id="ENG-21",
-            status="In Progress",
-            labels=["user-input-needed", "user-feedback-given"],
-            pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Should I use approach A or B?",
-            has_user_feedback=True,
-            has_user_input_needed=True,
-        )
-
-        state = decision.build_issue_state(data, "00000000-0000-0000-0000-000000000000")
-
-        assert state.suggested_action == "relay_user_feedback"
-        assert state.blocked_question == "Should I use approach A or B?"
-        assert state.has_user_feedback is True
 
     def test_all_labels_present_relay_takes_precedence(self) -> None:
         """When worker-done, user-input-needed, and user-feedback-given all present, relay wins."""
@@ -669,9 +677,7 @@ class TestBuildIssueState:
             status="In Progress",
             labels=["worker-done", "user-input-needed", "user-feedback-given"],
             pr_is_draft=None,
-            has_live_worker=True,
-            is_blocked=True,
-            blocked_question="Final question before completion?",
+            has_live_worker=False,
             has_user_feedback=True,
             has_user_input_needed=True,
         )
@@ -682,16 +688,19 @@ class TestBuildIssueState:
         assert state.suggested_action == "relay_user_feedback"
 
 
-
-
 class TestFetchAllIssueData:
     """Test full data fetching."""
 
     @pytest.mark.anyio
     async def test_fetches_data_for_issues(self) -> None:
         with (
-            mock.patch("legion.state.fetch.get_live_workers", new_callable=mock.AsyncMock) as mock_workers,
-            mock.patch("legion.state.fetch.get_pr_draft_status_batch", new_callable=mock.AsyncMock) as mock_draft,
+            mock.patch(
+                "legion.state.fetch.get_live_workers", new_callable=mock.AsyncMock
+            ) as mock_workers,
+            mock.patch(
+                "legion.state.fetch.get_pr_draft_status_batch",
+                new_callable=mock.AsyncMock,
+            ) as mock_draft,
         ):
             mock_workers.return_value = {"ENG-21"}
             mock_draft.return_value = {}
@@ -706,7 +715,6 @@ class TestFetchAllIssueData:
 
             result = await fetch.fetch_all_issue_data(
                 linear_issues=linear_issues,
-                team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
                 short_id="abc123",
             )
 
@@ -726,8 +734,6 @@ class TestBuildCollectedState:
                 labels=[],
                 pr_is_draft=None,
                 has_live_worker=False,
-                is_blocked=False,
-                blocked_question=None,
                 has_user_feedback=False,
                 has_user_input_needed=False,
             ),
@@ -737,19 +743,19 @@ class TestBuildCollectedState:
                 labels=["worker-done"],
                 pr_is_draft=None,
                 has_live_worker=False,
-                is_blocked=False,
-                blocked_question=None,
                 has_user_feedback=False,
                 has_user_input_needed=False,
             ),
         ]
 
-        state = decision.build_collected_state(issues_data, "00000000-0000-0000-0000-000000000000")
+        state = decision.build_collected_state(
+            issues_data, "00000000-0000-0000-0000-000000000000"
+        )
 
         assert "ENG-21" in state.issues
         assert "ENG-22" in state.issues
         assert state.issues["ENG-21"].suggested_action == "dispatch_planner"
-        assert state.issues["ENG-22"].suggested_action == "dispatch_reviewer"
+        assert state.issues["ENG-22"].suggested_action == "transition_to_needs_review"
 
     def test_to_dict_serializes_correctly(self) -> None:
         issues_data = [
@@ -759,14 +765,14 @@ class TestBuildCollectedState:
                 labels=[],
                 pr_is_draft=None,
                 has_live_worker=False,
-                is_blocked=False,
-                blocked_question=None,
                 has_user_feedback=False,
                 has_user_input_needed=False,
             ),
         ]
 
-        state = decision.build_collected_state(issues_data, "00000000-0000-0000-0000-000000000000")
+        state = decision.build_collected_state(
+            issues_data, "00000000-0000-0000-0000-000000000000"
+        )
         result = state.to_dict()
 
         assert "issues" in result
@@ -784,32 +790,26 @@ class TestBuildCollectedState:
                 labels=[],
                 pr_is_draft=None,
                 has_live_worker=False,
-                is_blocked=False,
-                blocked_question=None,
                 has_user_feedback=False,
                 has_user_input_needed=False,
             ),
-            # Blocked with feedback - relay
+            # User responded - relay feedback
             types.FetchedIssueData(
                 issue_id="ENG-22",
                 status="In Progress",
                 labels=["user-input-needed", "user-feedback-given"],
                 pr_is_draft=None,
-                has_live_worker=True,
-                is_blocked=True,
-                blocked_question="How should I proceed?",
+                has_live_worker=False,
                 has_user_feedback=True,
                 has_user_input_needed=True,
             ),
-            # Blocked without feedback - skip
+            # Waiting for input - skip
             types.FetchedIssueData(
                 issue_id="ENG-23",
                 status="In Progress",
                 labels=["user-input-needed"],
                 pr_is_draft=None,
-                has_live_worker=True,
-                is_blocked=True,
-                blocked_question="Waiting for input",
+                has_live_worker=False,
                 has_user_feedback=False,
                 has_user_input_needed=True,
             ),
@@ -820,7 +820,4 @@ class TestBuildCollectedState:
         assert len(state.issues) == 3
         assert state.issues["ENG-21"].suggested_action == "dispatch_planner"
         assert state.issues["ENG-22"].suggested_action == "relay_user_feedback"
-        assert state.issues["ENG-22"].blocked_question == "How should I proceed?"
         assert state.issues["ENG-23"].suggested_action == "skip"
-
-

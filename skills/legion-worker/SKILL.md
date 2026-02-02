@@ -18,6 +18,41 @@ Required:
 2. **Use jj, not git** - changes auto-tracked
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 
+## Session Lifecycle
+
+### Starting
+
+Sync with main and create a fresh commit on your branch:
+
+```bash
+jj git fetch
+jj rebase -d main
+jj new  # Fresh commit for this session
+```
+
+If you're resuming after user feedback, also read the Linear comments for the answer.
+
+### Blocking on User Input
+
+When you need human input that the oracle can't answer:
+
+1. Push your work: `jj git push`
+2. Post your question as a Linear comment: `mcp__linear__create_comment`
+3. Add `user-input-needed` label (see @references/linear-labels.md)
+4. Exit immediately
+
+The controller will resume your session when the user responds.
+
+### Exiting
+
+Always push before exiting:
+
+```bash
+jj git push
+```
+
+Then add `worker-done` label if your mode requires it (see routing table).
+
 ## Mode Routing
 
 | Mode | Workflow | Adds `worker-done` |
@@ -27,11 +62,11 @@ Required:
 | `implement` | @workflows/implement.md | No |
 | `review` | @workflows/review.md | Yes |
 | `retro` | @workflows/retro.md | Yes |
-| `finish` | @workflows/finish.md | No |
+| `merge` | @workflows/merge.md | No |
 
-**Lifecycle order:** architect → plan → implement → review → (implement if changes requested) → retro → finish
+**Lifecycle order:** architect → plan → implement → review → (implement if changes requested) → retro → merge
 
-Note: `retro` runs before `finish` because retro adds learnings to the workspace, and finish deletes it.
+Note: `retro` runs before `merge` because retro adds learnings to the workspace, and merge deletes it.
 
 ## Review Mode Signaling
 
@@ -41,13 +76,15 @@ Review signals outcome via PR draft status BEFORE `worker-done`:
 
 ## Research Sub-Skill
 
-Before using `AskUserQuestion`, workers should invoke the oracle:
+Before blocking on user input, workers should invoke the oracle to try to find the answer:
 
 | Sub-Skill | Workflow | Purpose |
 |-----------|----------|---------|
 | `oracle` | @workflows/oracle.md | Research before escalating |
 
 Usage: `/oracle [your question]`
+
+Only escalate to the user (via Linear comment + label) if the oracle cannot answer.
 
 ## Reference
 
