@@ -7,7 +7,12 @@ import re
 import secrets
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
+
+# Type alias for JSON-serializable session metadata values
+# More specific than Any, captures the actual constraint (must be JSON-serializable)
+JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+SessionMetadata = dict[str, JsonValue]
 
 # Security: Strict validation patterns prevent path traversal and DoS
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8}$")
@@ -69,7 +74,7 @@ class Session:
     last_accessed_at: float
     expires_at: float
     idle_timeout_secs: int
-    metadata: dict[str, Any] | None = None
+    metadata: SessionMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +201,7 @@ async def create_session(
     *,
     config: SessionConfig = DEFAULT_CONFIG,
     storage: SessionStorage | None = None,
-    metadata: dict[str, Any] | None = None,
+    metadata: SessionMetadata | None = None,
 ) -> tuple[str, Session]:
     """
     Create a new session.
