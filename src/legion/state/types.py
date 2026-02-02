@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypedDict
+from typing import Literal, TypedDict
 
 
 # =============================================================================
@@ -67,6 +67,7 @@ ActionType = Literal[
     "transition_to_in_progress",
     "transition_to_retro",
     "escalate_blocked",
+    "relay_user_feedback",
 ]
 
 
@@ -132,10 +133,17 @@ class ToolUseContent(TypedDict):
     input: AskUserQuestionInput
 
 
+class TextContent(TypedDict):
+    """Text content item in assistant message."""
+
+    type: Literal["text"]
+    text: str
+
+
 class AssistantMessage(TypedDict):
     """Assistant message structure."""
 
-    content: list[ToolUseContent | dict[str, Any]]
+    content: list[ToolUseContent | TextContent]
 
 
 class SessionEntry(TypedDict):
@@ -185,10 +193,22 @@ class ParsedIssue:
     issue_id: str
     status: str
     labels: list[str]
-    has_worker_done: bool
-    has_user_feedback: bool
-    has_user_input_needed: bool
     pr_ref: GitHubPRRef | None = None
+
+    @property
+    def has_worker_done(self) -> bool:
+        """Whether this issue has the worker-done label."""
+        return "worker-done" in self.labels
+
+    @property
+    def has_user_feedback(self) -> bool:
+        """Whether this issue has the user-feedback-given label."""
+        return "user-feedback-given" in self.labels
+
+    @property
+    def has_user_input_needed(self) -> bool:
+        """Whether this issue has the user-input-needed label."""
+        return "user-input-needed" in self.labels
 
     @property
     def needs_pr_status(self) -> bool:
@@ -215,6 +235,25 @@ class FetchedIssueData:
     has_user_input_needed: bool
 
 
+class IssueStateDict(TypedDict):
+    """Serialized form of IssueState."""
+
+    status: str
+    labels: list[str]
+    pr_is_draft: bool | None
+    has_live_worker: bool
+    suggested_action: ActionType
+    session_id: str
+    has_user_feedback: bool
+    blocked_question: str | None
+
+
+class CollectedStateDict(TypedDict):
+    """Serialized form of CollectedState."""
+
+    issues: dict[str, IssueStateDict]
+
+
 @dataclass
 class IssueState:
     """Final state for an issue with suggested action."""
@@ -228,7 +267,7 @@ class IssueState:
     has_user_feedback: bool
     blocked_question: str | None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> IssueStateDict:
         """Convert to dictionary for JSON serialization."""
         return {
             "status": self.status,
@@ -248,7 +287,7 @@ class CollectedState:
 
     issues: dict[str, IssueState] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> CollectedStateDict:
         """Convert to dictionary for JSON serialization."""
         return {
             "issues": {k: v.to_dict() for k, v in self.issues.items()}

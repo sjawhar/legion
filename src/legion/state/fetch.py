@@ -328,7 +328,7 @@ async def check_worker_blocked_any_mode(
     Returns:
         Tuple of (is_blocked, question_text)
     """
-    for mode in (WorkerMode.IMPLEMENT, WorkerMode.REVIEW, WorkerMode.FINISH):
+    for mode in (WorkerMode.PLAN, WorkerMode.IMPLEMENT, WorkerMode.REVIEW, WorkerMode.FINISH):
         session_id = compute_session_id(team_id, issue_id, mode)
         session_file = session_dir / f"{session_id}.jsonl"
         blocked, question = await check_worker_blocked(session_file)
@@ -401,9 +401,6 @@ def parse_linear_issues(
             issue_id=issue_id,
             status=status,
             labels=labels,
-            has_worker_done="worker-done" in labels,
-            has_user_feedback="user-feedback-given" in labels,
-            has_user_input_needed="user-input-needed" in labels,
             pr_ref=pr_ref,
         ))
 

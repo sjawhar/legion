@@ -6,5 +6,11 @@
     "name": "Sami Jawhar"
   },
   "repository": "https://github.com/sjawhar/legion",
-  "license": "MIT"
+  "license": "MIT",
+  "mcpServers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    }
+  }
 }

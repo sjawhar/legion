@@ -1,11 +1,18 @@
 """Legion CLI entry point."""
 
+import subprocess
 from pathlib import Path
 
 import anyio
 import click
 
 from legion import daemon
+
+# Required Claude Code plugins
+REQUIRED_PLUGINS = [
+    ("superpowers@claude-plugins-official", "TDD, debugging, workflows"),
+    ("compound-engineering@every-marketplace", "Research agents, review agents"),
+]
 
 
 @click.group()
@@ -71,6 +78,30 @@ def status(project_id: str, state_dir: Path | None) -> None:
         state_dir = Path.home() / ".legion" / project_id
 
     anyio.run(daemon.status, project_id, state_dir)
+
+
+@cli.command()
+def install() -> None:
+    """Install required Claude Code plugins."""
+    click.echo("Installing required Claude Code plugins...\n")
+
+    for plugin, description in REQUIRED_PLUGINS:
+        click.echo(f"  {plugin}")
+        click.echo(f"    {description}")
+        result = subprocess.run(
+            ["claude", "plugin", "install", plugin, "--scope", "user"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            click.echo(click.style("    ✓ installed", fg="green"))
+        elif "already installed" in result.stderr.lower():
+            click.echo(click.style("    ✓ already installed", fg="yellow"))
+        else:
+            click.echo(click.style(f"    ✗ failed: {result.stderr.strip()}", fg="red"))
+        click.echo()
+
+    click.echo("Done! Verify with: claude plugin list")
 
 
 def main() -> None:

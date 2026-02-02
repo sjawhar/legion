@@ -42,6 +42,22 @@ legion/
 uv sync
 ```
 
+### Required Claude Code Plugins
+
+Legion workers use skills and agents from these plugins:
+
+| Plugin | Purpose |
+|--------|---------|
+| `superpowers@claude-plugins-official` | TDD, debugging, workflows |
+| `compound-engineering@every-marketplace` | Research agents, review agents |
+
+Install with:
+```bash
+legion install
+```
+
+**Note:** Context7 (for framework documentation lookup) is bundled in Legion's plugin config.
+
 ### Testing
 
 ```bash

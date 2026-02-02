@@ -100,6 +100,7 @@ ACTION_TO_MODE: dict[ActionType, WorkerModeLiteral] = {
     "transition_to_in_progress": WorkerMode.IMPLEMENT,
     "transition_to_retro": WorkerMode.IMPLEMENT,
     "escalate_blocked": WorkerMode.IMPLEMENT,
+    "relay_user_feedback": WorkerMode.IMPLEMENT,
 }
 
 
@@ -114,15 +115,24 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
         Issue state with suggested action
     """
     # Determine action based on state
-    if data.has_user_input_needed:
-        action: ActionType = "skip"
+    # If worker is blocked AND user gave feedback AND worker is still alive, relay it
+    # Without a live worker, we can't relay feedback - need to re-dispatch
+    if data.is_blocked and data.has_user_feedback and data.has_live_worker:
+        action: ActionType = "relay_user_feedback"
+    elif data.has_user_input_needed and not data.has_user_feedback:
+        # Waiting for user to provide feedback - skip until they respond
+        action = "skip"
     else:
+        # Only consider "blocked" state for live workers.
+        # If worker died but session file shows blocked, that's stale state -
+        # a new worker will pick up from the feedback when dispatched.
+        effective_is_blocked = data.is_blocked and data.has_live_worker
         action = suggest_action(
             status=data.status,
             has_worker_done="worker-done" in data.labels,
             has_live_worker=data.has_live_worker,
             pr_is_draft=data.pr_is_draft,
-            is_blocked=data.is_blocked,
+            is_blocked=effective_is_blocked,
         )
 
     # Compute session_id based on the action's mode
