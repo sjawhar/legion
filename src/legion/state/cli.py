@@ -6,11 +6,14 @@ import argparse
 import json
 import sys
 import uuid
-from typing import Any
 
 import anyio
 
 from legion.state import decision, fetch
+from legion.state.types import LinearIssueRaw
+
+# Type for JSON data that could be either a list of issues or a wrapper object
+type LinearJsonData = list[LinearIssueRaw] | dict[str, list[LinearIssueRaw]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +30,11 @@ def parse_args() -> argparse.Namespace:
         "--short-id",
         required=True,
         help="Short project ID for tmux sessions",
+    )
+    parser.add_argument(
+        "--tmux-session",
+        required=True,
+        help="Tmux session name containing worker windows",
     )
     parser.add_argument(
         "--session-dir",
@@ -64,10 +72,10 @@ async def async_main() -> None:
     # Read Linear issues from stdin
     linear_json = sys.stdin.read()
     try:
-        linear_data = json.loads(linear_json)
+        linear_data: LinearJsonData = json.loads(linear_json)
         # Handle both raw list and wrapped format
         if isinstance(linear_data, list):
-            issues: list[dict[str, Any]] = linear_data
+            issues: list[LinearIssueRaw] = linear_data
         else:
             issues = linear_data.get("issues", [])
     except json.JSONDecodeError as e:
@@ -78,6 +86,7 @@ async def async_main() -> None:
     issues_data = await fetch.fetch_all_issue_data(
         linear_issues=issues,
         short_id=args.short_id,
+        tmux_session=args.tmux_session,
     )
 
     # Build and output state

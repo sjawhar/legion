@@ -4,13 +4,25 @@ import anyio
 
 
 async def run(cmd: list[str]) -> tuple[str, str, int]:
-    """Run a command and return (stdout, stderr, returncode)."""
-    result = await anyio.run_process(cmd, check=False)
-    return (
-        result.stdout.decode().strip(),
-        result.stderr.decode().strip(),
-        result.returncode,
-    )
+    """Run a command and return (stdout, stderr, returncode).
+
+    Handles edge cases gracefully:
+    - Command not found: returns ("", error message, 127)
+    - Non-UTF8 output: uses errors='replace' to substitute invalid bytes
+    """
+    try:
+        result = await anyio.run_process(cmd, check=False)
+        return (
+            result.stdout.decode(errors="replace").strip(),
+            result.stderr.decode(errors="replace").strip(),
+            result.returncode,
+        )
+    except FileNotFoundError as e:
+        # Command not found - return standard shell exit code 127
+        return ("", str(e), 127)
+    except OSError as e:
+        # Other OS errors (permission denied, etc.)
+        return ("", str(e), 126)
 
 
 async def list_sessions() -> list[str]:
@@ -18,7 +30,7 @@ async def list_sessions() -> list[str]:
     stdout, _, rc = await run(["tmux", "list-sessions", "-F", "#{session_name}"])
     if rc != 0:
         return []
-    return [s for s in stdout.split("\n") if s]
+    return [s for s in stdout.split("\n") if s.strip()]
 
 
 async def session_exists(session: str) -> bool:
@@ -44,7 +56,7 @@ async def list_windows(session: str) -> list[str]:
     )
     if rc != 0:
         return []
-    return [w for w in stdout.split("\n") if w]
+    return [w for w in stdout.split("\n") if w.strip()]
 
 
 async def new_window(session: str, name: str) -> None:
@@ -60,3 +72,28 @@ async def kill_window(session: str, window: str) -> None:
 async def send_keys(session: str, window: str, keys: str) -> None:
     """Send keys to a tmux window."""
     _ = await run(["tmux", "send-keys", "-t", f"{session}:{window}", keys, "Enter"])
+
+
+async def new_session(session: str, window: str, command: str) -> None:
+    """Create new tmux session with command.
+
+    Unlike create_session which just creates an empty session,
+    this runs a command directly in the new session.
+
+    Args:
+        session: Session name
+        window: Window name
+        command: Command to run in the session
+    """
+    _ = await run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-n",
+            window,
+            command,
+        ]
+    )

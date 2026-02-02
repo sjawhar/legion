@@ -50,12 +50,15 @@ class IssueStatus:
     }
 
     @classmethod
-    def normalize(cls, raw: str) -> IssueStatusLiteral | str:
+    def normalize(cls, raw: str | None) -> IssueStatusLiteral | str:
         """Normalize a raw status string to canonical form.
 
         Returns the canonical IssueStatusLiteral if the raw value matches
         a known alias, otherwise returns the original string unchanged.
+        Returns empty string if raw is None.
         """
+        if raw is None:
+            return ""
         return cls.ALIASES.get(raw, raw)
 
 
@@ -87,6 +90,7 @@ ActionType = Literal[
     "transition_to_retro",
     "transition_to_todo",
     "relay_user_feedback",
+    "remove_worker_active_and_redispatch",
 ]
 
 
@@ -119,6 +123,26 @@ class LinearIssue(TypedDict):
     identifier: str
     state: LinearStateDict | None
     labels: LinearLabelsContainer | None
+
+
+class LinearAttachment(TypedDict, total=False):
+    """Linear attachment object."""
+
+    url: str
+
+
+class LinearIssueRaw(TypedDict, total=False):
+    """Raw Linear issue from API (MCP or GraphQL).
+
+    Uses total=False since different APIs return different fields.
+    The identifier field is required for valid issues.
+    """
+
+    identifier: str
+    status: str  # MCP format: status as string
+    state: LinearStateDict  # GraphQL format: state.name
+    labels: list[str] | LinearLabelsContainer  # MCP: list[str], GraphQL: {nodes: [...]}
+    attachments: list[LinearAttachment]
 
 
 class GitHubLabel(TypedDict):
@@ -203,9 +227,11 @@ class GitHubPRRef:
         match = re.match(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", url)
         if not match:
             return None
-        return cls(
-            owner=match.group(1), repo=match.group(2), number=int(match.group(3))
-        )
+        pr_number = int(match.group(3))
+        # Guard against unreasonably large PR numbers (GraphQL uses 32-bit int)
+        if pr_number > 2_147_483_647:
+            return None
+        return cls(owner=match.group(1), repo=match.group(2), number=pr_number)
 
 
 @dataclass
@@ -231,6 +257,11 @@ class ParsedIssue:
     def has_user_input_needed(self) -> bool:
         """Whether this issue has the user-input-needed label."""
         return "user-input-needed" in self.labels
+
+    @property
+    def has_worker_active(self) -> bool:
+        """Whether this issue has the worker-active label."""
+        return "worker-active" in self.labels
 
     @property
     def needs_pr_status(self) -> bool:
@@ -331,3 +362,19 @@ def compute_session_id(team_id: str, issue_id: str, mode: WorkerModeLiteral) -> 
     namespace = uuid.UUID(team_id)
     name = f"{issue_id}:{mode}"
     return str(uuid.uuid5(namespace, name))
+
+
+def compute_controller_session_id(team_id: str) -> str:
+    """Compute deterministic session ID for controller.
+
+    Args:
+        team_id: Linear team UUID (must be valid UUID string)
+
+    Returns:
+        UUID string for the controller session
+
+    Raises:
+        ValueError: If team_id is not a valid UUID string
+    """
+    namespace = uuid.UUID(team_id)
+    return str(uuid.uuid5(namespace, "controller"))

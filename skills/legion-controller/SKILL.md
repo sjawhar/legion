@@ -46,7 +46,7 @@ digraph controller {
 
 ```bash
 LINEAR_JSON=$(mcp__linear__list_issues team="$LINEAR_TEAM_ID" limit=100)
-ACTIVE_WORKERS=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "legion-$LEGION_SHORT_ID-worker-" | wc -l)
+ACTIVE_WORKERS=$(tmux list-windows -t "legion-$LEGION_SHORT_ID-controller" -F '#{window_name}' 2>/dev/null | grep -v "^main$" | wc -l)
 ```
 
 ### 2. Relay User Feedback (Highest Priority)
@@ -59,7 +59,7 @@ When both `user-input-needed` AND `user-feedback-given` labels present:
 
 Run state script:
 ```bash
-echo "$LINEAR_JSON" | python -m legion.state --team-id "$LINEAR_TEAM_ID" --short-id "$LEGION_SHORT_ID"
+echo "$LINEAR_JSON" | python -m legion.state --team-id "$LINEAR_TEAM_ID" --short-id "$LEGION_SHORT_ID" --tmux-session "legion-$LEGION_SHORT_ID-controller"
 ```
 
 State transitions (always remove `worker-done` after):
@@ -72,6 +72,7 @@ State transitions (always remove `worker-done` after):
 | Needs Review + worker-done (PR ready) | → Retro, resume implementer |
 | Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
 | Retro + worker-done | Dispatch merger |
+| `remove_worker_active_and_redispatch` | Remove worker-active label, then dispatch |
 
 ### 4. Route Triage
 
@@ -128,17 +129,28 @@ Then return to step 1.
 
 ## Dispatch vs Resume
 
-**Dispatch** = new worker session:
+**Dispatch** = new worker window:
 ```bash
 SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid5(uuid.UUID('$LINEAR_TEAM_ID'), '$ISSUE_ID:$MODE'))")
 [ ! -d "$LEGION_DIR/$ISSUE_ID" ] && jj workspace add "$LEGION_DIR/$ISSUE_ID" --name "$ISSUE_ID" -R "$LEGION_DIR"
-tmux new-session -d -s "legion-$LEGION_SHORT_ID-worker-$(echo $ISSUE_ID | tr '[:upper:]' '[:lower:]')" -n "main"
-tmux send-keys -t "$SESSION:main" "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --session-id '$SESSION_ID' -p 'Use legion-worker skill in $MODE mode for $ISSUE_ID'" Enter
+
+# Create worker as WINDOW in controller session (not new session)
+WINDOW_NAME="$MODE-$(echo $ISSUE_ID | tr '[:upper:]' '[:lower:]')"
+tmux new-window -t "legion-$LEGION_SHORT_ID-controller" -n "$WINDOW_NAME" -d
+
+# Send command to new window
+tmux send-keys -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" \
+    "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --session-id '$SESSION_ID' -p 'Use legion-worker skill in $MODE mode for $ISSUE_ID'" Enter
+
+# Add worker-active label
+mcp__linear__update_issue id="$ISSUE_ID" labels=["worker-active", ...existing...]
 ```
 
-**Resume** = continue existing session:
+**Resume** = continue existing window:
 ```bash
-tmux send-keys -t "$SESSION:main" "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --resume '$SESSION_ID' -p '$PROMPT'" Enter
+WINDOW_NAME="$MODE-$(echo $ISSUE_ID | tr '[:upper:]' '[:lower:]')"
+tmux send-keys -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" \
+    "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --resume '$SESSION_ID' -p '$PROMPT'" Enter
 ```
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
@@ -148,17 +160,17 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 Available when needed (debugging, intervention):
 
 ```bash
-# List sessions
-tmux list-sessions -F '#{session_name}' | grep "legion-$LEGION_SHORT_ID-worker-"
+# List worker windows
+tmux list-windows -t "legion-$LEGION_SHORT_ID-controller" -F '#{window_name}' | grep -v "^main$"
 
 # Capture pane output
-tmux capture-pane -t "$SESSION:main" -p
+tmux capture-pane -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" -p
 
 # Read session file
 cat ~/.claude/projects/*/SESSION_ID.jsonl | tail -20
 
 # Send input (use sparingly)
-tmux send-keys -t "$SESSION:main" "message" Enter
+tmux send-keys -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" "message" Enter
 ```
 
 ## Labels
@@ -166,6 +178,7 @@ tmux send-keys -t "$SESSION:main" "message" Enter
 | Label | Meaning |
 |-------|---------|
 | `worker-done` | Worker finished phase, controller acts |
+| `worker-active` | Worker dispatched and running |
 | `user-input-needed` | Blocked on human, controller skips |
 | `user-feedback-given` | Human responded, controller resumes |
 
