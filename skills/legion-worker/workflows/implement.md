@@ -15,9 +15,8 @@ Trust the controller's explicit mode parameter.
 ## All Modes: Rebase First
 
 ```bash
-cd "$WORKSPACE_DIR"
-jj git fetch --repository "$WORKSPACE_DIR"
-jj rebase -d main --repository "$WORKSPACE_DIR"
+jj git fetch
+jj rebase -d main
 ```
 
 Resolve any conflicts before proceeding.
@@ -43,16 +42,15 @@ Invoke `/analyze` to run cleanup agents.
 ### 4. Ship
 
 ```bash
-jj describe -m "$LINEAR_ISSUE_ID: [description]" --repository "$WORKSPACE_DIR"
-jj git push --named "$LINEAR_ISSUE_ID"=@ --repository "$WORKSPACE_DIR"
+jj describe -m "$LINEAR_ISSUE_ID: [description]"
+jj git push --named "$LINEAR_ISSUE_ID"=@
 
 gh pr create \
   --title "$LINEAR_ISSUE_ID: [title]" \
   --body "Implements $LINEAR_ISSUE_ID
 
 [summary]" \
-  --head "$LINEAR_ISSUE_ID" \
-  --repo "$(cd "$LEGION_DIR" && gh repo view --json nameWithOwner -q .nameWithOwner)"
+  --head "$LINEAR_ISSUE_ID"
 ```
 
 Linear auto-associates the PR via the issue ID in the branch/title.
@@ -83,7 +81,7 @@ Use TDD and subagent-driven development:
 ### 3. Push
 
 ```bash
-jj git push --repository "$WORKSPACE_DIR"
+jj git push
 ```
 
 ### 4. Reply to Comments
