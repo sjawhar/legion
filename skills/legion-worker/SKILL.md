@@ -17,6 +17,7 @@ Required:
 1. **Read Linear issue first** - `mcp__linear__get_issue`
 2. **Use jj, not git** - changes auto-tracked
 3. **Signal completion** - add `worker-done` label when done (see routing table)
+4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
 ## Session Lifecycle
 
@@ -38,7 +39,7 @@ When you need human input that the oracle can't answer:
 
 1. Push your work: `jj git push`
 2. Post your question as a Linear comment: `mcp__linear__create_comment`
-3. Add `user-input-needed` label (see @references/linear-labels.md)
+3. Update labels: add `user-input-needed`, remove `worker-active`
 4. Exit immediately
 
 The controller will resume your session when the user responds.
@@ -51,7 +52,9 @@ Always push before exiting:
 jj git push
 ```
 
-Then add `worker-done` label if your mode requires it (see routing table).
+Then update labels:
+- Add `worker-done` if your mode requires it (see routing table)
+- Remove `worker-active` (the controller added this when dispatching you)
 
 ## Mode Routing
 

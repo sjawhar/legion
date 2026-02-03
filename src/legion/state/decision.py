@@ -6,15 +6,11 @@ No I/O operations - just business logic.
 
 from __future__ import annotations
 
+from legion.state import types
 from legion.state.types import (
     ActionType,
-    CollectedState,
-    compute_session_id,
     FetchedIssueData,
-    IssueState,
-    IssueStatus,
     IssueStatusLiteral,
-    WorkerMode,
     WorkerModeLiteral,
 )
 
@@ -37,35 +33,35 @@ def suggest_action(
         Action to take for this issue
     """
     match status:
-        case IssueStatus.DONE:
+        case types.IssueStatus.DONE:
             return "skip"
 
-        case IssueStatus.TRIAGE | IssueStatus.ICEBOX:
+        case types.IssueStatus.TRIAGE | types.IssueStatus.ICEBOX:
             # Controller handles triage routing and Icebox pulls directly
             return "skip"
 
-        case IssueStatus.BACKLOG:
+        case types.IssueStatus.BACKLOG:
             if has_worker_done:
                 return "transition_to_todo"
             if has_live_worker:
                 return "skip"
             return "dispatch_architect"
 
-        case IssueStatus.TODO:
+        case types.IssueStatus.TODO:
             if has_worker_done:
                 return "transition_to_in_progress"
             if has_live_worker:
                 return "skip"
             return "dispatch_planner"
 
-        case IssueStatus.IN_PROGRESS:
+        case types.IssueStatus.IN_PROGRESS:
             if has_worker_done:
                 return "transition_to_needs_review"
             if has_live_worker:
                 return "skip"
             return "dispatch_implementer"
 
-        case IssueStatus.NEEDS_REVIEW:
+        case types.IssueStatus.NEEDS_REVIEW:
             if has_worker_done:
                 # Review outcome is signaled by PR draft status:
                 # - PR ready (not draft) = approved → transition to retro
@@ -83,7 +79,7 @@ def suggest_action(
                 return "skip"
             return "dispatch_reviewer"
 
-        case IssueStatus.RETRO:
+        case types.IssueStatus.RETRO:
             if has_worker_done:
                 return "dispatch_merger"
             if has_live_worker:
@@ -94,25 +90,28 @@ def suggest_action(
             return "skip"
 
 
-# Direct mapping from action to worker mode
+# Direct mapping from action to worker mode.
+# Used to compute session_id for each action. "skip" uses IMPLEMENT as a
+# fallback since session_id is computed even when no worker will be dispatched.
 ACTION_TO_MODE: dict[ActionType, WorkerModeLiteral] = {
-    "skip": WorkerMode.IMPLEMENT,  # default
-    "dispatch_architect": WorkerMode.ARCHITECT,
-    "dispatch_planner": WorkerMode.PLAN,
-    "dispatch_implementer": WorkerMode.IMPLEMENT,
-    "dispatch_reviewer": WorkerMode.REVIEW,
-    "dispatch_merger": WorkerMode.MERGE,
-    "resume_implementer_for_changes": WorkerMode.IMPLEMENT,
-    "resume_implementer_for_retro": WorkerMode.IMPLEMENT,
-    "transition_to_in_progress": WorkerMode.IMPLEMENT,
-    "transition_to_needs_review": WorkerMode.REVIEW,
-    "transition_to_todo": WorkerMode.PLAN,
-    "transition_to_retro": WorkerMode.IMPLEMENT,
-    "relay_user_feedback": WorkerMode.IMPLEMENT,
+    "skip": types.WorkerMode.IMPLEMENT,  # fallback - not actually dispatched
+    "dispatch_architect": types.WorkerMode.ARCHITECT,
+    "dispatch_planner": types.WorkerMode.PLAN,
+    "dispatch_implementer": types.WorkerMode.IMPLEMENT,
+    "dispatch_reviewer": types.WorkerMode.REVIEW,
+    "dispatch_merger": types.WorkerMode.MERGE,
+    "resume_implementer_for_changes": types.WorkerMode.IMPLEMENT,
+    "resume_implementer_for_retro": types.WorkerMode.IMPLEMENT,
+    "transition_to_in_progress": types.WorkerMode.IMPLEMENT,
+    "transition_to_needs_review": types.WorkerMode.REVIEW,
+    "transition_to_todo": types.WorkerMode.PLAN,
+    "transition_to_retro": types.WorkerMode.IMPLEMENT,
+    "relay_user_feedback": types.WorkerMode.IMPLEMENT,
+    "remove_worker_active_and_redispatch": types.WorkerMode.IMPLEMENT,
 }
 
 
-def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
+def build_issue_state(data: FetchedIssueData, team_id: str) -> types.IssueState:
     """Build final issue state with suggested action.
 
     Args:
@@ -131,6 +130,10 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
     elif data.has_user_input_needed:
         # Worker asked for input but user hasn't responded yet - skip until they respond
         action = "skip"
+    elif "worker-active" in data.labels and not data.has_live_worker:
+        # Detect orphaned workers: worker-active label but no live window
+        # Worker died - remove label and re-dispatch
+        action = "remove_worker_active_and_redispatch"
     else:
         action = suggest_action(
             status=data.status,
@@ -140,10 +143,11 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
         )
 
     # Compute session_id based on the action's mode
-    mode = ACTION_TO_MODE[action]
-    session_id = compute_session_id(team_id, data.issue_id, mode)
+    # Default to IMPLEMENT if action not found (defensive against missing mapping)
+    mode = ACTION_TO_MODE.get(action, types.WorkerMode.IMPLEMENT)
+    session_id = types.compute_session_id(team_id, data.issue_id, mode)
 
-    return IssueState(
+    return types.IssueState(
         status=data.status,
         labels=data.labels,
         pr_is_draft=data.pr_is_draft,
@@ -156,7 +160,7 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> IssueState:
 
 def build_collected_state(
     issues_data: list[FetchedIssueData], team_id: str
-) -> CollectedState:
+) -> types.CollectedState:
     """Build complete collected state from fetched data.
 
     Args:
@@ -166,7 +170,7 @@ def build_collected_state(
     Returns:
         Complete state with all issues and suggested actions
     """
-    result = CollectedState()
+    result = types.CollectedState()
 
     for data in issues_data:
         result.issues[data.issue_id] = build_issue_state(data, team_id)

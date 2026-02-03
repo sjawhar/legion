@@ -3,30 +3,29 @@
 All I/O operations are async and can be composed in a single task group.
 Uses:
 - anyio for subprocess execution
-- async_lru for caching
+- tenacity for retry logic
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
-from typing import Any, Protocol
+from collections.abc import Sequence
+from typing import Protocol, TypedDict
 
 import anyio
-from async_lru import alru_cache
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
 
 from legion import tmux
+from legion.state import types
 from legion.state.types import (
     FetchedIssueData,
-    GitHubPRRef,
-    IssueStatus,
+    LinearIssueRaw,
     ParsedIssue,
 )
 
@@ -53,45 +52,59 @@ async def default_runner(cmd: list[str]) -> tuple[str, str, int]:
 
 
 # =============================================================================
-# Tmux Session Detection
+# Tmux Worker Detection
 # =============================================================================
 
 
-@alru_cache(ttl=2.0)
-async def get_tmux_sessions() -> list[str]:
-    """Get all tmux session names (cached for 2 seconds)."""
-    return await tmux.list_sessions()
-
-
 async def get_live_workers(
-    short_id: str,
-) -> set[str]:
-    """Get issue IDs of running worker sessions.
+    short_id: str,  # noqa: ARG001
+    tmux_session: str,
+) -> dict[str, str]:
+    """Get live workers as {issue_id: mode} from tmux windows.
+
+    Workers run as windows within the controller's tmux session.
+    Window naming convention: {mode}-{issue_id} (e.g., "implement-ENG-21").
 
     Args:
-        short_id: Short project ID for session name prefix
+        short_id: Short project ID (unused, kept for API compatibility)
+        tmux_session: Name of the tmux session containing worker windows
 
     Returns:
-        Set of issue IDs (uppercase) with live workers
+        Dict mapping issue_id (uppercase) to mode
     """
-    sessions = await get_tmux_sessions()
-    prefix = f"legion-{short_id}-worker-"
-    workers: set[str] = set()
+    _ = short_id  # Explicitly mark as intentionally unused
+    windows = await tmux.list_windows(tmux_session)
+    workers: dict[str, str] = {}
 
-    for session in sessions:
-        if session.startswith(prefix):
-            # Normalize to uppercase (Linear uses ENG-21, tmux might use eng-21)
-            issue_id = session[len(prefix) :].upper()
-            workers.add(issue_id)
-            logger.debug("Found live worker for %s", issue_id)
+    for window in windows:
+        if window == "main":
+            continue
 
-    logger.debug("Found %d live workers for project %s", len(workers), short_id)
+        parts = window.split("-", 1)
+        if len(parts) == 2:
+            mode, issue_id = parts
+            workers[issue_id.upper()] = mode
+            logger.debug("Found live worker for %s in mode %s", issue_id.upper(), mode)
+
+    logger.debug("Found %d live workers in session %s", len(workers), tmux_session)
     return workers
 
 
 # =============================================================================
 # GitHub PR Draft Status Fetching
 # =============================================================================
+
+
+class PRDraftData(TypedDict, total=False):
+    """GraphQL response for a single PR's draft status."""
+
+    isDraft: bool
+
+
+class GraphQLResponse(TypedDict, total=False):
+    """Top-level GraphQL response structure."""
+
+    data: dict[str, dict[str, PRDraftData | None]]
 
 
 class GitHubAPIError(Exception):
@@ -105,7 +118,7 @@ class GitHubAPIError(Exception):
     reraise=True,
 )
 async def get_pr_draft_status_batch(
-    pr_refs: dict[str, GitHubPRRef],
+    pr_refs: dict[str, types.GitHubPRRef],
     *,
     runner: CommandRunner = default_runner,
 ) -> dict[str, bool | None]:
@@ -142,13 +155,13 @@ async def get_pr_draft_status_batch(
         str, dict[str, tuple[str, int]]
     ] = {}  # repo_alias -> {pr_alias -> (issue_id, pr_number)}
 
-    query_parts = []
+    query_parts: list[str] = []
     for repo_idx, ((owner, repo), issue_prs) in enumerate(by_repo.items()):
         repo_alias = f"repo{repo_idx}"
         repo_alias_map[repo_alias] = (owner, repo)
         pr_alias_map[repo_alias] = {}
 
-        pr_parts = []
+        pr_parts: list[str] = []
         for pr_idx, (issue_id, pr_number) in enumerate(issue_prs):
             pr_alias = f"pr{pr_idx}"
             pr_alias_map[repo_alias][pr_alias] = (issue_id, pr_number)
@@ -175,21 +188,22 @@ async def get_pr_draft_status_batch(
         raise GitHubAPIError(f"GraphQL query failed: {stderr}")
 
     try:
-        data = json.loads(stdout)
+        response: GraphQLResponse = json.loads(stdout)
     except json.JSONDecodeError as e:
         logger.error("Failed to parse GraphQL response: %s", e)
         raise GitHubAPIError(f"Failed to parse GraphQL response: {e}") from e
 
-    data_obj = data.get("data") or {}
+    data_obj: dict[str, dict[str, PRDraftData | None]] = response.get("data") or {}
     result: dict[str, bool | None] = {}
 
     # Parse response using alias maps
     for repo_alias, (owner, repo) in repo_alias_map.items():
-        repo_data = data_obj.get(repo_alias) or {}
+        repo_data: dict[str, PRDraftData | None] = data_obj.get(repo_alias) or {}
 
         for pr_alias, (issue_id, pr_number) in pr_alias_map[repo_alias].items():
-            pr_data = repo_data.get(pr_alias)
-            if pr_data and "isDraft" in pr_data:
+            pr_data: PRDraftData | None = repo_data.get(pr_alias)
+            if pr_data is not None and "isDraft" in pr_data:
+                # Convert None to False for safety (null isDraft means not draft)
                 result[issue_id] = bool(pr_data["isDraft"])
                 logger.debug(
                     "Issue %s PR #%d isDraft: %s", issue_id, pr_number, result[issue_id]
@@ -213,7 +227,7 @@ async def get_pr_draft_status_batch(
 
 
 def parse_linear_issues(
-    linear_issues: Sequence[Mapping[str, Any]],
+    linear_issues: Sequence[LinearIssueRaw],
 ) -> list[ParsedIssue]:
     """Parse Linear API response into structured data.
 
@@ -236,34 +250,34 @@ def parse_linear_issues(
         if not raw_status:
             state_obj = issue.get("state")
             raw_status = state_obj.get("name", "") if state_obj else ""
-        status = IssueStatus.normalize(raw_status)
+        status = types.IssueStatus.normalize(raw_status)
 
         # Extract labels
         # Linear MCP returns "labels" as list of strings, raw API might return "labels.nodes"
         labels_raw = issue.get("labels", [])
-        if isinstance(labels_raw, list) and all(isinstance(x, str) for x in labels_raw):
-            # MCP format: ["label1", "label2"]
-            labels: list[str] = labels_raw
-        elif isinstance(labels_raw, dict):
+        labels: list[str] = []
+        if isinstance(labels_raw, dict):
             # Raw API format: {"nodes": [{"name": "label1"}, ...]}
-            label_nodes = labels_raw.get("nodes", [])
             labels = [
-                node.get("name", "")
-                for node in (label_nodes or [])
-                if isinstance(node, dict)
+                node["name"]
+                for node in labels_raw.get("nodes") or []
+                if isinstance(node, dict) and node.get("name")
             ]
-        else:
-            labels = []
+        elif isinstance(labels_raw, list):
+            # MCP format: ["label1", "label2"] - filter out empty/non-string values
+            labels = [x for x in labels_raw if isinstance(x, str) and x]
 
         # Extract PR reference from attachments
         # Linear MCP returns attachments with PR URLs like https://github.com/owner/repo/pull/123
-        pr_ref: GitHubPRRef | None = None
-        attachments = issue.get("attachments", [])
+        pr_ref: types.GitHubPRRef | None = None
+        attachments = issue.get("attachments") or []
+        if not isinstance(attachments, list):
+            attachments = []
         for attachment in attachments:
             if isinstance(attachment, dict):
                 url = attachment.get("url", "")
                 if "github.com" in url and "/pull/" in url:
-                    pr_ref = GitHubPRRef.from_url(url)
+                    pr_ref = types.GitHubPRRef.from_url(url)
                     if pr_ref:
                         break
 
@@ -286,20 +300,22 @@ def parse_linear_issues(
 
 
 async def fetch_all_issue_data(
-    linear_issues: Sequence[Mapping[str, Any]],
+    linear_issues: Sequence[LinearIssueRaw],
     short_id: str,
+    tmux_session: str,
     *,
     runner: CommandRunner = default_runner,
 ) -> list[FetchedIssueData]:
     """Fetch all data for issues in parallel.
 
     All I/O operations run concurrently in a single task group:
-    - Tmux session list (cached)
+    - Tmux window list (for live workers)
     - GitHub PR draft status (fetched per-repo based on PR attachments)
 
     Args:
         linear_issues: Raw issue dicts from Linear API
         short_id: Short project ID for tmux sessions
+        tmux_session: Name of the tmux session containing worker windows
         runner: Command runner for testing
 
     Returns:
@@ -309,19 +325,19 @@ async def fetch_all_issue_data(
     parsed_issues = parse_linear_issues(linear_issues)
 
     # Identify PRs that need draft status lookup
-    pr_refs_for_status: dict[str, GitHubPRRef] = {
+    pr_refs_for_status: dict[str, types.GitHubPRRef] = {
         p.issue_id: p.pr_ref
         for p in parsed_issues
         if p.needs_pr_status and p.pr_ref is not None
     }
 
     # Phase 2: Fetch everything in parallel
-    live_workers: set[str] = set()
+    live_workers: dict[str, str] = {}
     pr_draft_map: dict[str, bool | None] = {}
 
     async def fetch_workers() -> None:
         nonlocal live_workers
-        live_workers = await get_live_workers(short_id)
+        live_workers = await get_live_workers(short_id, tmux_session)
 
     async def fetch_pr_draft_status() -> None:
         nonlocal pr_draft_map

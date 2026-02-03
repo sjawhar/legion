@@ -1,13 +1,29 @@
 """Legion daemon: manages tmux session and controller lifecycle."""
 
+import logging
 import re
+import shlex
 import time
 from pathlib import Path
+from typing import TypeGuard
 
 import anyio
 
 from legion import short_id as short_id_mod
 from legion import tmux
+from legion.state import types
+from legion.state.types import WorkerModeLiteral
+
+logger = logging.getLogger(__name__)
+
+
+def is_valid_worker_mode(mode: str) -> TypeGuard[WorkerModeLiteral]:
+    """Check if a string is a valid worker mode.
+
+    This provides type narrowing - after calling this function, the type
+    checker knows that the mode is a WorkerModeLiteral if True is returned.
+    """
+    return mode in ("architect", "plan", "implement", "review", "merge")
 
 
 def get_short_id(project_id: str) -> str:
@@ -16,19 +32,19 @@ def get_short_id(project_id: str) -> str:
     If project_id looks like a UUID, shorten it. Otherwise use as-is.
     """
     clean = project_id.replace("-", "")
-    if len(clean) == 32 and all(c in "0123456789abcdefABCDEF" for c in clean):
-        return short_id_mod.uuid_to_short(project_id)
+    try:
+        # If it parses as a hex UUID (32 hex chars), shorten it
+        if len(clean) == 32:
+            int(clean, 16)
+            return short_id_mod.uuid_to_short(project_id)
+    except ValueError:
+        pass
     return project_id
 
 
 def controller_session_name(short: str) -> str:
     """Get tmux session name for controller."""
     return f"legion-{short}-controller"
-
-
-def worker_session_prefix(short: str) -> str:
-    """Get prefix for worker session names."""
-    return f"legion-{short}-worker-"
 
 
 def validate_project_id(project_id: str) -> None:
@@ -39,12 +55,114 @@ def validate_project_id(project_id: str) -> None:
         )
 
 
+def get_session_file_path(workspace: Path, session_id: str) -> Path:
+    """Get path to Claude Code session file.
+
+    Claude Code encodes workspace paths by replacing all non-alphanumeric
+    characters with dashes. Examples:
+    - /home/sami/legion/default -> -home-sami-legion-default
+    - /home/sami/.dotfiles -> -home-sami--dotfiles
+    """
+    encoded = re.sub(r"[^a-zA-Z0-9]", "-", str(workspace))
+    return Path.home() / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+
+
+async def get_newest_mtime(session_file: Path) -> float | None:
+    """Get newest mtime from session file and any subagent files.
+
+    Returns None if session file doesn't exist or is inaccessible.
+    """
+    session_path = anyio.Path(session_file)
+    if not await session_path.exists():
+        return None
+
+    try:
+        newest = (await session_path.stat()).st_mtime
+    except (PermissionError, OSError):
+        # Session file exists but is inaccessible
+        return None
+
+    # Check subagent files
+    subagents_dir = session_file.parent / session_file.stem / "subagents"
+    subagents_path = anyio.Path(subagents_dir)
+    try:
+        if await subagents_path.exists():
+            async for entry in subagents_path.iterdir():
+                if entry.suffix == ".jsonl":
+                    try:
+                        stat = await entry.stat()
+                        newest = max(newest, stat.st_mtime)
+                    except (PermissionError, OSError):
+                        # Skip inaccessible subagent files
+                        continue
+    except (PermissionError, OSError):
+        # Subagents directory inaccessible, use session file mtime only
+        pass
+
+    return newest
+
+
+async def check_worker_health(
+    tmux_session: str,
+    team_id: str,
+    workspace_dir: Path,
+    staleness_threshold: int = 600,
+) -> None:
+    """Check worker health and kill stale windows.
+
+    Workers run as windows within the controller's tmux session.
+    Window names follow the format: {mode}-{issue} (e.g., "implement-ENG-21").
+
+    Args:
+        tmux_session: Name of the tmux session containing workers
+        team_id: Linear team UUID for computing session IDs
+        workspace_dir: Base directory containing issue workspaces
+        staleness_threshold: Seconds of inactivity before killing (default 10 min)
+    """
+    windows = await tmux.list_windows(tmux_session)
+
+    for window in windows:
+        if window == "main":
+            continue  # Skip controller window
+
+        # Parse {mode}-{issue} from window name
+        parts = window.split("-", 1)
+        if len(parts) != 2:
+            continue  # Invalid format, skip
+
+        mode, issue_id = parts
+        if not is_valid_worker_mode(mode):
+            continue  # Not a valid worker mode
+
+        issue_id = issue_id.upper()  # Normalize
+
+        # Compute session file path
+        session_id = types.compute_session_id(team_id, issue_id, mode)
+        workspace = workspace_dir / issue_id
+        session_file = get_session_file_path(workspace, session_id)
+
+        # Check staleness
+        mtime = await get_newest_mtime(session_file)
+        if mtime is None:
+            # No session file yet - worker just started
+            continue
+
+        age = time.time() - mtime
+        if age > staleness_threshold:
+            logger.info("Killing stale worker: %s (age: %.0fs)", window, age)
+            try:
+                await tmux.kill_window(tmux_session, window)
+            except Exception as e:
+                logger.warning("Failed to kill window %s: %s", window, e)
+
+
 async def validate_workspace(workspace: Path) -> None:
     """Validate the workspace directory."""
-    if not workspace.exists():
+    workspace_path = anyio.Path(workspace)
+    if not await workspace_path.exists():
         raise ValueError(f"Workspace does not exist: {workspace}")
 
-    if not (workspace / ".jj").exists():
+    if not await (workspace_path / ".jj").exists():
         raise ValueError(f"Not a jj repository: {workspace}")
 
     # Check for default workspace
@@ -60,43 +178,119 @@ async def validate_workspace(workspace: Path) -> None:
 
 
 async def start_controller(
-    session: str, project_id: str, short: str, workspace: Path
+    tmux_session: str,
+    project_id: str,
+    short: str,
+    workspace: Path,
+    session_id: str,
 ) -> None:
-    """Start the controller in the tmux session."""
+    """Start controller in tmux session.
+
+    Uses --session-id for new sessions, --resume for existing ones.
+    Passes command directly to tmux new-session (not send_keys).
+    """
+    session_file = get_session_file_path(workspace, session_id)
+
+    # Decide whether to create new or resume
+    if await anyio.Path(session_file).exists():
+        session_flag = f"--resume {shlex.quote(session_id)}"
+    else:
+        session_flag = f"--session-id {shlex.quote(session_id)}"
+
+    prompt = f"Use the legion-controller skill. Project: {project_id}"
     cmd = (
-        f"cd '{workspace}' && "
-        f"LEGION_DIR='{workspace}' LINEAR_TEAM_ID={project_id} LEGION_SHORT_ID={short} "
-        f"claude --dangerously-skip-permissions -p "
-        f"'Use the legion-controller skill. Project: {project_id}'"
+        f"cd {shlex.quote(str(workspace))} && "
+        f"LEGION_DIR={shlex.quote(str(workspace))} "
+        f"LINEAR_TEAM_ID={shlex.quote(project_id)} "
+        f"LEGION_SHORT_ID={shlex.quote(short)} "
+        f"claude --dangerously-skip-permissions {session_flag} "
+        f"-p {shlex.quote(prompt)}"
     )
-    await tmux.send_keys(session, "main", cmd)
+
+    await tmux.new_session(tmux_session, "main", cmd)
+
+
+async def controller_needs_restart(
+    tmux_session: str,
+    session_file: Path,
+    threshold: int = 600,
+) -> bool:
+    """Check if controller needs restart.
+
+    Args:
+        tmux_session: tmux session name
+        session_file: Path to Claude Code session file
+        threshold: Staleness threshold in seconds (default 10 min)
+
+    Returns:
+        True if controller should be restarted
+    """
+    if not await tmux.session_exists(tmux_session):
+        return True
+
+    newest_mtime = await get_newest_mtime(session_file)
+    if newest_mtime is None:
+        return True
+
+    age = time.time() - newest_mtime
+    return age > threshold
 
 
 async def health_loop(
+    tmux_session: str,
+    project_id: str,
     short: str,
-    state_dir: Path,
-    interval_seconds: int = 180,
+    workspace: Path,
+    session_id: str,
+    check_interval: float = 60.0,
+    staleness_threshold: int = 600,
+    restart_cooldown: float = 60.0,
 ) -> None:
-    """Monitor controller heartbeat."""
-    session = controller_session_name(short)
-    heartbeat_file = state_dir / "heartbeat"
+    """Monitor controller health and restart if needed.
+
+    Never exits - always restarts controller on failure.
+    """
+    last_restart: float = 0.0
+    session_file = get_session_file_path(workspace, session_id)
 
     while True:
-        await anyio.sleep(interval_seconds)
+        await anyio.sleep(check_interval)
 
-        if not await tmux.session_exists(session):
-            print(f"Session {session} no longer exists, exiting health loop")
-            break
+        # Check worker health first (kill stale worker windows)
+        # Wrapped in try/except to prevent daemon crash if worker health check fails
+        try:
+            await check_worker_health(
+                tmux_session, project_id, workspace, staleness_threshold
+            )
+        except Exception as e:
+            logger.error("Worker health check failed: %s", e)
 
-        if not heartbeat_file.exists():
-            print(f"WARNING: No heartbeat file for {short}")
-            continue
+        needs_restart = await controller_needs_restart(
+            tmux_session, session_file, staleness_threshold
+        )
 
-        age = time.time() - heartbeat_file.stat().st_mtime
-        if age > interval_seconds:
-            print(f"WARNING: Controller heartbeat stale ({age:.0f}s) for {short}")
-        else:
-            print(f"Controller heartbeat OK for {short}")
+        if needs_restart:
+            # Enforce cooldown
+            elapsed = time.time() - last_restart
+            if elapsed < restart_cooldown:
+                wait_time = restart_cooldown - elapsed
+                print(f"Restart cooldown: waiting {wait_time:.0f}s")
+                await anyio.sleep(wait_time)
+
+            print("Restarting controller...")
+
+            # Kill existing session if it exists
+            if await tmux.session_exists(tmux_session):
+                await tmux.kill_session(tmux_session)
+
+            try:
+                await start_controller(
+                    tmux_session, project_id, short, workspace, session_id
+                )
+                last_restart = time.time()
+            except Exception as e:
+                print(f"Failed to start controller: {e}")
+                # Don't update last_restart - next iteration will try again
 
 
 async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
@@ -106,6 +300,7 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
 
     short = get_short_id(project_id)
     session = controller_session_name(short)
+    session_id = types.compute_controller_session_id(project_id)
 
     if await tmux.session_exists(session):
         raise RuntimeError(
@@ -120,13 +315,9 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
     # Create state directory
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create tmux session with window named "main"
-    await tmux.create_session(session, "main")
-    print(f"Created tmux session: {session}")
-
-    # Start controller
-    await start_controller(session, project_id, short, workspace)
-    print("Started controller")
+    # Start controller directly (no need to create empty session first)
+    await start_controller(session, project_id, short, workspace, session_id)
+    print(f"Started controller in tmux session: {session}")
 
     print()
     print(f"To attach: tmux attach -t {session}")
@@ -134,30 +325,35 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
     print()
 
     # Run health loop
-    await health_loop(short, state_dir)
+    await health_loop(
+        tmux_session=session,
+        project_id=project_id,
+        short=short,
+        workspace=workspace,
+        session_id=session_id,
+    )
 
 
-async def stop(project_id: str, state_dir: Path) -> None:
-    """Stop the Legion swarm."""
+async def stop(project_id: str, state_dir: Path) -> None:  # noqa: ARG001
+    """Stop the Legion swarm.
+
+    Args:
+        project_id: Linear project/team UUID
+        state_dir: State directory (unused, kept for API compatibility)
+    """
+    _ = state_dir  # Explicitly mark as intentionally unused
     validate_project_id(project_id)
     short = get_short_id(project_id)
     session = controller_session_name(short)
 
     print(f"Stopping Legion for project: {project_id}")
 
-    # Kill controller session
+    # Kill controller session (this also kills all worker windows within it)
     if await tmux.session_exists(session):
         await tmux.kill_session(session)
         print(f"Killed controller session: {session}")
     else:
         print(f"No controller session found: {session}")
-
-    # Kill any worker sessions matching this short ID
-    prefix = worker_session_prefix(short)
-    for sess in await tmux.list_sessions():
-        if sess.startswith(prefix):
-            await tmux.kill_session(sess)
-            print(f"Killed worker session: {sess}")
 
 
 async def status(project_id: str, state_dir: Path) -> None:
@@ -176,22 +372,25 @@ async def status(project_id: str, state_dir: Path) -> None:
     else:
         print(f"Controller ({session}): NOT RUNNING")
 
-    # Check worker sessions
-    prefix = worker_session_prefix(short)
-    workers = [s for s in await tmux.list_sessions() if s.startswith(prefix)]
-    if workers:
-        print(f"Workers: {len(workers)}")
-        for w in workers:
-            issue_id = w.removeprefix(prefix)
-            print(f"  - {issue_id}")
+    # Check worker windows within controller session
+    if await tmux.session_exists(session):
+        windows = await tmux.list_windows(session)
+        workers = [w for w in windows if w != "main"]
+        if workers:
+            print(f"Workers: {len(workers)}")
+            for w in workers:
+                print(f"  - {w}")
+        else:
+            print("Workers: none")
     else:
-        print("Workers: none")
+        print("Workers: N/A (controller not running)")
 
     print()
 
-    heartbeat_file = state_dir / "heartbeat"
-    if heartbeat_file.exists():
-        age = time.time() - heartbeat_file.stat().st_mtime
+    heartbeat_path = anyio.Path(state_dir / "heartbeat")
+    if await heartbeat_path.exists():
+        stat_result = await heartbeat_path.stat()
+        age = time.time() - stat_result.st_mtime
         print(f"Heartbeat: {age:.0f}s ago")
     else:
         print("Heartbeat: NO FILE")
