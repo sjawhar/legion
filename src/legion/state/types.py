@@ -19,13 +19,25 @@ from typing import Literal, TypedDict
 # =============================================================================
 
 # Literal types for compile-time safety
-IssueStatusLiteral = Literal["Todo", "In Progress", "Needs Review", "Retro", "Done"]
-WorkerModeLiteral = Literal["plan", "implement", "review", "finish"]
+IssueStatusLiteral = Literal[
+    "Triage",
+    "Icebox",
+    "Backlog",
+    "Todo",
+    "In Progress",
+    "Needs Review",
+    "Retro",
+    "Done",
+]
+WorkerModeLiteral = Literal["architect", "plan", "implement", "review", "merge"]
 
 
 class IssueStatus:
     """Canonical issue status values with normalization."""
 
+    TRIAGE: IssueStatusLiteral = "Triage"
+    ICEBOX: IssueStatusLiteral = "Icebox"
+    BACKLOG: IssueStatusLiteral = "Backlog"
     TODO: IssueStatusLiteral = "Todo"
     IN_PROGRESS: IssueStatusLiteral = "In Progress"
     NEEDS_REVIEW: IssueStatusLiteral = "Needs Review"
@@ -38,18 +50,23 @@ class IssueStatus:
     }
 
     @classmethod
-    def normalize(cls, raw: str) -> str:
-        """Normalize a raw status string to canonical form."""
+    def normalize(cls, raw: str) -> IssueStatusLiteral | str:
+        """Normalize a raw status string to canonical form.
+
+        Returns the canonical IssueStatusLiteral if the raw value matches
+        a known alias, otherwise returns the original string unchanged.
+        """
         return cls.ALIASES.get(raw, raw)
 
 
 class WorkerMode:
     """Worker mode constants for session ID computation."""
 
+    ARCHITECT: WorkerModeLiteral = "architect"
     PLAN: WorkerModeLiteral = "plan"
     IMPLEMENT: WorkerModeLiteral = "implement"
     REVIEW: WorkerModeLiteral = "review"
-    FINISH: WorkerModeLiteral = "finish"
+    MERGE: WorkerModeLiteral = "merge"
 
 
 # =============================================================================
@@ -58,15 +75,17 @@ class WorkerMode:
 
 ActionType = Literal[
     "skip",
+    "dispatch_architect",
     "dispatch_planner",
     "dispatch_implementer",
     "dispatch_reviewer",
-    "dispatch_finisher",
+    "dispatch_merger",
     "resume_implementer_for_changes",
     "resume_implementer_for_retro",
     "transition_to_in_progress",
+    "transition_to_needs_review",
     "transition_to_retro",
-    "escalate_blocked",
+    "transition_to_todo",
     "relay_user_feedback",
 ]
 
@@ -146,11 +165,15 @@ class AssistantMessage(TypedDict):
     content: list[ToolUseContent | TextContent]
 
 
-class SessionEntry(TypedDict):
-    """Entry in Claude session JSONL file."""
+class SessionEntry(TypedDict, total=False):
+    """Entry in Claude session JSONL file.
 
-    type: Literal["assistant", "user"]
-    message: AssistantMessage
+    Note: `message` is only present for assistant entries, not user entries.
+    Using total=False since not all fields are present in all entry types.
+    """
+
+    type: Literal["assistant", "user"]  # Required via runtime check
+    message: AssistantMessage  # Only present for assistant type
 
 
 # =============================================================================
@@ -176,14 +199,13 @@ class GitHubPRRef:
         Returns:
             GitHubPRRef or None if URL doesn't match expected format
         """
-        match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
+        # Validate URL format and owner/repo characters (alphanumeric, hyphen, underscore, dot)
+        match = re.match(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", url)
         if not match:
             return None
-        owner, repo = match.group(1), match.group(2)
-        # Validate owner/repo contain only safe characters (alphanumeric, hyphen, underscore, dot)
-        if not re.match(r"^[\w.-]+$", owner) or not re.match(r"^[\w.-]+$", repo):
-            return None
-        return cls(owner=owner, repo=repo, number=int(match.group(3)))
+        return cls(
+            owner=match.group(1), repo=match.group(2), number=int(match.group(3))
+        )
 
 
 @dataclass
@@ -191,7 +213,7 @@ class ParsedIssue:
     """Parsed issue data from Linear API response."""
 
     issue_id: str
-    status: str
+    status: IssueStatusLiteral | str  # Canonical status or unknown raw value
     labels: list[str]
     pr_ref: GitHubPRRef | None = None
 
@@ -225,12 +247,10 @@ class FetchedIssueData:
     """Complete fetched data for an issue."""
 
     issue_id: str
-    status: str
+    status: IssueStatusLiteral | str  # Canonical status or unknown raw value
     labels: list[str]
     pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
     has_live_worker: bool
-    is_blocked: bool
-    blocked_question: str | None
     has_user_feedback: bool
     has_user_input_needed: bool
 
@@ -238,14 +258,13 @@ class FetchedIssueData:
 class IssueStateDict(TypedDict):
     """Serialized form of IssueState."""
 
-    status: str
+    status: IssueStatusLiteral | str
     labels: list[str]
     pr_is_draft: bool | None
     has_live_worker: bool
     suggested_action: ActionType
     session_id: str
     has_user_feedback: bool
-    blocked_question: str | None
 
 
 class CollectedStateDict(TypedDict):
@@ -258,14 +277,13 @@ class CollectedStateDict(TypedDict):
 class IssueState:
     """Final state for an issue with suggested action."""
 
-    status: str
+    status: IssueStatusLiteral | str  # Canonical status or unknown raw value
     labels: list[str]
     pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
     has_live_worker: bool
     suggested_action: ActionType
     session_id: str
     has_user_feedback: bool
-    blocked_question: str | None
 
     def to_dict(self) -> IssueStateDict:
         """Convert to dictionary for JSON serialization."""
@@ -277,7 +295,6 @@ class IssueState:
             "suggested_action": self.suggested_action,
             "session_id": self.session_id,
             "has_user_feedback": self.has_user_feedback,
-            "blocked_question": self.blocked_question,
         }
 
 
@@ -289,9 +306,7 @@ class CollectedState:
 
     def to_dict(self) -> CollectedStateDict:
         """Convert to dictionary for JSON serialization."""
-        return {
-            "issues": {k: v.to_dict() for k, v in self.issues.items()}
-        }
+        return {"issues": {k: v.to_dict() for k, v in self.issues.items()}}
 
 
 # =============================================================================

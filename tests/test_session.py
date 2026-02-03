@@ -25,7 +25,7 @@ class TestSessionDataclass:
             metadata=None,
         )
         with pytest.raises(AttributeError):
-            sess.session_id = "changed"  # type: ignore[misc]
+            sess.session_id = "changed"  # pyright: ignore[reportAttributeAccessIssue]
 
     def test_session_fields(self) -> None:
         """Session should have all required fields."""
@@ -179,9 +179,7 @@ class TestFileSessionStorage:
         assert loaded.metadata == sample_session.metadata
 
     @pytest.mark.anyio
-    async def test_load_nonexistent(
-        self, storage: session.FileSessionStorage
-    ) -> None:
+    async def test_load_nonexistent(self, storage: session.FileSessionStorage) -> None:
         """Loading nonexistent session should return None."""
         loaded = await storage.load("nonexist")
         assert loaded is None

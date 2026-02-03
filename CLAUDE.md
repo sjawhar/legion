@@ -14,7 +14,7 @@ legion/
 │   └── short_id.py      # Legion instance IDs
 ├── skills/              # Claude Code skills
 │   ├── legion-controller/  # Polls Linear, dispatches workers
-│   └── legion-worker/      # Implements issues (plan/implement/review/retro/finish)
+│   └── legion-worker/      # Implements issues (plan/implement/review/retro/merge)
 ├── hooks/               # Claude Code hooks
 ├── tests/               # pytest test suite
 └── docs/
@@ -30,6 +30,8 @@ legion/
 - **Click** for CLI
 - **uv** for package management
 - **pytest** for testing
+- **ruff** for linting and formatting
+- **basedpyright** for type checking
 - **jj (Jujutsu)** for version control with workspaces
 - **Linear MCP** for issue tracking
 - **tmux** for worker session management
@@ -58,10 +60,13 @@ legion install
 
 **Note:** Context7 (for framework documentation lookup) is bundled in Legion's plugin config.
 
-### Testing
+### Quality Checks
 
 ```bash
-uv run pytest
+uv run ruff check .        # Lint
+uv run ruff format --check # Format check
+uv run basedpyright .      # Type check
+uv run pytest              # Test
 ```
 
 ### Version Control
@@ -89,21 +94,26 @@ Linear Issue → Controller → Worker (in jj workspace) → PR → Review → M
 ### Issue Lifecycle
 
 ```
-Todo → In Progress → Needs Review → Retro → Done
-         ↑              │
-         └──────────────┘
-         (changes requested)
+Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In Progress ──► Needs Review ──► Retro ──► Done
+         │                  ^           ^            ^               │
+         │                  │           │            │               │
+         ├──────────────────┘           │            └───────────────┘
+         │   (already spec-ready)       │            (changes requested)
+         │                              │
+         └──────────────────────────────┘
+                    (urgent + clear)
 ```
 
 ### Worker Modes
 
 | Mode | Phase | Output |
 |------|-------|--------|
+| `architect` | Backlog | Spec-ready issue or sub-issues |
 | `plan` | Todo | Plan posted to Linear |
 | `implement` | In Progress | PR opened |
 | `review` | Needs Review | PR labeled |
 | `retro` | Retro | Learnings documented |
-| `finish` | Done | PR merged, workspace cleaned |
+| `merge` | Done | PR merged, workspace cleaned |
 
 ### Labels
 

@@ -48,7 +48,9 @@ class TestValidateProjectId:
         daemon.validate_project_id("my_project_123")  # Should not raise
 
     def test_valid_uuid(self) -> None:
-        daemon.validate_project_id("7b4f0862-b775-4cb0-9a67-85400c6f44a8")  # Should not raise
+        daemon.validate_project_id(
+            "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+        )  # Should not raise
 
     def test_invalid_spaces(self) -> None:
         with pytest.raises(ValueError, match="must contain only"):

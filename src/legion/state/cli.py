@@ -6,7 +6,6 @@ import argparse
 import json
 import sys
 import uuid
-from pathlib import Path
 from typing import Any
 
 import anyio
@@ -31,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--session-dir",
-        help="Claude session directory",
+        help="Claude session directory (for controller inspection)",
     )
     parser.add_argument(
         "--debug",
@@ -47,6 +46,7 @@ async def async_main() -> None:
 
     # Set up logging
     import logging
+
     level = logging.DEBUG if args.debug else logging.WARNING
     logging.basicConfig(
         level=level,
@@ -74,15 +74,10 @@ async def async_main() -> None:
         print(f"Error parsing Linear JSON: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Parse session dir
-    session_dir = Path(args.session_dir) if args.session_dir else None
-
     # Fetch all data
     issues_data = await fetch.fetch_all_issue_data(
         linear_issues=issues,
-        team_id=args.team_id,
         short_id=args.short_id,
-        session_dir=session_dir,
     )
 
     # Build and output state

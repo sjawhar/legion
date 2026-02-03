@@ -1,6 +1,7 @@
 """Legion daemon: manages tmux session and controller lifecycle."""
 
 import re
+import time
 from pathlib import Path
 
 import anyio
@@ -23,6 +24,11 @@ def get_short_id(project_id: str) -> str:
 def controller_session_name(short: str) -> str:
     """Get tmux session name for controller."""
     return f"legion-{short}-controller"
+
+
+def worker_session_prefix(short: str) -> str:
+    """Get prefix for worker session names."""
+    return f"legion-{short}-worker-"
 
 
 def validate_project_id(project_id: str) -> None:
@@ -59,7 +65,7 @@ async def start_controller(
     """Start the controller in the tmux session."""
     cmd = (
         f"cd '{workspace}' && "
-        f"LEGION_DIR='{workspace}' LINEAR_PROJECT_ID={project_id} LEGION_SHORT_ID={short} "
+        f"LEGION_DIR='{workspace}' LINEAR_TEAM_ID={project_id} LEGION_SHORT_ID={short} "
         f"claude --dangerously-skip-permissions -p "
         f"'Use the legion-controller skill. Project: {project_id}'"
     )
@@ -86,7 +92,7 @@ async def health_loop(
             print(f"WARNING: No heartbeat file for {short}")
             continue
 
-        age = anyio.current_time() - heartbeat_file.stat().st_mtime
+        age = time.time() - heartbeat_file.stat().st_mtime
         if age > interval_seconds:
             print(f"WARNING: Controller heartbeat stale ({age:.0f}s) for {short}")
         else:
@@ -147,10 +153,9 @@ async def stop(project_id: str, state_dir: Path) -> None:
         print(f"No controller session found: {session}")
 
     # Kill any worker sessions matching this short ID
-    stdout, _, _ = await tmux.run(["tmux", "list-sessions", "-F", "#{session_name}"])
-    worker_prefix = f"legion-{short}-worker-"
-    for sess in stdout.split("\n"):
-        if sess.startswith(worker_prefix):
+    prefix = worker_session_prefix(short)
+    for sess in await tmux.list_sessions():
+        if sess.startswith(prefix):
             await tmux.kill_session(sess)
             print(f"Killed worker session: {sess}")
 
@@ -172,13 +177,12 @@ async def status(project_id: str, state_dir: Path) -> None:
         print(f"Controller ({session}): NOT RUNNING")
 
     # Check worker sessions
-    stdout, _, _ = await tmux.run(["tmux", "list-sessions", "-F", "#{session_name}"])
-    worker_prefix = f"legion-{short}-worker-"
-    workers = [s for s in stdout.split("\n") if s.startswith(worker_prefix)]
+    prefix = worker_session_prefix(short)
+    workers = [s for s in await tmux.list_sessions() if s.startswith(prefix)]
     if workers:
         print(f"Workers: {len(workers)}")
         for w in workers:
-            issue_id = w.replace(worker_prefix, "")
+            issue_id = w.removeprefix(prefix)
             print(f"  - {issue_id}")
     else:
         print("Workers: none")
@@ -187,7 +191,7 @@ async def status(project_id: str, state_dir: Path) -> None:
 
     heartbeat_file = state_dir / "heartbeat"
     if heartbeat_file.exists():
-        age = anyio.current_time() - heartbeat_file.stat().st_mtime
+        age = time.time() - heartbeat_file.stat().st_mtime
         print(f"Heartbeat: {age:.0f}s ago")
     else:
         print("Heartbeat: NO FILE")

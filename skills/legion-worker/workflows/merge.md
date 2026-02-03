@@ -1,22 +1,21 @@
-# Finish Workflow
+# Merge Workflow
 
-Merge the PR into main and clean up the workspace.
+Merge the PR into main. The controller handles workspace cleanup after completion.
 
 ## Workflow
 
 ### 1. Rebase onto Main
 
 ```bash
-cd "$WORKSPACE_DIR"
-jj git fetch --repository "$WORKSPACE_DIR"
-jj rebase -d main --repository "$WORKSPACE_DIR"
+jj git fetch
+jj rebase -d main
 ```
 
 ### 2. Resolve Conflicts
 
 If rebase produces conflicts:
 
-1. Check status: `jj status --repository "$WORKSPACE_DIR"`
+1. Check status: `jj status`
 2. Open each conflicted file and resolve markers
 3. Verify no conflicts remain: `jj status` shows clean state
 
@@ -28,7 +27,7 @@ If rebase produces conflicts:
 ### 3. Push
 
 ```bash
-jj git push --repository "$WORKSPACE_DIR"
+jj git push
 ```
 
 ### 4. Wait for CI
@@ -52,17 +51,6 @@ Only escalate with `user-input-needed` if something has gone fundamentally wrong
 gh pr merge "$LINEAR_ISSUE_ID" --squash --delete-branch
 ```
 
-### 6. Clean Up Workspace
+### 6. Exit
 
-Fetch to sync the merge, then remove the workspace:
-
-```bash
-jj git fetch --repository "$LEGION_DIR"
-jj workspace forget "$LINEAR_ISSUE_ID" --force --cleanup --repository "$LEGION_DIR"
-```
-
-The `--cleanup` flag deletes the workspace directory. No manual `rm -rf` needed.
-
-### 7. Exit
-
-Exit without adding a label. The Linear issue auto-closes when the PR merges.
+Exit without adding a label. The Linear issue auto-closes when the PR merges. The controller will clean up the workspace.
