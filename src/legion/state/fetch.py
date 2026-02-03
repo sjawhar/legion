@@ -31,6 +31,18 @@ from legion.state.types import (
 
 logger = logging.getLogger(__name__)
 
+# Export public API and tmux module for test mocking access
+__all__ = [
+    "CommandRunner",
+    "GitHubAPIError",
+    "default_runner",
+    "fetch_all_issue_data",
+    "get_live_workers",
+    "get_pr_draft_status_batch",
+    "parse_linear_issues",
+    "tmux",  # Exposed for test mocking
+]
+
 
 # =============================================================================
 # Protocols for Dependency Injection
@@ -193,15 +205,22 @@ async def get_pr_draft_status_batch(
         logger.error("Failed to parse GraphQL response: %s", e)
         raise GitHubAPIError(f"Failed to parse GraphQL response: {e}") from e
 
-    data_obj: dict[str, dict[str, PRDraftData | None]] = response.get("data") or {}
+    raw_data = response.get("data")
+    data_obj: dict[str, dict[str, PRDraftData | None]] = (
+        raw_data if isinstance(raw_data, dict) else {}
+    )
     result: dict[str, bool | None] = {}
 
     # Parse response using alias maps
     for repo_alias, (owner, repo) in repo_alias_map.items():
-        repo_data: dict[str, PRDraftData | None] = data_obj.get(repo_alias) or {}
+        raw_repo = data_obj.get(repo_alias)
+        repo_data: dict[str, PRDraftData | None] = (
+            raw_repo if isinstance(raw_repo, dict) else {}
+        )
 
         for pr_alias, (issue_id, pr_number) in pr_alias_map[repo_alias].items():
-            pr_data: PRDraftData | None = repo_data.get(pr_alias)
+            raw_pr = repo_data.get(pr_alias)
+            pr_data: PRDraftData | None = raw_pr if isinstance(raw_pr, dict) else None
             if pr_data is not None and "isDraft" in pr_data:
                 # Convert None to False for safety (null isDraft means not draft)
                 result[issue_id] = bool(pr_data["isDraft"])
@@ -342,16 +361,22 @@ async def fetch_all_issue_data(
         nonlocal live_workers
         live_workers = await get_live_workers(short_id, tmux_session)
 
-    async def fetch_pr_draft_status() -> None:
+    async def fetch_pr_draft_status_safe() -> None:
         nonlocal pr_draft_map
-        if pr_refs_for_status:
+        if not pr_refs_for_status:
+            return
+        try:
             pr_draft_map = await get_pr_draft_status_batch(
                 pr_refs_for_status, runner=runner
             )
+        except GitHubAPIError as e:
+            logger.warning("GitHub API failed: %s - will retry next iteration", e)
+            # Set all PRs to None (couldn't check) rather than missing (no PR)
+            pr_draft_map = {issue_id: None for issue_id in pr_refs_for_status}
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(fetch_workers)
-        tg.start_soon(fetch_pr_draft_status)
+        tg.start_soon(fetch_pr_draft_status_safe)
 
     # Phase 3: Build results
     results: list[FetchedIssueData] = []
@@ -365,6 +390,7 @@ async def fetch_all_issue_data(
                 issue_id=issue.issue_id,
                 status=issue.status,
                 labels=issue.labels,
+                has_pr=issue.has_pr,
                 pr_is_draft=pr_is_draft,
                 has_live_worker=has_live_worker,
                 has_user_feedback=issue.has_user_feedback,

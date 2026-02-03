@@ -78,6 +78,7 @@ class WorkerMode:
 
 ActionType = Literal[
     "skip",
+    "investigate_no_pr",  # Needs attention, PR might be missing
     "dispatch_architect",
     "dispatch_planner",
     "dispatch_implementer",
@@ -158,49 +159,6 @@ class GitHubPR(TypedDict):
 
 
 # =============================================================================
-# Session File TypedDicts
-# =============================================================================
-
-
-class AskUserQuestionInput(TypedDict):
-    """Input for AskUserQuestion tool call."""
-
-    question: str
-
-
-class ToolUseContent(TypedDict):
-    """Tool use content item in assistant message."""
-
-    type: Literal["tool_use"]
-    name: str
-    input: AskUserQuestionInput
-
-
-class TextContent(TypedDict):
-    """Text content item in assistant message."""
-
-    type: Literal["text"]
-    text: str
-
-
-class AssistantMessage(TypedDict):
-    """Assistant message structure."""
-
-    content: list[ToolUseContent | TextContent]
-
-
-class SessionEntry(TypedDict, total=False):
-    """Entry in Claude session JSONL file.
-
-    Note: `message` is only present for assistant entries, not user entries.
-    Using total=False since not all fields are present in all entry types.
-    """
-
-    type: Literal["assistant", "user"]  # Required via runtime check
-    message: AssistantMessage  # Only present for assistant type
-
-
-# =============================================================================
 # Internal Dataclasses
 # =============================================================================
 
@@ -264,6 +222,11 @@ class ParsedIssue:
         return "worker-active" in self.labels
 
     @property
+    def has_pr(self) -> bool:
+        """Whether this issue has a PR attached."""
+        return self.pr_ref is not None
+
+    @property
     def needs_pr_status(self) -> bool:
         """Whether this issue needs PR draft status lookup."""
         return (
@@ -280,7 +243,8 @@ class FetchedIssueData:
     issue_id: str
     status: IssueStatusLiteral | str  # Canonical status or unknown raw value
     labels: list[str]
-    pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
+    has_pr: bool  # True if Linear has a PR URL attached
+    pr_is_draft: bool | None  # None if no PR or couldn't check status
     has_live_worker: bool
     has_user_feedback: bool
     has_user_input_needed: bool
@@ -291,6 +255,7 @@ class IssueStateDict(TypedDict):
 
     status: IssueStatusLiteral | str
     labels: list[str]
+    has_pr: bool
     pr_is_draft: bool | None
     has_live_worker: bool
     suggested_action: ActionType
@@ -310,7 +275,10 @@ class IssueState:
 
     status: IssueStatusLiteral | str  # Canonical status or unknown raw value
     labels: list[str]
-    pr_is_draft: bool | None  # None if no PR, True if draft, False if ready
+    has_pr: bool  # Whether issue has a PR attached in Linear
+    pr_is_draft: (
+        bool | None
+    )  # None if couldn't check status, True if draft, False if ready
     has_live_worker: bool
     suggested_action: ActionType
     session_id: str
@@ -321,6 +289,7 @@ class IssueState:
         return {
             "status": self.status,
             "labels": self.labels,
+            "has_pr": self.has_pr,
             "pr_is_draft": self.pr_is_draft,
             "has_live_worker": self.has_live_worker,
             "suggested_action": self.suggested_action,
