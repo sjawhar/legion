@@ -254,6 +254,9 @@ def parse_linear_issues(
 
         # Extract labels
         # Linear MCP returns "labels" as list of strings, raw API might return "labels.nodes"
+        # Note: isinstance checks below are defensive guards against malformed API responses.
+        # basedpyright reports them as unnecessary based on TypedDicts, but the API can
+        # return unexpected shapes (nulls, wrong types) that the types don't capture.
         labels_raw = issue.get("labels", [])
         labels: list[str] = []
         if isinstance(labels_raw, dict):
@@ -261,20 +264,20 @@ def parse_linear_issues(
             labels = [
                 node["name"]
                 for node in labels_raw.get("nodes") or []
-                if isinstance(node, dict) and node.get("name")
+                if isinstance(node, dict) and node.get("name")  # pyright: ignore[reportUnnecessaryIsInstance]
             ]
-        elif isinstance(labels_raw, list):
+        elif isinstance(labels_raw, list):  # pyright: ignore[reportUnnecessaryIsInstance]
             # MCP format: ["label1", "label2"] - filter out empty/non-string values
-            labels = [x for x in labels_raw if isinstance(x, str) and x]
+            labels = [x for x in labels_raw if isinstance(x, str) and x]  # pyright: ignore[reportUnnecessaryIsInstance]
 
         # Extract PR reference from attachments
         # Linear MCP returns attachments with PR URLs like https://github.com/owner/repo/pull/123
         pr_ref: types.GitHubPRRef | None = None
         attachments = issue.get("attachments") or []
-        if not isinstance(attachments, list):
+        if not isinstance(attachments, list):  # pyright: ignore[reportUnnecessaryIsInstance]
             attachments = []
         for attachment in attachments:
-            if isinstance(attachment, dict):
+            if isinstance(attachment, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
                 url = attachment.get("url", "")
                 if "github.com" in url and "/pull/" in url:
                     pr_ref = types.GitHubPRRef.from_url(url)

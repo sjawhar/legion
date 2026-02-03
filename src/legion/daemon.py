@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TypeGuard
 
 import anyio
+import click
 
 from legion import short_id as short_id_mod
 from legion import tmux
@@ -15,6 +16,9 @@ from legion.state import types
 from legion.state.types import WorkerModeLiteral
 
 logger = logging.getLogger(__name__)
+
+# Default staleness threshold for controller and worker health checks (10 minutes)
+DEFAULT_STALENESS_THRESHOLD = 600
 
 
 def is_valid_worker_mode(mode: str) -> TypeGuard[WorkerModeLiteral]:
@@ -106,7 +110,7 @@ async def check_worker_health(
     tmux_session: str,
     team_id: str,
     workspace_dir: Path,
-    staleness_threshold: int = 600,
+    staleness_threshold: int = DEFAULT_STALENESS_THRESHOLD,
 ) -> None:
     """Check worker health and kill stale windows.
 
@@ -173,8 +177,15 @@ async def validate_workspace(workspace: Path) -> None:
     # Check for git remote (warn if missing)
     stdout, _, _ = await tmux.run(["jj", "git", "remote", "list", "-R", str(workspace)])
     if not stdout.strip():
-        print("WARNING: No git remote configured. Push/PR steps will fail.")
-        print("  Add one with: jj git remote add origin <url>")
+        click.echo(
+            click.style(
+                "WARNING: No git remote configured. Push/PR steps will fail.",
+                fg="yellow",
+            )
+        )
+        click.echo(
+            click.style("  Add one with: jj git remote add origin <url>", fg="yellow")
+        )
 
 
 async def start_controller(
@@ -213,7 +224,7 @@ async def start_controller(
 async def controller_needs_restart(
     tmux_session: str,
     session_file: Path,
-    threshold: int = 600,
+    threshold: int = DEFAULT_STALENESS_THRESHOLD,
 ) -> bool:
     """Check if controller needs restart.
 
@@ -243,7 +254,7 @@ async def health_loop(
     workspace: Path,
     session_id: str,
     check_interval: float = 60.0,
-    staleness_threshold: int = 600,
+    staleness_threshold: int = DEFAULT_STALENESS_THRESHOLD,
     restart_cooldown: float = 60.0,
 ) -> None:
     """Monitor controller health and restart if needed.
@@ -274,10 +285,10 @@ async def health_loop(
             elapsed = time.time() - last_restart
             if elapsed < restart_cooldown:
                 wait_time = restart_cooldown - elapsed
-                print(f"Restart cooldown: waiting {wait_time:.0f}s")
+                logger.info("Restart cooldown: waiting %.0fs", wait_time)
                 await anyio.sleep(wait_time)
 
-            print("Restarting controller...")
+            logger.info("Restarting controller...")
 
             # Kill existing session if it exists
             if await tmux.session_exists(tmux_session):
@@ -289,7 +300,7 @@ async def health_loop(
                 )
                 last_restart = time.time()
             except Exception as e:
-                print(f"Failed to start controller: {e}")
+                logger.error("Failed to start controller: %s", e)
                 # Don't update last_restart - next iteration will try again
 
 
@@ -308,21 +319,21 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
             f"Use 'legion stop {project_id}' first."
         )
 
-    print(f"Starting Legion for project: {project_id}")
-    print(f"Session ID: {short}")
-    print(f"Workspace: {workspace}")
+    click.echo(f"Starting Legion for project: {project_id}")
+    click.echo(f"Session ID: {short}")
+    click.echo(f"Workspace: {workspace}")
 
     # Create state directory
     state_dir.mkdir(parents=True, exist_ok=True)
 
     # Start controller directly (no need to create empty session first)
     await start_controller(session, project_id, short, workspace, session_id)
-    print(f"Started controller in tmux session: {session}")
+    click.echo(f"Started controller in tmux session: {session}")
 
-    print()
-    print(f"To attach: tmux attach -t {session}")
-    print(f"To view:   tmux capture-pane -t {session}:main -p")
-    print()
+    click.echo()
+    click.echo(f"To attach: tmux attach -t {session}")
+    click.echo(f"To view:   tmux capture-pane -t {session}:main -p")
+    click.echo()
 
     # Run health loop
     await health_loop(
@@ -346,14 +357,14 @@ async def stop(project_id: str, state_dir: Path) -> None:  # noqa: ARG001
     short = get_short_id(project_id)
     session = controller_session_name(short)
 
-    print(f"Stopping Legion for project: {project_id}")
+    click.echo(f"Stopping Legion for project: {project_id}")
 
     # Kill controller session (this also kills all worker windows within it)
     if await tmux.session_exists(session):
         await tmux.kill_session(session)
-        print(f"Killed controller session: {session}")
+        click.echo(f"Killed controller session: {session}")
     else:
-        print(f"No controller session found: {session}")
+        click.echo(f"No controller session found: {session}")
 
 
 async def status(project_id: str, state_dir: Path) -> None:
@@ -362,35 +373,35 @@ async def status(project_id: str, state_dir: Path) -> None:
     short = get_short_id(project_id)
     session = controller_session_name(short)
 
-    print(f"Legion Status: {project_id}")
-    print(f"Session ID: {short}")
-    print("=" * 40)
+    click.echo(f"Legion Status: {project_id}")
+    click.echo(f"Session ID: {short}")
+    click.echo("=" * 40)
 
     # Check controller session
     if await tmux.session_exists(session):
-        print(f"Controller ({session}): RUNNING")
+        click.echo(f"Controller ({session}): RUNNING")
     else:
-        print(f"Controller ({session}): NOT RUNNING")
+        click.echo(f"Controller ({session}): NOT RUNNING")
 
     # Check worker windows within controller session
     if await tmux.session_exists(session):
         windows = await tmux.list_windows(session)
         workers = [w for w in windows if w != "main"]
         if workers:
-            print(f"Workers: {len(workers)}")
+            click.echo(f"Workers: {len(workers)}")
             for w in workers:
-                print(f"  - {w}")
+                click.echo(f"  - {w}")
         else:
-            print("Workers: none")
+            click.echo("Workers: none")
     else:
-        print("Workers: N/A (controller not running)")
+        click.echo("Workers: N/A (controller not running)")
 
-    print()
+    click.echo()
 
     heartbeat_path = anyio.Path(state_dir / "heartbeat")
     if await heartbeat_path.exists():
         stat_result = await heartbeat_path.stat()
         age = time.time() - stat_result.st_mtime
-        print(f"Heartbeat: {age:.0f}s ago")
+        click.echo(f"Heartbeat: {age:.0f}s ago")
     else:
-        print("Heartbeat: NO FILE")
+        click.echo("Heartbeat: NO FILE")
