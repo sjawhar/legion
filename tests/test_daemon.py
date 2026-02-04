@@ -37,13 +37,13 @@ class TestShortId:
 
 class TestControllerSessionName:
     def test_format(self) -> None:
-        assert daemon.controller_session_name("abc123") == "legion-abc123-controller"
+        assert daemon.session_name("abc123") == "legion-abc123"
 
     def test_with_short_uuid(self) -> None:
         short = daemon.get_short_id("7b4f0862-b775-4cb0-9a67-85400c6f44a8")
-        session = daemon.controller_session_name(short)
+        session = daemon.session_name(short)
         assert session.startswith("legion-")
-        assert session.endswith("-controller")
+        assert session.endswith("")
 
 
 class TestValidateProjectId:
@@ -177,7 +177,7 @@ class TestStartController:
         """When no session file exists, uses --session-id."""
         mock_new = mocker.patch("legion.daemon.tmux.new_session", autospec=True)
         await daemon.start_controller(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             project_id="proj-123",
             short="abc",
             workspace=tmp_path,
@@ -199,7 +199,7 @@ class TestStartController:
 
         mock_new = mocker.patch("legion.daemon.tmux.new_session", autospec=True)
         await daemon.start_controller(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             project_id="proj-123",
             short="abc",
             workspace=tmp_path,
@@ -219,7 +219,7 @@ class TestStartController:
 
         mock_new = mocker.patch("legion.daemon.tmux.new_session", autospec=True)
         await daemon.start_controller(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             project_id="proj-123",
             short="abc",
             workspace=weird_workspace,
@@ -244,7 +244,7 @@ class TestControllerNeedsRestart:
         mock_exists = mocker.patch("legion.daemon.tmux.session_exists", autospec=True)
         mock_exists.return_value = False
         result = await daemon.controller_needs_restart(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             session_file=session_file,
             threshold=600,
         )
@@ -259,7 +259,7 @@ class TestControllerNeedsRestart:
         mock_exists = mocker.patch("legion.daemon.tmux.session_exists", autospec=True)
         mock_exists.return_value = True
         result = await daemon.controller_needs_restart(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             session_file=session_file,
             threshold=600,
         )
@@ -278,7 +278,7 @@ class TestControllerNeedsRestart:
         mock_exists = mocker.patch("legion.daemon.tmux.session_exists", autospec=True)
         mock_exists.return_value = True
         result = await daemon.controller_needs_restart(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             session_file=session_file,
             threshold=600,
         )
@@ -294,7 +294,7 @@ class TestControllerNeedsRestart:
         mock_exists = mocker.patch("legion.daemon.tmux.session_exists", autospec=True)
         mock_exists.return_value = True
         result = await daemon.controller_needs_restart(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             session_file=session_file,
             threshold=600,
         )
@@ -319,7 +319,7 @@ class TestControllerNeedsRestart:
         mock_exists = mocker.patch("legion.daemon.tmux.session_exists", autospec=True)
         mock_exists.return_value = True
         result = await daemon.controller_needs_restart(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             session_file=session_file,
             threshold=600,
         )
@@ -369,7 +369,7 @@ class TestHealthLoop:
 
         with pytest.raises(Exception, match="stop"):
             await daemon.health_loop(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="proj-123",
                 short="abc",
                 workspace=tmp_path,
@@ -422,7 +422,7 @@ class TestHealthLoop:
 
         with pytest.raises(Exception, match="stop"):
             await daemon.health_loop(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="proj-123",
                 short="abc",
                 workspace=tmp_path,
@@ -478,7 +478,7 @@ class TestHealthLoop:
 
         with pytest.raises(Exception, match="stop"):
             await daemon.health_loop(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="proj-123",
                 short="abc",
                 workspace=tmp_path,
@@ -567,9 +567,9 @@ class TestCheckWorkerHealth:
         mock_list.return_value = ["main"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -579,12 +579,12 @@ class TestCheckWorkerHealth:
     async def test_parses_window_name_format(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
-        """Correctly parses {mode}-{issue} format like 'implement-ENG-21'."""
+        """Correctly parses {issue}-{mode} format like 'eng-21-implement'."""
         # Create stale session file for implement-ENG-21
         session_id = types.compute_session_id(
             "7b4f0862-b775-4cb0-9a67-85400c6f44a8", "ENG-21", "implement"
         )
-        workspace = tmp_path / "ENG-21"
+        workspace = tmp_path / "eng-21"
         workspace.mkdir()
         session_file = daemon.get_session_file_path(workspace, session_id)
         session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -595,16 +595,16 @@ class TestCheckWorkerHealth:
 
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
-        mock_list.return_value = ["main", "implement-ENG-21"]
+        mock_list.return_value = ["main", "eng-21-implement"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
-        mock_kill.assert_called_once_with("legion-abc-controller", "implement-ENG-21")
+        mock_kill.assert_called_once_with("legion-abc", "eng-21-implement")
 
     @pytest.mark.anyio
     async def test_does_not_kill_fresh_window(
@@ -614,7 +614,7 @@ class TestCheckWorkerHealth:
         session_id = types.compute_session_id(
             "7b4f0862-b775-4cb0-9a67-85400c6f44a8", "ENG-21", "implement"
         )
-        workspace = tmp_path / "ENG-21"
+        workspace = tmp_path / "eng-21"
         workspace.mkdir()
         session_file = daemon.get_session_file_path(workspace, session_id)
         session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -622,12 +622,12 @@ class TestCheckWorkerHealth:
 
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
-        mock_list.return_value = ["main", "implement-ENG-21"]
+        mock_list.return_value = ["main", "eng-21-implement"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -640,12 +640,12 @@ class TestCheckWorkerHealth:
         """Workers without session files (just started) should not be killed."""
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
-        mock_list.return_value = ["main", "implement-ENG-21"]
+        mock_list.return_value = ["main", "eng-21-implement"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -655,15 +655,15 @@ class TestCheckWorkerHealth:
     async def test_skips_invalid_window_name_format(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
-        """Windows not matching {mode}-{issue} format should be skipped."""
+        """Windows not matching {issue}-{mode} format should be skipped."""
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
         mock_list.return_value = ["main", "bash", "invalid"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -678,7 +678,7 @@ class TestCheckWorkerHealth:
         session_id = types.compute_session_id(
             "7b4f0862-b775-4cb0-9a67-85400c6f44a8", "ENG-21", "plan"
         )
-        workspace = tmp_path / "ENG-21"
+        workspace = tmp_path / "eng-21"
         workspace.mkdir()
         session_file = daemon.get_session_file_path(workspace, session_id)
         session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -690,17 +690,17 @@ class TestCheckWorkerHealth:
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
         # Window name has lowercase issue ID
-        mock_list.return_value = ["main", "plan-eng-21"]
+        mock_list.return_value = ["main", "eng-21-plan"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
         # Should still detect and kill the stale worker
-        mock_kill.assert_called_once_with("legion-abc-controller", "plan-eng-21")
+        mock_kill.assert_called_once_with("legion-abc", "eng-21-plan")
 
     @pytest.mark.anyio
     async def test_handles_multiple_workers(
@@ -711,7 +711,7 @@ class TestCheckWorkerHealth:
         stale_session_id = types.compute_session_id(
             "7b4f0862-b775-4cb0-9a67-85400c6f44a8", "ENG-21", "implement"
         )
-        stale_workspace = tmp_path / "ENG-21"
+        stale_workspace = tmp_path / "eng-21"
         stale_workspace.mkdir()
         stale_file = daemon.get_session_file_path(stale_workspace, stale_session_id)
         stale_file.parent.mkdir(parents=True, exist_ok=True)
@@ -723,7 +723,7 @@ class TestCheckWorkerHealth:
         fresh_session_id = types.compute_session_id(
             "7b4f0862-b775-4cb0-9a67-85400c6f44a8", "LEG-5", "plan"
         )
-        fresh_workspace = tmp_path / "LEG-5"
+        fresh_workspace = tmp_path / "leg-5"
         fresh_workspace.mkdir()
         fresh_file = daemon.get_session_file_path(fresh_workspace, fresh_session_id)
         fresh_file.parent.mkdir(parents=True, exist_ok=True)
@@ -731,17 +731,17 @@ class TestCheckWorkerHealth:
 
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
-        mock_list.return_value = ["main", "implement-ENG-21", "plan-LEG-5"]
+        mock_list.return_value = ["main", "eng-21-implement", "leg-5-plan"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
         # Only the stale worker should be killed
-        mock_kill.assert_called_once_with("legion-abc-controller", "implement-ENG-21")
+        mock_kill.assert_called_once_with("legion-abc", "eng-21-implement")
 
 
 class TestHealthLoopWorkerIntegration:
@@ -789,7 +789,7 @@ class TestHealthLoopWorkerIntegration:
 
         with pytest.raises(Exception, match="stop"):
             await daemon.health_loop(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
                 short="abc",
                 workspace=tmp_path,
@@ -801,11 +801,11 @@ class TestHealthLoopWorkerIntegration:
 
         # Should have checked worker health on each iteration
         assert len(check_calls) >= 2
-        # Verify arguments
-        session, team_id, workspace, threshold = check_calls[0]
-        assert session == "legion-abc-controller"
+        # Verify arguments - workspaces_dir is workspace.parent (sibling layout)
+        session, team_id, workspaces_dir, threshold = check_calls[0]
+        assert session == "legion-abc"
         assert team_id == "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
-        assert workspace == tmp_path
+        assert workspaces_dir == tmp_path.parent
         assert threshold == 600
 
 
@@ -825,7 +825,7 @@ class TestStartControllerErrorHandling:
 
         with pytest.raises(RuntimeError, match="tmux: command not found"):
             await daemon.start_controller(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="proj-123",
                 short="abc",
                 workspace=tmp_path,
@@ -846,7 +846,7 @@ class TestStartControllerErrorHandling:
             return_value=("", "", 0),
         )
         await daemon.start_controller(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             project_id="proj-123",
             short="abc",
             workspace=weird_workspace,
@@ -871,7 +871,7 @@ class TestHealthLoopConcurrentWorkers:
             session_id = types.compute_session_id(
                 "7b4f0862-b775-4cb0-9a67-85400c6f44a8", issue_id, "implement"
             )
-            workspace = tmp_path / issue_id
+            workspace = tmp_path / issue_id.lower()
             workspace.mkdir()
             session_file = daemon.get_session_file_path(workspace, session_id)
             session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -893,23 +893,23 @@ class TestHealthLoopConcurrentWorkers:
         )
         mock_list.return_value = [
             "main",
-            "implement-ENG-21",
-            "implement-ENG-22",
-            "implement-ENG-23",
+            "eng-21-implement",
+            "eng-22-implement",
+            "eng-23-implement",
         ]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
         # All 3 stale workers should be killed
         assert len(killed_windows) == 3
-        assert "implement-ENG-21" in killed_windows
-        assert "implement-ENG-22" in killed_windows
-        assert "implement-ENG-23" in killed_windows
+        assert "eng-21-implement" in killed_windows
+        assert "eng-22-implement" in killed_windows
+        assert "eng-23-implement" in killed_windows
 
 
 class TestGetNewestMtimeEdgeCases:
@@ -1004,7 +1004,7 @@ class TestWorkerHealthIntegration:
 
         # 1. Stale worker: implement-ENG-21 (should be killed)
         stale_session_id = types.compute_session_id(team_id, "ENG-21", "implement")
-        stale_workspace = tmp_path / "ENG-21"
+        stale_workspace = tmp_path / "eng-21"
         stale_workspace.mkdir()
         stale_file = daemon.get_session_file_path(stale_workspace, stale_session_id)
         stale_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1014,7 +1014,7 @@ class TestWorkerHealthIntegration:
 
         # 2. Fresh worker: plan-LEG-5 (should NOT be killed)
         fresh_session_id = types.compute_session_id(team_id, "LEG-5", "plan")
-        fresh_workspace = tmp_path / "LEG-5"
+        fresh_workspace = tmp_path / "leg-5"
         fresh_workspace.mkdir()
         fresh_file = daemon.get_session_file_path(fresh_workspace, fresh_session_id)
         fresh_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1043,10 +1043,10 @@ class TestWorkerHealthIntegration:
 
         windows = [
             "main",
-            "implement-ENG-21",
-            "plan-LEG-5",
-            "review-ABC-1",
-            "architect-XYZ-99",
+            "eng-21-implement",
+            "leg-5-plan",
+            "abc-1-review",
+            "xyz-99-architect",
             "bash",
         ]
         killed_windows: list[str] = []
@@ -1069,18 +1069,18 @@ class TestWorkerHealthIntegration:
         )
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id=team_id,
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=threshold,
         )
 
         # === Verify: Only the stale worker should be killed ===
 
-        assert killed_windows == ["implement-ENG-21"], (
+        assert killed_windows == ["eng-21-implement"], (
             f"Expected only ['implement-ENG-21'] to be killed, but got {killed_windows}. "
             f"Workers should be preserved: main (controller), plan-LEG-5 (fresh), "
-            f"review-ABC-1 (no session file), architect-XYZ-99 (fresh subagent), bash (invalid format)"
+            f"abc-1-review (no session file), xyz-99-architect (fresh subagent), bash (invalid format)"
         )
 
     @pytest.mark.anyio
@@ -1101,7 +1101,7 @@ class TestWorkerHealthIntegration:
         # Create stale session files for all workers
         for mode, issue_id in workers:
             session_id = types.compute_session_id(team_id, issue_id, mode)
-            workspace = tmp_path / issue_id
+            workspace = tmp_path / issue_id.lower()
             workspace.mkdir()
             session_file = daemon.get_session_file_path(workspace, session_id)
             session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1121,22 +1121,22 @@ class TestWorkerHealthIntegration:
         )
         mock_list.return_value = [
             "main",
-            "implement-ENG-21",
-            "plan-LEG-5",
-            "review-ABC-1",
+            "eng-21-implement",
+            "leg-5-plan",
+            "abc-1-review",
         ]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id=team_id,
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=threshold,
         )
 
         # All 3 workers should be killed, main preserved
         assert len(killed_windows) == 3
         assert "main" not in killed_windows
-        assert set(killed_windows) == {"implement-ENG-21", "plan-LEG-5", "review-ABC-1"}
+        assert set(killed_windows) == {"eng-21-implement", "leg-5-plan", "abc-1-review"}
 
     @pytest.mark.anyio
     async def test_all_workers_fresh_scenario(
@@ -1155,7 +1155,7 @@ class TestWorkerHealthIntegration:
         # Create fresh session files for all workers
         for mode, issue_id in workers:
             session_id = types.compute_session_id(team_id, issue_id, mode)
-            workspace = tmp_path / issue_id
+            workspace = tmp_path / issue_id.lower()
             workspace.mkdir()
             session_file = daemon.get_session_file_path(workspace, session_id)
             session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1174,15 +1174,15 @@ class TestWorkerHealthIntegration:
         )
         mock_list.return_value = [
             "main",
-            "implement-ENG-21",
-            "plan-LEG-5",
-            "review-ABC-1",
+            "eng-21-implement",
+            "leg-5-plan",
+            "abc-1-review",
         ]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id=team_id,
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=threshold,
         )
 
@@ -1208,9 +1208,9 @@ class TestWorkerHealthIntegration:
         mock_list.return_value = ["main"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -1297,7 +1297,7 @@ class TestCheckWorkerHealthRaceConditions:
         session_id = types.compute_session_id(
             "7b4f0862-b775-4cb0-9a67-85400c6f44a8", "ENG-21", "implement"
         )
-        workspace = tmp_path / "ENG-21"
+        workspace = tmp_path / "eng-21"
         workspace.mkdir()
         session_file = daemon.get_session_file_path(workspace, session_id)
         session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1320,14 +1320,14 @@ class TestCheckWorkerHealthRaceConditions:
             side_effect=kill_window_fails_once,
             autospec=True,
         )
-        mock_list.return_value = ["main", "implement-ENG-21"]
+        mock_list.return_value = ["main", "eng-21-implement"]
 
         # Should not crash even if kill fails
         try:
             await daemon.check_worker_health(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-                workspace_dir=tmp_path,
+                workspaces_dir=tmp_path,
                 staleness_threshold=600,
             )
             # If kill_window is allowed to raise, the function should handle it
@@ -1345,13 +1345,13 @@ class TestCheckWorkerHealthRaceConditions:
 
         mock_list = mocker.patch("legion.daemon.tmux.list_windows", autospec=True)
         mock_kill = mocker.patch("legion.daemon.tmux.kill_window", autospec=True)
-        mock_list.return_value = ["main", "implement-ENG-21"]
+        mock_list.return_value = ["main", "eng-21-implement"]
 
         # Should handle missing workspace gracefully
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -1373,9 +1373,9 @@ class TestCheckWorkerHealthEdgeCases:
         mock_list.return_value = ["main", "invalid-ENG-21", "test-ENG-22"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -1392,9 +1392,9 @@ class TestCheckWorkerHealthEdgeCases:
         mock_list.return_value = ["main", "implement-", "plan-"]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -1411,9 +1411,9 @@ class TestCheckWorkerHealthEdgeCases:
         mock_list.return_value = ["main", "implement-   "]
 
         await daemon.check_worker_health(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             team_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
-            workspace_dir=tmp_path,
+            workspaces_dir=tmp_path,
             staleness_threshold=600,
         )
 
@@ -1464,7 +1464,7 @@ class TestHealthLoopErrorResilience:
         # Should not crash on first failure
         with pytest.raises(Exception, match="stop"):
             await daemon.health_loop(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="7b4f0862-b775-4cb0-9a67-85400c6f44a8",
                 short="abc",
                 workspace=tmp_path,
@@ -1496,7 +1496,7 @@ class TestStartControllerErrorReporting:
 
         with pytest.raises(RuntimeError) as exc_info:
             await daemon.start_controller(
-                tmux_session="legion-abc-controller",
+                tmux_session="legion-abc",
                 project_id="proj-123",
                 short="abc",
                 workspace=tmp_path,
@@ -1519,7 +1519,7 @@ class TestStartControllerErrorReporting:
 
         # Should complete (current implementation doesn't check return value)
         await daemon.start_controller(
-            tmux_session="legion-abc-controller",
+            tmux_session="legion-abc",
             project_id="proj-123",
             short="abc",
             workspace=tmp_path,

@@ -46,7 +46,7 @@ digraph controller {
 
 ```bash
 LINEAR_JSON=$(mcp__linear__list_issues team="$LINEAR_TEAM_ID" limit=100)
-ACTIVE_WORKERS=$(tmux list-windows -t "legion-$LEGION_SHORT_ID-controller" -F '#{window_name}' 2>/dev/null | grep -v "^main$" | wc -l)
+ACTIVE_WORKERS=$(tmux list-windows -t "legion-$LEGION_SHORT_ID" -F '#{window_name}' 2>/dev/null | grep -v "^main$" | wc -l)
 ```
 
 ### 2. Relay User Feedback (Highest Priority)
@@ -59,7 +59,7 @@ When both `user-input-needed` AND `user-feedback-given` labels present:
 
 Run state script:
 ```bash
-echo "$LINEAR_JSON" | python -m legion.state --team-id "$LINEAR_TEAM_ID" --short-id "$LEGION_SHORT_ID" --tmux-session "legion-$LEGION_SHORT_ID-controller"
+echo "$LINEAR_JSON" | python -m legion.state --team-id "$LINEAR_TEAM_ID" --short-id "$LEGION_SHORT_ID" --tmux-session "legion-$LEGION_SHORT_ID"
 ```
 
 State transitions (always remove `worker-done` after):
@@ -104,8 +104,10 @@ Controller routes Triage issues directly (no worker needed):
 
 For Done issues without live workers:
 ```bash
-jj workspace forget "$ISSUE_ID" -R "$LEGION_DIR"
-rm -rf "$LEGION_DIR/$ISSUE_ID"
+WORKSPACES_DIR=$(dirname "$LEGION_DIR")
+ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
+jj workspace forget "$ISSUE_LOWER" -R "$LEGION_DIR"
+rm -rf "$WORKSPACES_DIR/$ISSUE_LOWER"
 ```
 
 ### 7. Write Heartbeat
@@ -140,16 +142,22 @@ Then return to step 1.
 
 **Dispatch** = new worker window:
 ```bash
-SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid5(uuid.UUID('$LINEAR_TEAM_ID'), '$ISSUE_ID:$MODE'))")
-[ ! -d "$LEGION_DIR/$ISSUE_ID" ] && jj workspace add "$LEGION_DIR/$ISSUE_ID" --name "$ISSUE_ID" -R "$LEGION_DIR"
+# $ISSUE_ID = Linear UUID, $ISSUE_IDENTIFIER = e.g. "LEG-18"
+# Workspaces are siblings to default workspace, named by identifier for easy navigation
+WORKSPACES_DIR=$(dirname "$LEGION_DIR")
+ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
+WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
 
-# Create worker as WINDOW in controller session (not new session)
-WINDOW_NAME="$MODE-$(echo $ISSUE_ID | tr '[:upper:]' '[:lower:]')"
-tmux new-window -t "legion-$LEGION_SHORT_ID-controller" -n "$WINDOW_NAME" -d
+SESSION_ID=$(python3 -c "import uuid; print(uuid.uuid5(uuid.UUID('$LINEAR_TEAM_ID'), '$ISSUE_IDENTIFIER:$MODE'))")
+[ ! -d "$WORKSPACE_PATH" ] && jj workspace add "$WORKSPACE_PATH" --name "$ISSUE_LOWER" -R "$LEGION_DIR"
 
-# Send command to new window
-tmux send-keys -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" \
-    "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --session-id '$SESSION_ID' -p 'Use legion-worker skill in $MODE mode for $ISSUE_ID'" Enter
+# Window name: issue-mode (e.g., leg-18-architect)
+WINDOW_NAME="$ISSUE_LOWER-$MODE"
+tmux new-window -t "legion-$LEGION_SHORT_ID" -n "$WINDOW_NAME" -d
+
+# Start interactive Claude with skill invocation
+tmux send-keys -t "legion-$LEGION_SHORT_ID:$WINDOW_NAME" \
+    "cd '$WORKSPACE_PATH' && LINEAR_ISSUE_ID='$ISSUE_IDENTIFIER' claude --dangerously-skip-permissions --session-id '$SESSION_ID' '/legion-worker $MODE mode for $ISSUE_IDENTIFIER'" Enter
 
 # Add worker-active label
 mcp__linear__update_issue id="$ISSUE_ID" labels=["worker-active", ...existing...]
@@ -157,9 +165,9 @@ mcp__linear__update_issue id="$ISSUE_ID" labels=["worker-active", ...existing...
 
 **Resume** = continue existing window:
 ```bash
-WINDOW_NAME="$MODE-$(echo $ISSUE_ID | tr '[:upper:]' '[:lower:]')"
-tmux send-keys -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" \
-    "cd '$LEGION_DIR/$ISSUE_ID' && LINEAR_ISSUE_ID='$ISSUE_ID' claude --dangerously-skip-permissions --resume '$SESSION_ID' -p '$PROMPT'" Enter
+ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
+WINDOW_NAME="$ISSUE_LOWER-$MODE"
+tmux send-keys -t "legion-$LEGION_SHORT_ID:$WINDOW_NAME" "$PROMPT" Enter
 ```
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
@@ -170,16 +178,16 @@ Available when needed (debugging, intervention):
 
 ```bash
 # List worker windows
-tmux list-windows -t "legion-$LEGION_SHORT_ID-controller" -F '#{window_name}' | grep -v "^main$"
+tmux list-windows -t "legion-$LEGION_SHORT_ID" -F '#{window_name}' | grep -v "^main$"
 
 # Capture pane output
-tmux capture-pane -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" -p
+tmux capture-pane -t "legion-$LEGION_SHORT_ID:$WINDOW_NAME" -p
 
 # Read session file
 cat ~/.claude/projects/*/SESSION_ID.jsonl | tail -20
 
 # Send input (use sparingly)
-tmux send-keys -t "legion-$LEGION_SHORT_ID-controller:$WINDOW_NAME" "message" Enter
+tmux send-keys -t "legion-$LEGION_SHORT_ID:$WINDOW_NAME" "message" Enter
 ```
 
 ## Labels
