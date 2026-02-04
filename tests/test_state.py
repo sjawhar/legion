@@ -161,7 +161,7 @@ class TestGetPrDraftStatusBatch:
     async def test_returns_draft_status_for_multiple_issues(self) -> None:
         """Multiple PRs in same repo are fetched in single query."""
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             # Single repo uses repo0 alias
             response = {
                 "data": {
@@ -186,7 +186,7 @@ class TestGetPrDraftStatusBatch:
     async def test_returns_none_for_missing_pr(self) -> None:
         """PR not found returns None (not omitted from results)."""
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             response = {
                 "data": {
                     "repo0": {
@@ -206,7 +206,7 @@ class TestGetPrDraftStatusBatch:
     async def test_handles_null_is_draft_value(self) -> None:
         """isDraft: null in response is treated as False (not draft)."""
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             response = {
                 "data": {
                     "repo0": {
@@ -227,7 +227,7 @@ class TestGetPrDraftStatusBatch:
         """GraphQL failure raises GitHubAPIError after retries."""
         call_count = 0
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             nonlocal call_count
             call_count += 1
             return "", "rate limited", 1
@@ -246,7 +246,7 @@ class TestGetPrDraftStatusBatch:
         """Malformed JSON raises GitHubAPIError after retries."""
         call_count = 0
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             nonlocal call_count
             call_count += 1
             return "not valid json {[", "", 0  # Success exit but bad JSON
@@ -267,7 +267,7 @@ class TestGetPrDraftStatusBatch:
         """API succeeds after transient failures - retries work correctly."""
         call_count = 0
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             nonlocal call_count
             call_count += 1
             if call_count < 3:
@@ -288,7 +288,7 @@ class TestGetPrDraftStatusBatch:
     async def test_handles_null_data_in_response(self) -> None:
         """GitHub returning null data field is handled gracefully."""
 
-        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             # GitHub can return {"data": null, "errors": [...]} for invalid repos
             response = {"data": None, "errors": [{"message": "Not found"}]}
             return json.dumps(response), "", 0
@@ -299,6 +299,57 @@ class TestGetPrDraftStatusBatch:
         )
 
         # Should return None for the PR (not found), not crash
+        assert result == {"ENG-21": None}
+
+    @pytest.mark.anyio
+    async def test_handles_non_dict_data_in_response(self) -> None:
+        """GitHub returning non-dict data field is handled gracefully."""
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
+            # Malformed response where data is a string instead of dict
+            response = {"data": "unexpected string"}
+            return json.dumps(response), "", 0
+
+        result = await fetch.get_pr_draft_status_batch(
+            {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+            runner=mock_runner,
+        )
+
+        # Should return None for the PR (malformed response), not crash
+        assert result == {"ENG-21": None}
+
+    @pytest.mark.anyio
+    async def test_handles_non_dict_repo_in_response(self) -> None:
+        """GitHub returning non-dict repo field is handled gracefully."""
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
+            # Malformed response where repo is a string instead of dict
+            response = {"data": {"repo0": "unexpected string"}}
+            return json.dumps(response), "", 0
+
+        result = await fetch.get_pr_draft_status_batch(
+            {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+            runner=mock_runner,
+        )
+
+        # Should return None for the PR (malformed response), not crash
+        assert result == {"ENG-21": None}
+
+    @pytest.mark.anyio
+    async def test_handles_non_dict_pr_in_response(self) -> None:
+        """GitHub returning non-dict PR field is handled gracefully."""
+
+        async def mock_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
+            # Malformed response where PR is a string instead of dict
+            response = {"data": {"repo0": {"pr0": "unexpected string"}}}
+            return json.dumps(response), "", 0
+
+        result = await fetch.get_pr_draft_status_batch(
+            {"ENG-21": types.GitHubPRRef(owner="owner", repo="repo", number=1)},
+            runner=mock_runner,
+        )
+
+        # Should return None for the PR (malformed response), not crash
         assert result == {"ENG-21": None}
 
     @pytest.mark.anyio
@@ -430,6 +481,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "dispatch_planner"
 
@@ -439,6 +491,7 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "transition_to_in_progress"
 
@@ -448,6 +501,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "dispatch_implementer"
 
@@ -457,6 +511,7 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "transition_to_needs_review"
 
@@ -466,6 +521,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -476,6 +532,7 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=False,  # PR is ready = approved
+            has_pr=True,
         )
         assert action == "transition_to_retro"
 
@@ -486,18 +543,31 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=True,  # PR is draft = changes requested
+            has_pr=True,
         )
         assert action == "resume_implementer_for_changes"
 
-    def test_needs_review_no_pr_skips(self) -> None:
-        """No PR yet = wait."""
+    def test_needs_review_worker_done_has_pr_but_unknown_status_skips(self) -> None:
+        """PR exists but couldn't check status - transient, retry later."""
         action = decision.suggest_action(
             status=types.IssueStatus.NEEDS_REVIEW,
             has_worker_done=True,
             has_live_worker=False,
-            pr_is_draft=None,  # No PR
+            pr_is_draft=None,
+            has_pr=True,  # Has PR but couldn't check
         )
         assert action == "skip"
+
+    def test_needs_review_worker_done_no_pr_investigates(self) -> None:
+        """No PR linked - needs attention."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=None,
+            has_pr=False,  # No PR attached
+        )
+        assert action == "investigate_no_pr"
 
     def test_needs_review_no_worker_done_dispatches_reviewer(self) -> None:
         """Issue in Needs Review without worker-done = dispatch reviewer."""
@@ -506,6 +576,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "dispatch_reviewer"
 
@@ -516,6 +587,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -527,6 +599,7 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=True,  # Stale session still running
             pr_is_draft=False,
+            has_pr=True,
         )
         assert action == "transition_to_retro"
 
@@ -537,6 +610,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "dispatch_architect"
 
@@ -547,6 +621,7 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "transition_to_todo"
 
@@ -557,6 +632,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -567,6 +643,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -577,6 +654,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -587,6 +665,7 @@ class TestSuggestAction:
             has_worker_done=True,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "dispatch_merger"
 
@@ -597,6 +676,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "resume_implementer_for_retro"
 
@@ -607,6 +687,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=True,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -617,6 +698,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -627,6 +709,7 @@ class TestSuggestAction:
             has_worker_done=False,
             has_live_worker=False,
             pr_is_draft=None,
+            has_pr=False,
         )
         assert action == "skip"
 
@@ -639,6 +722,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=[],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=False,
@@ -653,6 +737,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=["user-input-needed"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=False,
@@ -667,6 +752,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-input-needed", "user-feedback-given"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,  # Worker exited after asking
             has_user_feedback=True,
@@ -683,6 +769,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-input-needed"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=False,
@@ -700,6 +787,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-feedback-given", "worker-done"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=True,
@@ -720,6 +808,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="In Progress",
             labels=["user-input-needed", "user-feedback-given"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=True,
@@ -742,6 +831,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="Todo",
             labels=["user-input-needed", "user-feedback-given"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=True,
@@ -755,6 +845,7 @@ class TestBuildIssueState:
             issue_id="ENG-22",
             status="Needs Review",
             labels=["user-input-needed", "user-feedback-given"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=True,
@@ -769,6 +860,7 @@ class TestBuildIssueState:
             issue_id="ENG-21",
             status="In Progress",
             labels=["worker-done", "user-input-needed", "user-feedback-given"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=True,
@@ -790,6 +882,7 @@ class TestOrphanDetection:
             issue_id="ENG-21",
             status="In Progress",
             labels=["worker-active"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,  # Worker died
             has_user_feedback=False,
@@ -804,6 +897,7 @@ class TestOrphanDetection:
             issue_id="ENG-21",
             status="In Progress",
             labels=["worker-active"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=True,  # Worker is running
             has_user_feedback=False,
@@ -819,6 +913,7 @@ class TestOrphanDetection:
             issue_id="ENG-21",
             status="In Progress",
             labels=[],  # No worker-active label
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=False,
@@ -837,6 +932,7 @@ class TestOrphanDetection:
                 issue_id="ENG-21",
                 status=status,
                 labels=["worker-active"],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=False,
@@ -853,6 +949,7 @@ class TestOrphanDetection:
             issue_id="ENG-21",
             status="In Progress",
             labels=["worker-active", "user-input-needed", "user-feedback-given"],
+            has_pr=False,
             pr_is_draft=None,
             has_live_worker=False,
             has_user_feedback=True,
@@ -915,6 +1012,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=False,
@@ -924,6 +1022,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-22",
                 status="In Progress",
                 labels=["worker-done"],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=False,
@@ -946,6 +1045,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=False,
@@ -971,6 +1071,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-21",
                 status="Todo",
                 labels=[],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=False,
@@ -981,6 +1082,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-22",
                 status="In Progress",
                 labels=["user-input-needed", "user-feedback-given"],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=True,
@@ -991,6 +1093,7 @@ class TestBuildCollectedState:
                 issue_id="ENG-23",
                 status="In Progress",
                 labels=["user-input-needed"],
+                has_pr=False,
                 pr_is_draft=None,
                 has_live_worker=False,
                 has_user_feedback=False,
@@ -1015,7 +1118,7 @@ class TestGetPrDraftStatusBatchErrorHandling:
         call_count = 0
         call_times: list[float] = []
 
-        async def rate_limited_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def rate_limited_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             nonlocal call_count
             call_count += 1
             call_times.append(time.time())
@@ -1045,7 +1148,7 @@ class TestGetPrDraftStatusBatchErrorHandling:
         """Empty PR refs dict returns empty result without API call."""
         call_count = 0
 
-        async def counting_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def counting_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             nonlocal call_count
             call_count += 1
             return "{}", "", 0
@@ -1059,7 +1162,7 @@ class TestGetPrDraftStatusBatchErrorHandling:
     async def test_handles_mixed_repo_failure(self) -> None:
         """Handles case where some repos return data, others don't."""
 
-        async def mixed_runner(cmd: list[str]) -> tuple[str, str, int]:
+        async def mixed_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
             response = {
                 "data": {
                     "repo0": {"pr0": {"isDraft": True}},
@@ -1139,16 +1242,16 @@ class TestFetchAllIssueDataErrorHandling:
     """Test error handling in fetch_all_issue_data."""
 
     @pytest.mark.anyio
-    async def test_handles_partial_api_failure(self) -> None:
-        """PR API failure raises GitHubAPIError after retries."""
+    async def test_github_api_failure_sets_pr_draft_to_none(self) -> None:
+        """GitHub API failure: has_pr=True, pr_is_draft=None -> skip (not investigate_no_pr)."""
 
-        async def failing_pr_runner(cmd: list[str]) -> tuple[str, str, int]:
-            return "", "GitHub API unavailable", 1
+        async def failing_runner(cmd: list[str]) -> tuple[str, str, int]:  # pyright: ignore[reportUnusedParameter]
+            return "", "rate limited", 1
 
         with mock.patch.object(
             fetch.tmux, "list_windows", autospec=True
         ) as mock_windows:
-            mock_windows.return_value = ["implement-ENG-21"]
+            mock_windows.return_value = []
 
             linear_issues: list[LinearIssueRaw] = [
                 {
@@ -1159,14 +1262,16 @@ class TestFetchAllIssueDataErrorHandling:
                 }
             ]
 
-            # Should raise GitHubAPIError after retries (wrapped in ExceptionGroup by anyio)
-            with pytest.raises((fetch.GitHubAPIError, ExceptionGroup)):
-                await fetch.fetch_all_issue_data(
-                    linear_issues=linear_issues,
-                    short_id="abc123",
-                    tmux_session="legion-abc123",
-                    runner=failing_pr_runner,
-                )
+            result = await fetch.fetch_all_issue_data(
+                linear_issues=linear_issues,
+                short_id="abc123",
+                tmux_session="legion-abc123",
+                runner=failing_runner,
+            )
+
+        assert len(result) == 1
+        assert result[0].has_pr is True  # PR attachment exists
+        assert result[0].pr_is_draft is None  # Couldn't check status
 
     @pytest.mark.anyio
     async def test_handles_malformed_linear_issue_data(self) -> None:
@@ -1209,8 +1314,8 @@ class TestParseLinearIssuesEdgeCases:
         ]
         result = fetch.parse_linear_issues(issues)
         assert len(result) == 1
-        # When state.name is None, normalize returns None (not empty string)
-        assert result[0].status is None or result[0].status == ""
+        # When state.name is None, normalize returns "" (empty string)
+        assert result[0].status == ""
         assert result[0].labels == []
 
     def test_handles_labels_with_missing_name(self) -> None:
@@ -1224,8 +1329,8 @@ class TestParseLinearIssuesEdgeCases:
         ]
         result = fetch.parse_linear_issues(issues)
         assert len(result) == 1
-        # Empty dict in nodes should produce empty string label
-        assert "" in result[0].labels or len(result[0].labels) == 2
+        # Empty dict in nodes is filtered out (truthy check on node.get("name"))
+        assert result[0].labels == ["worker-done", "urgent"]
 
     def test_handles_attachments_with_invalid_urls(self) -> None:
         """Handles attachments with invalid or non-PR URLs."""
@@ -1290,6 +1395,7 @@ class TestSuggestActionEdgeCases:
                 has_worker_done=False,
                 has_live_worker=False,
                 pr_is_draft=None,
+                has_pr=False,
             )
             assert action == "skip"
 
@@ -1301,5 +1407,350 @@ class TestSuggestActionEdgeCases:
             has_worker_done=True,
             has_live_worker=True,
             pr_is_draft=False,
+            has_pr=True,
         )
         assert action == "skip"
+
+    def test_unknown_status_with_worker_done_still_skips(self) -> None:
+        """Unknown status skips even with worker-done."""
+        action = decision.suggest_action(
+            status="SomeUnknownStatus",
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=None,
+            has_pr=False,
+        )
+        assert action == "skip"
+
+
+class TestActionToModeMapping:
+    """Test ACTION_TO_MODE mapping for session ID computation."""
+
+    def test_investigate_no_pr_has_implement_mode(self) -> None:
+        """Verify investigate_no_pr action maps to implement mode."""
+        assert (
+            decision.ACTION_TO_MODE["investigate_no_pr"] == types.WorkerMode.IMPLEMENT
+        )
+
+
+class TestSessionIdComputation:
+    """Test session ID computation for various actions."""
+
+    team_id: str = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+
+    def test_dispatch_architect_uses_architect_mode(self) -> None:
+        """Dispatch architect action uses architect mode for session ID."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.BACKLOG,
+            labels=[],
+            has_pr=False,
+            pr_is_draft=None,
+            has_live_worker=False,
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+        state = decision.build_issue_state(data, self.team_id)
+        assert state.suggested_action == "dispatch_architect"
+        assert state.session_id == types.compute_session_id(
+            self.team_id, "ENG-21", "architect"
+        )
+
+    def test_dispatch_merger_uses_merge_mode(self) -> None:
+        """Dispatch merger action uses merge mode for session ID."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.RETRO,
+            labels=["worker-done"],
+            has_pr=True,
+            pr_is_draft=None,
+            has_live_worker=False,
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+        state = decision.build_issue_state(data, self.team_id)
+        assert state.suggested_action == "dispatch_merger"
+        assert state.session_id == types.compute_session_id(
+            self.team_id, "ENG-21", "merge"
+        )
+
+    def test_transition_to_needs_review_uses_review_mode(self) -> None:
+        """Transition to needs review uses review mode for session ID."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.IN_PROGRESS,
+            labels=["worker-done"],
+            has_pr=False,
+            pr_is_draft=None,
+            has_live_worker=False,
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+        state = decision.build_issue_state(data, self.team_id)
+        assert state.suggested_action == "transition_to_needs_review"
+        assert state.session_id == types.compute_session_id(
+            self.team_id, "ENG-21", "review"
+        )
+
+    def test_transition_to_todo_uses_plan_mode(self) -> None:
+        """Transition to todo uses plan mode for session ID."""
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.BACKLOG,
+            labels=["worker-done"],
+            has_pr=False,
+            pr_is_draft=None,
+            has_live_worker=False,
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+        state = decision.build_issue_state(data, self.team_id)
+        assert state.suggested_action == "transition_to_todo"
+        assert state.session_id == types.compute_session_id(
+            self.team_id, "ENG-21", "plan"
+        )
+
+
+class TestStuckStateIntegration:
+    """Integration tests for stuck state detection with GitHub API failures."""
+
+    def test_github_api_failure_results_in_skip_not_investigate(self) -> None:
+        """GitHub API failure: has_pr=True, pr_is_draft=None -> skip (not investigate_no_pr).
+
+        Critical: This distinguishes between "no PR exists" (investigate) and
+        "couldn't check PR status" (skip and retry later).
+        """
+        team_id = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.NEEDS_REVIEW,
+            labels=["worker-done"],
+            has_pr=True,  # PR exists
+            pr_is_draft=None,  # But couldn't check status (GitHub API down)
+            has_live_worker=False,
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+
+        state = decision.build_issue_state(data, team_id)
+
+        # Must skip, not investigate - API failure is transient
+        assert state.suggested_action == "skip"
+
+    def test_truly_missing_pr_triggers_investigate(self) -> None:
+        """No PR attached: has_pr=False -> investigate_no_pr.
+
+        This is the stuck state that needs human attention.
+        """
+        team_id = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.NEEDS_REVIEW,
+            labels=["worker-done"],
+            has_pr=False,  # No PR attached at all
+            pr_is_draft=None,
+            has_live_worker=False,
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+
+        state = decision.build_issue_state(data, team_id)
+
+        # Must investigate - worker claimed done but no PR exists
+        assert state.suggested_action == "investigate_no_pr"
+
+
+class TestActionToModeCompleteness:
+    """Test that ACTION_TO_MODE mapping is complete and correct."""
+
+    def test_all_actions_have_mode_mapping(self) -> None:
+        """Every ActionType value must have an ACTION_TO_MODE entry.
+
+        Missing entries cause fallback to IMPLEMENT mode, which could cause
+        session ID collisions if multiple actions for same issue use the fallback.
+        """
+        # Get all ActionType literals from the type definition
+        # ActionType is a Literal, so we need to extract the values
+        import typing
+
+        action_type = typing.get_args(types.ActionType)
+        mapped_actions = set(decision.ACTION_TO_MODE.keys())
+
+        # All ActionType values should be in ACTION_TO_MODE
+        for action in action_type:
+            assert action in mapped_actions, (
+                f"Action '{action}' missing from ACTION_TO_MODE mapping. "
+                f"This would cause fallback to IMPLEMENT mode."
+            )
+
+
+class TestSessionIdUniqueness:
+    """Test session ID uniqueness across different actions for same issue."""
+
+    team_id: str = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+
+    def test_different_actions_produce_different_session_ids(self) -> None:
+        """Different actions on same issue must produce different session IDs.
+
+        Session ID collision would cause workers to overwrite each other's state.
+        """
+        issue_id = "ENG-21"
+
+        # Test key action pairs that operate on same issue
+        plan_session = types.compute_session_id(self.team_id, issue_id, "plan")
+        implement_session = types.compute_session_id(
+            self.team_id, issue_id, "implement"
+        )
+        review_session = types.compute_session_id(self.team_id, issue_id, "review")
+        merge_session = types.compute_session_id(self.team_id, issue_id, "merge")
+        architect_session = types.compute_session_id(
+            self.team_id, issue_id, "architect"
+        )
+
+        # All must be unique
+        session_ids = {
+            plan_session,
+            implement_session,
+            review_session,
+            merge_session,
+            architect_session,
+        }
+        assert len(session_ids) == 5, (
+            "Session IDs must be unique across different modes"
+        )
+
+    def test_same_action_same_issue_produces_same_session_id(self) -> None:
+        """Same action on same issue must be deterministic."""
+        issue_id = "ENG-21"
+
+        session1 = types.compute_session_id(self.team_id, issue_id, "implement")
+        session2 = types.compute_session_id(self.team_id, issue_id, "implement")
+
+        assert session1 == session2, "Session ID must be deterministic"
+
+
+class TestParsedIssueProperties:
+    """Test ParsedIssue property logic."""
+
+    def test_needs_pr_status_requires_all_three_conditions(self) -> None:
+        """needs_pr_status should only be True when:
+        1. Status is NEEDS_REVIEW
+        2. Has worker-done label
+        3. Has PR attached
+
+        This controls whether GitHub API is called for PR status.
+        """
+        # All conditions met - should return True
+        issue_all_met = types.ParsedIssue(
+            issue_id="ENG-21",
+            status=types.IssueStatus.NEEDS_REVIEW,
+            labels=["worker-done"],
+            pr_ref=types.GitHubPRRef(owner="org", repo="repo", number=1),
+        )
+        assert issue_all_met.needs_pr_status is True
+
+        # Missing worker-done label
+        issue_no_done = types.ParsedIssue(
+            issue_id="ENG-21",
+            status=types.IssueStatus.NEEDS_REVIEW,
+            labels=[],
+            pr_ref=types.GitHubPRRef(owner="org", repo="repo", number=1),
+        )
+        assert issue_no_done.needs_pr_status is False
+
+        # Wrong status
+        issue_wrong_status = types.ParsedIssue(
+            issue_id="ENG-21",
+            status=types.IssueStatus.IN_PROGRESS,
+            labels=["worker-done"],
+            pr_ref=types.GitHubPRRef(owner="org", repo="repo", number=1),
+        )
+        assert issue_wrong_status.needs_pr_status is False
+
+        # No PR attached
+        issue_no_pr = types.ParsedIssue(
+            issue_id="ENG-21",
+            status=types.IssueStatus.NEEDS_REVIEW,
+            labels=["worker-done"],
+            pr_ref=None,
+        )
+        assert issue_no_pr.needs_pr_status is False
+
+
+class TestOrphanDetectionPriority:
+    """Test priority of orphan detection vs other conditions."""
+
+    def test_orphan_with_worker_done_and_worker_active_removes_active(self) -> None:
+        """When both worker-done and worker-active exist but no live worker, orphan detection wins.
+
+        This scenario can happen if worker sets worker-done, then crashes before removing worker-active.
+        """
+        team_id = "7b4f0862-b775-4cb0-9a67-85400c6f44a8"
+        data = types.FetchedIssueData(
+            issue_id="ENG-21",
+            status=types.IssueStatus.IN_PROGRESS,
+            labels=["worker-done", "worker-active"],  # Both labels present
+            has_pr=False,
+            pr_is_draft=None,
+            has_live_worker=False,  # But worker died
+            has_user_feedback=False,
+            has_user_input_needed=False,
+        )
+
+        state = decision.build_issue_state(data, team_id)
+
+        # Orphan detection takes precedence - worker died, need to clean up
+        assert state.suggested_action == "remove_worker_active_and_redispatch"
+
+
+class TestSuggestActionEdgeCasesWithPR:
+    """Test that PR status is only checked in NEEDS_REVIEW state."""
+
+    def test_in_progress_ignores_pr_status(self) -> None:
+        """IN_PROGRESS with has_pr=True and pr_is_draft=False should not transition to retro.
+
+        Only NEEDS_REVIEW state should check PR draft status.
+        """
+        action = decision.suggest_action(
+            status=types.IssueStatus.IN_PROGRESS,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=False,  # PR is ready
+            has_pr=True,
+        )
+        # Should transition to needs review, not retro
+        assert action == "transition_to_needs_review"
+
+    def test_todo_ignores_pr_status(self) -> None:
+        """TODO with PR should still follow normal flow."""
+        action = decision.suggest_action(
+            status=types.IssueStatus.TODO,
+            has_worker_done=True,
+            has_live_worker=False,
+            pr_is_draft=False,
+            has_pr=True,
+        )
+        # Should transition to in progress, ignoring PR
+        assert action == "transition_to_in_progress"
+
+
+class TestInvestigateNoPrWithLiveWorker:
+    """Test investigate_no_pr behavior with live worker edge case."""
+
+    def test_needs_review_no_pr_with_live_worker_still_investigates(self) -> None:
+        """Even with live worker, investigate_no_pr should trigger when no PR exists.
+
+        Live worker check happens before worker-done checks in decision tree,
+        but this combination (worker-done + no PR + live worker) is unusual.
+        Current implementation: worker-done bypasses live worker check.
+        """
+        action = decision.suggest_action(
+            status=types.IssueStatus.NEEDS_REVIEW,
+            has_worker_done=True,  # Worker claims done
+            has_live_worker=True,  # But somehow still running (stale?)
+            pr_is_draft=None,
+            has_pr=False,  # No PR exists
+        )
+
+        # Worker-done takes precedence, so should still investigate
+        assert action == "investigate_no_pr"

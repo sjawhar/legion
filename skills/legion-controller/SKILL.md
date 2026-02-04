@@ -71,8 +71,17 @@ State transitions (always remove `worker-done` after):
 | In Progress + worker-done | → Needs Review, dispatch reviewer |
 | Needs Review + worker-done (PR ready) | → Retro, resume implementer |
 | Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
+| Needs Review + worker-done (no PR) | `investigate_no_pr` - see below |
 | Retro + worker-done | Dispatch merger |
 | `remove_worker_active_and_redispatch` | Remove worker-active label, then dispatch |
+
+**Handling `investigate_no_pr`:** Worker marked done but no PR exists. Likely causes:
+1. Worker crashed before creating PR
+2. PR creation failed silently
+3. Issue moved to wrong status manually
+4. Linear attachment wasn't added
+
+**Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
 
 ### 4. Route Triage
 

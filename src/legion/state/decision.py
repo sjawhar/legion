@@ -20,6 +20,7 @@ def suggest_action(
     has_worker_done: bool,
     has_live_worker: bool,
     pr_is_draft: bool | None,
+    has_pr: bool,
 ) -> ActionType:
     """Suggest action based on issue state.
 
@@ -27,7 +28,8 @@ def suggest_action(
         status: Normalized issue status (IssueStatusLiteral or unknown raw value)
         has_worker_done: Whether issue has worker-done label
         has_live_worker: Whether a tmux worker session is running
-        pr_is_draft: PR draft status (None if no PR, True if draft, False if ready)
+        pr_is_draft: PR draft status (None if couldn't check, True if draft, False if ready)
+        has_pr: Whether a PR is linked to this issue
 
     Returns:
         Action to take for this issue
@@ -63,17 +65,12 @@ def suggest_action(
 
         case types.IssueStatus.NEEDS_REVIEW:
             if has_worker_done:
-                # Review outcome is signaled by PR draft status:
-                # - PR ready (not draft) = approved → transition to retro
-                # - PR still draft = changes requested → resume implementer
-                # - No PR = wait for PR to be created
+                if not has_pr:
+                    return "investigate_no_pr"  # No PR linked - needs attention
                 if pr_is_draft is None:
-                    # No PR yet - wait for it
-                    return "skip"
+                    return "skip"  # Has PR but couldn't check - transient, retry
                 if pr_is_draft:
-                    # PR is draft = changes requested
                     return "resume_implementer_for_changes"
-                # PR is ready (not draft) = approved
                 return "transition_to_retro"
             if has_live_worker:
                 return "skip"
@@ -95,6 +92,7 @@ def suggest_action(
 # fallback since session_id is computed even when no worker will be dispatched.
 ACTION_TO_MODE: dict[ActionType, WorkerModeLiteral] = {
     "skip": types.WorkerMode.IMPLEMENT,  # fallback - not actually dispatched
+    "investigate_no_pr": types.WorkerMode.IMPLEMENT,  # stuck state - needs investigation
     "dispatch_architect": types.WorkerMode.ARCHITECT,
     "dispatch_planner": types.WorkerMode.PLAN,
     "dispatch_implementer": types.WorkerMode.IMPLEMENT,
@@ -140,6 +138,7 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> types.IssueState:
             has_worker_done="worker-done" in data.labels,
             has_live_worker=data.has_live_worker,
             pr_is_draft=data.pr_is_draft,
+            has_pr=data.has_pr,
         )
 
     # Compute session_id based on the action's mode
@@ -150,6 +149,7 @@ def build_issue_state(data: FetchedIssueData, team_id: str) -> types.IssueState:
     return types.IssueState(
         status=data.status,
         labels=data.labels,
+        has_pr=data.has_pr,
         pr_is_draft=data.pr_is_draft,
         has_live_worker=data.has_live_worker,
         suggested_action=action,
