@@ -115,16 +115,14 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 | `retro` | Retro | Learnings documented |
 | `merge` | Done | PR merged, workspace cleaned |
 
-### Labels
+### Labels (Linear)
 
-**Linear:**
 - `worker-done` - Worker signals completion
+- `worker-active` - Worker dispatched and running
 - `user-input-needed` - Waiting for human
 - `user-feedback-given` - Human answered
 
-**GitHub PR:**
-- `worker-approved` - Review passed
-- `worker-changes-requested` - Review found issues
+Review outcomes use **PR draft status** (not labels): draft = changes requested, ready = approved.
 
 ## Conventions
 
@@ -151,12 +149,20 @@ Skills live in `skills/<name>/SKILL.md`. Workflows are in `skills/<name>/workflo
 - Plans go in `docs/plans/YYYY-MM-DD-<slug>.md`
 - Learnings go in `docs/solutions/<category>/<slug>.md`
 
-## Environment Variables
+## Usage
 
-| Variable | Description |
-|----------|-------------|
-| `LINEAR_TEAM_ID` | Linear team UUID |
-| `LEGION_DIR` | Path to default jj workspace |
-| `LEGION_SHORT_ID` | Short ID for tmux sessions |
-| `LINEAR_ISSUE_ID` | Current issue (workers only) |
-| `WORKSPACE_DIR` | Worker's jj workspace path |
+```bash
+# Start the swarm for a Linear team (key or UUID)
+legion start <team> [--workspace /path/to/repo]
+
+# Check status
+legion status <team>
+
+# Stop the swarm
+legion stop <team>
+
+# Cache team key → UUID mappings
+legion teams
+```
+
+The daemon automatically passes context to spawned processes via environment variables (internal implementation detail - users don't set these manually).

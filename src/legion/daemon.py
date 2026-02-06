@@ -46,9 +46,9 @@ def get_short_id(project_id: str) -> str:
     return project_id
 
 
-def controller_session_name(short: str) -> str:
-    """Get tmux session name for controller."""
-    return f"legion-{short}-controller"
+def session_name(short: str) -> str:
+    """Get tmux session name for Legion instance."""
+    return f"legion-{short}"
 
 
 def validate_project_id(project_id: str) -> None:
@@ -109,18 +109,19 @@ async def get_newest_mtime(session_file: Path) -> float | None:
 async def check_worker_health(
     tmux_session: str,
     team_id: str,
-    workspace_dir: Path,
+    workspaces_dir: Path,
     staleness_threshold: int = DEFAULT_STALENESS_THRESHOLD,
 ) -> None:
     """Check worker health and kill stale windows.
 
-    Workers run as windows within the controller's tmux session.
-    Window names follow the format: {mode}-{issue} (e.g., "implement-ENG-21").
+    Workers run as windows within the Legion tmux session.
+    Window names follow the format: {issue}-{mode} (e.g., "leg-18-architect").
+    Worker workspaces are sibling directories to the default workspace.
 
     Args:
         tmux_session: Name of the tmux session containing workers
         team_id: Linear team UUID for computing session IDs
-        workspace_dir: Base directory containing issue workspaces
+        workspaces_dir: Parent directory containing worker workspaces as siblings
         staleness_threshold: Seconds of inactivity before killing (default 10 min)
     """
     windows = await tmux.list_windows(tmux_session)
@@ -129,20 +130,21 @@ async def check_worker_health(
         if window == "main":
             continue  # Skip controller window
 
-        # Parse {mode}-{issue} from window name
-        parts = window.split("-", 1)
+        # Parse {issue}-{mode} from window name (e.g., "leg-18-architect")
+        # Split from right since issue identifier contains a hyphen
+        parts = window.rsplit("-", 1)
         if len(parts) != 2:
             continue  # Invalid format, skip
 
-        mode, issue_id = parts
+        issue_lower, mode = parts
         if not is_valid_worker_mode(mode):
             continue  # Not a valid worker mode
 
-        issue_id = issue_id.upper()  # Normalize
+        issue_id = issue_lower.upper()  # Normalize for session ID computation
 
         # Compute session file path
         session_id = types.compute_session_id(team_id, issue_id, mode)
-        workspace = workspace_dir / issue_id
+        workspace = workspaces_dir / issue_lower
         session_file = get_session_file_path(workspace, session_id)
 
         # Check staleness
@@ -208,14 +210,15 @@ async def start_controller(
     else:
         session_flag = f"--session-id {shlex.quote(session_id)}"
 
-    prompt = f"Use the legion-controller skill. Project: {project_id}"
+    # Start interactive Claude with initial prompt as positional argument
+    prompt = f"/legion-controller Project: {project_id}"
     cmd = (
         f"cd {shlex.quote(str(workspace))} && "
         f"LEGION_DIR={shlex.quote(str(workspace))} "
         f"LINEAR_TEAM_ID={shlex.quote(project_id)} "
         f"LEGION_SHORT_ID={shlex.quote(short)} "
         f"claude --dangerously-skip-permissions {session_flag} "
-        f"-p {shlex.quote(prompt)}"
+        f"{shlex.quote(prompt)}"
     )
 
     await tmux.new_session(tmux_session, "main", cmd)
@@ -271,7 +274,7 @@ async def health_loop(
         # Wrapped in try/except to prevent daemon crash if worker health check fails
         try:
             await check_worker_health(
-                tmux_session, project_id, workspace, staleness_threshold
+                tmux_session, project_id, workspace.parent, staleness_threshold
             )
         except Exception as e:
             logger.error("Worker health check failed: %s", e)
@@ -310,7 +313,7 @@ async def start(project_id: str, workspace: Path, state_dir: Path) -> None:
     await validate_workspace(workspace)
 
     short = get_short_id(project_id)
-    session = controller_session_name(short)
+    session = session_name(short)
     session_id = types.compute_controller_session_id(project_id)
 
     if await tmux.session_exists(session):
@@ -355,7 +358,7 @@ async def stop(project_id: str, state_dir: Path) -> None:  # noqa: ARG001
     _ = state_dir  # Explicitly mark as intentionally unused
     validate_project_id(project_id)
     short = get_short_id(project_id)
-    session = controller_session_name(short)
+    session = session_name(short)
 
     click.echo(f"Stopping Legion for project: {project_id}")
 
@@ -371,7 +374,7 @@ async def status(project_id: str, state_dir: Path) -> None:
     """Show Legion swarm status."""
     validate_project_id(project_id)
     short = get_short_id(project_id)
-    session = controller_session_name(short)
+    session = session_name(short)
 
     click.echo(f"Legion Status: {project_id}")
     click.echo(f"Session ID: {short}")
