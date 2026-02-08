@@ -1,0 +1,21 @@
+{
+  "name": "legion",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Autonomous development swarm using OpenCode agents",
+  "scripts": {
+    "start:daemon": "bun run src/daemon/index.ts",
+    "test": "bun test",
+    "lint": "echo 'Linting not yet configured'",
+    "typecheck": "bunx tsc --noEmit",
+    "format": "echo 'Formatting not yet configured'"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.1.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}
