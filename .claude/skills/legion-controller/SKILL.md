@@ -46,7 +46,7 @@ digraph controller {
 ### 1. Fetch Issues
 
 ```bash
-LINEAR_JSON=$(mcp__linear__list_issues team="$LINEAR_TEAM_ID" limit=100)
+LINEAR_JSON=$(linear_linear(action="search", query={"team": "$LINEAR_TEAM_ID"}))
 ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
 ```
 
@@ -182,7 +182,7 @@ curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
   }"
 
 # Add worker-active label
-mcp__linear__update_issue id="$ISSUE_ID" labels=["worker-active", ...existing...]
+linear_linear(action="update", id="$ISSUE_ID", labels=["worker-active", ...existing...])
 ```
 
 **Resume** = send prompt to existing worker:
@@ -213,7 +213,7 @@ Available when needed (debugging, intervention):
 
 ```bash
 # List all workers
-curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq '.[] | {id, status, port, issueId, mode}'
+curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq '.[] | {id, status, port, pid, sessionId, startedAt}'
 
 # Get specific worker info
 curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID | jq '.'
@@ -223,11 +223,7 @@ curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/status | jq '.'
 
 # Get worker messages
 WORKER_PORT=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID | jq -r '.port')
-curl -s http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/message | jq '.[-5:]'
-
-# Read session file directly
-CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-~/.dotfiles/.claude}
-cat $CLAUDE_CONFIG_DIR/transcripts/$SESSION_ID.jsonl | tail -20
+curl -s http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/message?limit=20 | jq '.[-5:]'
 
 # Send input (use sparingly - prefer prompt_async)
 curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \

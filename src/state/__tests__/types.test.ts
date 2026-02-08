@@ -1,29 +1,29 @@
 /**
  * Tests for state types module.
- * 
+ *
  * Ported from Python tests:
  * - tests/test_state.py (TestComputeSessionId, TestComputeControllerSessionId, TestIssueStatus, TestParsedIssueWorkerActive)
  * - tests/test_session_naming.py (session ID computation tests)
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { validate as validateUuid } from "uuid";
 import {
-  IssueStatus,
-  computeSessionId,
   computeControllerSessionId,
-  GitHubPRRef,
+  computeSessionId,
   createParsedIssue,
+  GitHubPRRef,
+  IssueStatus,
 } from "../types";
 
 describe("computeSessionId", () => {
   it("returns uuid string with ses_ prefix", () => {
     const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
     const result = computeSessionId(teamId, "ENG-21", "implement");
-    
+
     // Should have ses_ prefix
     expect(result).toMatch(/^ses_/);
-    
+
     // After removing prefix, should be valid UUID
     const uuidPart = result.slice(4);
     expect(validateUuid(uuidPart)).toBe(true);
@@ -61,10 +61,10 @@ describe("computeControllerSessionId", () => {
   it("returns uuid string with ses_ prefix", () => {
     const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
     const result = computeControllerSessionId(teamId);
-    
+
     // Should have ses_ prefix
     expect(result).toMatch(/^ses_/);
-    
+
     // After removing prefix, should be valid UUID
     const uuidPart = result.slice(4);
     expect(validateUuid(uuidPart)).toBe(true);
@@ -114,7 +114,7 @@ describe("GitHubPRRef.fromUrl", () => {
   it("parses valid PR URL", () => {
     const url = "https://github.com/owner/repo/pull/123";
     const ref = GitHubPRRef.fromUrl(url);
-    
+
     expect(ref).not.toBeNull();
     expect(ref?.owner).toBe("owner");
     expect(ref?.repo).toBe("repo");
@@ -136,7 +136,7 @@ describe("GitHubPRRef.fromUrl", () => {
   it("handles owner and repo with hyphens, underscores, dots", () => {
     const url = "https://github.com/my-org.test/my_repo-2.0/pull/456";
     const ref = GitHubPRRef.fromUrl(url);
-    
+
     expect(ref).not.toBeNull();
     expect(ref?.owner).toBe("my-org.test");
     expect(ref?.repo).toBe("my_repo-2.0");
@@ -176,12 +176,11 @@ describe("ParsedIssue properties", () => {
   });
 
   it("has_pr returns true when pr_ref exists", () => {
-    const issue = createParsedIssue(
-      "ENG-21",
-      "Needs Review",
-      [],
-      { owner: "owner", repo: "repo", number: 123 }
-    );
+    const issue = createParsedIssue("ENG-21", "Needs Review", [], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
     expect(issue.hasPr).toBe(true);
   });
 
@@ -191,32 +190,29 @@ describe("ParsedIssue properties", () => {
   });
 
   it("needs_pr_status returns true when conditions met", () => {
-    const issue = createParsedIssue(
-      "ENG-21",
-      "Needs Review",
-      ["worker-done"],
-      { owner: "owner", repo: "repo", number: 123 }
-    );
+    const issue = createParsedIssue("ENG-21", "Needs Review", ["worker-done"], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
     expect(issue.needsPrStatus).toBe(true);
   });
 
   it("needs_pr_status returns false when status not Needs Review", () => {
-    const issue = createParsedIssue(
-      "ENG-21",
-      "In Progress",
-      ["worker-done"],
-      { owner: "owner", repo: "repo", number: 123 }
-    );
+    const issue = createParsedIssue("ENG-21", "In Progress", ["worker-done"], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
     expect(issue.needsPrStatus).toBe(false);
   });
 
   it("needs_pr_status returns false when no worker-done label", () => {
-    const issue = createParsedIssue(
-      "ENG-21",
-      "Needs Review",
-      [],
-      { owner: "owner", repo: "repo", number: 123 }
-    );
+    const issue = createParsedIssue("ENG-21", "Needs Review", [], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
     expect(issue.needsPrStatus).toBe(false);
   });
 

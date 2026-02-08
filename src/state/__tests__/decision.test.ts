@@ -5,29 +5,13 @@
  * - tests/test_state.py (TestSuggestAction, TestBuildIssueState, TestOrphanDetection, TestBuildCollectedState)
  */
 
-import { describe, it, expect } from "bun:test";
-import {
-  IssueStatus,
-  computeSessionId,
-  CollectedState,
-  type FetchedIssueData,
-} from "../types";
-import {
-  ACTION_TO_MODE,
-  suggestAction,
-  buildIssueState,
-  buildCollectedState,
-} from "../decision";
+import { describe, expect, it } from "bun:test";
+import { ACTION_TO_MODE, buildCollectedState, buildIssueState, suggestAction } from "../decision";
+import { CollectedState, computeSessionId, type FetchedIssueData, IssueStatus } from "../types";
 
 describe("suggestAction", () => {
   it("todo_no_worker_done_no_live_worker dispatches planner", () => {
-    const action = suggestAction(
-      IssueStatus.TODO,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.TODO, false, false, null, false);
     expect(action).toBe("dispatch_planner");
   });
 
@@ -37,222 +21,102 @@ describe("suggestAction", () => {
   });
 
   it("in_progress_no_worker_no_done dispatches implementer", () => {
-    const action = suggestAction(
-      IssueStatus.IN_PROGRESS,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, false);
     expect(action).toBe("dispatch_implementer");
   });
 
   it("in_progress_worker_done transitions to needs review", () => {
-    const action = suggestAction(
-      IssueStatus.IN_PROGRESS,
-      true,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.IN_PROGRESS, true, false, null, false);
     expect(action).toBe("transition_to_needs_review");
   });
 
   it("in_progress_with_live_worker skips", () => {
-    const action = suggestAction(
-      IssueStatus.IN_PROGRESS,
-      false,
-      true,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.IN_PROGRESS, false, true, null, false);
     expect(action).toBe("skip");
   });
 
   it("needs_review_approved transitions to retro", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      true,
-      false,
-      false,
-      true
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, false, true);
     expect(action).toBe("transition_to_retro");
   });
 
   it("needs_review_changes_requested resumes implementer", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      true,
-      false,
-      true,
-      true
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, true, true);
     expect(action).toBe("resume_implementer_for_changes");
   });
 
   it("needs_review_worker_done_has_pr_but_unknown_status skips", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      true,
-      false,
-      null,
-      true
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true);
     expect(action).toBe("skip");
   });
 
   it("needs_review_worker_done_no_pr investigates", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      true,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, false);
     expect(action).toBe("investigate_no_pr");
   });
 
   it("needs_review_no_worker_done dispatches reviewer", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, false, null, false);
     expect(action).toBe("dispatch_reviewer");
   });
 
   it("needs_review_with_live_worker_no_done skips", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      false,
-      true,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, true, null, false);
     expect(action).toBe("skip");
   });
 
   it("needs_review_worker_done_ignores_live_worker", () => {
-    const action = suggestAction(
-      IssueStatus.NEEDS_REVIEW,
-      true,
-      true,
-      false,
-      true
-    );
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, true, false, true);
     expect(action).toBe("transition_to_retro");
   });
 
   it("backlog_no_worker_done dispatches architect", () => {
-    const action = suggestAction(
-      IssueStatus.BACKLOG,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.BACKLOG, false, false, null, false);
     expect(action).toBe("dispatch_architect");
   });
 
   it("backlog_worker_done transitions to todo", () => {
-    const action = suggestAction(
-      IssueStatus.BACKLOG,
-      true,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.BACKLOG, true, false, null, false);
     expect(action).toBe("transition_to_todo");
   });
 
   it("backlog_with_live_worker skips", () => {
-    const action = suggestAction(
-      IssueStatus.BACKLOG,
-      false,
-      true,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.BACKLOG, false, true, null, false);
     expect(action).toBe("skip");
   });
 
   it("triage_skips", () => {
-    const action = suggestAction(
-      IssueStatus.TRIAGE,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.TRIAGE, false, false, null, false);
     expect(action).toBe("skip");
   });
 
   it("icebox_skips", () => {
-    const action = suggestAction(
-      IssueStatus.ICEBOX,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.ICEBOX, false, false, null, false);
     expect(action).toBe("skip");
   });
 
   it("retro_worker_done dispatches merger", () => {
-    const action = suggestAction(
-      IssueStatus.RETRO,
-      true,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.RETRO, true, false, null, false);
     expect(action).toBe("dispatch_merger");
   });
 
   it("retro_no_worker_done resumes implementer", () => {
-    const action = suggestAction(
-      IssueStatus.RETRO,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.RETRO, false, false, null, false);
     expect(action).toBe("resume_implementer_for_retro");
   });
 
   it("retro_with_live_worker skips", () => {
-    const action = suggestAction(
-      IssueStatus.RETRO,
-      false,
-      true,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.RETRO, false, true, null, false);
     expect(action).toBe("skip");
   });
 
   it("done_always_skips", () => {
-    const action = suggestAction(
-      IssueStatus.DONE,
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction(IssueStatus.DONE, false, false, null, false);
     expect(action).toBe("skip");
   });
 
   it("unknown_status_skips", () => {
-    const action = suggestAction(
-      "SomeUnknownStatus",
-      false,
-      false,
-      null,
-      false
-    );
+    const action = suggestAction("SomeUnknownStatus", false, false, null, false);
     expect(action).toBe("skip");
   });
 });
@@ -270,10 +134,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: false,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("dispatch_planner");
   });
 
@@ -289,10 +150,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("skip");
   });
 
@@ -308,10 +166,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("relay_user_feedback");
   });
 
@@ -327,10 +182,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("skip");
   });
 
@@ -416,10 +268,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("relay_user_feedback");
   });
 });
@@ -437,10 +286,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("remove_worker_active_and_redispatch");
   });
 
@@ -456,10 +302,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("skip");
   });
 
@@ -475,10 +318,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("dispatch_implementer");
   });
 
@@ -514,10 +354,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: true,
     };
 
-    const state = buildIssueState(
-      data,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("relay_user_feedback");
   });
 
@@ -551,17 +388,12 @@ describe("buildCollectedState", () => {
       },
     ];
 
-    const state = buildCollectedState(
-      issuesData,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildCollectedState(issuesData, "00000000-0000-0000-0000-000000000000");
 
     expect("ENG-21" in state.issues).toBe(true);
     expect("ENG-22" in state.issues).toBe(true);
     expect(state.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");
-    expect(state.issues["ENG-22"].suggestedAction).toBe(
-      "transition_to_needs_review"
-    );
+    expect(state.issues["ENG-22"].suggestedAction).toBe("transition_to_needs_review");
   });
 
   it("to_dict_serializes_correctly", () => {
@@ -578,10 +410,7 @@ describe("buildCollectedState", () => {
       },
     ];
 
-    const state = buildCollectedState(
-      issuesData,
-      "00000000-0000-0000-0000-000000000000"
-    );
+    const state = buildCollectedState(issuesData, "00000000-0000-0000-0000-000000000000");
     const result = CollectedState.toDict(state);
 
     expect("issues" in result).toBe(true);

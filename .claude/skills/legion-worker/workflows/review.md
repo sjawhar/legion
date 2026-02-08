@@ -13,7 +13,7 @@ Signal outcome via PR draft status instead (draft = changes requested, ready = a
 
 Fetch the Linear issue:
 ```
-mcp__linear__get_issue with id: $LINEAR_ISSUE_ID
+linear_linear(action="get", id=$LINEAR_ISSUE_ID)
 ```
 
 Extract:

@@ -1,9 +1,25 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { computeSessionId } from "../../state/types";
 import type { SpawnOptions, WorkerEntry } from "../serve-manager";
-import { startServer, type PortAllocatorInterface, type ServeManagerInterface } from "../server";
+import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "../server";
+
+let mockSessionStatus: (() => Promise<unknown>) | null = null;
+
+mock.module("@opencode-ai/sdk/v2", () => ({
+  createOpencodeClient: () => ({
+    session: {
+      status: async () => {
+        if (mockSessionStatus) {
+          return mockSessionStatus();
+        }
+        throw new Error("No mock configured");
+      },
+    },
+  }),
+}));
 
 class TestPortAllocator implements PortAllocatorInterface {
   private nextPort: number;
@@ -33,6 +49,7 @@ describe("daemon server", () => {
   let spawnCalls: SpawnOptions[] = [];
   let killCalls: WorkerEntry[] = [];
   const originalFetch = globalThis.fetch;
+  const teamId = "123e4567-e89b-12d3-a456-426614174000";
 
   async function startTestServer() {
     spawnCalls = [];
@@ -61,6 +78,7 @@ describe("daemon server", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      teamId,
       serveManager,
       portAllocator,
       stateFilePath,
@@ -82,6 +100,7 @@ describe("daemon server", () => {
 
   afterEach(async () => {
     globalThis.fetch = originalFetch;
+    mockSessionStatus = null;
     if (stopServer) {
       stopServer();
       stopServer = null;
@@ -137,13 +156,13 @@ describe("daemon server", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { id: string; port: number; sessionId: string };
-    expect(body.id).toBe("ENG-42-implement");
+    expect(body.id).toBe("eng-42-implement");
     expect(body.port).toBe(15500);
-    expect(typeof body.sessionId).toBe("string");
+    expect(body.sessionId).toBe(computeSessionId(teamId, "eng-42", "implement"));
 
     expect(spawnCalls.length).toBe(1);
     expect(spawnCalls[0]).toMatchObject({
-      issueId: "ENG-42",
+      issueId: "eng-42",
       mode: "implement",
       workspace: "/tmp/work",
       port: 15500,
@@ -199,18 +218,15 @@ describe("daemon server", () => {
         workspace: "/tmp/work",
       }),
     });
-    const created = (await createResponse.json()) as { id: string; port: number; sessionId: string };
+    const created = (await createResponse.json()) as {
+      id: string;
+      port: number;
+      sessionId: string;
+    };
 
-    globalThis.fetch = (async (input: Request | string) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url.includes(`/session/status`)) {
-        return {
-          ok: true,
-          json: async () => ({ status: "active", sessionId: created.sessionId }),
-        } as Response;
-      }
-      return originalFetch(input);
-    }) as typeof fetch;
+    mockSessionStatus = async () => ({
+      data: { status: "active", sessionId: created.sessionId },
+    });
 
     const response = await requestJson(`/workers/${created.id}/status`);
     expect(response.status).toBe(200);
@@ -227,18 +243,69 @@ describe("daemon server", () => {
         workspace: "/tmp/work",
       }),
     });
-    const created = (await createResponse.json()) as { id: string; port: number; sessionId: string };
+    const created = (await createResponse.json()) as {
+      id: string;
+      port: number;
+      sessionId: string;
+    };
 
-    globalThis.fetch = (async (input: Request | string) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url.includes(`/session/status`)) {
-        throw new Error("boom");
-      }
-      return originalFetch(input);
-    }) as typeof fetch;
+    mockSessionStatus = async () => {
+      throw new Error("boom");
+    };
 
     const response = await requestJson(`/workers/${created.id}/status`);
     expect(response.status).toBe(502);
+  });
+
+  it("returns 502 when worker returns error status", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-12",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+    const created = (await createResponse.json()) as {
+      id: string;
+      port: number;
+      sessionId: string;
+    };
+
+    mockSessionStatus = async () => ({
+      data: undefined,
+      error: { message: "internal server error" },
+    });
+
+    const response = await requestJson(`/workers/${created.id}/status`);
+    expect(response.status).toBe(502);
+  });
+
+  it("shuts down on request", async () => {
+    let shutdownCalls = 0;
+    await startTestServer();
+    stopServer?.();
+    stopServer = null;
+
+    const { server, stop } = startServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      teamId,
+      serveManager,
+      portAllocator,
+      stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),
+      shutdownFn: async () => {
+        shutdownCalls += 1;
+      },
+    });
+    stopServer = stop;
+    baseUrl = `http://127.0.0.1:${server.port}`;
+
+    const response = await requestJson("/shutdown", { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "shutting_down" });
+    expect(shutdownCalls).toBe(1);
   });
 
   it("returns 404 for unknown routes", async () => {

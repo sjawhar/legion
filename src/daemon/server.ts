@@ -1,5 +1,7 @@
-import { readStateFile, writeStateFile } from "./state-file";
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
 import type { SpawnOptions, WorkerEntry } from "./serve-manager";
+import { readStateFile, writeStateFile } from "./state-file";
 
 type Server = ReturnType<typeof Bun.serve>;
 
@@ -18,9 +20,11 @@ export interface PortAllocatorInterface {
 export interface ServerOptions {
   port?: number;
   hostname?: string;
+  teamId: string;
   serveManager: ServeManagerInterface;
   portAllocator: PortAllocatorInterface;
   stateFilePath: string;
+  shutdownFn?: () => void | Promise<void>;
 }
 
 interface ErrorResponse {
@@ -90,7 +94,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
         try {
           const healthy = await opts.serveManager.healthCheck(entry.port);
           if (healthy) {
-            workers.set(id, { ...entry, status: "running" });
+            const normalizedId = id.toLowerCase();
+            workers.set(normalizedId, { ...entry, id: normalizedId, status: "running" });
           }
         } catch {
           return;
@@ -136,19 +141,40 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const workspace = payload.workspace;
             const env = payload.env;
 
-            if (typeof issueId !== "string" || typeof mode !== "string" || typeof workspace !== "string") {
+            if (
+              typeof issueId !== "string" ||
+              typeof mode !== "string" ||
+              typeof workspace !== "string"
+            ) {
               return badRequest("missing_fields");
             }
-            if (env !== undefined && !isRecord(env)) {
-              return badRequest("invalid_env");
+            const validModes = Object.values(WorkerMode);
+            if (!validModes.includes(mode as WorkerModeLiteral)) {
+              return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
+            }
+            if (env !== undefined) {
+              if (!isRecord(env)) {
+                return badRequest("invalid_env");
+              }
+              for (const [, val] of Object.entries(env)) {
+                if (typeof val !== "string") {
+                  return badRequest("env values must be strings");
+                }
+              }
             }
 
+            const normalizedIssueId = issueId.toLowerCase();
+
             const port = opts.portAllocator.allocate();
-            const sessionId = crypto.randomUUID();
+            const sessionId = computeSessionId(
+              opts.teamId,
+              normalizedIssueId,
+              mode as WorkerModeLiteral
+            );
             let entry: WorkerEntry;
             try {
               entry = await opts.serveManager.spawnServe({
-                issueId,
+                issueId: normalizedIssueId,
                 mode,
                 workspace,
                 port,
@@ -168,13 +194,34 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
         }
 
         if (segments.length === 2 && segments[0] === "workers") {
-          const id = segments[1];
+          const id = segments[1].toLowerCase();
           const entry = workers.get(id);
           if (!entry) {
             return notFound();
           }
           if (method === "GET") {
             return jsonResponse(entry);
+          }
+          if (method === "PATCH") {
+            let payload: Record<string, unknown>;
+            try {
+              payload = await parseJson(request);
+            } catch {
+              return badRequest("invalid_json");
+            }
+
+            const status = payload.status;
+            if (typeof status !== "string") {
+              return badRequest("missing_fields");
+            }
+            if (!"starting running stopped dead".split(" ").includes(status)) {
+              return badRequest("invalid_status");
+            }
+
+            const updated = { ...entry, status: status as WorkerEntry["status"] };
+            workers.set(id, updated);
+            await persistState();
+            return jsonResponse(updated);
           }
           if (method === "DELETE") {
             await opts.serveManager.killWorker(entry);
@@ -189,22 +236,27 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           if (method !== "GET") {
             return notFound();
           }
-          const id = segments[1];
+          const id = segments[1].toLowerCase();
           const entry = workers.get(id);
           if (!entry) {
             return notFound();
           }
 
           try {
-            const response = await fetch(`http://127.0.0.1:${entry.port}/session/status`);
-            if (!response.ok) {
+            const client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${entry.port}` });
+            const result = await client.session.status();
+            if (result.error || !result.data) {
               return badGateway();
             }
-            const data = await response.json();
-            return jsonResponse(data);
+            return jsonResponse(result.data);
           } catch {
             return badGateway();
           }
+        }
+
+        if (method === "POST" && url.pathname === "/shutdown") {
+          await opts.shutdownFn?.();
+          return jsonResponse({ status: "shutting_down" });
         }
 
         return notFound();

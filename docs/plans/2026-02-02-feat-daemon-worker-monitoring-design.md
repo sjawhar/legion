@@ -6,6 +6,8 @@ date: 2026-02-02
 
 # Daemon Worker Monitoring Design
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Enable recovery from hung workers by having the daemon monitor worker windows and kill stale ones, while the controller re-dispatches naturally.

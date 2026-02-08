@@ -1,5 +1,7 @@
 # Knowledge Graph Tools Market Research Plan
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 ## Objective
 
 Produce a comparative analysis of knowledge graph tools to select a foundation for AI agent orchestration and knowledge storage.

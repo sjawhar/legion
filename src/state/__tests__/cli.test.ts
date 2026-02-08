@@ -5,10 +5,10 @@
  * calls fetchAllIssueData then buildCollectedState, and outputs JSON to stdout.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { parseArgs, runPipeline } from "../cli";
-import type { LinearIssueRaw } from "../types";
 import type { CommandRunner } from "../fetch";
+import type { LinearIssueRaw } from "../types";
 
 // =============================================================================
 // Arg Parsing
@@ -16,7 +16,12 @@ import type { CommandRunner } from "../fetch";
 
 describe("parseArgs", () => {
   it("parses --team-id and --daemon-url", () => {
-    const args = parseArgs(["--team-id", "00000000-0000-0000-0000-000000000000", "--daemon-url", "http://localhost:3000"]);
+    const args = parseArgs([
+      "--team-id",
+      "00000000-0000-0000-0000-000000000000",
+      "--daemon-url",
+      "http://localhost:3000",
+    ]);
     expect(args.teamId).toBe("00000000-0000-0000-0000-000000000000");
     expect(args.daemonUrl).toBe("http://localhost:3000");
   });
@@ -26,7 +31,9 @@ describe("parseArgs", () => {
   });
 
   it("throws on missing --daemon-url", () => {
-    expect(() => parseArgs(["--team-id", "00000000-0000-0000-0000-000000000000"])).toThrow("--daemon-url");
+    expect(() => parseArgs(["--team-id", "00000000-0000-0000-0000-000000000000"])).toThrow(
+      "--daemon-url"
+    );
   });
 
   it("throws on empty args", () => {
@@ -51,8 +58,7 @@ describe("runPipeline", () => {
     // Mock fetch for getLiveWorkers
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify([]), { status: 200 })
-    ) as unknown as typeof fetch;
+      new Response(JSON.stringify([]), { status: 200 })) as unknown as typeof fetch;
 
     try {
       const result = await runPipeline(
@@ -73,8 +79,7 @@ describe("runPipeline", () => {
   it("handles empty issue list", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify([]), { status: 200 })
-    ) as unknown as typeof fetch;
+      new Response(JSON.stringify([]), { status: 200 })) as unknown as typeof fetch;
 
     try {
       const result = await runPipeline(
@@ -102,8 +107,7 @@ describe("runPipeline", () => {
 
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify([]), { status: 200 })
-    ) as unknown as typeof fetch;
+      new Response(JSON.stringify([]), { status: 200 })) as unknown as typeof fetch;
 
     const runner: CommandRunner = async (_cmd: string[]) => {
       const response = { data: { repo0: { pr0: { isDraft: false } } } };

@@ -8,7 +8,7 @@ tags:
   - background-tasks
   - workflow-design
   - skill-authoring
-  - claude-code
+  - opencode
 module: legion-worker
 component: workflows
 symptoms:

@@ -29,6 +29,8 @@ related_issues: []
 
 # Refactoring Sync Module to Async Package Architecture
 
+> **[HISTORICAL]** This document predates the TypeScript rewrite. Code references (Python files, pytest, anyio, aiofiles, etc.) are outdated. The patterns and lessons may still be relevant.
+
 ## Problem
 
 A monolithic `state.py` module suffered from multiple architectural issues:

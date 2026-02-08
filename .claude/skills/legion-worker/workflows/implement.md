@@ -27,7 +27,7 @@ Resolve any conflicts before proceeding.
 
 ### 1. Load Plan
 
-Fetch issue and comments with `mcp__linear__get_issue`. The plan is in comments.
+Fetch issue and comments with `linear_linear(action="get", ...)`. The plan is in comments.
 
 ### 2. Invoke Skills (in order)
 

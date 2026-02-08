@@ -3,8 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 // UUID regex pattern
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface TeamInfo {
   id: string;
@@ -23,25 +22,20 @@ interface TeamsCache {
  * @returns The team UUID
  * @throws Error if team cannot be resolved
  */
-export async function resolveTeamId(
-  teamRef: string,
-  cacheDir?: string
-): Promise<string> {
+export async function resolveTeamId(teamRef: string, cacheDir?: string): Promise<string> {
   if (UUID_PATTERN.test(teamRef)) {
     return teamRef;
   }
 
   const resolvedCacheDir = cacheDir ?? path.join(os.homedir(), ".legion");
   const cacheFile = path.join(resolvedCacheDir, "teams.json");
-  
+
   if (fs.existsSync(cacheFile)) {
     const teams: TeamsCache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
     const keyUpper = teamRef.toUpperCase();
     if (keyUpper in teams) {
       const team = teams[keyUpper];
-      console.log(
-        `Using cached: ${teamRef} → ${team.name} (${team.id})`
-      );
+      console.log(`Using cached: ${teamRef} → ${team.name} (${team.id})`);
       return team.id;
     }
   }
@@ -60,10 +54,7 @@ export async function resolveTeamId(
 /**
  * Look up team via Linear GraphQL API.
  */
-async function lookupTeamViaApi(
-  teamRef: string,
-  apiKey: string
-): Promise<string> {
+async function lookupTeamViaApi(teamRef: string, apiKey: string): Promise<string> {
   const query = `
     query GetTeam($key: String!) {
       team(key: $key) {

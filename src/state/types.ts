@@ -1,12 +1,12 @@
 /**
  * Type definitions for Legion state collection.
- * 
+ *
  * Contains:
  * - Interfaces for internal data structures
  * - Type aliases for external API response shapes
  * - Constants and functions for status normalization
  * - Session ID computation utilities
- * 
+ *
  * Ported from Python: src/legion/state/types.py
  */
 
@@ -76,7 +76,7 @@ export const IssueStatus = {
 
   /**
    * Normalize a raw status string to canonical form.
-   * 
+   *
    * Returns the canonical IssueStatusLiteral if the raw value matches
    * a known alias, otherwise returns the original string unchanged.
    * Returns empty string if raw is null.
@@ -128,7 +128,7 @@ export interface LinearAttachment {
 
 /**
  * Raw Linear issue from API (MCP or GraphQL).
- * 
+ *
  * Different APIs return different fields.
  * The identifier field is required for valid issues.
  */
@@ -164,7 +164,7 @@ export interface GitHubPRRef {
 export const GitHubPRRef = {
   /**
    * Parse a GitHub PR URL into a reference.
-   * 
+   *
    * @param url - GitHub PR URL like https://github.com/owner/repo/pull/123
    * @returns GitHubPRRef or null if URL doesn't match expected format
    */
@@ -174,13 +174,13 @@ export const GitHubPRRef = {
     if (!match) {
       return null;
     }
-    
+
     const prNumber = parseInt(match[3], 10);
     // Guard against unreasonably large PR numbers (GraphQL uses 32-bit int)
     if (prNumber > 2_147_483_647) {
       return null;
     }
-    
+
     return {
       owner: match[1],
       repo: match[2],
@@ -197,7 +197,7 @@ export interface ParsedIssue {
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   prRef: GitHubPRRef | null;
-  
+
   // Computed properties (implemented as getters)
   readonly hasWorkerDone: boolean;
   readonly hasUserFeedback: boolean;
@@ -221,27 +221,27 @@ export function createParsedIssue(
     status,
     labels,
     prRef,
-    
+
     get hasWorkerDone() {
       return this.labels.includes("worker-done");
     },
-    
+
     get hasUserFeedback() {
       return this.labels.includes("user-feedback-given");
     },
-    
+
     get hasUserInputNeeded() {
       return this.labels.includes("user-input-needed");
     },
-    
+
     get hasWorkerActive() {
       return this.labels.includes("worker-active");
     },
-    
+
     get hasPr() {
       return this.prRef !== null;
     },
-    
+
     get needsPrStatus() {
       return (
         this.status === IssueStatus.NEEDS_REVIEW &&
@@ -345,37 +345,33 @@ export const CollectedState = {
 
 /**
  * Compute deterministic session ID using UUIDv5.
- * 
+ *
  * Session IDs have `ses_` prefix for OpenCode compatibility.
- * 
+ *
  * @param teamId - Linear project UUID
  * @param issueId - Issue identifier (e.g., "ENG-21")
  * @param mode - Worker mode (e.g., "implement", "review")
  * @returns Session ID string with ses_ prefix (e.g., "ses_12345678-1234-5678-1234-567812345678")
  * @throws Error if teamId is not a valid UUID string
  */
-export function computeSessionId(
-  teamId: string,
-  issueId: string,
-  mode: WorkerModeLiteral
-): string {
+export function computeSessionId(teamId: string, issueId: string, mode: WorkerModeLiteral): string {
   // Validate team ID is a valid UUID
   if (!validateUuid(teamId)) {
     throw new Error(`Invalid UUID: ${teamId}`);
   }
-  
+
   const namespace = teamId;
   const name = `${issueId}:${mode}`;
   const uuid = uuidv5(name, namespace);
-  
+
   return `ses_${uuid}`;
 }
 
 /**
  * Compute deterministic session ID for controller.
- * 
+ *
  * Session IDs have `ses_` prefix for OpenCode compatibility.
- * 
+ *
  * @param teamId - Linear team UUID (must be valid UUID string)
  * @returns Session ID string with ses_ prefix
  * @throws Error if teamId is not a valid UUID string
@@ -385,10 +381,10 @@ export function computeControllerSessionId(teamId: string): string {
   if (!validateUuid(teamId)) {
     throw new Error(`Invalid UUID: ${teamId}`);
   }
-  
+
   const namespace = teamId;
   const name = "controller";
   const uuid = uuidv5(name, namespace);
-  
+
   return `ses_${uuid}`;
 }

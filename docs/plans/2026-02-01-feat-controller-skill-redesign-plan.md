@@ -6,6 +6,8 @@ date: 2026-02-01
 
 # Redesign Controller Skill for Decision-Making Architecture
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 ## Overview
 
 Redesign the Legion controller skill from a procedural flowchart to a declarative decision-maker. The new controller defines affordances, information sources, goals, and priorities—then reasons from those primitives rather than following rigid steps.

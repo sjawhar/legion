@@ -21,7 +21,7 @@ Use Bash tool with `run_in_background: true` to spawn a fresh subagent:
 
 ```bash
 # run_in_background: true
-claude -p "You are analyzing a completed PR to capture learnings.
+opencode run "You are analyzing a completed PR to capture learnings.
 
 Issue: $LINEAR_ISSUE_ID
 PR: $PR_URL

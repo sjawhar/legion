@@ -1,8 +1,7 @@
-import { randomUUID } from "crypto";
+import { randomUUID } from "node:crypto";
 
 // Base62 alphabet (0-9, A-Z, a-z)
-const ALPHABET =
-  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const BASE = 62n;
 
 /**

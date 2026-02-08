@@ -14,7 +14,7 @@ Required:
 
 ## Essential Rules
 
-1. **Read Linear issue first** - `mcp__linear__get_issue`
+1. **Read Linear issue first** - `linear_linear(action="get", id="$LINEAR_ISSUE_ID")`
 2. **Use jj, not git** - changes auto-tracked
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
@@ -38,7 +38,7 @@ If you're resuming after user feedback, also read the Linear comments for the an
 When you need human input that the oracle can't answer:
 
 1. Push your work: `jj git push`
-2. Post your question as a Linear comment: `mcp__linear__create_comment`
+2. Post your question as a Linear comment: `linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="...")`
 3. Update labels: add `user-input-needed`, remove `worker-active`
 4. Exit immediately
 

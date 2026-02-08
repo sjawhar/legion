@@ -6,15 +6,15 @@
  */
 
 import {
-  IssueStatus,
-  WorkerMode,
-  computeSessionId,
   type ActionType,
-  type FetchedIssueData,
-  type IssueStatusLiteral,
-  type WorkerModeLiteral,
-  type IssueState,
   type CollectedState,
+  computeSessionId,
+  type FetchedIssueData,
+  type IssueState,
+  IssueStatus,
+  type IssueStatusLiteral,
+  WorkerMode,
+  type WorkerModeLiteral,
 } from "./types";
 
 export function suggestAction(
@@ -109,10 +109,7 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   remove_worker_active_and_redispatch: WorkerMode.IMPLEMENT,
 };
 
-export function buildIssueState(
-  data: FetchedIssueData,
-  teamId: string
-): IssueState {
+export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {
   let action: ActionType;
 
   if (data.hasUserInputNeeded && data.hasUserFeedback) {

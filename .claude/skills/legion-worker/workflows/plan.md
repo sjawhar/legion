@@ -36,7 +36,7 @@ digraph plan_workflow {
 ### 1. Fetch the Issue
 
 ```
-mcp__linear__get_issue with id: $LINEAR_ISSUE_ID
+linear_linear(action="get", id=$LINEAR_ISSUE_ID)
 ```
 
 The `$LINEAR_ISSUE_ID` environment variable is set by the controller when spawning this worker.
@@ -52,7 +52,7 @@ Invoke `/workflows:plan` with this context:
 
 ```
 You are running autonomously without user interaction.
-Do NOT use AskUserQuestion. If requirements are unclear:
+Do NOT ask the user questions interactively. If requirements are unclear:
 
 1. Invoke /oracle [specific question] for research-based guidance
 2. Make reasonable assumptions and document them explicitly
@@ -69,8 +69,8 @@ The skill handles:
 - Structured plan creation
 
 **If the skill determines requirements are fundamentally unclear** (even after oracle + assumptions):
-1. Add `user-input-needed` label via `mcp__linear__update_issue`
-2. Post a comment via `mcp__linear__create_comment` explaining what needs clarification
+1. Add `user-input-needed` label via `linear_linear(action="update", ...)`
+2. Post a comment via `linear_linear(action="comment", ...)` explaining what needs clarification
 3. Exit immediately - do NOT add `worker-done`
 
 ### 3. Invoke /deepen-plan
@@ -111,13 +111,13 @@ This is what the implement workflow will follow.
 
 ### 6. Post to Linear
 
-Use `mcp__linear__create_comment` to post the **full executable plan** from step 5.
+Use `linear_linear(action="comment", ...)` to post the **full executable plan** from step 5.
 
 The complete `/superpowers:writing-plans` output goes directly into the Linear comment - all tasks, all code examples, all test commands.
 
 ### 7. Signal Completion
 
-Add `worker-done` label to the Linear issue via `mcp__linear__update_issue`, then exit.
+Add `worker-done` label to the Linear issue via `linear_linear(action="update", ...)`, then exit.
 
 **CRITICAL:** Only add `worker-done` after successfully posting the plan. Never add this label if:
 - Requirements were unclear and could not be resolved (use `user-input-needed` instead)
@@ -128,21 +128,21 @@ Add `worker-done` label to the Linear issue via `mcp__linear__update_issue`, the
 
 | Step | Action | Skill/Tool |
 |------|--------|------------|
-| Fetch | Get issue details | `mcp__linear__get_issue` |
+| Fetch | Get issue details | `linear_linear(action="get", ...)` |
 | Research + Structure | Create plan | `/workflows:plan` (autonomous) |
 | Enhance | Deepen with agents | `/deepen-plan` |
 | Validate | Review plan | `/compound-engineering:plan_review` (iterate) |
 | Executable | Bite-sized tasks | `/superpowers:writing-plans` |
-| Post | Full plan to issue | `mcp__linear__create_comment` |
-| Complete | Add done label | `mcp__linear__update_issue` |
+| Post | Full plan to issue | `linear_linear(action="comment", ...)` |
+| Complete | Add done label | `linear_linear(action="update", ...)` |
 
 ## Autonomous Context Template
 
-When invoking skills that normally use `AskUserQuestion`:
+When invoking skills that normally ask user questions:
 
 ```
 You are running autonomously without user interaction.
-Do NOT use AskUserQuestion. If uncertain:
+Do NOT ask the user questions interactively. If uncertain:
 
 1. Invoke /oracle [specific question] - cheap research-based guidance
 2. Make reasonable assumptions and document them

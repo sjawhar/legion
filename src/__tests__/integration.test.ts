@@ -1,12 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { startServer } from "../daemon/server";
 import { PortAllocator } from "../daemon/ports";
 import type { SpawnOptions, WorkerEntry } from "../daemon/serve-manager";
+import { startServer } from "../daemon/server";
 import { buildCollectedState } from "../state/decision";
-import type { FetchedIssueData } from "../state/types";
+import { computeSessionId, type FetchedIssueData } from "../state/types";
 
 const TEAM_ID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -41,7 +41,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
         pid: 4242,
         sessionId: opts.sessionId,
         startedAt: new Date().toISOString(),
-        status: "running",
+        status: "starting",
       };
     },
     killWorker: async (entry: WorkerEntry): Promise<void> => {
@@ -53,6 +53,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
   const { server, stop } = startServer({
     port: randomPort(),
     hostname: "127.0.0.1",
+    teamId: TEAM_ID,
     serveManager,
     portAllocator: allocator,
     stateFilePath,
@@ -116,9 +117,9 @@ describe("Integration: daemon HTTP lifecycle", () => {
         port: number;
         sessionId: string;
       };
-      expect(created.id).toBe("ENG-100-plan");
+      expect(created.id).toBe("eng-100-plan");
       expect(typeof created.port).toBe("number");
-      expect(typeof created.sessionId).toBe("string");
+      expect(created.sessionId).toBe(computeSessionId(TEAM_ID, "eng-100", "plan"));
       expect(spawnCalls.length).toBe(1);
       expect(spawnCalls[0].port).toBe(created.port);
       expect(allocator.isAllocated(created.port)).toBe(true);
@@ -133,7 +134,7 @@ describe("Integration: daemon HTTP lifecycle", () => {
       expect(detailResponse.ok).toBe(true);
       const detail = (await detailResponse.json()) as WorkerEntry;
       expect(detail.id).toBe(created.id);
-      expect(detail.status).toBe("running");
+      expect(detail.status).toBe("starting");
 
       const deleteResponse = await fetch(`${baseUrl}/workers/${created.id}`, {
         method: "DELETE",

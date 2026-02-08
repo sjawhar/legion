@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
 import { readStateFile, writeStateFile } from "../state-file";
 
 const sampleState = {
-  "ENG-42-implement": {
-    id: "ENG-42-implement",
+  "eng-42-implement": {
+    id: "eng-42-implement",
     port: 14444,
     pid: 9999,
     sessionId: "ses_test",

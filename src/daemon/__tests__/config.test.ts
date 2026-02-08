@@ -12,11 +12,8 @@ describe("daemon config", () => {
     expect(config.legionDir).toBeUndefined();
     expect(config.shortId).toBeUndefined();
     expect(config.checkIntervalMs).toBe(60_000);
-    expect(config.stalenessThresholdMs).toBe(600_000);
     expect(config.baseWorkerPort).toBe(13381);
-    expect(config.stateFilePath).toBe(
-      path.join(os.homedir(), ".legion", "daemon", "workers.json")
-    );
+    expect(config.stateFilePath).toBe(path.join(os.homedir(), ".legion", "daemon", "workers.json"));
   });
 
   it("reads values from env vars", () => {

@@ -11,13 +11,13 @@
  */
 
 import {
-  IssueStatus,
-  GitHubPRRef,
   createParsedIssue,
+  type FetchedIssueData,
+  GitHubPRRef,
+  type GitHubPRRef as GitHubPRRefType,
+  IssueStatus,
   type LinearIssueRaw,
   type LinearLabelsContainer,
-  type GitHubPRRef as GitHubPRRefType,
-  type FetchedIssueData,
   type ParsedIssue,
 } from "./types";
 
@@ -72,7 +72,7 @@ export class GitHubAPIError extends Error {
 }
 
 // =============================================================================
-// HTTP Worker Detection (replaces tmux)
+// HTTP Worker Detection
 // =============================================================================
 
 interface DaemonWorker {
@@ -88,9 +88,7 @@ interface DaemonWorker {
  * @param daemonUrl - Base URL of the daemon HTTP API
  * @returns Dict mapping issue_id (uppercase) to mode
  */
-export async function getLiveWorkers(
-  daemonUrl: string
-): Promise<Record<string, string>> {
+export async function getLiveWorkers(daemonUrl: string): Promise<Record<string, string>> {
   try {
     const response = await fetch(`${daemonUrl}/workers`);
     if (!response.ok) {
@@ -155,7 +153,7 @@ export async function getPrDraftStatusBatch(
     if (!byRepo.has(key)) {
       byRepo.set(key, []);
     }
-    byRepo.get(key)!.push([issueId, ref.number]);
+    byRepo.get(key)?.push([issueId, ref.number]);
   }
 
   // Build single GraphQL query for all repos and PRs
@@ -175,10 +173,8 @@ export async function getPrDraftStatusBatch(
     for (let prIdx = 0; prIdx < issuePrs.length; prIdx++) {
       const [issueId, prNumber] = issuePrs[prIdx];
       const prAlias = `pr${prIdx}`;
-      prAliasMap.get(repoAlias)!.set(prAlias, [issueId, prNumber]);
-      prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { isDraft }`
-      );
+      prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
+      prParts.push(`${prAlias}: pullRequest(number: ${prNumber}) { isDraft }`);
     }
 
     queryParts.push(
@@ -196,7 +192,7 @@ export async function getPrDraftStatusBatch(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
       // Exponential backoff: 1s, 2s (min 1s, max 10s)
-      const waitMs = Math.min(Math.pow(2, attempt - 1) * 1000, 10000);
+      const waitMs = Math.min(2 ** (attempt - 1) * 1000, 10000);
       await sleep(waitMs);
     }
 
@@ -217,16 +213,17 @@ export async function getPrDraftStatusBatch(
     try {
       response = JSON.parse(stdout);
     } catch (e) {
-      lastError = new GitHubAPIError(
-        `Failed to parse GraphQL response: ${e}`
-      );
+      lastError = new GitHubAPIError(`Failed to parse GraphQL response: ${e}`);
       continue;
     }
 
     // Success - parse response
     const rawData = response.data;
     const dataObj: Record<string, unknown> =
-      rawData !== null && rawData !== undefined && typeof rawData === "object" && !Array.isArray(rawData)
+      rawData !== null &&
+      rawData !== undefined &&
+      typeof rawData === "object" &&
+      !Array.isArray(rawData)
         ? (rawData as Record<string, unknown>)
         : {};
 
@@ -235,14 +232,20 @@ export async function getPrDraftStatusBatch(
     for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
       const rawRepo = dataObj[repoAlias];
       const repoData: Record<string, unknown> =
-        rawRepo !== null && rawRepo !== undefined && typeof rawRepo === "object" && !Array.isArray(rawRepo)
+        rawRepo !== null &&
+        rawRepo !== undefined &&
+        typeof rawRepo === "object" &&
+        !Array.isArray(rawRepo)
           ? (rawRepo as Record<string, unknown>)
           : {};
 
       for (const [prAlias, [issueId]] of prAliasMap.get(repoAlias)!) {
         const rawPr = repoData[prAlias];
         const prData: { isDraft?: boolean } | null =
-          rawPr !== null && rawPr !== undefined && typeof rawPr === "object" && !Array.isArray(rawPr)
+          rawPr !== null &&
+          rawPr !== undefined &&
+          typeof rawPr === "object" &&
+          !Array.isArray(rawPr)
             ? (rawPr as { isDraft?: boolean })
             : null;
 
@@ -273,9 +276,7 @@ export async function getPrDraftStatusBatch(
  * @param linearIssues - Raw issue dicts from Linear API
  * @returns List of parsed issues with normalized data
  */
-export function parseLinearIssues(
-  linearIssues: LinearIssueRaw[]
-): ParsedIssue[] {
+export function parseLinearIssues(linearIssues: LinearIssueRaw[]): ParsedIssue[] {
   const parsed: ParsedIssue[] = [];
 
   for (const issue of linearIssues) {
@@ -316,9 +317,7 @@ export function parseLinearIssues(
         }
       } else if (Array.isArray(labelsRaw)) {
         // MCP format: ["label1", "label2"] - filter out empty/non-string values
-        labels = labelsRaw.filter(
-          (x): x is string => typeof x === "string" && x !== ""
-        );
+        labels = labelsRaw.filter((x): x is string => typeof x === "string" && x !== "");
       }
     }
 

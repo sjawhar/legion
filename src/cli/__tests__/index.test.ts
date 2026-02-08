@@ -1,85 +1,111 @@
-import { describe, test, expect, mock } from "bun:test";
-import { parseArgs, type Command } from "../index";
+import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  attachCommand,
+  getDaemonPort,
+  loadTeamsCache,
+  startCommand,
+  statusCommand,
+  stopCommand,
+  teamsCommand,
+} from "../index";
 
-describe("parseArgs", () => {
-  test("parses start command with team", () => {
-    const result = parseArgs(["start", "LEG"]);
-    expect(result.command).toBe("start");
-    expect(result.args.team).toBe("LEG");
-    expect(result.args.workspace).toBe(process.cwd());
+async function resolveArgs(command: { args?: unknown }): Promise<Record<string, unknown>> {
+  const { args } = command;
+  if (!args) {
+    throw new Error("Command has no args");
+  }
+  if (typeof args === "function") {
+    return (await args()) as Record<string, unknown>;
+  }
+  return args as Record<string, unknown>;
+}
+
+describe("citty command definitions", () => {
+  test("start command args are defined", async () => {
+    const args = await resolveArgs(startCommand);
+    const team = args.team as { type: string; required?: boolean };
+    const workspace = args.workspace as { type: string; alias?: string; default?: string };
+    const stateDir = args["state-dir"] as { type: string };
+    expect(team.type).toBe("positional");
+    expect(team.required).toBe(true);
+    expect(workspace.type).toBe("string");
+    expect(workspace.alias).toBe("w");
+    expect(workspace.default).toBe(process.cwd());
+    expect(stateDir.type).toBe("string");
   });
 
-  test("parses start command with workspace option", () => {
-    const result = parseArgs(["start", "LEG", "--workspace", "/path/to/workspace"]);
-    expect(result.command).toBe("start");
-    expect(result.args.team).toBe("LEG");
-    expect(result.args.workspace).toBe("/path/to/workspace");
+  test("stop command args are defined", async () => {
+    const args = await resolveArgs(stopCommand);
+    const team = args.team as { type: string; required?: boolean };
+    const stateDir = args["state-dir"] as { type: string };
+    expect(team.type).toBe("positional");
+    expect(team.required).toBe(true);
+    expect(stateDir.type).toBe("string");
   });
 
-  test("parses start command with -w shorthand", () => {
-    const result = parseArgs(["start", "LEG", "-w", "/path/to/workspace"]);
-    expect(result.command).toBe("start");
-    expect(result.args.team).toBe("LEG");
-    expect(result.args.workspace).toBe("/path/to/workspace");
+  test("status command args are defined", async () => {
+    const args = await resolveArgs(statusCommand);
+    const team = args.team as { type: string; required?: boolean };
+    const stateDir = args["state-dir"] as { type: string };
+    expect(team.type).toBe("positional");
+    expect(team.required).toBe(true);
+    expect(stateDir.type).toBe("string");
   });
 
-  test("parses start command with state-dir option", () => {
-    const result = parseArgs(["start", "LEG", "--state-dir", "/custom/state"]);
-    expect(result.command).toBe("start");
-    expect(result.args.team).toBe("LEG");
-    expect(result.args.stateDir).toBe("/custom/state");
+  test("attach command args are defined", async () => {
+    const args = await resolveArgs(attachCommand);
+    const team = args.team as { type: string; required?: boolean };
+    const issue = args.issue as { type: string; required?: boolean };
+    expect(team.type).toBe("positional");
+    expect(team.required).toBe(true);
+    expect(issue.type).toBe("positional");
+    expect(issue.required).toBe(true);
   });
 
-  test("parses stop command", () => {
-    const result = parseArgs(["stop", "LEG"]);
-    expect(result.command).toBe("stop");
-    expect(result.args.team).toBe("LEG");
+  test("teams command args are defined", async () => {
+    const args = await resolveArgs(teamsCommand);
+    const all = args.all as { type: string; default?: boolean };
+    expect(all.type).toBe("boolean");
+    expect(all.default).toBe(false);
+  });
+});
+
+describe("getDaemonPort", () => {
+  test("returns default port when env unset", () => {
+    expect(getDaemonPort({} as NodeJS.ProcessEnv)).toBe(13370);
   });
 
-  test("parses status command", () => {
-    const result = parseArgs(["status", "LEG"]);
-    expect(result.command).toBe("status");
-    expect(result.args.team).toBe("LEG");
+  test("returns env port when valid", () => {
+    expect(
+      getDaemonPort({ LEGION_DAEMON_PORT: "14400" } as NodeJS.ProcessEnv)
+    ).toBe(14400);
   });
 
-  test("parses attach command with issue identifier", () => {
-    const result = parseArgs(["attach", "LEG-123"]);
-    expect(result.command).toBe("attach");
-    expect(result.args.issue).toBe("LEG-123");
+  test("falls back when env port invalid", () => {
+    expect(
+      getDaemonPort({ LEGION_DAEMON_PORT: "not-a-number" } as NodeJS.ProcessEnv)
+    ).toBe(13370);
+  });
+});
+
+describe("loadTeamsCache", () => {
+  test("returns null when cache missing", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cache-"));
+    expect(loadTeamsCache(tempDir)).toBeNull();
   });
 
-  test("parses teams command", () => {
-    const result = parseArgs(["teams"]);
-    expect(result.command).toBe("teams");
-  });
+  test("loads teams cache from disk", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cache-"));
+    const cacheFile = path.join(tempDir, "teams.json");
+    const payload = {
+      LEG: { id: "uuid-123", name: "Legion" },
+    };
+    fs.writeFileSync(cacheFile, JSON.stringify(payload, null, 2));
 
-  test("throws error for unknown command", () => {
-    expect(() => parseArgs(["unknown"])).toThrow("Unknown command: unknown");
-  });
-
-  test("throws error for start without team", () => {
-    expect(() => parseArgs(["start"])).toThrow("start requires a team argument");
-  });
-
-  test("throws error for stop without team", () => {
-    expect(() => parseArgs(["stop"])).toThrow("stop requires a team argument");
-  });
-
-  test("throws error for status without team", () => {
-    expect(() => parseArgs(["status"])).toThrow("status requires a team argument");
-  });
-
-  test("throws error for attach without issue", () => {
-    expect(() => parseArgs(["attach"])).toThrow("attach requires an issue argument");
-  });
-
-  test("throws error for missing option value", () => {
-    expect(() => parseArgs(["start", "LEG", "--workspace"])).toThrow(
-      "Option --workspace requires a value"
-    );
-  });
-
-  test("throws error for no command", () => {
-    expect(() => parseArgs([])).toThrow("No command provided");
+    const result = loadTeamsCache(tempDir);
+    expect(result).toEqual(payload);
   });
 });

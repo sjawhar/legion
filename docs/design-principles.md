@@ -184,7 +184,7 @@ This doesn't mean "remove all structure." It means every piece of structure shou
 - Hard iteration limits (3x plan review) — should become model-assessed confidence thresholds
 - Context management workarounds — should shrink as context windows and memory improve
 
-**The rubric:** Build a tool that lets the agent read pytest output, not a regex that parses it for the agent. The first gets better when models improve. The second becomes technical debt.
+**The rubric:** Build a tool that lets the agent read test output, not a regex that parses it for the agent. The first gets better when models improve. The second becomes technical debt.
 
 **In practice:**
 - New features are hooks and capabilities, not hardcoded state transitions

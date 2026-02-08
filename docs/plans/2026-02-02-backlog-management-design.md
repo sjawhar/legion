@@ -1,5 +1,7 @@
 # Legion Backlog Management Design
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Expand Legion to handle the full issue lifecycle, from raw intake through completion, with a persistent controller that builds context over time.

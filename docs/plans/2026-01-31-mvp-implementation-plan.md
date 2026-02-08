@@ -1,5 +1,7 @@
 # Ralph Dev Swarm MVP Implementation Plan
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build the minimum system to prove the core autonomous development loop works: Daemon starts Controller, Controller polls Linear and spawns workers, workers implement code and self-terminate.

@@ -1,99 +1,66 @@
 #!/usr/bin/env bun
-import { resolveTeamId } from "./team-resolver";
-import { startDaemon } from "../daemon/index";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { defineCommand, runMain } from "citty";
+import { startDaemon } from "../daemon/index";
+import { resolveTeamId } from "./team-resolver";
 
-export type Command = "start" | "stop" | "status" | "attach" | "teams";
+const DEFAULT_DAEMON_PORT = 13370;
 
-interface ParsedArgs {
-  command: Command;
-  args: {
-    team?: string;
-    workspace?: string;
-    stateDir?: string;
-    issue?: string;
-  };
+interface TeamInfo {
+  id: string;
+  name: string;
 }
 
-/**
- * Parse command-line arguments.
- */
-export function parseArgs(argv: string[]): ParsedArgs {
-  if (argv.length === 0) {
-    throw new Error("No command provided. Usage: legion <command> [args]");
+export type TeamsCache = Record<string, TeamInfo>;
+
+export function getDaemonPort(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.LEGION_DAEMON_PORT;
+  if (!raw) {
+    return DEFAULT_DAEMON_PORT;
   }
-
-  const command = argv[0];
-  const validCommands: Command[] = ["start", "stop", "status", "attach", "teams"];
-
-  if (!validCommands.includes(command as Command)) {
-    throw new Error(`Unknown command: ${command}`);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_DAEMON_PORT;
   }
-
-  const args: ParsedArgs["args"] = {};
-  let i = 1;
-
-  // Parse positional arguments based on command
-  if (command === "start" || command === "stop" || command === "status") {
-    if (i >= argv.length) {
-      throw new Error(`${command} requires a team argument`);
-    }
-    args.team = argv[i++];
-  } else if (command === "attach") {
-    if (i >= argv.length) {
-      throw new Error(`${command} requires an issue argument`);
-    }
-    args.issue = argv[i++];
-  }
-
-  // Parse options
-  while (i < argv.length) {
-    const arg = argv[i];
-
-    if (arg === "--workspace" || arg === "-w") {
-      if (i + 1 >= argv.length) {
-        throw new Error(`Option ${arg} requires a value`);
-      }
-      args.workspace = argv[++i];
-      i++;
-    } else if (arg === "--state-dir") {
-      if (i + 1 >= argv.length) {
-        throw new Error(`Option ${arg} requires a value`);
-      }
-      args.stateDir = argv[++i];
-      i++;
-    } else {
-      throw new Error(`Unknown option: ${arg}`);
-    }
-  }
-
-  // Set defaults
-  if (command === "start" && !args.workspace) {
-    args.workspace = process.cwd();
-  }
-
-  return { command: command as Command, args };
+  return parsed;
 }
 
-/**
- * Start the Legion swarm.
- */
+export function loadTeamsCache(cacheDir = path.join(os.homedir(), ".legion")): TeamsCache | null {
+  const cacheFile = path.join(cacheDir, "teams.json");
+  if (!fs.existsSync(cacheFile)) {
+    return null;
+  }
+
+  const raw = fs.readFileSync(cacheFile, "utf-8");
+  if (!raw.trim()) {
+    return null;
+  }
+
+  const parsed = JSON.parse(raw) as TeamsCache;
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`Invalid teams cache at ${cacheFile}`);
+  }
+
+  return parsed;
+}
+
+function resolveStateDir(teamId: string, stateDir?: string): string {
+  return stateDir ?? path.join(os.homedir(), ".legion", teamId);
+}
+
 async function cmdStart(team: string, workspace: string, stateDir?: string): Promise<void> {
   const teamId = await resolveTeamId(team);
-
-  const resolvedStateDir = stateDir ?? path.join(os.homedir(), ".legion", teamId);
+  const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Starting Legion for team: ${teamId}`);
   console.log(`Workspace: ${workspace}`);
   console.log(`State directory: ${resolvedStateDir}`);
 
-  // Create state directory
   fs.mkdirSync(resolvedStateDir, { recursive: true });
 
-  // Start daemon
   const handle = await startDaemon({
     teamId,
     legionDir: workspace,
@@ -104,28 +71,22 @@ async function cmdStart(team: string, workspace: string, stateDir?: string): Pro
   console.log(`\nTo check status: legion status ${team}`);
   console.log(`To stop: legion stop ${team}`);
 
-  // Keep process alive
   await new Promise(() => {});
 }
 
-/**
- * Stop the Legion swarm.
- */
 async function cmdStop(team: string, stateDir?: string): Promise<void> {
   const teamId = await resolveTeamId(team);
-  const resolvedStateDir = stateDir ?? path.join(os.homedir(), ".legion", teamId);
+  const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Stopping Legion for team: ${teamId}`);
 
-  // Read state file to find daemon port
   const stateFilePath = path.join(resolvedStateDir, "workers.json");
   if (!fs.existsSync(stateFilePath)) {
     console.log("No state file found. Daemon may not be running.");
     return;
   }
 
-  // Try to connect to daemon and shut it down
-  const daemonPort = 13370; // Default port
+  const daemonPort = getDaemonPort();
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/shutdown`, {
       method: "POST",
@@ -135,23 +96,19 @@ async function cmdStop(team: string, stateDir?: string): Promise<void> {
     } else {
       console.log("Failed to stop daemon. It may not be running.");
     }
-  } catch (error) {
+  } catch (_error) {
     console.log("Could not connect to daemon. It may not be running.");
   }
 }
 
-/**
- * Show Legion swarm status.
- */
 async function cmdStatus(team: string, stateDir?: string): Promise<void> {
   const teamId = await resolveTeamId(team);
-  const resolvedStateDir = stateDir ?? path.join(os.homedir(), ".legion", teamId);
+  const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Legion Status: ${teamId}`);
   console.log("=".repeat(40));
 
-  // Try to connect to daemon
-  const daemonPort = 13370; // Default port
+  const daemonPort = getDaemonPort();
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (response.ok) {
@@ -164,11 +121,10 @@ async function cmdStatus(team: string, stateDir?: string): Promise<void> {
     } else {
       console.log("Daemon: NOT RUNNING");
     }
-  } catch (error) {
+  } catch (_error) {
     console.log("Daemon: NOT RUNNING");
   }
 
-  // Check state file
   const stateFilePath = path.join(resolvedStateDir, "workers.json");
   if (fs.existsSync(stateFilePath)) {
     const stat = fs.statSync(stateFilePath);
@@ -180,14 +136,13 @@ async function cmdStatus(team: string, stateDir?: string): Promise<void> {
   }
 }
 
-/**
- * Attach to a worker session.
- */
-async function cmdAttach(issue: string): Promise<void> {
-  console.log(`Attaching to worker for issue: ${issue}`);
+async function cmdAttach(team: string, issue: string): Promise<void> {
+  const teamId = await resolveTeamId(team);
 
-  // Query daemon for worker port
-  const daemonPort = 13370; // Default port
+  console.log(`Attaching to worker for issue: ${issue}`);
+  console.log(`Team: ${teamId}`);
+
+  const daemonPort = getDaemonPort();
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (!response.ok) {
@@ -196,21 +151,34 @@ async function cmdAttach(issue: string): Promise<void> {
     }
 
     const workers = (await response.json()) as Array<{ id: string; port: number }>;
-    const worker = workers.find((w) => w.id === issue.toLowerCase());
+    const normalizedIssue = issue.toLowerCase();
+    const matches = workers.filter(
+      (worker) => worker.id === normalizedIssue || worker.id.startsWith(`${normalizedIssue}-`)
+    );
 
-    if (!worker) {
+    if (matches.length === 0) {
       console.error(`No worker found for issue: ${issue}`);
       console.log(`\nAvailable workers:`);
-      for (const w of workers) {
-        console.log(`  - ${w.id}`);
+      for (const worker of workers) {
+        console.log(`  - ${worker.id}`);
       }
       process.exit(1);
     }
 
+    if (matches.length > 1) {
+      console.error(`Multiple workers found for ${issue}:`);
+      for (const worker of matches) {
+        console.log(`  - ${worker.id} (port ${worker.port})`);
+      }
+      console.error("Be more specific, e.g.: legion attach eng-21-implement");
+      process.exit(1);
+    }
+
+    const worker = matches[0];
+
     console.log(`Found worker on port ${worker.port}`);
     console.log(`Attaching with: opencode attach http://localhost:${worker.port}`);
 
-    // Spawn opencode attach
     const child = spawn("opencode", ["attach", `http://localhost:${worker.port}`], {
       stdio: "inherit",
     });
@@ -224,154 +192,131 @@ async function cmdAttach(issue: string): Promise<void> {
   }
 }
 
-/**
- * List and cache Linear teams.
- */
-async function cmdTeams(): Promise<void> {
-  console.log("Fetching teams from Linear via OpenCode...");
+async function checkDaemonHealth(port: number): Promise<{ running: boolean; workerCount?: number }> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    if (!response.ok) {
+      return { running: false };
+    }
+    const data = (await response.json()) as { status?: string; workerCount?: number };
+    if (data.status !== "ok") {
+      return { running: false };
+    }
+    return { running: true, workerCount: data.workerCount ?? 0 };
+  } catch (_error) {
+    return { running: false };
+  }
+}
 
-  // Use opencode run to get teams via Linear MCP
-  const child = spawn(
-    "opencode",
-    [
-      "run",
-      "--dangerously-skip-permissions",
-      "--output-format",
-      "json",
-      "--max-turns",
-      "3",
-      "Use mcp__linear__list_teams to list all teams. " +
-        "Then output ONLY a JSON object where each key is the team's key " +
-        "(uppercase letters like LEG, ENG) and the value is {id, name}. " +
-        "Find the team key from the response - it's typically uppercase letters. " +
-        'Example format: {"LEG": {"id": "uuid-here", "name": "Legion"}}. ' +
-        "No markdown, just raw JSON.",
-    ],
-    { stdio: ["inherit", "pipe", "inherit"] }
+async function cmdTeams(includeAll: boolean): Promise<void> {
+  const cache = loadTeamsCache();
+  if (!cache || Object.keys(cache).length === 0) {
+    console.log("No teams cached. Start a swarm first.");
+    return;
+  }
+
+  const daemonPort = getDaemonPort();
+  const entries = await Promise.all(
+    Object.entries(cache).map(async ([key, team]) => {
+      const stateFilePath = path.join(os.homedir(), ".legion", team.id, "workers.json");
+      if (!fs.existsSync(stateFilePath)) {
+        return { key, team, running: false, workerCount: 0 };
+      }
+      const health = await checkDaemonHealth(daemonPort);
+      return { key, team, running: health.running, workerCount: health.workerCount ?? 0 };
+    })
   );
 
-  let stdout = "";
-  child.stdout?.on("data", (data) => {
-    stdout += data.toString();
-  });
+  const filtered = includeAll ? entries : entries.filter((entry) => entry.running);
+  if (filtered.length === 0) {
+    console.log("No active daemons. Use --all to show cached teams.");
+    return;
+  }
 
-  await new Promise<void>((resolve, reject) => {
-    child.on("exit", (code) => {
-      if (code !== 0) {
-        reject(new Error(`opencode run exited with code ${code}`));
-      } else {
-        resolve();
-      }
-    });
-    child.on("error", reject);
-  });
-
-  // Parse OpenCode's response
-  try {
-    const response = JSON.parse(stdout);
-    const content = response.result || "";
-
-    // Find JSON object - might be nested or contain multiple objects
-    const start = content.indexOf("{");
-    if (start === -1) {
-      throw new Error(`No JSON found in: ${content.slice(0, 200)}`);
-    }
-
-    // Find matching closing brace
-    let depth = 0;
-    let end = start;
-    for (let i = start; i < content.length; i++) {
-      const char = content[i];
-      if (char === "{") {
-        depth++;
-      } else if (char === "}") {
-        depth--;
-        if (depth === 0) {
-          end = i + 1;
-          break;
-        }
-      }
-    }
-
-    const teamsJson = content.slice(start, end);
-    const teams = JSON.parse(teamsJson);
-
-    // Validate structure
-    if (!teams || typeof teams !== "object") {
-      throw new Error(`Invalid teams format: ${teamsJson.slice(0, 200)}`);
-    }
-
-    // Check if it's a single team (missing key wrapper)
-    if ("id" in teams && "name" in teams && Object.keys(teams).length <= 3) {
-      throw new Error(
-        `OpenCode returned a single team without the key. ` +
-          `Please manually create ~/.legion/teams.json with format:\n` +
-          `{"TEAMKEY": ${teamsJson}}`
-      );
-    }
-
-    // Save to cache
-    const cacheDir = path.join(os.homedir(), ".legion");
-    fs.mkdirSync(cacheDir, { recursive: true });
-    const cacheFile = path.join(cacheDir, "teams.json");
-
-    fs.writeFileSync(cacheFile, JSON.stringify(teams, null, 2));
-
-    console.log(`\nCached ${Object.keys(teams).length} teams to ${cacheFile}:\n`);
-    for (const [key, team] of Object.entries(teams)) {
-      if (
-        typeof team === "object" &&
-        team !== null &&
-        "name" in team &&
-        "id" in team
-      ) {
-        console.log(`  ${key}: ${(team as any).name} (${(team as any).id})`);
-      } else {
-        console.log(`  ${key}: ${team}`);
-      }
-    }
-  } catch (error) {
-    throw new Error(
-      `Failed to parse teams response: ${error instanceof Error ? error.message : String(error)}`
-    );
+  console.log("Teams:");
+  for (const entry of filtered) {
+    const status = entry.running
+      ? `RUNNING (workers: ${entry.workerCount})`
+      : "STOPPED";
+    console.log(`  ${entry.key}: ${entry.team.name} (${entry.team.id}) - ${status}`);
   }
 }
 
-/**
- * Main CLI entry point.
- */
-async function main(): Promise<void> {
-  try {
-    const parsed = parseArgs(process.argv.slice(2));
+export const startCommand = defineCommand({
+  meta: { name: "start", description: "Start the Legion swarm" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    workspace: {
+      type: "string",
+      alias: "w",
+      description: "Workspace path",
+      default: process.cwd(),
+    },
+    "state-dir": { type: "string", description: "State directory path" },
+  },
+  async run({ args }) {
+    await cmdStart(args.team, args.workspace, args["state-dir"]);
+  },
+});
 
-    switch (parsed.command) {
-      case "start":
-        await cmdStart(
-          parsed.args.team!,
-          parsed.args.workspace!,
-          parsed.args.stateDir
-        );
-        break;
-      case "stop":
-        await cmdStop(parsed.args.team!, parsed.args.stateDir);
-        break;
-      case "status":
-        await cmdStatus(parsed.args.team!, parsed.args.stateDir);
-        break;
-      case "attach":
-        await cmdAttach(parsed.args.issue!);
-        break;
-      case "teams":
-        await cmdTeams();
-        break;
-    }
-  } catch (error) {
-    console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(1);
-  }
-}
+export const stopCommand = defineCommand({
+  meta: { name: "stop", description: "Stop the Legion swarm" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    "state-dir": { type: "string", description: "State directory path" },
+  },
+  async run({ args }) {
+    await cmdStop(args.team, args["state-dir"]);
+  },
+});
 
-// Run if executed directly
+export const statusCommand = defineCommand({
+  meta: { name: "status", description: "Show Legion swarm status" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    "state-dir": { type: "string", description: "State directory path" },
+  },
+  async run({ args }) {
+    await cmdStatus(args.team, args["state-dir"]);
+  },
+});
+
+export const attachCommand = defineCommand({
+  meta: { name: "attach", description: "Attach to a worker session" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    issue: { type: "positional", description: "Issue key or identifier", required: true },
+  },
+  async run({ args }) {
+    await cmdAttach(args.team, args.issue);
+  },
+});
+
+export const teamsCommand = defineCommand({
+  meta: { name: "teams", description: "List teams and their daemon status" },
+  args: {
+    all: {
+      type: "boolean",
+      description: "Include cached teams without running daemons",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    await cmdTeams(args.all);
+  },
+});
+
+export const mainCommand = defineCommand({
+  meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
+  subCommands: {
+    start: startCommand,
+    stop: stopCommand,
+    status: statusCommand,
+    attach: attachCommand,
+    teams: teamsCommand,
+  },
+});
+
 if (import.meta.main) {
-  void main();
+  runMain(mainCommand);
 }

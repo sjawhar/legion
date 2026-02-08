@@ -17,11 +17,10 @@ digraph {
 ### 1. Fetch Issue
 
 ```
-mcp__linear__get_issue with id: $LINEAR_ISSUE_ID
-mcp__linear__list_comments with issueId: $LINEAR_ISSUE_ID
+linear_linear(action="get", id=$LINEAR_ISSUE_ID)
 ```
 
-Extract title, description, comments, current labels.
+Extract title, description, comments (included in get response), current labels.
 
 ### 2. Assess
 
@@ -72,19 +71,20 @@ Each criterion should answer: "How will we know this is done?"
 ## Sub-Issue Creation
 
 ```
-parent = mcp__linear__get_issue with id: $LINEAR_ISSUE_ID
+parent = linear_linear(action="get", id=$LINEAR_ISSUE_ID)
 
-mcp__linear__create_issue with:
-  title: [Scoped title]
-  team: [Same team as parent]
-  parentId: parent.id  # UUID required
+linear_linear(action="create",
+  title: [Scoped title],
+  team: [Same team as parent],
+  parentId: parent.id,  # UUID required
   description: |
     ## Acceptance Criteria
     - [ ] [Testable condition]
 
-    Part of $LINEAR_ISSUE_ID.
-  state: "Backlog"
+    Part of $LINEAR_ISSUE_ID.,
+  state: "Backlog",
   labels: ["worker-done"]
+)
 ```
 
 Post comment to parent explaining the breakdown.
@@ -94,12 +94,13 @@ Post comment to parent explaining the breakdown.
 Labels array replaces all labels. Fetch current labels first:
 
 ```
-issue = mcp__linear__get_issue with id: $LINEAR_ISSUE_ID
+issue = linear_linear(action="get", id=$LINEAR_ISSUE_ID)
 current_label_names = [label.name for label in issue.labels]
 
-mcp__linear__update_issue with:
-  id: $LINEAR_ISSUE_ID
+linear_linear(action="update",
+  id: $LINEAR_ISSUE_ID,
   labels: current_label_names + ["worker-done"]
+)
 ```
 
 ## Completion Signals

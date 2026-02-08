@@ -7,14 +7,12 @@ export interface DaemonConfig {
   legionDir?: string;
   shortId?: string;
   checkIntervalMs: number;
-  stalenessThresholdMs: number;
   baseWorkerPort: number;
   stateFilePath: string;
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
-const DEFAULT_STALENESS_THRESHOLD_MS = 600_000;
 const DEFAULT_BASE_WORKER_PORT = 13381;
 
 function parseNumber(value: string | undefined, fallback: number): number {
@@ -41,7 +39,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     legionDir,
     shortId: env.LEGION_SHORT_ID,
     checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
-    stalenessThresholdMs: DEFAULT_STALENESS_THRESHOLD_MS,
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
     stateFilePath: resolveStateFilePath(legionDir),
   };

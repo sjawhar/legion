@@ -1,5 +1,7 @@
 # Session Management Infrastructure Implementation Plan
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Create foundational session management infrastructure for Legion with secure token generation, validation, refresh, and revocation capabilities.

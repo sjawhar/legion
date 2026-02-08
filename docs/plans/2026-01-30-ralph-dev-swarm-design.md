@@ -1,6 +1,8 @@
 # Ralph Dev Swarm: Autonomous Development System
 
-A system for autonomous, parallel software development using Claude Code agents coordinated through Linear and jj.
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
+A system for autonomous, parallel software development using OpenCode agents coordinated through Linear and jj.
 
 ## Overview
 

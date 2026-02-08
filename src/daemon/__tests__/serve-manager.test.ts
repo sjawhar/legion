@@ -1,16 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
 import os from "node:os";
-import {
-  adoptExistingWorkers,
-  healthCheck,
-  killWorker,
-  spawnServe,
-} from "../serve-manager";
+import path from "node:path";
+import { adoptExistingWorkers, healthCheck, killWorker, spawnServe } from "../serve-manager";
 
 const baseEntry = {
-  id: "ENG-42-implement",
+  id: "eng-42-implement",
   port: 15001,
   pid: 2222,
   sessionId: "ses_test",
@@ -51,7 +46,7 @@ describe("serve-manager", () => {
       env: { EXTRA_FLAG: "1" },
     });
 
-    expect(entry.id).toBe("ENG-42-implement");
+    expect(entry.id).toBe("eng-42-implement");
     expect(entry.port).toBe(14000);
     expect(entry.pid).toBe(4242);
     expect(entry.sessionId).toBe("ses_123");
@@ -66,7 +61,7 @@ describe("serve-manager", () => {
 
   it("kills a worker by pid", async () => {
     const killed = { pid: 0, called: false };
-    process.kill = ((pid: number, signal?: NodeJS.Signals) => {
+    process.kill = ((pid: number, _signal?: NodeJS.Signals) => {
       killed.pid = pid;
       killed.called = true;
       return true;
@@ -103,8 +98,8 @@ describe("serve-manager", () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-workers-"));
     const filePath = path.join(tempDir, "workers.json");
     const state = {
-      "ENG-42-implement": baseEntry,
-      "ENG-99-implement": { ...baseEntry, id: "ENG-99-implement", port: 16000 },
+      "eng-42-implement": baseEntry,
+      "eng-99-implement": { ...baseEntry, id: "eng-99-implement", port: 16000 },
     };
     await writeFile(filePath, JSON.stringify(state, null, 2));
 
@@ -123,7 +118,7 @@ describe("serve-manager", () => {
 
     const adopted = await adoptExistingWorkers(filePath);
     expect(adopted.size).toBe(1);
-    const adoptedEntry = adopted.get("ENG-42-implement");
+    const adoptedEntry = adopted.get("eng-42-implement");
     expect(adoptedEntry?.status).toBe("running");
 
     await rm(tempDir, { recursive: true, force: true });

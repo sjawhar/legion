@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { startDaemon } from "../index";
 import { PortAllocator } from "../ports";
 import type { WorkerEntry } from "../serve-manager";
 import type { WorkerState } from "../state-file";
-import { startDaemon } from "../index";
 
 type IntervalCallback = (...args: any[]) => void;
 
 const baseEntry: WorkerEntry = {
-  id: "ENG-1-implement",
+  id: "eng-1-implement",
   port: 15000,
   pid: 2222,
   sessionId: "ses-1",
@@ -16,13 +16,15 @@ const baseEntry: WorkerEntry = {
 };
 
 const secondEntry: WorkerEntry = {
-  id: "ENG-2-plan",
+  id: "eng-2-plan",
   port: 15002,
   pid: 3333,
   sessionId: "ses-2",
   startedAt: "2026-02-01T01:00:00.000Z",
   status: "running",
 };
+
+const TEAM_ID = "123e4567-e89b-12d3-a456-426614174000";
 
 describe("daemon entry", () => {
   const originalOn = process.on;
@@ -57,6 +59,7 @@ describe("daemon entry", () => {
     await startDaemon(
       {
         stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
       },
       {
         adoptExistingWorkers,
@@ -101,12 +104,27 @@ describe("daemon entry", () => {
     };
 
     const deleteCalls: string[] = [];
+    const patchCalls: Array<{ url: string; status: string }> = [];
     globalThis.fetch = (async (input: Request | string, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.url;
       if (url.endsWith("/workers") && (!init?.method || init.method === "GET")) {
         return {
           ok: true,
           json: async () => [baseEntry, secondEntry],
+        } as Response;
+      }
+      if (url.includes(`/workers/${baseEntry.id}`) && init?.method === "PATCH") {
+        patchCalls.push({ url, status: JSON.parse(init.body as string).status });
+        return {
+          ok: true,
+          json: async () => ({ status: "running" }),
+        } as Response;
+      }
+      if (url.includes(`/workers/${secondEntry.id}`) && init?.method === "PATCH") {
+        patchCalls.push({ url, status: JSON.parse(init.body as string).status });
+        return {
+          ok: true,
+          json: async () => ({ status: "dead" }),
         } as Response;
       }
       if (url.includes(`/workers/${secondEntry.id}`) && init?.method === "DELETE") {
@@ -126,6 +144,7 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         checkIntervalMs: 1000,
+        teamId: TEAM_ID,
       },
       {
         adoptExistingWorkers: async () => new Map(),
@@ -154,6 +173,12 @@ describe("daemon entry", () => {
 
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0]).toContain(secondEntry.id);
+    expect(patchCalls).toEqual(
+      expect.arrayContaining([
+        { url: expect.stringContaining(baseEntry.id), status: "running" },
+        { url: expect.stringContaining(secondEntry.id), status: "dead" },
+      ])
+    );
   });
 
   it("registers signal handlers and shuts down cleanly", async () => {
@@ -177,6 +202,7 @@ describe("daemon entry", () => {
     await startDaemon(
       {
         stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
       },
       {
         adoptExistingWorkers: async () => new Map(),

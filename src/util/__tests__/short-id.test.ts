@@ -1,10 +1,5 @@
-import { describe, it, expect } from "bun:test";
-import {
-  encodeBase62,
-  decodeBase62,
-  uuidToShort,
-  generateShortId,
-} from "../short-id";
+import { describe, expect, it } from "bun:test";
+import { decodeBase62, encodeBase62, generateShortId, uuidToShort } from "../short-id";
 
 describe("Base62", () => {
   describe("encodeBase62", () => {

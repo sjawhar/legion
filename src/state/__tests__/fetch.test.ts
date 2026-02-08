@@ -6,16 +6,16 @@
  *   TestParseLinearIssuesEdgeCases, TestFetchAllIssueData, TestFetchAllIssueDataErrorHandling)
  */
 
-import { describe, it, expect, mock } from "bun:test";
-import type { LinearIssueRaw, GitHubPRRef } from "../types";
+import { describe, expect, it, mock } from "bun:test";
 import {
-  parseLinearIssues,
-  getLiveWorkers,
-  getPrDraftStatusBatch,
+  type CommandRunner,
   fetchAllIssueData,
   GitHubAPIError,
-  type CommandRunner,
+  getLiveWorkers,
+  getPrDraftStatusBatch,
+  parseLinearIssues,
 } from "../fetch";
+import type { LinearIssueRaw } from "../types";
 
 // =============================================================================
 // TestParseLinearIssues
@@ -112,11 +112,7 @@ describe("parseLinearIssues edge cases", () => {
         identifier: "ENG-21",
         state: { name: "Todo" },
         labels: {
-          nodes: [
-            { name: "worker-done" },
-            {} as { name: string },
-            { name: "urgent" },
-          ],
+          nodes: [{ name: "worker-done" }, {} as { name: string }, { name: "urgent" }],
         },
       },
     ];
@@ -145,20 +141,17 @@ describe("parseLinearIssues edge cases", () => {
 });
 
 // =============================================================================
-// TestGetLiveWorkers (HTTP-based, replaces tmux)
+// TestGetLiveWorkers (HTTP-based)
 // =============================================================================
 
 describe("getLiveWorkers", () => {
   it("parses worker response from daemon HTTP API", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(
-        JSON.stringify([
-          { id: "ENG-21-implement" },
-          { id: "ENG-22-plan" },
-        ]),
-        { status: 200 }
-      )
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify([{ id: "ENG-21-implement" }, { id: "ENG-22-plan" }]), {
+          status: 200,
+        })
     ) as unknown as typeof fetch;
 
     try {
@@ -171,14 +164,11 @@ describe("getLiveWorkers", () => {
 
   it("normalizes issue IDs to uppercase", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(
-        JSON.stringify([
-          { id: "eng-21-implement" },
-          { id: "Eng-22-plan" },
-        ]),
-        { status: 200 }
-      )
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify([{ id: "eng-21-implement" }, { id: "Eng-22-plan" }]), {
+          status: 200,
+        })
     ) as unknown as typeof fetch;
 
     try {
@@ -191,8 +181,8 @@ describe("getLiveWorkers", () => {
 
   it("returns empty dict on HTTP error", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response("Internal Server Error", { status: 500 })
+    globalThis.fetch = mock(
+      async () => new Response("Internal Server Error", { status: 500 })
     ) as unknown as typeof fetch;
 
     try {
@@ -219,8 +209,8 @@ describe("getLiveWorkers", () => {
 
   it("returns empty dict on empty worker list", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(JSON.stringify([]), { status: 200 })
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
     ) as unknown as typeof fetch;
 
     try {
@@ -233,14 +223,15 @@ describe("getLiveWorkers", () => {
 
   it("handles worker IDs with multiple hyphens", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(
-        JSON.stringify([
-          { id: "TEAM-PROJECT-123-implement" },
-          { id: "MY-COMPLEX-ISSUE-456-plan" },
-        ]),
-        { status: 200 }
-      )
+    globalThis.fetch = mock(
+      async () =>
+        new Response(
+          JSON.stringify([
+            { id: "TEAM-PROJECT-123-implement" },
+            { id: "MY-COMPLEX-ISSUE-456-plan" },
+          ]),
+          { status: 200 }
+        )
     ) as unknown as typeof fetch;
 
     try {
@@ -333,10 +324,7 @@ describe("getPrDraftStatusBatch", () => {
     };
 
     await expect(
-      getPrDraftStatusBatch(
-        { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
-        runner
-      )
+      getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
     ).rejects.toThrow(GitHubAPIError);
 
     expect(callCount).toBe(3);
@@ -350,10 +338,7 @@ describe("getPrDraftStatusBatch", () => {
     };
 
     await expect(
-      getPrDraftStatusBatch(
-        { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
-        runner
-      )
+      getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
     ).rejects.toThrow(GitHubAPIError);
 
     expect(callCount).toBe(3);
@@ -480,11 +465,8 @@ describe("getPrDraftStatusBatch", () => {
 describe("fetchAllIssueData", () => {
   it("fetches data for issues", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(
-        JSON.stringify([{ id: "ENG-21-implement" }]),
-        { status: 200 }
-      )
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([{ id: "ENG-21-implement" }]), { status: 200 })
     ) as unknown as typeof fetch;
 
     try {
@@ -500,11 +482,7 @@ describe("fetchAllIssueData", () => {
         },
       ];
 
-      const result = await fetchAllIssueData(
-        linearIssues,
-        "http://localhost:3000",
-        runner
-      );
+      const result = await fetchAllIssueData(linearIssues, "http://localhost:3000", runner);
 
       expect(result).toHaveLength(1);
       expect(result[0].issueId).toBe("ENG-21");
@@ -516,8 +494,8 @@ describe("fetchAllIssueData", () => {
 
   it("GitHub API failure sets prIsDraft to null", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(JSON.stringify([]), { status: 200 })
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
     ) as unknown as typeof fetch;
 
     try {
@@ -534,11 +512,7 @@ describe("fetchAllIssueData", () => {
         },
       ];
 
-      const result = await fetchAllIssueData(
-        linearIssues,
-        "http://localhost:3000",
-        runner
-      );
+      const result = await fetchAllIssueData(linearIssues, "http://localhost:3000", runner);
 
       expect(result).toHaveLength(1);
       expect(result[0].hasPr).toBe(true);
@@ -550,8 +524,8 @@ describe("fetchAllIssueData", () => {
 
   it("handles malformed Linear issue data", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async () =>
-      new Response(JSON.stringify([]), { status: 200 })
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
     ) as unknown as typeof fetch;
 
     try {
@@ -561,10 +535,7 @@ describe("fetchAllIssueData", () => {
         { state: { name: "Todo" } } as LinearIssueRaw,
       ];
 
-      const result = await fetchAllIssueData(
-        linearIssues,
-        "http://localhost:3000"
-      );
+      const result = await fetchAllIssueData(linearIssues, "http://localhost:3000");
 
       expect(result).toHaveLength(1);
       expect(result[0].issueId).toBe("ENG-21");

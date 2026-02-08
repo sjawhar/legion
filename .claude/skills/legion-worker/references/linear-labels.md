@@ -13,12 +13,12 @@
 Labels array **replaces all labels**. Fetch current first:
 
 ```
-issue = mcp__linear__get_issue(id: ISSUE_ID)
+issue = linear_linear(action="get", id=ISSUE_ID)
 current_labels = [label.name for label in issue.labels]
 
-mcp__linear__update_issue(
-  id: ISSUE_ID,
-  labels: current_labels + ["worker-done"]
+linear_linear(action="update",
+  id=ISSUE_ID,
+  labels=current_labels + ["worker-done"]
 )
 ```
 

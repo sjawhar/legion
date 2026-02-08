@@ -1,8 +1,8 @@
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { resolveTeamId } from "../team-resolver";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveTeamId } from "../team-resolver";
 
 describe("resolveTeamId", () => {
   const originalHome = process.env.HOME;
@@ -14,7 +14,7 @@ describe("resolveTeamId", () => {
     testHome = path.join(os.tmpdir(), `legion-test-${Date.now()}-${Math.random()}`);
     testCacheDir = path.join(testHome, ".legion");
     testCacheFile = path.join(testCacheDir, "teams.json");
-    
+
     fs.mkdirSync(testCacheDir, { recursive: true });
     process.env.HOME = testHome;
   });
@@ -78,15 +78,11 @@ describe("resolveTeamId", () => {
     };
     fs.writeFileSync(testCacheFile, JSON.stringify(teams, null, 2));
 
-    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
-      "'LEG' is not a UUID"
-    );
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow("'LEG' is not a UUID");
   });
 
   test("throws error when no cache file and no API key", async () => {
-    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
-      "'LEG' is not a UUID"
-    );
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow("'LEG' is not a UUID");
   });
 
   test("looks up team via API when cache miss and API key present", async () => {

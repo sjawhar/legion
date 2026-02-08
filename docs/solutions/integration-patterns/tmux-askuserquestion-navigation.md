@@ -25,6 +25,8 @@ slug: tmux-askuserquestion-navigation
 
 # Navigating AskUserQuestion Dialogs in Claude Code via tmux
 
+> **[HISTORICAL]** This document predates the TypeScript rewrite. Code references (Python files, pytest, anyio, aiofiles, etc.) are outdated. The patterns and lessons may still be relevant.
+
 ## Problem
 
 When controlling a Claude Code session remotely via tmux, AskUserQuestion prompts present multiple options. Simply sending Enter accepts the default (first option). To select a different option, you need to navigate with arrow keys—but sending keys too quickly causes missed inputs.

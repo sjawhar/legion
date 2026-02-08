@@ -55,7 +55,7 @@ The plan workflow annotates task dependencies and parallelizability explicitly. 
 ### New: Pre-transition quality gates
 **Principle:** *Every claim must be verified independently*
 
-Before the controller advances from In Progress → Needs Review, verify that the worker's branch passes basic quality checks (ruff, basedpyright, pytest). Don't waste a review cycle on code that doesn't compile.
+Before the controller advances from In Progress → Needs Review, verify that the worker's branch passes basic quality checks (biome, tsc, bun test). Don't waste a review cycle on code that doesn't compile.
 
 **Scope:** Controller runs quality checks in the worker's workspace before state transition. Add `tests_passing` parameter to `suggest_action()`.
 
@@ -122,7 +122,7 @@ Build a testing capability set (skill + tools) that any worker can load, rather 
 
 The architect defines E2E test scenarios, the planner includes test steps, and the controller dispatches a worker with the testing capability loaded. The capability includes Playwright MCP (or agent-browser), subprocess runners, and evidence capture.
 
-**Scope:** New skill (`skills/testing-e2e/SKILL.md`), tool integrations. No new worker mode in types.py — testing is a loadable capability, not a specialist.
+**Scope:** New skill (`skills/testing-e2e/SKILL.md`), tool integrations. No new worker mode — testing is a loadable capability, not a specialist.
 
 ### New: Active-but-unproductive stuck detection
 **Principle:** *Failure is an output, not a bug*
@@ -131,7 +131,7 @@ Current stuck detection kills workers after 10 min of inactivity. Missing: detec
 
 Heuristics from Factory's research: self-rewriting plans, edits outside scope, claims without reproductions, bloated diffs. Monitor session file growth patterns — if a worker has been active for 30+ minutes with a very large session file, it may be stuck.
 
-**Scope:** Enhancement to `check_worker_health()` in daemon.py. Add session size / duration heuristics alongside existing staleness checks.
+**Scope:** Enhancement to worker health checking in the daemon. Add session size / duration heuristics alongside existing staleness checks.
 
 ---
 

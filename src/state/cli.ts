@@ -8,9 +8,9 @@
  *   echo '<linear-json>' | bun run src/state/cli.ts --team-id <uuid> --daemon-url <url>
  */
 
-import { CollectedState, type LinearIssueRaw } from "./types";
 import { buildCollectedState } from "./decision";
-import { fetchAllIssueData, type CommandRunner } from "./fetch";
+import { type CommandRunner, fetchAllIssueData } from "./fetch";
+import { CollectedState, type LinearIssueRaw } from "./types";
 
 // =============================================================================
 // Arg Parsing
@@ -71,11 +71,7 @@ export async function runPipeline(
   daemonUrl: string,
   runner?: CommandRunner
 ): Promise<string> {
-  const issuesData = await fetchAllIssueData(
-    linearIssues,
-    daemonUrl,
-    runner
-  );
+  const issuesData = await fetchAllIssueData(linearIssues, daemonUrl, runner);
   const state = buildCollectedState(issuesData, teamId);
   return JSON.stringify(CollectedState.toDict(state));
 }
@@ -98,7 +94,7 @@ async function main(): Promise<void> {
   }
 
   const output = await runPipeline(linearIssues, args.teamId, args.daemonUrl);
-  process.stdout.write(output + "\n");
+  process.stdout.write(`${output}\n`);
 }
 
 // Only run main when executed directly

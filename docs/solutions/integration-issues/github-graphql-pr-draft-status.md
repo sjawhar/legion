@@ -21,6 +21,8 @@ date_solved: 2026-02-01
 
 # Using PR Draft Status Instead of Labels for Review Signaling
 
+> **[HISTORICAL]** This document predates the TypeScript rewrite. Code references (Python files, pytest, anyio, aiofiles, etc.) are outdated. The patterns and lessons may still be relevant.
+
 ## Problem
 
 Legion's state collection system needed to detect whether a GitHub PR was approved or had changes requested to determine the next action for worker dispatch. The initial approach used GitHub PR labels (`worker-approved`, `worker-changes-requested`), but this had problems:

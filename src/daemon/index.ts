@@ -1,4 +1,5 @@
-import { loadConfig, type DaemonConfig } from "./config";
+import { type DaemonConfig, loadConfig } from "./config";
+import { PortAllocator } from "./ports";
 import {
   adoptExistingWorkers,
   healthCheck,
@@ -6,13 +7,8 @@ import {
   spawnServe,
   type WorkerEntry,
 } from "./serve-manager";
-import {
-  startServer,
-  type PortAllocatorInterface,
-  type ServeManagerInterface,
-} from "./server";
-import { PortAllocator } from "./ports";
-import { readStateFile, writeStateFile, type WorkerState } from "./state-file";
+import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "./server";
+import { readStateFile, type WorkerState, writeStateFile } from "./state-file";
 
 type ServerHandle = ReturnType<typeof startServer>;
 
@@ -67,10 +63,7 @@ function seedAllocator(allocator: PortAllocatorInterface, entries: Iterable<Work
   }
 }
 
-async function fetchWorkers(
-  baseUrl: string,
-  fetchFn: typeof fetch
-): Promise<WorkerEntry[]> {
+async function fetchWorkers(baseUrl: string, fetchFn: typeof fetch): Promise<WorkerEntry[]> {
   const response = await fetchFn(`${baseUrl}/workers`);
   if (!response.ok) {
     return [];
@@ -94,9 +87,21 @@ async function healthTick(
     workers.map(async (entry) => {
       try {
         const healthy = await serveManager.healthCheck(entry.port);
-        if (!healthy) {
-          await fetchFn(`${baseUrl}/workers/${entry.id}`, { method: "DELETE" });
+        if (healthy) {
+          await fetchFn(`${baseUrl}/workers/${entry.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "running" }),
+          });
+          return;
         }
+
+        await fetchFn(`${baseUrl}/workers/${entry.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "dead" }),
+        });
+        await fetchFn(`${baseUrl}/workers/${entry.id}`, { method: "DELETE" });
       } catch {
         return;
       }
@@ -126,47 +131,66 @@ export async function startDaemon(
   deps?: Partial<DaemonDependencies>
 ): Promise<DaemonHandle> {
   const config = { ...loadConfig(), ...overrides };
+  if (!config.teamId) {
+    throw new Error("Missing teamId for daemon");
+  }
   const resolvedDeps = resolveDependencies(config, deps);
 
   const adopted = await resolvedDeps.adoptExistingWorkers(config.stateFilePath);
   await resolvedDeps.writeStateFile(config.stateFilePath, mapToState(adopted));
   seedAllocator(resolvedDeps.portAllocator, adopted.values());
 
-  const { server, stop } = resolvedDeps.startServer({
-    port: config.daemonPort,
-    hostname: "127.0.0.1",
-    serveManager: resolvedDeps.serveManager,
-    portAllocator: resolvedDeps.portAllocator,
-    stateFilePath: config.stateFilePath,
-  });
-
-  const baseUrl = `http://127.0.0.1:${server.port}`;
-  const intervalId = resolvedDeps.setInterval(
-    () => healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch),
-    config.checkIntervalMs
-  );
-
   let shuttingDown = false;
+  let intervalId: ReturnType<typeof setInterval> | null = null;
+  let stopServer: () => void = () => {};
+
   const shutdown = async (exitAfter = false) => {
     if (shuttingDown) {
       return;
     }
     shuttingDown = true;
-    resolvedDeps.clearInterval(intervalId);
+    if (intervalId) {
+      resolvedDeps.clearInterval(intervalId);
+      intervalId = null;
+    }
 
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
     const entries = Object.values(state);
-    await Promise.allSettled(entries.map(async (entry) => resolvedDeps.serveManager.killWorker(entry)));
+    await Promise.allSettled(
+      entries.map(async (entry) => resolvedDeps.serveManager.killWorker(entry))
+    );
     for (const entry of entries) {
       resolvedDeps.portAllocator.release(entry.port);
     }
 
     await resolvedDeps.writeStateFile(config.stateFilePath, {});
-    stop();
+    stopServer();
     if (exitAfter) {
       process.exit(0);
     }
   };
+
+   const { server, stop } = resolvedDeps.startServer({
+     port: config.daemonPort,
+     hostname: "127.0.0.1",
+     teamId: config.teamId,
+     serveManager: resolvedDeps.serveManager,
+     portAllocator: resolvedDeps.portAllocator,
+     stateFilePath: config.stateFilePath,
+     shutdownFn: async () => {
+       // Shutdown asynchronously after response is sent
+       setTimeout(async () => {
+         await shutdown(true);
+       }, 100);
+     },
+   });
+  stopServer = stop;
+
+  const baseUrl = `http://127.0.0.1:${server.port}`;
+  intervalId = resolvedDeps.setInterval(
+    () => healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch),
+    config.checkIntervalMs
+  );
 
   const handleSignal = async () => {
     await shutdown(true);

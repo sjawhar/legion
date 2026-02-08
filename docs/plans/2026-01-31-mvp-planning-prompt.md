@@ -1,5 +1,7 @@
 # MVP Implementation Planning Prompt
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > Feed this prompt to a planning agent to create a detailed implementation plan.
 
 ---

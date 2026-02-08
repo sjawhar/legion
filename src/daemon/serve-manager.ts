@@ -34,7 +34,7 @@ export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
   }
 
   return {
-    id: `${opts.issueId}-${opts.mode}`,
+    id: `${opts.issueId}-${opts.mode}`.toLowerCase(),
     port: opts.port,
     pid,
     sessionId: opts.sessionId,
@@ -83,11 +83,12 @@ export async function adoptExistingWorkers(
     }))
   );
 
-  const adopted = new Map<string, WorkerEntry>();
-  for (const result of results) {
-    if (result.healthy) {
-      adopted.set(result.id, { ...result.entry, status: "running" });
-    }
-  }
-  return adopted;
+   const adopted = new Map<string, WorkerEntry>();
+   for (const result of results) {
+     if (result.healthy) {
+       const normalizedId = result.id.toLowerCase();
+       adopted.set(normalizedId, { ...result.entry, id: normalizedId, status: "running" });
+     }
+   }
+   return adopted;
 }
