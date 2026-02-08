@@ -1,0 +1,634 @@
+/**
+ * Tests for state decision logic.
+ *
+ * Ported from Python tests:
+ * - tests/test_state.py (TestSuggestAction, TestBuildIssueState, TestOrphanDetection, TestBuildCollectedState)
+ */
+
+import { describe, it, expect } from "bun:test";
+import {
+  IssueStatus,
+  computeSessionId,
+  CollectedState,
+  type FetchedIssueData,
+} from "../types";
+import {
+  ACTION_TO_MODE,
+  suggestAction,
+  buildIssueState,
+  buildCollectedState,
+} from "../decision";
+
+describe("suggestAction", () => {
+  it("todo_no_worker_done_no_live_worker dispatches planner", () => {
+    const action = suggestAction(
+      IssueStatus.TODO,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("dispatch_planner");
+  });
+
+  it("todo_worker_done transitions to in progress", () => {
+    const action = suggestAction(IssueStatus.TODO, true, false, null, false);
+    expect(action).toBe("transition_to_in_progress");
+  });
+
+  it("in_progress_no_worker_no_done dispatches implementer", () => {
+    const action = suggestAction(
+      IssueStatus.IN_PROGRESS,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("dispatch_implementer");
+  });
+
+  it("in_progress_worker_done transitions to needs review", () => {
+    const action = suggestAction(
+      IssueStatus.IN_PROGRESS,
+      true,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("transition_to_needs_review");
+  });
+
+  it("in_progress_with_live_worker skips", () => {
+    const action = suggestAction(
+      IssueStatus.IN_PROGRESS,
+      false,
+      true,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("needs_review_approved transitions to retro", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true
+    );
+    expect(action).toBe("transition_to_retro");
+  });
+
+  it("needs_review_changes_requested resumes implementer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      true,
+      true
+    );
+    expect(action).toBe("resume_implementer_for_changes");
+  });
+
+  it("needs_review_worker_done_has_pr_but_unknown_status skips", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      null,
+      true
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("needs_review_worker_done_no_pr investigates", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("investigate_no_pr");
+  });
+
+  it("needs_review_no_worker_done dispatches reviewer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("dispatch_reviewer");
+  });
+
+  it("needs_review_with_live_worker_no_done skips", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      true,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("needs_review_worker_done_ignores_live_worker", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      true,
+      false,
+      true
+    );
+    expect(action).toBe("transition_to_retro");
+  });
+
+  it("backlog_no_worker_done dispatches architect", () => {
+    const action = suggestAction(
+      IssueStatus.BACKLOG,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("dispatch_architect");
+  });
+
+  it("backlog_worker_done transitions to todo", () => {
+    const action = suggestAction(
+      IssueStatus.BACKLOG,
+      true,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("transition_to_todo");
+  });
+
+  it("backlog_with_live_worker skips", () => {
+    const action = suggestAction(
+      IssueStatus.BACKLOG,
+      false,
+      true,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("triage_skips", () => {
+    const action = suggestAction(
+      IssueStatus.TRIAGE,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("icebox_skips", () => {
+    const action = suggestAction(
+      IssueStatus.ICEBOX,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("retro_worker_done dispatches merger", () => {
+    const action = suggestAction(
+      IssueStatus.RETRO,
+      true,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("dispatch_merger");
+  });
+
+  it("retro_no_worker_done resumes implementer", () => {
+    const action = suggestAction(
+      IssueStatus.RETRO,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("resume_implementer_for_retro");
+  });
+
+  it("retro_with_live_worker skips", () => {
+    const action = suggestAction(
+      IssueStatus.RETRO,
+      false,
+      true,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("done_always_skips", () => {
+    const action = suggestAction(
+      IssueStatus.DONE,
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("unknown_status_skips", () => {
+    const action = suggestAction(
+      "SomeUnknownStatus",
+      false,
+      false,
+      null,
+      false
+    );
+    expect(action).toBe("skip");
+  });
+});
+
+describe("buildIssueState", () => {
+  it("builds_state_with_action", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Todo",
+      labels: [],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("dispatch_planner");
+  });
+
+  it("skips_when_user_input_needed", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Todo",
+      labels: ["user-input-needed"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: false,
+      hasUserInputNeeded: true,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("skip");
+  });
+
+  it("relay_user_feedback_when_user_responded", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["user-input-needed", "user-feedback-given"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: true,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("relay_user_feedback");
+  });
+
+  it("waiting_for_feedback_skips", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["user-input-needed"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: false,
+      hasUserInputNeeded: true,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("skip");
+  });
+
+  it("feedback_without_input_needed_follows_normal_flow", () => {
+    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["user-feedback-given", "worker-done"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: false,
+    };
+
+    const state = buildIssueState(data, teamId);
+
+    expect(state.suggestedAction).toBe("transition_to_needs_review");
+    const expectedSessionId = computeSessionId(teamId, "ENG-21", "review");
+    expect(state.sessionId).toBe(expectedSessionId);
+  });
+
+  it("relay_feedback_computes_correct_session_id", () => {
+    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["user-input-needed", "user-feedback-given"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: true,
+    };
+
+    const state = buildIssueState(data, teamId);
+
+    const expectedSessionId = computeSessionId(teamId, "ENG-21", "implement");
+    expect(state.sessionId).toBe(expectedSessionId);
+    expect(state.suggestedAction).toBe("relay_user_feedback");
+  });
+
+  it("relay_feedback_in_different_statuses", () => {
+    const teamId = "00000000-0000-0000-0000-000000000000";
+
+    const dataTodo: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Todo",
+      labels: ["user-input-needed", "user-feedback-given"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: true,
+    };
+    const stateTodo = buildIssueState(dataTodo, teamId);
+    expect(stateTodo.suggestedAction).toBe("relay_user_feedback");
+
+    const dataReview: FetchedIssueData = {
+      issueId: "ENG-22",
+      status: "Needs Review",
+      labels: ["user-input-needed", "user-feedback-given"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: true,
+    };
+    const stateReview = buildIssueState(dataReview, teamId);
+    expect(stateReview.suggestedAction).toBe("relay_user_feedback");
+  });
+
+  it("all_labels_present_relay_takes_precedence", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["worker-done", "user-input-needed", "user-feedback-given"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: true,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("relay_user_feedback");
+  });
+});
+
+describe("orphan detection", () => {
+  it("orphan_detected_when_worker_active_but_no_live_worker", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["worker-active"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("remove_worker_active_and_redispatch");
+  });
+
+  it("no_orphan_when_worker_active_and_live_worker", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["worker-active"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: true,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("skip");
+  });
+
+  it("no_orphan_when_no_worker_active_label", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: [],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("dispatch_implementer");
+  });
+
+  it("orphan_detected_in_various_statuses", () => {
+    const teamId = "00000000-0000-0000-0000-000000000000";
+
+    for (const status of ["Todo", "In Progress", "Backlog", "Needs Review"]) {
+      const data: FetchedIssueData = {
+        issueId: "ENG-21",
+        status,
+        labels: ["worker-active"],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: false,
+        hasUserInputNeeded: false,
+      };
+
+      const state = buildIssueState(data, teamId);
+      expect(state.suggestedAction).toBe("remove_worker_active_and_redispatch");
+    }
+  });
+
+  it("user_feedback_takes_precedence_over_orphan", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["worker-active", "user-input-needed", "user-feedback-given"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      hasUserFeedback: true,
+      hasUserInputNeeded: true,
+    };
+
+    const state = buildIssueState(
+      data,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    expect(state.suggestedAction).toBe("relay_user_feedback");
+  });
+
+  it("orphan_action_mode_mapping", () => {
+    expect("remove_worker_active_and_redispatch" in ACTION_TO_MODE).toBe(true);
+  });
+});
+
+describe("buildCollectedState", () => {
+  it("builds_state_for_multiple_issues", () => {
+    const issuesData: FetchedIssueData[] = [
+      {
+        issueId: "ENG-21",
+        status: "Todo",
+        labels: [],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: false,
+        hasUserInputNeeded: false,
+      },
+      {
+        issueId: "ENG-22",
+        status: "In Progress",
+        labels: ["worker-done"],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: false,
+        hasUserInputNeeded: false,
+      },
+    ];
+
+    const state = buildCollectedState(
+      issuesData,
+      "00000000-0000-0000-0000-000000000000"
+    );
+
+    expect("ENG-21" in state.issues).toBe(true);
+    expect("ENG-22" in state.issues).toBe(true);
+    expect(state.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");
+    expect(state.issues["ENG-22"].suggestedAction).toBe(
+      "transition_to_needs_review"
+    );
+  });
+
+  it("to_dict_serializes_correctly", () => {
+    const issuesData: FetchedIssueData[] = [
+      {
+        issueId: "ENG-21",
+        status: "Todo",
+        labels: [],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: false,
+        hasUserInputNeeded: false,
+      },
+    ];
+
+    const state = buildCollectedState(
+      issuesData,
+      "00000000-0000-0000-0000-000000000000"
+    );
+    const result = CollectedState.toDict(state);
+
+    expect("issues" in result).toBe(true);
+    expect("ENG-21" in result.issues).toBe(true);
+    expect(result.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");
+  });
+
+  it("relay_feedback_with_multiple_issues", () => {
+    const teamId = "00000000-0000-0000-0000-000000000000";
+    const issuesData: FetchedIssueData[] = [
+      {
+        issueId: "ENG-21",
+        status: "Todo",
+        labels: [],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: false,
+        hasUserInputNeeded: false,
+      },
+      {
+        issueId: "ENG-22",
+        status: "In Progress",
+        labels: ["user-input-needed", "user-feedback-given"],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: true,
+        hasUserInputNeeded: true,
+      },
+      {
+        issueId: "ENG-23",
+        status: "In Progress",
+        labels: ["user-input-needed"],
+        hasPr: false,
+        prIsDraft: null,
+        hasLiveWorker: false,
+        hasUserFeedback: false,
+        hasUserInputNeeded: true,
+      },
+    ];
+
+    const state = buildCollectedState(issuesData, teamId);
+
+    expect(Object.keys(state.issues)).toHaveLength(3);
+    expect(state.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");
+    expect(state.issues["ENG-22"].suggestedAction).toBe("relay_user_feedback");
+    expect(state.issues["ENG-23"].suggestedAction).toBe("skip");
+  });
+});
