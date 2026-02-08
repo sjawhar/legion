@@ -19,17 +19,21 @@ interface TeamsCache {
  * Resolve a team reference to a UUID.
  *
  * @param teamRef - Either a UUID or a team key (e.g., "LEG")
+ * @param cacheDir - Optional cache directory (defaults to ~/.legion)
  * @returns The team UUID
  * @throws Error if team cannot be resolved
  */
-export async function resolveTeamId(teamRef: string): Promise<string> {
-  // If it's already a UUID, return it
+export async function resolveTeamId(
+  teamRef: string,
+  cacheDir?: string
+): Promise<string> {
   if (UUID_PATTERN.test(teamRef)) {
     return teamRef;
   }
 
-  // Check for cached team mapping
-  const cacheFile = path.join(os.homedir(), ".legion", "teams.json");
+  const resolvedCacheDir = cacheDir ?? path.join(os.homedir(), ".legion");
+  const cacheFile = path.join(resolvedCacheDir, "teams.json");
+  
   if (fs.existsSync(cacheFile)) {
     const teams: TeamsCache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
     const keyUpper = teamRef.toUpperCase();
@@ -42,13 +46,11 @@ export async function resolveTeamId(teamRef: string): Promise<string> {
     }
   }
 
-  // Try LINEAR_API_KEY if available
   const apiKey = process.env.LINEAR_API_KEY;
   if (apiKey) {
     return await lookupTeamViaApi(teamRef, apiKey);
   }
 
-  // No cache, no API key
   throw new Error(
     `'${teamRef}' is not a UUID.\n` +
       `Run 'legion teams' to cache team mappings, or set LINEAR_API_KEY.`
@@ -86,7 +88,9 @@ async function lookupTeamViaApi(
       body: payload,
     });
 
-    const data = await response.json();
+    const data = (await response.json()) as {
+      data?: { team?: { id: string; name: string } };
+    };
     const team = data?.data?.team;
 
     if (!team) {

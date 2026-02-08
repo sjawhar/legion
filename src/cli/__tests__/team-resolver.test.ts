@@ -5,41 +5,37 @@ import os from "node:os";
 import path from "node:path";
 
 describe("resolveTeamId", () => {
-  const testCacheDir = path.join(os.tmpdir(), "legion-test-cache");
-  const testCacheFile = path.join(testCacheDir, "teams.json");
   const originalHome = process.env.HOME;
+  let testHome: string;
+  let testCacheDir: string;
+  let testCacheFile: string;
 
   beforeEach(() => {
-    // Create test cache directory
-    if (!fs.existsSync(testCacheDir)) {
-      fs.mkdirSync(testCacheDir, { recursive: true });
-    }
-    // Override HOME to use test cache
-    process.env.HOME = os.tmpdir();
+    testHome = path.join(os.tmpdir(), `legion-test-${Date.now()}-${Math.random()}`);
+    testCacheDir = path.join(testHome, ".legion");
+    testCacheFile = path.join(testCacheDir, "teams.json");
+    
+    fs.mkdirSync(testCacheDir, { recursive: true });
+    process.env.HOME = testHome;
   });
 
   afterEach(() => {
-    // Clean up test cache
-    if (fs.existsSync(testCacheFile)) {
-      fs.unlinkSync(testCacheFile);
+    if (fs.existsSync(testHome)) {
+      fs.rmSync(testHome, { recursive: true, force: true });
     }
-    if (fs.existsSync(testCacheDir)) {
-      fs.rmdirSync(testCacheDir);
-    }
-    // Restore HOME
     process.env.HOME = originalHome;
     delete process.env.LINEAR_API_KEY;
   });
 
   test("returns UUID as-is when given valid UUID", async () => {
     const uuid = "12345678-1234-1234-1234-123456789abc";
-    const result = await resolveTeamId(uuid);
+    const result = await resolveTeamId(uuid, testCacheDir);
     expect(result).toBe(uuid);
   });
 
   test("returns UUID as-is when given valid UUID (uppercase)", async () => {
     const uuid = "12345678-1234-1234-1234-123456789ABC";
-    const result = await resolveTeamId(uuid);
+    const result = await resolveTeamId(uuid, testCacheDir);
     expect(result).toBe(uuid);
   });
 
@@ -56,7 +52,7 @@ describe("resolveTeamId", () => {
     };
     fs.writeFileSync(testCacheFile, JSON.stringify(teams, null, 2));
 
-    const result = await resolveTeamId("LEG");
+    const result = await resolveTeamId("LEG", testCacheDir);
     expect(result).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
   });
 
@@ -69,7 +65,7 @@ describe("resolveTeamId", () => {
     };
     fs.writeFileSync(testCacheFile, JSON.stringify(teams, null, 2));
 
-    const result = await resolveTeamId("leg");
+    const result = await resolveTeamId("leg", testCacheDir);
     expect(result).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
   });
 
@@ -82,13 +78,13 @@ describe("resolveTeamId", () => {
     };
     fs.writeFileSync(testCacheFile, JSON.stringify(teams, null, 2));
 
-    await expect(resolveTeamId("LEG")).rejects.toThrow(
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
       "'LEG' is not a UUID"
     );
   });
 
   test("throws error when no cache file and no API key", async () => {
-    await expect(resolveTeamId("LEG")).rejects.toThrow(
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
       "'LEG' is not a UUID"
     );
   });
@@ -96,7 +92,6 @@ describe("resolveTeamId", () => {
   test("looks up team via API when cache miss and API key present", async () => {
     process.env.LINEAR_API_KEY = "test-api-key";
 
-    // Mock fetch
     const mockFetch = mock(async (url: string, options?: RequestInit) => {
       expect(url).toBe("https://api.linear.app/graphql");
       expect(options?.method).toBe("POST");
@@ -118,7 +113,7 @@ describe("resolveTeamId", () => {
 
     globalThis.fetch = mockFetch as any;
 
-    const result = await resolveTeamId("LEG");
+    const result = await resolveTeamId("LEG", testCacheDir);
     expect(result).toBe("fetched-uuid-1234");
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
@@ -135,7 +130,7 @@ describe("resolveTeamId", () => {
       );
     }) as any;
 
-    await expect(resolveTeamId("NOTFOUND")).rejects.toThrow(
+    await expect(resolveTeamId("NOTFOUND", testCacheDir)).rejects.toThrow(
       "Team 'NOTFOUND' not found in Linear"
     );
   });
@@ -147,7 +142,7 @@ describe("resolveTeamId", () => {
       throw new Error("Network error");
     }) as any;
 
-    await expect(resolveTeamId("LEG")).rejects.toThrow(
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
       "Failed to look up team 'LEG'"
     );
   });
@@ -163,13 +158,12 @@ describe("resolveTeamId", () => {
     };
     fs.writeFileSync(testCacheFile, JSON.stringify(teams, null, 2));
 
-    // Mock fetch should not be called
     const mockFetch = mock(async () => {
       throw new Error("Should not call API when cache hit");
     });
     globalThis.fetch = mockFetch as any;
 
-    const result = await resolveTeamId("LEG");
+    const result = await resolveTeamId("LEG", testCacheDir);
     expect(result).toBe("cached-uuid");
     expect(mockFetch).not.toHaveBeenCalled();
   });

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Autonomous development swarm using OpenCode agents",
+  "bin": {
+    "legion": "src/cli/index.ts"
+  },
   "scripts": {
     "start:daemon": "bun run src/daemon/index.ts",
     "test": "bun test",
