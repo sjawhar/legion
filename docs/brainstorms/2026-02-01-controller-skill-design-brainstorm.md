@@ -1,5 +1,7 @@
 # Controller Skill Design Brainstorm
 
+> **[HISTORICAL]** This document predates the TypeScript rewrite. Code references (Python files, pytest, anyio, aiofiles, etc.) are outdated. The patterns and lessons may still be relevant.
+
 **Date:** 2026-02-01
 **Status:** Ready for review
 **Context:** Designing the Legion controller skill - the "brain" that coordinates workers

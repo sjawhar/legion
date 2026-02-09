@@ -1,5 +1,7 @@
 # Persistent Controller Daemon Implementation Plan
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Update Legion daemon to supervise persistent controller with deterministic session IDs, session file-based liveness detection, and auto-restart.

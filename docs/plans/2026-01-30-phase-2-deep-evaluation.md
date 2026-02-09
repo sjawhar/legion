@@ -1,5 +1,7 @@
 # Phase 2: Deep Evaluation Implementation Plan
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** This is a research plan, not a coding plan. Use parallel agents (5 at a time) to execute research tasks. Each agent fills out the Phase 2 template for one tool.
 
 **Goal:** Complete technical deep-dive evaluation on all 23 tools that passed Phase 1 screening.

@@ -1,5 +1,7 @@
 # Worker Skill Design: Compound Engineering vs Superpowers Analysis
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 **Date:** 2026-01-31
 **Status:** Draft — ready for review
 **Context:** Determining which development workflow (Compound Engineering or Superpowers) should guide Legion worker behavior

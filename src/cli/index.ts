@@ -1,0 +1,322 @@
+#!/usr/bin/env bun
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { defineCommand, runMain } from "citty";
+import { startDaemon } from "../daemon/index";
+import { resolveTeamId } from "./team-resolver";
+
+const DEFAULT_DAEMON_PORT = 13370;
+
+interface TeamInfo {
+  id: string;
+  name: string;
+}
+
+export type TeamsCache = Record<string, TeamInfo>;
+
+export function getDaemonPort(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.LEGION_DAEMON_PORT;
+  if (!raw) {
+    return DEFAULT_DAEMON_PORT;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_DAEMON_PORT;
+  }
+  return parsed;
+}
+
+export function loadTeamsCache(cacheDir = path.join(os.homedir(), ".legion")): TeamsCache | null {
+  const cacheFile = path.join(cacheDir, "teams.json");
+  if (!fs.existsSync(cacheFile)) {
+    return null;
+  }
+
+  const raw = fs.readFileSync(cacheFile, "utf-8");
+  if (!raw.trim()) {
+    return null;
+  }
+
+  const parsed = JSON.parse(raw) as TeamsCache;
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`Invalid teams cache at ${cacheFile}`);
+  }
+
+  return parsed;
+}
+
+function resolveStateDir(teamId: string, stateDir?: string): string {
+  return stateDir ?? path.join(os.homedir(), ".legion", teamId);
+}
+
+async function cmdStart(team: string, workspace: string, stateDir?: string): Promise<void> {
+  const teamId = await resolveTeamId(team);
+  const resolvedStateDir = resolveStateDir(teamId, stateDir);
+
+  console.log(`Starting Legion for team: ${teamId}`);
+  console.log(`Workspace: ${workspace}`);
+  console.log(`State directory: ${resolvedStateDir}`);
+
+  fs.mkdirSync(resolvedStateDir, { recursive: true });
+
+  const handle = await startDaemon({
+    teamId,
+    legionDir: workspace,
+    stateFilePath: path.join(resolvedStateDir, "workers.json"),
+  });
+
+  console.log(`Daemon started on port ${handle.config.daemonPort}`);
+  console.log(`\nTo check status: legion status ${team}`);
+  console.log(`To stop: legion stop ${team}`);
+
+  await new Promise(() => {});
+}
+
+async function cmdStop(team: string, stateDir?: string): Promise<void> {
+  const teamId = await resolveTeamId(team);
+  const resolvedStateDir = resolveStateDir(teamId, stateDir);
+
+  console.log(`Stopping Legion for team: ${teamId}`);
+
+  const stateFilePath = path.join(resolvedStateDir, "workers.json");
+  if (!fs.existsSync(stateFilePath)) {
+    console.log("No state file found. Daemon may not be running.");
+    return;
+  }
+
+  const daemonPort = getDaemonPort();
+  try {
+    const response = await fetch(`http://127.0.0.1:${daemonPort}/shutdown`, {
+      method: "POST",
+    });
+    if (response.ok) {
+      console.log("Daemon stopped successfully.");
+    } else {
+      console.log("Failed to stop daemon. It may not be running.");
+    }
+  } catch (_error) {
+    console.log("Could not connect to daemon. It may not be running.");
+  }
+}
+
+async function cmdStatus(team: string, stateDir?: string): Promise<void> {
+  const teamId = await resolveTeamId(team);
+  const resolvedStateDir = resolveStateDir(teamId, stateDir);
+
+  console.log(`Legion Status: ${teamId}`);
+  console.log("=".repeat(40));
+
+  const daemonPort = getDaemonPort();
+  try {
+    const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
+    if (response.ok) {
+      const workers = (await response.json()) as Array<{ id: string; port: number }>;
+      console.log(`Daemon: RUNNING (port ${daemonPort})`);
+      console.log(`Workers: ${workers.length}`);
+      for (const worker of workers) {
+        console.log(`  - ${worker.id} (port ${worker.port})`);
+      }
+    } else {
+      console.log("Daemon: NOT RUNNING");
+    }
+  } catch (_error) {
+    console.log("Daemon: NOT RUNNING");
+  }
+
+  const stateFilePath = path.join(resolvedStateDir, "workers.json");
+  if (fs.existsSync(stateFilePath)) {
+    const stat = fs.statSync(stateFilePath);
+    const age = Math.floor((Date.now() - stat.mtimeMs) / 1000);
+    console.log(`\nState file: ${stateFilePath}`);
+    console.log(`Last updated: ${age}s ago`);
+  } else {
+    console.log(`\nState file: NOT FOUND`);
+  }
+}
+
+async function cmdAttach(team: string, issue: string): Promise<void> {
+  const teamId = await resolveTeamId(team);
+
+  console.log(`Attaching to worker for issue: ${issue}`);
+  console.log(`Team: ${teamId}`);
+
+  const daemonPort = getDaemonPort();
+  try {
+    const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
+    if (!response.ok) {
+      console.error("Could not connect to daemon. Is it running?");
+      process.exit(1);
+    }
+
+    const workers = (await response.json()) as Array<{ id: string; port: number }>;
+    const normalizedIssue = issue.toLowerCase();
+    const matches = workers.filter(
+      (worker) => worker.id === normalizedIssue || worker.id.startsWith(`${normalizedIssue}-`)
+    );
+
+    if (matches.length === 0) {
+      console.error(`No worker found for issue: ${issue}`);
+      console.log(`\nAvailable workers:`);
+      for (const worker of workers) {
+        console.log(`  - ${worker.id}`);
+      }
+      process.exit(1);
+    }
+
+    if (matches.length > 1) {
+      console.error(`Multiple workers found for ${issue}:`);
+      for (const worker of matches) {
+        console.log(`  - ${worker.id} (port ${worker.port})`);
+      }
+      console.error("Be more specific, e.g.: legion attach eng-21-implement");
+      process.exit(1);
+    }
+
+    const worker = matches[0];
+
+    console.log(`Found worker on port ${worker.port}`);
+    console.log(`Attaching with: opencode attach http://localhost:${worker.port}`);
+
+    const child = spawn("opencode", ["attach", `http://localhost:${worker.port}`], {
+      stdio: "inherit",
+    });
+
+    child.on("exit", (code) => {
+      process.exit(code ?? 0);
+    });
+  } catch (error) {
+    console.error("Failed to attach:", error);
+    process.exit(1);
+  }
+}
+
+async function checkDaemonHealth(port: number): Promise<{ running: boolean; workerCount?: number }> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    if (!response.ok) {
+      return { running: false };
+    }
+    const data = (await response.json()) as { status?: string; workerCount?: number };
+    if (data.status !== "ok") {
+      return { running: false };
+    }
+    return { running: true, workerCount: data.workerCount ?? 0 };
+  } catch (_error) {
+    return { running: false };
+  }
+}
+
+async function cmdTeams(includeAll: boolean): Promise<void> {
+  const cache = loadTeamsCache();
+  if (!cache || Object.keys(cache).length === 0) {
+    console.log("No teams cached. Start a swarm first.");
+    return;
+  }
+
+  const daemonPort = getDaemonPort();
+  const entries = await Promise.all(
+    Object.entries(cache).map(async ([key, team]) => {
+      const stateFilePath = path.join(os.homedir(), ".legion", team.id, "workers.json");
+      if (!fs.existsSync(stateFilePath)) {
+        return { key, team, running: false, workerCount: 0 };
+      }
+      const health = await checkDaemonHealth(daemonPort);
+      return { key, team, running: health.running, workerCount: health.workerCount ?? 0 };
+    })
+  );
+
+  const filtered = includeAll ? entries : entries.filter((entry) => entry.running);
+  if (filtered.length === 0) {
+    console.log("No active daemons. Use --all to show cached teams.");
+    return;
+  }
+
+  console.log("Teams:");
+  for (const entry of filtered) {
+    const status = entry.running
+      ? `RUNNING (workers: ${entry.workerCount})`
+      : "STOPPED";
+    console.log(`  ${entry.key}: ${entry.team.name} (${entry.team.id}) - ${status}`);
+  }
+}
+
+export const startCommand = defineCommand({
+  meta: { name: "start", description: "Start the Legion swarm" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    workspace: {
+      type: "string",
+      alias: "w",
+      description: "Workspace path",
+      default: process.cwd(),
+    },
+    "state-dir": { type: "string", description: "State directory path" },
+  },
+  async run({ args }) {
+    await cmdStart(args.team, args.workspace, args["state-dir"]);
+  },
+});
+
+export const stopCommand = defineCommand({
+  meta: { name: "stop", description: "Stop the Legion swarm" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    "state-dir": { type: "string", description: "State directory path" },
+  },
+  async run({ args }) {
+    await cmdStop(args.team, args["state-dir"]);
+  },
+});
+
+export const statusCommand = defineCommand({
+  meta: { name: "status", description: "Show Legion swarm status" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    "state-dir": { type: "string", description: "State directory path" },
+  },
+  async run({ args }) {
+    await cmdStatus(args.team, args["state-dir"]);
+  },
+});
+
+export const attachCommand = defineCommand({
+  meta: { name: "attach", description: "Attach to a worker session" },
+  args: {
+    team: { type: "positional", description: "Team key or UUID", required: true },
+    issue: { type: "positional", description: "Issue key or identifier", required: true },
+  },
+  async run({ args }) {
+    await cmdAttach(args.team, args.issue);
+  },
+});
+
+export const teamsCommand = defineCommand({
+  meta: { name: "teams", description: "List teams and their daemon status" },
+  args: {
+    all: {
+      type: "boolean",
+      description: "Include cached teams without running daemons",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    await cmdTeams(args.all);
+  },
+});
+
+export const mainCommand = defineCommand({
+  meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
+  subCommands: {
+    start: startCommand,
+    stop: stopCommand,
+    status: statusCommand,
+    attach: attachCommand,
+    teams: teamsCommand,
+  },
+});
+
+if (import.meta.main) {
+  runMain(mainCommand);
+}

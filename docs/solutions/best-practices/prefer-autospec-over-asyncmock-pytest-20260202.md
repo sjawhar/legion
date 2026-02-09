@@ -14,6 +14,8 @@ tags: [pytest-mock, autospec, asyncmock, testing, mocking, python]
 
 # Best Practice: Prefer autospec=True Over AsyncMock in pytest-mock
 
+> **[HISTORICAL]** This document predates the TypeScript rewrite. Code references (Python files, pytest, anyio, aiofiles, etc.) are outdated. The patterns and lessons may still be relevant.
+
 ## Problem
 When mocking async functions with pytest-mock, many codebases use `new_callable=mocker.AsyncMock`. However, in modern Python (3.8+), `autospec=True` alone correctly handles async functions AND provides signature validation.
 

@@ -1,5 +1,7 @@
 # PR Stack Merge Plan
 
+> **[HISTORICAL]** This plan predates the TypeScript rewrite. Code references (Python files, pytest, ruff, basedpyright, etc.) are outdated. The architectural concepts may still be relevant.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan. Launch one subagent per PR, working sequentially (PR #13 must merge before PR #18).
 
 **Goal:** Safely merge the PR stack (PR #13 → PR #18) into main by fixing CI failures, running code review, and merging in order.
