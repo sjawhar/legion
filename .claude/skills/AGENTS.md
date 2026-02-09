@@ -7,7 +7,7 @@ OpenCode skills that orchestrate the autonomous development loop. These are mark
 | Interface | Direction | Example |
 |-----------|-----------|---------|
 | HTTP API | Controller → Daemon | `curl POST http://127.0.0.1:$LEGION_DAEMON_PORT/workers` |
-| Piped CLI | Controller → State | `echo $JSON \| bun run src/state/cli.ts --team-id X` |
+| Piped CLI | Controller → State | `echo $JSON \| bun run packages/daemon/src/state/cli.ts --team-id X` |
 | Env vars | Daemon → Worker | `LINEAR_ISSUE_ID`, `LEGION_DIR`, etc. |
 | Linear skill | Worker → Linear | `linear_linear(action="get"\|"update"\|"comment"\|"create"\|"search")` |
 

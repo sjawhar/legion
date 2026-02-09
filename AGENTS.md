@@ -19,7 +19,7 @@ Autonomous development swarm using OpenCode agents. Workers implement Linear iss
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Skills invoke TypeScript via: HTTP API (`/workers`), piped CLI (`src/state/cli.ts`), and environment variables. TypeScript never calls skills directly.
+Skills invoke TypeScript via: HTTP API (`/workers`), piped CLI (`packages/daemon/src/state/cli.ts`), and environment variables. TypeScript never calls skills directly.
 
 ## Tech Stack
 

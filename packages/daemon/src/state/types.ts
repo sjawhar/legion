@@ -1,0 +1,414 @@
+/**
+ * Type definitions for Legion state collection.
+ *
+ * Contains:
+ * - Interfaces for internal data structures
+ * - Type aliases for external API response shapes
+ * - Constants and functions for status normalization
+ * - Session ID computation utilities
+ *
+ * Ported from Python: src/legion/state/types.py
+ */
+
+import { v5 as uuidv5, validate as validateUuid } from "uuid";
+
+// =============================================================================
+// Status Constants and Normalization
+// =============================================================================
+
+/**
+ * Canonical issue status values.
+ */
+export type IssueStatusLiteral =
+  | "Triage"
+  | "Icebox"
+  | "Backlog"
+  | "Todo"
+  | "In Progress"
+  | "Needs Review"
+  | "Retro"
+  | "Done";
+
+/**
+ * Worker mode values for session ID computation.
+ */
+export type WorkerModeLiteral = "architect" | "plan" | "implement" | "review" | "merge";
+
+/**
+ * Pre-check types that must pass before a transition proceeds.
+ */
+export type PreCheckType = "quality-gate";
+
+/**
+ * Action types for state machine transitions.
+ */
+export type ActionType =
+  | "skip"
+  | "investigate_no_pr"
+  | "dispatch_architect"
+  | "dispatch_planner"
+  | "dispatch_implementer"
+  | "dispatch_reviewer"
+  | "dispatch_merger"
+  | "resume_implementer_for_changes"
+  | "resume_implementer_for_retro"
+  | "transition_to_in_progress"
+  | "transition_to_needs_review"
+  | "transition_to_retro"
+  | "transition_to_todo"
+  | "relay_user_feedback"
+  | "remove_worker_active_and_redispatch"
+  | "add_needs_approval";
+
+/**
+ * Canonical issue status values with normalization.
+ */
+export const IssueStatus = {
+  TRIAGE: "Triage" as IssueStatusLiteral,
+  ICEBOX: "Icebox" as IssueStatusLiteral,
+  BACKLOG: "Backlog" as IssueStatusLiteral,
+  TODO: "Todo" as IssueStatusLiteral,
+  IN_PROGRESS: "In Progress" as IssueStatusLiteral,
+  NEEDS_REVIEW: "Needs Review" as IssueStatusLiteral,
+  RETRO: "Retro" as IssueStatusLiteral,
+  DONE: "Done" as IssueStatusLiteral,
+
+  /**
+   * Map Linear's status names to our canonical names.
+   */
+  ALIASES: {
+    "In Review": "Needs Review" as IssueStatusLiteral,
+  },
+
+  /**
+   * Normalize a raw status string to canonical form.
+   *
+   * Returns the canonical IssueStatusLiteral if the raw value matches
+   * a known alias, otherwise returns the original string unchanged.
+   * Returns empty string if raw is null.
+   */
+  normalize(raw: string | null): IssueStatusLiteral | string {
+    if (raw === null) {
+      return "";
+    }
+    return IssueStatus.ALIASES[raw as keyof typeof IssueStatus.ALIASES] ?? raw;
+  },
+} as const;
+
+/**
+ * Worker mode constants for session ID computation.
+ */
+export const WorkerMode = {
+  ARCHITECT: "architect" as WorkerModeLiteral,
+  PLAN: "plan" as WorkerModeLiteral,
+  IMPLEMENT: "implement" as WorkerModeLiteral,
+  REVIEW: "review" as WorkerModeLiteral,
+  MERGE: "merge" as WorkerModeLiteral,
+} as const;
+
+// =============================================================================
+// External API Types (documenting what APIs return)
+// =============================================================================
+
+export interface LinearStateDict {
+  name: string;
+}
+
+export interface LinearLabelNode {
+  name: string;
+}
+
+export interface LinearLabelsContainer {
+  nodes: LinearLabelNode[];
+}
+
+export interface LinearIssue {
+  identifier: string;
+  state: LinearStateDict | null;
+  labels: LinearLabelsContainer | null;
+}
+
+export interface LinearAttachment {
+  url?: string;
+}
+
+/**
+ * Raw Linear issue from API (MCP or GraphQL).
+ *
+ * Different APIs return different fields.
+ * The identifier field is required for valid issues.
+ */
+export interface LinearIssueRaw {
+  identifier?: string;
+  status?: string; // MCP format: status as string
+  state?: LinearStateDict; // GraphQL format: state.name
+  labels?: string[] | LinearLabelsContainer; // MCP: string[], GraphQL: {nodes: [...]}
+  attachments?: LinearAttachment[];
+}
+
+export interface GitHubLabel {
+  name: string;
+}
+
+export interface GitHubPR {
+  labels: GitHubLabel[] | null;
+}
+
+// =============================================================================
+// Internal Data Structures
+// =============================================================================
+
+/**
+ * Parsed GitHub PR reference from URL (immutable value object).
+ */
+export interface GitHubPRRef {
+  owner: string;
+  repo: string;
+  number: number;
+}
+
+export const GitHubPRRef = {
+  /**
+   * Parse a GitHub PR URL into a reference.
+   *
+   * @param url - GitHub PR URL like https://github.com/owner/repo/pull/123
+   * @returns GitHubPRRef or null if URL doesn't match expected format
+   */
+  fromUrl(url: string): GitHubPRRef | null {
+    // Validate URL format and owner/repo characters (alphanumeric, hyphen, underscore, dot)
+    const match = url.match(/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/);
+    if (!match) {
+      return null;
+    }
+
+    const prNumber = parseInt(match[3], 10);
+    // Guard against unreasonably large PR numbers (GraphQL uses 32-bit int)
+    if (prNumber > 2_147_483_647) {
+      return null;
+    }
+
+    return {
+      owner: match[1],
+      repo: match[2],
+      number: prNumber,
+    };
+  },
+};
+
+/**
+ * Parsed issue data from Linear API response.
+ */
+export interface ParsedIssue {
+  issueId: string;
+  status: IssueStatusLiteral | string; // Canonical status or unknown raw value
+  labels: string[];
+  prRef: GitHubPRRef | null;
+
+  // Computed properties (implemented as getters)
+  readonly hasWorkerDone: boolean;
+  readonly hasUserFeedback: boolean;
+  readonly hasUserInputNeeded: boolean;
+  readonly hasWorkerActive: boolean;
+  readonly hasNeedsApproval: boolean;
+  readonly hasHumanApproved: boolean;
+  readonly hasPr: boolean;
+  readonly needsPrStatus: boolean;
+}
+
+/**
+ * Create a ParsedIssue with computed properties.
+ */
+export function createParsedIssue(
+  issueId: string,
+  status: IssueStatusLiteral | string,
+  labels: string[],
+  prRef: GitHubPRRef | null
+): ParsedIssue {
+  return {
+    issueId,
+    status,
+    labels,
+    prRef,
+
+    get hasWorkerDone() {
+      return this.labels.includes("worker-done");
+    },
+
+    get hasUserFeedback() {
+      return this.labels.includes("user-feedback-given");
+    },
+
+    get hasUserInputNeeded() {
+      return this.labels.includes("user-input-needed");
+    },
+
+    get hasWorkerActive() {
+      return this.labels.includes("worker-active");
+    },
+
+    get hasNeedsApproval() {
+      return this.labels.includes("needs-approval");
+    },
+
+    get hasHumanApproved() {
+      return this.labels.includes("human-approved");
+    },
+
+    get hasPr() {
+      return this.prRef !== null;
+    },
+
+    get needsPrStatus() {
+      return (
+        this.status === IssueStatus.NEEDS_REVIEW &&
+        this.labels.includes("worker-done") &&
+        this.prRef !== null
+      );
+    },
+  };
+}
+
+/**
+ * Complete fetched data for an issue.
+ */
+export interface FetchedIssueData {
+  issueId: string;
+  status: IssueStatusLiteral | string; // Canonical status or unknown raw value
+  labels: string[];
+  hasPr: boolean; // True if Linear has a PR URL attached
+  prIsDraft: boolean | null; // null if no PR or couldn't check status
+  hasLiveWorker: boolean;
+  hasUserFeedback: boolean;
+  hasUserInputNeeded: boolean;
+  hasNeedsApproval: boolean;
+  hasHumanApproved: boolean;
+}
+
+/**
+ * Serialized form of IssueState.
+ */
+export interface IssueStateDict {
+  status: IssueStatusLiteral | string;
+  labels: string[];
+  hasPr: boolean;
+  prIsDraft: boolean | null;
+  hasLiveWorker: boolean;
+  suggestedAction: ActionType;
+  preCheck?: PreCheckType;
+  sessionId: string;
+  hasUserFeedback: boolean;
+}
+
+/**
+ * Serialized form of CollectedState.
+ */
+export interface CollectedStateDict {
+  issues: Record<string, IssueStateDict>;
+}
+
+/**
+ * Final state for an issue with suggested action.
+ */
+export interface IssueState {
+  status: IssueStatusLiteral | string; // Canonical status or unknown raw value
+  labels: string[];
+  hasPr: boolean; // Whether issue has a PR attached in Linear
+  prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
+  hasLiveWorker: boolean;
+  suggestedAction: ActionType;
+  preCheck?: PreCheckType;
+  sessionId: string;
+  hasUserFeedback: boolean;
+}
+
+export const IssueState = {
+  /**
+   * Convert to dictionary for JSON serialization.
+   */
+  toDict(state: IssueState): IssueStateDict {
+    const dict: IssueStateDict = {
+      status: state.status,
+      labels: state.labels,
+      hasPr: state.hasPr,
+      prIsDraft: state.prIsDraft,
+      hasLiveWorker: state.hasLiveWorker,
+      suggestedAction: state.suggestedAction,
+      sessionId: state.sessionId,
+      hasUserFeedback: state.hasUserFeedback,
+    };
+    if (state.preCheck) {
+      dict.preCheck = state.preCheck;
+    }
+    return dict;
+  },
+};
+
+/**
+ * Complete state collection result.
+ */
+export interface CollectedState {
+  issues: Record<string, IssueState>;
+}
+
+export const CollectedState = {
+  /**
+   * Convert to dictionary for JSON serialization.
+   */
+  toDict(state: CollectedState): CollectedStateDict {
+    return {
+      issues: Object.fromEntries(
+        Object.entries(state.issues).map(([k, v]) => [k, IssueState.toDict(v)])
+      ),
+    };
+  },
+};
+
+// =============================================================================
+// Utility Functions
+// =============================================================================
+
+/**
+ * Compute deterministic session ID using UUIDv5.
+ *
+ * Session IDs have `ses_` prefix for OpenCode compatibility.
+ *
+ * @param teamId - Linear project UUID
+ * @param issueId - Issue identifier (e.g., "ENG-21")
+ * @param mode - Worker mode (e.g., "implement", "review")
+ * @returns Session ID string with ses_ prefix (e.g., "ses_12345678-1234-5678-1234-567812345678")
+ * @throws Error if teamId is not a valid UUID string
+ */
+export function computeSessionId(teamId: string, issueId: string, mode: WorkerModeLiteral): string {
+  // Validate team ID is a valid UUID
+  if (!validateUuid(teamId)) {
+    throw new Error(`Invalid UUID: ${teamId}`);
+  }
+
+  const namespace = teamId;
+  const name = `${issueId.toLowerCase()}:${mode}`;
+  const uuid = uuidv5(name, namespace);
+
+  return `ses_${uuid}`;
+}
+
+/**
+ * Compute deterministic session ID for controller.
+ *
+ * Session IDs have `ses_` prefix for OpenCode compatibility.
+ *
+ * @param teamId - Linear team UUID (must be valid UUID string)
+ * @returns Session ID string with ses_ prefix
+ * @throws Error if teamId is not a valid UUID string
+ */
+export function computeControllerSessionId(teamId: string): string {
+  // Validate team ID is a valid UUID
+  if (!validateUuid(teamId)) {
+    throw new Error(`Invalid UUID: ${teamId}`);
+  }
+
+  const namespace = teamId;
+  const name = "controller";
+  const uuid = uuidv5(name, namespace);
+
+  return `ses_${uuid}`;
+}

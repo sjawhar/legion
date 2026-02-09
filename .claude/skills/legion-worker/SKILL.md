@@ -38,7 +38,30 @@ If you're resuming after user feedback, also read the Linear comments for the an
 When you need human input that the oracle can't answer:
 
 1. Push your work: `jj git push`
-2. Post your question as a Linear comment: `linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="...")`
+2. Post a structured escalation comment to Linear:
+
+```
+linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="
+## Escalation
+
+**Phase:** [current mode - architect/plan/implement/review]
+**Completed:** [what work has been done so far]
+
+### Blocker
+[Specific question or decision needed — be precise]
+
+### Options Considered
+1. [Option A] — [trade-offs]
+2. [Option B] — [trade-offs]
+3. [Option C if applicable]
+
+### Context
+- **Remaining estimate:** [rough scope of remaining work after unblock]
+- **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
+- **Branch:** [current branch name if applicable]
+")
+```
+
 3. Update labels: add `user-input-needed`, remove `worker-active`
 4. Exit immediately
 

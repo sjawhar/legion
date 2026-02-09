@@ -60,16 +60,19 @@ When both `user-input-needed` AND `user-feedback-given` labels present:
 
 Run state script:
 ```bash
-echo "$LINEAR_JSON" | bun run src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
+echo "$LINEAR_JSON" | bun run packages/daemon/src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
 ```
 
 State transitions (always remove `worker-done` after):
 
 | Current Status | Action |
 |----------------|--------|
-| Backlog + worker-done | → Todo, dispatch planner |
+| Backlog + worker-done | → Add `needs-approval`, remove `worker-done` (pause for human) |
+| Backlog + needs-approval + human-approved | → Todo, remove both labels, dispatch planner |
+
+> **Note:** The approval gate only applies to automated transitions. If a human manually moves an issue from Backlog → Todo in Linear, this is treated as an intentional bypass — the controller proceeds normally without requiring `human-approved`.
 | Todo + worker-done | → In Progress, dispatch implementer |
-| In Progress + worker-done | → Needs Review, dispatch reviewer |
+| In Progress + worker-done | Quality gate check → if pass: → Needs Review, dispatch reviewer. If fail: resume implementer with fix instructions |
 | Needs Review + worker-done (PR ready) | → Retro, resume implementer |
 | Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
 | Needs Review + worker-done (no PR) | `investigate_no_pr` - see below |
@@ -83,6 +86,35 @@ State transitions (always remove `worker-done` after):
 4. Linear attachment wasn't added
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
+
+### Quality Gate Check
+
+When the state machine returns `preCheck: "quality-gate"` (on In Progress + worker-done transitions), the controller must verify the worker's code before advancing.
+
+**Trust but verify:** The implement workflow self-enforces checks before PR (step 4). The controller independently verifies.
+
+```bash
+WORKSPACES_DIR=$(dirname "$LEGION_DIR")
+ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
+WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
+
+cd "$WORKSPACE_PATH"
+bun test 2>&1
+TST_EXIT=$?
+bunx tsc --noEmit 2>&1
+TSC_EXIT=$?
+bunx biome check 2>&1
+BIOME_EXIT=$?
+```
+
+**If all pass** (exit codes 0): Proceed with transition to Needs Review.
+
+**If any fail:** Do NOT advance to Needs Review. Instead:
+1. Remove `worker-done` label
+2. Resume the implementer session with the failure output
+3. The implementer will fix and re-add `worker-done` when ready
+
+**Reading preCheck:** After calling the state CLI, parse the returned JSON. If `preCheck` is present, run the quality gate before executing the suggested action. Only proceed with the action if the gate passes.
 
 ### 4. Route Triage
 
@@ -239,6 +271,8 @@ curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
 | `worker-active` | Worker dispatched and running |
 | `user-input-needed` | Blocked on human, controller skips |
 | `user-feedback-given` | Human responded, controller resumes |
+| `needs-approval` | Architect done, waiting for human approval |
+| `human-approved` | Human approved, controller advances to planner |
 
 ## Common Mistakes
 
