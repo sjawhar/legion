@@ -10,6 +10,8 @@ The controller passes explicit mode in the dispatch prompt:
 
 Trust the controller's explicit mode parameter.
 
+> **Note:** The daemon API mode is always `implement`. The sub-mode (fresh vs address-comments) is conveyed in the controller's prompt text, not the API call.
+
 ---
 
 ## All Modes: Rebase First
@@ -86,7 +88,7 @@ If any check fails:
 
 Do NOT create a PR if any check fails — fix first.
 
-Record the results as evidence for the controller's quality gate verification. Include in your Linear comment when adding `worker-done`:
+Record the results as evidence for the controller's quality gate verification. Include in your Linear comment:
 ```
 CI Results: tests ✅ | tsc ✅ | biome ✅
 ```

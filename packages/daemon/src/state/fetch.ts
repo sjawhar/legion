@@ -77,6 +77,7 @@ export class GitHubAPIError extends Error {
 
 interface DaemonWorker {
   id: string;
+  status?: string;
 }
 
 /**
@@ -99,6 +100,10 @@ export async function getLiveWorkers(daemonUrl: string): Promise<Record<string, 
     const result: Record<string, string> = {};
 
     for (const worker of workers) {
+      if (worker.status && worker.status !== "running" && worker.status !== "starting") {
+        continue;
+      }
+
       // Parse worker.id format: "ISSUE-ID-mode"
       // The mode is always the last segment after the last hyphen
       const lastDash = worker.id.lastIndexOf("-");
