@@ -179,6 +179,23 @@ describe("daemon server", () => {
     expect(entryBody.port).toBe(15500);
   });
 
+  it("rejects duplicate worker for same issue+mode", async () => {
+    await startTestServer();
+    const res1 = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-1", mode: "implement", workspace: "/tmp" }),
+    });
+    expect(res1.status).toBe(200);
+
+    const res2 = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-1", mode: "implement", workspace: "/tmp" }),
+    });
+    expect(res2.status).toBe(409);
+    const body = (await res2.json()) as { error: string };
+    expect(body.error).toBe("worker_already_exists");
+  });
+
   it("returns 404 for missing worker", async () => {
     await startTestServer();
     const response = await requestJson("/workers/unknown");

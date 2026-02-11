@@ -78,22 +78,24 @@ about what to do:
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
 
-State transitions (always remove `worker-done` after):
+### Routing by Action Intent
 
-| Current Status | Action |
-|----------------|--------|
-| Backlog + worker-done | → Add `needs-approval`, remove `worker-done` (pause for human) |
-| Backlog + needs-approval + human-approved | → Todo, remove both labels, dispatch planner |
+The state machine returns a `suggestedAction`. Route by prefix:
 
-> **Note:** The approval gate only applies to automated transitions. If a human manually moves an issue from Backlog → Todo in Linear, this is treated as an intentional bypass — the controller proceeds normally without requiring `human-approved`.
-| Todo + worker-done | → In Progress, dispatch implementer |
-| In Progress + worker-done | Quality gate check → if pass: → Needs Review, dispatch reviewer. If fail: resume implementer with fix instructions |
-| Needs Review + worker-done (PR ready) | → Retro, resume implementer |
-| Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
-| Needs Review + worker-done (no PR) | `investigate_no_pr` - see below |
-| Needs Review + worker-done (PR status unknown) | `retry_pr_check` - do NOT dispatch any worker; wait and re-check next iteration |
-| Retro + worker-done | Dispatch merger |
-| `remove_worker_active_and_redispatch` | Remove worker-active label, then dispatch |
+| Prefix | Intent | Controller action |
+|--------|--------|-------------------|
+| `dispatch_` | Spawn a new worker | `POST /workers` with mode from `ACTION_TO_MODE` |
+| `transition_to_` | Move issue to new status | Update Linear issue status |
+| `resume_` | Send prompt to existing worker | Find worker by sessionId, send prompt |
+| `relay_` | Forward information | Relay user feedback to worker |
+| `add_` | Add label | Add the specified label to the issue |
+| `remove_` | Remove label + retry | Remove label, then re-evaluate |
+| `retry_` | Wait | Do nothing this iteration, re-check next loop |
+| `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
+| `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
+
+This routing is stable across code changes. New action types automatically route
+correctly if they follow the naming convention.
 
 **Handling `investigate_no_pr`:** Worker marked done but no PR exists. Likely causes:
 1. Worker crashed before creating PR
