@@ -35,4 +35,28 @@ describe("task lock regressions (concurrency hazards)", () => {
     lock1.release();
     lock2.release();
   });
+
+  it("reclaims a stale lock when the holding process is dead", () => {
+    const lock1 = acquireLock(tempDir);
+    expect(lock1.acquired).toBe(true);
+    const lockPath = path.join(tempDir, ".lock");
+
+    const lockContent = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    fs.writeFileSync(
+      lockPath,
+      JSON.stringify({
+        ...lockContent,
+        timestamp: Date.now() - 60_000,
+        pid: 2_147_483_647,
+        startTime: "99999999999",
+      }),
+      "utf-8"
+    );
+
+    const lock2 = acquireLock(tempDir);
+    expect(lock2.acquired).toBe(true);
+
+    lock1.release();
+    lock2.release();
+  });
 });

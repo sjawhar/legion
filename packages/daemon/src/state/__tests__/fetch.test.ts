@@ -380,9 +380,11 @@ describe("getPrDraftStatusBatch", () => {
       return { stdout: "", stderr: "rate limited", exitCode: 1 };
     };
 
-    await expect(
-      getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
-    ).rejects.toThrow(GitHubAPIError);
+    await Promise.resolve(
+      expect(
+        getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
+      ).rejects.toThrow(GitHubAPIError)
+    );
 
     expect(callCount).toBe(3);
   });
@@ -394,9 +396,11 @@ describe("getPrDraftStatusBatch", () => {
       return { stdout: "not valid json {[", stderr: "", exitCode: 0 };
     };
 
-    await expect(
-      getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
-    ).rejects.toThrow(GitHubAPIError);
+    await Promise.resolve(
+      expect(
+        getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
+      ).rejects.toThrow(GitHubAPIError)
+    );
 
     expect(callCount).toBe(3);
   });

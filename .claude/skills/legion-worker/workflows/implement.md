@@ -97,9 +97,9 @@ CI Results: tests ✅ | tsc ✅ | biome ✅
 
 After all checks pass, spawn a cross-family review session before creating the PR.
 
-1. Spawn a review session:
+1. Spawn a review session using `background_task`:
    - Category: `review-implementation`
-   - Model override: Use a different model family than the one that implemented the code
+   - Model: Specify an explicit model from a different provider (e.g., `google/gemini-3-pro` or `openai/gpt-5.2-codex`)
    - Prompt: Include:
      - The original plan/requirements from the Linear issue
      - A summary of what was implemented

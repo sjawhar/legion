@@ -12,6 +12,22 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type { z } from "zod";
 
+/**
+ * Read process start time from /proc to guard against PID reuse.
+ * Returns null on non-Linux or if the proc file is unreadable.
+ */
+function getProcessStartTime(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const afterComm = stat.indexOf(") ");
+    if (afterComm === -1) return null;
+    const fields = stat.substring(afterComm + 2).split(" ");
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 const STALE_LOCK_THRESHOLD_MS = 30_000;
 
 export function sanitizePathSegment(value: string): string {
@@ -94,12 +110,17 @@ interface Lock {
 export function acquireLock(dirPath: string): Lock {
   const lockPath = join(dirPath, ".lock");
   const lockId = randomUUID();
+  const startTime = getProcessStartTime(process.pid);
 
   const createLockExclusive = (timestamp: number) => {
-    writeFileSync(lockPath, JSON.stringify({ id: lockId, timestamp }), {
-      encoding: "utf-8",
-      flag: "wx",
-    });
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ id: lockId, timestamp, pid: process.pid, startTime }),
+      {
+        encoding: "utf-8",
+        flag: "wx",
+      }
+    );
   };
 
   const isStale = () => {
@@ -107,7 +128,29 @@ export function acquireLock(dirPath: string): Lock {
       const lockContent = readFileSync(lockPath, "utf-8");
       const lockData = JSON.parse(lockContent);
       const lockAge = Date.now() - lockData.timestamp;
-      return lockAge > STALE_LOCK_THRESHOLD_MS;
+      if (lockAge <= STALE_LOCK_THRESHOLD_MS) return false;
+
+      if (typeof lockData.pid === "number") {
+        try {
+          process.kill(lockData.pid, 0);
+        } catch (err: unknown) {
+          if (err && typeof err === "object" && "code" in err) {
+            return (err as { code: string }).code === "ESRCH";
+          }
+          return true;
+        }
+
+        if (lockData.startTime != null) {
+          const currentStartTime = getProcessStartTime(lockData.pid);
+          if (currentStartTime !== null && currentStartTime !== lockData.startTime) {
+            return true;
+          }
+        }
+
+        return false;
+      }
+
+      return true;
     } catch {
       return true;
     }
@@ -129,7 +172,11 @@ export function acquireLock(dirPath: string): Lock {
     const tempLockPath = `${lockPath}.${lockId}`;
     const now = Date.now();
     try {
-      writeFileSync(tempLockPath, JSON.stringify({ id: lockId, timestamp: now }), "utf-8");
+      writeFileSync(
+        tempLockPath,
+        JSON.stringify({ id: lockId, timestamp: now, pid: process.pid, startTime }),
+        "utf-8"
+      );
       renameSync(tempLockPath, lockPath);
       const verification = readFileSync(lockPath, "utf-8");
       const verifiedData = JSON.parse(verification);
