@@ -7,13 +7,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { ACTION_TO_MODE, buildCollectedState, buildIssueState, suggestAction } from "../decision";
-import {
-  type ActionType,
-  CollectedState,
-  computeSessionId,
-  type FetchedIssueData,
-  IssueStatus,
-} from "../types";
+import { CollectedState, computeSessionId, type FetchedIssueData, IssueStatus } from "../types";
 
 describe("suggestAction", () => {
   it("todo_no_worker_done_no_live_worker dispatches planner", () => {
@@ -365,98 +359,6 @@ describe("approval gate", () => {
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("skip");
-  });
-});
-
-describe("quality gate pre-check", () => {
-  it("in_progress_worker_done_includes_quality_gate_precheck", () => {
-    const data: FetchedIssueData = {
-      issueId: "ENG-21",
-      status: "In Progress",
-      labels: ["worker-done"],
-      hasPr: false,
-      prIsDraft: null,
-      hasLiveWorker: false,
-      hasUserFeedback: false,
-      hasUserInputNeeded: false,
-      hasNeedsApproval: false,
-      hasHumanApproved: false,
-    };
-
-    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
-    expect(state.suggestedAction).toBe("transition_to_needs_review");
-    expect(state.preCheck).toBe("quality-gate");
-  });
-
-  it("other_transitions_have_no_precheck", () => {
-    const transitions: Array<{ status: string; labels: string[]; expectedAction: ActionType }> = [
-      { status: "Todo", labels: ["worker-done"], expectedAction: "transition_to_in_progress" },
-      { status: "Todo", labels: [], expectedAction: "dispatch_planner" },
-      { status: "In Progress", labels: [], expectedAction: "dispatch_implementer" },
-      { status: "Needs Review", labels: [], expectedAction: "dispatch_reviewer" },
-      { status: "Retro", labels: ["worker-done"], expectedAction: "dispatch_merger" },
-    ];
-
-    for (const { status, labels, expectedAction } of transitions) {
-      const data: FetchedIssueData = {
-        issueId: "ENG-21",
-        status,
-        labels,
-        hasPr: false,
-        prIsDraft: null,
-        hasLiveWorker: false,
-        hasUserFeedback: false,
-        hasUserInputNeeded: false,
-        hasNeedsApproval: false,
-        hasHumanApproved: false,
-      };
-
-      const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
-      expect(state.suggestedAction).toBe(expectedAction);
-      expect(state.preCheck).toBeUndefined();
-    }
-  });
-
-  it("precheck_serialized_in_toDict", () => {
-    const issuesData: FetchedIssueData[] = [
-      {
-        issueId: "ENG-21",
-        status: "In Progress",
-        labels: ["worker-done"],
-        hasPr: false,
-        prIsDraft: null,
-        hasLiveWorker: false,
-        hasUserFeedback: false,
-        hasUserInputNeeded: false,
-        hasNeedsApproval: false,
-        hasHumanApproved: false,
-      },
-    ];
-
-    const state = buildCollectedState(issuesData, "00000000-0000-0000-0000-000000000000");
-    const dict = CollectedState.toDict(state);
-    expect(dict.issues["ENG-21"].preCheck).toBe("quality-gate");
-  });
-
-  it("precheck_omitted_from_toDict_when_undefined", () => {
-    const issuesData: FetchedIssueData[] = [
-      {
-        issueId: "ENG-21",
-        status: "Todo",
-        labels: [],
-        hasPr: false,
-        prIsDraft: null,
-        hasLiveWorker: false,
-        hasUserFeedback: false,
-        hasUserInputNeeded: false,
-        hasNeedsApproval: false,
-        hasHumanApproved: false,
-      },
-    ];
-
-    const state = buildCollectedState(issuesData, "00000000-0000-0000-0000-000000000000");
-    const dict = CollectedState.toDict(state);
-    expect("preCheck" in dict.issues["ENG-21"]).toBe(false);
   });
 });
 

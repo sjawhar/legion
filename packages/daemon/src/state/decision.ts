@@ -13,7 +13,6 @@ import {
   type IssueState,
   IssueStatus,
   type IssueStatusLiteral,
-  type PreCheckType,
   WorkerMode,
   type WorkerModeLiteral,
 } from "./types";
@@ -141,9 +140,6 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
   const mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
   const sessionId = computeSessionId(teamId, data.issueId, mode);
 
-  const preCheck: PreCheckType | undefined =
-    action === "transition_to_needs_review" ? "quality-gate" : undefined;
-
   return {
     status: data.status,
     labels: data.labels,
@@ -151,7 +147,6 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     prIsDraft: data.prIsDraft,
     hasLiveWorker: data.hasLiveWorker,
     suggestedAction: action,
-    preCheck,
     sessionId,
     hasUserFeedback: data.hasUserFeedback,
   };

@@ -35,11 +35,6 @@ export type IssueStatusLiteral =
 export type WorkerModeLiteral = "architect" | "plan" | "implement" | "review" | "merge";
 
 /**
- * Pre-check types that must pass before a transition proceeds.
- */
-export type PreCheckType = "quality-gate";
-
-/**
  * Action types for state machine transitions.
  */
 export type ActionType =
@@ -295,7 +290,6 @@ export interface IssueStateDict {
   prIsDraft: boolean | null;
   hasLiveWorker: boolean;
   suggestedAction: ActionType;
-  preCheck?: PreCheckType;
   sessionId: string;
   hasUserFeedback: boolean;
 }
@@ -317,7 +311,6 @@ export interface IssueState {
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
   hasLiveWorker: boolean;
   suggestedAction: ActionType;
-  preCheck?: PreCheckType;
   sessionId: string;
   hasUserFeedback: boolean;
 }
@@ -337,9 +330,6 @@ export const IssueState = {
       sessionId: state.sessionId,
       hasUserFeedback: state.hasUserFeedback,
     };
-    if (state.preCheck) {
-      dict.preCheck = state.preCheck;
-    }
     return dict;
   },
 };
