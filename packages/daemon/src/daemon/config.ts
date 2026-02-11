@@ -9,6 +9,7 @@ export interface DaemonConfig {
   checkIntervalMs: number;
   baseWorkerPort: number;
   stateFilePath: string;
+  logDir: string;
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -33,6 +34,8 @@ function resolveStateFilePath(legionDir?: string): string {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const legionDir = env.LEGION_DIR;
+  const stateFilePath = resolveStateFilePath(legionDir);
+  const stateDir = path.dirname(stateFilePath);
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,
@@ -40,6 +43,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     shortId: env.LEGION_SHORT_ID,
     checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
-    stateFilePath: resolveStateFilePath(legionDir),
+    stateFilePath,
+    logDir: path.join(stateDir, "logs"),
   };
 }

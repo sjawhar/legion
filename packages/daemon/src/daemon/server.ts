@@ -29,6 +29,7 @@ export interface ServerOptions {
   serveManager: ServeManagerInterface;
   portAllocator: PortAllocatorInterface;
   stateFilePath: string;
+  logDir?: string;
   shutdownFn?: () => void | Promise<void>;
 }
 
@@ -196,6 +197,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
                 workspace,
                 port,
                 sessionId,
+                logDir: opts.logDir,
                 env: env as Record<string, string> | undefined,
               });
             } catch (error) {

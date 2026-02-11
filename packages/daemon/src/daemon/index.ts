@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { type DaemonConfig, loadConfig } from "./config";
 import { PortAllocator } from "./ports";
 import {
@@ -134,6 +135,7 @@ export async function startDaemon(
   if (!config.teamId) {
     throw new Error("Missing teamId for daemon");
   }
+  mkdirSync(config.logDir, { recursive: true });
   const resolvedDeps = resolveDependencies(config, deps);
 
   const adopted = await resolvedDeps.adoptExistingWorkers(config.stateFilePath);
@@ -177,6 +179,7 @@ export async function startDaemon(
     serveManager: resolvedDeps.serveManager,
     portAllocator: resolvedDeps.portAllocator,
     stateFilePath: config.stateFilePath,
+    logDir: config.logDir,
     shutdownFn: async () => {
       // Shutdown asynchronously after response is sent
       setTimeout(async () => {

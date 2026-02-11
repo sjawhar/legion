@@ -1,3 +1,5 @@
+import { mkdirSync, openSync } from "node:fs";
+import { join } from "node:path";
 import { readStateFile } from "./state-file";
 
 export interface SpawnOptions {
@@ -6,6 +8,7 @@ export interface SpawnOptions {
   workspace: string;
   port: number;
   sessionId: string;
+  logDir?: string;
   env?: Record<string, string>;
 }
 
@@ -19,13 +22,20 @@ export interface WorkerEntry {
 }
 
 export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
+  let stderr: "ignore" | number = "ignore";
+  if (opts.logDir) {
+    mkdirSync(opts.logDir, { recursive: true });
+    const logFile = join(opts.logDir, `${opts.issueId}-${opts.mode}.stderr.log`);
+    stderr = openSync(logFile, "a");
+  }
+
   const subprocess = Bun.spawn(["opencode", "serve", "--port", String(opts.port)], {
     cwd: opts.workspace,
     env: {
       ...process.env,
       ...opts.env,
     },
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "ignore", stderr],
   });
 
   const pid = subprocess.pid;
@@ -83,12 +93,12 @@ export async function adoptExistingWorkers(
     }))
   );
 
-   const adopted = new Map<string, WorkerEntry>();
-   for (const result of results) {
-     if (result.healthy) {
-       const normalizedId = result.id.toLowerCase();
-       adopted.set(normalizedId, { ...result.entry, id: normalizedId, status: "running" });
-     }
-   }
-   return adopted;
+  const adopted = new Map<string, WorkerEntry>();
+  for (const result of results) {
+    if (result.healthy) {
+      const normalizedId = result.id.toLowerCase();
+      adopted.set(normalizedId, { ...result.entry, id: normalizedId, status: "running" });
+    }
+  }
+  return adopted;
 }
