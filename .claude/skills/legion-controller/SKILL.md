@@ -63,6 +63,21 @@ Run state script:
 echo "$LINEAR_JSON" | bun run packages/daemon/src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
 ```
 
+The state CLI returns JSON with both `suggestedAction` and raw signals:
+- `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
+- `hasPr`, `prIsDraft` — PR state
+- `hasUserFeedback` — user interaction state
+
+Use `suggestedAction` as the primary guide, but consult raw signals when the suggestion
+is `skip`. The state machine returns `skip` conservatively — the controller should reason
+about what to do:
+
+| suggestedAction | Signals | Controller should... |
+|-----------------|---------|---------------------|
+| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for Linear auto-transition or manually advance to Needs Review |
+| `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
+| `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
+
 State transitions (always remove `worker-done` after):
 
 | Current Status | Action |
@@ -76,6 +91,7 @@ State transitions (always remove `worker-done` after):
 | Needs Review + worker-done (PR ready) | → Retro, resume implementer |
 | Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
 | Needs Review + worker-done (no PR) | `investigate_no_pr` - see below |
+| Needs Review + worker-done (PR status unknown) | `retry_pr_check` - do NOT dispatch any worker; wait and re-check next iteration |
 | Retro + worker-done | Dispatch merger |
 | `remove_worker_active_and_redispatch` | Remove worker-active label, then dispatch |
 
@@ -87,9 +103,16 @@ State transitions (always remove `worker-done` after):
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
 
-### Quality Gate Check
+**`retry_pr_check`:** The GitHub API couldn't determine PR draft status. Do nothing this iteration —
+don't dispatch a worker, don't transition status. The next loop iteration will re-run the state script
+which will retry the GitHub API call. If this persists across multiple iterations, investigate the
+GitHub API connectivity.
 
-When the state machine returns `preCheck: "quality-gate"` (on In Progress + worker-done transitions), the controller must verify the worker's code before advancing.
+### Quality Gate (Controller Policy)
+
+Before transitioning from In Progress → Needs Review, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
+
+**When to run:** Whenever executing a `transition_to_needs_review` action.
 
 **Trust but verify:** The implement workflow self-enforces checks before PR (step 4). The controller independently verifies.
 
@@ -113,8 +136,6 @@ BIOME_EXIT=$?
 1. Remove `worker-done` label
 2. Resume the implementer session with the failure output
 3. The implementer will fix and re-add `worker-done` when ready
-
-**Reading preCheck:** After calling the state CLI, parse the returned JSON. If `preCheck` is present, run the quality gate before executing the suggested action. Only proceed with the action if the gate passes.
 
 ### 4. Route Triage
 

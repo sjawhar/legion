@@ -1,5 +1,10 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
-import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
+import {
+  computeControllerSessionId,
+  computeSessionId,
+  WorkerMode,
+  type WorkerModeLiteral,
+} from "../state/types";
 import type { SpawnOptions, WorkerEntry } from "./serve-manager";
 import { readStateFile, writeStateFile } from "./state-file";
 
@@ -164,9 +169,25 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             }
 
             const normalizedIssueId = issueId.toLowerCase();
+            const workerId = `${normalizedIssueId}-${mode}`.toLowerCase();
+            const existing = workers.get(workerId);
+            if (existing) {
+              return jsonResponse(
+                {
+                  error: "worker_already_exists",
+                  id: workerId,
+                  port: existing.port,
+                  sessionId: existing.sessionId,
+                },
+                409
+              );
+            }
 
             const port = opts.portAllocator.allocate();
-            const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
+            const sessionId =
+              mode === "controller"
+                ? computeControllerSessionId(opts.teamId)
+                : computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
             let entry: WorkerEntry;
             try {
               entry = await opts.serveManager.spawnServe({

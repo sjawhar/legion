@@ -170,23 +170,56 @@ export async function startDaemon(
     }
   };
 
-   const { server, stop } = resolvedDeps.startServer({
-     port: config.daemonPort,
-     hostname: "127.0.0.1",
-     teamId: config.teamId,
-     serveManager: resolvedDeps.serveManager,
-     portAllocator: resolvedDeps.portAllocator,
-     stateFilePath: config.stateFilePath,
-     shutdownFn: async () => {
-       // Shutdown asynchronously after response is sent
-       setTimeout(async () => {
-         await shutdown(true);
-       }, 100);
-     },
-   });
+  const { server, stop } = resolvedDeps.startServer({
+    port: config.daemonPort,
+    hostname: "127.0.0.1",
+    teamId: config.teamId,
+    serveManager: resolvedDeps.serveManager,
+    portAllocator: resolvedDeps.portAllocator,
+    stateFilePath: config.stateFilePath,
+    shutdownFn: async () => {
+      // Shutdown asynchronously after response is sent
+      setTimeout(async () => {
+        await shutdown(true);
+      }, 100);
+    },
+  });
   stopServer = stop;
 
   const baseUrl = `http://127.0.0.1:${server.port}`;
+  try {
+    const controllerRes = await resolvedDeps.fetch(`${baseUrl}/workers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        issueId: "controller",
+        mode: "controller",
+        workspace: config.legionDir,
+        env: {
+          LINEAR_TEAM_ID: config.teamId,
+          LEGION_DIR: config.legionDir,
+          LEGION_DAEMON_PORT: String(server.port),
+          LEGION_SHORT_ID: config.shortId ?? "default",
+        },
+      }),
+    });
+    if (controllerRes.ok) {
+      const data = (await controllerRes.json()) as { port: number; sessionId: string };
+      await resolvedDeps.fetch(
+        `http://127.0.0.1:${data.port}/session/${data.sessionId}/prompt_async`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            parts: [{ type: "text", text: "/legion-controller" }],
+          }),
+        }
+      );
+      console.log(`Controller started: session=${data.sessionId} port=${data.port}`);
+    }
+  } catch (error) {
+    console.error(`Failed to spawn controller: ${error}`);
+  }
   intervalId = resolvedDeps.setInterval(
     () => healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch),
     config.checkIntervalMs
