@@ -82,7 +82,8 @@ export async function syncTaskTodoUpdate(
         body: { todos: nextTodos },
       });
     }
-  } catch {
-    // Todo sync is best-effort; silently ignore failures
+  } catch (err) {
+    // Todo sync is best-effort, but log first failure for observability
+    console.warn(`[task] todo sync failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

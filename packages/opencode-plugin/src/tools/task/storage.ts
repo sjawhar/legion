@@ -19,7 +19,7 @@ import type { z } from "zod";
 function getProcessStartTime(pid: number): string | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    const afterComm = stat.indexOf(") ");
+    const afterComm = stat.lastIndexOf(") ");
     if (afterComm === -1) return null;
     const fields = stat.substring(afterComm + 2).split(" ");
     return fields[19] ?? null;

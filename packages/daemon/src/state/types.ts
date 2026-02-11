@@ -49,6 +49,7 @@ export type ActionType =
   | "dispatch_architect"
   | "dispatch_planner"
   | "dispatch_implementer"
+  | "dispatch_implementer_for_retro"
   | "dispatch_reviewer"
   | "dispatch_merger"
   | "resume_implementer_for_changes"

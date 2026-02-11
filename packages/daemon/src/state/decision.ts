@@ -84,7 +84,10 @@ export function suggestAction(
       if (hasWorkerDone) {
         return "dispatch_merger";
       }
-      return "resume_implementer_for_retro";
+      if (hasLiveWorker) {
+        return "resume_implementer_for_retro";
+      }
+      return "dispatch_implementer_for_retro";
 
     default:
       return "skip";
@@ -97,6 +100,7 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   dispatch_architect: WorkerMode.ARCHITECT,
   dispatch_planner: WorkerMode.PLAN,
   dispatch_implementer: WorkerMode.IMPLEMENT,
+  dispatch_implementer_for_retro: WorkerMode.IMPLEMENT,
   dispatch_reviewer: WorkerMode.REVIEW,
   dispatch_merger: WorkerMode.MERGE,
   resume_implementer_for_changes: WorkerMode.IMPLEMENT,

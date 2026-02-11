@@ -102,9 +102,9 @@ describe("suggestAction", () => {
     expect(action).toBe("dispatch_merger");
   });
 
-  it("retro_no_worker_done resumes implementer", () => {
+  it("retro_without_live_worker_dispatches_implementer_for_retro", () => {
     const action = suggestAction(IssueStatus.RETRO, false, false, null, false);
-    expect(action).toBe("resume_implementer_for_retro");
+    expect(action).toBe("dispatch_implementer_for_retro");
   });
 
   it("retro_with_live_worker resumes implementer", () => {
