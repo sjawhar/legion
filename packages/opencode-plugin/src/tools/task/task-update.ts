@@ -68,6 +68,12 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
             if (validated.subject !== undefined) task.subject = validated.subject;
             if (validated.description !== undefined) task.description = validated.description;
             if (validated.status !== undefined) task.status = validated.status;
+            if (validated.status === "completed" || validated.status === "cancelled") {
+              if (task.metadata) {
+                delete task.metadata.lease_expires_at;
+                delete task.metadata.claimed_by_session;
+              }
+            }
             if (validated.owner !== undefined) task.owner = validated.owner;
             if (validated.parentID !== undefined) task.parentID = validated.parentID;
 
