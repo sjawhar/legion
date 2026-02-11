@@ -31,6 +31,8 @@ export interface ServerOptions {
   port?: number;
   hostname?: string;
   teamId: string;
+  legionDir: string;
+  shortId: string;
   serveManager: ServeManagerInterface;
   portAllocator: PortAllocatorInterface;
   stateFilePath: string;
@@ -243,7 +245,14 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
                 port,
                 sessionId,
                 logDir: opts.logDir,
-                env: env as Record<string, string> | undefined,
+                env: {
+                  LINEAR_ISSUE_ID: issueId,
+                  LINEAR_TEAM_ID: opts.teamId,
+                  LEGION_DIR: opts.legionDir,
+                  LEGION_SHORT_ID: opts.shortId,
+                  LEGION_DAEMON_PORT: String(server.port),
+                  ...(env as Record<string, string> | undefined),
+                },
               });
             } catch (error) {
               opts.portAllocator.release(port);

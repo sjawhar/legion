@@ -212,19 +212,10 @@ WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
 [ ! -d "$WORKSPACE_PATH" ] && jj workspace add "$WORKSPACE_PATH" --name "$ISSUE_LOWER" -R "$LEGION_DIR"
 
 # Dispatch worker via daemon HTTP API
+# The daemon auto-injects LINEAR_ISSUE_ID, LINEAR_TEAM_ID, LEGION_DIR, LEGION_SHORT_ID, LEGION_DAEMON_PORT
 RESPONSE=$(curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/workers \
   -H 'content-type: application/json' \
-  -d "{
-    \"issueId\": \"$ISSUE_IDENTIFIER\",
-    \"mode\": \"$MODE\",
-    \"workspace\": \"$WORKSPACE_PATH\",
-    \"env\": {
-      \"LINEAR_ISSUE_ID\": \"$ISSUE_IDENTIFIER\",
-      \"LINEAR_TEAM_ID\": \"$LINEAR_TEAM_ID\",
-      \"LEGION_DIR\": \"$LEGION_DIR\",
-      \"LEGION_SHORT_ID\": \"$LEGION_SHORT_ID\"
-    }
-  }")
+  -d "{\"issueId\": \"$ISSUE_IDENTIFIER\", \"mode\": \"$MODE\", \"workspace\": \"$WORKSPACE_PATH\"}")
 
 WORKER_ID=$(echo "$RESPONSE" | jq -r '.id')
 WORKER_PORT=$(echo "$RESPONSE" | jq -r '.port')

@@ -56,6 +56,8 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     port: randomPort(),
     hostname: "127.0.0.1",
     teamId: TEAM_ID,
+    legionDir: tempDir,
+    shortId: "test",
     serveManager,
     portAllocator: allocator,
     stateFilePath,

@@ -202,6 +202,8 @@ export async function startDaemon(
     port: config.daemonPort,
     hostname: "127.0.0.1",
     teamId: config.teamId,
+    legionDir: config.legionDir ?? "",
+    shortId: config.shortId ?? "default",
     serveManager: resolvedDeps.serveManager,
     portAllocator: resolvedDeps.portAllocator,
     stateFilePath: config.stateFilePath,
@@ -224,12 +226,6 @@ export async function startDaemon(
         issueId: "controller",
         mode: "controller",
         workspace: config.legionDir,
-        env: {
-          LINEAR_TEAM_ID: config.teamId,
-          LEGION_DIR: config.legionDir,
-          LEGION_DAEMON_PORT: String(server.port),
-          LEGION_SHORT_ID: config.shortId ?? "default",
-        },
       }),
     });
     if (controllerRes.ok) {
