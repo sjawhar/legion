@@ -101,6 +101,15 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
               }
 
               task.blockedBy = newBlockedBy;
+
+              for (const depId of addBlockedBy) {
+                const depPath = join(taskDir, `${depId}.json`);
+                const depTask = readJsonSafe(depPath, TaskSchema);
+                if (depTask) {
+                  depTask.blocks = [...new Set([...depTask.blocks, validated.id])];
+                  writeJsonAtomic(depPath, TaskSchema.parse(depTask));
+                }
+              }
             }
 
             if (addBlocks && addBlocks.length > 0) {

@@ -58,7 +58,8 @@ export type ActionType =
   | "transition_to_todo"
   | "relay_user_feedback"
   | "remove_worker_active_and_redispatch"
-  | "add_needs_approval";
+  | "add_needs_approval"
+  | "retry_pr_check";
 
 /**
  * Canonical issue status values with normalization.

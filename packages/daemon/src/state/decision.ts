@@ -55,6 +55,9 @@ export function suggestAction(
       if (hasWorkerDone) {
         return "transition_to_needs_review";
       }
+      if (hasPr && !hasLiveWorker) {
+        return "skip";
+      }
       if (hasLiveWorker) {
         return "skip";
       }
@@ -66,7 +69,7 @@ export function suggestAction(
           return "investigate_no_pr";
         }
         if (prIsDraft === null) {
-          return "skip";
+          return "retry_pr_check";
         }
         if (prIsDraft) {
           return "resume_implementer_for_changes";
@@ -81,9 +84,6 @@ export function suggestAction(
     case IssueStatus.RETRO:
       if (hasWorkerDone) {
         return "dispatch_merger";
-      }
-      if (hasLiveWorker) {
-        return "skip";
       }
       return "resume_implementer_for_retro";
 
@@ -109,6 +109,7 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   relay_user_feedback: WorkerMode.IMPLEMENT,
   remove_worker_active_and_redispatch: WorkerMode.IMPLEMENT,
   add_needs_approval: WorkerMode.PLAN,
+  retry_pr_check: WorkerMode.REVIEW,
 };
 
 export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {

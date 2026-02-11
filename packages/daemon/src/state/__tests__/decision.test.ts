@@ -51,9 +51,9 @@ describe("suggestAction", () => {
     expect(action).toBe("resume_implementer_for_changes");
   });
 
-  it("needs_review_worker_done_has_pr_but_unknown_status skips", () => {
+  it("needs_review_worker_done_has_pr_but_unknown_status retries pr check", () => {
     const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true);
-    expect(action).toBe("skip");
+    expect(action).toBe("retry_pr_check");
   });
 
   it("needs_review_worker_done_no_pr investigates", () => {
@@ -113,8 +113,21 @@ describe("suggestAction", () => {
     expect(action).toBe("resume_implementer_for_retro");
   });
 
-  it("retro_with_live_worker skips", () => {
+  it("retro_with_live_worker resumes implementer", () => {
     const action = suggestAction(IssueStatus.RETRO, false, true, null, false);
+    expect(action).toBe("resume_implementer_for_retro");
+  });
+
+  it("retry_pr_check_is_distinct_from_skip", () => {
+    const retry = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true);
+    const skip = suggestAction(IssueStatus.DONE, false, false, null, false);
+    expect(retry).toBe("retry_pr_check");
+    expect(skip).toBe("skip");
+    expect(retry).not.toBe(skip);
+  });
+
+  it("in_progress_has_pr_no_worker_done_no_live_worker_skips", () => {
+    const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, true);
     expect(action).toBe("skip");
   });
 
