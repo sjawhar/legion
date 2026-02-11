@@ -5,6 +5,7 @@ import path from "node:path";
 import { computeSessionId } from "../../state/types";
 import type { SpawnOptions, WorkerEntry } from "../serve-manager";
 import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "../server";
+import { type PersistedWorkerState, writeStateFile } from "../state-file";
 
 let mockSessionStatus: (() => Promise<unknown>) | null = null;
 
@@ -51,10 +52,14 @@ describe("daemon server", () => {
   const originalFetch = globalThis.fetch;
   const teamId = "123e4567-e89b-12d3-a456-426614174000";
 
-  async function startTestServer() {
+  async function startTestServer(options?: {
+    state?: PersistedWorkerState;
+    serveManagerOverrides?: Partial<ServeManagerInterface>;
+    portAllocatorOverride?: TestPortAllocator;
+  }) {
     spawnCalls = [];
     killCalls = [];
-    portAllocator = new TestPortAllocator(15500);
+    portAllocator = options?.portAllocatorOverride ?? new TestPortAllocator(15500);
     serveManager = {
       spawnServe: async (opts: SpawnOptions) => {
         spawnCalls.push(opts);
@@ -74,9 +79,15 @@ describe("daemon server", () => {
       },
       healthCheck: async () => true,
     };
+    if (options?.serveManagerOverrides) {
+      serveManager = { ...serveManager, ...options.serveManagerOverrides };
+    }
 
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-server-"));
     const stateFilePath = path.join(tempDir, "workers.json");
+    if (options?.state) {
+      await writeStateFile(stateFilePath, options.state);
+    }
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
@@ -196,6 +207,129 @@ describe("daemon server", () => {
     expect(res2.status).toBe(409);
     const body = (await res2.json()) as { error: string };
     expect(body.error).toBe("worker_already_exists");
+  });
+
+  it("waits for state load before checking duplicates", async () => {
+    let healthGateResolve!: () => void;
+    const healthGate = new Promise<void>((resolve) => {
+      healthGateResolve = () => resolve();
+    });
+    const existing: WorkerEntry = {
+      id: "eng-1-implement",
+      port: 15510,
+      pid: 4321,
+      sessionId: computeSessionId(teamId, "eng-1", "implement"),
+      startedAt: "2026-02-01T00:00:00.000Z",
+      status: "running",
+      crashCount: 0,
+      lastCrashAt: null,
+    };
+
+    await startTestServer({
+      state: {
+        workers: {
+          [existing.id]: existing,
+        },
+        crashHistory: {},
+      },
+      serveManagerOverrides: {
+        healthCheck: async () => {
+          await healthGate;
+          return true;
+        },
+      },
+    });
+
+    const responsePromise = requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-1", mode: "implement", workspace: "/tmp" }),
+    });
+
+    const early = await Promise.race([
+      responsePromise.then(() => "resolved" as const),
+      new Promise<"pending">((resolve) => {
+        setTimeout(() => resolve("pending"), 20);
+      }),
+    ]);
+
+    expect(early).toBe("pending");
+    healthGateResolve();
+    const response = await responsePromise;
+    expect(response.status).toBe(409);
+  });
+
+  it("allows respawn for dead workers", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-5", mode: "implement", workspace: "/tmp" }),
+    });
+    const created = (await createResponse.json()) as { id: string };
+
+    await requestJson(`/workers/${created.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        status: "dead",
+        crashCount: 1,
+        lastCrashAt: new Date().toISOString(),
+      }),
+    });
+
+    const respawn = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-5", mode: "implement", workspace: "/tmp" }),
+    });
+    expect(respawn.status).toBe(200);
+    expect(portAllocator.released).toEqual([15500]);
+  });
+
+  it("resets crash history via endpoint", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-6", mode: "implement", workspace: "/tmp" }),
+    });
+    const created = (await createResponse.json()) as { id: string };
+
+    await requestJson(`/workers/${created.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        status: "dead",
+        crashCount: 3,
+        lastCrashAt: new Date().toISOString(),
+      }),
+    });
+
+    const resetResponse = await requestJson(`/workers/${created.id}/crashes`, {
+      method: "DELETE",
+    });
+    expect(resetResponse.status).toBe(200);
+    expect(await resetResponse.json()).toEqual({ reset: true, id: created.id });
+
+    const respawn = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-6", mode: "implement", workspace: "/tmp" }),
+    });
+    expect(respawn.status).toBe(200);
+  });
+
+  it("auto-resets crash history after cooldown", async () => {
+    const workerId = "eng-7-implement";
+    const oldCrashAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await startTestServer({
+      state: {
+        workers: {},
+        crashHistory: {
+          [workerId]: { crashCount: 3, lastCrashAt: oldCrashAt },
+        },
+      },
+    });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-7", mode: "implement", workspace: "/tmp" }),
+    });
+    expect(response.status).toBe(200);
   });
 
   it("returns 404 for missing worker", async () => {

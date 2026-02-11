@@ -44,6 +44,7 @@ interface ErrorResponse {
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const MAX_CRASHES = 3;
+const ONE_HOUR_MS = 60 * 60 * 1000;
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: JSON_HEADERS });
@@ -127,7 +128,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
     await persistState();
   };
 
-  void loadState();
+  const stateLoaded = loadState();
 
   const server = Bun.serve({
     hostname,
@@ -148,9 +149,11 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
 
         if (segments.length === 1 && segments[0] === "workers") {
           if (method === "GET") {
+            await stateLoaded;
             return jsonResponse(Array.from(workers.values()));
           }
           if (method === "POST") {
+            await stateLoaded;
             let payload: Record<string, unknown>;
             try {
               payload = await parseJson(request);
@@ -188,7 +191,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const normalizedIssueId = issueId.toLowerCase();
             const workerId = `${normalizedIssueId}-${mode}`.toLowerCase();
             const existing = workers.get(workerId);
-            if (existing) {
+            if (existing && existing.status !== "dead") {
               return jsonResponse(
                 {
                   error: "worker_already_exists",
@@ -199,18 +202,31 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
                 409
               );
             }
+            if (existing) {
+              opts.portAllocator.release(existing.port);
+              workers.delete(workerId);
+            }
 
-            const crashHistoryEntry = crashHistory.get(workerId);
+            let crashHistoryEntry = crashHistory.get(workerId);
             if ((crashHistoryEntry?.crashCount ?? 0) >= MAX_CRASHES) {
-              return jsonResponse(
-                {
-                  error: "crash_limit_exceeded",
-                  id: workerId,
-                  crashCount: crashHistoryEntry?.crashCount ?? 0,
-                  message: "Worker has crashed too many times. Add user-input-needed label.",
-                },
-                429
-              );
+              const lastCrashAtMs = crashHistoryEntry?.lastCrashAt
+                ? new Date(crashHistoryEntry.lastCrashAt).getTime()
+                : 0;
+              if (Date.now() - lastCrashAtMs > ONE_HOUR_MS) {
+                crashHistory.delete(workerId);
+                await persistState();
+                crashHistoryEntry = undefined;
+              } else {
+                return jsonResponse(
+                  {
+                    error: "crash_limit_exceeded",
+                    id: workerId,
+                    crashCount: crashHistoryEntry?.crashCount ?? 0,
+                    message: "Worker has crashed too many times. Add user-input-needed label.",
+                  },
+                  429
+                );
+              }
             }
 
             const port = opts.portAllocator.allocate();
@@ -249,7 +265,19 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
         }
 
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "crashes") {
+          await stateLoaded;
+          if (method !== "DELETE") {
+            return notFound();
+          }
+          const workerId = segments[1].toLowerCase();
+          crashHistory.delete(workerId);
+          await persistState();
+          return jsonResponse({ reset: true, id: workerId });
+        }
+
         if (segments.length === 2 && segments[0] === "workers") {
+          await stateLoaded;
           const id = segments[1].toLowerCase();
           const entry = workers.get(id);
           if (!entry) {
@@ -315,6 +343,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
         }
 
         if (segments.length === 3 && segments[0] === "workers" && segments[2] === "status") {
+          await stateLoaded;
           if (method !== "GET") {
             return notFound();
           }

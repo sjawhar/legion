@@ -4,7 +4,7 @@ import { PortAllocator } from "../ports";
 import type { WorkerEntry } from "../serve-manager";
 import type { PersistedWorkerState } from "../state-file";
 
-type IntervalCallback = (...args: any[]) => void;
+type IntervalCallback = (...args: any[]) => Promise<void> | void;
 
 const baseEntry: WorkerEntry = {
   id: "eng-1-implement",
@@ -29,6 +29,14 @@ const secondEntry: WorkerEntry = {
 };
 
 const TEAM_ID = "123e4567-e89b-12d3-a456-426614174000";
+const noopSetTimeout: typeof setTimeout = Object.assign(
+  ((callback: (...args: any[]) => void) => {
+    callback();
+    return {} as ReturnType<typeof setTimeout>;
+  }) as unknown as typeof setTimeout,
+  { __promisify__: setTimeout.__promisify__ }
+);
+const noopClearTimeout = (() => {}) as typeof clearTimeout;
 
 describe("daemon entry", () => {
   const originalOn = process.on;
@@ -82,6 +90,8 @@ describe("daemon entry", () => {
         portAllocator: allocator,
         setInterval: () => 1 as unknown as ReturnType<typeof globalThis.setInterval>,
         clearInterval: () => {},
+        setTimeout: noopSetTimeout,
+        clearTimeout: noopClearTimeout,
         fetch: originalFetch,
       }
     );
@@ -106,15 +116,14 @@ describe("daemon entry", () => {
   });
 
   it("runs health loop ticks and cleans up dead workers", async () => {
-    let intervalCallback: IntervalCallback | null = null;
-    const setInterval: typeof globalThis.setInterval = (
-      callback: IntervalCallback,
-      _delay?: number,
-      ..._args: any[]
-    ) => {
-      intervalCallback = callback as IntervalCallback;
-      return 1 as unknown as ReturnType<typeof globalThis.setInterval>;
-    };
+    let timeoutCallback: IntervalCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: IntervalCallback, _delay?: number, ..._args: any[]) => {
+        timeoutCallback = callback as IntervalCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
 
     const deleteCalls: string[] = [];
     const patchCalls: Array<{ url: string; status: string }> = [];
@@ -173,16 +182,19 @@ describe("daemon entry", () => {
           stop: () => {},
         }),
         portAllocator: new PortAllocator(15000, 5),
-        setInterval,
+        setInterval: () => 1 as unknown as ReturnType<typeof globalThis.setInterval>,
         clearInterval: () => {},
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
         fetch: globalThis.fetch,
       }
     );
 
-    if (!intervalCallback) {
+    if (!timeoutCallback) {
       throw new Error("Expected health loop callback to be scheduled");
     }
-    await (intervalCallback as IntervalCallback)();
+    const result = (timeoutCallback as () => Promise<void>)();
+    await result;
 
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0]).toContain(secondEntry.id);
@@ -209,7 +221,7 @@ describe("daemon entry", () => {
 
     const killed: WorkerEntry[] = [];
     let stopCalls = 0;
-    let clearedInterval = 0;
+    let clearedTimeout = 0;
     let finalState: PersistedWorkerState | null = null;
 
     await startDaemon(
@@ -246,9 +258,11 @@ describe("daemon entry", () => {
         }),
         portAllocator: new PortAllocator(15000, 5),
         setInterval: () => 1 as unknown as ReturnType<typeof globalThis.setInterval>,
-        clearInterval: () => {
-          clearedInterval += 1;
-        },
+        clearInterval: () => {},
+        setTimeout: noopSetTimeout,
+        clearTimeout: (() => {
+          clearedTimeout += 1;
+        }) as typeof globalThis.clearTimeout,
         fetch: originalFetch,
       }
     );
@@ -260,7 +274,7 @@ describe("daemon entry", () => {
 
     expect(killed).toEqual([baseEntry, secondEntry]);
     expect(stopCalls).toBe(1);
-    expect(clearedInterval).toBe(1);
+    expect(clearedTimeout).toBe(1);
     if (!finalState) {
       throw new Error("Expected final state to be written");
     }

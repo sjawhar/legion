@@ -28,6 +28,8 @@ interface DaemonDependencies {
   fetch: typeof fetch;
   setInterval: typeof setInterval;
   clearInterval: typeof clearInterval;
+  setTimeout: typeof setTimeout;
+  clearTimeout: typeof clearTimeout;
 }
 
 export interface DaemonHandle {
@@ -140,6 +142,8 @@ function resolveDependencies(
     fetch: overrides?.fetch ?? globalThis.fetch,
     setInterval: overrides?.setInterval ?? setInterval,
     clearInterval: overrides?.clearInterval ?? clearInterval,
+    setTimeout: overrides?.setTimeout ?? setTimeout,
+    clearTimeout: overrides?.clearTimeout ?? clearTimeout,
   };
 }
 
@@ -162,7 +166,7 @@ export async function startDaemon(
   seedAllocator(resolvedDeps.portAllocator, adopted.workers.values());
 
   let shuttingDown = false;
-  let intervalId: ReturnType<typeof setInterval> | null = null;
+  let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
   let stopServer: () => void = () => {};
 
   const shutdown = async (exitAfter = false) => {
@@ -170,9 +174,9 @@ export async function startDaemon(
       return;
     }
     shuttingDown = true;
-    if (intervalId) {
-      resolvedDeps.clearInterval(intervalId);
-      intervalId = null;
+    if (healthTickTimeout) {
+      resolvedDeps.clearTimeout(healthTickTimeout);
+      healthTickTimeout = null;
     }
 
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -245,10 +249,18 @@ export async function startDaemon(
   } catch (error) {
     console.error(`Failed to spawn controller: ${error}`);
   }
-  intervalId = resolvedDeps.setInterval(
-    () => healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch),
-    config.checkIntervalMs
-  );
+  const scheduleHealthTick = () => {
+    healthTickTimeout = resolvedDeps.setTimeout(async () => {
+      try {
+        await healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch);
+      } finally {
+        if (!shuttingDown) {
+          scheduleHealthTick();
+        }
+      }
+    }, config.checkIntervalMs);
+  };
+  scheduleHealthTick();
 
   const handleSignal = async () => {
     await shutdown(true);
