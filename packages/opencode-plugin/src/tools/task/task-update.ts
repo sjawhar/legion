@@ -54,108 +54,116 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
           return JSON.stringify({ error: "task_lock_unavailable" });
         }
 
+        let result: string;
+        let validatedTask: ReturnType<typeof TaskSchema.parse> | null = null;
         try {
-          const taskPath = join(taskDir, `${validated.id}.json`);
-          const task = readJsonSafe(taskPath, TaskSchema);
+          const computeResult = () => {
+            const taskPath = join(taskDir, `${validated.id}.json`);
+            const task = readJsonSafe(taskPath, TaskSchema);
 
-          if (!task) {
-            return JSON.stringify({ error: "task_not_found" });
-          }
-
-          if (validated.subject !== undefined) task.subject = validated.subject;
-          if (validated.description !== undefined) task.description = validated.description;
-          if (validated.status !== undefined) task.status = validated.status;
-          if (validated.owner !== undefined) task.owner = validated.owner;
-          if (validated.parentID !== undefined) task.parentID = validated.parentID;
-
-          const addBlocks = validated.addBlocks;
-          const addBlockedBy = validated.addBlockedBy;
-          const warnings: string[] = [];
-
-          const needsGraphCheck =
-            (addBlocks && addBlocks.length > 0) || (addBlockedBy && addBlockedBy.length > 0);
-          const allTasks = needsGraphCheck ? readAllTasks(taskDir) : [];
-          const taskMap = needsGraphCheck ? new Map(allTasks.map((t) => [t.id, t])) : new Map();
-
-          if (addBlockedBy && addBlockedBy.length > 0) {
-            const newBlockedBy = [...new Set([...task.blockedBy, ...addBlockedBy])];
-
-            taskMap.set(validated.id, { ...task, blockedBy: newBlockedBy });
-
-            const cycle = detectCycle(validated.id, newBlockedBy, (id) => {
-              const t = taskMap.get(id);
-              return t ? { blocks: t.blocks, blockedBy: t.blockedBy } : null;
-            });
-
-            if (cycle) {
-              return JSON.stringify({ error: "cycle_detected", cycle });
+            if (!task) {
+              return JSON.stringify({ error: "task_not_found" });
             }
 
-            for (const depId of addBlockedBy) {
-              if (!taskMap.has(depId)) {
-                warnings.push(`blockedBy references non-existent task ${depId}`);
+            if (validated.subject !== undefined) task.subject = validated.subject;
+            if (validated.description !== undefined) task.description = validated.description;
+            if (validated.status !== undefined) task.status = validated.status;
+            if (validated.owner !== undefined) task.owner = validated.owner;
+            if (validated.parentID !== undefined) task.parentID = validated.parentID;
+
+            const addBlocks = validated.addBlocks;
+            const addBlockedBy = validated.addBlockedBy;
+            const warnings: string[] = [];
+
+            const needsGraphCheck =
+              (addBlocks && addBlocks.length > 0) || (addBlockedBy && addBlockedBy.length > 0);
+            const allTasks = needsGraphCheck ? readAllTasks(taskDir) : [];
+            const taskMap = needsGraphCheck ? new Map(allTasks.map((t) => [t.id, t])) : new Map();
+
+            if (addBlockedBy && addBlockedBy.length > 0) {
+              const newBlockedBy = [...new Set([...task.blockedBy, ...addBlockedBy])];
+
+              taskMap.set(validated.id, { ...task, blockedBy: newBlockedBy });
+
+              const cycle = detectCycle(validated.id, newBlockedBy, (id) => {
+                const t = taskMap.get(id);
+                return t ? { blocks: t.blocks, blockedBy: t.blockedBy } : null;
+              });
+
+              if (cycle) {
+                return JSON.stringify({ error: "cycle_detected", cycle });
               }
+
+              for (const depId of addBlockedBy) {
+                if (!taskMap.has(depId)) {
+                  warnings.push(`blockedBy references non-existent task ${depId}`);
+                }
+              }
+
+              task.blockedBy = newBlockedBy;
             }
 
-            task.blockedBy = newBlockedBy;
-          }
+            if (addBlocks && addBlocks.length > 0) {
+              const newBlocks = [...new Set([...task.blocks, ...addBlocks])];
 
-          if (addBlocks && addBlocks.length > 0) {
-            const newBlocks = [...new Set([...task.blocks, ...addBlocks])];
+              for (const blockedId of addBlocks) {
+                const blockedTask = taskMap.get(blockedId);
+                if (blockedTask) {
+                  const proposedBlockedBy = [...new Set([...blockedTask.blockedBy, validated.id])];
+                  const cycle = detectCycle(blockedId, proposedBlockedBy, (id) => {
+                    if (id === blockedId)
+                      return { blocks: blockedTask.blocks, blockedBy: proposedBlockedBy };
+                    const t = taskMap.get(id);
+                    return t ? { blocks: t.blocks, blockedBy: t.blockedBy } : null;
+                  });
 
-            for (const blockedId of addBlocks) {
-              const blockedTask = taskMap.get(blockedId);
-              if (blockedTask) {
-                const proposedBlockedBy = [...new Set([...blockedTask.blockedBy, validated.id])];
-                const cycle = detectCycle(blockedId, proposedBlockedBy, (id) => {
-                  if (id === blockedId)
-                    return { blocks: blockedTask.blocks, blockedBy: proposedBlockedBy };
-                  const t = taskMap.get(id);
-                  return t ? { blocks: t.blocks, blockedBy: t.blockedBy } : null;
-                });
+                  if (cycle) {
+                    return JSON.stringify({ error: "cycle_detected", cycle });
+                  }
+                }
+              }
 
-                if (cycle) {
-                  return JSON.stringify({ error: "cycle_detected", cycle });
+              task.blocks = newBlocks;
+            }
+
+            if (validated.metadata !== undefined) {
+              task.metadata = { ...task.metadata, ...validated.metadata };
+              for (const key of Object.keys(task.metadata)) {
+                if (task.metadata[key] === null) {
+                  delete task.metadata[key];
                 }
               }
             }
 
-            task.blocks = newBlocks;
-          }
+            validatedTask = TaskSchema.parse(task);
+            writeJsonAtomic(taskPath, validatedTask);
 
-          if (validated.metadata !== undefined) {
-            task.metadata = { ...task.metadata, ...validated.metadata };
-            for (const key of Object.keys(task.metadata)) {
-              if (task.metadata[key] === null) {
-                delete task.metadata[key];
+            if (addBlocks && addBlocks.length > 0) {
+              for (const blockedId of addBlocks) {
+                const blockedPath = join(taskDir, `${blockedId}.json`);
+                const blockedTask = readJsonSafe(blockedPath, TaskSchema);
+                if (blockedTask) {
+                  blockedTask.blockedBy = [...new Set([...blockedTask.blockedBy, validated.id])];
+                  writeJsonAtomic(blockedPath, TaskSchema.parse(blockedTask));
+                }
               }
             }
-          }
 
-          const validatedTask = TaskSchema.parse(task);
-          writeJsonAtomic(taskPath, validatedTask);
-
-          if (addBlocks && addBlocks.length > 0) {
-            for (const blockedId of addBlocks) {
-              const blockedPath = join(taskDir, `${blockedId}.json`);
-              const blockedTask = readJsonSafe(blockedPath, TaskSchema);
-              if (blockedTask) {
-                blockedTask.blockedBy = [...new Set([...blockedTask.blockedBy, validated.id])];
-                writeJsonAtomic(blockedPath, TaskSchema.parse(blockedTask));
-              }
+            const response: Record<string, unknown> = { task: validatedTask };
+            if (warnings.length > 0) {
+              response.warnings = warnings;
             }
-          }
+            return JSON.stringify(response);
+          };
 
-          await syncTaskTodoUpdate(ctx, validatedTask, context.sessionID);
-
-          const result: Record<string, unknown> = { task: validatedTask };
-          if (warnings.length > 0) {
-            result.warnings = warnings;
-          }
-          return JSON.stringify(result);
+          result = computeResult();
         } finally {
           lock.release();
         }
+        if (validatedTask) {
+          syncTaskTodoUpdate(ctx, validatedTask, context.sessionID).catch(() => {});
+        }
+        return result;
       } catch (error) {
         if (error instanceof Error && error.message.includes("Required")) {
           return JSON.stringify({ error: "validation_error", message: error.message });

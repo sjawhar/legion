@@ -35,102 +35,116 @@ export function createTaskCreateTool(ctx?: PluginInput, listId?: string): ToolDe
           return JSON.stringify({ error: "task_lock_unavailable" });
         }
 
+        let validatedTask: Task | null = null;
+        let result: string;
         try {
-          const taskId = generateTaskId();
+          const computeResult = () => {
+            const taskId = generateTaskId();
 
-          const proposedBlockedBy = validated.blockedBy ?? [];
-          const proposedBlocks = validated.blocks ?? [];
+            const proposedBlockedBy = validated.blockedBy ?? [];
+            const proposedBlocks = validated.blocks ?? [];
 
-          const allTasks =
-            proposedBlockedBy.length > 0 || proposedBlocks.length > 0 ? readAllTasks(taskDir) : [];
-          const taskMap = new Map(allTasks.map((t) => [t.id, t]));
+            const allTasks =
+              proposedBlockedBy.length > 0 || proposedBlocks.length > 0
+                ? readAllTasks(taskDir)
+                : [];
+            const taskMap = new Map(allTasks.map((t) => [t.id, t]));
 
-          if (proposedBlockedBy.length > 0 || proposedBlocks.length > 0) {
-            const getTaskWithVirtualEdges = (
-              id: string
-            ): { blocks: string[]; blockedBy: string[] } | null => {
-              if (id === taskId) {
-                return { blocks: proposedBlocks, blockedBy: proposedBlockedBy };
+            if (proposedBlockedBy.length > 0 || proposedBlocks.length > 0) {
+              const getTaskWithVirtualEdges = (
+                id: string
+              ): { blocks: string[]; blockedBy: string[] } | null => {
+                if (id === taskId) {
+                  return { blocks: proposedBlocks, blockedBy: proposedBlockedBy };
+                }
+                const t = taskMap.get(id);
+                if (!t) return null;
+                const blockedBy = proposedBlocks.includes(id)
+                  ? [...new Set([...t.blockedBy, taskId])]
+                  : t.blockedBy;
+                return { blocks: t.blocks, blockedBy };
+              };
+
+              const forwardCycle = detectCycle(taskId, proposedBlockedBy, getTaskWithVirtualEdges);
+              if (forwardCycle) {
+                return JSON.stringify({ error: "cycle_detected", cycle: forwardCycle });
               }
-              const t = taskMap.get(id);
-              if (!t) return null;
-              const blockedBy = proposedBlocks.includes(id)
-                ? [...new Set([...t.blockedBy, taskId])]
-                : t.blockedBy;
-              return { blocks: t.blocks, blockedBy };
+
+              for (const blockedId of proposedBlocks) {
+                const virtualBlockedBy = [
+                  ...new Set([...(taskMap.get(blockedId)?.blockedBy ?? []), taskId]),
+                ];
+                const blocksCycle = detectCycle(
+                  blockedId,
+                  virtualBlockedBy,
+                  getTaskWithVirtualEdges
+                );
+                if (blocksCycle) {
+                  return JSON.stringify({ error: "cycle_detected", cycle: blocksCycle });
+                }
+              }
+            }
+
+            const warnings: string[] = [];
+            for (const depId of proposedBlockedBy) {
+              if (!taskMap.has(depId) && allTasks.length > 0) {
+                const depPath = join(taskDir, `${depId}.json`);
+                const dep = readJsonSafe(depPath, TaskSchema);
+                if (!dep) {
+                  warnings.push(`blockedBy references non-existent task ${depId}`);
+                }
+              } else if (allTasks.length === 0) {
+                const depPath = join(taskDir, `${depId}.json`);
+                const dep = readJsonSafe(depPath, TaskSchema);
+                if (!dep) {
+                  warnings.push(`blockedBy references non-existent task ${depId}`);
+                }
+              }
+            }
+
+            const task: Task = {
+              id: taskId,
+              subject: validated.subject,
+              description: validated.description ?? "",
+              status: "pending",
+              blocks: proposedBlocks,
+              blockedBy: proposedBlockedBy,
+              owner: validated.owner,
+              metadata: validated.metadata,
+              parentID: validated.parentID,
+              threadID: context.sessionID,
             };
 
-            const forwardCycle = detectCycle(taskId, proposedBlockedBy, getTaskWithVirtualEdges);
-            if (forwardCycle) {
-              return JSON.stringify({ error: "cycle_detected", cycle: forwardCycle });
-            }
+            validatedTask = TaskSchema.parse(task);
+            writeJsonAtomic(join(taskDir, `${taskId}.json`), validatedTask);
 
             for (const blockedId of proposedBlocks) {
-              const virtualBlockedBy = [
-                ...new Set([...(taskMap.get(blockedId)?.blockedBy ?? []), taskId]),
-              ];
-              const blocksCycle = detectCycle(blockedId, virtualBlockedBy, getTaskWithVirtualEdges);
-              if (blocksCycle) {
-                return JSON.stringify({ error: "cycle_detected", cycle: blocksCycle });
+              const blockedPath = join(taskDir, `${blockedId}.json`);
+              const blockedTask = readJsonSafe(blockedPath, TaskSchema);
+              if (blockedTask) {
+                blockedTask.blockedBy = [...new Set([...blockedTask.blockedBy, taskId])];
+                writeJsonAtomic(blockedPath, TaskSchema.parse(blockedTask));
               }
             }
-          }
 
-          const warnings: string[] = [];
-          for (const depId of proposedBlockedBy) {
-            if (!taskMap.has(depId) && allTasks.length > 0) {
-              const depPath = join(taskDir, `${depId}.json`);
-              const dep = readJsonSafe(depPath, TaskSchema);
-              if (!dep) {
-                warnings.push(`blockedBy references non-existent task ${depId}`);
-              }
-            } else if (allTasks.length === 0) {
-              const depPath = join(taskDir, `${depId}.json`);
-              const dep = readJsonSafe(depPath, TaskSchema);
-              if (!dep) {
-                warnings.push(`blockedBy references non-existent task ${depId}`);
-              }
+            const response: Record<string, unknown> = {
+              task: { id: validatedTask.id, subject: validatedTask.subject },
+            };
+            if (warnings.length > 0) {
+              response.warnings = warnings;
             }
-          }
 
-          const task: Task = {
-            id: taskId,
-            subject: validated.subject,
-            description: validated.description ?? "",
-            status: "pending",
-            blocks: proposedBlocks,
-            blockedBy: proposedBlockedBy,
-            owner: validated.owner,
-            metadata: validated.metadata,
-            parentID: validated.parentID,
-            threadID: context.sessionID,
+            return JSON.stringify(response);
           };
 
-          const validatedTask = TaskSchema.parse(task);
-          writeJsonAtomic(join(taskDir, `${taskId}.json`), validatedTask);
-
-          for (const blockedId of proposedBlocks) {
-            const blockedPath = join(taskDir, `${blockedId}.json`);
-            const blockedTask = readJsonSafe(blockedPath, TaskSchema);
-            if (blockedTask) {
-              blockedTask.blockedBy = [...new Set([...blockedTask.blockedBy, taskId])];
-              writeJsonAtomic(blockedPath, TaskSchema.parse(blockedTask));
-            }
-          }
-
-          await syncTaskTodoUpdate(ctx, validatedTask, context.sessionID);
-
-          const result: Record<string, unknown> = {
-            task: { id: validatedTask.id, subject: validatedTask.subject },
-          };
-          if (warnings.length > 0) {
-            result.warnings = warnings;
-          }
-
-          return JSON.stringify(result);
+          result = computeResult();
         } finally {
           lock.release();
         }
+        if (validatedTask) {
+          syncTaskTodoUpdate(ctx, validatedTask, context.sessionID).catch(() => {});
+        }
+        return result;
       } catch (error) {
         if (error instanceof Error && error.message.includes("Required")) {
           return JSON.stringify({ error: "validation_error", message: error.message });
