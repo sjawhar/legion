@@ -17,23 +17,22 @@ PR_URL=$(gh pr view "$LINEAR_ISSUE_ID" --json url --jq '.url')
 
 ### 2. Launch Background Subagent (Parallel)
 
-Use Bash tool with `run_in_background: true` to spawn a fresh subagent:
+Use `background_task` tool to spawn a fresh subagent:
 
-```bash
-# run_in_background: true
-opencode run "You are analyzing a completed PR to capture learnings.
+- **Category:** `unspecified-low`
+- **Description:** "Retro analysis for $LINEAR_ISSUE_ID"
+- **Prompt:**
 
-Issue: $LINEAR_ISSUE_ID
-PR: $PR_URL
-
-1. Fetch the PR diff and description via gh pr view and gh pr diff
-2. Invoke /compound-engineering:workflows:compound to document learnings
-3. Write output to docs/solutions/ in the current directory
-
-Focus on patterns that would help future implementations."
-```
-
-The subagent has NO prior context - it discovers what was learned from the PR alone.
+> You are analyzing a completed PR to capture learnings.
+>
+> Issue: $LINEAR_ISSUE_ID
+> PR: $PR_URL
+>
+> 1. Fetch the PR diff and description via gh pr view and gh pr diff
+> 2. Invoke /compound-engineering:workflows:compound to document learnings
+> 3. Write output to docs/solutions/ in the current directory
+>
+> Focus on patterns that would help future implementations.
 
 ### 3. Do Your Own Compound (In Parallel)
 
