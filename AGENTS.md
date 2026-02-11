@@ -2,22 +2,20 @@
 
 Autonomous development swarm using OpenCode agents. Workers implement Linear issues in isolated jj workspaces, coordinated by a controller daemon.
 
-## Two-Layer Architecture
+## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ OpenCode Skills (markdown)                                  │
-│  controller: polls Linear, dispatches workers via HTTP      │
-│  worker: 7 workflows (architect/plan/implement/review/...)  │
-│  ↕ HTTP API + stdin/stdout + env vars                       │
-├─────────────────────────────────────────────────────────────┤
-│ TypeScript Daemon (Bun)                                     │
-│  cli/       citty CLI (start/stop/status/attach/teams)      │
-│  daemon/    HTTP server, worker process management          │
-│  state/     Issue state machine, decision logic             │
-│  util/      Base62 short IDs                                │
-└─────────────────────────────────────────────────────────────┘
-```
+The state machine provides **deterministic defaults + raw signals**. The controller skill
+**decides whether to follow or override** them. Users customize behavior by modifying the
+controller skill, not the TypeScript.
+
+- **TypeScript daemon** — thin substrate: spawns processes, tracks health, computes
+  deterministic session IDs, collects signals from Linear/GitHub/workers, suggests actions.
+  The suggestions are testable defaults, not policy.
+- **Controller skill** — the customization point: reads suggested actions + raw signals,
+  executes transitions, runs quality gates, handles edge cases. Users who want different
+  workflows edit this file.
+- **Worker skills** — execute specific workflow phases (architect, plan, implement, review,
+  retro, merge). Each is independently modifiable.
 
 Skills invoke TypeScript via: HTTP API (`/workers`), piped CLI (`packages/daemon/src/state/cli.ts`), and environment variables. TypeScript never calls skills directly.
 

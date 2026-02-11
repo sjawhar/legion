@@ -5,6 +5,10 @@ description: Use when coordinating Legion workers across Linear issues - invoked
 
 # Legion Controller
 
+> **Customization:** This skill is the primary extension point for Legion's behavior.
+> The state machine provides suggested actions and raw signals. This skill decides what
+> to do with them. Modify this file to change how issues flow through the pipeline.
+
 Persistent coordinator that loops forever, dispatching and resuming workers based on Linear issue state.
 
 ## Environment
