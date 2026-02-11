@@ -9,7 +9,12 @@ import {
   type WorkerEntry,
 } from "./serve-manager";
 import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "./server";
-import { readStateFile, type WorkerState, writeStateFile } from "./state-file";
+import {
+  type CrashHistoryEntry,
+  type PersistedWorkerState,
+  readStateFile,
+  writeStateFile,
+} from "./state-file";
 
 type ServerHandle = ReturnType<typeof startServer>;
 
@@ -31,12 +36,15 @@ export interface DaemonHandle {
   config: DaemonConfig;
 }
 
-function mapToState(entries: Map<string, WorkerEntry>): WorkerState {
-  const state: WorkerState = {};
+function mapToState(
+  entries: Map<string, WorkerEntry>,
+  crashHistory: Record<string, CrashHistoryEntry>
+): PersistedWorkerState {
+  const state: Record<string, WorkerEntry> = {};
   for (const [id, entry] of entries.entries()) {
     state[id] = entry;
   }
-  return state;
+  return { workers: state, crashHistory };
 }
 
 function seedAllocator(allocator: PortAllocatorInterface, entries: Iterable<WorkerEntry>): void {
@@ -97,10 +105,18 @@ async function healthTick(
           return;
         }
 
+        entry.crashCount = (entry.crashCount ?? 0) + 1;
+        entry.lastCrashAt = new Date().toISOString();
+        entry.status = "dead";
+
         await fetchFn(`${baseUrl}/workers/${entry.id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ status: "dead" }),
+          body: JSON.stringify({
+            status: "dead",
+            crashCount: entry.crashCount,
+            lastCrashAt: entry.lastCrashAt,
+          }),
         });
         await fetchFn(`${baseUrl}/workers/${entry.id}`, { method: "DELETE" });
       } catch {
@@ -139,8 +155,11 @@ export async function startDaemon(
   const resolvedDeps = resolveDependencies(config, deps);
 
   const adopted = await resolvedDeps.adoptExistingWorkers(config.stateFilePath);
-  await resolvedDeps.writeStateFile(config.stateFilePath, mapToState(adopted));
-  seedAllocator(resolvedDeps.portAllocator, adopted.values());
+  await resolvedDeps.writeStateFile(
+    config.stateFilePath,
+    mapToState(adopted.workers, adopted.crashHistory)
+  );
+  seedAllocator(resolvedDeps.portAllocator, adopted.workers.values());
 
   let shuttingDown = false;
   let intervalId: ReturnType<typeof setInterval> | null = null;
@@ -157,7 +176,7 @@ export async function startDaemon(
     }
 
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
-    const entries = Object.values(state);
+    const entries = Object.values(state.workers);
     await Promise.allSettled(
       entries.map(async (entry) => resolvedDeps.serveManager.killWorker(entry))
     );
@@ -165,7 +184,10 @@ export async function startDaemon(
       resolvedDeps.portAllocator.release(entry.port);
     }
 
-    await resolvedDeps.writeStateFile(config.stateFilePath, {});
+    await resolvedDeps.writeStateFile(config.stateFilePath, {
+      workers: {},
+      crashHistory: state.crashHistory,
+    });
     stopServer();
     if (exitAfter) {
       process.exit(0);

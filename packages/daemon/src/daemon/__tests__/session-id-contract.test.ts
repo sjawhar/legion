@@ -52,6 +52,8 @@ describe("sessionId contract (daemon vs state)", () => {
         sessionId: opts.sessionId,
         startedAt: "2026-02-01T00:00:00.000Z",
         status: "starting",
+        crashCount: 0,
+        lastCrashAt: null,
       }),
       killWorker: async () => {},
       healthCheck: async () => true,

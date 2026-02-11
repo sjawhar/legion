@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { startDaemon } from "../index";
 import { PortAllocator } from "../ports";
 import type { WorkerEntry } from "../serve-manager";
-import type { WorkerState } from "../state-file";
+import type { PersistedWorkerState } from "../state-file";
 
 type IntervalCallback = (...args: any[]) => void;
 
@@ -13,6 +13,8 @@ const baseEntry: WorkerEntry = {
   sessionId: "ses-1",
   startedAt: "2026-02-01T00:00:00.000Z",
   status: "running",
+  crashCount: 0,
+  lastCrashAt: null,
 };
 
 const secondEntry: WorkerEntry = {
@@ -22,6 +24,8 @@ const secondEntry: WorkerEntry = {
   sessionId: "ses-2",
   startedAt: "2026-02-01T01:00:00.000Z",
   status: "running",
+  crashCount: 0,
+  lastCrashAt: null,
 };
 
 const TEAM_ID = "123e4567-e89b-12d3-a456-426614174000";
@@ -38,14 +42,18 @@ describe("daemon entry", () => {
   });
 
   it("adopts existing workers and seeds the port allocator", async () => {
-    const adoptExistingWorkers = async () =>
-      new Map<string, WorkerEntry>([
+    const adoptExistingWorkers = async () => ({
+      workers: new Map<string, WorkerEntry>([
         [baseEntry.id, baseEntry],
         [secondEntry.id, secondEntry],
-      ]);
+      ]),
+      crashHistory: {
+        [baseEntry.id]: { crashCount: 1, lastCrashAt: "2026-02-02T00:00:00.000Z" },
+      },
+    });
 
-    let writtenState: WorkerState | null = null;
-    const writeStateFile = async (_path: string, state: WorkerState) => {
+    let writtenState: PersistedWorkerState | null = null;
+    const writeStateFile = async (_path: string, state: PersistedWorkerState) => {
       writtenState = state;
     };
 
@@ -64,7 +72,7 @@ describe("daemon entry", () => {
       {
         adoptExistingWorkers,
         writeStateFile,
-        readStateFile: async () => ({}),
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         serveManager: {
           spawnServe: async () => baseEntry,
           killWorker: async () => {},
@@ -82,9 +90,14 @@ describe("daemon entry", () => {
       throw new Error("Expected state file to be written");
     }
 
-    expect(writtenState as WorkerState).toEqual({
-      [baseEntry.id]: baseEntry,
-      [secondEntry.id]: secondEntry,
+    expect(writtenState as PersistedWorkerState).toEqual({
+      workers: {
+        [baseEntry.id]: baseEntry,
+        [secondEntry.id]: secondEntry,
+      },
+      crashHistory: {
+        [baseEntry.id]: { crashCount: 1, lastCrashAt: "2026-02-02T00:00:00.000Z" },
+      },
     });
 
     expect(allocator.isAllocated(baseEntry.port)).toBe(true);
@@ -147,9 +160,9 @@ describe("daemon entry", () => {
         teamId: TEAM_ID,
       },
       {
-        adoptExistingWorkers: async () => new Map(),
+        adoptExistingWorkers: async () => ({ workers: new Map(), crashHistory: {} }),
         writeStateFile: async () => {},
-        readStateFile: async () => ({}),
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         serveManager: {
           spawnServe: async () => baseEntry,
           killWorker: async () => {},
@@ -197,7 +210,7 @@ describe("daemon entry", () => {
     const killed: WorkerEntry[] = [];
     let stopCalls = 0;
     let clearedInterval = 0;
-    let finalState: WorkerState | null = null;
+    let finalState: PersistedWorkerState | null = null;
 
     await startDaemon(
       {
@@ -205,10 +218,15 @@ describe("daemon entry", () => {
         teamId: TEAM_ID,
       },
       {
-        adoptExistingWorkers: async () => new Map(),
+        adoptExistingWorkers: async () => ({ workers: new Map(), crashHistory: {} }),
         readStateFile: async () => ({
-          [baseEntry.id]: baseEntry,
-          [secondEntry.id]: secondEntry,
+          workers: {
+            [baseEntry.id]: baseEntry,
+            [secondEntry.id]: secondEntry,
+          },
+          crashHistory: {
+            [secondEntry.id]: { crashCount: 2, lastCrashAt: "2026-02-02T02:00:00.000Z" },
+          },
         }),
         writeStateFile: async (_path, state) => {
           finalState = state;
@@ -246,7 +264,12 @@ describe("daemon entry", () => {
     if (!finalState) {
       throw new Error("Expected final state to be written");
     }
-    expect(finalState as WorkerState).toEqual({});
+    expect(finalState as PersistedWorkerState).toEqual({
+      workers: {},
+      crashHistory: {
+        [secondEntry.id]: { crashCount: 2, lastCrashAt: "2026-02-02T02:00:00.000Z" },
+      },
+    });
     if (exitCode === null) {
       throw new Error("Expected process exit to be called");
     }

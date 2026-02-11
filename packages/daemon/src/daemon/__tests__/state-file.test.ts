@@ -5,13 +5,20 @@ import path from "node:path";
 import { readStateFile, writeStateFile } from "../state-file";
 
 const sampleState = {
-  "eng-42-implement": {
-    id: "eng-42-implement",
-    port: 14444,
-    pid: 9999,
-    sessionId: "ses_test",
-    startedAt: "2026-01-01T00:00:00.000Z",
-    status: "running" as const,
+  workers: {
+    "eng-42-implement": {
+      id: "eng-42-implement",
+      port: 14444,
+      pid: 9999,
+      sessionId: "ses_test",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      status: "running" as const,
+      crashCount: 0,
+      lastCrashAt: null,
+    },
+  },
+  crashHistory: {
+    "eng-42-implement": { crashCount: 1, lastCrashAt: "2026-01-02T00:00:00.000Z" },
   },
 };
 
@@ -28,7 +35,7 @@ describe("state-file", () => {
   it("returns empty state when file missing", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
     const state = await readStateFile(path.join(tempDir, "workers.json"));
-    expect(state).toEqual({});
+    expect(state).toEqual({ workers: {}, crashHistory: {} });
   });
 
   it("writes and reads state file roundtrip", async () => {

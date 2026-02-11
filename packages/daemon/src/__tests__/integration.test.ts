@@ -42,6 +42,8 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
         sessionId: opts.sessionId,
         startedAt: new Date().toISOString(),
         status: "starting",
+        crashCount: 0,
+        lastCrashAt: null,
       };
     },
     killWorker: async (entry: WorkerEntry): Promise<void> => {

@@ -11,6 +11,8 @@ const baseEntry = {
   sessionId: "ses_test",
   startedAt: "2026-01-01T00:00:00.000Z",
   status: "running" as const,
+  crashCount: 0,
+  lastCrashAt: null,
 };
 
 describe("serve-manager", () => {
@@ -98,8 +100,13 @@ describe("serve-manager", () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-workers-"));
     const filePath = path.join(tempDir, "workers.json");
     const state = {
-      "eng-42-implement": baseEntry,
-      "eng-99-implement": { ...baseEntry, id: "eng-99-implement", port: 16000 },
+      workers: {
+        "eng-42-implement": baseEntry,
+        "eng-99-implement": { ...baseEntry, id: "eng-99-implement", port: 16000 },
+      },
+      crashHistory: {
+        "eng-99-implement": { crashCount: 2, lastCrashAt: "2026-01-02T00:00:00.000Z" },
+      },
     };
     await writeFile(filePath, JSON.stringify(state, null, 2));
 
@@ -117,9 +124,13 @@ describe("serve-manager", () => {
     }) as unknown as typeof fetch;
 
     const adopted = await adoptExistingWorkers(filePath);
-    expect(adopted.size).toBe(1);
-    const adoptedEntry = adopted.get("eng-42-implement");
+    expect(adopted.workers.size).toBe(1);
+    const adoptedEntry = adopted.workers.get("eng-42-implement");
     expect(adoptedEntry?.status).toBe("running");
+    expect(adopted.crashHistory["eng-99-implement"]).toEqual({
+      crashCount: 2,
+      lastCrashAt: "2026-01-02T00:00:00.000Z",
+    });
 
     await rm(tempDir, { recursive: true, force: true });
   });

@@ -6,7 +6,12 @@ import {
   type WorkerModeLiteral,
 } from "../state/types";
 import type { SpawnOptions, WorkerEntry } from "./serve-manager";
-import { readStateFile, writeStateFile } from "./state-file";
+import {
+  type CrashHistoryEntry,
+  type PersistedWorkerState,
+  readStateFile,
+  writeStateFile,
+} from "./state-file";
 
 type Server = ReturnType<typeof Bun.serve>;
 
@@ -38,6 +43,7 @@ interface ErrorResponse {
 }
 
 const JSON_HEADERS = { "content-type": "application/json" };
+const MAX_CRASHES = 3;
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: JSON_HEADERS });
@@ -80,20 +86,30 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
   const port = opts.port ?? 13370;
   const startedAt = Date.now();
   const workers = new Map<string, WorkerEntry>();
+  const crashHistory = new Map<string, CrashHistoryEntry>();
 
   const persistState = async (): Promise<void> => {
-    const state: Record<string, WorkerEntry> = {};
+    const state: PersistedWorkerState = { workers: {}, crashHistory: {} };
     for (const [id, entry] of workers.entries()) {
-      state[id] = entry;
+      state.workers[id] = entry;
+    }
+    for (const [id, history] of crashHistory.entries()) {
+      state.crashHistory[id] = history;
     }
     await writeStateFile(opts.stateFilePath, state);
   };
 
   const loadState = async (): Promise<void> => {
     const state = await readStateFile(opts.stateFilePath);
-    const entries = Object.entries(state);
+    const entries = Object.entries(state.workers);
     if (entries.length === 0) {
+      for (const [id, history] of Object.entries(state.crashHistory)) {
+        crashHistory.set(id.toLowerCase(), history);
+      }
       return;
+    }
+    for (const [id, history] of Object.entries(state.crashHistory)) {
+      crashHistory.set(id.toLowerCase(), history);
     }
     await Promise.all(
       entries.map(async ([id, entry]) => {
@@ -184,6 +200,19 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               );
             }
 
+            const crashHistoryEntry = crashHistory.get(workerId);
+            if ((crashHistoryEntry?.crashCount ?? 0) >= MAX_CRASHES) {
+              return jsonResponse(
+                {
+                  error: "crash_limit_exceeded",
+                  id: workerId,
+                  crashCount: crashHistoryEntry?.crashCount ?? 0,
+                  message: "Worker has crashed too many times. Add user-input-needed label.",
+                },
+                429
+              );
+            }
+
             const port = opts.portAllocator.allocate();
             const sessionId =
               mode === "controller"
@@ -203,6 +232,14 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             } catch (error) {
               opts.portAllocator.release(port);
               return serverError((error as Error).message);
+            }
+
+            if (crashHistoryEntry) {
+              entry = {
+                ...entry,
+                crashCount: crashHistoryEntry.crashCount,
+                lastCrashAt: crashHistoryEntry.lastCrashAt,
+              };
             }
 
             workers.set(entry.id, entry);
@@ -237,8 +274,30 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               return badRequest("invalid_status");
             }
 
-            const updated = { ...entry, status: status as WorkerEntry["status"] };
+            const hasCrashCount = "crashCount" in payload;
+            const hasLastCrashAt = "lastCrashAt" in payload;
+            const crashCount = payload.crashCount;
+            const lastCrashAt = payload.lastCrashAt;
+            if (hasCrashCount && typeof crashCount !== "number") {
+              return badRequest("invalid_crash_count");
+            }
+            if (hasLastCrashAt && typeof lastCrashAt !== "string" && lastCrashAt !== null) {
+              return badRequest("invalid_last_crash_at");
+            }
+
+            const updated: WorkerEntry = {
+              ...entry,
+              status: status as WorkerEntry["status"],
+              crashCount: hasCrashCount ? (crashCount as number) : entry.crashCount,
+              lastCrashAt: hasLastCrashAt ? (lastCrashAt as string | null) : entry.lastCrashAt,
+            };
             workers.set(id, updated);
+            if (status === "dead") {
+              crashHistory.set(id, {
+                crashCount: updated.crashCount,
+                lastCrashAt: updated.lastCrashAt,
+              });
+            }
             await persistState();
             return jsonResponse(updated);
           }
@@ -246,6 +305,10 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             await opts.serveManager.killWorker(entry);
             opts.portAllocator.release(entry.port);
             workers.delete(id);
+            crashHistory.set(id, {
+              crashCount: entry.crashCount,
+              lastCrashAt: entry.lastCrashAt,
+            });
             await persistState();
             return jsonResponse({ status: "stopped" });
           }

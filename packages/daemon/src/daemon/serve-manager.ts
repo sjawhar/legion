@@ -1,6 +1,6 @@
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
-import { readStateFile } from "./state-file";
+import { type CrashHistoryEntry, readStateFile } from "./state-file";
 
 export interface SpawnOptions {
   issueId: string;
@@ -19,6 +19,8 @@ export interface WorkerEntry {
   sessionId: string;
   startedAt: string;
   status: "starting" | "running" | "stopped" | "dead";
+  crashCount: number;
+  lastCrashAt: string | null;
 }
 
 export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
@@ -50,6 +52,8 @@ export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
     sessionId: opts.sessionId,
     startedAt: new Date().toISOString(),
     status: "starting",
+    crashCount: 0,
+    lastCrashAt: null,
   };
 }
 
@@ -80,11 +84,14 @@ export async function healthCheck(port: number, timeoutMs = 5000): Promise<boole
   }
 }
 
-export async function adoptExistingWorkers(
-  stateFilePath: string
-): Promise<Map<string, WorkerEntry>> {
+export interface AdoptedWorkers {
+  workers: Map<string, WorkerEntry>;
+  crashHistory: Record<string, CrashHistoryEntry>;
+}
+
+export async function adoptExistingWorkers(stateFilePath: string): Promise<AdoptedWorkers> {
   const state = await readStateFile(stateFilePath);
-  const entries = Object.entries(state);
+  const entries = Object.entries(state.workers);
   const results = await Promise.all(
     entries.map(async ([id, entry]) => ({
       id,
@@ -100,5 +107,5 @@ export async function adoptExistingWorkers(
       adopted.set(normalizedId, { ...result.entry, id: normalizedId, status: "running" });
     }
   }
-  return adopted;
+  return { workers: adopted, crashHistory: state.crashHistory };
 }

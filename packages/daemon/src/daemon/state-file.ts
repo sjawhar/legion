@@ -3,6 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import type { WorkerEntry } from "./serve-manager";
 
+export interface CrashHistoryEntry {
+  crashCount: number;
+  lastCrashAt: string | null;
+}
+
+export interface PersistedWorkerState {
+  workers: Record<string, WorkerEntry>;
+  crashHistory: Record<string, CrashHistoryEntry>;
+}
+
 export type WorkerState = Record<string, WorkerEntry>;
 
 function resolveHome(filePath: string): string {
@@ -12,24 +22,44 @@ function resolveHome(filePath: string): string {
   return filePath;
 }
 
-export async function readStateFile(filePath: string): Promise<WorkerState> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeState(raw: unknown): PersistedWorkerState {
+  if (isRecord(raw) && isRecord(raw.workers)) {
+    return {
+      workers: raw.workers as Record<string, WorkerEntry>,
+      crashHistory: isRecord(raw.crashHistory)
+        ? (raw.crashHistory as Record<string, CrashHistoryEntry>)
+        : {},
+    };
+  }
+
+  return {
+    workers: (raw ?? {}) as Record<string, WorkerEntry>,
+    crashHistory: {},
+  };
+}
+
+export async function readStateFile(filePath: string): Promise<PersistedWorkerState> {
   const resolvedPath = resolveHome(filePath);
   try {
     const raw = await readFile(resolvedPath, "utf-8");
     if (!raw.trim()) {
-      return {};
+      return { workers: {}, crashHistory: {} };
     }
-    return JSON.parse(raw) as WorkerState;
+    return normalizeState(JSON.parse(raw));
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
-      return {};
+      return { workers: {}, crashHistory: {} };
     }
     throw error;
   }
 }
 
-export async function writeStateFile(filePath: string, state: WorkerState): Promise<void> {
+export async function writeStateFile(filePath: string, state: PersistedWorkerState): Promise<void> {
   const resolvedPath = resolveHome(filePath);
   const dir = path.dirname(resolvedPath);
   await mkdir(dir, { recursive: true });
