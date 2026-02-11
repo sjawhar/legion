@@ -156,7 +156,10 @@ describe("getLiveWorkers", () => {
 
     try {
       const result = await getLiveWorkers("http://localhost:3000");
-      expect(result).toEqual({ "ENG-21": "implement", "ENG-22": "plan" });
+      expect(result).toEqual({
+        "ENG-21": { mode: "implement", status: "running" },
+        "ENG-22": { mode: "plan", status: "running" },
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -173,7 +176,10 @@ describe("getLiveWorkers", () => {
 
     try {
       const result = await getLiveWorkers("http://localhost:3000");
-      expect(result).toEqual({ "ENG-21": "implement", "ENG-22": "plan" });
+      expect(result).toEqual({
+        "ENG-21": { mode: "implement", status: "running" },
+        "ENG-22": { mode: "plan", status: "running" },
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -195,7 +201,7 @@ describe("getLiveWorkers", () => {
 
     try {
       const result = await getLiveWorkers("http://localhost:3000");
-      expect(result).toEqual({ "ENG-21": "implement" });
+      expect(result).toEqual({ "ENG-21": { mode: "implement", status: "running" } });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -216,7 +222,10 @@ describe("getLiveWorkers", () => {
 
     try {
       const result = await getLiveWorkers("http://localhost:3000");
-      expect(result).toEqual({ "ENG-21": "implement", "ENG-22": "plan" });
+      expect(result).toEqual({
+        "ENG-21": { mode: "implement", status: "starting" },
+        "ENG-22": { mode: "plan", status: "running" },
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -230,7 +239,7 @@ describe("getLiveWorkers", () => {
 
     try {
       const result = await getLiveWorkers("http://localhost:3000");
-      expect(result).toEqual({ "ENG-21": "implement" });
+      expect(result).toEqual({ "ENG-21": { mode: "implement", status: "running" } });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -294,8 +303,8 @@ describe("getLiveWorkers", () => {
     try {
       const result = await getLiveWorkers("http://localhost:3000");
       expect(result).toEqual({
-        "TEAM-PROJECT-123": "implement",
-        "MY-COMPLEX-ISSUE-456": "plan",
+        "TEAM-PROJECT-123": { mode: "implement", status: "running" },
+        "MY-COMPLEX-ISSUE-456": { mode: "plan", status: "running" },
       });
     } finally {
       globalThis.fetch = originalFetch;

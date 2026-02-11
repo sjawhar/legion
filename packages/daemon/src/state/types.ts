@@ -274,6 +274,8 @@ export interface FetchedIssueData {
   hasPr: boolean; // True if Linear has a PR URL attached
   prIsDraft: boolean | null; // null if no PR or couldn't check status
   hasLiveWorker: boolean;
+  workerMode: string | null;
+  workerStatus: string | null;
   hasUserFeedback: boolean;
   hasUserInputNeeded: boolean;
   hasNeedsApproval: boolean;
@@ -289,6 +291,8 @@ export interface IssueStateDict {
   hasPr: boolean;
   prIsDraft: boolean | null;
   hasLiveWorker: boolean;
+  workerMode: string | null;
+  workerStatus: string | null;
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
@@ -310,6 +314,8 @@ export interface IssueState {
   hasPr: boolean; // Whether issue has a PR attached in Linear
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
   hasLiveWorker: boolean;
+  workerMode: string | null;
+  workerStatus: string | null;
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
@@ -326,6 +332,8 @@ export const IssueState = {
       hasPr: state.hasPr,
       prIsDraft: state.prIsDraft,
       hasLiveWorker: state.hasLiveWorker,
+      workerMode: state.workerMode,
+      workerStatus: state.workerStatus,
       suggestedAction: state.suggestedAction,
       sessionId: state.sessionId,
       hasUserFeedback: state.hasUserFeedback,

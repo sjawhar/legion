@@ -146,6 +146,8 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     hasPr: data.hasPr,
     prIsDraft: data.prIsDraft,
     hasLiveWorker: data.hasLiveWorker,
+    workerMode: data.workerMode,
+    workerStatus: data.workerStatus,
     suggestedAction: action,
     sessionId,
     hasUserFeedback: data.hasUserFeedback,

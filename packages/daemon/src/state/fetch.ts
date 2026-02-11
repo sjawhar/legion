@@ -81,15 +81,17 @@ interface DaemonWorker {
 }
 
 /**
- * Get live workers as {issue_id: mode} from daemon HTTP API.
+ * Get live workers as {issue_id: {mode, status}} from daemon HTTP API.
  *
  * Workers are reported by the daemon's /workers endpoint.
  * Worker ID format: "ISSUE-ID-mode" (e.g., "ENG-21-implement").
  *
  * @param daemonUrl - Base URL of the daemon HTTP API
- * @returns Dict mapping issue_id (uppercase) to mode
+ * @returns Dict mapping issue_id (uppercase) to mode/status
  */
-export async function getLiveWorkers(daemonUrl: string): Promise<Record<string, string>> {
+export async function getLiveWorkers(
+  daemonUrl: string
+): Promise<Record<string, { mode: string; status: string }>> {
   try {
     const response = await fetch(`${daemonUrl}/workers`);
     if (!response.ok) {
@@ -97,7 +99,7 @@ export async function getLiveWorkers(daemonUrl: string): Promise<Record<string, 
     }
 
     const workers = (await response.json()) as DaemonWorker[];
-    const result: Record<string, string> = {};
+    const result: Record<string, { mode: string; status: string }> = {};
 
     for (const worker of workers) {
       if (worker.status && worker.status !== "running" && worker.status !== "starting") {
@@ -111,7 +113,7 @@ export async function getLiveWorkers(daemonUrl: string): Promise<Record<string, 
 
       const issueId = worker.id.substring(0, lastDash).toUpperCase();
       const mode = worker.id.substring(lastDash + 1);
-      result[issueId] = mode;
+      result[issueId] = { mode, status: worker.status ?? "running" };
     }
 
     return result;
@@ -383,7 +385,7 @@ export async function fetchAllIssueData(
   }
 
   // Phase 2: Fetch everything in parallel
-  let liveWorkers: Record<string, string> = {};
+  let liveWorkers: Record<string, { mode: string; status: string }> = {};
   let prDraftMap: Record<string, boolean | null> = {};
 
   const fetchWorkers = async () => {
@@ -410,7 +412,8 @@ export async function fetchAllIssueData(
   const results: FetchedIssueData[] = [];
 
   for (const issue of parsedIssues) {
-    const hasLiveWorker = issue.issueId.toUpperCase() in liveWorkers;
+    const workerInfo = liveWorkers[issue.issueId.toUpperCase()] ?? null;
+    const hasLiveWorker = workerInfo !== null;
     const prIsDraft: boolean | null = prDraftMap[issue.issueId] ?? null;
 
     results.push({
@@ -420,6 +423,8 @@ export async function fetchAllIssueData(
       hasPr: issue.hasPr,
       prIsDraft,
       hasLiveWorker,
+      workerMode: workerInfo?.mode ?? null,
+      workerStatus: workerInfo?.status ?? null,
       hasUserFeedback: issue.hasUserFeedback,
       hasUserInputNeeded: issue.hasUserInputNeeded,
       hasNeedsApproval: issue.hasNeedsApproval,
