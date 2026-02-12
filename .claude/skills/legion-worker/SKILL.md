@@ -35,7 +35,7 @@ If you're resuming after user feedback, also read the Linear comments for the an
 
 ### Blocking on User Input
 
-When you need human input that the oracle can't answer:
+When you need human input that the legion-oracle can't answer:
 
 1. Push your work: `jj git push`
 2. Post a structured escalation comment to Linear:
@@ -87,12 +87,11 @@ Then update labels:
 | `plan` | @workflows/plan.md | Yes |
 | `implement` | @workflows/implement.md | No |
 | `review` | @workflows/review.md | Yes |
-| `retro` | @workflows/retro.md | Yes |
 | `merge` | @workflows/merge.md | No |
 
 **Lifecycle order:** architect → plan → implement → review → (implement if changes requested) → retro → merge
 
-Note: `retro` runs before `merge` because retro adds learnings to the workspace, and merge deletes it.
+**Retro** is not a mode — the controller resumes the implement worker's session with `/legion-retro`, preserving full implementation context. See the `legion-retro` skill.
 
 ## Review Mode Signaling
 
@@ -100,17 +99,9 @@ Review signals outcome via PR draft status BEFORE `worker-done`:
 - **PR ready** (not draft) - no blocking issues, approved
 - **PR draft** - blocking issues found, changes requested
 
-## Research Sub-Skill
+## Research Before Escalating
 
-Before blocking on user input, workers should invoke the oracle to try to find the answer:
-
-| Sub-Skill | Workflow | Purpose |
-|-----------|----------|---------|
-| `oracle` | @workflows/oracle.md | Research before escalating |
-
-Usage: `/oracle [your question]`
-
-Only escalate to the user (via Linear comment + label) if the oracle cannot answer.
+Before blocking on user input, workers should invoke `/legion-oracle [your question]` to search institutional knowledge (docs/solutions/, codebase patterns). Only escalate to the user (via Linear comment + label) if the legion-oracle cannot answer.
 
 ## Reference
 

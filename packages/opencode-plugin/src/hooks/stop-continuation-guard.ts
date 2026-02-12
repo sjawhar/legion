@@ -16,8 +16,6 @@
  *   - event (session.idle): continuation hooks check isStopped() before injecting
  */
 
-const HOOK_NAME = "stop-continuation-guard";
-
 export interface StopContinuationGuard {
   event: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
   "chat.message": (input: { sessionID?: string }) => Promise<void>;

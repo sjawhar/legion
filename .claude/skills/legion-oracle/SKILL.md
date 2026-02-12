@@ -1,4 +1,9 @@
-# Oracle Workflow
+---
+name: legion-oracle
+description: Research institutional knowledge before escalating questions to users. Check docs/solutions/ and codebase patterns before asking humans.
+---
+
+# Legion Oracle
 
 Research institutional knowledge before escalating questions to users.
 
@@ -49,7 +54,7 @@ Run steps 1-2 first (parallel OK), then 3-4 if needed:
 ## Example
 
 ```
-/oracle How should I handle GraphQL pagination?
+/legion-oracle How should I handle GraphQL pagination?
 
 [learnings-researcher] → No matches
 [Explore] → Found src/legion/state/fetch.py uses cursor-based pagination

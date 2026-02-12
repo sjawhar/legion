@@ -15,7 +15,7 @@ controller skill, not the TypeScript.
   executes transitions, runs quality gates, handles edge cases. Users who want different
   workflows edit this file.
 - **Worker skills** — execute specific workflow phases (architect, plan, implement, review,
-  retro, merge). Each is independently modifiable.
+  merge). Retro runs via `/legion-retro` on the implement worker session.
 
 Skills invoke TypeScript via: HTTP API (`/workers`), piped CLI (`packages/daemon/src/state/cli.ts`), and environment variables. TypeScript never calls skills directly.
 
@@ -88,7 +88,8 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
                     (urgent + clear)
 ```
 
-**Worker modes:** architect → plan → implement → review → retro → merge
+**Worker modes:** architect → plan → implement → review → merge
+**Retro:** invoked by resuming the implement worker session with `/legion-retro`
 
 **Labels:** `worker-done`, `worker-active`, `user-input-needed`, `user-feedback-given`
 

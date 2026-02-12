@@ -153,8 +153,10 @@ Based on this design:
 │   └── SKILL.md          # Controller skill (this design)
 ├── worker/
 │   └── SKILL.md          # Worker skill (TDD cycle + self-review)
-├── oracle/
+├── legion-oracle/
 │   └── SKILL.md          # Oracle subagent (answer questions)
+├── legion-retro/
+│   └── SKILL.md          # Dual-perspective retro
 ├── groomer/
 │   └── SKILL.md          # Break down epics into features
 └── reviewer/

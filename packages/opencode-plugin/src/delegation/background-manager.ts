@@ -68,7 +68,7 @@ export class BackgroundTaskManager {
 
   private async startPrompt(task: BackgroundTask, opts: LaunchOptions): Promise<void> {
     try {
-      if (task.status === "cancelled") return;
+      if (task.status === "cancelled" || !task.sessionID) return;
       task.status = "running";
 
       const modelStr = task.model;
@@ -77,7 +77,7 @@ export class BackgroundTaskManager {
       const modelID = slashIdx >= 0 ? modelStr.slice(slashIdx + 1) : modelStr;
 
       await this.client.session.promptAsync({
-        path: { id: task.sessionID! },
+        path: { id: task.sessionID },
         body: {
           agent: opts.agent,
           model: { providerID, modelID },

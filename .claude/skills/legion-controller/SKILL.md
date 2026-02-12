@@ -200,62 +200,39 @@ Then return to step 1.
 
 ## Dispatch vs Resume
 
-**Dispatch** = new worker via daemon API:
+**Dispatch** = new worker:
 ```bash
-# $ISSUE_ID = Linear UUID, $ISSUE_IDENTIFIER = e.g. "LEG-18"
-# Workspaces are siblings to default workspace, named by identifier for easy navigation
-WORKSPACES_DIR=$(dirname "$LEGION_DIR")
-ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE"
+```
 
-# Create workspace if needed
-[ ! -d "$WORKSPACE_PATH" ] && jj workspace add "$WORKSPACE_PATH" --name "$ISSUE_LOWER" -R "$LEGION_DIR"
+The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
 
-# Dispatch worker via daemon HTTP API
-# The daemon auto-injects LINEAR_ISSUE_ID, LINEAR_TEAM_ID, LEGION_DIR, LEGION_SHORT_ID, LEGION_DAEMON_PORT
-RESPONSE=$(curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/workers \
-  -H 'content-type: application/json' \
-  -d "{\"issueId\": \"$ISSUE_IDENTIFIER\", \"mode\": \"$MODE\", \"workspace\": \"$WORKSPACE_PATH\"}")
-
-WORKER_ID=$(echo "$RESPONSE" | jq -r '.id')
-WORKER_PORT=$(echo "$RESPONSE" | jq -r '.port')
-SESSION_ID=$(echo "$RESPONSE" | jq -r '.sessionId')
-
-# Send initial prompt to worker's OpenCode serve
-curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
-  -H 'content-type: application/json' \
-  -d "{
-    \"parts\": [{
-      \"type\": \"text\",
-      \"text\": \"/legion-worker $MODE mode for $ISSUE_IDENTIFIER\"
-    }]
-  }"
-
-# Add worker-active label
-linear_linear(action="update", id="$ISSUE_ID", labels=["worker-active", ...existing...])
+For custom prompts:
+```bash
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --prompt "Custom instructions here"
 ```
 
 **Resume** = send prompt to existing worker:
 ```bash
-# Get worker info from daemon
-ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-WORKER_ID="$ISSUE_LOWER-$MODE"
-WORKER_INFO=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID)
-WORKER_PORT=$(echo "$WORKER_INFO" | jq -r '.port')
-SESSION_ID=$(echo "$WORKER_INFO" | jq -r '.sessionId')
+legion prompt "$ISSUE_IDENTIFIER" "Check Linear comments for user feedback"
+```
 
-# Send prompt to worker's OpenCode serve
-curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
-  -H 'content-type: application/json' \
-  -d "{
-    \"parts\": [{
-      \"type\": \"text\",
-      \"text\": \"$PROMPT\"
-    }]
-  }"
+If multiple workers exist for the same issue (different modes), specify mode:
+```bash
+legion prompt "$ISSUE_IDENTIFIER" --mode implement "Address PR review comments"
 ```
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
+
+### Retro
+
+Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
+
+```bash
+legion prompt "$ISSUE_IDENTIFIER" --mode implement "/legion-retro"
+```
+
+**If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
 
 ## Worker Inspection
 

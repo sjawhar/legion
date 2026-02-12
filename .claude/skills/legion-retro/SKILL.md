@@ -1,6 +1,17 @@
-# Retro Workflow
+---
+name: legion-retro
+description: Capture learnings from completed work via dual-perspective retrospective. Invoked by resuming an implement worker session — the implementer has full context, and a fresh subagent provides an outside view.
+---
+
+# Legion Retro
 
 Capture learnings from completed work via parallel compounding.
+
+## When This Runs
+
+The controller resumes the **implement worker's existing session** after PR approval, so you (the implementer) have full context of what was built and why. This is intentional — your perspective as the person who did the work is valuable.
+
+A fresh subagent provides the outside perspective (see step 2).
 
 ## Important
 

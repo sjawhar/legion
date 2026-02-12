@@ -8,6 +8,7 @@ import { startDaemon } from "../daemon/index";
 import { resolveTeamId } from "./team-resolver";
 
 const DEFAULT_DAEMON_PORT = 13370;
+const SAFE_IDENTIFIER_RE = /^[a-zA-Z0-9_-]+$/;
 
 interface TeamInfo {
   id: string;
@@ -192,7 +193,242 @@ async function cmdAttach(team: string, issue: string): Promise<void> {
   }
 }
 
-async function checkDaemonHealth(port: number): Promise<{ running: boolean; workerCount?: number }> {
+export async function cmdDispatch(
+  issue: string,
+  mode: string,
+  opts: { legionDir?: string; daemonPort?: number; prompt?: string; workspace?: string }
+): Promise<void> {
+  if (!SAFE_IDENTIFIER_RE.test(issue)) {
+    console.error(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
+    process.exit(1);
+  }
+  if (!SAFE_IDENTIFIER_RE.test(mode)) {
+    console.error(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
+    process.exit(1);
+  }
+  const daemonPort = opts.daemonPort ?? getDaemonPort();
+  const legionDir = opts.legionDir ?? process.env.LEGION_DIR ?? process.cwd();
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  // Verify daemon is reachable before creating workspace to avoid orphan directories
+  try {
+    const healthResp = await fetch(`${baseUrl}/health`);
+    if (!healthResp.ok) {
+      console.error("Daemon is not healthy. Is it running?");
+      process.exit(1);
+    }
+  } catch {
+    console.error("Could not connect to daemon. Is it running?");
+    console.error(`Tried: ${baseUrl}/health`);
+    process.exit(1);
+  }
+
+  const issueLower = issue.toLowerCase();
+  const workspacePath = opts.workspace ?? path.join(path.dirname(legionDir), issueLower);
+
+  if (!fs.existsSync(workspacePath)) {
+    console.log(`Creating workspace: ${workspacePath}`);
+    const jjResult = Bun.spawnSync(
+      ["jj", "workspace", "add", workspacePath, "--name", issueLower, "-R", legionDir],
+      { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
+    );
+    if (jjResult.exitCode !== 0) {
+      const stderr = jjResult.stderr.toString();
+      console.error(`Failed to create workspace: ${stderr}`);
+      process.exit(1);
+    }
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/workers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ issueId: issue, mode, workspace: workspacePath }),
+    });
+  } catch (_error) {
+    console.error("Could not connect to daemon. Is it running?");
+    console.error(`Tried: ${baseUrl}/workers`);
+    process.exit(1);
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await response.json()) as Record<string, unknown>;
+  } catch {
+    console.error(`Daemon returned non-JSON response (status ${response.status})`);
+    process.exit(1);
+  }
+
+  if (response.status === 409) {
+    console.log(`Worker already running: ${body.id}`);
+    console.log(`  port: ${body.port}`);
+    console.log(`  session: ${body.sessionId}`);
+    console.log(
+      `\nTo resume: legion prompt ${issue} "${
+        opts.prompt ?? `/legion-worker ${mode} mode for ${issue}`
+      }"`
+    );
+    return;
+  }
+
+  if (response.status === 429) {
+    console.error(`Crash limit exceeded for ${body.id} (${body.crashCount} crashes)`);
+    console.error(`Reset with: legion reset-crashes ${issue} ${mode}`);
+    process.exit(1);
+  }
+
+  if (!response.ok) {
+    console.error(`Failed to dispatch: ${JSON.stringify(body)}`);
+    process.exit(1);
+  }
+
+  const workerId = body.id as string;
+  const workerPort = body.port as number;
+  const sessionId = body.sessionId as string;
+
+  console.log(`Worker dispatched: ${workerId}`);
+  console.log(`  port: ${workerPort}`);
+  console.log(`  session: ${sessionId}`);
+
+  const initialPrompt = opts.prompt ?? `/legion-worker ${mode} mode for ${issue}`;
+  try {
+    await fetch(`http://127.0.0.1:${workerPort}/session/${sessionId}/prompt_async`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parts: [{ type: "text", text: initialPrompt }] }),
+    });
+    console.log(`Prompt sent: ${initialPrompt}`);
+  } catch (_error) {
+    console.warn("Worker spawned but prompt delivery failed. Send manually:");
+    console.warn(`  legion prompt ${issue} "${initialPrompt}"`);
+  }
+
+  console.log(`\nTo attach: legion attach <team> ${issue}`);
+}
+
+export async function cmdPrompt(
+  issue: string,
+  prompt: string,
+  opts: { daemonPort?: number; mode?: string }
+): Promise<void> {
+  if (!SAFE_IDENTIFIER_RE.test(issue)) {
+    console.error(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
+    process.exit(1);
+  }
+  const daemonPort = opts.daemonPort ?? getDaemonPort();
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  let workers: Array<{ id: string; port: number; sessionId: string; status: string }>;
+  try {
+    const response = await fetch(`${baseUrl}/workers`);
+    if (!response.ok) {
+      console.error("Could not connect to daemon.");
+      process.exit(1);
+    }
+    workers = (await response.json()) as typeof workers;
+  } catch {
+    console.error("Could not connect to daemon. Is it running?");
+    process.exit(1);
+  }
+
+  const normalized = issue.toLowerCase();
+  let matches = workers.filter(
+    (worker) => worker.id === normalized || worker.id.startsWith(`${normalized}-`)
+  );
+
+  if (opts.mode) {
+    matches = matches.filter((worker) => worker.id.endsWith(`-${opts.mode}`));
+  }
+
+  matches = matches.filter((worker) => worker.status === "running" || worker.status === "starting");
+
+  if (matches.length === 0) {
+    console.error(
+      `No active worker found for: ${issue}${opts.mode ? ` (mode: ${opts.mode})` : ""}`
+    );
+    const alive = workers.filter(
+      (worker) => worker.status === "running" || worker.status === "starting"
+    );
+    if (alive.length > 0) {
+      console.log("\nActive workers:");
+      for (const worker of alive) {
+        console.log(`  - ${worker.id}`);
+      }
+    }
+    process.exit(1);
+  }
+
+  if (matches.length > 1) {
+    console.error(`Multiple workers found for ${issue}:`);
+    for (const worker of matches) {
+      console.log(`  - ${worker.id}`);
+    }
+    console.error(`\nSpecify mode: legion prompt ${issue} --mode <mode> "${prompt}"`);
+    process.exit(1);
+  }
+
+  const worker = matches[0];
+
+  try {
+    const promptResponse = await fetch(
+      `http://127.0.0.1:${worker.port}/session/${worker.sessionId}/prompt_async`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ parts: [{ type: "text", text: prompt }] }),
+      }
+    );
+    if (!promptResponse.ok) {
+      console.error(`Worker rejected prompt (status ${promptResponse.status}): ${worker.id}`);
+      process.exit(1);
+    }
+    console.log(`Prompt sent to ${worker.id}: ${prompt}`);
+  } catch {
+    console.error(`Failed to send prompt to ${worker.id} (port ${worker.port})`);
+    process.exit(1);
+  }
+}
+
+export async function cmdResetCrashes(
+  issue: string,
+  mode: string,
+  opts?: { daemonPort?: number }
+): Promise<void> {
+  if (!SAFE_IDENTIFIER_RE.test(issue)) {
+    console.error(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
+    process.exit(1);
+  }
+  if (!SAFE_IDENTIFIER_RE.test(mode)) {
+    console.error(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
+    process.exit(1);
+  }
+  const daemonPort = opts?.daemonPort ?? getDaemonPort();
+  const workerId = `${issue.toLowerCase()}-${mode}`;
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${daemonPort}/workers/${encodeURIComponent(workerId)}/crashes`,
+      {
+        method: "DELETE",
+      }
+    );
+    if (response.ok) {
+      console.log(`Crash history cleared for ${workerId}`);
+      console.log(`You can now dispatch: legion dispatch ${issue} ${mode}`);
+    } else {
+      console.error(`Failed to reset crashes: ${response.status}`);
+      process.exit(1);
+    }
+  } catch {
+    console.error("Could not connect to daemon. Is it running?");
+    process.exit(1);
+  }
+}
+
+async function checkDaemonHealth(
+  port: number
+): Promise<{ running: boolean; workerCount?: number }> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
     if (!response.ok) {
@@ -235,9 +471,7 @@ async function cmdTeams(includeAll: boolean): Promise<void> {
 
   console.log("Teams:");
   for (const entry of filtered) {
-    const status = entry.running
-      ? `RUNNING (workers: ${entry.workerCount})`
-      : "STOPPED";
+    const status = entry.running ? `RUNNING (workers: ${entry.workerCount})` : "STOPPED";
     console.log(`  ${entry.key}: ${entry.team.name} (${entry.team.id}) - ${status}`);
   }
 }
@@ -306,6 +540,58 @@ export const teamsCommand = defineCommand({
   },
 });
 
+export const dispatchCommand = defineCommand({
+  meta: { name: "dispatch", description: "Dispatch a worker for an issue" },
+  args: {
+    issue: {
+      type: "positional",
+      description: "Issue identifier (e.g., LEG-42)",
+      required: true,
+    },
+    mode: {
+      type: "positional",
+      description: "Worker mode (architect, plan, implement, review, merge)",
+      required: true,
+    },
+    prompt: { type: "string", description: "Custom initial prompt (default: /legion-worker)" },
+    workspace: { type: "string", alias: "w", description: "Override workspace path" },
+  },
+  async run({ args }) {
+    await cmdDispatch(args.issue, args.mode, {
+      legionDir: process.env.LEGION_DIR,
+      prompt: args.prompt,
+      workspace: args.workspace,
+    });
+  },
+});
+
+export const promptCommand = defineCommand({
+  meta: { name: "prompt", description: "Send a prompt to an existing worker" },
+  args: {
+    issue: {
+      type: "positional",
+      description: "Issue identifier (e.g., LEG-42)",
+      required: true,
+    },
+    prompt: { type: "positional", description: "Prompt text to send", required: true },
+    mode: { type: "string", description: "Worker mode (to disambiguate)" },
+  },
+  async run({ args }) {
+    await cmdPrompt(args.issue, args.prompt, { mode: args.mode });
+  },
+});
+
+export const resetCrashesCommand = defineCommand({
+  meta: { name: "reset-crashes", description: "Reset crash history for a worker" },
+  args: {
+    issue: { type: "positional", description: "Issue identifier", required: true },
+    mode: { type: "positional", description: "Worker mode", required: true },
+  },
+  async run({ args }) {
+    await cmdResetCrashes(args.issue, args.mode);
+  },
+});
+
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
   subCommands: {
@@ -313,6 +599,9 @@ export const mainCommand = defineCommand({
     stop: stopCommand,
     status: statusCommand,
     attach: attachCommand,
+    dispatch: dispatchCommand,
+    prompt: promptCommand,
+    "reset-crashes": resetCrashesCommand,
     teams: teamsCommand,
   },
 });

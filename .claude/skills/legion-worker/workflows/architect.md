@@ -26,7 +26,7 @@ Extract title, description, comments (included in get response), current labels.
 
 **Is it clear?** Does it have testable acceptance criteria and no unresolved questions?
 
-If unclear and researchable, try `/oracle [your question]`.
+If unclear and researchable, try `/legion-oracle [your question]`.
 If still unclear, escalate.
 
 **Is it small enough?** Could it be split into independent, shippable pieces?

@@ -79,12 +79,6 @@ const MESSAGE_STORAGE = join(OPENCODE_STORAGE, "message");
 const PART_STORAGE = join(OPENCODE_STORAGE, "part");
 const THINKING_TYPES = new Set(["thinking", "redacted_thinking", "reasoning"]);
 
-function generatePartId(): string {
-  const timestamp = Date.now().toString(16);
-  const random = Math.random().toString(36).substring(2, 10);
-  return `prt_${timestamp}${random}`;
-}
-
 function getMessageDir(sessionID: string): string {
   if (!existsSync(MESSAGE_STORAGE)) return "";
 

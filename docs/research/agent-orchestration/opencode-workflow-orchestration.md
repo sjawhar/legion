@@ -601,7 +601,7 @@ Task → Agent → Result → Persist (markdown) → Index → Searchable
 1. **Persistent Controller Daemon** - Similar to OpenCode's server mode
 2. **Isolated Workspaces** (jj) - Similar to OpenCode's Docker workspace support
 3. **Issue State Machine** - Clear lifecycle like OpenCode's agent loop
-4. **Specialized Modes** (architect, plan, implement, review, retro) - Similar to agent specialization
+4. **Specialized Modes** (architect, plan, implement, review) plus `/legion-retro` for retrospectives
 
 ### What Legion Could Adopt
 

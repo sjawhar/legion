@@ -22,7 +22,7 @@ digraph plan_workflow {
     exit_unclear [label="Exit (user-input-needed)"];
 
     fetch -> unclear;
-    unclear -> exit_unclear [label="yes: after oracle + assumptions exhausted"];
+    unclear -> exit_unclear [label="yes: after legion-oracle + assumptions exhausted"];
     unclear -> research_plan [label="no"];
     research_plan -> deepen;
     deepen -> review;
@@ -56,7 +56,7 @@ Invoke `/workflows:plan` with this context:
 You are running autonomously without user interaction.
 Do NOT ask the user questions interactively. If requirements are unclear:
 
-1. Invoke /oracle [specific question] for research-based guidance
+1. Invoke /legion-oracle [specific question] for research-based guidance
 2. Make reasonable assumptions and document them explicitly
 3. Only escalate to user-input-needed if you truly cannot proceed
 
@@ -70,7 +70,7 @@ The skill handles:
 - SpecFlow analysis for edge cases
 - Structured plan creation
 
-**If the skill determines requirements are fundamentally unclear** (even after oracle + assumptions):
+**If the skill determines requirements are fundamentally unclear** (even after legion-oracle + assumptions):
 1. Add `user-input-needed` label via `linear_linear(action="update", ...)`
 2. Post a comment via `linear_linear(action="comment", ...)` explaining what needs clarification
 3. Exit immediately - do NOT add `worker-done`
@@ -193,7 +193,7 @@ When invoking skills that normally ask user questions:
 You are running autonomously without user interaction.
 Do NOT ask the user questions interactively. If uncertain:
 
-1. Invoke /oracle [specific question] - cheap research-based guidance
+1. Invoke /legion-oracle [specific question] - cheap research-based guidance
 2. Make reasonable assumptions and document them
 3. Only escalate to user-input-needed as absolute last resort
 
@@ -207,5 +207,5 @@ Do NOT ask the user questions interactively. If uncertain:
 | Adding `worker-done` when requirements unclear | Use `user-input-needed` label, exit without `worker-done` |
 | Skipping /deepen-plan | Always run to enhance plan with research |
 | Posting summary instead of full plan | Post complete executable plan from /superpowers:writing-plans |
-| Asking user questions | Use oracle first, then assumptions, escalate only as last resort |
+| Asking user questions | Use legion-oracle first, then assumptions, escalate only as last resort |
 | Skipping plan review iteration | Always iterate until review passes or max 3 attempts |

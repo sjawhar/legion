@@ -47,7 +47,7 @@ function readJsonFile(filePath: string): unknown {
 }
 
 function writeJsonFile(filePath: string, data: unknown): void {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
 }
 
 async function cmdInit(dryRun: boolean): Promise<void> {
