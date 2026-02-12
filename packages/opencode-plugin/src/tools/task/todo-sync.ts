@@ -1,4 +1,5 @@
 import type { PluginInput } from "@opencode-ai/plugin";
+import { extractTodos as extractTodosRaw } from "../../hooks/utils";
 import type { Task, TaskStatus } from "./types";
 
 export interface TodoInfo {
@@ -46,14 +47,7 @@ export function syncTaskToTodo(task: Task): TodoInfo | null {
 }
 
 function extractTodos(response: unknown): TodoInfo[] {
-  const payload = response as { data?: unknown };
-  if (Array.isArray(payload?.data)) {
-    return payload.data as TodoInfo[];
-  }
-  if (Array.isArray(response)) {
-    return response as TodoInfo[];
-  }
-  return [];
+  return extractTodosRaw(response) as TodoInfo[];
 }
 
 export async function syncTaskTodoUpdate(

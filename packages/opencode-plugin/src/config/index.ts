@@ -47,6 +47,7 @@ const PluginConfigSchema = z
     agents: z.record(z.string(), AgentOverrideSchema).optional(),
     categories: z.record(z.string(), CategoryConfigSchema).optional(),
     permission: PermissionConfigSchema.optional(),
+    continuationGracePeriodMs: z.number().optional(),
   })
   .passthrough();
 
@@ -62,6 +63,7 @@ export interface PluginConfig {
   };
   categories?: Record<string, CategoryOverrideConfig>;
   permission?: PermissionConfig;
+  continuationGracePeriodMs?: number;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {};

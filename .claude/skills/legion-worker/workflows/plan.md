@@ -10,27 +10,28 @@ digraph plan_workflow {
     node [shape=box];
 
     fetch [label="1. Fetch Issue"];
-    unclear [label="Requirements unclear?" shape=diamond];
+    metis [label="1.5. Metis Pre-Analysis"];
+    critical [label="Critical ambiguities?" shape=diamond];
     research_plan [label="2. /workflows:plan (autonomous)"];
-    deepen [label="3. /deepen-plan"];
-    review [label="4. /compound-engineering:plan_review"];
+    unclear [label="Requirements unclear?" shape=diamond];
+    executable [label="3. /superpowers:writing-plans"];
+    review [label="4. /plan-review"];
     passed [label="Review passed?" shape=diamond];
-    executable [label="5. /superpowers:writing-plans"];
-    cross_review [label="6. Cross-Family Review"];
-    post [label="7. Post to Linear"];
-    complete [label="8. Signal Completion"];
+    post [label="5. Post to Linear"];
+    complete [label="6. Signal Completion"];
     exit_unclear [label="Exit (user-input-needed)"];
 
-    fetch -> unclear;
+    fetch -> metis;
+    metis -> critical;
+    critical -> exit_unclear [label="yes: requires human input"];
+    critical -> research_plan [label="no: pass to planner"];
+    research_plan -> unclear;
     unclear -> exit_unclear [label="yes: after legion-oracle + assumptions exhausted"];
-    unclear -> research_plan [label="no"];
-    research_plan -> deepen;
-    deepen -> review;
+    unclear -> executable [label="no"];
+    executable -> review;
     review -> passed;
-    passed -> research_plan [label="no: address feedback"];
-    passed -> executable [label="yes"];
-    executable -> cross_review;
-    cross_review -> post;
+    passed -> review [label="no: fix issues, re-review"];
+    passed -> post [label="yes"];
     post -> complete;
 }
 ```
@@ -48,6 +49,33 @@ Extract:
 - Comments with additional context
 - Acceptance criteria if present
 
+### 1.5. Pre-Planning Analysis (Metis)
+
+Before researching and structuring the plan, run a pre-planning analysis to identify risks that could derail the planner.
+
+Spawn via background_task:
+- subagent_type: metis
+- run_in_background: true
+- description: "Pre-planning analysis for $LINEAR_ISSUE_ID"
+- prompt: Start with "MODE: PRE_PLANNING" then include the issue title, description, acceptance criteria, and relevant comments. Ask Metis to identify: hidden assumptions, ambiguities with effort implications, scope traps, and AI-slop risks.
+
+Wait for the result via background_output.
+
+**Verify mode activation:** The response must begin with `## Mode: Pre-Planning Analysis`. If it echoes a different mode, retry once with the correct MODE header.
+
+**If Metis fails or times out (>3 min):** Proceed to step 2 without pre-analysis. Note the missing analysis in the planner context.
+
+**If Metis flags critical ambiguities requiring human input** — specifically, ambiguities where the effort delta exceeds ~1 hour or where a user choice is required (not planner judgment) — treat as unclear and exit via the existing escalation protocol (add `user-input-needed`, post comment, exit).
+
+**Otherwise**, pass the Metis analysis as additional context to step 2:
+
+```
+Metis pre-analysis:
+[analysis output]
+
+Create the implementation plan accounting for these findings.
+```
+
 ### 2. Invoke /workflows:plan (Autonomous)
 
 Invoke `/workflows:plan` with this context:
@@ -59,6 +87,9 @@ Do NOT ask the user questions interactively. If requirements are unclear:
 1. Invoke /legion-oracle [specific question] for research-based guidance
 2. Make reasonable assumptions and document them explicitly
 3. Only escalate to user-input-needed if you truly cannot proceed
+
+Metis pre-analysis:
+[analysis output from step 1.5]
 
 Feature description:
 [Linear issue title + description + comments]
@@ -75,31 +106,7 @@ The skill handles:
 2. Post a comment via `linear_linear(action="comment", ...)` explaining what needs clarification
 3. Exit immediately - do NOT add `worker-done`
 
-### 3. Invoke /deepen-plan
-
-Invoke `/deepen-plan` on the plan file from step 2.
-
-This enhances each section with:
-- Parallel research agents
-- Available skills matched to plan content
-- Institutional learnings from `docs/solutions/`
-- Review agents for comprehensive coverage
-
-### 4. Review with /compound-engineering:plan_review
-
-Invoke `/compound-engineering:plan_review` to validate the plan.
-
-**Iterate until review passes:**
-1. Read the review feedback
-2. Address each issue identified (may re-invoke portions of step 2 or 3)
-3. Re-invoke `/compound-engineering:plan_review`
-4. Repeat until no blocking issues remain
-
-**Max 3 iterations.** If still failing:
-1. Add `user-input-needed` label with a comment summarizing unresolved issues
-2. Exit without `worker-done`
-
-### 5. Invoke /superpowers:writing-plans
+### 3. Invoke /superpowers:writing-plans
 
 Convert the approved plan into executable, bite-sized tasks.
 
@@ -133,43 +140,40 @@ The implementer will use these annotations to create a task graph with `blockedB
 - Minimize dependency chains — prefer wide, shallow graphs over deep sequential chains
 - When in doubt, mark as independent (the implementer can add dependencies if needed)
 
-### 6. Cross-Family Review
+### 4. Review with /plan-review
 
-After creating the executable plan, spawn a cross-family review session for external validation.
+After creating the executable plan, invoke `/plan-review` with the plan file path.
 
-1. Spawn a review session:
-   - Category: `review-plan`
-   - Model override: Use a different model family than the one that created the plan
-   - Prompt: Include the original issue requirements AND the complete executable plan from step 5
+This spawns parallel cross-family reviewers:
+- **Momus** (on a different model family) checks plan executability — can a stateless agent follow every task without asking questions?
+- **Simplicity reviewer** challenges unnecessary complexity — are there tasks that could be removed or combined?
 
-2. The reviewer evaluates:
-   - Does the plan address all requirements from the issue?
-   - Are the tasks correctly ordered and dependencies explicit?
-   - Is the plan feasible given the codebase structure?
-   - Are there missing steps or edge cases?
-   - Is each task small enough to be independently testable?
+**Iterate until review passes:**
+1. Read the aggregated review feedback
+2. Address each blocking issue by editing the plan directly — do NOT re-run `/superpowers:writing-plans`
+3. Re-invoke `/plan-review`
+4. Repeat until no blocking issues remain
 
-3. If the reviewer finds issues:
-   - Address each finding (adjust tasks, fix ordering, add missing steps)
-   - Re-run `/superpowers:writing-plans` if structural changes are needed
-   - You do NOT need to re-review after fixes — one cross-family pass is sufficient
+**Max 3 iterations.** If still failing:
+1. Add `user-input-needed` label via `linear_linear(action="update", ...)`
+2. Post a comment explaining unresolved review issues
+3. Exit without `worker-done`
 
-4. Proceed to posting with the final (possibly revised) plan.
+**If a reviewer fails/times out:** Proceed with partial results. Note the missing review in the Linear comment.
 
-### 7. Post to Linear
+### 5. Post to Linear
 
-Use `linear_linear(action="comment", ...)` to post the **full executable plan** from step 5 (or step 6 if revised).
+Use `linear_linear(action="comment", ...)` to post the **full executable plan** from step 3 (or revised after step 4).
 
 The complete `/superpowers:writing-plans` output goes directly into the Linear comment - all tasks, all code examples, all test commands.
 
-### 8. Signal Completion
+### 6. Signal Completion
 
 Add `worker-done` label to the Linear issue via `linear_linear(action="update", ...)`, then exit.
 
 **CRITICAL:** Only add `worker-done` after successfully posting the plan. Never add this label if:
 - Requirements were unclear and could not be resolved (use `user-input-needed` instead)
 - Plan review failed and was not resolved
-- Cross-family review found unresolved issues
 - Any step failed to complete
 
 ## Quick Reference
@@ -177,11 +181,10 @@ Add `worker-done` label to the Linear issue via `linear_linear(action="update", 
 | Step | Action | Skill/Tool |
 |------|--------|------------|
 | Fetch | Get issue details | `linear_linear(action="get", ...)` |
+| Pre-Analysis | Identify risks | Metis agent (background) |
 | Research + Structure | Create plan | `/workflows:plan` (autonomous) |
-| Enhance | Deepen with agents | `/deepen-plan` |
-| Validate | Review plan | `/compound-engineering:plan_review` (iterate) |
 | Executable | Bite-sized tasks | `/superpowers:writing-plans` |
-| Cross-Family Review | External validation | Spawn review session (different model family) |
+| Validate | Review plan | `/plan-review` (iterate) |
 | Post | Full plan to issue | `linear_linear(action="comment", ...)` |
 | Complete | Add done label | `linear_linear(action="update", ...)` |
 
@@ -205,7 +208,7 @@ Do NOT ask the user questions interactively. If uncertain:
 | Mistake | Correction |
 |---------|------------|
 | Adding `worker-done` when requirements unclear | Use `user-input-needed` label, exit without `worker-done` |
-| Skipping /deepen-plan | Always run to enhance plan with research |
 | Posting summary instead of full plan | Post complete executable plan from /superpowers:writing-plans |
 | Asking user questions | Use legion-oracle first, then assumptions, escalate only as last resort |
-| Skipping plan review iteration | Always iterate until review passes or max 3 attempts |
+| Skipping plan review iteration | Always iterate until /plan-review passes or max 3 attempts |
+| Ignoring Metis pre-analysis | Always pass Metis findings to /workflows:plan as context |

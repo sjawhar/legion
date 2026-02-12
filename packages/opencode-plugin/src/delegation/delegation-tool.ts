@@ -7,7 +7,15 @@ import { resolveCategory } from "./category-router";
 
 const z = tool.schema;
 
-const LEAF_AGENTS = new Set(["explorer", "librarian", "oracle", "metis", "momus", "multimodal"]);
+const LEAF_AGENTS = new Set([
+  "explorer",
+  "librarian",
+  "oracle",
+  "metis",
+  "momus",
+  "multimodal",
+  "simplicity-reviewer",
+]);
 
 export function createDelegationTools(
   manager: BackgroundTaskManager,

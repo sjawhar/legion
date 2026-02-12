@@ -101,9 +101,9 @@ function createToolContext(directory: string, agent = "orchestrator"): ToolConte
 
 describe("opencode-legion plugin", () => {
   describe("agents", () => {
-    it("creates 8 agents", () => {
+    it("creates 10 agents", () => {
       const agents = createAgents();
-      expect(agents).toHaveLength(8);
+      expect(agents).toHaveLength(10);
     });
 
     it("all agents have name, description, and config", () => {
@@ -135,6 +135,7 @@ describe("opencode-legion plugin", () => {
         "metis",
         "momus",
         "multimodal",
+        "conductor",
       ];
       for (const name of expected) {
         expect(names).toContain(name);
@@ -582,6 +583,1015 @@ describe("opencode-legion plugin", () => {
 
       expect(summarizeCalled).toBe(false);
       fs.rmSync(tempRoot, { recursive: true, force: true });
+    });
+  });
+
+  describe("conductor agent", () => {
+    it("is included in agent list", () => {
+      const agents = createAgents();
+      expect(agents.map((a) => a.name)).toContain("conductor");
+    });
+
+    it("has delegation-only permissions via plugin config", async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-conductor-"));
+      try {
+        const ctx = createStubContext(tempRoot);
+        const hooks = await OpenCodeLegion(ctx);
+        const config: Record<string, unknown> = {};
+        await hooks.config?.(config);
+
+        const agentMap = config.agent as Record<string, { permission?: Record<string, string> }>;
+        const conductor = agentMap?.conductor;
+        expect(conductor).toBeTruthy();
+        expect(conductor.permission?.edit).toBe("deny");
+        expect(conductor.permission?.write).toBe("deny");
+        expect(conductor.permission?.bash).toBe("deny");
+        expect(conductor.permission?.task).toBe("allow");
+        expect(conductor.permission?.read).toBe("allow");
+        expect(conductor.permission?.glob).toBe("allow");
+        expect(conductor.permission?.list).toBe("allow");
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("prompt enforces delegation-only constraints", () => {
+      const agents = createAgents();
+      const conductor = agents.find((a) => a.name === "conductor");
+      expect(conductor).toBeTruthy();
+      expect(conductor!.config.prompt).toContain("MUST NOT");
+      expect(conductor!.config.prompt).not.toMatch(/claude|anthropic|gpt|openai|gemini|google/i);
+    });
+
+    it("prompt mentions background_task for delegation", () => {
+      const agents = createAgents();
+      const conductor = agents.find((a) => a.name === "conductor");
+      expect(conductor).toBeTruthy();
+      expect(conductor!.config.prompt).toContain("background_task");
+    });
+
+    it("prompt is within token budget (<3000 tokens)", () => {
+      const agents = createAgents();
+      const conductor = agents.find((a) => a.name === "conductor");
+      expect(conductor!.config.prompt.length / 4).toBeLessThan(3000);
+    });
+  });
+
+  describe("todo continuation enforcer", () => {
+    it("injects continuation when session idles with incomplete todos", async () => {
+      const sessionID = "session-continue";
+      let capturedPrompt:
+        | {
+            agent?: string;
+            model?: unknown;
+            pathId: string;
+            directory: string;
+          }
+        | undefined;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-continue-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [
+                { id: "1", content: "Task A", status: "in_progress", priority: "high" },
+                { id: "2", content: "Task B", status: "pending", priority: "medium" },
+              ],
+            }),
+            messages: async () => ({
+              data: [
+                {
+                  info: {
+                    role: "assistant",
+                    agent: "orchestrator",
+                    providerID: "anthropic",
+                    modelID: "claude-sonnet-4-20250514",
+                  },
+                },
+              ],
+            }),
+            promptAsync: async ({
+              path: p,
+              body,
+              query,
+            }: {
+              path: { id: string };
+              body: { agent?: string; model?: unknown; parts?: unknown[] };
+              query: { directory: string };
+            }) => {
+              capturedPrompt = {
+                agent: body.agent,
+                model: body.model,
+                pathId: p.id,
+                directory: query.directory,
+              };
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+
+        expect(capturedPrompt).toBeTruthy();
+        expect(capturedPrompt!.agent).toBe("orchestrator");
+        expect(capturedPrompt!.pathId).toBe(sessionID);
+        expect(capturedPrompt!.directory).toBe(tempRoot);
+        expect(capturedPrompt!.model).toEqual({
+          providerID: "anthropic",
+          modelID: "claude-sonnet-4-20250514",
+        });
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips when all todos are complete", async () => {
+      const sessionID = "session-all-done";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-all-done-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "completed" }],
+            }),
+            messages: async () => ({ data: [] }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips when continuation is stopped", async () => {
+      const sessionID = "session-stopped";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-stopped-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => true,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips for non-continuation agents", async () => {
+      const sessionID = "session-leaf";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-leaf-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "explorer" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails closed when agent cannot be resolved", async () => {
+      const sessionID = "session-no-agent";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-no-agent-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({ data: [] }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips for background sessions", async () => {
+      const sessionID = "session-bg";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-bg-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => true,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips during recovery", async () => {
+      const sessionID = "session-recovering";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-recovering-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => true,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 20));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("replaces timer on repeated idle (no duplicate injection)", async () => {
+      const sessionID = "session-double-idle";
+      let promptCount = 0;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-double-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "executor" } }],
+            }),
+            promptAsync: async () => {
+              promptCount++;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 50,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await new Promise((r) => setTimeout(r, 150));
+
+        expect(promptCount).toBe(1);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("cancels pending continuation on user message", async () => {
+      const sessionID = "session-cancel";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-cancel-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 100,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await hook.chatMessage({ sessionID });
+        await new Promise((r) => setTimeout(r, 200));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("cleans up on session.deleted", async () => {
+      const sessionID = "session-cleanup";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-cleanup-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 100,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await hook.event({
+          event: { type: "session.deleted", properties: { info: { id: sessionID } } },
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("cleans up on session.deleted with sessionID format (C3)", async () => {
+      const sessionID = "session-cleanup-c3";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-c3-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 100,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        await hook.event({
+          event: { type: "session.deleted", properties: { sessionID } },
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("cancelPending prevents timer from firing (C1)", async () => {
+      const sessionID = "session-cancel-pending";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-c1-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 100,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        hook.cancelPending(sessionID);
+        await new Promise((r) => setTimeout(r, 200));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("re-checks isContinuationStopped when timer fires (C1)", async () => {
+      const sessionID = "session-recheck-stop";
+      let promptInjected = false;
+      let stopped = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-c1-recheck-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending" }],
+            }),
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => stopped,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 50,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        stopped = true;
+        await new Promise((r) => setTimeout(r, 150));
+        expect(promptInjected).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("stop-continuation + continuation integration (e2e)", () => {
+    it("stop prevents continuation; user message clears stop; idle then continues", async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-e2e-stop-"));
+      let promptCount = 0;
+      try {
+        writeJsonFile(path.join(tempRoot, ".opencode", "opencode-legion.json"), {
+          continuationGracePeriodMs: 0,
+        });
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Task A", status: "pending", priority: "high" }],
+            }),
+            messages: async () => ({
+              data: [
+                {
+                  info: {
+                    role: "assistant",
+                    agent: "orchestrator",
+                    providerID: "anthropic",
+                    modelID: "test",
+                  },
+                },
+              ],
+            }),
+            promptAsync: async () => {
+              promptCount++;
+              return {};
+            },
+          },
+        });
+
+        const hooks = await OpenCodeLegion(ctx);
+
+        await hooks["tool.execute.before"]!(
+          { tool: "slashcommand", sessionID: "ses1", callID: "1" },
+          { args: { command: "stop-continuation" } }
+        );
+
+        await hooks.event!({
+          event: { type: "session.idle", properties: { sessionID: "ses1" } },
+        } as any);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(promptCount).toBe(0);
+
+        await hooks["chat.message"]!({ sessionID: "ses1" } as any, {} as any);
+
+        await hooks.event!({
+          event: { type: "session.idle", properties: { sessionID: "ses1" } },
+        } as any);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(promptCount).toBe(1);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("compaction todo preserver", () => {
+    it("restores todos after compaction when missing", async () => {
+      const sessionID = "session-compact-missing";
+      let capturedRestoreCall: { sessionID: string; todos: unknown[] } | undefined;
+      let todoCalls = 0;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-todo-preserve-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              todoCalls++;
+              if (todoCalls === 1) {
+                return {
+                  data: [
+                    { id: "1", content: "Task A", status: "pending", priority: "high" },
+                    { id: "2", content: "Task B", status: "completed", priority: "low" },
+                  ],
+                };
+              }
+              return { data: [] };
+            },
+            todoUpdate: async ({
+              path: p,
+              body,
+            }: {
+              path: { id: string };
+              body: { todos: unknown[] };
+            }) => {
+              capturedRestoreCall = { sessionID: p.id, todos: body.todos };
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+
+        expect(capturedRestoreCall).toBeTruthy();
+        expect(capturedRestoreCall!.sessionID).toBe(sessionID);
+        expect(capturedRestoreCall!.todos).toHaveLength(2);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips restore when todos still exist post-compaction", async () => {
+      const sessionID = "session-compact-present";
+      let todoUpdateCalled = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-todo-skip-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => ({
+              data: [{ id: "1", content: "Still here", status: "pending", priority: "high" }],
+            }),
+            todoUpdate: async () => {
+              todoUpdateCalled = true;
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+
+        expect(todoUpdateCalled).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("cleans up snapshot on session.deleted", async () => {
+      const sessionID = "session-compact-cleanup";
+      let todoUpdateCalled = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-todo-cleanup-"));
+      try {
+        let todoCalls = 0;
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              todoCalls++;
+              return todoCalls === 1
+                ? { data: [{ id: "1", content: "Task", status: "pending" }] }
+                : { data: [] };
+            },
+            todoUpdate: async () => {
+              todoUpdateCalled = true;
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.event({
+          event: { type: "session.deleted", properties: { info: { id: sessionID } } },
+        });
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+
+        expect(todoUpdateCalled).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips restore when todoUpdate is unavailable", async () => {
+      const sessionID = "session-compact-no-api";
+      let todoCalls = 0;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-todo-noapi-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              todoCalls++;
+              return todoCalls === 1
+                ? { data: [{ id: "1", content: "Task", status: "pending" }] }
+                : { data: [] };
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("merges back missing todos after partial loss (M5)", async () => {
+      const sessionID = "session-m5-partial";
+      let restoredTodos: unknown[] | undefined;
+      let todoCalls = 0;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-m5-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              todoCalls++;
+              if (todoCalls === 1) {
+                return {
+                  data: [
+                    { id: "1", content: "Task A", status: "pending", priority: "high" },
+                    { id: "2", content: "Task B", status: "in_progress", priority: "medium" },
+                    { id: "3", content: "Task C", status: "completed", priority: "low" },
+                  ],
+                };
+              }
+              // Post-compaction: only task 1 survived
+              return {
+                data: [{ id: "1", content: "Task A", status: "pending", priority: "high" }],
+              };
+            },
+            todoUpdate: async ({ body }: { path: { id: string }; body: { todos: unknown[] } }) => {
+              restoredTodos = body.todos;
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+
+        expect(restoredTodos).toBeTruthy();
+        expect(restoredTodos).toHaveLength(3);
+        const ids = (restoredTodos as Array<{ id: string }>).map((t) => t.id);
+        expect(ids).toContain("1");
+        expect(ids).toContain("2");
+        expect(ids).toContain("3");
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("preserves fresher status from subagent updates during compaction (M5)", async () => {
+      const sessionID = "session-m5-fresh";
+      let restoredTodos: Array<{ id: string; status: string }> | undefined;
+      let todoCalls = 0;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-m5-fresh-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              todoCalls++;
+              if (todoCalls === 1) {
+                return {
+                  data: [
+                    { id: "1", content: "Task A", status: "in_progress" },
+                    { id: "2", content: "Task B", status: "pending" },
+                  ],
+                };
+              }
+              // Post-compaction: task 1 was updated by subagent to completed,
+              // but task 2 was lost
+              return {
+                data: [{ id: "1", content: "Task A", status: "completed" }],
+              };
+            },
+            todoUpdate: async ({
+              body,
+            }: {
+              path: { id: string };
+              body: { todos: Array<{ id: string; status: string }> };
+            }) => {
+              restoredTodos = body.todos;
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+
+        expect(restoredTodos).toBeTruthy();
+        expect(restoredTodos).toHaveLength(2);
+        // Task 1 keeps the fresher "completed" status from current, not snapshot's "in_progress"
+        const task1 = restoredTodos!.find((t) => t.id === "1");
+        expect(task1?.status).toBe("completed");
+        // Task 2 was restored from snapshot
+        const task2 = restoredTodos!.find((t) => t.id === "2");
+        expect(task2?.status).toBe("pending");
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("deletes stale snapshot when capture finds empty todos (M1)", async () => {
+      const sessionID = "session-m1-stale";
+      let todoUpdateCalled = false;
+      let todoCalls = 0;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-m1-"));
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              todoCalls++;
+              if (todoCalls === 1) {
+                return { data: [{ id: "1", content: "Task", status: "pending" }] };
+              }
+              return { data: [] };
+            },
+            todoUpdate: async () => {
+              todoUpdateCalled = true;
+            },
+          },
+        });
+
+        const { createCompactionTodoPreserverHook } = await import(
+          "../hooks/compaction-todo-preserver"
+        );
+        const hook = createCompactionTodoPreserverHook(ctx);
+
+        await hook.capture(sessionID);
+        await hook.capture(sessionID);
+        await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
+
+        expect(todoUpdateCalled).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("compaction context injector", () => {
+    it("injects context template into compaction output via plugin", async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-compact-ctx-"));
+      try {
+        const ctx = createStubContext(tempRoot);
+        const hooks = await OpenCodeLegion(ctx);
+        const compactingHook = hooks["experimental.session.compacting"];
+        expect(compactingHook).toBeTruthy();
+        if (!compactingHook) throw new Error("Missing compacting hook");
+
+        const output = { context: [] as string[] };
+        await compactingHook({ sessionID: "session" }, output);
+
+        expect(output.context.length).toBeGreaterThan(0);
+        const template = output.context[0];
+        expect(template).toContain("User Requests");
+        expect(template).toContain("Remaining Tasks");
+        expect(template).toContain("Active Working Context");
+        expect(template).toContain("Explicit Constraints");
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("shared utils (extractTodos + resolveSessionID)", () => {
+    it("extractTodos handles { data: [...] } wrapper", async () => {
+      const { extractTodos } = await import("../hooks/utils");
+      const result = extractTodos({ data: [{ id: "1", content: "A", status: "pending" }] });
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("1");
+    });
+
+    it("extractTodos handles raw array", async () => {
+      const { extractTodos } = await import("../hooks/utils");
+      const result = extractTodos([{ id: "2", content: "B", status: "completed" }]);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("2");
+    });
+
+    it("extractTodos returns empty for non-array input", async () => {
+      const { extractTodos } = await import("../hooks/utils");
+      expect(extractTodos(null)).toEqual([]);
+      expect(extractTodos(undefined)).toEqual([]);
+      expect(extractTodos("string")).toEqual([]);
+      expect(extractTodos({})).toEqual([]);
+    });
+
+    it("resolveSessionID handles { sessionID } shape", async () => {
+      const { resolveSessionID } = await import("../hooks/utils");
+      expect(resolveSessionID({ sessionID: "ses-1" })).toBe("ses-1");
+    });
+
+    it("resolveSessionID handles { info: { id } } shape", async () => {
+      const { resolveSessionID } = await import("../hooks/utils");
+      expect(resolveSessionID({ info: { id: "ses-2" } })).toBe("ses-2");
+    });
+
+    it("resolveSessionID prefers sessionID over info.id", async () => {
+      const { resolveSessionID } = await import("../hooks/utils");
+      expect(resolveSessionID({ sessionID: "ses-1", info: { id: "ses-2" } })).toBe("ses-1");
+    });
+
+    it("resolveSessionID returns undefined for empty props", async () => {
+      const { resolveSessionID } = await import("../hooks/utils");
+      expect(resolveSessionID(undefined)).toBeUndefined();
+      expect(resolveSessionID({})).toBeUndefined();
     });
   });
 

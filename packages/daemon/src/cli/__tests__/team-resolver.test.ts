@@ -6,6 +6,7 @@ import { resolveTeamId } from "../team-resolver";
 
 describe("resolveTeamId", () => {
   const originalHome = process.env.HOME;
+  const originalFetch = globalThis.fetch;
   let testHome: string;
   let testCacheDir: string;
   let testCacheFile: string;
@@ -20,6 +21,7 @@ describe("resolveTeamId", () => {
   });
 
   afterEach(() => {
+    globalThis.fetch = originalFetch;
     if (fs.existsSync(testHome)) {
       fs.rmSync(testHome, { recursive: true, force: true });
     }

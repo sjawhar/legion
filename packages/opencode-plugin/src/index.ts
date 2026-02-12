@@ -7,10 +7,13 @@ import { loadPluginConfig, mergePermissionConfig } from "./config";
 import { BackgroundTaskManager, createDelegationTools } from "./delegation";
 import {
   anthropicEffortHook,
+  COMPACTION_CONTEXT_TEMPLATE,
   createBackgroundNotificationHook,
+  createCompactionTodoPreserverHook,
   createPreemptiveCompactionHook,
   createSessionRecoveryHook,
   createStopContinuationGuardHook,
+  createTodoContinuationEnforcerHook,
   nonInteractiveEnvHook,
   subagentQuestionBlockerHook,
   thinkingBlockValidatorHook,
@@ -42,6 +45,13 @@ const OpenCodeLegion: Plugin = async (ctx) => {
   const preemptiveCompactionHook = createPreemptiveCompactionHook(ctx);
   const sessionRecoveryHook = createSessionRecoveryHook(ctx);
   const stopContinuationGuardHook = createStopContinuationGuardHook();
+  const compactionTodoPreserver = createCompactionTodoPreserverHook(ctx);
+  const todoContinuationEnforcer = createTodoContinuationEnforcerHook(ctx, {
+    isContinuationStopped: (sessionID) => stopContinuationGuardHook.isStopped(sessionID),
+    isBackgroundSession: (sessionID) => manager.isBackgroundSession(sessionID),
+    isRecovering: (sessionID) => sessionRecoveryHook.isRecovering(sessionID),
+    gracePeriodMs: pluginConfig.continuationGracePeriodMs,
+  });
 
   return {
     name: "opencode-legion",
@@ -83,6 +93,20 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       } else {
         Object.assign(opencodeConfig.agent, agentMap);
       }
+
+      const conductorEntry = (opencodeConfig.agent as Record<string, Record<string, unknown>>)
+        ?.conductor;
+      if (conductorEntry) {
+        conductorEntry.permission = {
+          read: "allow",
+          glob: "allow",
+          list: "allow",
+          edit: "deny",
+          write: "deny",
+          bash: "deny",
+          task: "allow",
+        };
+      }
     },
     event: async (input: { event: Event }) => {
       manager.handleSessionStatus(input.event);
@@ -91,6 +115,12 @@ const OpenCodeLegion: Plugin = async (ctx) => {
         input as { event: { type: string; properties?: unknown } }
       );
       await stopContinuationGuardHook.event(
+        input as { event: { type: string; properties?: unknown } }
+      );
+      await compactionTodoPreserver.event(
+        input as { event: { type: string; properties?: unknown } }
+      );
+      await todoContinuationEnforcer.event(
         input as { event: { type: string; properties?: unknown } }
       );
 
@@ -129,18 +159,35 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     },
     "tool.execute.before": async (input, output) => {
       subagentQuestionBlockerHook(input, output);
+      const toolInput = input as { tool: string; sessionID?: string };
+      if (toolInput.tool === "slashcommand") {
+        const args = (output as { args?: { command?: string } }).args;
+        const command = args?.command?.replace(/^\//, "").toLowerCase();
+        if (command === "stop-continuation" && toolInput.sessionID) {
+          stopContinuationGuardHook.stop(toolInput.sessionID);
+          todoContinuationEnforcer.cancelPending(toolInput.sessionID);
+        }
+      }
     },
     "tool.execute.after": async (input, output) => {
       await preemptiveCompactionHook["tool.execute.after"]?.(input, output);
     },
     "chat.message": async (input) => {
       await stopContinuationGuardHook["chat.message"](input as { sessionID?: string });
+      await todoContinuationEnforcer.chatMessage(input as { sessionID?: string });
     },
     "shell.env": async (input, output) => {
       nonInteractiveEnvHook(input, output);
     },
     "experimental.chat.messages.transform": async (input, output) => {
       thinkingBlockValidatorHook(input, output);
+    },
+    "experimental.session.compacting": async (
+      _input: { sessionID: string },
+      output: { context: string[] }
+    ): Promise<void> => {
+      await compactionTodoPreserver.capture(_input.sessionID);
+      output.context.push(COMPACTION_CONTEXT_TEMPLATE);
     },
     "experimental.chat.system.transform": async (input, output) => {
       const overlay = getModelOverlay(input.model.providerID, input.model.id);

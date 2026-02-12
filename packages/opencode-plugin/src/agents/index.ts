@@ -1,4 +1,5 @@
 import type { AgentOverrideConfig, PluginConfig } from "../config";
+import { createConductorAgent } from "./conductor";
 import { createExecutorAgent } from "./executor";
 import { createExplorerAgent } from "./explorer";
 import { createLibrarianAgent } from "./librarian";
@@ -7,6 +8,7 @@ import { createMomusAgent } from "./momus";
 import { createMultimodalAgent } from "./multimodal";
 import { createOracleAgent } from "./oracle";
 import { createOrchestratorAgent } from "./orchestrator";
+import { createSimplicityReviewerAgent } from "./simplicity-reviewer";
 import type { AgentDefinition } from "./types";
 
 export type { AgentDefinition } from "./types";
@@ -20,6 +22,8 @@ const DEFAULT_MODELS: Record<string, string> = {
   metis: "anthropic/claude-sonnet-4-20250514",
   momus: "anthropic/claude-sonnet-4-20250514",
   multimodal: "anthropic/claude-sonnet-4-20250514",
+  conductor: "anthropic/claude-sonnet-4-20250514",
+  "simplicity-reviewer": "anthropic/claude-sonnet-4-20250514",
 };
 
 function getModel(config: PluginConfig | undefined, agentName: string): string {
@@ -54,6 +58,8 @@ export function createAgents(config?: PluginConfig): AgentDefinition[] {
     createMetisAgent(getModel(config, "metis")),
     createMomusAgent(getModel(config, "momus")),
     createMultimodalAgent(getModel(config, "multimodal")),
+    createConductorAgent(getModel(config, "conductor")),
+    createSimplicityReviewerAgent(getModel(config, "simplicity-reviewer")),
   ];
 
   return agents.map((agent) => applyOverrides(agent, config?.agents?.[agent.name]));

@@ -423,13 +423,19 @@ async function resumeSession(
 export interface SessionRecoveryHook {
   handleSessionRecovery: (info: MessageInfo) => Promise<boolean>;
   isRecoverableError: (error: unknown) => boolean;
+  isRecovering: (sessionID: string) => boolean;
 }
 
 export function createSessionRecoveryHook(ctx: PluginInput): SessionRecoveryHook {
   const processingErrors = new Set<string>();
+  const recoveringSessions = new Set<string>();
 
   const isRecoverableError = (error: unknown): boolean => {
     return detectErrorType(error) !== null;
+  };
+
+  const isRecovering = (sessionID: string): boolean => {
+    return recoveringSessions.has(sessionID);
   };
 
   const handleSessionRecovery = async (info: MessageInfo): Promise<boolean> => {
@@ -445,6 +451,7 @@ export function createSessionRecoveryHook(ctx: PluginInput): SessionRecoveryHook
     if (processingErrors.has(assistantMsgID)) return false;
     processingErrors.add(assistantMsgID);
 
+    recoveringSessions.add(sessionID);
     try {
       await ctx.client.session
         .abort({
@@ -481,11 +488,13 @@ export function createSessionRecoveryHook(ctx: PluginInput): SessionRecoveryHook
       return success;
     } finally {
       processingErrors.delete(assistantMsgID);
+      if (sessionID) recoveringSessions.delete(sessionID);
     }
   };
 
   return {
     handleSessionRecovery,
     isRecoverableError,
+    isRecovering,
   };
 }
