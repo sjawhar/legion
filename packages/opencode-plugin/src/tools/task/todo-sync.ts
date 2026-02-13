@@ -58,7 +58,13 @@ export async function syncTaskTodoUpdate(
   if (!ctx) return;
 
   try {
-    const sessionApi = ctx.client.session as unknown as Record<string, CallableFunction>;
+    const sessionApi = ctx.client.session as {
+      todo: (input: { path: { id: string } }) => Promise<unknown>;
+      todoUpdate?: (input: {
+        path: { id: string };
+        body: { todos: TodoInfo[] };
+      }) => Promise<unknown>;
+    };
     const response = await sessionApi.todo({
       path: { id: sessionID },
     });

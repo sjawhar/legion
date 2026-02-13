@@ -1,5 +1,5 @@
 import type { PluginInput } from "@opencode-ai/plugin";
-import { extractTodos, resolveSessionID, type TodoItem } from "./utils";
+import { extractTodos, isRecord, resolveSessionID, type TodoItem } from "./utils";
 
 const CONTINUATION_AGENTS = new Set(["orchestrator", "executor", "builder", "conductor"]);
 const DEFAULT_GRACE_PERIOD_MS = 2000;
@@ -15,6 +15,18 @@ interface MessageInfo {
   model?: { providerID?: string; modelID?: string };
 }
 
+interface SessionMessage {
+  info?: MessageInfo;
+}
+
+interface SessionEventInput {
+  event: { type: string; properties?: unknown };
+}
+
+interface ChatMessageInput {
+  sessionID?: string;
+}
+
 interface ResolvedAgent {
   agent: string;
   model?: { providerID: string; modelID: string };
@@ -24,9 +36,7 @@ function getIncompleteCount(todos: TodoItem[]): number {
   return todos.filter((t) => t.status !== "completed" && t.status !== "cancelled").length;
 }
 
-function resolveAgentFromMessages(
-  messages: Array<{ info?: MessageInfo }>
-): ResolvedAgent | undefined {
+function resolveAgentFromMessages(messages: SessionMessage[]): ResolvedAgent | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const info = messages[i].info;
     if (!info) continue;
@@ -44,6 +54,26 @@ function resolveAgentFromMessages(
   return undefined;
 }
 
+async function resolveAgentForSession(
+  ctx: PluginInput,
+  sessionID: string,
+  warningLabel: string
+): Promise<ResolvedAgent | undefined> {
+  try {
+    const messagesResp = await ctx.client.session.messages({
+      path: { id: sessionID },
+      query: { directory: ctx.directory },
+    });
+    const messages = (
+      isRecord(messagesResp) && Array.isArray(messagesResp.data) ? messagesResp.data : []
+    ) as SessionMessage[];
+    return resolveAgentFromMessages(messages);
+  } catch (err) {
+    console.warn(`[opencode-legion] ${warningLabel}`, err);
+    return undefined;
+  }
+}
+
 export interface TodoContinuationEnforcerOptions {
   isContinuationStopped: (sessionID: string) => boolean;
   isBackgroundSession: (sessionID: string) => boolean;
@@ -52,8 +82,8 @@ export interface TodoContinuationEnforcerOptions {
 }
 
 export interface TodoContinuationEnforcer {
-  event: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
-  chatMessage: (input: { sessionID?: string }) => Promise<void>;
+  event: (input: SessionEventInput) => Promise<void>;
+  chatMessage: (input: ChatMessageInput) => Promise<void>;
   cancelPending: (sessionID: string) => void;
 }
 
@@ -106,20 +136,11 @@ export function createTodoContinuationEnforcerHook(
     // C2: Check generation after first await — bail if invalidated
     if (getGeneration(sessionID) !== startGeneration) return;
 
-    let resolved: ResolvedAgent | undefined;
-    try {
-      const messagesResp = await ctx.client.session.messages({
-        path: { id: sessionID },
-        query: { directory: ctx.directory },
-      });
-      const messages = ((messagesResp as { data?: unknown[] }).data ?? []) as Array<{
-        info?: MessageInfo;
-      }>;
-      resolved = resolveAgentFromMessages(messages);
-    } catch (err) {
-      console.warn("[opencode-legion] Failed to fetch messages for continuation:", err);
-      return;
-    }
+    const resolved = await resolveAgentForSession(
+      ctx,
+      sessionID,
+      "Failed to fetch messages for continuation:"
+    );
 
     if (!resolved) return;
     if (!CONTINUATION_AGENTS.has(resolved.agent)) return;
@@ -137,6 +158,8 @@ export function createTodoContinuationEnforcerHook(
 
       // C1: Re-check stop state when timer fires
       if (options.isContinuationStopped(sessionID)) return;
+      if (options.isBackgroundSession(sessionID)) return;
+      if (options.isRecovering(sessionID)) return;
 
       // C2: Bail if generation changed during grace period
       if (getGeneration(sessionID) !== timerGeneration) return;
@@ -151,20 +174,11 @@ export function createTodoContinuationEnforcerHook(
       }
 
       // Re-resolve agent at fire time so we use the current agent, not the stale one (M4)
-      let freshResolved: ResolvedAgent | undefined;
-      try {
-        const messagesResp = await ctx.client.session.messages({
-          path: { id: sessionID },
-          query: { directory: ctx.directory },
-        });
-        const messages = ((messagesResp as { data?: unknown[] }).data ?? []) as Array<{
-          info?: MessageInfo;
-        }>;
-        freshResolved = resolveAgentFromMessages(messages);
-      } catch (err) {
-        console.warn("[opencode-legion] Failed to re-resolve agent for continuation:", err);
-        return;
-      }
+      const freshResolved = await resolveAgentForSession(
+        ctx,
+        sessionID,
+        "Failed to re-resolve agent for continuation:"
+      );
 
       if (!freshResolved || !CONTINUATION_AGENTS.has(freshResolved.agent)) return;
 
@@ -186,12 +200,8 @@ export function createTodoContinuationEnforcerHook(
     pendingTimers.set(sessionID, timer);
   };
 
-  const event = async ({
-    event,
-  }: {
-    event: { type: string; properties?: unknown };
-  }): Promise<void> => {
-    const props = event.properties as Record<string, unknown> | undefined;
+  const event = async ({ event }: SessionEventInput): Promise<void> => {
+    const props = isRecord(event.properties) ? event.properties : undefined;
 
     if (event.type === "session.idle") {
       const sessionID = resolveSessionID(props);
@@ -211,7 +221,7 @@ export function createTodoContinuationEnforcerHook(
     }
   };
 
-  const chatMessage = async ({ sessionID }: { sessionID?: string }): Promise<void> => {
+  const chatMessage = async ({ sessionID }: ChatMessageInput): Promise<void> => {
     if (sessionID) {
       cancelPending(sessionID);
     }

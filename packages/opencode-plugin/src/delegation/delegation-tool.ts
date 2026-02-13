@@ -17,6 +17,11 @@ const LEAF_AGENTS = new Set([
   "simplicity-reviewer",
 ]);
 
+interface DelegationToolContext {
+  agent?: string;
+  sessionID?: string;
+}
+
 export function createDelegationTools(
   manager: BackgroundTaskManager,
   config?: PluginConfig
@@ -46,7 +51,8 @@ export function createDelegationTools(
       run_in_background: z.boolean().optional().default(true),
     },
     async execute(args, toolContext) {
-      const callingAgent = (toolContext as { agent?: string })?.agent;
+      const context = toolContext as DelegationToolContext | undefined;
+      const callingAgent = context?.agent;
       if (callingAgent && LEAF_AGENTS.has(callingAgent)) {
         return `Error: Agent '${callingAgent}' cannot delegate tasks. Only orchestrator-type agents can use background_task.`;
       }
@@ -63,10 +69,7 @@ export function createDelegationTools(
       const agentName = (args.subagent_type as string | undefined) ?? "executor";
       const resolvedModel = modelOverride ?? categoryConfig?.model ?? agentModelMap.get(agentName);
 
-      const parentSessionId =
-        toolContext && "sessionID" in toolContext
-          ? (toolContext as { sessionID: string }).sessionID
-          : undefined;
+      const parentSessionId = context?.sessionID;
 
       const task = await manager.launch({
         agent: agentName,
