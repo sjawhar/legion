@@ -5,6 +5,10 @@ description: Use when coordinating Legion workers across Linear issues - invoked
 
 # Legion Controller
 
+> **Customization:** This skill is the primary extension point for Legion's behavior.
+> The state machine provides suggested actions and raw signals. This skill decides what
+> to do with them. Modify this file to change how issues flow through the pipeline.
+
 Persistent coordinator that loops forever, dispatching and resuming workers based on Linear issue state.
 
 ## Environment
@@ -60,21 +64,42 @@ When both `user-input-needed` AND `user-feedback-given` labels present:
 
 Run state script:
 ```bash
-echo "$LINEAR_JSON" | bun run src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
+echo "$LINEAR_JSON" | bun run packages/daemon/src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
 ```
 
-State transitions (always remove `worker-done` after):
+The state CLI returns JSON with both `suggestedAction` and raw signals:
+- `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
+- `hasPr`, `prIsDraft` — PR state
+- `hasUserFeedback` — user interaction state
 
-| Current Status | Action |
-|----------------|--------|
-| Backlog + worker-done | → Todo, dispatch planner |
-| Todo + worker-done | → In Progress, dispatch implementer |
-| In Progress + worker-done | → Needs Review, dispatch reviewer |
-| Needs Review + worker-done (PR ready) | → Retro, resume implementer |
-| Needs Review + worker-done (PR draft) | Keep status, resume implementer for changes |
-| Needs Review + worker-done (no PR) | `investigate_no_pr` - see below |
-| Retro + worker-done | Dispatch merger |
-| `remove_worker_active_and_redispatch` | Remove worker-active label, then dispatch |
+Use `suggestedAction` as the primary guide, but consult raw signals when the suggestion
+is `skip`. The state machine returns `skip` conservatively — the controller should reason
+about what to do:
+
+| suggestedAction | Signals | Controller should... |
+|-----------------|---------|---------------------|
+| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for Linear auto-transition or manually advance to Needs Review |
+| `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
+| `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
+
+### Routing by Action Intent
+
+The state machine returns a `suggestedAction`. Route by prefix:
+
+| Prefix | Intent | Controller action |
+|--------|--------|-------------------|
+| `dispatch_` | Spawn a new worker | `POST /workers` with mode from `ACTION_TO_MODE` |
+| `transition_to_` | Move issue to new status | Update Linear issue status |
+| `resume_` | Send prompt to existing worker | Find worker by sessionId, send prompt |
+| `relay_` | Forward information | Relay user feedback to worker |
+| `add_` | Add label | Add the specified label to the issue |
+| `remove_` | Remove label + retry | Remove label, then re-evaluate |
+| `retry_` | Wait | Do nothing this iteration, re-check next loop |
+| `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
+| `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
+
+This routing is stable across code changes. New action types automatically route
+correctly if they follow the naming convention.
 
 **Handling `investigate_no_pr`:** Worker marked done but no PR exists. Likely causes:
 1. Worker crashed before creating PR
@@ -83,6 +108,40 @@ State transitions (always remove `worker-done` after):
 4. Linear attachment wasn't added
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
+
+**`retry_pr_check`:** The GitHub API couldn't determine PR draft status. Do nothing this iteration —
+don't dispatch a worker, don't transition status. The next loop iteration will re-run the state script
+which will retry the GitHub API call. If this persists across multiple iterations, investigate the
+GitHub API connectivity.
+
+### Quality Gate (Controller Policy)
+
+Before transitioning from In Progress → Needs Review, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
+
+**When to run:** Whenever executing a `transition_to_needs_review` action.
+
+**Trust but verify:** The implement workflow self-enforces checks before PR (step 4). The controller independently verifies.
+
+```bash
+WORKSPACES_DIR=$(dirname "$LEGION_DIR")
+ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
+WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
+
+cd "$WORKSPACE_PATH"
+bun test 2>&1
+TST_EXIT=$?
+bunx tsc --noEmit 2>&1
+TSC_EXIT=$?
+bunx biome check 2>&1
+BIOME_EXIT=$?
+```
+
+**If all pass** (exit codes 0): Proceed with transition to Needs Review.
+
+**If any fail:** Do NOT advance to Needs Review. Instead:
+1. Remove `worker-done` label
+2. Resume the implementer session with the failure output
+3. The implementer will fix and re-add `worker-done` when ready
 
 ### 4. Route Triage
 
@@ -141,71 +200,39 @@ Then return to step 1.
 
 ## Dispatch vs Resume
 
-**Dispatch** = new worker via daemon API:
+**Dispatch** = new worker:
 ```bash
-# $ISSUE_ID = Linear UUID, $ISSUE_IDENTIFIER = e.g. "LEG-18"
-# Workspaces are siblings to default workspace, named by identifier for easy navigation
-WORKSPACES_DIR=$(dirname "$LEGION_DIR")
-ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE"
+```
 
-# Create workspace if needed
-[ ! -d "$WORKSPACE_PATH" ] && jj workspace add "$WORKSPACE_PATH" --name "$ISSUE_LOWER" -R "$LEGION_DIR"
+The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
 
-# Dispatch worker via daemon HTTP API
-RESPONSE=$(curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/workers \
-  -H 'content-type: application/json' \
-  -d "{
-    \"issueId\": \"$ISSUE_IDENTIFIER\",
-    \"mode\": \"$MODE\",
-    \"workspace\": \"$WORKSPACE_PATH\",
-    \"env\": {
-      \"LINEAR_ISSUE_ID\": \"$ISSUE_IDENTIFIER\",
-      \"LINEAR_TEAM_ID\": \"$LINEAR_TEAM_ID\",
-      \"LEGION_DIR\": \"$LEGION_DIR\",
-      \"LEGION_SHORT_ID\": \"$LEGION_SHORT_ID\"
-    }
-  }")
-
-WORKER_ID=$(echo "$RESPONSE" | jq -r '.id')
-WORKER_PORT=$(echo "$RESPONSE" | jq -r '.port')
-SESSION_ID=$(echo "$RESPONSE" | jq -r '.sessionId')
-
-# Send initial prompt to worker's OpenCode serve
-curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
-  -H 'content-type: application/json' \
-  -d "{
-    \"parts\": [{
-      \"type\": \"text\",
-      \"text\": \"/legion-worker $MODE mode for $ISSUE_IDENTIFIER\"
-    }]
-  }"
-
-# Add worker-active label
-linear_linear(action="update", id="$ISSUE_ID", labels=["worker-active", ...existing...])
+For custom prompts:
+```bash
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --prompt "Custom instructions here"
 ```
 
 **Resume** = send prompt to existing worker:
 ```bash
-# Get worker info from daemon
-ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-WORKER_ID="$ISSUE_LOWER-$MODE"
-WORKER_INFO=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID)
-WORKER_PORT=$(echo "$WORKER_INFO" | jq -r '.port')
-SESSION_ID=$(echo "$WORKER_INFO" | jq -r '.sessionId')
+legion prompt "$ISSUE_IDENTIFIER" "Check Linear comments for user feedback"
+```
 
-# Send prompt to worker's OpenCode serve
-curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
-  -H 'content-type: application/json' \
-  -d "{
-    \"parts\": [{
-      \"type\": \"text\",
-      \"text\": \"$PROMPT\"
-    }]
-  }"
+If multiple workers exist for the same issue (different modes), specify mode:
+```bash
+legion prompt "$ISSUE_IDENTIFIER" --mode implement "Address PR review comments"
 ```
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
+
+### Retro
+
+Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
+
+```bash
+legion prompt "$ISSUE_IDENTIFIER" --mode implement "/legion-retro"
+```
+
+**If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
 
 ## Worker Inspection
 
@@ -239,6 +266,8 @@ curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
 | `worker-active` | Worker dispatched and running |
 | `user-input-needed` | Blocked on human, controller skips |
 | `user-feedback-given` | Human responded, controller resumes |
+| `needs-approval` | Architect done, waiting for human approval |
+| `human-approved` | Human approved, controller advances to planner |
 
 ## Common Mistakes
 

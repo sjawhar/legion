@@ -1,0 +1,29 @@
+{
+  "name": "opencode-legion",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "opencode-legion": "./src/cli/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.1.19",
+    "@opencode-ai/sdk": "^1.1.19",
+    "citty": "^0.2.0",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

@@ -86,7 +86,7 @@ Factory identifies specific warning signs of agent failure: self-rewriting plans
 - Workers escalate with structured reports (phase, completed work, blocker, options considered, remaining estimate)
 - Stuck detection monitors both inactivity (worker stopped doing anything) and unproductive activity (oscillating between fixes)
 - Max iteration limits prevent infinite loops (3x for plan review, bounded retries for test fixing)
-- The oracle researches before escalating — cheap self-help before expensive human involvement
+- The legion-oracle researches before escalating — cheap self-help before expensive human involvement
 
 **The anti-pattern:** Agents that "try harder" indefinitely. More attempts at a fundamentally blocked task waste compute and delay human intervention.
 
@@ -101,7 +101,7 @@ Blitzy is "much more bullish on memory than fine-tuning" — memory stored at th
 **In practice:**
 - The retro phase captures learnings from every completed PR, using dual perspectives (context-free + full-context)
 - Learnings are stored in `docs/solutions/` with structured frontmatter (tags, symptoms, module)
-- The oracle surfaces relevant learnings before workers start new work
+- The legion-oracle surfaces relevant learnings before workers start new work
 - Plans reference institutional learnings during research phases
 
 **What's missing:** Proactive injection of relevant learnings based on files being touched (not just reactive search). A file-to-learnings index that automatically includes applicable knowledge when a worker enters a familiar area of the codebase.
@@ -110,7 +110,7 @@ Blitzy is "much more bullish on memory than fine-tuning" — memory stored at th
 
 ## 8. Structure should be thin and model-determined
 
-The default workflow (architect → plan → implement → review → retro → merge) exists because it works today. It should not be treated as the architecture. It's a routing template — one of potentially many — that the system should be able to reshape as models and tasks demand.
+The default workflow (architect → plan → implement → review → retro via `/legion-retro` → merge) exists because it works today. It should not be treated as the architecture. It's a routing template — one of potentially many — that the system should be able to reshape as models and tasks demand.
 
 The Bitter Lesson (Sutton, 2019) observes that general methods leveraging computation consistently outperform handcrafted human knowledge. Applied to agent harnesses: if your system scales by adding more human-authored workflow nodes, you're scaling headcount, not capability. Every fixed workflow step is a bet that the model can't figure out how to do this itself. Some of those bets are correct today and will be wrong in six months.
 

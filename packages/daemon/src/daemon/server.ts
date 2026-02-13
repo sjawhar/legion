@@ -1,0 +1,395 @@
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import {
+  computeControllerSessionId,
+  computeSessionId,
+  WorkerMode,
+  type WorkerModeLiteral,
+} from "../state/types";
+import type { SpawnOptions, WorkerEntry } from "./serve-manager";
+import {
+  type CrashHistoryEntry,
+  type PersistedWorkerState,
+  readStateFile,
+  writeStateFile,
+} from "./state-file";
+
+type Server = ReturnType<typeof Bun.serve>;
+
+export interface ServeManagerInterface {
+  spawnServe(opts: SpawnOptions): Promise<WorkerEntry>;
+  killWorker(entry: WorkerEntry): Promise<void>;
+  healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
+}
+
+export interface PortAllocatorInterface {
+  allocate(): number;
+  release(port: number): void;
+  isAllocated?(port: number): boolean;
+}
+
+export interface ServerOptions {
+  port?: number;
+  hostname?: string;
+  teamId: string;
+  legionDir: string;
+  shortId: string;
+  serveManager: ServeManagerInterface;
+  portAllocator: PortAllocatorInterface;
+  stateFilePath: string;
+  logDir?: string;
+  shutdownFn?: () => void | Promise<void>;
+}
+
+interface ErrorResponse {
+  error: string;
+}
+
+const JSON_HEADERS = { "content-type": "application/json" };
+const MAX_CRASHES = 3;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), { status, headers: JSON_HEADERS });
+}
+
+function badRequest(message: string): Response {
+  return jsonResponse({ error: message } satisfies ErrorResponse, 400);
+}
+
+function notFound(message = "not_found"): Response {
+  return jsonResponse({ error: message } satisfies ErrorResponse, 404);
+}
+
+function serverError(message = "server_error"): Response {
+  return jsonResponse({ error: message } satisfies ErrorResponse, 500);
+}
+
+function badGateway(message = "worker_unreachable"): Response {
+  return jsonResponse({ error: message } satisfies ErrorResponse, 502);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+async function parseJson(request: Request): Promise<Record<string, unknown>> {
+  try {
+    const payload = await request.json();
+    if (!isRecord(payload)) {
+      throw new Error("invalid_body");
+    }
+    return payload;
+  } catch {
+    throw new Error("invalid_json");
+  }
+}
+
+export function startServer(opts: ServerOptions): { server: Server; stop: () => void } {
+  const hostname = opts.hostname ?? "127.0.0.1";
+  const port = opts.port ?? 13370;
+  const startedAt = Date.now();
+  const workers = new Map<string, WorkerEntry>();
+  const crashHistory = new Map<string, CrashHistoryEntry>();
+
+  const persistState = async (): Promise<void> => {
+    const state: PersistedWorkerState = { workers: {}, crashHistory: {} };
+    for (const [id, entry] of workers.entries()) {
+      state.workers[id] = entry;
+    }
+    for (const [id, history] of crashHistory.entries()) {
+      state.crashHistory[id] = history;
+    }
+    await writeStateFile(opts.stateFilePath, state);
+  };
+
+  const loadState = async (): Promise<void> => {
+    const state = await readStateFile(opts.stateFilePath);
+    const entries = Object.entries(state.workers);
+    if (entries.length === 0) {
+      for (const [id, history] of Object.entries(state.crashHistory)) {
+        crashHistory.set(id.toLowerCase(), history);
+      }
+      return;
+    }
+    for (const [id, history] of Object.entries(state.crashHistory)) {
+      crashHistory.set(id.toLowerCase(), history);
+    }
+    await Promise.all(
+      entries.map(async ([id, entry]) => {
+        try {
+          const healthy = await opts.serveManager.healthCheck(entry.port);
+          if (healthy) {
+            const normalizedId = id.toLowerCase();
+            workers.set(normalizedId, { ...entry, id: normalizedId, status: "running" });
+          }
+        } catch {
+          return;
+        }
+      })
+    );
+    await persistState();
+  };
+
+  const stateLoaded = loadState();
+
+  const server = Bun.serve({
+    hostname,
+    port,
+    async fetch(request: Request): Promise<Response> {
+      try {
+        const url = new URL(request.url);
+        const method = request.method.toUpperCase();
+        const segments = url.pathname.split("/").filter(Boolean);
+
+        if (method === "GET" && url.pathname === "/health") {
+          return jsonResponse({
+            status: "ok",
+            uptime: Date.now() - startedAt,
+            workerCount: workers.size,
+          });
+        }
+
+        if (segments.length === 1 && segments[0] === "workers") {
+          if (method === "GET") {
+            await stateLoaded;
+            return jsonResponse(Array.from(workers.values()));
+          }
+          if (method === "POST") {
+            await stateLoaded;
+            let payload: Record<string, unknown>;
+            try {
+              payload = await parseJson(request);
+            } catch {
+              return badRequest("invalid_json");
+            }
+
+            const issueId = payload.issueId;
+            const mode = payload.mode;
+            const workspace = payload.workspace;
+            const env = payload.env;
+
+            if (
+              typeof issueId !== "string" ||
+              typeof mode !== "string" ||
+              typeof workspace !== "string"
+            ) {
+              return badRequest("missing_fields");
+            }
+            const validModes = Object.values(WorkerMode);
+            if (!validModes.includes(mode as WorkerModeLiteral)) {
+              return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
+            }
+            if (env !== undefined) {
+              if (!isRecord(env)) {
+                return badRequest("invalid_env");
+              }
+              for (const [, val] of Object.entries(env)) {
+                if (typeof val !== "string") {
+                  return badRequest("env values must be strings");
+                }
+              }
+            }
+
+            const normalizedIssueId = issueId.toLowerCase();
+            const workerId = `${normalizedIssueId}-${mode}`.toLowerCase();
+            const existing = workers.get(workerId);
+            if (existing && existing.status !== "dead") {
+              return jsonResponse(
+                {
+                  error: "worker_already_exists",
+                  id: workerId,
+                  port: existing.port,
+                  sessionId: existing.sessionId,
+                },
+                409
+              );
+            }
+            if (existing) {
+              opts.portAllocator.release(existing.port);
+              workers.delete(workerId);
+            }
+
+            let crashHistoryEntry = crashHistory.get(workerId);
+            if ((crashHistoryEntry?.crashCount ?? 0) >= MAX_CRASHES) {
+              const lastCrashAtMs = crashHistoryEntry?.lastCrashAt
+                ? new Date(crashHistoryEntry.lastCrashAt).getTime()
+                : 0;
+              if (Date.now() - lastCrashAtMs > ONE_HOUR_MS) {
+                crashHistory.delete(workerId);
+                await persistState();
+                crashHistoryEntry = undefined;
+              } else {
+                return jsonResponse(
+                  {
+                    error: "crash_limit_exceeded",
+                    id: workerId,
+                    crashCount: crashHistoryEntry?.crashCount ?? 0,
+                    message: "Worker has crashed too many times. Add user-input-needed label.",
+                  },
+                  429
+                );
+              }
+            }
+
+            const port = opts.portAllocator.allocate();
+            const sessionId =
+              mode === "controller"
+                ? computeControllerSessionId(opts.teamId)
+                : computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
+            let entry: WorkerEntry;
+            try {
+              entry = await opts.serveManager.spawnServe({
+                issueId: normalizedIssueId,
+                mode,
+                workspace,
+                port,
+                sessionId,
+                logDir: opts.logDir,
+                env: {
+                  LINEAR_ISSUE_ID: issueId,
+                  LINEAR_TEAM_ID: opts.teamId,
+                  LEGION_DIR: opts.legionDir,
+                  LEGION_SHORT_ID: opts.shortId,
+                  LEGION_DAEMON_PORT: String(server.port),
+                  ...(env as Record<string, string> | undefined),
+                },
+              });
+            } catch (error) {
+              opts.portAllocator.release(port);
+              return serverError((error as Error).message);
+            }
+
+            if (crashHistoryEntry) {
+              entry = {
+                ...entry,
+                crashCount: crashHistoryEntry.crashCount,
+                lastCrashAt: crashHistoryEntry.lastCrashAt,
+              };
+            }
+
+            workers.set(entry.id, entry);
+            await persistState();
+
+            return jsonResponse({ id: entry.id, port: entry.port, sessionId: entry.sessionId });
+          }
+        }
+
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "crashes") {
+          await stateLoaded;
+          if (method !== "DELETE") {
+            return notFound();
+          }
+          const workerId = segments[1].toLowerCase();
+          crashHistory.delete(workerId);
+          await persistState();
+          return jsonResponse({ reset: true, id: workerId });
+        }
+
+        if (segments.length === 2 && segments[0] === "workers") {
+          await stateLoaded;
+          const id = segments[1].toLowerCase();
+          const entry = workers.get(id);
+          if (!entry) {
+            return notFound();
+          }
+          if (method === "GET") {
+            return jsonResponse(entry);
+          }
+          if (method === "PATCH") {
+            let payload: Record<string, unknown>;
+            try {
+              payload = await parseJson(request);
+            } catch {
+              return badRequest("invalid_json");
+            }
+
+            const status = payload.status;
+            if (typeof status !== "string") {
+              return badRequest("missing_fields");
+            }
+            if (!"starting running stopped dead".split(" ").includes(status)) {
+              return badRequest("invalid_status");
+            }
+
+            const hasCrashCount = "crashCount" in payload;
+            const hasLastCrashAt = "lastCrashAt" in payload;
+            const crashCount = payload.crashCount;
+            const lastCrashAt = payload.lastCrashAt;
+            if (hasCrashCount && typeof crashCount !== "number") {
+              return badRequest("invalid_crash_count");
+            }
+            if (hasLastCrashAt && typeof lastCrashAt !== "string" && lastCrashAt !== null) {
+              return badRequest("invalid_last_crash_at");
+            }
+
+            const updated: WorkerEntry = {
+              ...entry,
+              status: status as WorkerEntry["status"],
+              crashCount: hasCrashCount ? (crashCount as number) : entry.crashCount,
+              lastCrashAt: hasLastCrashAt ? (lastCrashAt as string | null) : entry.lastCrashAt,
+            };
+            workers.set(id, updated);
+            if (status === "dead") {
+              crashHistory.set(id, {
+                crashCount: updated.crashCount,
+                lastCrashAt: updated.lastCrashAt,
+              });
+            }
+            await persistState();
+            return jsonResponse(updated);
+          }
+          if (method === "DELETE") {
+            await opts.serveManager.killWorker(entry);
+            opts.portAllocator.release(entry.port);
+            workers.delete(id);
+            crashHistory.set(id, {
+              crashCount: entry.crashCount,
+              lastCrashAt: entry.lastCrashAt,
+            });
+            await persistState();
+            return jsonResponse({ status: "stopped" });
+          }
+        }
+
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "status") {
+          await stateLoaded;
+          if (method !== "GET") {
+            return notFound();
+          }
+          const id = segments[1].toLowerCase();
+          const entry = workers.get(id);
+          if (!entry) {
+            return notFound();
+          }
+
+          try {
+            const client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${entry.port}` });
+            const result = await client.session.status();
+            if (result.error || !result.data) {
+              return badGateway();
+            }
+            return jsonResponse(result.data);
+          } catch {
+            return badGateway();
+          }
+        }
+
+        if (method === "POST" && url.pathname === "/shutdown") {
+          await opts.shutdownFn?.();
+          return jsonResponse({ status: "shutting_down" });
+        }
+
+        return notFound();
+      } catch {
+        return serverError();
+      }
+    },
+  });
+
+  return {
+    server,
+    stop: () => {
+      server.stop(true);
+    },
+  };
+}

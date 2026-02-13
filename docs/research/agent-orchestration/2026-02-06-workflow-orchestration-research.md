@@ -108,12 +108,12 @@ All systems separate generation from evaluation.
 ### 5. Institutional Memory
 - **Blitzy:** "Much more bullish on memory than fine-tuning" — stored at application layer
 - **Oh My OpenCode:** Atlas accumulates wisdom from task to task, forwards learnings
-- **Legion:** Dual-perspective retro (context-free + full-context), docs/solutions/ with oracle retrieval
+- **Legion:** Dual-perspective retro (context-free + full-context), docs/solutions/ with legion-oracle retrieval
 
 ### 6. Escalation Before Blocking
 - **Blitzy:** Independent evaluation system generates human completion reports
 - **Oh My OpenCode:** Forced completion hooks prevent agents from quitting mid-task
-- **Legion:** Oracle sub-skill researches before escalating to user-input-needed
+- **Legion:** Legion-oracle sub-skill researches before escalating to user-input-needed
 
 ---
 
@@ -140,7 +140,7 @@ All systems separate generation from evaluation.
 - Oh My OpenCode: Categories + skills system routes tasks to appropriate agents
 - Claude Code Teams: Plan approval mode, delegate mode, self-claiming tasks
 
-**What Legion does:** Fixed state machine: architect → plan → implement → review → retro → merge, always in order.
+**What Legion does:** Fixed state machine: architect → plan → implement → review → retro via `/legion-retro` → merge, always in order.
 
 **Specific patterns worth adopting:**
 
@@ -222,7 +222,7 @@ All systems separate generation from evaluation.
 
 ### Oh My OpenCode's Wisdom Accumulation
 - Atlas forwards learnings from completed tasks to subsequent tasks
-- Legion equivalent: retro captures learnings to docs/solutions/, oracle surfaces them
+- Legion equivalent: retro captures learnings to docs/solutions/, legion-oracle surfaces them
 - Enhancement: Controller could inject recent learnings from same codebase area into new worker context
 
 ### Claude Code Teams' Plan Approval Mode

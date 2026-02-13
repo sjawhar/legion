@@ -35,10 +35,33 @@ If you're resuming after user feedback, also read the Linear comments for the an
 
 ### Blocking on User Input
 
-When you need human input that the oracle can't answer:
+When you need human input that the legion-oracle can't answer:
 
 1. Push your work: `jj git push`
-2. Post your question as a Linear comment: `linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="...")`
+2. Post a structured escalation comment to Linear:
+
+```
+linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="
+## Escalation
+
+**Phase:** [current mode - architect/plan/implement/review]
+**Completed:** [what work has been done so far]
+
+### Blocker
+[Specific question or decision needed — be precise]
+
+### Options Considered
+1. [Option A] — [trade-offs]
+2. [Option B] — [trade-offs]
+3. [Option C if applicable]
+
+### Context
+- **Remaining estimate:** [rough scope of remaining work after unblock]
+- **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
+- **Branch:** [current branch name if applicable]
+")
+```
+
 3. Update labels: add `user-input-needed`, remove `worker-active`
 4. Exit immediately
 
@@ -64,12 +87,11 @@ Then update labels:
 | `plan` | @workflows/plan.md | Yes |
 | `implement` | @workflows/implement.md | No |
 | `review` | @workflows/review.md | Yes |
-| `retro` | @workflows/retro.md | Yes |
 | `merge` | @workflows/merge.md | No |
 
 **Lifecycle order:** architect → plan → implement → review → (implement if changes requested) → retro → merge
 
-Note: `retro` runs before `merge` because retro adds learnings to the workspace, and merge deletes it.
+**Retro** is not a mode — the controller resumes the implement worker's session with `/legion-retro`, preserving full implementation context. See the `legion-retro` skill.
 
 ## Review Mode Signaling
 
@@ -77,17 +99,9 @@ Review signals outcome via PR draft status BEFORE `worker-done`:
 - **PR ready** (not draft) - no blocking issues, approved
 - **PR draft** - blocking issues found, changes requested
 
-## Research Sub-Skill
+## Research Before Escalating
 
-Before blocking on user input, workers should invoke the oracle to try to find the answer:
-
-| Sub-Skill | Workflow | Purpose |
-|-----------|----------|---------|
-| `oracle` | @workflows/oracle.md | Research before escalating |
-
-Usage: `/oracle [your question]`
-
-Only escalate to the user (via Linear comment + label) if the oracle cannot answer.
+Before blocking on user input, workers should invoke `/legion-oracle [your question]` to search institutional knowledge (docs/solutions/, codebase patterns). Only escalate to the user (via Linear comment + label) if the legion-oracle cannot answer.
 
 ## Reference
 

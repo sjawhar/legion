@@ -87,7 +87,7 @@ You will be notified when the background task completes.
 ```markdown
 # WRONG: Task tool doesn't exist
 Task tool:
-  description: "Fresh retro analysis"
+  description: "Fresh legion-retro analysis"
   prompt: |
     Your instructions here...
   run_in_background: true
@@ -104,7 +104,7 @@ Task tool:
 
 ## Benefits of Dual-Perspective Pattern
 
-The retro workflow uses this pattern effectively:
+The `/legion-retro` skill uses this pattern effectively:
 
 1. **Full-context agent** (you): Knows what was hard, captures decisions not obvious from code
 2. **Fresh-context subagent**: Discovers learnings purely from the PR diff and description

@@ -26,7 +26,7 @@ Extract title, description, comments (included in get response), current labels.
 
 **Is it clear?** Does it have testable acceptance criteria and no unresolved questions?
 
-If unclear and researchable, try `/oracle [your question]`.
+If unclear and researchable, try `/legion-oracle [your question]`.
 If still unclear, escalate.
 
 **Is it small enough?** Could it be split into independent, shippable pieces?
@@ -51,6 +51,31 @@ Create each spec-ready sub-issue with `worker-done` label.
 This unblocks work on clear pieces while getting answers on unclear ones.
 
 **If spec-ready:** Ensure acceptance criteria are present and testable, add `worker-done` label. Exit.
+
+### 4. Cross-Family Review
+
+Before signaling completion, spawn a cross-family review session to validate the architect output.
+
+**When to review:** Only when you've produced output (created sub-issues or verified spec-readiness). Skip review if escalating with `user-input-needed`.
+
+**How to review:**
+
+1. Spawn a review session using the delegation tool:
+   - Category: `review-architect`
+   - Model override: Use a different model family than the one doing the architecture work
+   - Prompt: Include the original issue description AND your architect output (sub-issues created, acceptance criteria written, or spec-readiness assessment)
+
+2. The reviewer evaluates:
+   - Are acceptance criteria testable? (Can a human or CI verify pass/fail?)
+   - Are sub-issues properly scoped? (Each small enough for one PR?)
+   - Is anything missing from the original requirements?
+   - Are there unresolved ambiguities that should be questions, not assumptions?
+
+3. If the reviewer finds issues:
+   - Address each finding (fix acceptance criteria, adjust sub-issues, add missing items)
+   - You do NOT need to re-review after fixes — one review pass is sufficient
+
+4. Only after incorporating review feedback, proceed to signal completion.
 
 ## What Makes Good Acceptance Criteria
 
@@ -107,12 +132,14 @@ linear_linear(action="update",
 
 | Outcome | Action |
 |---------|--------|
-| Spec-ready | Add `worker-done` to issue |
-| Fully broken down | Add `worker-done` to each child, leave parent unchanged |
-| Partial breakdown | Add `worker-done` to clear children, add `user-input-needed` to parent |
-| Unclear | Add `user-input-needed` to issue |
+| Spec-ready | Cross-family review → incorporate feedback → Add `worker-done` to issue |
+| Fully broken down | Cross-family review → incorporate feedback → Add `worker-done` to each child, leave parent unchanged |
+| Partial breakdown | Cross-family review → incorporate feedback → Add `worker-done` to clear children, add `user-input-needed` to parent |
+| Unclear | Add `user-input-needed` to issue (no review needed) |
 
 **After breakdown:** Parent keeps its existing labels. Do NOT add `worker-done` to parent - only children get it. Post comment to parent explaining what was created and what still needs clarification.
+
+**Cross-family review requirement:** Before adding `worker-done` to any issue or sub-issue, the architect output must pass cross-family review (Section 4). This ensures acceptance criteria are testable, sub-issues are properly scoped, and nothing is missing from the original requirements.
 
 ## Common Mistakes
 
