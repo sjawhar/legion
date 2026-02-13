@@ -5,19 +5,18 @@ import { createAgents } from "./agents";
 import type { PermissionConfig } from "./config";
 import { loadPluginConfig, mergePermissionConfig } from "./config";
 import { BackgroundTaskManager, createDelegationTools } from "./delegation";
-import {
-  anthropicEffortHook,
-  COMPACTION_CONTEXT_TEMPLATE,
-  createBackgroundNotificationHook,
-  createCompactionTodoPreserverHook,
-  createPreemptiveCompactionHook,
-  createSessionRecoveryHook,
-  createStopContinuationGuardHook,
-  createTodoContinuationEnforcerHook,
-  nonInteractiveEnvHook,
-  subagentQuestionBlockerHook,
-  thinkingBlockValidatorHook,
-} from "./hooks";
+import { anthropicEffortHook } from "./hooks/anthropic-effort";
+import { createBackgroundNotificationHook } from "./hooks/background-notification";
+import { COMPACTION_CONTEXT_TEMPLATE } from "./hooks/compaction-context-injector";
+import { createCompactionTodoPreserverHook } from "./hooks/compaction-todo-preserver";
+import { nonInteractiveEnvHook } from "./hooks/non-interactive-env";
+import { createPreemptiveCompactionHook } from "./hooks/preemptive-compaction";
+import { createSessionRecoveryHook } from "./hooks/session-recovery";
+import { createStopContinuationGuardHook } from "./hooks/stop-continuation-guard";
+import { subagentQuestionBlockerHook } from "./hooks/subagent-question-blocker";
+import { thinkingBlockValidatorHook } from "./hooks/thinking-block-validator";
+import { createTodoContinuationEnforcerHook } from "./hooks/todo-continuation-enforcer";
+import { isRecord, resolveSessionID } from "./hooks/utils";
 import { getModelOverlay } from "./overlays";
 import { createSessionTools } from "./tools";
 import { createTaskTools } from "./tools/task";
@@ -30,6 +29,45 @@ const DEFAULT_GLOBAL_PERMISSION: PermissionConfig = {
   bash: "allow",
   task: "allow",
 };
+
+interface AgentConfigEntry {
+  model: string;
+  temperature: number;
+  prompt: string;
+  description: string;
+  permission?: PermissionConfig;
+}
+
+interface OpencodeConfigShape {
+  default_agent?: string;
+  permission?: PermissionConfig;
+  agent?: Record<string, AgentConfigEntry | Record<string, unknown>>;
+}
+
+interface GenericEventInput {
+  event: { type: string; properties?: unknown };
+}
+
+interface ToolExecuteInput {
+  tool: string;
+  sessionID?: string;
+}
+
+interface SlashCommandOutput {
+  args?: { command?: string };
+}
+
+interface ChatMessageInput {
+  sessionID?: string;
+}
+
+interface SessionCompactingInput {
+  sessionID: string;
+}
+
+interface SessionCompactingOutput {
+  context: string[];
+}
 
 const OpenCodeLegion: Plugin = async (ctx) => {
   const pluginConfig = await loadPluginConfig(ctx.directory);
@@ -57,16 +95,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     name: "opencode-legion",
     config: async (opencodeConfig: Record<string, unknown>) => {
       const agents = createAgents(pluginConfig);
-      const agentMap: Record<
-        string,
-        {
-          model: string;
-          temperature: number;
-          prompt: string;
-          description: string;
-          permission?: PermissionConfig;
-        }
-      > = {};
+      const agentMap: Record<string, AgentConfigEntry> = {};
       for (const agent of agents) {
         agentMap[agent.name] = {
           model: agent.config.model,
@@ -76,26 +105,23 @@ const OpenCodeLegion: Plugin = async (ctx) => {
         };
       }
 
-      (opencodeConfig as { default_agent?: string }).default_agent = "orchestrator";
+      const config = opencodeConfig as OpencodeConfigShape;
+      config.default_agent = "orchestrator";
 
-      const existingPermission = (opencodeConfig as { permission?: PermissionConfig }).permission;
+      const existingPermission = config.permission;
       const mergedGlobalPermission = mergePermissionConfig(
         DEFAULT_GLOBAL_PERMISSION,
         pluginConfig.permission
       );
-      (opencodeConfig as { permission?: PermissionConfig }).permission = mergePermissionConfig(
-        mergedGlobalPermission,
-        existingPermission
-      );
+      config.permission = mergePermissionConfig(mergedGlobalPermission, existingPermission);
 
-      if (!opencodeConfig.agent) {
-        opencodeConfig.agent = agentMap;
+      if (!config.agent) {
+        config.agent = agentMap;
       } else {
-        Object.assign(opencodeConfig.agent, agentMap);
+        Object.assign(config.agent, agentMap);
       }
 
-      const conductorEntry = (opencodeConfig.agent as Record<string, Record<string, unknown>>)
-        ?.conductor;
+      const conductorEntry = config.agent?.conductor as Record<string, unknown> | undefined;
       if (conductorEntry) {
         conductorEntry.permission = {
           read: "allow",
@@ -111,36 +137,30 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     event: async (input: { event: Event }) => {
       manager.handleSessionStatus(input.event);
       backgroundNotificationHook(input);
-      await preemptiveCompactionHook.event?.(
-        input as { event: { type: string; properties?: unknown } }
-      );
-      await stopContinuationGuardHook.event(
-        input as { event: { type: string; properties?: unknown } }
-      );
-      await compactionTodoPreserver.event(
-        input as { event: { type: string; properties?: unknown } }
-      );
-      await todoContinuationEnforcer.event(
-        input as { event: { type: string; properties?: unknown } }
-      );
+      await preemptiveCompactionHook.event?.(input as GenericEventInput);
+      await stopContinuationGuardHook.event(input as GenericEventInput);
+      await compactionTodoPreserver.event(input as GenericEventInput);
+      await todoContinuationEnforcer.event(input as GenericEventInput);
 
       const { event } = input;
 
       if (event.type === "session.deleted") {
-        const delProps = event.properties as Record<string, unknown> | undefined;
-        const delInfo = delProps?.info as { id?: string } | undefined;
-        if (delInfo?.id) {
-          manager.cleanup(delInfo.id);
+        const sessionProps = isRecord(event.properties) ? event.properties : undefined;
+        const sessionID = resolveSessionID(sessionProps);
+        if (sessionID) {
+          manager.cleanup(sessionID);
         }
       }
 
       if (event.type === "session.error") {
-        const props = event.properties as Record<string, unknown> | undefined;
-        const sessionID = props?.sessionID as string | undefined;
+        const props = isRecord(event.properties)
+          ? (event.properties as Record<string, unknown>)
+          : undefined;
+        const sessionID = resolveSessionID(props);
         const error = props?.error;
         if (sessionRecoveryHook.isRecoverableError(error)) {
           const messageInfo = {
-            id: props?.messageID as string | undefined,
+            id: typeof props?.messageID === "string" ? props.messageID : undefined,
             role: "assistant" as const,
             sessionID,
             error,
@@ -159,13 +179,17 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     },
     "tool.execute.before": async (input, output) => {
       subagentQuestionBlockerHook(input, output);
-      const toolInput = input as { tool: string; sessionID?: string };
-      if (toolInput.tool === "slashcommand") {
-        const args = (output as { args?: { command?: string } }).args;
-        const command = args?.command?.replace(/^\//, "").toLowerCase();
-        if (command === "stop-continuation" && toolInput.sessionID) {
-          stopContinuationGuardHook.stop(toolInput.sessionID);
-          todoContinuationEnforcer.cancelPending(toolInput.sessionID);
+      const toolInput = isRecord(input) ? (input as ToolExecuteInput) : undefined;
+      const toolName = typeof toolInput?.tool === "string" ? toolInput.tool : undefined;
+      const sessionID = typeof toolInput?.sessionID === "string" ? toolInput.sessionID : undefined;
+      if (toolName === "slashcommand") {
+        const outputRecord = isRecord(output) ? (output as SlashCommandOutput) : undefined;
+        const args = outputRecord?.args;
+        const commandValue = typeof args?.command === "string" ? args.command : undefined;
+        const command = commandValue?.replace(/^\//, "").toLowerCase();
+        if (command === "stop-continuation" && sessionID) {
+          stopContinuationGuardHook.stop(sessionID);
+          todoContinuationEnforcer.cancelPending(sessionID);
         }
       }
     },
@@ -173,8 +197,8 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       await preemptiveCompactionHook["tool.execute.after"]?.(input, output);
     },
     "chat.message": async (input) => {
-      await stopContinuationGuardHook["chat.message"](input as { sessionID?: string });
-      await todoContinuationEnforcer.chatMessage(input as { sessionID?: string });
+      await stopContinuationGuardHook["chat.message"](input as ChatMessageInput);
+      await todoContinuationEnforcer.chatMessage(input as ChatMessageInput);
     },
     "shell.env": async (input, output) => {
       nonInteractiveEnvHook(input, output);
@@ -183,8 +207,8 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       thinkingBlockValidatorHook(input, output);
     },
     "experimental.session.compacting": async (
-      _input: { sessionID: string },
-      output: { context: string[] }
+      _input: SessionCompactingInput,
+      output: SessionCompactingOutput
     ): Promise<void> => {
       await compactionTodoPreserver.capture(_input.sessionID);
       output.context.push(COMPACTION_CONTEXT_TEMPLATE);

@@ -37,6 +37,7 @@ function createStubClient(overrides?: ClientOverrides): Record<string, unknown> 
       create: async () => ({ data: { id: "session" } }),
       promptAsync: async () => ({}),
       messages: async () => ({ data: [] }),
+      todo: async () => ({ data: [] }),
       summarize: async () => ({}),
       abort: async () => ({}),
       list: async () => ({ data: [] }),
@@ -450,43 +451,48 @@ describe("opencode-legion plugin", () => {
   describe("overlay injection", () => {
     it("injects overlay once via system hook", async () => {
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-overlay-"));
-      const ctx = createStubContext(tempRoot);
-      const hooks = await OpenCodeLegion(ctx);
-      const systemHook = hooks["experimental.chat.system.transform"];
-      expect(systemHook).toBeTruthy();
-      if (!systemHook) throw new Error("Missing system transform hook");
+      try {
+        const ctx = createStubContext(tempRoot);
+        const hooks = await OpenCodeLegion(ctx);
+        const systemHook = hooks["experimental.chat.system.transform"];
+        expect(systemHook).toBeTruthy();
+        if (!systemHook) throw new Error("Missing system transform hook");
 
-      const output = { system: [] as string[] };
-      const systemInput = {
-        model: { providerID: "openai", id: "gpt-5.2-codex" },
-      } as Parameters<typeof systemHook>[0];
-      await systemHook(systemInput, output);
+        const output = { system: [] as string[] };
+        const systemInput = {
+          model: { providerID: "openai", id: "gpt-5.2-codex" },
+        } as Parameters<typeof systemHook>[0];
+        await systemHook(systemInput, output);
 
-      expect(output.system).toHaveLength(1);
+        expect(output.system).toHaveLength(1);
 
-      await systemHook(systemInput, output);
+        await systemHook(systemInput, output);
 
-      expect(output.system).toHaveLength(1);
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+        expect(output.system).toHaveLength(1);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
     });
   });
 
   describe("permissions", () => {
     it("sets global permission map", async () => {
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-permission-"));
-      const ctx = createStubContext(tempRoot);
-      const hooks = await OpenCodeLegion(ctx);
-      const config: Record<string, unknown> = {};
+      try {
+        const ctx = createStubContext(tempRoot);
+        const hooks = await OpenCodeLegion(ctx);
+        const config: Record<string, unknown> = {};
 
-      await hooks.config?.(config);
+        await hooks.config?.(config);
 
-      const permission = (config as { permission?: Record<string, unknown> }).permission;
-      expect(permission).toBeTruthy();
-      expect((permission as { edit?: string }).edit).toBe("allow");
-      expect((permission as { bash?: string }).bash).toBe("allow");
-      expect((permission as { read?: string }).read).toBe("allow");
-
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+        const permission = (config as { permission?: Record<string, unknown> }).permission;
+        expect(permission).toBeTruthy();
+        expect((permission as { edit?: string }).edit).toBe("allow");
+        expect((permission as { bash?: string }).bash).toBe("allow");
+        expect((permission as { read?: string }).read).toBe("allow");
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
     });
   });
 
@@ -494,95 +500,168 @@ describe("opencode-legion plugin", () => {
     it("triggers compaction at threshold and allows re-compaction", async () => {
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-compact-"));
       const summarizeCalls: Array<{ providerID: string; modelID: string; auto?: boolean }> = [];
-
-      const ctx = createStubContext(tempRoot, {
-        session: {
-          messages: async () => ({
-            data: [
-              {
-                info: {
-                  role: "assistant",
-                  providerID: "openai",
-                  modelID: "gpt-5.2-codex",
-                  tokens: {
-                    input: 100_000,
-                    output: 0,
-                    reasoning: 0,
-                    cache: { read: 0, write: 0 },
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            messages: async () => ({
+              data: [
+                {
+                  info: {
+                    role: "assistant",
+                    providerID: "openai",
+                    modelID: "gpt-5.2-codex",
+                    tokens: {
+                      input: 100_000,
+                      output: 0,
+                      reasoning: 0,
+                      cache: { read: 0, write: 0 },
+                    },
                   },
                 },
-              },
-            ],
-          }),
-          summarize: async ({
-            body,
-          }: {
-            body: { providerID: string; modelID: string; auto?: boolean };
-          }) => {
-            summarizeCalls.push(body);
-            return {};
+              ],
+            }),
+            summarize: async ({
+              body,
+            }: {
+              body: { providerID: string; modelID: string; auto?: boolean };
+            }) => {
+              summarizeCalls.push(body);
+              return {};
+            },
           },
-        },
-      });
+        });
 
-      const hook = createPreemptiveCompactionHook(ctx);
-      const toolAfter = hook["tool.execute.after"];
-      await toolAfter?.(
-        { tool: "grep", sessionID: "session", callID: "1" },
-        { title: "", output: "", metadata: {} }
-      );
-      await toolAfter?.(
-        { tool: "grep", sessionID: "session", callID: "2" },
-        { title: "", output: "", metadata: {} }
-      );
+        const hook = createPreemptiveCompactionHook(ctx);
+        const toolAfter = hook["tool.execute.after"];
+        await toolAfter?.(
+          { tool: "grep", sessionID: "session", callID: "1" },
+          { title: "", output: "", metadata: {} }
+        );
+        await toolAfter?.(
+          { tool: "grep", sessionID: "session", callID: "2" },
+          { title: "", output: "", metadata: {} }
+        );
 
-      expect(summarizeCalls).toHaveLength(2);
-      expect(summarizeCalls[0]).toMatchObject({
-        providerID: "openai",
-        modelID: "gpt-5.2-codex",
-        auto: true,
-      });
-
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+        expect(summarizeCalls).toHaveLength(2);
+        expect(summarizeCalls[0]).toMatchObject({
+          providerID: "openai",
+          modelID: "gpt-5.2-codex",
+          auto: true,
+        });
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
     });
 
     it("skips compaction below threshold", async () => {
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-compact-low-"));
       let summarizeCalled = false;
-      const ctx = createStubContext(tempRoot, {
-        session: {
-          messages: async () => ({
-            data: [
-              {
-                info: {
-                  role: "assistant",
-                  providerID: "openai",
-                  modelID: "gpt-5.2-codex",
-                  tokens: {
-                    input: 1_000,
-                    output: 0,
-                    reasoning: 0,
-                    cache: { read: 0, write: 0 },
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            messages: async () => ({
+              data: [
+                {
+                  info: {
+                    role: "assistant",
+                    providerID: "openai",
+                    modelID: "gpt-5.2-codex",
+                    tokens: {
+                      input: 1_000,
+                      output: 0,
+                      reasoning: 0,
+                      cache: { read: 0, write: 0 },
+                    },
                   },
                 },
-              },
-            ],
-          }),
-          summarize: async () => {
-            summarizeCalled = true;
-            return {};
+              ],
+            }),
+            summarize: async () => {
+              summarizeCalled = true;
+              return {};
+            },
           },
-        },
-      });
+        });
 
-      const hook = createPreemptiveCompactionHook(ctx);
-      await hook["tool.execute.after"]?.(
-        { tool: "grep", sessionID: "session", callID: "1" },
-        { title: "", output: "", metadata: {} }
-      );
+        const hook = createPreemptiveCompactionHook(ctx);
+        await hook["tool.execute.after"]?.(
+          { tool: "grep", sessionID: "session", callID: "1" },
+          { title: "", output: "", metadata: {} }
+        );
 
-      expect(summarizeCalled).toBe(false);
-      fs.rmSync(tempRoot, { recursive: true, force: true });
+        expect(summarizeCalled).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips compaction when modelID is missing", async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-compact-nomodel-"));
+      let summarizeCalled = false;
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            messages: async () => ({
+              data: [
+                {
+                  info: {
+                    role: "assistant",
+                    providerID: "openai",
+                    tokens: {
+                      input: 200_000,
+                      output: 0,
+                      reasoning: 0,
+                      cache: { read: 0, write: 0 },
+                    },
+                  },
+                },
+              ],
+            }),
+            summarize: async () => {
+              summarizeCalled = true;
+              return {};
+            },
+          },
+        });
+
+        const hook = createPreemptiveCompactionHook(ctx);
+        await hook["tool.execute.after"]?.(
+          { tool: "grep", sessionID: "session", callID: "1" },
+          { title: "", output: "", metadata: {} }
+        );
+
+        expect(summarizeCalled).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("swallows message fetch errors", async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-compact-error-"));
+      let summarizeCalled = false;
+      try {
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            messages: async () => {
+              throw new Error("boom");
+            },
+            summarize: async () => {
+              summarizeCalled = true;
+              return {};
+            },
+          },
+        });
+
+        const hook = createPreemptiveCompactionHook(ctx);
+        await hook["tool.execute.after"]?.(
+          { tool: "grep", sessionID: "session", callID: "1" },
+          { title: "", output: "", metadata: {} }
+        );
+
+        expect(summarizeCalled).toBe(false);
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
     });
   });
 
@@ -748,6 +827,46 @@ describe("opencode-legion plugin", () => {
         await new Promise((r) => setTimeout(r, 20));
         expect(promptInjected).toBe(false);
       } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips when todo fetch fails", async () => {
+      const sessionID = "session-todo-error";
+      let promptInjected = false;
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-todo-error-"));
+      const originalWarn = console.warn;
+      try {
+        console.warn = () => {};
+        const ctx = createStubContext(tempRoot, {
+          session: {
+            todo: async () => {
+              throw new Error("todo failure");
+            },
+            messages: async () => ({
+              data: [{ info: { role: "assistant", agent: "orchestrator" } }],
+            }),
+            promptAsync: async () => {
+              promptInjected = true;
+              return {};
+            },
+          },
+        });
+
+        const { createTodoContinuationEnforcerHook } = await import(
+          "../hooks/todo-continuation-enforcer"
+        );
+        const hook = createTodoContinuationEnforcerHook(ctx, {
+          isContinuationStopped: () => false,
+          isBackgroundSession: () => false,
+          isRecovering: () => false,
+          gracePeriodMs: 0,
+        });
+
+        await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+        expect(promptInjected).toBe(false);
+      } finally {
+        console.warn = originalWarn;
         fs.rmSync(tempRoot, { recursive: true, force: true });
       }
     });

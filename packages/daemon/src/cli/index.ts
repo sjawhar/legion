@@ -7,12 +7,53 @@ import { defineCommand, runMain } from "citty";
 import { startDaemon } from "../daemon/index";
 import { resolveTeamId } from "./team-resolver";
 
+export class CliError extends Error {
+  constructor(
+    message: string,
+    public code = 1
+  ) {
+    super(message);
+    this.name = "CliError";
+  }
+}
+
 const DEFAULT_DAEMON_PORT = 13370;
 const SAFE_IDENTIFIER_RE = /^[a-zA-Z0-9_-]+$/;
 
 interface TeamInfo {
   id: string;
   name: string;
+}
+
+interface WorkerInfo {
+  id: string;
+  port: number;
+}
+
+interface WorkerStatusInfo extends WorkerInfo {
+  sessionId: string;
+  status: string;
+}
+
+interface DispatchOptions {
+  legionDir?: string;
+  daemonPort?: number;
+  prompt?: string;
+  workspace?: string;
+}
+
+interface PromptOptions {
+  daemonPort?: number;
+  mode?: string;
+}
+
+interface ResetCrashesOptions {
+  daemonPort?: number;
+}
+
+interface DaemonHealth {
+  running: boolean;
+  workerCount?: number;
 }
 
 export type TeamsCache = Record<string, TeamInfo>;
@@ -40,12 +81,12 @@ export function loadTeamsCache(cacheDir = path.join(os.homedir(), ".legion")): T
     return null;
   }
 
-  const parsed = JSON.parse(raw) as TeamsCache;
+  const parsed = JSON.parse(raw) as unknown;
   if (!parsed || typeof parsed !== "object") {
     throw new Error(`Invalid teams cache at ${cacheFile}`);
   }
 
-  return parsed;
+  return parsed as TeamsCache;
 }
 
 function resolveStateDir(teamId: string, stateDir?: string): string {
@@ -113,7 +154,7 @@ async function cmdStatus(team: string, stateDir?: string): Promise<void> {
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (response.ok) {
-      const workers = (await response.json()) as Array<{ id: string; port: number }>;
+      const workers = (await response.json()) as WorkerInfo[];
       console.log(`Daemon: RUNNING (port ${daemonPort})`);
       console.log(`Workers: ${workers.length}`);
       for (const worker of workers) {
@@ -147,8 +188,7 @@ async function cmdAttach(team: string, issue: string): Promise<void> {
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (!response.ok) {
-      console.error("Could not connect to daemon. Is it running?");
-      process.exit(1);
+      throw new CliError("Could not connect to daemon. Is it running?");
     }
 
     const workers = (await response.json()) as Array<{ id: string; port: number }>;
@@ -158,21 +198,21 @@ async function cmdAttach(team: string, issue: string): Promise<void> {
     );
 
     if (matches.length === 0) {
-      console.error(`No worker found for issue: ${issue}`);
-      console.log(`\nAvailable workers:`);
+      let msg = `No worker found for issue: ${issue}`;
+      msg += "\n\nAvailable workers:";
       for (const worker of workers) {
-        console.log(`  - ${worker.id}`);
+        msg += `\n  - ${worker.id}`;
       }
-      process.exit(1);
+      throw new CliError(msg);
     }
 
     if (matches.length > 1) {
-      console.error(`Multiple workers found for ${issue}:`);
+      let msg = `Multiple workers found for ${issue}:`;
       for (const worker of matches) {
-        console.log(`  - ${worker.id} (port ${worker.port})`);
+        msg += `\n  - ${worker.id} (port ${worker.port})`;
       }
-      console.error("Be more specific, e.g.: legion attach eng-21-implement");
-      process.exit(1);
+      msg += "\nBe more specific, e.g.: legion attach eng-21-implement";
+      throw new CliError(msg);
     }
 
     const worker = matches[0];
@@ -188,23 +228,24 @@ async function cmdAttach(team: string, issue: string): Promise<void> {
       process.exit(code ?? 0);
     });
   } catch (error) {
-    console.error("Failed to attach:", error);
-    process.exit(1);
+    if (error instanceof CliError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CliError(`Failed to attach: ${message}`);
   }
 }
 
 export async function cmdDispatch(
   issue: string,
   mode: string,
-  opts: { legionDir?: string; daemonPort?: number; prompt?: string; workspace?: string }
+  opts: DispatchOptions
 ): Promise<void> {
   if (!SAFE_IDENTIFIER_RE.test(issue)) {
-    console.error(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
-    process.exit(1);
+    throw new CliError(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
   }
   if (!SAFE_IDENTIFIER_RE.test(mode)) {
-    console.error(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
-    process.exit(1);
+    throw new CliError(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
   }
   const daemonPort = opts.daemonPort ?? getDaemonPort();
   const legionDir = opts.legionDir ?? process.env.LEGION_DIR ?? process.cwd();
@@ -214,13 +255,13 @@ export async function cmdDispatch(
   try {
     const healthResp = await fetch(`${baseUrl}/health`);
     if (!healthResp.ok) {
-      console.error("Daemon is not healthy. Is it running?");
-      process.exit(1);
+      throw new CliError("Daemon is not healthy. Is it running?");
     }
-  } catch {
-    console.error("Could not connect to daemon. Is it running?");
-    console.error(`Tried: ${baseUrl}/health`);
-    process.exit(1);
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw error;
+    }
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/health`);
   }
 
   const issueLower = issue.toLowerCase();
@@ -234,8 +275,7 @@ export async function cmdDispatch(
     );
     if (jjResult.exitCode !== 0) {
       const stderr = jjResult.stderr.toString();
-      console.error(`Failed to create workspace: ${stderr}`);
-      process.exit(1);
+      throw new CliError(`Failed to create workspace: ${stderr}`);
     }
   }
 
@@ -247,17 +287,14 @@ export async function cmdDispatch(
       body: JSON.stringify({ issueId: issue, mode, workspace: workspacePath }),
     });
   } catch (_error) {
-    console.error("Could not connect to daemon. Is it running?");
-    console.error(`Tried: ${baseUrl}/workers`);
-    process.exit(1);
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/workers`);
   }
 
   let body: Record<string, unknown>;
   try {
     body = (await response.json()) as Record<string, unknown>;
   } catch {
-    console.error(`Daemon returned non-JSON response (status ${response.status})`);
-    process.exit(1);
+    throw new CliError(`Daemon returned non-JSON response (status ${response.status})`);
   }
 
   if (response.status === 409) {
@@ -273,14 +310,14 @@ export async function cmdDispatch(
   }
 
   if (response.status === 429) {
-    console.error(`Crash limit exceeded for ${body.id} (${body.crashCount} crashes)`);
-    console.error(`Reset with: legion reset-crashes ${issue} ${mode}`);
-    process.exit(1);
+    throw new CliError(
+      `Crash limit exceeded for ${body.id} (${body.crashCount} crashes)\n` +
+        `Reset with: legion reset-crashes ${issue} ${mode}`
+    );
   }
 
   if (!response.ok) {
-    console.error(`Failed to dispatch: ${JSON.stringify(body)}`);
-    process.exit(1);
+    throw new CliError(`Failed to dispatch: ${JSON.stringify(body)}`);
   }
 
   const workerId = body.id as string;
@@ -307,29 +344,25 @@ export async function cmdDispatch(
   console.log(`\nTo attach: legion attach <team> ${issue}`);
 }
 
-export async function cmdPrompt(
-  issue: string,
-  prompt: string,
-  opts: { daemonPort?: number; mode?: string }
-): Promise<void> {
+export async function cmdPrompt(issue: string, prompt: string, opts: PromptOptions): Promise<void> {
   if (!SAFE_IDENTIFIER_RE.test(issue)) {
-    console.error(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
-    process.exit(1);
+    throw new CliError(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
   }
   const daemonPort = opts.daemonPort ?? getDaemonPort();
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
 
-  let workers: Array<{ id: string; port: number; sessionId: string; status: string }>;
+  let workers: WorkerStatusInfo[];
   try {
     const response = await fetch(`${baseUrl}/workers`);
     if (!response.ok) {
-      console.error("Could not connect to daemon.");
-      process.exit(1);
+      throw new CliError("Could not connect to daemon.");
     }
     workers = (await response.json()) as typeof workers;
-  } catch {
-    console.error("Could not connect to daemon. Is it running?");
-    process.exit(1);
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw error;
+    }
+    throw new CliError("Could not connect to daemon. Is it running?");
   }
 
   const normalized = issue.toLowerCase();
@@ -344,28 +377,26 @@ export async function cmdPrompt(
   matches = matches.filter((worker) => worker.status === "running" || worker.status === "starting");
 
   if (matches.length === 0) {
-    console.error(
-      `No active worker found for: ${issue}${opts.mode ? ` (mode: ${opts.mode})` : ""}`
-    );
+    let msg = `No active worker found for: ${issue}${opts.mode ? ` (mode: ${opts.mode})` : ""}`;
     const alive = workers.filter(
       (worker) => worker.status === "running" || worker.status === "starting"
     );
     if (alive.length > 0) {
-      console.log("\nActive workers:");
+      msg += "\n\nActive workers:";
       for (const worker of alive) {
-        console.log(`  - ${worker.id}`);
+        msg += `\n  - ${worker.id}`;
       }
     }
-    process.exit(1);
+    throw new CliError(msg);
   }
 
   if (matches.length > 1) {
-    console.error(`Multiple workers found for ${issue}:`);
+    let msg = `Multiple workers found for ${issue}:`;
     for (const worker of matches) {
-      console.log(`  - ${worker.id}`);
+      msg += `\n  - ${worker.id}`;
     }
-    console.error(`\nSpecify mode: legion prompt ${issue} --mode <mode> "${prompt}"`);
-    process.exit(1);
+    msg += `\n\nSpecify mode: legion prompt ${issue} --mode <mode> "${prompt}"`;
+    throw new CliError(msg);
   }
 
   const worker = matches[0];
@@ -380,28 +411,27 @@ export async function cmdPrompt(
       }
     );
     if (!promptResponse.ok) {
-      console.error(`Worker rejected prompt (status ${promptResponse.status}): ${worker.id}`);
-      process.exit(1);
+      throw new CliError(`Worker rejected prompt (status ${promptResponse.status}): ${worker.id}`);
     }
     console.log(`Prompt sent to ${worker.id}: ${prompt}`);
-  } catch {
-    console.error(`Failed to send prompt to ${worker.id} (port ${worker.port})`);
-    process.exit(1);
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw error;
+    }
+    throw new CliError(`Failed to send prompt to ${worker.id} (port ${worker.port})`);
   }
 }
 
 export async function cmdResetCrashes(
   issue: string,
   mode: string,
-  opts?: { daemonPort?: number }
+  opts?: ResetCrashesOptions
 ): Promise<void> {
   if (!SAFE_IDENTIFIER_RE.test(issue)) {
-    console.error(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
-    process.exit(1);
+    throw new CliError(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
   }
   if (!SAFE_IDENTIFIER_RE.test(mode)) {
-    console.error(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
-    process.exit(1);
+    throw new CliError(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
   }
   const daemonPort = opts?.daemonPort ?? getDaemonPort();
   const workerId = `${issue.toLowerCase()}-${mode}`;
@@ -417,18 +447,17 @@ export async function cmdResetCrashes(
       console.log(`Crash history cleared for ${workerId}`);
       console.log(`You can now dispatch: legion dispatch ${issue} ${mode}`);
     } else {
-      console.error(`Failed to reset crashes: ${response.status}`);
-      process.exit(1);
+      throw new CliError(`Failed to reset crashes: ${response.status}`);
     }
-  } catch {
-    console.error("Could not connect to daemon. Is it running?");
-    process.exit(1);
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw error;
+    }
+    throw new CliError("Could not connect to daemon. Is it running?");
   }
 }
 
-async function checkDaemonHealth(
-  port: number
-): Promise<{ running: boolean; workerCount?: number }> {
+async function checkDaemonHealth(port: number): Promise<DaemonHealth> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
     if (!response.ok) {
@@ -452,13 +481,13 @@ async function cmdTeams(includeAll: boolean): Promise<void> {
   }
 
   const daemonPort = getDaemonPort();
+  const health = await checkDaemonHealth(daemonPort);
   const entries = await Promise.all(
     Object.entries(cache).map(async ([key, team]) => {
       const stateFilePath = path.join(os.homedir(), ".legion", team.id, "workers.json");
       if (!fs.existsSync(stateFilePath)) {
         return { key, team, running: false, workerCount: 0 };
       }
-      const health = await checkDaemonHealth(daemonPort);
       return { key, team, running: health.running, workerCount: health.workerCount ?? 0 };
     })
   );
@@ -522,7 +551,15 @@ export const attachCommand = defineCommand({
     issue: { type: "positional", description: "Issue key or identifier", required: true },
   },
   async run({ args }) {
-    await cmdAttach(args.team, args.issue);
+    try {
+      await cmdAttach(args.team, args.issue);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
   },
 });
 
@@ -557,11 +594,19 @@ export const dispatchCommand = defineCommand({
     workspace: { type: "string", alias: "w", description: "Override workspace path" },
   },
   async run({ args }) {
-    await cmdDispatch(args.issue, args.mode, {
-      legionDir: process.env.LEGION_DIR,
-      prompt: args.prompt,
-      workspace: args.workspace,
-    });
+    try {
+      await cmdDispatch(args.issue, args.mode, {
+        legionDir: process.env.LEGION_DIR,
+        prompt: args.prompt,
+        workspace: args.workspace,
+      });
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
   },
 });
 
@@ -577,7 +622,15 @@ export const promptCommand = defineCommand({
     mode: { type: "string", description: "Worker mode (to disambiguate)" },
   },
   async run({ args }) {
-    await cmdPrompt(args.issue, args.prompt, { mode: args.mode });
+    try {
+      await cmdPrompt(args.issue, args.prompt, { mode: args.mode });
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
   },
 });
 
@@ -588,7 +641,15 @@ export const resetCrashesCommand = defineCommand({
     mode: { type: "positional", description: "Worker mode", required: true },
   },
   async run({ args }) {
-    await cmdResetCrashes(args.issue, args.mode);
+    try {
+      await cmdResetCrashes(args.issue, args.mode);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
   },
 });
 

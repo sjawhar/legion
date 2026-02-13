@@ -1,5 +1,5 @@
 import type { PluginInput } from "@opencode-ai/plugin";
-import { extractTodos, resolveSessionID, type TodoItem } from "./utils";
+import { extractTodos, isRecord, resolveSessionID, type TodoItem } from "./utils";
 
 const SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 
@@ -12,7 +12,19 @@ interface TimestampedSnapshot {
 
 export interface CompactionTodoPreserver {
   capture: (sessionID: string) => Promise<void>;
-  event: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
+  event: (input: CompactionEventInput) => Promise<void>;
+}
+
+interface CompactionEventInput {
+  event: { type: string; properties?: unknown };
+}
+
+interface SessionApi {
+  todo: (input: { path: { id: string } }) => Promise<unknown>;
+  todoUpdate?: (input: {
+    path: { id: string };
+    body: { todos: TodoSnapshot[] };
+  }) => Promise<unknown>;
 }
 
 export function createCompactionTodoPreserverHook(ctx: PluginInput): CompactionTodoPreserver {
@@ -66,7 +78,7 @@ export function createCompactionTodoPreserverHook(ctx: PluginInput): CompactionT
     let currentTodos: TodoSnapshot[] = [];
     try {
       const response = await ctx.client.session.todo({ path: { id: sessionID } });
-      currentTodos = extractTodos(response) as TodoSnapshot[];
+      currentTodos = extractTodos(response);
     } catch (err) {
       console.warn("[opencode-legion] Failed to check current todos during restore:", err);
     }
@@ -77,7 +89,7 @@ export function createCompactionTodoPreserverHook(ctx: PluginInput): CompactionT
       return;
     }
 
-    const sessionApi = ctx.client.session as unknown as Record<string, CallableFunction>;
+    const sessionApi = ctx.client.session as SessionApi;
     if (!sessionApi.todoUpdate) {
       snapshots.delete(sessionID);
       return;
@@ -95,12 +107,8 @@ export function createCompactionTodoPreserverHook(ctx: PluginInput): CompactionT
     }
   };
 
-  const event = async ({
-    event,
-  }: {
-    event: { type: string; properties?: unknown };
-  }): Promise<void> => {
-    const props = event.properties as Record<string, unknown> | undefined;
+  const event = async ({ event }: CompactionEventInput): Promise<void> => {
+    const props = isRecord(event.properties) ? event.properties : undefined;
 
     if (event.type === "session.deleted") {
       const sessionID = resolveSessionID(props);

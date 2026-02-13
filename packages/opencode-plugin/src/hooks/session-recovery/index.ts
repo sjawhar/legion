@@ -9,6 +9,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginInput } from "@opencode-ai/plugin";
+import { isRecord } from "../utils";
 import type { ErrorType } from "./types";
 
 interface MessageInfo {
@@ -255,17 +256,22 @@ function findLastUserMessage(messages: MessageData[]): MessageData | undefined {
   return undefined;
 }
 
+function findLastAssistantMessage(messages: MessageData[]): MessageData | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info?.role === "assistant") {
+      return messages[i];
+    }
+  }
+  return undefined;
+}
+
 function getErrorMessage(error: unknown): string {
   if (!error) return "";
   if (typeof error === "string") return error.toLowerCase();
 
-  const errorObj = error as Record<string, unknown>;
-  const paths = [
-    errorObj.data,
-    errorObj.error,
-    errorObj,
-    (errorObj.data as Record<string, unknown>)?.error,
-  ];
+  const errorObj = isRecord(error) ? error : undefined;
+  const errorData = isRecord(errorObj?.data) ? errorObj?.data : undefined;
+  const paths = [errorObj?.data, errorObj?.error, errorObj, errorData?.error];
 
   for (const obj of paths) {
     if (obj && typeof obj === "object") {
@@ -404,8 +410,9 @@ async function resumeSession(
   messages: MessageData[]
 ): Promise<void> {
   const lastUser = findLastUserMessage(messages);
-  const agent = lastUser?.info?.agent;
-  const model = lastUser?.info?.model;
+  const lastAssistant = findLastAssistantMessage(messages);
+  const agent = lastAssistant?.info?.agent ?? lastUser?.info?.agent;
+  const model = lastAssistant?.info?.model ?? lastUser?.info?.model;
 
   await ctx.client.session
     .promptAsync({
@@ -464,7 +471,9 @@ export function createSessionRecoveryHook(ctx: PluginInput): SessionRecoveryHook
         path: { id: sessionID },
         query: { directory: ctx.directory },
       });
-      const msgs = (messagesResp as { data?: MessageData[] }).data ?? [];
+      const msgs = (
+        isRecord(messagesResp) && Array.isArray(messagesResp.data) ? messagesResp.data : []
+      ) as MessageData[];
 
       const failedMsg = msgs.find((m) => m.info?.id === assistantMsgID);
       if (!failedMsg) {
