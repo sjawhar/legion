@@ -78,7 +78,7 @@ about what to do:
 
 | suggestedAction | Signals | Controller should... |
 |-----------------|---------|---------------------|
-| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for Linear auto-transition or manually advance to Needs Review |
+| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for Linear auto-transition to Needs Review |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
 
@@ -114,11 +114,19 @@ don't dispatch a worker, don't transition status. The next loop iteration will r
 which will retry the GitHub API call. If this persists across multiple iterations, investigate the
 GitHub API connectivity.
 
+### Implement → Review Handoff
+
+The implementer does **not** use `worker-done`. Instead:
+1. Implementer opens a **draft PR** and exits
+2. Linear's GitHub integration auto-transitions the issue to Needs Review
+3. State machine sees: Needs Review, no `worker-done`, no live worker → `dispatch_reviewer`
+4. Controller runs the quality gate (below), then dispatches the reviewer
+
 ### Quality Gate (Controller Policy)
 
-Before transitioning from In Progress → Needs Review, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
+Before dispatching a reviewer, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
 
-**When to run:** Whenever executing a `transition_to_needs_review` action.
+**When to run:** Whenever about to execute a `dispatch_reviewer` action.
 
 **Trust but verify:** The implement workflow self-enforces checks before PR (step 4). The controller independently verifies.
 
@@ -136,12 +144,12 @@ bunx biome check 2>&1
 BIOME_EXIT=$?
 ```
 
-**If all pass** (exit codes 0): Proceed with transition to Needs Review.
+**If all pass** (exit codes 0): Proceed with dispatching the reviewer.
 
-**If any fail:** Do NOT advance to Needs Review. Instead:
-1. Remove `worker-done` label
-2. Resume the implementer session with the failure output
-3. The implementer will fix and re-add `worker-done` when ready
+**If any fail:** Do NOT dispatch reviewer. Instead:
+1. Move issue back to In Progress
+2. Dispatch a fresh implementer with the failure output
+3. The implementer will fix, re-open/update the PR, and exit — Linear will auto-transition back to Needs Review
 
 ### 4. Route Triage
 
@@ -278,6 +286,8 @@ curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
 | Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
 | Process issue with live worker | Skip it - worker is already handling |
+| Give workers step-by-step fix instructions | State the mode and issue ID only. Let the workflow guide the worker. E.g. `/legion-worker implement mode for LEG-122 — address comments` not "fix the state file race and empty catch block" |
+| Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. Otherwise the state machine re-triggers on the next loop. |
 
 ## Status Flow
 

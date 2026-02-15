@@ -40,14 +40,14 @@ Use `background_task` tool to spawn a fresh subagent:
 > PR: $PR_URL
 >
 > 1. Fetch the PR diff and description via gh pr view and gh pr diff
-> 2. Invoke /compound-engineering:workflows:compound to document learnings
+> 2. Invoke /compound-engineering/workflows/compound to document learnings
 > 3. Write output to docs/solutions/ in the current directory
 >
 > Focus on patterns that would help future implementations.
 
 ### 3. Do Your Own Compound (In Parallel)
 
-While the subagent runs in background, invoke `/compound-engineering:workflows:compound` yourself.
+While the subagent runs in background, invoke `/compound-engineering/workflows/compound` yourself.
 
 You have full implementation context - capture:
 - What was hard

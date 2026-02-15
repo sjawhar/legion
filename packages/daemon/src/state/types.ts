@@ -32,13 +32,7 @@ export type IssueStatusLiteral =
 /**
  * Worker mode values for session ID computation.
  */
-export type WorkerModeLiteral =
-  | "architect"
-  | "plan"
-  | "implement"
-  | "review"
-  | "merge"
-  | "controller";
+export type WorkerModeLiteral = "architect" | "plan" | "implement" | "review" | "merge";
 
 /**
  * Action types for state machine transitions.
@@ -107,7 +101,6 @@ export const WorkerMode = {
   IMPLEMENT: "implement" as WorkerModeLiteral,
   REVIEW: "review" as WorkerModeLiteral,
   MERGE: "merge" as WorkerModeLiteral,
-  CONTROLLER: "controller" as WorkerModeLiteral,
 } as const;
 
 // =============================================================================

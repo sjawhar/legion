@@ -33,9 +33,9 @@ Fetch issue and comments with `linear_linear(action="get", ...)`. The plan is in
 
 ### 2. Invoke Skills (in order)
 
-1. `/superpowers:executing-plans` - Load and structure the plan
-2. `/superpowers:test-driven-development` - RED-GREEN-REFACTOR cycle
-3. `/superpowers:subagent-driven-development` - Parallel execution for independent tasks
+1. `/superpowers/executing-plans` - Load and structure the plan
+2. `/superpowers/test-driven-development` - RED-GREEN-REFACTOR cycle
+3. `/superpowers/subagent-driven-development` - Parallel execution for independent tasks
 
 #### Parallel Execution with Task System
 
@@ -124,7 +124,7 @@ After all checks pass, spawn a cross-family review session before creating the P
 jj describe -m "$LINEAR_ISSUE_ID: [description]"
 jj git push --named "$LINEAR_ISSUE_ID"=@
 
-gh pr create \
+gh pr create --draft \
   --title "$LINEAR_ISSUE_ID: [title]" \
   --body "Implements $LINEAR_ISSUE_ID
 
@@ -144,7 +144,7 @@ Exit without adding labels. Opening PR auto-transitions issue in Linear.
 
 ### 1. Process Review Feedback
 
-Invoke `/superpowers:receiving-code-review` to evaluate and prioritize feedback.
+Invoke `/superpowers/receiving-code-review` to evaluate and prioritize feedback.
 
 Key behaviors:
 - Verify suggestions against codebase before implementing
@@ -154,8 +154,8 @@ Key behaviors:
 ### 2. Fix Issues
 
 Use TDD and subagent-driven development:
-- `/superpowers:test-driven-development`
-- `/superpowers:subagent-driven-development`
+- `/superpowers/test-driven-development`
+- `/superpowers/subagent-driven-development`
 
 ### 3. Verify
 
