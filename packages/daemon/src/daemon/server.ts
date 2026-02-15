@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
 import { createWorkerClient, type SpawnOptions, type WorkerEntry } from "./serve-manager";
 import {
@@ -172,6 +173,9 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               typeof workspace !== "string"
             ) {
               return badRequest("missing_fields");
+            }
+            if (!isAbsolute(workspace)) {
+              return badRequest("workspace must be an absolute path");
             }
             const validModes = Object.values(WorkerMode);
             if (!validModes.includes(mode as WorkerModeLiteral)) {
@@ -363,6 +367,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
 
           try {
+            // Client is lightweight (fetch wrapper); no caching needed at current
+            // polling frequency. Revisit if status endpoint becomes a hot path.
             const client = createWorkerClient(entry.port, entry.workspace);
             const result = await client.session.status();
             if (result.error || !result.data) {

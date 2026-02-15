@@ -159,6 +159,21 @@ describe("daemon server", () => {
     expect(response.status).toBe(400);
   });
 
+  it("rejects relative workspace paths", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-50",
+        mode: "implement",
+        workspace: "relative/path",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("workspace must be an absolute path");
+  });
+
   it("creates workers", async () => {
     await startTestServer();
     const response = await requestJson("/workers", {
