@@ -4,14 +4,26 @@ Merge the PR into main. The controller handles workspace cleanup after completio
 
 ## Workflow
 
-### 1. Rebase onto Main
+### 1. Check PR State
+
+Before doing anything, verify the PR is open and mergeable:
+
+```bash
+gh pr view "$LINEAR_ISSUE_ID" --json state,merged,mergeable
+```
+
+- If **already merged**: verify changes are on main (`jj log --revisions main`), then exit cleanly.
+- If **closed without merge**: escalate with `user-input-needed` — something unexpected happened.
+- If **open**: proceed to step 2.
+
+### 2. Rebase onto Main
 
 ```bash
 jj git fetch
 jj rebase -d main
 ```
 
-### 2. Resolve Conflicts
+### 3. Resolve Conflicts
 
 If rebase produces conflicts:
 
@@ -24,13 +36,13 @@ If rebase produces conflicts:
 - Post comment describing the conflict
 - Exit
 
-### 3. Push
+### 4. Push
 
 ```bash
 jj git push
 ```
 
-### 4. Wait for CI
+### 5. Wait for CI
 
 ```bash
 gh pr checks "$LINEAR_ISSUE_ID" --watch
@@ -45,12 +57,17 @@ gh pr checks "$LINEAR_ISSUE_ID" --watch
 
 Only escalate with `user-input-needed` if something has gone fundamentally wrong (e.g., infrastructure issues, impossible conflicts, external service failures). Normal code issues like type errors should be fixed, not escalated.
 
-### 5. Merge
+### 6. Merge
 
 ```bash
 gh pr merge "$LINEAR_ISSUE_ID" --squash --delete-branch
 ```
 
-### 6. Exit
+**If merge fails with a permission error** (e.g., external repo you don't own):
+- Post a comment to Linear explaining the permission issue
+- Add `user-input-needed` label
+- Exit — the user needs to merge manually or grant access
+
+### 7. Exit
 
 Exit without adding a label. The Linear issue auto-closes when the PR merges. The controller will clean up the workspace.

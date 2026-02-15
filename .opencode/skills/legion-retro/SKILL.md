@@ -61,12 +61,30 @@ Write to `docs/solutions/`.
 
 Check subagent completion before proceeding (you will be notified when background task completes).
 
-### 5. Push
+### 5. Commit and Push Learnings
+
+Ensure all `docs/solutions/` files are committed and pushed:
 
 ```bash
+jj describe -m "$LINEAR_ISSUE_ID: retro learnings"
 jj git push
 ```
 
-### 6. Signal Completion
+### 6. Post Summary to Linear
+
+Post a brief summary to the Linear issue so learnings are discoverable without checking the repo:
+
+```
+linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="## Retro Complete
+
+**Learnings documented in:**
+- [list docs/solutions/ files written]
+
+**Key takeaways:**
+- [1-3 bullet summary of the most important learnings]
+")
+```
+
+### 7. Signal Completion
 
 Add `worker-done` label to the Linear issue via MCP (see @references/linear-labels.md), then exit.

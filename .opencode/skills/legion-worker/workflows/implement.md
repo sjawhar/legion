@@ -120,6 +120,14 @@ After all checks pass, spawn a cross-family review session before creating the P
 
 ### 6. Ship
 
+Before creating the PR, verify branch ancestry is clean:
+```bash
+jj log -r 'ancestors(@, 5)'  # Should show only your issue's commits on top of main
+jj diff --stat --from main    # File count should match expectations — no unrelated files
+```
+
+If unrelated commits are in the ancestry, rebase to isolate your changes before creating the PR.
+
 ```bash
 jj describe -m "$LINEAR_ISSUE_ID: [description]"
 jj git push --named "$LINEAR_ISSUE_ID"=@
@@ -144,7 +152,17 @@ Exit without adding labels. Opening PR auto-transitions issue in Linear.
 
 ### 1. Process Review Feedback
 
-Invoke `/superpowers/receiving-code-review` to evaluate and prioritize feedback.
+First, check if review comments actually exist on the PR:
+```bash
+# Review comments (on the diff)
+gh api repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments
+# Issue comments (on the conversation tab)
+gh api repos/$OWNER/$REPO/issues/$PR_NUMBER/comments
+```
+
+If the PR was converted to draft but has no review comments in either location, there's nothing to address. Rebase onto latest main, verify tests pass, push, and exit.
+
+Otherwise, invoke `/superpowers/receiving-code-review` to evaluate and prioritize feedback.
 
 Key behaviors:
 - Verify suggestions against codebase before implementing

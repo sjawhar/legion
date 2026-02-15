@@ -35,11 +35,9 @@ Three-pronged fix:
 
 ## Key Patterns
 
-### SDK vs Raw Fetch Split
+### SDK Usage
 
-The OpenCode SDK's `session.create()` doesn't accept a custom `id` parameter, but the daemon uses deterministic session IDs (`computeSessionId`). Solution: keep raw `fetch` for session creation (which needs `{id: sessionId}` in the body) but add the `x-opencode-directory` header manually. Use the SDK for everything else.
-
-**When to use raw fetch:** When the SDK's typed API doesn't expose a field the server accepts.
+The custom fork of the OpenCode SDK (`@opencode-ai/sdk` v1.2.4-post.2) supports both custom session IDs and the `x-opencode-directory` header via `createWorkerClient(port, workspace).session.create({ id: sessionId })`. The SDK handles both the directory header and the custom ID — no raw fetch needed.
 **When to use SDK:** For all standard operations — the SDK handles headers automatically.
 
 ### Centralized Client Construction
