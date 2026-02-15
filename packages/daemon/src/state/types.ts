@@ -367,48 +367,68 @@ export const CollectedState = {
 // Utility Functions
 // =============================================================================
 
+const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
 /**
- * Compute deterministic session ID using UUIDv5.
+ * Convert UUID to OpenCode session ID format: ses_ + 12 hex + 14 Base62.
  *
- * Session IDs have `ses_` prefix for OpenCode compatibility.
+ * Uses the 16 bytes of the UUID deterministically:
+ * - First 6 bytes → 12 lowercase hex chars
+ * - Remaining 10 bytes → 14 Base62 chars (big-endian encoding)
+ */
+function uuidToSessionId(uuid: string): string {
+  const hex = uuid.replace(/-/g, "");
+  const hexPart = hex.slice(0, 12);
+
+  let value = 0n;
+  for (let i = 12; i < hex.length; i += 2) {
+    value = (value << 8n) | BigInt(parseInt(hex.slice(i, i + 2), 16));
+  }
+
+  const base62Chars: string[] = [];
+  for (let i = 0; i < 14; i++) {
+    base62Chars.unshift(BASE62_CHARS[Number(value % 62n)]);
+    value = value / 62n;
+  }
+
+  return `ses_${hexPart}${base62Chars.join("")}`;
+}
+
+/**
+ * Compute deterministic session ID for a worker.
+ *
+ * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
+ * Pattern: ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
  *
  * @param teamId - Linear project UUID
  * @param issueId - Issue identifier (e.g., "ENG-21")
  * @param mode - Worker mode (e.g., "implement", "review")
- * @returns Session ID string with ses_ prefix (e.g., "ses_12345678-1234-5678-1234-567812345678")
+ * @returns Session ID string matching OpenCode format
  * @throws Error if teamId is not a valid UUID string
  */
 export function computeSessionId(teamId: string, issueId: string, mode: WorkerModeLiteral): string {
-  // Validate team ID is a valid UUID
   if (!validateUuid(teamId)) {
     throw new Error(`Invalid UUID: ${teamId}`);
   }
 
-  const namespace = teamId;
-  const name = `${issueId.toLowerCase()}:${mode}`;
-  const uuid = uuidv5(name, namespace);
-
-  return `ses_${uuid}`;
+  const uuid = uuidv5(`${issueId.toLowerCase()}:${mode}`, teamId);
+  return uuidToSessionId(uuid);
 }
 
 /**
  * Compute deterministic session ID for controller.
  *
- * Session IDs have `ses_` prefix for OpenCode compatibility.
+ * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
  *
  * @param teamId - Linear team UUID (must be valid UUID string)
- * @returns Session ID string with ses_ prefix
+ * @returns Session ID string matching OpenCode format
  * @throws Error if teamId is not a valid UUID string
  */
 export function computeControllerSessionId(teamId: string): string {
-  // Validate team ID is a valid UUID
   if (!validateUuid(teamId)) {
     throw new Error(`Invalid UUID: ${teamId}`);
   }
 
-  const namespace = teamId;
-  const name = "controller";
-  const uuid = uuidv5(name, namespace);
-
-  return `ses_${uuid}`;
+  const uuid = uuidv5("controller", teamId);
+  return uuidToSessionId(uuid);
 }

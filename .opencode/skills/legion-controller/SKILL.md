@@ -54,6 +54,8 @@ LINEAR_JSON=$(linear_linear(action="search", query={"team": "$LINEAR_TEAM_ID"}))
 ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
 ```
 
+**CRITICAL:** Pass `LINEAR_JSON` directly to the state CLI in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both MCP and GraphQL formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
+
 ### 2. Relay User Feedback (Highest Priority)
 
 When both `user-input-needed` AND `user-feedback-given` labels present:
