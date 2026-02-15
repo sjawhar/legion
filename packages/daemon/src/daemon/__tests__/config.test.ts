@@ -37,4 +37,20 @@ describe("daemon config", () => {
     const config = loadConfig({ LEGION_DAEMON_PORT: "nope" });
     expect(config.daemonPort).toBe(13370);
   });
+
+  it("reads controllerSessionId from env", () => {
+    const config = loadConfig({ LEGION_CONTROLLER_SESSION_ID: "ses_abc123" });
+    expect(config.controllerSessionId).toBe("ses_abc123");
+  });
+
+  it("controllerSessionId is undefined when env var missing", () => {
+    const config = loadConfig({});
+    expect(config.controllerSessionId).toBeUndefined();
+  });
+
+  it("throws when controllerSessionId has invalid format", () => {
+    expect(() => {
+      loadConfig({ LEGION_CONTROLLER_SESSION_ID: "bad_value" });
+    }).toThrow("LEGION_CONTROLLER_SESSION_ID must start with 'ses_' (got: bad_value)");
+  });
 });

@@ -8,9 +8,16 @@ export interface CrashHistoryEntry {
   lastCrashAt: string | null;
 }
 
+export interface ControllerState {
+  sessionId: string;
+  port?: number;
+  pid?: number;
+}
+
 export interface PersistedWorkerState {
   workers: Record<string, WorkerEntry>;
   crashHistory: Record<string, CrashHistoryEntry>;
+  controller?: ControllerState;
 }
 
 export type WorkerState = Record<string, WorkerEntry>;
@@ -28,12 +35,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeState(raw: unknown): PersistedWorkerState {
   if (isRecord(raw) && isRecord(raw.workers)) {
-    return {
-      workers: raw.workers as Record<string, WorkerEntry>,
-      crashHistory: isRecord(raw.crashHistory)
-        ? (raw.crashHistory as Record<string, CrashHistoryEntry>)
-        : {},
-    };
+    const workers = raw.workers as Record<string, WorkerEntry>;
+    const legacyController = workers["controller-controller"];
+    delete workers["controller-controller"];
+
+    const crashHistory = isRecord(raw.crashHistory)
+      ? (raw.crashHistory as Record<string, CrashHistoryEntry>)
+      : {};
+    delete crashHistory["controller-controller"];
+
+    const result: PersistedWorkerState = { workers, crashHistory };
+
+    if (isRecord(raw.controller)) {
+      const ctrl = raw.controller as Record<string, unknown>;
+      if (typeof ctrl.sessionId === "string") {
+        result.controller = {
+          sessionId: ctrl.sessionId,
+          port: typeof ctrl.port === "number" ? ctrl.port : undefined,
+          pid: typeof ctrl.pid === "number" ? ctrl.pid : undefined,
+        };
+      }
+    } else if (legacyController) {
+      result.controller = {
+        sessionId: legacyController.sessionId,
+        port: legacyController.port,
+        pid: legacyController.pid,
+      };
+    }
+
+    return result;
   }
 
   return {
@@ -47,13 +77,13 @@ export async function readStateFile(filePath: string): Promise<PersistedWorkerSt
   try {
     const raw = await readFile(resolvedPath, "utf-8");
     if (!raw.trim()) {
-      return { workers: {}, crashHistory: {} };
+      return { workers: {}, crashHistory: {}, controller: undefined };
     }
     return normalizeState(JSON.parse(raw));
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {
-      return { workers: {}, crashHistory: {} };
+      return { workers: {}, crashHistory: {}, controller: undefined };
     }
     throw error;
   }

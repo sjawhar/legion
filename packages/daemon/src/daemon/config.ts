@@ -10,6 +10,7 @@ export interface DaemonConfig {
   baseWorkerPort: number;
   stateFilePath: string;
   logDir: string;
+  controllerSessionId?: string;
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -36,6 +37,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const legionDir = env.LEGION_DIR;
   const stateFilePath = resolveStateFilePath(legionDir);
   const stateDir = path.dirname(stateFilePath);
+  const controllerSessionId = env.LEGION_CONTROLLER_SESSION_ID || undefined;
+
+  if (controllerSessionId && !controllerSessionId.startsWith("ses_")) {
+    throw new Error(
+      `LEGION_CONTROLLER_SESSION_ID must start with 'ses_' (got: ${controllerSessionId})`
+    );
+  }
+
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,
@@ -45,5 +54,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
     stateFilePath,
     logDir: path.join(stateDir, "logs"),
+    controllerSessionId,
   };
 }

@@ -7,7 +7,7 @@ HTTP server + worker process management. Spawns `opencode serve` instances, trac
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/health` | `{status, uptime, workerCount}` |
-| `GET` | `/workers` | List all `WorkerEntry[]` |
+| `GET` | `/workers` | List all `WorkerEntry[]` (controller NOT included — tracked separately) |
 | `POST` | `/workers` | Spawn worker — `{issueId, mode, workspace, env?}` → `{id, port, sessionId}` |
 | `GET` | `/workers/:id` | Single worker details |
 | `PATCH` | `/workers/:id` | Update status (`running`, `dead`) |
@@ -17,15 +17,17 @@ HTTP server + worker process management. Spawns `opencode serve` instances, trac
 
 **Worker ID format:** `{issueId}-{mode}` lowercase (e.g., `eng-21-implement`)
 
+**Controller:** The controller is NOT listed in `/workers` responses. It has its own lifecycle state tracked separately in the state file's `controller` field.
+
 ## Files
 
 | File | Responsibility |
 |------|---------------|
-| `index.ts` | Daemon lifecycle: `startDaemon()`, health tick loop, signal handlers. Uses DI via `DaemonDependencies` interface for testability. |
+| `index.ts` | Daemon lifecycle: `startDaemon()`, health tick loop, signal handlers. Manages controller lifecycle (external vs internal mode, conflict resolution on restart). Uses DI via `DaemonDependencies` interface for testability. |
 | `server.ts` | HTTP routing, request validation, in-memory worker map. Imports `computeSessionId` from `../state/types` (only cross-module dep). |
 | `serve-manager.ts` | `spawnServe()` — runs `opencode serve --port X`. `killWorker()` — SIGTERM. `healthCheck()` — `/global/health`. `adoptExistingWorkers()` — restore from state file. |
-| `config.ts` | `DaemonConfig` interface, `loadConfig()` reads env vars. Defaults: daemon port 13370, worker base port 13381, check interval 60s. |
-| `state-file.ts` | `readStateFile()` / `writeStateFile()` — atomic JSON persistence to `~/.legion/{teamId}/workers.json`. |
+| `config.ts` | `DaemonConfig` interface, `loadConfig()` reads env vars. Defaults: daemon port 13370, worker base port 13381, check interval 60s. **Controller mode:** `LEGION_CONTROLLER_SESSION_ID` env var (optional, must start with `ses_` if set, hard fails on invalid format). When set, daemon uses external controller mode (no process spawn). When unset, daemon spawns its own controller. |
+| `state-file.ts` | `readStateFile()` / `writeStateFile()` — atomic JSON persistence to `~/.legion/{teamId}/workers.json`. Includes `controller?: ControllerState` field for controller lifecycle. Legacy `controller-controller` worker entries are stripped on read. |
 | `ports.ts` | `PortAllocator` class — sequential allocation from base port, tracks allocated set. Seeded from existing workers on startup. |
 
 ## Key Patterns
@@ -34,3 +36,4 @@ HTTP server + worker process management. Spawns `opencode serve` instances, trac
 - **Health tick** — every 60s, checks each worker's `/global/health`, marks dead, cleans up
 - **State persistence** — worker map persisted to disk, restored on daemon restart via `adoptExistingWorkers()`
 - **Session IDs** — deterministic UUIDv5 from `computeSessionId(teamId, issueId, mode)`, enables idempotent worker spawning
+- **Controller lifecycle** — separate from workers. Tracked in state file's `controller` field. For internal mode (no `LEGION_CONTROLLER_SESSION_ID`), daemon spawns controller and health-checks it. For external mode, daemon stores session ID without spawning or health-checking.

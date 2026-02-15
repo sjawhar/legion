@@ -50,12 +50,14 @@ describe("sessionId contract (daemon vs state)", () => {
         port: opts.port,
         pid: 1234,
         sessionId: opts.sessionId,
+        workspace: opts.workspace,
         startedAt: "2026-02-01T00:00:00.000Z",
         status: "starting",
         crashCount: 0,
         lastCrashAt: null,
       }),
       killWorker: async () => {},
+      initializeSession: async () => {},
       healthCheck: async () => true,
     };
 

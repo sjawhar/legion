@@ -2,13 +2,21 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { adoptExistingWorkers, healthCheck, killWorker, spawnServe } from "../serve-manager";
+import {
+  adoptExistingWorkers,
+  createWorkerClient,
+  healthCheck,
+  initializeSession,
+  killWorker,
+  spawnServe,
+} from "../serve-manager";
 
 const baseEntry = {
   id: "eng-42-implement",
   port: 15001,
   pid: 2222,
   sessionId: "ses_test",
+  workspace: "/tmp/test-workspace",
   startedAt: "2026-01-01T00:00:00.000Z",
   status: "running" as const,
   crashCount: 0,
@@ -61,6 +69,90 @@ describe("serve-manager", () => {
     expect(spawnArgs.options.env.EXTRA_FLAG).toBe("1");
   });
 
+  it("sets SUPERPOWERS_SKIP_BOOTSTRAP for implement mode", async () => {
+    const spawnArgs = {
+      options: {} as any,
+    };
+    Bun.spawn = ((_: string[], options: any) => {
+      spawnArgs.options = options;
+      return { pid: 4243 } as any;
+    }) as typeof Bun.spawn;
+
+    await spawnServe({
+      issueId: "ENG-43",
+      mode: "implement",
+      workspace: "/tmp",
+      port: 14001,
+      sessionId: "ses_124",
+    });
+
+    expect(spawnArgs.options.env.SUPERPOWERS_SKIP_BOOTSTRAP).toBe("1");
+  });
+
+  it("sets OPENCODE_PERMISSION denies for implement mode", async () => {
+    const spawnArgs = {
+      options: {} as any,
+    };
+    Bun.spawn = ((_: string[], options: any) => {
+      spawnArgs.options = options;
+      return { pid: 4244 } as any;
+    }) as typeof Bun.spawn;
+
+    await spawnServe({
+      issueId: "ENG-44",
+      mode: "implement",
+      workspace: "/tmp",
+      port: 14002,
+      sessionId: "ses_125",
+    });
+
+    const permissions = JSON.parse(spawnArgs.options.env.OPENCODE_PERMISSION);
+    expect(permissions.skill["superpowers/brainstorming"]).toBe("deny");
+    expect(permissions.skill["superpowers/writing-plans"]).toBe("deny");
+  });
+
+  it("sets OPENCODE_PERMISSION denies for plan mode", async () => {
+    const spawnArgs = {
+      options: {} as any,
+    };
+    Bun.spawn = ((_: string[], options: any) => {
+      spawnArgs.options = options;
+      return { pid: 4245 } as any;
+    }) as typeof Bun.spawn;
+
+    await spawnServe({
+      issueId: "ENG-45",
+      mode: "plan",
+      workspace: "/tmp",
+      port: 14003,
+      sessionId: "ses_126",
+    });
+
+    const permissions = JSON.parse(spawnArgs.options.env.OPENCODE_PERMISSION);
+    expect(permissions.skill["superpowers/brainstorming"]).toBe("deny");
+    expect(permissions.skill["superpowers/executing-plans"]).toBe("deny");
+  });
+
+  it("omits OPENCODE_PERMISSION for merge mode", async () => {
+    const spawnArgs = {
+      options: {} as any,
+    };
+    Bun.spawn = ((_: string[], options: any) => {
+      spawnArgs.options = options;
+      return { pid: 4246 } as any;
+    }) as typeof Bun.spawn;
+
+    await spawnServe({
+      issueId: "ENG-46",
+      mode: "merge",
+      workspace: "/tmp",
+      port: 14004,
+      sessionId: "ses_127",
+    });
+
+    expect(spawnArgs.options.env.OPENCODE_PERMISSION).toBeUndefined();
+  });
+
   it("kills a worker by pid", async () => {
     const killed = { pid: 0, called: false };
     process.kill = ((pid: number, _signal?: NodeJS.Signals) => {
@@ -72,6 +164,45 @@ describe("serve-manager", () => {
     await killWorker(baseEntry);
     expect(killed.called).toBe(true);
     expect(killed.pid).toBe(baseEntry.pid);
+  });
+
+  it("sends x-opencode-directory header during session initialization", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    let capturedBody: Record<string, unknown> = {};
+    let healthChecked = false;
+
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (url.includes("/global/health")) {
+        healthChecked = true;
+        return {
+          ok: true,
+          json: async () => ({ healthy: true }),
+        } as any;
+      }
+      if (url.includes("/session")) {
+        capturedHeaders = Object.fromEntries(
+          Object.entries(init?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])
+        );
+        capturedBody = JSON.parse(init?.body as string);
+        return { ok: true, json: async () => ({}) } as any;
+      }
+      return { ok: false } as any;
+    }) as unknown as typeof fetch;
+
+    await initializeSession(15000, "ses_test123", "/home/user/workspace");
+
+    expect(healthChecked).toBe(true);
+    expect(capturedHeaders["x-opencode-directory"]).toBe("/home/user/workspace");
+    expect(capturedBody.id).toBe("ses_test123");
+  });
+
+  it("creates an SDK client with workspace directory", () => {
+    const client = createWorkerClient(15000, "/home/user/my-workspace");
+    expect(client).toBeDefined();
+    expect(client.session).toBeDefined();
+    expect(client.session.status).toBeFunction();
+    // promptAsync existence is validated by typecheck; runtime check is
+    // unreliable across Bun versions due to lazy prototype resolution.
   });
 
   it("checks health via /global/health", async () => {

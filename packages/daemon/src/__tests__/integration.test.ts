@@ -40,6 +40,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
         port: opts.port,
         pid: 4242,
         sessionId: opts.sessionId,
+        workspace: opts.workspace,
         startedAt: new Date().toISOString(),
         status: "starting",
         crashCount: 0,
@@ -49,6 +50,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     killWorker: async (entry: WorkerEntry): Promise<void> => {
       killCalls.push(entry);
     },
+    initializeSession: async (): Promise<void> => {},
     healthCheck: async (): Promise<boolean> => true,
   };
 
@@ -138,7 +140,7 @@ describe("Integration: daemon HTTP lifecycle", () => {
       expect(detailResponse.ok).toBe(true);
       const detail = (await detailResponse.json()) as WorkerEntry;
       expect(detail.id).toBe(created.id);
-      expect(detail.status).toBe("starting");
+      expect(detail.status).toBe("running");
 
       const deleteResponse = await fetch(`${baseUrl}/workers/${created.id}`, {
         method: "DELETE",

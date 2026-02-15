@@ -1,5 +1,6 @@
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
+import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { type CrashHistoryEntry, readStateFile } from "./state-file";
 
 export interface SpawnOptions {
@@ -17,11 +18,27 @@ export interface WorkerEntry {
   port: number;
   pid: number;
   sessionId: string;
+  workspace: string;
   startedAt: string;
   status: "starting" | "running" | "stopped" | "dead";
   crashCount: number;
   lastCrashAt: string | null;
 }
+
+export function createWorkerClient(port: number, workspace: string): OpencodeClient {
+  return createOpencodeClient({
+    baseUrl: `http://127.0.0.1:${port}`,
+    directory: workspace,
+  });
+}
+
+const DENIED_SKILLS_BY_MODE: Record<string, string[]> = {
+  architect: ["superpowers/writing-plans", "superpowers/executing-plans"],
+  plan: ["superpowers/brainstorming", "superpowers/executing-plans"],
+  implement: ["superpowers/brainstorming", "superpowers/writing-plans"],
+  review: ["superpowers/brainstorming", "superpowers/writing-plans", "superpowers/executing-plans"],
+  merge: [],
+};
 
 export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
   let stderr: "ignore" | number = "ignore";
@@ -31,11 +48,24 @@ export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
     stderr = openSync(logFile, "a");
   }
 
+  const deniedSkills = DENIED_SKILLS_BY_MODE[opts.mode] ?? [];
+  const skillPermissions: Record<string, string> = {};
+  for (const skill of deniedSkills) {
+    skillPermissions[skill] = "deny";
+  }
+  const permissionEnv =
+    Object.keys(skillPermissions).length > 0
+      ? { OPENCODE_PERMISSION: JSON.stringify({ skill: skillPermissions }) }
+      : {};
+
+  const { OPENCODE_PERMISSION: _, ...baseEnv } = process.env;
   const subprocess = Bun.spawn(["opencode", "serve", "--port", String(opts.port)], {
     cwd: opts.workspace,
     env: {
-      ...process.env,
+      ...baseEnv,
       ...opts.env,
+      SUPERPOWERS_SKIP_BOOTSTRAP: "1",
+      ...permissionEnv,
     },
     stdio: ["ignore", "ignore", stderr],
   });
@@ -50,11 +80,44 @@ export async function spawnServe(opts: SpawnOptions): Promise<WorkerEntry> {
     port: opts.port,
     pid,
     sessionId: opts.sessionId,
+    workspace: opts.workspace,
     startedAt: new Date().toISOString(),
     status: "starting",
     crashCount: 0,
     lastCrashAt: null,
   };
+}
+
+export async function initializeSession(
+  port: number,
+  sessionId: string,
+  workspace: string,
+  maxRetries = 30,
+  delayMs = 500
+): Promise<void> {
+  for (let i = 0; i < maxRetries; i++) {
+    const healthy = await healthCheck(port);
+    if (healthy) {
+      const response = await fetch(`http://127.0.0.1:${port}/session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencode-directory": workspace,
+        },
+        body: JSON.stringify({ id: sessionId }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok && response.status !== 409) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`Failed to create session ${sessionId}: ${response.status} ${text}`);
+      }
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  throw new Error(
+    `OpenCode serve on port ${port} did not become healthy after ${maxRetries} retries`
+  );
 }
 
 export async function killWorker(entry: WorkerEntry): Promise<void> {

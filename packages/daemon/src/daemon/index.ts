@@ -1,15 +1,19 @@
 import { mkdirSync } from "node:fs";
+import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig } from "./config";
 import { PortAllocator } from "./ports";
 import {
   adoptExistingWorkers,
+  createWorkerClient,
   healthCheck,
+  initializeSession,
   killWorker,
   spawnServe,
   type WorkerEntry,
 } from "./serve-manager";
 import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "./server";
 import {
+  type ControllerState,
   type CrashHistoryEntry,
   type PersistedWorkerState,
   readStateFile,
@@ -40,13 +44,14 @@ export interface DaemonHandle {
 
 function mapToState(
   entries: Map<string, WorkerEntry>,
-  crashHistory: Record<string, CrashHistoryEntry>
+  crashHistory: Record<string, CrashHistoryEntry>,
+  controller?: ControllerState
 ): PersistedWorkerState {
   const state: Record<string, WorkerEntry> = {};
   for (const [id, entry] of entries.entries()) {
     state[id] = entry;
   }
-  return { workers: state, crashHistory };
+  return { workers: state, crashHistory, controller };
 }
 
 function seedAllocator(allocator: PortAllocatorInterface, entries: Iterable<WorkerEntry>): void {
@@ -133,7 +138,12 @@ function resolveDependencies(
   overrides?: Partial<DaemonDependencies>
 ): DaemonDependencies {
   return {
-    serveManager: overrides?.serveManager ?? { spawnServe, killWorker, healthCheck },
+    serveManager: overrides?.serveManager ?? {
+      spawnServe,
+      initializeSession,
+      killWorker,
+      healthCheck,
+    },
     startServer: overrides?.startServer ?? startServer,
     portAllocator: overrides?.portAllocator ?? new PortAllocator(config.baseWorkerPort),
     adoptExistingWorkers: overrides?.adoptExistingWorkers ?? adoptExistingWorkers,
@@ -158,10 +168,14 @@ export async function startDaemon(
   mkdirSync(config.logDir, { recursive: true });
   const resolvedDeps = resolveDependencies(config, deps);
 
+  // Read existing state to preserve controller across the initial write
+  const preState = await resolvedDeps.readStateFile(config.stateFilePath);
+  let controllerState: ControllerState | undefined = preState.controller;
+
   const adopted = await resolvedDeps.adoptExistingWorkers(config.stateFilePath);
   await resolvedDeps.writeStateFile(
     config.stateFilePath,
-    mapToState(adopted.workers, adopted.crashHistory)
+    mapToState(adopted.workers, adopted.crashHistory, controllerState)
   );
   seedAllocator(resolvedDeps.portAllocator, adopted.workers.values());
 
@@ -188,9 +202,18 @@ export async function startDaemon(
       resolvedDeps.portAllocator.release(entry.port);
     }
 
+    if (controllerProcess) {
+      await resolvedDeps.serveManager.killWorker(controllerProcess);
+      if (controllerProcess.port) {
+        resolvedDeps.portAllocator.release(controllerProcess.port);
+      }
+    }
+
+    controllerState = undefined;
     await resolvedDeps.writeStateFile(config.stateFilePath, {
       workers: {},
       crashHistory: state.crashHistory,
+      controller: undefined,
     });
     stopServer();
     if (exitAfter) {
@@ -208,6 +231,7 @@ export async function startDaemon(
     portAllocator: resolvedDeps.portAllocator,
     stateFilePath: config.stateFilePath,
     logDir: config.logDir,
+    getControllerState: () => controllerState,
     shutdownFn: async () => {
       // Shutdown asynchronously after response is sent
       setTimeout(async () => {
@@ -218,37 +242,114 @@ export async function startDaemon(
   stopServer = stop;
 
   const baseUrl = `http://127.0.0.1:${server.port}`;
-  try {
-    const controllerRes = await resolvedDeps.fetch(`${baseUrl}/workers`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        issueId: "controller",
-        mode: "controller",
-        workspace: config.legionDir,
-      }),
-    });
-    if (controllerRes.ok) {
-      const data = (await controllerRes.json()) as { port: number; sessionId: string };
-      await resolvedDeps.fetch(
-        `http://127.0.0.1:${data.port}/session/${data.sessionId}/prompt_async`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            parts: [{ type: "text", text: "/legion-controller" }],
-          }),
+  let controllerProcess: WorkerEntry | null = null;
+  const existingController = controllerState;
+
+  if (config.controllerSessionId) {
+    if (existingController && existingController.sessionId !== config.controllerSessionId) {
+      if (existingController.port) {
+        const oldAlive = await resolvedDeps.serveManager.healthCheck(existingController.port);
+        if (oldAlive) {
+          throw new Error(
+            `Another controller is running (session=${existingController.sessionId}, port=${existingController.port})`
+          );
         }
-      );
-      console.log(`Controller started: session=${data.sessionId} port=${data.port}`);
+      }
     }
-  } catch (error) {
-    console.error(`Failed to spawn controller: ${error}`);
+    console.log(`External controller: session=${config.controllerSessionId}`);
+    controllerState = { sessionId: config.controllerSessionId };
+    const extState = await resolvedDeps.readStateFile(config.stateFilePath);
+    await resolvedDeps.writeStateFile(config.stateFilePath, {
+      ...extState,
+      controller: controllerState,
+    });
+  } else {
+    if (existingController?.port) {
+      const alive = await resolvedDeps.serveManager.healthCheck(existingController.port);
+      if (alive && existingController.pid) {
+        console.log(`Adopted existing controller: session=${existingController.sessionId}`);
+        controllerProcess = {
+          id: "controller",
+          port: existingController.port,
+          pid: existingController.pid,
+          sessionId: existingController.sessionId,
+          workspace: config.legionDir ?? process.cwd(),
+          startedAt: new Date().toISOString(),
+          status: "running",
+          crashCount: 0,
+          lastCrashAt: null,
+        };
+      }
+    }
+    if (!controllerProcess) {
+      const port = resolvedDeps.portAllocator.allocate();
+      try {
+        const sessionId = computeControllerSessionId(config.teamId!);
+        controllerProcess = await resolvedDeps.serveManager.spawnServe({
+          issueId: "controller",
+          mode: "controller",
+          workspace: config.legionDir ?? "",
+          port,
+          sessionId,
+          logDir: config.logDir,
+          env: {
+            LINEAR_TEAM_ID: config.teamId!,
+            LEGION_DIR: config.legionDir ?? "",
+            LEGION_SHORT_ID: config.shortId ?? "default",
+            LEGION_DAEMON_PORT: String(server.port),
+          },
+        });
+        const controllerWorkspace = config.legionDir ?? process.cwd();
+        await resolvedDeps.serveManager.initializeSession(port, sessionId, controllerWorkspace);
+        controllerProcess = { ...controllerProcess, status: "running" };
+        try {
+          const client = createWorkerClient(port, controllerWorkspace);
+          await client.session.promptAsync({
+            sessionID: sessionId,
+            parts: [{ type: "text", text: "/legion-controller" }],
+          });
+        } catch (error) {
+          console.error(`Failed to prompt controller: ${error}`);
+        }
+        console.log(`Controller started: session=${sessionId} port=${port}`);
+      } catch (error) {
+        resolvedDeps.portAllocator.release(port);
+        console.error(`Failed to spawn controller: ${error}`);
+      }
+    }
+    if (controllerProcess) {
+      controllerState = {
+        sessionId: controllerProcess.sessionId,
+        port: controllerProcess.port,
+        pid: controllerProcess.pid,
+      };
+      const intState = await resolvedDeps.readStateFile(config.stateFilePath);
+      await resolvedDeps.writeStateFile(config.stateFilePath, {
+        ...intState,
+        controller: controllerState,
+      });
+    }
   }
   const scheduleHealthTick = () => {
     healthTickTimeout = resolvedDeps.setTimeout(async () => {
       try {
         await healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch);
+        if (controllerProcess?.port) {
+          const alive = await resolvedDeps.serveManager.healthCheck(controllerProcess.port);
+          if (!alive) {
+            console.error(
+              `Controller died (session=${controllerProcess.sessionId}, port=${controllerProcess.port}). Daemon continues headless.`
+            );
+            resolvedDeps.portAllocator.release(controllerProcess.port);
+            controllerProcess = null;
+            controllerState = undefined;
+            const state = await resolvedDeps.readStateFile(config.stateFilePath);
+            await resolvedDeps.writeStateFile(config.stateFilePath, {
+              ...state,
+              controller: undefined,
+            });
+          }
+        }
       } finally {
         if (!shuttingDown) {
           scheduleHealthTick();

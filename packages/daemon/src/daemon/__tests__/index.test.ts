@@ -11,6 +11,7 @@ const baseEntry: WorkerEntry = {
   port: 15000,
   pid: 2222,
   sessionId: "ses-1",
+  workspace: "/tmp/test-workspace",
   startedAt: "2026-02-01T00:00:00.000Z",
   status: "running",
   crashCount: 0,
@@ -22,6 +23,7 @@ const secondEntry: WorkerEntry = {
   port: 15002,
   pid: 3333,
   sessionId: "ses-2",
+  workspace: "/tmp/test-workspace",
   startedAt: "2026-02-01T01:00:00.000Z",
   status: "running",
   crashCount: 0,
@@ -61,8 +63,10 @@ describe("daemon entry", () => {
     });
 
     let writtenState: PersistedWorkerState | null = null;
+    let currentState: PersistedWorkerState = { workers: {}, crashHistory: {} };
     const writeStateFile = async (_path: string, state: PersistedWorkerState) => {
       writtenState = state;
+      currentState = state;
     };
 
     const startServer = () => ({
@@ -76,13 +80,15 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: "ses_test",
       },
       {
         adoptExistingWorkers,
         writeStateFile,
-        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        readStateFile: async () => currentState,
         serveManager: {
           spawnServe: async () => baseEntry,
+          initializeSession: async () => {},
           killWorker: async () => {},
           healthCheck: async () => true,
         },
@@ -107,6 +113,9 @@ describe("daemon entry", () => {
       },
       crashHistory: {
         [baseEntry.id]: { crashCount: 1, lastCrashAt: "2026-02-02T00:00:00.000Z" },
+      },
+      controller: {
+        sessionId: "ses_test",
       },
     });
 
@@ -167,6 +176,7 @@ describe("daemon entry", () => {
         stateFilePath: "/tmp/daemon-workers.json",
         checkIntervalMs: 1000,
         teamId: TEAM_ID,
+        controllerSessionId: "ses_test",
       },
       {
         adoptExistingWorkers: async () => ({ workers: new Map(), crashHistory: {} }),
@@ -174,6 +184,7 @@ describe("daemon entry", () => {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         serveManager: {
           spawnServe: async () => baseEntry,
+          initializeSession: async () => {},
           killWorker: async () => {},
           healthCheck: async (port: number) => port === baseEntry.port,
         },
@@ -228,6 +239,7 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: "ses_test",
       },
       {
         adoptExistingWorkers: async () => ({ workers: new Map(), crashHistory: {} }),
@@ -245,6 +257,7 @@ describe("daemon entry", () => {
         },
         serveManager: {
           spawnServe: async () => baseEntry,
+          initializeSession: async () => {},
           killWorker: async (entry: WorkerEntry) => {
             killed.push(entry);
           },
