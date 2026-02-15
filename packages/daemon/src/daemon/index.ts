@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig } from "./config";
-import { PortAllocator } from "./ports";
+import { isPortFree, PortAllocator } from "./ports";
 import {
   adoptExistingWorkers,
   createWorkerClient,
@@ -26,6 +26,7 @@ interface DaemonDependencies {
   serveManager: ServeManagerInterface;
   startServer: typeof startServer;
   portAllocator: PortAllocatorInterface;
+  isPortFree: typeof isPortFree;
   adoptExistingWorkers: typeof adoptExistingWorkers;
   readStateFile: typeof readStateFile;
   writeStateFile: typeof writeStateFile;
@@ -146,6 +147,7 @@ function resolveDependencies(
     },
     startServer: overrides?.startServer ?? startServer,
     portAllocator: overrides?.portAllocator ?? new PortAllocator(config.baseWorkerPort),
+    isPortFree: overrides?.isPortFree ?? isPortFree,
     adoptExistingWorkers: overrides?.adoptExistingWorkers ?? adoptExistingWorkers,
     readStateFile: overrides?.readStateFile ?? readStateFile,
     writeStateFile: overrides?.writeStateFile ?? writeStateFile,
@@ -229,6 +231,7 @@ export async function startDaemon(
     shortId: config.shortId ?? "default",
     serveManager: resolvedDeps.serveManager,
     portAllocator: resolvedDeps.portAllocator,
+    isPortFree: resolvedDeps.isPortFree,
     stateFilePath: config.stateFilePath,
     logDir: config.logDir,
     getControllerState: () => controllerState,

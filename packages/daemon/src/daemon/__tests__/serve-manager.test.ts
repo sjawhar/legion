@@ -153,17 +153,93 @@ describe("serve-manager", () => {
     expect(spawnArgs.options.env.OPENCODE_PERMISSION).toBeUndefined();
   });
 
-  it("kills a worker by pid", async () => {
-    const killed = { pid: 0, called: false };
-    process.kill = ((pid: number, _signal?: NodeJS.Signals) => {
-      killed.pid = pid;
-      killed.called = true;
+  it("gracefully disposes and returns when process exits", async () => {
+    const calls = {
+      disposeUrl: "",
+      disposeMethod: "",
+      signals: [] as (number | undefined | NodeJS.Signals)[],
+    };
+    globalThis.fetch = (async (input: Request | string, init?: RequestInit) => {
+      calls.disposeUrl = typeof input === "string" ? input : input.url;
+      calls.disposeMethod = typeof input === "string" ? (init?.method ?? "GET") : input.method;
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    process.kill = ((_: number, signal?: NodeJS.Signals) => {
+      calls.signals.push(signal);
+      const err = new Error("ESRCH") as NodeJS.ErrnoException;
+      err.code = "ESRCH";
+      throw err;
+    }) as typeof process.kill;
+
+    await killWorker(baseEntry, 50, 10, 100);
+
+    expect(calls.disposeUrl).toBe(`http://127.0.0.1:${baseEntry.port}/global/dispose`);
+    expect(calls.disposeMethod).toBe("POST");
+    expect(calls.signals).toEqual([0]);
+  });
+
+  it("sends SIGKILL when dispose succeeds but process lingers", async () => {
+    const calls = { sigkill: false, signalChecks: 0 };
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+
+    process.kill = ((_: number, signal?: NodeJS.Signals) => {
+      if (signal === "SIGKILL") {
+        calls.sigkill = true;
+        return true;
+      }
+      calls.signalChecks += 1;
       return true;
     }) as typeof process.kill;
 
-    await killWorker(baseEntry);
-    expect(killed.called).toBe(true);
-    expect(killed.pid).toBe(baseEntry.pid);
+    await killWorker(baseEntry, 50, 10, 100);
+
+    expect(calls.signalChecks).toBeGreaterThan(0);
+    expect(calls.sigkill).toBe(true);
+  });
+
+  it("sends SIGKILL when dispose fails and process lingers", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("connect ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    const calls = { sigkill: false, signalChecks: 0 };
+    process.kill = ((_: number, signal?: NodeJS.Signals) => {
+      if (signal === "SIGKILL") {
+        calls.sigkill = true;
+        return true;
+      }
+      calls.signalChecks += 1;
+      return true;
+    }) as typeof process.kill;
+
+    await killWorker(baseEntry, 50, 10, 100);
+
+    expect(calls.signalChecks).toBeGreaterThan(0);
+    expect(calls.sigkill).toBe(true);
+  });
+
+  it("returns immediately when process already exited", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("connect ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    const calls = { sigkill: false, signalChecks: 0 };
+    process.kill = ((_: number, signal?: NodeJS.Signals) => {
+      if (signal === "SIGKILL") {
+        calls.sigkill = true;
+        return true;
+      }
+      calls.signalChecks += 1;
+      const err = new Error("ESRCH") as NodeJS.ErrnoException;
+      err.code = "ESRCH";
+      throw err;
+    }) as typeof process.kill;
+
+    await killWorker(baseEntry, 50, 10, 100);
+
+    expect(calls.signalChecks).toBe(1);
+    expect(calls.sigkill).toBe(false);
   });
 
   it("sends x-opencode-directory header during session initialization", async () => {
