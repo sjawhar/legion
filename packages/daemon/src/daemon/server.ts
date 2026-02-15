@@ -32,6 +32,7 @@ export interface ServerOptions {
   shortId: string;
   serveManager: ServeManagerInterface;
   portAllocator: PortAllocatorInterface;
+  isPortFree?: (port: number) => Promise<boolean>;
   stateFilePath: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
@@ -234,6 +235,13 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             }
 
             const port = opts.portAllocator.allocate();
+            if (opts.isPortFree) {
+              const free = await opts.isPortFree(port);
+              if (!free) {
+                opts.portAllocator.release(port);
+                return serverError("allocated_port_occupied");
+              }
+            }
             const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
             let entry: WorkerEntry;
             try {

@@ -56,6 +56,7 @@ describe("daemon server", () => {
     state?: PersistedWorkerState;
     serveManagerOverrides?: Partial<ServeManagerInterface>;
     portAllocatorOverride?: TestPortAllocator;
+    isPortFree?: (port: number) => Promise<boolean>;
   }) {
     spawnCalls = [];
     killCalls = [];
@@ -99,6 +100,7 @@ describe("daemon server", () => {
       serveManager,
       portAllocator,
       stateFilePath,
+      isPortFree: options?.isPortFree,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -209,6 +211,48 @@ describe("daemon server", () => {
     expect(entryResponse.status).toBe(200);
     const entryBody = (await entryResponse.json()) as WorkerEntry;
     expect(entryBody.port).toBe(15500);
+  });
+
+  it("returns 500 when allocated port is occupied", async () => {
+    await startTestServer({
+      isPortFree: async () => false,
+    });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-77",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("allocated_port_occupied");
+    expect(spawnCalls.length).toBe(0);
+    expect(portAllocator.released).toEqual([15500]);
+  });
+
+  it("creates workers when port is free", async () => {
+    await startTestServer({
+      isPortFree: async () => true,
+    });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-78",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { id: string; port: number };
+    expect(body.id).toBe("eng-78-implement");
+    expect(body.port).toBe(15500);
+    expect(spawnCalls.length).toBe(1);
   });
 
   it("rejects duplicate worker for same issue+mode", async () => {

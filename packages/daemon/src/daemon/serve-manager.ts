@@ -120,9 +120,33 @@ export async function initializeSession(
   );
 }
 
-export async function killWorker(entry: WorkerEntry): Promise<void> {
+export async function killWorker(
+  entry: WorkerEntry,
+  waitTimeoutMs = 5000,
+  pollIntervalMs = 200,
+  disposeTimeoutMs = 3000
+): Promise<void> {
   try {
-    process.kill(entry.pid, "SIGTERM");
+    await fetch(`http://127.0.0.1:${entry.port}/global/dispose`, {
+      method: "POST",
+      signal: AbortSignal.timeout(disposeTimeoutMs),
+    });
+  } catch {
+    // Dispose is best-effort; failure handled by poll loop + SIGKILL fallback
+  }
+
+  const deadline = Date.now() + waitTimeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(entry.pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  try {
+    process.kill(entry.pid, "SIGKILL");
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ESRCH") {
