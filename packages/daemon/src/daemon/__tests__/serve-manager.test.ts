@@ -62,6 +62,7 @@ describe("serve-manager", () => {
     expect(entry.sessionId).toBe("ses_123");
     expect(new Date(entry.startedAt).toISOString()).toBe(entry.startedAt);
     expect(entry.status).toBe("starting");
+    expect(entry.workspace).toBe("/tmp");
 
     expect(spawnArgs.called).toBe(true);
     expect(spawnArgs.cmd).toEqual(["opencode", "serve", "--port", "14000"]);
@@ -167,26 +168,47 @@ describe("serve-manager", () => {
   });
 
   it("sends x-opencode-directory header during session initialization", async () => {
-    let capturedHeaders: Record<string, string> = {};
+    const capturedHeaders: Record<string, string> = {};
     let capturedBody: Record<string, unknown> = {};
     let healthChecked = false;
 
-    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    globalThis.fetch = (async (input: Request | string, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.url;
+      const method = typeof input === "string" ? (init?.method ?? "GET") : input.method;
+      const headers = typeof input === "string" ? init?.headers : input.headers;
+
       if (url.includes("/global/health")) {
         healthChecked = true;
-        return {
-          ok: true,
-          json: async () => ({ healthy: true }),
-        } as any;
+        return new Response(JSON.stringify({ healthy: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
-      if (url.includes("/session")) {
-        capturedHeaders = Object.fromEntries(
-          Object.entries(init?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])
+      if (url.includes("/session") && method.toUpperCase() === "POST") {
+        if (headers instanceof Headers) {
+          headers.forEach((v, k) => {
+            capturedHeaders[k.toLowerCase()] = v;
+          });
+        }
+        const body = typeof input === "string" ? init?.body : await new Response(input.body).text();
+        capturedBody = JSON.parse(body as string);
+        return new Response(
+          JSON.stringify({
+            id: "ses_test123",
+            slug: "test",
+            version: "test",
+            projectID: "test",
+            title: "test",
+            directory: "/home/user/workspace",
+            time: { created: 0, updated: 0 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }
         );
-        capturedBody = JSON.parse(init?.body as string);
-        return { ok: true, json: async () => ({}) } as any;
       }
-      return { ok: false } as any;
+      return new Response("not found", { status: 404 });
     }) as unknown as typeof fetch;
 
     await initializeSession(15000, "ses_test123", "/home/user/workspace");

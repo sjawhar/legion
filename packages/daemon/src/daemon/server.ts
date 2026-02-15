@@ -253,10 +253,9 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               await opts.serveManager.initializeSession(port, sessionId, workspace);
               entry = { ...entry, status: "running" };
             } catch (error) {
-              console.error(`Failed to initialize session for ${entry.id}: ${error}`);
               await opts.serveManager.killWorker(entry);
               opts.portAllocator.release(port);
-              return serverError(`session_init_failed: ${(error as Error).message}`);
+              return serverError(`Failed to initialize session: ${(error as Error).message}`);
             }
 
             if (crashHistoryEntry) {

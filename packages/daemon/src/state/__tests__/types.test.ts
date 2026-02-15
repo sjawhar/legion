@@ -17,16 +17,11 @@ import {
 } from "../types";
 
 describe("computeSessionId", () => {
-  it("returns uuid string with ses_ prefix", () => {
+  it("returns OpenCode-format session ID", () => {
     const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
     const result = computeSessionId(teamId, "ENG-21", "implement");
 
-    // Should have ses_ prefix
-    expect(result).toMatch(/^ses_/);
-
-    // After removing prefix, should be valid UUID
-    const uuidPart = result.slice(4);
-    expect(validateUuid(uuidPart)).toBe(true);
+    expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   });
 
   it("same inputs produce same output", () => {
@@ -58,16 +53,11 @@ describe("computeSessionId", () => {
 });
 
 describe("computeControllerSessionId", () => {
-  it("returns uuid string with ses_ prefix", () => {
+  it("returns OpenCode-format session ID", () => {
     const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
     const result = computeControllerSessionId(teamId);
 
-    // Should have ses_ prefix
-    expect(result).toMatch(/^ses_/);
-
-    // After removing prefix, should be valid UUID
-    const uuidPart = result.slice(4);
-    expect(validateUuid(uuidPart)).toBe(true);
+    expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   });
 
   it("same input produces same output", () => {

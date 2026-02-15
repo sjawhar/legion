@@ -98,18 +98,13 @@ export async function initializeSession(
   for (let i = 0; i < maxRetries; i++) {
     const healthy = await healthCheck(port);
     if (healthy) {
-      const response = await fetch(`http://127.0.0.1:${port}/session`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-opencode-directory": workspace,
-        },
-        body: JSON.stringify({ id: sessionId }),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!response.ok && response.status !== 409) {
-        const text = await response.text().catch(() => "");
-        throw new Error(`Failed to create session ${sessionId}: ${response.status} ${text}`);
+      const client = createWorkerClient(port, workspace);
+      const { error } = await client.session.create({ id: sessionId }, { throwOnError: false });
+      if (error) {
+        if ("name" in error && error.name === "DuplicateIDError") {
+          return;
+        }
+        throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(error)}`);
       }
       return;
     }
