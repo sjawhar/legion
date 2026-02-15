@@ -107,6 +107,90 @@ Tasks can be routed to different models based on category:
 | `unspecified-high` | anthropic/claude-opus-4-6 | High effort |
 | `writing` | anthropic/claude-sonnet-4-20250514 | Documentation |
 
+## Configuration Options
+
+The `opencode-legion.json` config file supports the following options:
+
+### Concurrency Control
+
+Control how many tasks can run in parallel:
+
+```json
+{
+  "concurrency": {
+    "perModel": 5,
+    "global": 15
+  }
+}
+```
+
+- `perModel` (default: 5) — Maximum concurrent tasks per model
+- `global` (default: 15) — Maximum concurrent tasks across all models
+
+### Inactivity Alerts
+
+Configure when to alert on inactive tasks:
+
+```json
+{
+  "inactivityAlertMs": 600000
+}
+```
+
+- `inactivityAlertMs` (default: 600000 / 10 minutes) — Time in milliseconds before alerting on inactive tasks
+
+### Retry Configuration
+
+Configure retry behavior for failed tasks:
+
+```json
+{
+  "retry": {
+    "maxRetries": 1,
+    "delayMs": 2000,
+    "fallbackModel": "anthropic/claude-sonnet-4-20250514"
+  }
+}
+```
+
+- `maxRetries` (default: 1) — Maximum number of retry attempts
+- `delayMs` (default: 2000) — Delay in milliseconds between retries
+- `fallbackModel` (optional) — Model to use if primary model fails
+
+### Task Retention
+
+Configure how long completed tasks are retained:
+
+```json
+{
+  "taskRetentionMs": 3600000
+}
+```
+
+- `taskRetentionMs` (default: 3600000 / 1 hour) — Time in milliseconds to retain completed tasks
+
+### Complete Example
+
+```json
+{
+  "agents": {
+    "orchestrator": { "model": "anthropic/claude-opus-4-6" },
+    "executor": { "model": "anthropic/claude-sonnet-4-20250514" }
+  },
+  "concurrency": {
+    "perModel": 8,
+    "global": 20
+  },
+  "inactivityAlertMs": 300000,
+  "retry": {
+    "maxRetries": 3,
+    "delayMs": 5000,
+    "fallbackModel": "anthropic/claude-opus-4-6"
+  },
+  "taskRetentionMs": 7200000
+}
+```
+
 ## Rollback
 
 To rollback:

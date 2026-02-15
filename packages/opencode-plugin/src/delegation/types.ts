@@ -5,10 +5,16 @@ export interface BackgroundTask {
   model: string;
   description: string;
   sessionID?: string;
+  parentSessionID?: string;
   result?: string;
   error?: string;
   createdAt: number;
   completedAt?: number;
+  retryCount?: number;
+  concurrencyKey?: string;
+  lastMessageCount?: number;
+  lastActivityAt?: number;
+  staleAlertSent?: boolean;
 }
 
 export interface LaunchOptions {

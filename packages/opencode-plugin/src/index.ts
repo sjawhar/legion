@@ -135,7 +135,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       }
     },
     event: async (input: { event: Event }) => {
-      manager.handleSessionStatus(input.event);
+      await manager.handleSessionStatus(input.event);
       backgroundNotificationHook(input);
       await preemptiveCompactionHook.event?.(input as GenericEventInput);
       await stopContinuationGuardHook.event(input as GenericEventInput);
@@ -148,7 +148,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
         const sessionProps = isRecord(event.properties) ? event.properties : undefined;
         const sessionID = resolveSessionID(sessionProps);
         if (sessionID) {
-          manager.cleanup(sessionID);
+          await manager.cleanup(sessionID);
         }
       }
 
