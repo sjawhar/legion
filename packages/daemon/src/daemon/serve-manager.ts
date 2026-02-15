@@ -95,23 +95,26 @@ export async function initializeSession(
   maxRetries = 30,
   delayMs = 500
 ): Promise<void> {
+  const baseUrl = `http://127.0.0.1:${port}`;
   for (let i = 0; i < maxRetries; i++) {
     const healthy = await healthCheck(port);
     if (healthy) {
-      const response = await fetch(`http://127.0.0.1:${port}/session`, {
+      const res = await fetch(`${baseUrl}/session`, {
         method: "POST",
         headers: {
-          "content-type": "application/json",
-          "x-opencode-directory": workspace,
+          "Content-Type": "application/json",
+          "x-opencode-directory": encodeURIComponent(workspace),
         },
         body: JSON.stringify({ id: sessionId }),
-        signal: AbortSignal.timeout(5000),
       });
-      if (!response.ok && response.status !== 409) {
-        const text = await response.text().catch(() => "");
-        throw new Error(`Failed to create session ${sessionId}: ${response.status} ${text}`);
+      if (res.ok) {
+        return;
       }
-      return;
+      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (res.status === 409 || body.name === "DuplicateIDError") {
+        return;
+      }
+      throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);
     }
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
