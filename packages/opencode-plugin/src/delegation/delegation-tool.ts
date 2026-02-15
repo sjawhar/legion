@@ -2,20 +2,11 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { createAgents } from "../agents";
 import type { PluginConfig } from "../config";
+import { isLeafAgent } from "./agent-restrictions";
 import type { BackgroundTaskManager } from "./background-manager";
 import { resolveCategory } from "./category-router";
 
 const z = tool.schema;
-
-const LEAF_AGENTS = new Set([
-  "explorer",
-  "librarian",
-  "oracle",
-  "metis",
-  "momus",
-  "multimodal",
-  "simplicity-reviewer",
-]);
 
 interface DelegationToolContext {
   agent?: string;
@@ -53,7 +44,7 @@ export function createDelegationTools(
     async execute(args, toolContext) {
       const context = toolContext as DelegationToolContext | undefined;
       const callingAgent = context?.agent;
-      if (callingAgent && LEAF_AGENTS.has(callingAgent)) {
+      if (callingAgent && isLeafAgent(callingAgent)) {
         return `Error: Agent '${callingAgent}' cannot delegate tasks. Only orchestrator-type agents can use background_task.`;
       }
 
@@ -116,12 +107,12 @@ export function createDelegationTools(
     },
     async execute(args) {
       if (args.all === true) {
-        const count = manager.cancelAll();
+        const count = await manager.cancelAll();
         return `Cancelled ${count} task(s).`;
       }
       const taskId = args.task_id as string | undefined;
       if (taskId) {
-        return manager.cancel(taskId)
+        return (await manager.cancel(taskId))
           ? `Cancelled task ${taskId}.`
           : `Task ${taskId} not found or not running.`;
       }

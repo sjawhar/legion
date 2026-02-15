@@ -3,6 +3,8 @@ import {
   registerSubagentSession,
   unregisterSubagentSession,
 } from "../hooks/subagent-question-blocker";
+import { getAgentToolRestrictions } from "./agent-restrictions";
+import { writeTask } from "./task-storage";
 import type { BackgroundTask, LaunchOptions } from "./types";
 
 type OpencodeClient = PluginInput["client"];
@@ -34,6 +36,7 @@ export class BackgroundTaskManager {
       agent: opts.agent,
       model: opts.model ?? "anthropic/claude-sonnet-4-20250514",
       description: opts.description,
+      parentSessionID: opts.parentSessionId,
       createdAt: Date.now(),
     };
 
@@ -56,11 +59,16 @@ export class BackgroundTaskManager {
       this.tasksBySessionId.set(session.data.id, task.id);
       registerSubagentSession(session.data.id);
 
+      await writeTask(this.directory, task).catch((err) => {
+        console.warn(`[background-manager] Failed to persist task ${task.id}:`, err);
+      });
+
       this.startPrompt(task, opts).catch(() => {});
     } catch (err) {
-      task.status = "failed";
-      task.error = err instanceof Error ? err.message : String(err);
-      task.completedAt = Date.now();
+      await this.finalize(task, "failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.tasks.delete(task.id);
     }
 
     return task;
@@ -83,17 +91,18 @@ export class BackgroundTaskManager {
           model: { providerID, modelID },
           parts: [{ type: "text" as const, text: opts.prompt }],
           ...(opts.systemPrompt ? { system: opts.systemPrompt } : {}),
+          tools: {
+            ...getAgentToolRestrictions(opts.agent),
+            question: false,
+            askuserquestion: false,
+          },
         },
         query: { directory: this.directory },
       });
     } catch (err) {
-      task.status = "failed";
-      task.error = err instanceof Error ? err.message : String(err);
-      task.completedAt = Date.now();
-      if (task.sessionID) {
-        this.tasksBySessionId.delete(task.sessionID);
-        unregisterSubagentSession(task.sessionID);
-      }
+      await this.finalize(task, "failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -115,49 +124,23 @@ export class BackgroundTaskManager {
     if (task.result) return task.result;
 
     if (task.sessionID) {
-      try {
-        const messagesResult = await this.client.session.messages({
-          path: { id: task.sessionID },
-          query: { directory: this.directory },
-        });
-        const messages = (messagesResult.data ?? []) as Array<{
-          info?: { role: string };
-          parts?: Array<{ type: string; text?: string }>;
-        }>;
-        const assistantMessages = messages.filter((m) => m.info?.role === "assistant");
-
-        const texts: string[] = [];
-        for (const msg of assistantMessages) {
-          for (const part of msg.parts ?? []) {
-            if (part.type === "text" && part.text) {
-              texts.push(part.text);
-            }
-          }
-        }
-
-        const output = texts.filter((t) => t.length > 0).join("\n\n");
-        if (output) {
-          task.result = output;
-          return output;
-        }
-      } catch {
-        // intentional fall-through
+      const output = await this.fetchSessionOutput(task.sessionID);
+      if (output) {
+        task.result = output;
+        return output;
       }
     }
 
     return "No output available";
   }
 
-  cancel(id: string): boolean {
+  async cancel(id: string): Promise<boolean> {
     const task = this.tasks.get(id);
     if (!task || (task.status !== "running" && task.status !== "pending")) {
       return false;
     }
-    task.status = "cancelled";
-    task.completedAt = Date.now();
+    await this.finalize(task, "cancelled");
     if (task.sessionID) {
-      this.tasksBySessionId.delete(task.sessionID);
-      unregisterSubagentSession(task.sessionID);
       this.client.session
         .abort({
           path: { id: task.sessionID },
@@ -168,10 +151,13 @@ export class BackgroundTaskManager {
     return true;
   }
 
-  cancelAll(): number {
+  async cancelAll(): Promise<number> {
     let count = 0;
     for (const task of this.tasks.values()) {
-      if ((task.status === "running" || task.status === "pending") && this.cancel(task.id)) {
+      if (
+        (task.status === "running" || task.status === "pending") &&
+        (await this.cancel(task.id))
+      ) {
         count++;
       }
     }
@@ -182,7 +168,10 @@ export class BackgroundTaskManager {
    * Handle session.status events for completion detection.
    * Wire this into the plugin's event handler.
    */
-  handleSessionStatus(event: { type: string; properties?: Record<string, unknown> }): void {
+  async handleSessionStatus(event: {
+    type: string;
+    properties?: Record<string, unknown>;
+  }): Promise<void> {
     if (event.type !== "session.status") return;
 
     const sessionID = event.properties?.sessionID as string | undefined;
@@ -192,18 +181,13 @@ export class BackgroundTaskManager {
     if (!taskId) return;
 
     const task = this.tasks.get(taskId);
-    if (!task || (task.status !== "running" && task.status !== "pending")) return;
+    if (!task || task.status !== "running") return;
 
     const status = event.properties?.status as { type: string } | undefined;
     if (status?.type === "idle") {
-      task.status = "completed";
-      task.completedAt = Date.now();
-      unregisterSubagentSession(sessionID);
+      await this.finalize(task, "completed");
     } else if (status?.type === "error") {
-      task.status = "failed";
-      task.error = "Session entered error state";
-      task.completedAt = Date.now();
-      unregisterSubagentSession(sessionID);
+      await this.finalize(task, "failed", { error: "Session entered error state" });
     }
   }
 
@@ -215,12 +199,89 @@ export class BackgroundTaskManager {
     return this.tasksBySessionId.has(sessionID);
   }
 
-  cleanup(sessionID: string): void {
+  async cleanup(sessionID: string): Promise<void> {
     const taskId = this.tasksBySessionId.get(sessionID);
-    if (taskId) {
-      this.tasks.delete(taskId);
-      this.tasksBySessionId.delete(sessionID);
+    if (!taskId) {
+      unregisterSubagentSession(sessionID);
+      return;
     }
+
+    const task = this.tasks.get(taskId);
+    if (task && (task.status === "pending" || task.status === "running")) {
+      await this.finalize(task, "failed", { error: "Session deleted before completion" });
+    }
+
+    // Clean up runtime state. Task file persists on disk for TTL.
+    // finalize() already cleaned tasksBySessionId and subagent session,
+    // but we also remove from tasks Map to prevent memory accumulation.
+    this.tasks.delete(taskId);
+    this.tasksBySessionId.delete(sessionID);
     unregisterSubagentSession(sessionID);
+  }
+
+  async finalize(
+    task: BackgroundTask,
+    status: "completed" | "failed" | "cancelled",
+    opts?: { error?: string }
+  ): Promise<void> {
+    if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+      return;
+    }
+
+    task.status = status;
+    task.completedAt = Date.now();
+    if (opts?.error) {
+      task.error = opts.error;
+    }
+
+    if (status === "completed" && task.sessionID) {
+      const output = await this.fetchSessionOutput(task.sessionID);
+      if (output) {
+        task.result = output;
+      }
+    }
+
+    if (task.sessionID) {
+      this.tasksBySessionId.delete(task.sessionID);
+      unregisterSubagentSession(task.sessionID);
+    }
+
+    try {
+      await writeTask(this.directory, task);
+    } catch (err) {
+      console.warn(`[background-manager] Failed to persist task ${task.id}:`, err);
+    }
+
+    if (!task.sessionID) {
+      this.tasks.delete(task.id);
+    }
+  }
+
+  private async fetchSessionOutput(sessionID: string): Promise<string | null> {
+    try {
+      const messagesResult = await this.client.session.messages({
+        path: { id: sessionID },
+        query: { directory: this.directory },
+      });
+      const messages = (messagesResult.data ?? []) as Array<{
+        info?: { role: string };
+        parts?: Array<{ type: string; text?: string }>;
+      }>;
+      const assistantMessages = messages.filter((m) => m.info?.role === "assistant");
+
+      const texts: string[] = [];
+      for (const msg of assistantMessages) {
+        for (const part of msg.parts ?? []) {
+          if (part.type === "text" && part.text) {
+            texts.push(part.text);
+          }
+        }
+      }
+
+      const output = texts.filter((t) => t.length > 0).join("\n\n");
+      return output.length > 0 ? output : null;
+    } catch {
+      return null;
+    }
   }
 }

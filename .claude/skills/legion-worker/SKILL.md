@@ -19,6 +19,10 @@ Required:
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
+## Skill Discipline
+
+You are executing work with an approved plan. Do NOT invoke the brainstorming or writing-plans skills — your workflow has already been designed. Follow your assigned workflow file. The individual skills referenced in your workflow (TDD, subagent-driven-development, etc.) are appropriate to load and use.
+
 ## Session Lifecycle
 
 ### Starting

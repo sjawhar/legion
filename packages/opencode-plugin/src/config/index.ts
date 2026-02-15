@@ -41,6 +41,21 @@ const CategoryConfigSchema = z
   })
   .strict();
 
+const ConcurrencyConfigSchema = z
+  .object({
+    perModel: z.number().optional(),
+    global: z.number().optional(),
+  })
+  .strict();
+
+const RetryConfigSchema = z
+  .object({
+    maxRetries: z.number().optional(),
+    delayMs: z.number().optional(),
+    fallbackModel: z.string().optional(),
+  })
+  .strict();
+
 const PluginConfigSchema = z
   .object({
     $schema: z.string().optional(),
@@ -48,6 +63,10 @@ const PluginConfigSchema = z
     categories: z.record(z.string(), CategoryConfigSchema).optional(),
     permission: PermissionConfigSchema.optional(),
     continuationGracePeriodMs: z.number().optional(),
+    concurrency: ConcurrencyConfigSchema.optional(),
+    inactivityAlertMs: z.number().optional(),
+    retry: RetryConfigSchema.optional(),
+    taskRetentionMs: z.number().optional(),
   })
   .passthrough();
 
@@ -57,6 +76,17 @@ export interface AgentOverrideConfig {
   permission?: PermissionConfig;
 }
 
+export interface ConcurrencyConfig {
+  perModel?: number;
+  global?: number;
+}
+
+export interface RetryConfig {
+  maxRetries?: number;
+  delayMs?: number;
+  fallbackModel?: string;
+}
+
 export interface PluginConfig {
   agents?: {
     [agentName: string]: AgentOverrideConfig;
@@ -64,9 +94,24 @@ export interface PluginConfig {
   categories?: Record<string, CategoryOverrideConfig>;
   permission?: PermissionConfig;
   continuationGracePeriodMs?: number;
+  concurrency?: ConcurrencyConfig;
+  inactivityAlertMs?: number;
+  retry?: RetryConfig;
+  taskRetentionMs?: number;
 }
 
-const DEFAULT_CONFIG: PluginConfig = {};
+const DEFAULT_CONFIG: PluginConfig = {
+  concurrency: {
+    perModel: 5,
+    global: 15,
+  },
+  inactivityAlertMs: 600000,
+  retry: {
+    maxRetries: 1,
+    delayMs: 2000,
+  },
+  taskRetentionMs: 3600000,
+};
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -124,6 +169,21 @@ function mergeCategoryOverrides(
   return merged;
 }
 
+function mergeConcurrency(
+  base?: ConcurrencyConfig,
+  override?: ConcurrencyConfig
+): ConcurrencyConfig | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return { ...base, ...override };
+}
+
+function mergeRetry(base?: RetryConfig, override?: RetryConfig): RetryConfig | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return { ...base, ...override };
+}
+
 function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
   return {
     ...base,
@@ -131,6 +191,25 @@ function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
     agents: mergeAgentOverrides(base.agents, override.agents),
     categories: mergeCategoryOverrides(base.categories, override.categories),
     permission: mergePermission(base.permission, override.permission),
+    concurrency: mergeConcurrency(base.concurrency, override.concurrency),
+    retry: mergeRetry(base.retry, override.retry),
+  };
+}
+
+function applyDefaults(config: PluginConfig): PluginConfig {
+  return {
+    ...config,
+    concurrency: {
+      perModel: config.concurrency?.perModel ?? DEFAULT_CONFIG.concurrency?.perModel,
+      global: config.concurrency?.global ?? DEFAULT_CONFIG.concurrency?.global,
+    },
+    inactivityAlertMs: config.inactivityAlertMs ?? DEFAULT_CONFIG.inactivityAlertMs,
+    retry: {
+      maxRetries: config.retry?.maxRetries ?? DEFAULT_CONFIG.retry?.maxRetries,
+      delayMs: config.retry?.delayMs ?? DEFAULT_CONFIG.retry?.delayMs,
+      fallbackModel: config.retry?.fallbackModel ?? DEFAULT_CONFIG.retry?.fallbackModel,
+    },
+    taskRetentionMs: config.taskRetentionMs ?? DEFAULT_CONFIG.taskRetentionMs,
   };
 }
 
@@ -167,7 +246,7 @@ export const loadPluginConfig = async (
   const userConfigPath = path.join(homeDir, ".config", "opencode", "opencode-legion.json");
   const repoConfigPath = path.join(directory, ".opencode", "opencode-legion.json");
 
-  let merged = DEFAULT_CONFIG;
+  let merged: PluginConfig = {};
   const userConfig = readConfigFile(userConfigPath);
   if (userConfig) {
     merged = mergeConfig(merged, userConfig);
@@ -178,7 +257,7 @@ export const loadPluginConfig = async (
     merged = mergeConfig(merged, repoConfig);
   }
 
-  return merged;
+  return applyDefaults(merged);
 };
 
 export const mergePermissionConfig = mergePermission;
