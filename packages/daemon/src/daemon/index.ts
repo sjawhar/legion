@@ -1,38 +1,39 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig } from "./config";
-import { isPortFree, PortAllocator } from "./ports";
 import {
-  adoptExistingWorkers,
+  createSession,
   createWorkerClient,
   healthCheck,
-  initializeSession,
-  killWorker,
-  spawnServe,
-  type WorkerEntry,
+  type SharedServeOptions,
+  type SharedServeState,
+  spawnSharedServe,
+  stopServe,
+  waitForHealthy,
 } from "./serve-manager";
-import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "./server";
-import {
-  type ControllerState,
-  type CrashHistoryEntry,
-  type PersistedWorkerState,
-  readStateFile,
-  writeStateFile,
-} from "./state-file";
+import { type ServeManagerInterface, startServer } from "./server";
+import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
 
 type ServerHandle = ReturnType<typeof startServer>;
 
+interface DaemonServeManager extends ServeManagerInterface {
+  spawnSharedServe(opts: SharedServeOptions): Promise<SharedServeState>;
+  waitForHealthy(port: number, maxRetries?: number, delayMs?: number): Promise<void>;
+  stopServe(
+    port: number,
+    pid: number,
+    waitTimeoutMs?: number,
+    pollIntervalMs?: number,
+    disposeTimeoutMs?: number
+  ): Promise<void>;
+}
+
 interface DaemonDependencies {
-  serveManager: ServeManagerInterface;
+  serveManager: DaemonServeManager;
   startServer: typeof startServer;
-  portAllocator: PortAllocatorInterface;
-  isPortFree: typeof isPortFree;
-  adoptExistingWorkers: typeof adoptExistingWorkers;
   readStateFile: typeof readStateFile;
   writeStateFile: typeof writeStateFile;
   fetch: typeof fetch;
-  setInterval: typeof setInterval;
-  clearInterval: typeof clearInterval;
   setTimeout: typeof setTimeout;
   clearTimeout: typeof clearTimeout;
 }
@@ -43,117 +44,22 @@ export interface DaemonHandle {
   config: DaemonConfig;
 }
 
-function mapToState(
-  entries: Map<string, WorkerEntry>,
-  crashHistory: Record<string, CrashHistoryEntry>,
-  controller?: ControllerState
-): PersistedWorkerState {
-  const state: Record<string, WorkerEntry> = {};
-  for (const [id, entry] of entries.entries()) {
-    state[id] = entry;
-  }
-  return { workers: state, crashHistory, controller };
-}
-
-function seedAllocator(allocator: PortAllocatorInterface, entries: Iterable<WorkerEntry>): void {
-  const ports = Array.from(entries, (entry) => entry.port);
-  if (ports.length === 0) {
-    return;
-  }
-  const uniquePorts = Array.from(new Set(ports)).sort((a, b) => a - b);
-  const desired = new Set(uniquePorts);
-  const allocated: number[] = [];
-
-  for (const port of uniquePorts) {
-    let allocatedPort = allocator.allocate();
-    allocated.push(allocatedPort);
-    while (allocatedPort < port) {
-      allocatedPort = allocator.allocate();
-      allocated.push(allocatedPort);
-    }
-  }
-
-  for (const port of allocated) {
-    if (!desired.has(port)) {
-      allocator.release(port);
-    }
-  }
-}
-
-async function fetchWorkers(baseUrl: string, fetchFn: typeof fetch): Promise<WorkerEntry[]> {
-  const response = await fetchFn(`${baseUrl}/workers`);
-  if (!response.ok) {
-    return [];
-  }
-  return (await response.json()) as WorkerEntry[];
-}
-
-async function healthTick(
-  baseUrl: string,
-  serveManager: ServeManagerInterface,
-  fetchFn: typeof fetch
-): Promise<void> {
-  let workers: WorkerEntry[] = [];
-  try {
-    workers = await fetchWorkers(baseUrl, fetchFn);
-  } catch {
-    return;
-  }
-
-  await Promise.all(
-    workers.map(async (entry) => {
-      try {
-        const healthy = await serveManager.healthCheck(entry.port);
-        if (healthy) {
-          await fetchFn(`${baseUrl}/workers/${entry.id}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ status: "running" }),
-          });
-          return;
-        }
-
-        entry.crashCount = (entry.crashCount ?? 0) + 1;
-        entry.lastCrashAt = new Date().toISOString();
-        entry.status = "dead";
-
-        await fetchFn(`${baseUrl}/workers/${entry.id}`, {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            status: "dead",
-            crashCount: entry.crashCount,
-            lastCrashAt: entry.lastCrashAt,
-          }),
-        });
-        await fetchFn(`${baseUrl}/workers/${entry.id}`, { method: "DELETE" });
-      } catch {
-        return;
-      }
-    })
-  );
-}
-
 function resolveDependencies(
-  config: DaemonConfig,
+  _config: DaemonConfig,
   overrides?: Partial<DaemonDependencies>
 ): DaemonDependencies {
   return {
     serveManager: overrides?.serveManager ?? {
-      spawnServe,
-      initializeSession,
-      killWorker,
+      spawnSharedServe,
+      waitForHealthy,
+      createSession,
       healthCheck,
+      stopServe,
     },
     startServer: overrides?.startServer ?? startServer,
-    portAllocator: overrides?.portAllocator ?? new PortAllocator(config.baseWorkerPort),
-    isPortFree: overrides?.isPortFree ?? isPortFree,
-    adoptExistingWorkers: overrides?.adoptExistingWorkers ?? adoptExistingWorkers,
     readStateFile: overrides?.readStateFile ?? readStateFile,
     writeStateFile: overrides?.writeStateFile ?? writeStateFile,
     fetch: overrides?.fetch ?? globalThis.fetch,
-    setInterval: overrides?.setInterval ?? setInterval,
-    clearInterval: overrides?.clearInterval ?? clearInterval,
     setTimeout: overrides?.setTimeout ?? setTimeout,
     clearTimeout: overrides?.clearTimeout ?? clearTimeout,
   };
@@ -170,16 +76,37 @@ export async function startDaemon(
   mkdirSync(config.logDir, { recursive: true });
   const resolvedDeps = resolveDependencies(config, deps);
 
-  // Read existing state to preserve controller across the initial write
+  const sharedServePort = config.baseWorkerPort;
+  let sharedServePid = 0;
+
+  const existingHealthy = await resolvedDeps.serveManager.healthCheck(sharedServePort);
+  if (existingHealthy) {
+    console.log(`Adopted existing shared serve on port ${sharedServePort}`);
+  } else {
+    const serve = await resolvedDeps.serveManager.spawnSharedServe({
+      port: sharedServePort,
+      workspace: config.legionDir ?? "",
+      logDir: config.logDir,
+    });
+    sharedServePid = serve.pid;
+    await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
+    console.log(`Shared serve started on port ${sharedServePort} pid=${sharedServePid}`);
+  }
+
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
   let controllerState: ControllerState | undefined = preState.controller;
 
-  const adopted = await resolvedDeps.adoptExistingWorkers(config.stateFilePath);
-  await resolvedDeps.writeStateFile(
-    config.stateFilePath,
-    mapToState(adopted.workers, adopted.crashHistory, controllerState)
-  );
-  seedAllocator(resolvedDeps.portAllocator, adopted.workers.values());
+  for (const entry of Object.values(preState.workers)) {
+    try {
+      await resolvedDeps.serveManager.createSession(
+        sharedServePort,
+        entry.sessionId,
+        entry.workspace
+      );
+    } catch (error) {
+      console.error(`Failed to re-create session for ${entry.id}: ${error}`);
+    }
+  }
 
   let shuttingDown = false;
   let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -190,28 +117,18 @@ export async function startDaemon(
       return;
     }
     shuttingDown = true;
+
     if (healthTickTimeout) {
       resolvedDeps.clearTimeout(healthTickTimeout);
       healthTickTimeout = null;
     }
 
-    const state = await resolvedDeps.readStateFile(config.stateFilePath);
-    const entries = Object.values(state.workers);
-    await Promise.allSettled(
-      entries.map(async (entry) => resolvedDeps.serveManager.killWorker(entry))
-    );
-    for (const entry of entries) {
-      resolvedDeps.portAllocator.release(entry.port);
-    }
-
-    if (controllerProcess) {
-      await resolvedDeps.serveManager.killWorker(controllerProcess);
-      if (controllerProcess.port) {
-        resolvedDeps.portAllocator.release(controllerProcess.port);
-      }
+    if (sharedServePid > 0) {
+      await resolvedDeps.serveManager.stopServe(sharedServePort, sharedServePid);
     }
 
     controllerState = undefined;
+    const state = await resolvedDeps.readStateFile(config.stateFilePath);
     await resolvedDeps.writeStateFile(config.stateFilePath, {
       workers: {},
       crashHistory: state.crashHistory,
@@ -230,22 +147,18 @@ export async function startDaemon(
     legionDir: config.legionDir ?? "",
     shortId: config.shortId ?? "default",
     serveManager: resolvedDeps.serveManager,
-    portAllocator: resolvedDeps.portAllocator,
-    isPortFree: resolvedDeps.isPortFree,
+    sharedServePort,
     stateFilePath: config.stateFilePath,
     logDir: config.logDir,
     getControllerState: () => controllerState,
     shutdownFn: async () => {
-      // Shutdown asynchronously after response is sent
-      setTimeout(async () => {
+      resolvedDeps.setTimeout(async () => {
         await shutdown(true);
       }, 100);
     },
   });
   stopServer = stop;
 
-  const baseUrl = `http://127.0.0.1:${server.port}`;
-  let controllerProcess: WorkerEntry | null = null;
   const existingController = controllerState;
 
   if (config.controllerSessionId) {
@@ -254,103 +167,83 @@ export async function startDaemon(
         const oldAlive = await resolvedDeps.serveManager.healthCheck(existingController.port);
         if (oldAlive) {
           throw new Error(
-            `Another controller is running (session=${existingController.sessionId}, port=${existingController.port})`
+            `Another controller is running (session=${existingController.sessionId})`
           );
         }
       }
     }
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
-    const extState = await resolvedDeps.readStateFile(config.stateFilePath);
-    await resolvedDeps.writeStateFile(config.stateFilePath, {
-      ...extState,
-      controller: controllerState,
-    });
   } else {
-    if (existingController?.port) {
-      const alive = await resolvedDeps.serveManager.healthCheck(existingController.port);
-      if (alive && existingController.pid) {
-        console.log(`Adopted existing controller: session=${existingController.sessionId}`);
-        controllerProcess = {
-          id: "controller",
-          port: existingController.port,
-          pid: existingController.pid,
-          sessionId: existingController.sessionId,
-          workspace: config.legionDir ?? process.cwd(),
-          startedAt: new Date().toISOString(),
-          status: "running",
-          crashCount: 0,
-          lastCrashAt: null,
-        };
-      }
-    }
-    if (!controllerProcess) {
-      const port = resolvedDeps.portAllocator.allocate();
-      try {
-        const sessionId = computeControllerSessionId(config.teamId!);
-        controllerProcess = await resolvedDeps.serveManager.spawnServe({
-          issueId: "controller",
-          mode: "controller",
-          workspace: config.legionDir ?? "",
-          port,
-          sessionId,
-          logDir: config.logDir,
-          env: {
-            LINEAR_TEAM_ID: config.teamId!,
-            LEGION_DIR: config.legionDir ?? "",
-            LEGION_SHORT_ID: config.shortId ?? "default",
-            LEGION_DAEMON_PORT: String(server.port),
-          },
-        });
-        const controllerWorkspace = config.legionDir ?? process.cwd();
-        await resolvedDeps.serveManager.initializeSession(port, sessionId, controllerWorkspace);
-        controllerProcess = { ...controllerProcess, status: "running" };
-        try {
-          const client = createWorkerClient(port, controllerWorkspace);
-          await client.session.promptAsync({
-            sessionID: sessionId,
-            parts: [{ type: "text", text: "/legion-controller" }],
-          });
-        } catch (error) {
-          console.error(`Failed to prompt controller: ${error}`);
-        }
-        console.log(`Controller started: session=${sessionId} port=${port}`);
-      } catch (error) {
-        resolvedDeps.portAllocator.release(port);
-        console.error(`Failed to spawn controller: ${error}`);
-      }
-    }
-    if (controllerProcess) {
-      controllerState = {
-        sessionId: controllerProcess.sessionId,
-        port: controllerProcess.port,
-        pid: controllerProcess.pid,
-      };
-      const intState = await resolvedDeps.readStateFile(config.stateFilePath);
-      await resolvedDeps.writeStateFile(config.stateFilePath, {
-        ...intState,
-        controller: controllerState,
+    const sessionId = computeControllerSessionId(config.teamId!);
+    try {
+      await resolvedDeps.serveManager.createSession(
+        sharedServePort,
+        sessionId,
+        config.legionDir ?? ""
+      );
+      const client = createWorkerClient(sharedServePort, config.legionDir ?? "");
+      await client.session.promptAsync({
+        sessionID: sessionId,
+        parts: [{ type: "text", text: "/legion-controller" }],
       });
+      controllerState = { sessionId, port: sharedServePort };
+      console.log(`Controller started: session=${sessionId} port=${sharedServePort}`);
+    } catch (error) {
+      console.error(`Failed to start controller: ${error}`);
     }
   }
+
   const scheduleHealthTick = () => {
     healthTickTimeout = resolvedDeps.setTimeout(async () => {
       try {
-        await healthTick(baseUrl, resolvedDeps.serveManager, resolvedDeps.fetch);
-        if (controllerProcess?.port) {
-          const alive = await resolvedDeps.serveManager.healthCheck(controllerProcess.port);
-          if (!alive) {
-            console.error(
-              `Controller died (session=${controllerProcess.sessionId}, port=${controllerProcess.port}). Daemon continues headless.`
-            );
-            resolvedDeps.portAllocator.release(controllerProcess.port);
-            controllerProcess = null;
-            controllerState = undefined;
-            const state = await resolvedDeps.readStateFile(config.stateFilePath);
-            await resolvedDeps.writeStateFile(config.stateFilePath, {
-              ...state,
-              controller: undefined,
+        const serveHealthy = await resolvedDeps.serveManager.healthCheck(sharedServePort);
+
+        if (!serveHealthy) {
+          console.error("Shared serve is unhealthy, attempting restart...");
+
+          try {
+            const serve = await resolvedDeps.serveManager.spawnSharedServe({
+              port: sharedServePort,
+              workspace: config.legionDir ?? "",
+              logDir: config.logDir,
             });
+            sharedServePid = serve.pid;
+            await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
+            console.log(`Shared serve restarted on port ${sharedServePort}`);
+
+            const state = await resolvedDeps.readStateFile(config.stateFilePath);
+            for (const entry of Object.values(state.workers)) {
+              try {
+                await resolvedDeps.serveManager.createSession(
+                  sharedServePort,
+                  entry.sessionId,
+                  entry.workspace
+                );
+              } catch {
+                // Best-effort session re-creation
+              }
+            }
+
+            if (controllerState?.port) {
+              try {
+                await resolvedDeps.serveManager.createSession(
+                  sharedServePort,
+                  controllerState.sessionId,
+                  config.legionDir ?? ""
+                );
+                const client = createWorkerClient(sharedServePort, config.legionDir ?? "");
+                await client.session.promptAsync({
+                  sessionID: controllerState.sessionId,
+                  parts: [{ type: "text", text: "/legion-controller" }],
+                });
+                console.log(`Controller re-created: session=${controllerState.sessionId}`);
+              } catch (error) {
+                console.error(`Failed to re-create controller session: ${error}`);
+              }
+            }
+          } catch (error) {
+            console.error(`Failed to restart shared serve: ${error}`);
           }
         }
       } finally {

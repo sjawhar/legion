@@ -1,27 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import {
-  adoptExistingWorkers,
+  createSession,
   createWorkerClient,
   healthCheck,
-  initializeSession,
-  killWorker,
-  spawnServe,
+  spawnSharedServe,
+  stopServe,
+  waitForHealthy,
 } from "../serve-manager";
-
-const baseEntry = {
-  id: "eng-42-implement",
-  port: 15001,
-  pid: 2222,
-  sessionId: "ses_test",
-  workspace: "/tmp/test-workspace",
-  startedAt: "2026-01-01T00:00:00.000Z",
-  status: "running" as const,
-  crashCount: 0,
-  lastCrashAt: null,
-};
 
 describe("serve-manager", () => {
   const originalSpawn = Bun.spawn;
@@ -34,339 +19,216 @@ describe("serve-manager", () => {
     process.kill = originalKill;
   });
 
-  it("spawns a serve process and returns worker entry", async () => {
-    const spawnArgs = {
-      cmd: [] as string[],
-      options: {} as any,
-      called: false,
-    };
-    Bun.spawn = ((cmd: string[], options: any) => {
-      spawnArgs.cmd = cmd;
-      spawnArgs.options = options;
-      spawnArgs.called = true;
-      return { pid: 4242 } as any;
-    }) as typeof Bun.spawn;
+  describe("spawnSharedServe", () => {
+    it("spawns opencode serve on the given port", async () => {
+      const spawnArgs = { cmd: [] as string[], options: {} as Record<string, unknown> };
+      Bun.spawn = ((cmd: string[], options: Record<string, unknown>) => {
+        spawnArgs.cmd = cmd;
+        spawnArgs.options = options;
+        return { pid: 4242 };
+      }) as typeof Bun.spawn;
 
-    const entry = await spawnServe({
-      issueId: "ENG-42",
-      mode: "implement",
-      workspace: "/tmp",
-      port: 14000,
-      sessionId: "ses_123",
-      env: { EXTRA_FLAG: "1" },
+      const result = await spawnSharedServe({
+        port: 13381,
+        workspace: "/tmp/legion",
+      });
+
+      expect(result.port).toBe(13381);
+      expect(result.pid).toBe(4242);
+      expect(result.status).toBe("starting");
+      expect(spawnArgs.cmd).toEqual(["opencode", "serve", "--port", "13381"]);
+      expect(spawnArgs.options.cwd).toBe("/tmp/legion");
+      expect((spawnArgs.options.env as Record<string, string>).SUPERPOWERS_SKIP_BOOTSTRAP).toBe(
+        "1"
+      );
     });
 
-    expect(entry.id).toBe("eng-42-implement");
-    expect(entry.port).toBe(14000);
-    expect(entry.pid).toBe(4242);
-    expect(entry.sessionId).toBe("ses_123");
-    expect(new Date(entry.startedAt).toISOString()).toBe(entry.startedAt);
-    expect(entry.status).toBe("starting");
-    expect(entry.workspace).toBe("/tmp");
+    it("strips OPENCODE_PERMISSION from environment", async () => {
+      const spawnArgs = { options: {} as Record<string, unknown> };
+      Bun.spawn = ((_: string[], options: Record<string, unknown>) => {
+        spawnArgs.options = options;
+        return { pid: 4243 };
+      }) as typeof Bun.spawn;
 
-    expect(spawnArgs.called).toBe(true);
-    expect(spawnArgs.cmd).toEqual(["opencode", "serve", "--port", "14000"]);
-    expect(spawnArgs.options.cwd).toBe("/tmp");
-    expect(spawnArgs.options.env.EXTRA_FLAG).toBe("1");
-  });
-
-  it("sets SUPERPOWERS_SKIP_BOOTSTRAP for implement mode", async () => {
-    const spawnArgs = {
-      options: {} as any,
-    };
-    Bun.spawn = ((_: string[], options: any) => {
-      spawnArgs.options = options;
-      return { pid: 4243 } as any;
-    }) as typeof Bun.spawn;
-
-    await spawnServe({
-      issueId: "ENG-43",
-      mode: "implement",
-      workspace: "/tmp",
-      port: 14001,
-      sessionId: "ses_124",
-    });
-
-    expect(spawnArgs.options.env.SUPERPOWERS_SKIP_BOOTSTRAP).toBe("1");
-  });
-
-  it("sets OPENCODE_PERMISSION denies for implement mode", async () => {
-    const spawnArgs = {
-      options: {} as any,
-    };
-    Bun.spawn = ((_: string[], options: any) => {
-      spawnArgs.options = options;
-      return { pid: 4244 } as any;
-    }) as typeof Bun.spawn;
-
-    await spawnServe({
-      issueId: "ENG-44",
-      mode: "implement",
-      workspace: "/tmp",
-      port: 14002,
-      sessionId: "ses_125",
-    });
-
-    const permissions = JSON.parse(spawnArgs.options.env.OPENCODE_PERMISSION);
-    expect(permissions.skill["superpowers/brainstorming"]).toBe("deny");
-    expect(permissions.skill["superpowers/writing-plans"]).toBe("deny");
-  });
-
-  it("sets OPENCODE_PERMISSION denies for plan mode", async () => {
-    const spawnArgs = {
-      options: {} as any,
-    };
-    Bun.spawn = ((_: string[], options: any) => {
-      spawnArgs.options = options;
-      return { pid: 4245 } as any;
-    }) as typeof Bun.spawn;
-
-    await spawnServe({
-      issueId: "ENG-45",
-      mode: "plan",
-      workspace: "/tmp",
-      port: 14003,
-      sessionId: "ses_126",
-    });
-
-    const permissions = JSON.parse(spawnArgs.options.env.OPENCODE_PERMISSION);
-    expect(permissions.skill["superpowers/brainstorming"]).toBe("deny");
-    expect(permissions.skill["superpowers/executing-plans"]).toBe("deny");
-  });
-
-  it("omits OPENCODE_PERMISSION for merge mode", async () => {
-    const spawnArgs = {
-      options: {} as any,
-    };
-    Bun.spawn = ((_: string[], options: any) => {
-      spawnArgs.options = options;
-      return { pid: 4246 } as any;
-    }) as typeof Bun.spawn;
-
-    await spawnServe({
-      issueId: "ENG-46",
-      mode: "merge",
-      workspace: "/tmp",
-      port: 14004,
-      sessionId: "ses_127",
-    });
-
-    expect(spawnArgs.options.env.OPENCODE_PERMISSION).toBeUndefined();
-  });
-
-  it("gracefully disposes and returns when process exits", async () => {
-    const calls = {
-      disposeUrl: "",
-      disposeMethod: "",
-      signals: [] as (number | undefined | NodeJS.Signals)[],
-    };
-    globalThis.fetch = (async (input: Request | string, init?: RequestInit) => {
-      calls.disposeUrl = typeof input === "string" ? input : input.url;
-      calls.disposeMethod = typeof input === "string" ? (init?.method ?? "GET") : input.method;
-      return new Response(null, { status: 200 });
-    }) as unknown as typeof fetch;
-
-    process.kill = ((_: number, signal?: NodeJS.Signals) => {
-      calls.signals.push(signal);
-      const err = new Error("ESRCH") as NodeJS.ErrnoException;
-      err.code = "ESRCH";
-      throw err;
-    }) as typeof process.kill;
-
-    await killWorker(baseEntry, 50, 10, 100);
-
-    expect(calls.disposeUrl).toBe(`http://127.0.0.1:${baseEntry.port}/global/dispose`);
-    expect(calls.disposeMethod).toBe("POST");
-    expect(calls.signals).toEqual([0]);
-  });
-
-  it("sends SIGKILL when dispose succeeds but process lingers", async () => {
-    const calls = { sigkill: false, signalChecks: 0 };
-    globalThis.fetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
-
-    process.kill = ((_: number, signal?: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        calls.sigkill = true;
-        return true;
+      const origPermission = process.env.OPENCODE_PERMISSION;
+      process.env.OPENCODE_PERMISSION = '{"skill":{}}';
+      try {
+        await spawnSharedServe({ port: 13381, workspace: "/tmp" });
+        expect(
+          (spawnArgs.options.env as Record<string, string>).OPENCODE_PERMISSION
+        ).toBeUndefined();
+      } finally {
+        if (origPermission !== undefined) {
+          process.env.OPENCODE_PERMISSION = origPermission;
+        } else {
+          delete process.env.OPENCODE_PERMISSION;
+        }
       }
-      calls.signalChecks += 1;
-      return true;
-    }) as typeof process.kill;
-
-    await killWorker(baseEntry, 50, 10, 100);
-
-    expect(calls.signalChecks).toBeGreaterThan(0);
-    expect(calls.sigkill).toBe(true);
+    });
   });
 
-  it("sends SIGKILL when dispose fails and process lingers", async () => {
-    globalThis.fetch = (async () => {
-      throw new Error("connect ECONNREFUSED");
-    }) as unknown as typeof fetch;
-
-    const calls = { sigkill: false, signalChecks: 0 };
-    process.kill = ((_: number, signal?: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        calls.sigkill = true;
-        return true;
-      }
-      calls.signalChecks += 1;
-      return true;
-    }) as typeof process.kill;
-
-    await killWorker(baseEntry, 50, 10, 100);
-
-    expect(calls.signalChecks).toBeGreaterThan(0);
-    expect(calls.sigkill).toBe(true);
-  });
-
-  it("returns immediately when process already exited", async () => {
-    globalThis.fetch = (async () => {
-      throw new Error("connect ECONNREFUSED");
-    }) as unknown as typeof fetch;
-
-    const calls = { sigkill: false, signalChecks: 0 };
-    process.kill = ((_: number, signal?: NodeJS.Signals) => {
-      if (signal === "SIGKILL") {
-        calls.sigkill = true;
-        return true;
-      }
-      calls.signalChecks += 1;
-      const err = new Error("ESRCH") as NodeJS.ErrnoException;
-      err.code = "ESRCH";
-      throw err;
-    }) as typeof process.kill;
-
-    await killWorker(baseEntry, 50, 10, 100);
-
-    expect(calls.signalChecks).toBe(1);
-    expect(calls.sigkill).toBe(false);
-  });
-
-  it("sends x-opencode-directory header during session initialization", async () => {
-    const capturedHeaders: Record<string, string> = {};
-    let capturedBody: Record<string, unknown> = {};
-    let healthChecked = false;
-
-    globalThis.fetch = (async (input: Request | string, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.url;
-      const method = typeof input === "string" ? (init?.method ?? "GET") : input.method;
-      const headers = typeof input === "string" ? init?.headers : input.headers;
-
-      if (url.includes("/global/health")) {
-        healthChecked = true;
+  describe("waitForHealthy", () => {
+    it("resolves when health check passes", async () => {
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
         return new Response(JSON.stringify({ healthy: true }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
-      }
-      if (url.includes("/session") && method.toUpperCase() === "POST") {
-        if (headers instanceof Headers) {
-          headers.forEach((v, k) => {
-            capturedHeaders[k.toLowerCase()] = v;
-          });
-        } else if (headers && typeof headers === "object") {
-          for (const [k, v] of Object.entries(headers)) {
-            capturedHeaders[k.toLowerCase()] = String(v);
-          }
-        }
-        const body = typeof input === "string" ? init?.body : await new Response(input.body).text();
-        capturedBody = JSON.parse(body as string);
-        return new Response(
-          JSON.stringify({
-            id: "ses_test123",
-            slug: "test",
-            version: "test",
-            projectID: "test",
-            title: "test",
-            directory: "/home/user/workspace",
-            time: { created: 0, updated: 0 },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }
-        );
-      }
-      return new Response("not found", { status: 404 });
-    }) as unknown as typeof fetch;
+      }) as unknown as typeof fetch;
 
-    await initializeSession(15000, "ses_test123", "/home/user/workspace");
-
-    expect(healthChecked).toBe(true);
-    expect(capturedHeaders["x-opencode-directory"]).toBe(
-      encodeURIComponent("/home/user/workspace")
-    );
-    expect(capturedBody.id).toBe("ses_test123");
-  });
-
-  it("creates an SDK client with workspace directory", () => {
-    const client = createWorkerClient(15000, "/home/user/my-workspace");
-    expect(client).toBeDefined();
-    expect(client.session).toBeDefined();
-    expect(client.session.status).toBeFunction();
-    // promptAsync existence is validated by typecheck; runtime check is
-    // unreliable across Bun versions due to lazy prototype resolution.
-  });
-
-  it("checks health via /global/health", async () => {
-    globalThis.fetch = (async (url: string) => {
-      expect(url).toBe("http://127.0.0.1:15000/global/health");
-      return {
-        ok: true,
-        json: async () => ({ healthy: true, version: "test" }),
-      } as any;
-    }) as unknown as typeof fetch;
-
-    const ok = await healthCheck(15000, 500);
-    expect(ok).toBe(true);
-  });
-
-  it("returns false when health check throws", async () => {
-    globalThis.fetch = (async () => {
-      throw new Error("boom");
-    }) as unknown as typeof fetch;
-
-    const ok = await healthCheck(15001, 500);
-    expect(ok).toBe(false);
-  });
-
-  it("adopts only healthy workers from state file", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-workers-"));
-    const filePath = path.join(tempDir, "workers.json");
-    const state = {
-      workers: {
-        "eng-42-implement": baseEntry,
-        "eng-99-implement": { ...baseEntry, id: "eng-99-implement", port: 16000 },
-      },
-      crashHistory: {
-        "eng-99-implement": { crashCount: 2, lastCrashAt: "2026-01-02T00:00:00.000Z" },
-      },
-    };
-    await writeFile(filePath, JSON.stringify(state, null, 2));
-
-    globalThis.fetch = (async (url: string) => {
-      if (url.includes(":15001/")) {
-        return {
-          ok: true,
-          json: async () => ({ healthy: true }),
-        } as any;
-      }
-      return {
-        ok: false,
-        json: async () => ({ healthy: false }),
-      } as any;
-    }) as unknown as typeof fetch;
-
-    const adopted = await adoptExistingWorkers(filePath);
-    expect(adopted.workers.size).toBe(1);
-    const adoptedEntry = adopted.workers.get("eng-42-implement");
-    expect(adoptedEntry?.status).toBe("running");
-    expect(adopted.crashHistory["eng-99-implement"]).toEqual({
-      crashCount: 2,
-      lastCrashAt: "2026-01-02T00:00:00.000Z",
+      await waitForHealthy(13381, 5, 10);
+      expect(calls).toBe(1);
     });
 
-    await rm(tempDir, { recursive: true, force: true });
+    it("retries until healthy", async () => {
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls += 1;
+        if (calls < 3) {
+          throw new Error("not ready");
+        }
+        return new Response(JSON.stringify({ healthy: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+
+      await waitForHealthy(13381, 5, 10);
+      expect(calls).toBe(3);
+    });
+
+    it("throws after max retries", async () => {
+      globalThis.fetch = (async () => {
+        throw new Error("not ready");
+      }) as unknown as typeof fetch;
+
+      await expect(waitForHealthy(13381, 3, 10)).rejects.toThrow(
+        "did not become healthy after 3 retries"
+      );
+    });
+  });
+
+  describe("createSession", () => {
+    it("creates session with correct headers", async () => {
+      const captured: {
+        url: string;
+        headers: Record<string, string>;
+        body: Record<string, unknown> | null;
+      } = {
+        url: "",
+        headers: {},
+        body: null,
+      };
+      globalThis.fetch = (async (input: string, init?: RequestInit) => {
+        captured.url = input;
+        if (init?.headers && typeof init.headers === "object") {
+          for (const [k, v] of Object.entries(init.headers)) {
+            captured.headers[k.toLowerCase()] = String(v);
+          }
+        }
+        captured.body = JSON.parse(init?.body as string) as Record<string, unknown>;
+        return new Response(JSON.stringify({ id: "ses_test" }), { status: 200 });
+      }) as unknown as typeof fetch;
+
+      await createSession(13381, "ses_test123", "/home/user/workspace");
+
+      expect(captured.url).toBe("http://127.0.0.1:13381/session");
+      expect(captured.headers["x-opencode-directory"]).toBe(
+        encodeURIComponent("/home/user/workspace")
+      );
+      expect(captured.body?.id).toBe("ses_test123");
+    });
+
+    it("treats 409 DuplicateIDError as success", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "DuplicateIDError" }), { status: 409 });
+      }) as unknown as typeof fetch;
+
+      await createSession(13381, "ses_existing", "/tmp");
+    });
+
+    it("throws on other errors", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ error: "internal" }), { status: 500 });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_fail", "/tmp")).rejects.toThrow(
+        "Failed to create session"
+      );
+    });
+  });
+
+  describe("stopServe", () => {
+    it("disposes and returns when process exits", async () => {
+      const calls = { disposeUrl: "", signals: [] as (number | undefined | NodeJS.Signals)[] };
+      globalThis.fetch = (async (input: string) => {
+        calls.disposeUrl = input;
+        return new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+
+      process.kill = ((_: number, signal?: NodeJS.Signals) => {
+        calls.signals.push(signal);
+        const err = new Error("ESRCH") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      }) as typeof process.kill;
+
+      await stopServe(13381, 4242, 50, 10, 100);
+
+      expect(calls.disposeUrl).toBe("http://127.0.0.1:13381/global/dispose");
+      expect(calls.signals).toEqual([0]);
+    });
+
+    it("sends SIGKILL when process lingers after dispose", async () => {
+      const calls = { sigkill: false, signalChecks: 0 };
+      globalThis.fetch = (async () =>
+        new Response(null, { status: 200 })) as unknown as typeof fetch;
+
+      process.kill = ((_: number, signal?: NodeJS.Signals) => {
+        if (signal === "SIGKILL") {
+          calls.sigkill = true;
+          return true;
+        }
+        calls.signalChecks += 1;
+        return true;
+      }) as typeof process.kill;
+
+      await stopServe(13381, 4242, 50, 10, 100);
+
+      expect(calls.signalChecks).toBeGreaterThan(0);
+      expect(calls.sigkill).toBe(true);
+    });
+  });
+
+  describe("healthCheck", () => {
+    it("returns true when healthy", async () => {
+      globalThis.fetch = (async (url: string) => {
+        expect(url).toBe("http://127.0.0.1:15000/global/health");
+        return new Response(JSON.stringify({ healthy: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+
+      expect(await healthCheck(15000, 500)).toBe(true);
+    });
+
+    it("returns false on error", async () => {
+      globalThis.fetch = (async () => {
+        throw new Error("boom");
+      }) as unknown as typeof fetch;
+
+      expect(await healthCheck(15001, 500)).toBe(false);
+    });
+  });
+
+  describe("createWorkerClient", () => {
+    it("creates SDK client with correct config", () => {
+      const client = createWorkerClient(13381, "/home/user/workspace");
+      expect(client).toBeDefined();
+      expect(client.session).toBeDefined();
+    });
   });
 });

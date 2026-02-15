@@ -3,25 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
-import type { SpawnOptions, WorkerEntry } from "../serve-manager";
-import type { PortAllocatorInterface, ServeManagerInterface } from "../server";
+import type { ServeManagerInterface } from "../server";
 import { startServer } from "../server";
-
-class TestPortAllocator implements PortAllocatorInterface {
-  private nextPort: number;
-
-  constructor(startPort = 16000) {
-    this.nextPort = startPort;
-  }
-
-  allocate(): number {
-    const port = this.nextPort;
-    this.nextPort += 1;
-    return port;
-  }
-
-  release(_port: number): void {}
-}
 
 describe("sessionId contract (daemon vs state)", () => {
   let tempDir: string | null = null;
@@ -43,21 +26,12 @@ describe("sessionId contract (daemon vs state)", () => {
   });
 
   it("uses the same deterministic sessionId as the state machine (case-insensitive issue IDs)", async () => {
-    const portAllocator = new TestPortAllocator(16500);
+    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const sharedServePort = 16500;
     const serveManager: ServeManagerInterface = {
-      spawnServe: async (opts: SpawnOptions): Promise<WorkerEntry> => ({
-        id: `${opts.issueId}-${opts.mode}`,
-        port: opts.port,
-        pid: 1234,
-        sessionId: opts.sessionId,
-        workspace: opts.workspace,
-        startedAt: "2026-02-01T00:00:00.000Z",
-        status: "starting",
-        crashCount: 0,
-        lastCrashAt: null,
-      }),
-      killWorker: async () => {},
-      initializeSession: async () => {},
+      createSession: async (port, sessionId, workspace) => {
+        createSessionCalls.push({ port, sessionId, workspace });
+      },
       healthCheck: async () => true,
     };
 
@@ -70,7 +44,7 @@ describe("sessionId contract (daemon vs state)", () => {
       legionDir: tempDir,
       shortId: "test",
       serveManager,
-      portAllocator,
+      sharedServePort,
       stateFilePath,
     });
     stopServer = stop;
@@ -89,5 +63,6 @@ describe("sessionId contract (daemon vs state)", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { sessionId: string };
     expect(body.sessionId).toBe(computeSessionId(teamId, "ENG-42", "implement"));
+    expect(createSessionCalls[0].port).toBe(sharedServePort);
   });
 });
