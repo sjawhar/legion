@@ -1,12 +1,7 @@
-import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
+import { createWorkerClient, type SpawnOptions, type WorkerEntry } from "./serve-manager";
 import {
-  computeControllerSessionId,
-  computeSessionId,
-  WorkerMode,
-  type WorkerModeLiteral,
-} from "../state/types";
-import type { SpawnOptions, WorkerEntry } from "./serve-manager";
-import {
+  type ControllerState,
   type CrashHistoryEntry,
   type PersistedWorkerState,
   readStateFile,
@@ -17,6 +12,7 @@ type Server = ReturnType<typeof Bun.serve>;
 
 export interface ServeManagerInterface {
   spawnServe(opts: SpawnOptions): Promise<WorkerEntry>;
+  initializeSession(port: number, sessionId: string, workspace: string): Promise<void>;
   killWorker(entry: WorkerEntry): Promise<void>;
   healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
 }
@@ -38,6 +34,7 @@ export interface ServerOptions {
   stateFilePath: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
+  getControllerState?: () => ControllerState | undefined;
 }
 
 interface ErrorResponse {
@@ -99,6 +96,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
     for (const [id, history] of crashHistory.entries()) {
       state.crashHistory[id] = history;
     }
+    state.controller = opts.getControllerState?.();
     await writeStateFile(opts.stateFilePath, state);
   };
 
@@ -232,10 +230,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             }
 
             const port = opts.portAllocator.allocate();
-            const sessionId =
-              mode === "controller"
-                ? computeControllerSessionId(opts.teamId)
-                : computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
+            const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
             let entry: WorkerEntry;
             try {
               entry = await opts.serveManager.spawnServe({
@@ -257,6 +252,16 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             } catch (error) {
               opts.portAllocator.release(port);
               return serverError((error as Error).message);
+            }
+
+            try {
+              await opts.serveManager.initializeSession(port, sessionId, workspace);
+              entry = { ...entry, status: "running" };
+            } catch (error) {
+              console.error(`Failed to initialize session for ${entry.id}: ${error}`);
+              await opts.serveManager.killWorker(entry);
+              opts.portAllocator.release(port);
+              return serverError(`session_init_failed: ${(error as Error).message}`);
             }
 
             if (crashHistoryEntry) {
@@ -363,7 +368,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
 
           try {
-            const client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${entry.port}` });
+            const client = createWorkerClient(entry.port, entry.workspace);
             const result = await client.session.status();
             if (result.error || !result.data) {
               return badGateway();

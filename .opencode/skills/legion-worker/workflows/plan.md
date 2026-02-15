@@ -14,7 +14,7 @@ digraph plan_workflow {
     critical [label="Critical ambiguities?" shape=diamond];
     research_plan [label="2. /workflows:plan (autonomous)"];
     unclear [label="Requirements unclear?" shape=diamond];
-    executable [label="3. /superpowers:writing-plans"];
+    executable [label="3. /superpowers/writing-plans"];
     review [label="4. /plan-review"];
     passed [label="Review passed?" shape=diamond];
     post [label="5. Post to Linear"];
@@ -106,7 +106,7 @@ The skill handles:
 2. Post a comment via `linear_linear(action="comment", ...)` explaining what needs clarification
 3. Exit immediately - do NOT add `worker-done`
 
-### 3. Invoke /superpowers:writing-plans
+### 3. Invoke /superpowers/writing-plans
 
 Convert the approved plan into executable, bite-sized tasks.
 
@@ -150,7 +150,7 @@ This spawns parallel cross-family reviewers:
 
 **Iterate until review passes:**
 1. Read the aggregated review feedback
-2. Address each blocking issue by editing the plan directly — do NOT re-run `/superpowers:writing-plans`
+2. Address each blocking issue by editing the plan directly — do NOT re-run `/superpowers/writing-plans`
 3. Re-invoke `/plan-review`
 4. Repeat until no blocking issues remain
 
@@ -183,7 +183,7 @@ Add `worker-done` label to the Linear issue via `linear_linear(action="update", 
 | Fetch | Get issue details | `linear_linear(action="get", ...)` |
 | Pre-Analysis | Identify risks | Metis agent (background) |
 | Research + Structure | Create plan | `/workflows:plan` (autonomous) |
-| Executable | Bite-sized tasks | `/superpowers:writing-plans` |
+| Executable | Bite-sized tasks | `/superpowers/writing-plans` |
 | Validate | Review plan | `/plan-review` (iterate) |
 | Post | Full plan to issue | `linear_linear(action="comment", ...)` |
 | Complete | Add done label | `linear_linear(action="update", ...)` |
@@ -208,7 +208,7 @@ Do NOT ask the user questions interactively. If uncertain:
 | Mistake | Correction |
 |---------|------------|
 | Adding `worker-done` when requirements unclear | Use `user-input-needed` label, exit without `worker-done` |
-| Posting summary instead of full plan | Post complete executable plan from /superpowers:writing-plans |
+| Posting summary instead of full plan | Post complete executable plan from /superpowers/writing-plans |
 | Asking user questions | Use legion-oracle first, then assumptions, escalate only as last resort |
 | Skipping plan review iteration | Always iterate until /plan-review passes or max 3 attempts |
 | Ignoring Metis pre-analysis | Always pass Metis findings to /workflows:plan as context |

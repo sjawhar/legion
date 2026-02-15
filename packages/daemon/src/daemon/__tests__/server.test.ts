@@ -68,6 +68,7 @@ describe("daemon server", () => {
           port: opts.port,
           pid: 1234,
           sessionId: opts.sessionId,
+          workspace: opts.workspace,
           startedAt: "2026-02-01T00:00:00.000Z",
           status: "starting",
           crashCount: 0,
@@ -77,6 +78,7 @@ describe("daemon server", () => {
       killWorker: async (entry: WorkerEntry) => {
         killCalls.push(entry);
       },
+      initializeSession: async () => {},
       healthCheck: async () => true,
     };
     if (options?.serveManagerOverrides) {
@@ -221,6 +223,7 @@ describe("daemon server", () => {
       port: 15510,
       pid: 4321,
       sessionId: computeSessionId(teamId, "eng-1", "implement"),
+      workspace: "/tmp",
       startedAt: "2026-02-01T00:00:00.000Z",
       status: "running",
       crashCount: 0,
