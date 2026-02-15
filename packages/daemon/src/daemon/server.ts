@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
-import { createWorkerClient, type SpawnOptions, type WorkerEntry } from "./serve-manager";
+import { createWorkerClient, type WorkerEntry } from "./serve-manager";
 import {
   type ControllerState,
   type CrashHistoryEntry,
@@ -12,16 +12,8 @@ import {
 type Server = ReturnType<typeof Bun.serve>;
 
 export interface ServeManagerInterface {
-  spawnServe(opts: SpawnOptions): Promise<WorkerEntry>;
-  initializeSession(port: number, sessionId: string, workspace: string): Promise<void>;
-  killWorker(entry: WorkerEntry): Promise<void>;
+  createSession(port: number, sessionId: string, workspace: string): Promise<void>;
   healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
-}
-
-export interface PortAllocatorInterface {
-  allocate(): number;
-  release(port: number): void;
-  isAllocated?(port: number): boolean;
 }
 
 export interface ServerOptions {
@@ -31,8 +23,7 @@ export interface ServerOptions {
   legionDir: string;
   shortId: string;
   serveManager: ServeManagerInterface;
-  portAllocator: PortAllocatorInterface;
-  isPortFree?: (port: number) => Promise<boolean>;
+  sharedServePort: number;
   stateFilePath: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
@@ -104,30 +95,13 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
 
   const loadState = async (): Promise<void> => {
     const state = await readStateFile(opts.stateFilePath);
-    const entries = Object.entries(state.workers);
-    if (entries.length === 0) {
-      for (const [id, history] of Object.entries(state.crashHistory)) {
-        crashHistory.set(id.toLowerCase(), history);
-      }
-      return;
-    }
     for (const [id, history] of Object.entries(state.crashHistory)) {
       crashHistory.set(id.toLowerCase(), history);
     }
-    await Promise.all(
-      entries.map(async ([id, entry]) => {
-        try {
-          const healthy = await opts.serveManager.healthCheck(entry.port);
-          if (healthy) {
-            const normalizedId = id.toLowerCase();
-            workers.set(normalizedId, { ...entry, id: normalizedId, status: "running" });
-          }
-        } catch {
-          return;
-        }
-      })
-    );
-    await persistState();
+    for (const [id, entry] of Object.entries(state.workers)) {
+      const normalizedId = id.toLowerCase();
+      workers.set(normalizedId, { ...entry, id: normalizedId });
+    }
   };
 
   const stateLoaded = loadState();
@@ -208,7 +182,6 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               );
             }
             if (existing) {
-              opts.portAllocator.release(existing.port);
               workers.delete(workerId);
             }
 
@@ -234,58 +207,33 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               }
             }
 
-            const port = opts.portAllocator.allocate();
-            if (opts.isPortFree) {
-              const free = await opts.isPortFree(port);
-              if (!free) {
-                opts.portAllocator.release(port);
-                return serverError("allocated_port_occupied");
-              }
-            }
             const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
-            let entry: WorkerEntry;
-            try {
-              entry = await opts.serveManager.spawnServe({
-                issueId: normalizedIssueId,
-                mode,
-                workspace,
-                port,
-                sessionId,
-                logDir: opts.logDir,
-                env: {
-                  ...(env as Record<string, string> | undefined),
-                },
-              });
-            } catch (error) {
-              opts.portAllocator.release(port);
-              return serverError((error as Error).message);
-            }
 
             try {
-              await opts.serveManager.initializeSession(port, sessionId, workspace);
-              entry = { ...entry, status: "running" };
+              await opts.serveManager.createSession(opts.sharedServePort, sessionId, workspace);
             } catch (error) {
-              try {
-                await opts.serveManager.killWorker(entry);
-              } catch {
-                // killWorker failure must not crash the daemon
-              }
-              opts.portAllocator.release(port);
-              return serverError(`Failed to initialize session: ${(error as Error).message}`);
+              return serverError(`Failed to create session: ${(error as Error).message}`);
             }
 
-            if (crashHistoryEntry) {
-              entry = {
-                ...entry,
-                crashCount: crashHistoryEntry.crashCount,
-                lastCrashAt: crashHistoryEntry.lastCrashAt,
-              };
-            }
+            const entry: WorkerEntry = {
+              id: workerId,
+              port: opts.sharedServePort,
+              sessionId,
+              workspace,
+              startedAt: new Date().toISOString(),
+              status: "running",
+              crashCount: crashHistoryEntry?.crashCount ?? 0,
+              lastCrashAt: crashHistoryEntry?.lastCrashAt ?? null,
+            };
 
             workers.set(entry.id, entry);
             await persistState();
 
-            return jsonResponse({ id: entry.id, port: entry.port, sessionId: entry.sessionId });
+            return jsonResponse({
+              id: entry.id,
+              port: opts.sharedServePort,
+              sessionId: entry.sessionId,
+            });
           }
         }
 
@@ -354,13 +302,11 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             return jsonResponse(updated);
           }
           if (method === "DELETE") {
-            await opts.serveManager.killWorker(entry);
-            opts.portAllocator.release(entry.port);
-            workers.delete(id);
             crashHistory.set(id, {
               crashCount: entry.crashCount,
               lastCrashAt: entry.lastCrashAt,
             });
+            workers.delete(id);
             await persistState();
             return jsonResponse({ status: "stopped" });
           }

@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
-import type { SpawnOptions, WorkerEntry } from "../serve-manager";
-import { type PortAllocatorInterface, type ServeManagerInterface, startServer } from "../server";
+import type { WorkerEntry } from "../serve-manager";
+import { type ServeManagerInterface, startServer } from "../server";
 import { type PersistedWorkerState, writeStateFile } from "../state-file";
 
 let mockSessionStatus: (() => Promise<unknown>) | null = null;
@@ -22,64 +22,26 @@ mock.module("@opencode-ai/sdk/v2", () => ({
   }),
 }));
 
-class TestPortAllocator implements PortAllocatorInterface {
-  private nextPort: number;
-  public readonly released: number[] = [];
-
-  constructor(startPort = 15000) {
-    this.nextPort = startPort;
-  }
-
-  allocate(): number {
-    const port = this.nextPort;
-    this.nextPort += 1;
-    return port;
-  }
-
-  release(port: number): void {
-    this.released.push(port);
-  }
-}
+const sharedServePort = 15500;
 
 describe("daemon server", () => {
   let tempDir: string | null = null;
   let stopServer: (() => void) | null = null;
   let baseUrl = "";
   let serveManager: ServeManagerInterface;
-  let portAllocator: TestPortAllocator;
-  let spawnCalls: SpawnOptions[] = [];
-  let killCalls: WorkerEntry[] = [];
+  let createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
   const originalFetch = globalThis.fetch;
   const teamId = "123e4567-e89b-12d3-a456-426614174000";
 
   async function startTestServer(options?: {
     state?: PersistedWorkerState;
     serveManagerOverrides?: Partial<ServeManagerInterface>;
-    portAllocatorOverride?: TestPortAllocator;
-    isPortFree?: (port: number) => Promise<boolean>;
   }) {
-    spawnCalls = [];
-    killCalls = [];
-    portAllocator = options?.portAllocatorOverride ?? new TestPortAllocator(15500);
+    createSessionCalls = [];
     serveManager = {
-      spawnServe: async (opts: SpawnOptions) => {
-        spawnCalls.push(opts);
-        return {
-          id: `${opts.issueId}-${opts.mode}`,
-          port: opts.port,
-          pid: 1234,
-          sessionId: opts.sessionId,
-          workspace: opts.workspace,
-          startedAt: "2026-02-01T00:00:00.000Z",
-          status: "starting",
-          crashCount: 0,
-          lastCrashAt: null,
-        };
+      createSession: async (port, sessionId, workspace) => {
+        createSessionCalls.push({ port, sessionId, workspace });
       },
-      killWorker: async (entry: WorkerEntry) => {
-        killCalls.push(entry);
-      },
-      initializeSession: async () => {},
       healthCheck: async () => true,
     };
     if (options?.serveManagerOverrides) {
@@ -98,9 +60,8 @@ describe("daemon server", () => {
       legionDir: tempDir,
       shortId: "test",
       serveManager,
-      portAllocator,
+      sharedServePort,
       stateFilePath,
-      isPortFree: options?.isPortFree,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -191,17 +152,12 @@ describe("daemon server", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { id: string; port: number; sessionId: string };
     expect(body.id).toBe("eng-42-implement");
-    expect(body.port).toBe(15500);
+    expect(body.port).toBe(sharedServePort);
     expect(body.sessionId).toBe(computeSessionId(teamId, "eng-42", "implement"));
 
-    expect(spawnCalls.length).toBe(1);
-    expect(spawnCalls[0]).toMatchObject({
-      issueId: "eng-42",
-      mode: "implement",
-      workspace: "/tmp/work",
-      port: 15500,
-      env: { DEBUG: "1" },
-    });
+    expect(createSessionCalls.length).toBe(1);
+    expect(createSessionCalls[0].port).toBe(sharedServePort);
+    expect(createSessionCalls[0].workspace).toBe("/tmp/work");
 
     const listResponse = await requestJson("/workers");
     const listBody = (await listResponse.json()) as WorkerEntry[];
@@ -210,49 +166,7 @@ describe("daemon server", () => {
     const entryResponse = await requestJson(`/workers/${body.id}`);
     expect(entryResponse.status).toBe(200);
     const entryBody = (await entryResponse.json()) as WorkerEntry;
-    expect(entryBody.port).toBe(15500);
-  });
-
-  it("returns 500 when allocated port is occupied", async () => {
-    await startTestServer({
-      isPortFree: async () => false,
-    });
-
-    const response = await requestJson("/workers", {
-      method: "POST",
-      body: JSON.stringify({
-        issueId: "ENG-77",
-        mode: "implement",
-        workspace: "/tmp/work",
-      }),
-    });
-
-    expect(response.status).toBe(500);
-    const body = (await response.json()) as { error: string };
-    expect(body.error).toBe("allocated_port_occupied");
-    expect(spawnCalls.length).toBe(0);
-    expect(portAllocator.released).toEqual([15500]);
-  });
-
-  it("creates workers when port is free", async () => {
-    await startTestServer({
-      isPortFree: async () => true,
-    });
-
-    const response = await requestJson("/workers", {
-      method: "POST",
-      body: JSON.stringify({
-        issueId: "ENG-78",
-        mode: "implement",
-        workspace: "/tmp/work",
-      }),
-    });
-
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { id: string; port: number };
-    expect(body.id).toBe("eng-78-implement");
-    expect(body.port).toBe(15500);
-    expect(spawnCalls.length).toBe(1);
+    expect(entryBody.port).toBe(sharedServePort);
   });
 
   it("rejects duplicate worker for same issue+mode", async () => {
@@ -272,15 +186,10 @@ describe("daemon server", () => {
     expect(body.error).toBe("worker_already_exists");
   });
 
-  it("waits for state load before checking duplicates", async () => {
-    let healthGateResolve!: () => void;
-    const healthGate = new Promise<void>((resolve) => {
-      healthGateResolve = () => resolve();
-    });
+  it("loads persisted workers from state file", async () => {
     const existing: WorkerEntry = {
       id: "eng-1-implement",
-      port: 15510,
-      pid: 4321,
+      port: sharedServePort,
       sessionId: computeSessionId(teamId, "eng-1", "implement"),
       workspace: "/tmp",
       startedAt: "2026-02-01T00:00:00.000Z",
@@ -291,34 +200,15 @@ describe("daemon server", () => {
 
     await startTestServer({
       state: {
-        workers: {
-          [existing.id]: existing,
-        },
+        workers: { [existing.id]: existing },
         crashHistory: {},
-      },
-      serveManagerOverrides: {
-        healthCheck: async () => {
-          await healthGate;
-          return true;
-        },
       },
     });
 
-    const responsePromise = requestJson("/workers", {
+    const response = await requestJson("/workers", {
       method: "POST",
       body: JSON.stringify({ issueId: "ENG-1", mode: "implement", workspace: "/tmp" }),
     });
-
-    const early = await Promise.race([
-      responsePromise.then(() => "resolved" as const),
-      new Promise<"pending">((resolve) => {
-        setTimeout(() => resolve("pending"), 20);
-      }),
-    ]);
-
-    expect(early).toBe("pending");
-    healthGateResolve();
-    const response = await responsePromise;
     expect(response.status).toBe(409);
   });
 
@@ -344,7 +234,6 @@ describe("daemon server", () => {
       body: JSON.stringify({ issueId: "ENG-5", mode: "implement", workspace: "/tmp" }),
     });
     expect(respawn.status).toBe(200);
-    expect(portAllocator.released).toEqual([15500]);
   });
 
   it("resets crash history via endpoint", async () => {
@@ -417,8 +306,6 @@ describe("daemon server", () => {
     const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
     expect(deleteResponse.status).toBe(200);
     expect(await deleteResponse.json()).toEqual({ status: "stopped" });
-    expect(killCalls.length).toBe(1);
-    expect(portAllocator.released).toEqual([15500]);
 
     const listResponse = await requestJson("/workers");
     const listBody = (await listResponse.json()) as WorkerEntry[];
@@ -512,7 +399,7 @@ describe("daemon server", () => {
       legionDir: tempDir ?? os.tmpdir(),
       shortId: "test",
       serveManager,
-      portAllocator,
+      sharedServePort,
       stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),
       shutdownFn: async () => {
         shutdownCalls += 1;

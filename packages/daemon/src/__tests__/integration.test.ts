@@ -2,8 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { PortAllocator } from "../daemon/ports";
-import type { SpawnOptions, WorkerEntry } from "../daemon/serve-manager";
+import type { WorkerEntry } from "../daemon/serve-manager";
 import { startServer } from "../daemon/server";
 import { buildCollectedState } from "../state/decision";
 import { computeSessionId, type FetchedIssueData } from "../state/types";
@@ -14,43 +13,21 @@ function randomPort(min = 19900, max = 19999): number {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-function randomBasePort(): number {
-  return 19900 + Math.floor(Math.random() * 90);
-}
-
 interface TestServerContext {
   baseUrl: string;
-  spawnCalls: SpawnOptions[];
-  killCalls: WorkerEntry[];
-  allocator: PortAllocator;
+  createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }>;
 }
 
 async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): Promise<void> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-integration-"));
   const stateFilePath = path.join(tempDir, "workers.json");
-  const spawnCalls: SpawnOptions[] = [];
-  const killCalls: WorkerEntry[] = [];
-  const allocator = new PortAllocator(randomBasePort(), 10);
+  const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+  const sharedServePort = randomPort();
 
   const serveManager = {
-    spawnServe: async (opts: SpawnOptions): Promise<WorkerEntry> => {
-      spawnCalls.push(opts);
-      return {
-        id: `${opts.issueId}-${opts.mode}`,
-        port: opts.port,
-        pid: 4242,
-        sessionId: opts.sessionId,
-        workspace: opts.workspace,
-        startedAt: new Date().toISOString(),
-        status: "starting",
-        crashCount: 0,
-        lastCrashAt: null,
-      };
+    createSession: async (port: number, sessionId: string, workspace: string): Promise<void> => {
+      createSessionCalls.push({ port, sessionId, workspace });
     },
-    killWorker: async (entry: WorkerEntry): Promise<void> => {
-      killCalls.push(entry);
-    },
-    initializeSession: async (): Promise<void> => {},
     healthCheck: async (): Promise<boolean> => true,
   };
 
@@ -61,17 +38,12 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     legionDir: tempDir,
     shortId: "test",
     serveManager,
-    portAllocator: allocator,
+    sharedServePort,
     stateFilePath,
   });
 
   try {
-    await run({
-      baseUrl: `http://127.0.0.1:${server.port}`,
-      spawnCalls,
-      killCalls,
-      allocator,
-    });
+    await run({ baseUrl: `http://127.0.0.1:${server.port}`, createSessionCalls });
   } finally {
     stop();
     await rm(tempDir, { recursive: true, force: true });
@@ -106,7 +78,7 @@ describe("Integration: daemon HTTP lifecycle", () => {
   });
 
   it("supports worker CRUD via HTTP", async () => {
-    await withTestServer(async ({ baseUrl, spawnCalls, killCalls, allocator }) => {
+    await withTestServer(async ({ baseUrl, createSessionCalls }) => {
       const createResponse = await fetch(`${baseUrl}/workers`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -126,9 +98,8 @@ describe("Integration: daemon HTTP lifecycle", () => {
       expect(created.id).toBe("eng-100-plan");
       expect(typeof created.port).toBe("number");
       expect(created.sessionId).toBe(computeSessionId(TEAM_ID, "eng-100", "plan"));
-      expect(spawnCalls.length).toBe(1);
-      expect(spawnCalls[0].port).toBe(created.port);
-      expect(allocator.isAllocated(created.port)).toBe(true);
+      expect(createSessionCalls.length).toBe(1);
+      expect(createSessionCalls[0].port).toBe(created.port);
 
       const listResponse = await fetch(`${baseUrl}/workers`);
       expect(listResponse.ok).toBe(true);
@@ -148,8 +119,6 @@ describe("Integration: daemon HTTP lifecycle", () => {
       expect(deleteResponse.ok).toBe(true);
       const deleted = (await deleteResponse.json()) as { status: string };
       expect(deleted.status).toBe("stopped");
-      expect(killCalls).toHaveLength(1);
-      expect(allocator.isAllocated(created.port)).toBe(false);
 
       const listAfter = await fetch(`${baseUrl}/workers`);
       expect(listAfter.ok).toBe(true);
