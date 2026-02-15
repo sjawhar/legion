@@ -15,13 +15,20 @@ Required:
 ## Essential Rules
 
 1. **Read Linear issue first** - `linear_linear(action="get", id="$LINEAR_ISSUE_ID")`
-2. **Use jj, not git** - changes auto-tracked
+2. **Use jj, not git** - changes auto-tracked (see jj safety rules below)
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
 ## Skill Discipline
 
 You are executing work with an approved plan. Do NOT invoke the brainstorming or writing-plans skills — your workflow has already been designed. Follow your assigned workflow file. The individual skills referenced in your workflow (TDD, subagent-driven-development, etc.) are appropriate to load and use.
+
+## jj Safety Rules
+
+- **Always `jj new` to create isolated commits.** Never `jj edit @-` to go back to a parent — this changes what `@` points to and makes `jj abandon` dangerous.
+- **Never `jj abandon` without first running `jj log`** to verify what `@` is. Abandoning the wrong commit destroys all changes on it.
+- **If you accidentally abandon the wrong commit:** `jj op restore` recovers the last operation.
+- **Before pushing, check ancestry:** `jj log -r 'ancestors(@, 5)'` — verify only your issue's commits are in the chain, not unrelated work.
 
 ## Session Lifecycle
 

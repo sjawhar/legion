@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when coordinating Legion workers across Linear issues - invoked with LINEAR_TEAM_ID, LEGION_DIR, LEGION_SHORT_ID, and LEGION_DAEMON_PORT environment variables set
+description: Use when coordinating Legion workers across Linear issues, dispatching workers, monitoring progress, or routing triage items
 ---
 
 # Legion Controller
@@ -246,27 +246,45 @@ legion prompt "$ISSUE_IDENTIFIER" --mode implement "/legion-retro"
 
 ## Worker Inspection
 
-Available when needed (debugging, intervention):
+The daemon is the controller's interface to workers. Use the daemon API, not direct port access.
 
 ```bash
 # List all workers
-curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq '.[] | {id, status, port, pid, sessionId, startedAt}'
-
-# Get specific worker info
-curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID | jq '.'
+curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq '.[] | {id, status, port, sessionId}'
 
 # Check worker status (busy/idle)
 curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/status | jq '.'
-
-# Get worker messages
-WORKER_PORT=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID | jq -r '.port')
-curl -s http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/message?limit=20 | jq '.[-5:]'
-
-# Send input (use sparingly - prefer prompt_async)
-curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
-  -H 'content-type: application/json' \
-  -d '{"parts":[{"type":"text","text":"message"}]}'
 ```
+
+The state machine reports `hasLiveWorker`, `workerMode`, and `workerStatus` for each issue.
+Use these signals — don't independently verify worker liveness.
+
+## Observability Rules
+
+### 1. Trust the state machine
+
+The state machine checks worker liveness, PR status, labels, and draft state. Pipe Linear
+output directly to the CLI and route by `suggestedAction`. Don't independently check PRs,
+ports, or process status — that's the state machine's job.
+
+For the full observability architecture and failure case studies, see `docs/solutions/daemon/controller-observability.md`.
+
+### 2. Never reconstruct state machine input
+
+Pass Linear search output directly to the state CLI. Do not hand-craft JSON, filter
+issues, or inject your own assumptions about labels or status. The state machine's
+parser handles the raw format.
+
+### 3. Fresh data every loop iteration
+
+Fetch issues from Linear at the start of every loop. Don't carry labels, statuses, or
+worker state between iterations — they go stale.
+
+### 4. One PR per issue
+
+Each issue gets its own workspace, its own branch (named after the issue ID), and its
+own PR. Do not accumulate changes from multiple issues into a single PR — this makes
+it impossible to track what's merged.
 
 ## Labels
 
@@ -279,6 +297,19 @@ curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
 | `needs-approval` | Architect done, waiting for human approval |
 | `human-approved` | Human approved, controller advances to planner |
 
+## Red Flags — STOP and Verify
+
+If you catch yourself thinking any of these, STOP. You're about to make a mistake.
+
+| Thought | What to do instead |
+|---------|--------------------|
+| "Let me construct the JSON for the state machine" | Pipe Linear output directly — no hand-crafting |
+| "I know the label/status from last iteration" | Fetch fresh from Linear. State goes stale between iterations. |
+| "The changes are lost" | Check local commits (`jj log`), open PRs (`gh pr list`), and worker workspaces before concluding anything is lost |
+| "I'll give the worker specific instructions" | State the mode and issue ID. Let the workflow guide the worker. |
+| "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |
+| "I'll accumulate these changes into the existing PR" | One issue = one workspace = one branch = one PR. |
+
 ## Common Mistakes
 
 | Mistake | Correction |
@@ -288,7 +319,7 @@ curl -s -X POST http://127.0.0.1:$WORKER_PORT/session/$SESSION_ID/prompt_async \
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
 | Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
 | Process issue with live worker | Skip it - worker is already handling |
-| Give workers step-by-step fix instructions | State the mode and issue ID only. Let the workflow guide the worker. E.g. `/legion-worker implement mode for LEG-122 — address comments` not "fix the state file race and empty catch block" |
+| Give workers step-by-step fix instructions | State the mode and issue ID only. Let the workflow guide the worker. |
 | Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. Otherwise the state machine re-triggers on the next loop. |
 
 ## Status Flow

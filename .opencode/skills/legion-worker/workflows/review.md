@@ -74,11 +74,13 @@ Group related issues when they affect the same area.
 
 **Order matters:** Set draft status BEFORE `worker-done` to avoid race condition with controller.
 
+Every review MUST set the PR draft status based on findings. This is how the controller knows the review outcome.
+
 ```bash
-# If any CRITICAL/P1 issues found - convert to draft:
+# If any CRITICAL/P1 issues found — convert to draft (changes requested):
 gh pr ready "$LINEAR_ISSUE_ID" --undo
 
-# If no CRITICAL issues - mark ready for merge:
+# If no CRITICAL issues — mark ready for merge (approved):
 gh pr ready "$LINEAR_ISSUE_ID"
 ```
 
