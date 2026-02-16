@@ -34,11 +34,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-async function renameSafe(oldPath: string, newPath: string): Promise<void> {
+async function moveCorruptFile(filePath: string): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const corruptPath = `${filePath}.corrupt.${timestamp}`;
   try {
-    await rename(oldPath, newPath);
-  } catch {
-    // Ignore rename errors (file may have been deleted, etc.)
+    await rename(filePath, corruptPath);
+  } catch (err) {
+    console.warn(`[state-file] Failed to rename corrupt file ${filePath}:`, err);
   }
 }
 
@@ -64,12 +66,14 @@ function normalizeState(raw: unknown): PersistedWorkerState {
           pid: typeof ctrl.pid === "number" ? ctrl.pid : undefined,
         };
       }
-    } else if (legacyController) {
-      result.controller = {
-        sessionId: legacyController.sessionId,
-        port: legacyController.port,
-        pid: legacyController.pid,
-      };
+    } else if (legacyController && isRecord(legacyController)) {
+      if (typeof legacyController.sessionId === "string") {
+        result.controller = {
+          sessionId: legacyController.sessionId,
+          port: typeof legacyController.port === "number" ? legacyController.port : undefined,
+          pid: typeof legacyController.pid === "number" ? legacyController.pid : undefined,
+        };
+      }
     }
 
     return result;
@@ -90,9 +94,8 @@ export async function readStateFile(filePath: string): Promise<PersistedWorkerSt
     try {
       parsed = JSON.parse(raw);
     } catch {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const corruptPath = `${resolvedPath}.corrupt.${timestamp}`;
-      await renameSafe(resolvedPath, corruptPath);
+      console.warn(`[state-file] Corrupt JSON in ${resolvedPath}, recovering to empty state`);
+      await moveCorruptFile(resolvedPath);
       return { workers: {}, crashHistory: {} };
     }
 
@@ -100,6 +103,9 @@ export async function readStateFile(filePath: string): Promise<PersistedWorkerSt
     const validation = PersistedWorkerStateSchema.safeParse(normalized);
 
     if (!validation.success) {
+      const issues = validation.error.issues.map((i) => i.message).join(", ");
+      console.warn(`[state-file] Schema validation failed for ${resolvedPath}: ${issues}`);
+      await moveCorruptFile(resolvedPath);
       return { workers: {}, crashHistory: {} };
     }
 

@@ -4,13 +4,15 @@ import {
   unregisterSubagentSession,
 } from "../hooks/subagent-question-blocker";
 import { getAgentToolRestrictions } from "./agent-restrictions";
-import { writeTask } from "./task-storage";
+import { deleteTask, listTasks, writeTask } from "./task-storage";
 import type { BackgroundTask, LaunchOptions } from "./types";
 
 type OpencodeClient = PluginInput["client"];
 
 function generateTaskId(): string {
-  return `bg_${Math.random().toString(36).slice(2, 10)}`;
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `bg_${hex}`;
 }
 
 export class BackgroundTaskManager {
@@ -22,6 +24,37 @@ export class BackgroundTaskManager {
   constructor(ctx: PluginInput) {
     this.client = ctx.client;
     this.directory = ctx.directory;
+  }
+
+  /**
+   * Rehydrate in-memory state from persisted task files.
+   * Call once during plugin init to restore task visibility across restarts.
+   */
+  async rehydrate(opts?: { taskRetentionMs?: number }): Promise<void> {
+    const tasks = await listTasks(this.directory);
+    const now = Date.now();
+    const ttl = opts?.taskRetentionMs;
+
+    for (const task of tasks) {
+      if (task.status === "pending" || task.status === "running") {
+        task.status = "failed";
+        task.error = "Interrupted: plugin restarted while task was in progress";
+        task.completedAt = now;
+        await writeTask(this.directory, task).catch((err) => {
+          console.warn(`[rehydrate] Failed to persist failed status for ${task.id}:`, err);
+        });
+      }
+
+      const taskAge = now - (task.completedAt ?? task.createdAt);
+      if (ttl !== undefined && taskAge > ttl) {
+        await deleteTask(this.directory, task.id).catch(() => {});
+        continue;
+      }
+
+      this.tasks.set(task.id, task);
+      // Don't index in tasksBySessionId — rehydrated tasks are all terminal
+      // (completed/failed/cancelled) and shouldn't trigger todoContinuationEnforcer
+    }
   }
 
   /**

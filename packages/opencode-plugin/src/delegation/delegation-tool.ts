@@ -7,7 +7,7 @@ import { resolveCategory } from "./category-router";
 
 const z = tool.schema;
 
-const DELEGATOR_ALLOWLIST = new Set(["orchestrator", "conductor", "hephaestus"]);
+const DELEGATOR_ALLOWLIST = new Set(["orchestrator", "conductor"]);
 
 interface DelegationToolContext {
   agent?: string;
@@ -44,9 +44,9 @@ export function createDelegationTools(
     },
     async execute(args, toolContext) {
       const context = toolContext as DelegationToolContext | undefined;
-      const callingAgent = context?.agent;
-      if (callingAgent && !DELEGATOR_ALLOWLIST.has(callingAgent.toLowerCase())) {
-        return `Error: Agent '${callingAgent}' cannot delegate tasks. Only orchestrator-type agents can use background_task.`;
+      const callingAgent = context?.agent?.toLowerCase();
+      if (!callingAgent || !DELEGATOR_ALLOWLIST.has(callingAgent)) {
+        return `Error: Agent '${callingAgent ?? "unknown"}' cannot delegate tasks. Only orchestrator-type agents can use background_task.`;
       }
 
       const category = args.category as string | undefined;
@@ -59,6 +59,13 @@ export function createDelegationTools(
       }
 
       const agentName = (args.subagent_type as string | undefined) ?? "executor";
+      if (!agentModelMap.has(agentName)) {
+        const known = [...agentModelMap.keys()].join(", ");
+        return `Error: Unknown agent '${agentName}'. Available agents: ${known}`;
+      }
+      if (DELEGATOR_ALLOWLIST.has(agentName.toLowerCase())) {
+        return `Error: Cannot delegate to '${agentName}' — delegator agents cannot be delegation targets.`;
+      }
       const resolvedModel = modelOverride ?? categoryConfig?.model ?? agentModelMap.get(agentName);
 
       const parentSessionId = context?.sessionID;
