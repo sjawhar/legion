@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
   TaskCreateInputSchema,
+  TaskIndexEntrySchema,
+  TaskIndexSchema,
   TaskSchema,
   TaskStatusSchema,
   TaskUpdateInputSchema,
@@ -95,5 +97,42 @@ describe("TaskUpdateInputSchema", () => {
       addBlockedBy: ["T-3"],
     });
     expect(result.success).toBe(true);
+  });
+});
+
+describe("TaskIndexEntrySchema", () => {
+  it("accepts a valid entry", () => {
+    const result = TaskIndexEntrySchema.safeParse({
+      id: "T-abc",
+      status: "pending",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects missing id", () => {
+    expect(TaskIndexEntrySchema.safeParse({ status: "pending" }).success).toBe(false);
+  });
+
+  it("rejects invalid status", () => {
+    expect(TaskIndexEntrySchema.safeParse({ id: "T-1", status: "deleted" }).success).toBe(false);
+  });
+});
+
+describe("TaskIndexSchema", () => {
+  it("accepts a valid index", () => {
+    const result = TaskIndexSchema.safeParse({
+      version: 1,
+      entries: [{ id: "T-1", status: "pending" }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("defaults entries to empty array", () => {
+    const result = TaskIndexSchema.parse({ version: 1 });
+    expect(result.entries).toEqual([]);
+  });
+
+  it("rejects missing version", () => {
+    expect(TaskIndexSchema.safeParse({ entries: [] }).success).toBe(false);
   });
 });

@@ -3,6 +3,7 @@ import type { PluginInput, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { detectCycle } from "./graph";
 import { acquireLock, generateTaskId, getTaskDir, readJsonSafe, writeJsonAtomic } from "./storage";
+import { indexPathFor, upsertIndexEntry } from "./task-index";
 import { readAllTasks } from "./task-list";
 import { syncTaskTodoUpdate } from "./todo-sync";
 import { type Task, TaskCreateInputSchema, TaskSchema } from "./types";
@@ -25,7 +26,7 @@ export function createTaskCreateTool(ctx?: PluginInput, listId?: string): ToolDe
       metadata: z.record(z.string(), z.unknown()).optional().describe("Task metadata"),
       parentID: z.string().optional().describe("Parent task ID for grouping"),
     },
-    execute: async (args, context) => {
+    execute: async (args, context): Promise<string> => {
       try {
         const validated = TaskCreateInputSchema.parse(args);
         const taskDir = getTaskDir(listId);
@@ -117,6 +118,10 @@ export function createTaskCreateTool(ctx?: PluginInput, listId?: string): ToolDe
 
             validatedTask = TaskSchema.parse(task);
             writeJsonAtomic(join(taskDir, `${taskId}.json`), validatedTask);
+            upsertIndexEntry(indexPathFor(taskDir), {
+              id: validatedTask.id,
+              status: validatedTask.status,
+            });
 
             for (const blockedId of proposedBlocks) {
               const blockedPath = join(taskDir, `${blockedId}.json`);
@@ -146,7 +151,7 @@ export function createTaskCreateTool(ctx?: PluginInput, listId?: string): ToolDe
         }
         return result;
       } catch (error) {
-        if (error instanceof Error && error.message.includes("Required")) {
+        if (error instanceof Error && error.name === "ZodError") {
           return JSON.stringify({ error: "validation_error", message: error.message });
         }
         return JSON.stringify({ error: "internal_error" });

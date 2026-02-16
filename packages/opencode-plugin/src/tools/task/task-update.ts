@@ -3,9 +3,10 @@ import type { PluginInput, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { detectCycle } from "./graph";
 import { acquireLock, getTaskDir, readJsonSafe, writeJsonAtomic } from "./storage";
+import { indexPathFor, upsertIndexEntry } from "./task-index";
 import { readAllTasks } from "./task-list";
 import { syncTaskTodoUpdate } from "./todo-sync";
-import { TaskSchema, TaskUpdateInputSchema } from "./types";
+import { type Task, TaskSchema, TaskUpdateInputSchema } from "./types";
 
 const z = tool.schema;
 
@@ -39,7 +40,7 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
         .describe("Metadata to merge (null values delete keys)"),
       parentID: z.string().optional().describe("Parent task ID"),
     },
-    execute: async (args, context) => {
+    execute: async (args, context): Promise<string> => {
       try {
         const validated = TaskUpdateInputSchema.parse(args);
 
@@ -55,7 +56,7 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
         }
 
         let result: string;
-        let validatedTask: ReturnType<typeof TaskSchema.parse> | null = null;
+        let validatedTask: Task | null = null;
         try {
           const computeResult = () => {
             const taskPath = join(taskDir, `${validated.id}.json`);
@@ -152,6 +153,10 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
 
             validatedTask = TaskSchema.parse(task);
             writeJsonAtomic(taskPath, validatedTask);
+            upsertIndexEntry(indexPathFor(taskDir), {
+              id: validatedTask.id,
+              status: validatedTask.status,
+            });
 
             if (addBlocks && addBlocks.length > 0) {
               for (const blockedId of addBlocks) {
@@ -180,7 +185,7 @@ export function createTaskUpdateTool(ctx?: PluginInput, listId?: string): ToolDe
         }
         return result;
       } catch (error) {
-        if (error instanceof Error && error.message.includes("Required")) {
+        if (error instanceof Error && error.name === "ZodError") {
           return JSON.stringify({ error: "validation_error", message: error.message });
         }
         return JSON.stringify({ error: "internal_error" });

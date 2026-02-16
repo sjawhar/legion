@@ -6,6 +6,7 @@ import type { ToolContext } from "@opencode-ai/plugin";
 import { writeJsonAtomic } from "../storage";
 import { createTaskCreateTool } from "../task-create";
 import type { Task } from "../types";
+import { MAX_DESCRIPTION_CHARS } from "../types";
 
 let tempDir: string;
 
@@ -103,5 +104,46 @@ describe("task_create", () => {
     const result = JSON.parse(await tool.execute({} as Record<string, unknown>, makeContext()));
 
     expect(result.error).toBeTruthy();
+  });
+});
+
+describe("task_create guardrails", () => {
+  it("rejects oversized description", async () => {
+    const tool = createTaskCreateTool(undefined, tempDir);
+    const result = JSON.parse(
+      await tool.execute(
+        { subject: "Big", description: "x".repeat(MAX_DESCRIPTION_CHARS + 1) },
+        makeContext()
+      )
+    );
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toContain("description");
+  });
+
+  it("accepts description at the limit", async () => {
+    const tool = createTaskCreateTool(undefined, tempDir);
+    const result = JSON.parse(
+      await tool.execute(
+        { subject: "OK", description: "x".repeat(MAX_DESCRIPTION_CHARS) },
+        makeContext()
+      )
+    );
+    expect(result.task).toBeTruthy();
+  });
+
+  it("accepts empty description", async () => {
+    const tool = createTaskCreateTool(undefined, tempDir);
+    const result = JSON.parse(
+      await tool.execute({ subject: "No desc", description: "" }, makeContext())
+    );
+    expect(result.task).toBeTruthy();
+    expect(result.task.id).toMatch(/^T-/);
+  });
+
+  it("accepts task without description field", async () => {
+    const tool = createTaskCreateTool(undefined, tempDir);
+    const result = JSON.parse(await tool.execute({ subject: "No desc field" }, makeContext()));
+    expect(result.task).toBeTruthy();
+    expect(result.task.id).toMatch(/^T-/);
   });
 });

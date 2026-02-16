@@ -2,9 +2,16 @@ import { join } from "node:path";
 import type { PluginInput, ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { acquireLock, getTaskDir, writeJsonAtomic } from "./storage";
-import { readAllTasks } from "./task-list";
+import { indexPathFor, upsertIndexEntry } from "./task-index";
+import { buildTaskMapWithBlockers, readActiveTasks } from "./task-list";
 import { syncTaskTodoUpdate } from "./todo-sync";
-import { LEASE_DURATION_MS, MAX_CLAIM_ATTEMPTS, SATISFYING_STATUSES, TaskSchema } from "./types";
+import {
+  LEASE_DURATION_MS,
+  MAX_CLAIM_ATTEMPTS,
+  SATISFYING_STATUSES,
+  type Task,
+  TaskSchema,
+} from "./types";
 
 export function createTaskClaimNextTool(ctx?: PluginInput, listId?: string): ToolDefinition {
   return tool({
@@ -15,7 +22,7 @@ export function createTaskClaimNextTool(ctx?: PluginInput, listId?: string): Too
       "Sets status=in_progress, owner, lease, and increments attempt_count.\n" +
       "Expired leases are auto-reclaimed.",
     args: {},
-    execute: async (_args, context) => {
+    execute: async (_args, context): Promise<string> => {
       const taskDir = getTaskDir(listId);
       const lock = acquireLock(taskDir);
 
@@ -24,11 +31,11 @@ export function createTaskClaimNextTool(ctx?: PluginInput, listId?: string): Too
       }
 
       let result: string;
-      let validatedTask: ReturnType<typeof TaskSchema.parse> | null = null;
+      let validatedTask: Task | null = null;
       try {
         const computeResult = () => {
-          const allTasks = readAllTasks(taskDir);
-          const taskMap = new Map(allTasks.map((t) => [t.id, t]));
+          const allTasks = readActiveTasks(taskDir);
+          const taskMap = buildTaskMapWithBlockers(taskDir, allTasks);
           const now = Date.now();
 
           const reclaimExpired = () => {
@@ -43,6 +50,7 @@ export function createTaskClaimNextTool(ctx?: PluginInput, listId?: string): Too
                   delete task.metadata.claimed_by_session;
                 }
                 writeJsonAtomic(join(taskDir, `${task.id}.json`), TaskSchema.parse(task));
+                upsertIndexEntry(indexPathFor(taskDir), { id: task.id, status: task.status });
               }
             }
           };
@@ -97,6 +105,10 @@ export function createTaskClaimNextTool(ctx?: PluginInput, listId?: string): Too
 
           validatedTask = TaskSchema.parse(target);
           writeJsonAtomic(join(taskDir, `${validatedTask.id}.json`), validatedTask);
+          upsertIndexEntry(indexPathFor(taskDir), {
+            id: validatedTask.id,
+            status: validatedTask.status,
+          });
 
           return JSON.stringify({ task: validatedTask });
         };

@@ -20,9 +20,11 @@ export const TaskSchema = z
 
 export type Task = z.infer<typeof TaskSchema>;
 
+export const MAX_DESCRIPTION_CHARS = 2_000;
+
 export const TaskCreateInputSchema = z.object({
   subject: z.string(),
-  description: z.string().optional(),
+  description: z.string().max(MAX_DESCRIPTION_CHARS).optional(),
   blocks: z.array(z.string()).optional(),
   blockedBy: z.array(z.string()).optional(),
   owner: z.string().optional(),
@@ -41,7 +43,7 @@ export type TaskGetInput = z.infer<typeof TaskGetInputSchema>;
 export const TaskUpdateInputSchema = z.object({
   id: z.string(),
   subject: z.string().optional(),
-  description: z.string().optional(),
+  description: z.string().max(MAX_DESCRIPTION_CHARS).optional(),
   status: TaskStatusSchema.optional(),
   addBlocks: z.array(z.string()).optional(),
   addBlockedBy: z.array(z.string()).optional(),
@@ -68,3 +70,17 @@ export const MAX_CLAIM_ATTEMPTS = 3;
 
 /** Default lease duration in milliseconds (5 minutes). */
 export const LEASE_DURATION_MS = 5 * 60 * 1000;
+
+export const TaskIndexEntrySchema = z.object({
+  id: z.string(),
+  status: TaskStatusSchema,
+});
+
+export type TaskIndexEntry = z.infer<typeof TaskIndexEntrySchema>;
+
+export const TaskIndexSchema = z.object({
+  version: z.literal(1),
+  entries: z.array(TaskIndexEntrySchema).default([]),
+});
+
+export type TaskIndex = z.infer<typeof TaskIndexSchema>;
