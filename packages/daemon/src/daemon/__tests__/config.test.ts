@@ -53,4 +53,20 @@ describe("daemon config", () => {
       loadConfig({ LEGION_CONTROLLER_SESSION_ID: "bad_value" });
     }).toThrow("LEGION_CONTROLLER_SESSION_ID must start with 'ses_' (got: bad_value)");
   });
+
+  describe("issueBackend", () => {
+    it("defaults to linear", () => {
+      const config = loadConfig({});
+      expect(config.issueBackend).toBe("linear");
+    });
+
+    it("reads LEGION_ISSUE_BACKEND env var", () => {
+      const config = loadConfig({ LEGION_ISSUE_BACKEND: "github" });
+      expect(config.issueBackend).toBe("github");
+    });
+
+    it("throws for invalid backend", () => {
+      expect(() => loadConfig({ LEGION_ISSUE_BACKEND: "jira" })).toThrow("LEGION_ISSUE_BACKEND");
+    });
+  });
 });

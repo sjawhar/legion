@@ -98,6 +98,7 @@ interface StartOptions {
   workspace: string;
   stateDir?: string;
   prompt?: string;
+  backend?: string;
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
@@ -119,6 +120,10 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
   console.log(`State directory: ${resolvedStateDir}`);
 
   fs.mkdirSync(resolvedStateDir, { recursive: true });
+
+  if (opts.backend) {
+    process.env.LEGION_ISSUE_BACKEND = opts.backend;
+  }
 
   const overrides: Partial<DaemonConfig> = {
     teamId,
