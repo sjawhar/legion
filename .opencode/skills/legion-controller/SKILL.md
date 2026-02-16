@@ -14,7 +14,8 @@ Persistent coordinator that loops forever, dispatching and resuming workers base
 ## Environment
 
 Required:
-- `LINEAR_TEAM_ID` - Linear team UUID
+- `LEGION_TEAM_ID` - Linear team UUID or GitHub project identifier
+- `LEGION_ISSUE_BACKEND` - issue backend: `"linear"` or `"github"`
 - `LEGION_DIR` - path to default jj workspace
 - `LEGION_SHORT_ID` - short ID for daemon identification
 - `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
@@ -50,11 +51,17 @@ digraph controller {
 ### 1. Fetch Issues
 
 ```bash
-LINEAR_JSON=$(linear_linear(action="search", query={"team": "$LINEAR_TEAM_ID"}))
+# Fetch issues based on backend
+if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+  ISSUES_JSON=$(gh project item-list $PROJECT_NUM --owner $OWNER --format json)
+else
+  ISSUES_JSON=$(linear_linear(action="search", query={"team": "$LEGION_TEAM_ID"}))
+fi
+
 ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
 ```
 
-**CRITICAL:** Pass `LINEAR_JSON` directly to the state CLI in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both MCP and GraphQL formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
+**CRITICAL:** Pass `ISSUES_JSON` directly to the state endpoint in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both Linear and GitHub formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
 
 ### 2. Relay User Feedback (Highest Priority)
 
@@ -64,12 +71,15 @@ When both `user-input-needed` AND `user-feedback-given` labels present:
 
 ### 3. Process worker-done
 
-Run state script:
+Analyze via daemon:
 ```bash
-echo "$LINEAR_JSON" | bun run packages/daemon/src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
+COLLECTED=$(echo "$ISSUES_JSON" | jq -Rs --arg backend "$LEGION_ISSUE_BACKEND" \
+  '{"backend": $backend, "issues": (. | fromjson)}' | \
+  curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect \
+  -H 'Content-Type: application/json' --data @-)
 ```
 
-The state CLI returns JSON with both `suggestedAction` and raw signals:
+The state endpoint returns JSON with both `suggestedAction` and raw signals:
 - `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
 - `hasPr`, `prIsDraft` — PR state
 - `hasUserFeedback` — user interaction state
@@ -91,11 +101,11 @@ The state machine returns a `suggestedAction`. Route by prefix:
 | Prefix | Intent | Controller action |
 |--------|--------|-------------------|
 | `dispatch_` | Spawn a new worker | `POST /workers` with mode from `ACTION_TO_MODE` |
-| `transition_to_` | Move issue to new status | Update Linear issue status |
+| `transition_to_` | Move issue to new status | Update issue status (Linear: `linear_linear(action="update", ...)`, GitHub: `gh api graphql` for status field) |
 | `resume_` | Send prompt to existing worker | Find worker by sessionId, send prompt |
 | `relay_` | Forward information | Relay user feedback to worker |
-| `add_` | Add label | Add the specified label to the issue |
-| `remove_` | Remove label + retry | Remove label, then re-evaluate |
+| `add_` | Add label | Add the specified label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --add-label`) |
+| `remove_` | Remove label + retry | Remove label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --remove-label`), then re-evaluate |
 | `retry_` | Wait | Do nothing this iteration, re-check next loop |
 | `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
 | `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
