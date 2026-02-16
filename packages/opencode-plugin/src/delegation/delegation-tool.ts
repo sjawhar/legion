@@ -7,7 +7,7 @@ import { resolveCategory } from "./category-router";
 
 const z = tool.schema;
 
-const DELEGATOR_ALLOWLIST = new Set(["orchestrator", "conductor", "hephaestus"]);
+const DELEGATOR_ALLOWLIST = new Set(["orchestrator", "conductor"]);
 
 interface DelegationToolContext {
   agent?: string;

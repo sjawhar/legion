@@ -4,7 +4,7 @@ import {
   unregisterSubagentSession,
 } from "../hooks/subagent-question-blocker";
 import { getAgentToolRestrictions } from "./agent-restrictions";
-import { writeTask } from "./task-storage";
+import { deleteTask, listTasks, writeTask } from "./task-storage";
 import type { BackgroundTask, LaunchOptions } from "./types";
 
 type OpencodeClient = PluginInput["client"];
@@ -22,6 +22,38 @@ export class BackgroundTaskManager {
   constructor(ctx: PluginInput) {
     this.client = ctx.client;
     this.directory = ctx.directory;
+  }
+
+  /**
+   * Rehydrate in-memory state from persisted task files.
+   * Call once during plugin init to restore task visibility across restarts.
+   */
+  async rehydrate(opts?: { taskRetentionMs?: number }): Promise<void> {
+    const tasks = await listTasks(this.directory);
+    const now = Date.now();
+    const ttl = opts?.taskRetentionMs;
+
+    for (const task of tasks) {
+      const taskAge = now - (task.completedAt ?? task.createdAt);
+      if (ttl && taskAge > ttl) {
+        await deleteTask(this.directory, task.id).catch(() => {});
+        continue;
+      }
+
+      if (task.status === "pending" || task.status === "running") {
+        task.status = "failed";
+        task.error = "Interrupted: plugin restarted while task was in progress";
+        task.completedAt = now;
+        await writeTask(this.directory, task).catch((err) => {
+          console.warn(`[rehydrate] Failed to persist failed status for ${task.id}:`, err);
+        });
+      }
+
+      this.tasks.set(task.id, task);
+      if (task.sessionID && task.status !== "completed" && task.status !== "failed") {
+        this.tasksBySessionId.set(task.sessionID, task.id);
+      }
+    }
   }
 
   /**
