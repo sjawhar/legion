@@ -56,7 +56,7 @@ Set by daemon when spawning workers, consumed by skills:
 
 ## Dispatch vs Resume
 
-- **Dispatch** = `POST /workers` → new OpenCode serve process + `prompt_async`
-- **Resume** = `POST /session/{id}/prompt_async` on existing worker port
+- **Dispatch** = `POST /workers` → new session on shared serve (idempotent, deterministic session ID)
+- **Resume** = `POST /session/{id}/prompt_async` on shared serve
 
 Resume is used for: user feedback relay, PR changes requested, retro via `/legion-retro` after review.

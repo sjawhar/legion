@@ -212,7 +212,7 @@ Total estimated: **~400 LOC** (vs. OMO's ~3,500 LOC for equivalent functionality
 ## Resolved Questions
 
 - **Continuation agent resolution**: Walk `ctx.client.session.messages()` backwards. Each message has `info.agent`, `info.model`, `info.providerID`, `info.modelID`. Find the first non-compaction message with agent info. Pass resolved `agent` and `model` to `promptAsync()` so continuation resumes on the same agent/model.
-- **OMO hook conflict**: OMO's `todo-continuation-enforcer` is already disabled in `~/.config/opencode/oh-my-opencode.json` (`disabled_hooks` list). Also disabled: `preemptive-compaction`, `start-work`, `atlas`, `prometheus-md-only`, `sisyphus-junior-notepad`, `agent-usage-reminder`, `category-skill-reminder`. No conflict.
+- **OMO hook conflict**: OMO's `todo-continuation-enforcer` is already disabled in `~/.config/opencode/opencode-legion.json` (`disabled_hooks` list). Also disabled: `preemptive-compaction`, `start-work`, `atlas`, `prometheus-md-only`, `sisyphus-junior-notepad`, `agent-usage-reminder`, `category-skill-reminder`. No conflict.
 - **Conductor model**: Configurable via the existing agent config system (same as all agents). Not a design decision.
 
 ## Next Steps

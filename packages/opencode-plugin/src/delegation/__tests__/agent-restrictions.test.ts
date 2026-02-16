@@ -104,14 +104,37 @@ describe("agent-restrictions", () => {
       expect(restrictions2).toEqual(restrictions3);
     });
 
-    it("returns empty object for unknown agents", () => {
+    it("returns default restrictions for unknown agents (fail-closed)", () => {
       const restrictions = getAgentToolRestrictions("unknown-agent");
+      expect(restrictions).toEqual({
+        write: false,
+        edit: false,
+        background_task: false,
+        background_cancel: false,
+      });
+    });
+
+    it("returns default restrictions for empty string (fail-closed)", () => {
+      const restrictions = getAgentToolRestrictions("");
+      expect(restrictions).toEqual({
+        write: false,
+        edit: false,
+        background_task: false,
+        background_cancel: false,
+      });
+    });
+
+    it("returns empty restrictions for orchestrator (delegator)", () => {
+      const restrictions = getAgentToolRestrictions("orchestrator");
       expect(restrictions).toEqual({});
     });
 
-    it("returns empty object for empty string", () => {
-      const restrictions = getAgentToolRestrictions("");
-      expect(restrictions).toEqual({});
+    it("returns write/edit restrictions for conductor (can delegate, cannot edit)", () => {
+      const restrictions = getAgentToolRestrictions("conductor");
+      expect(restrictions).toEqual({
+        write: false,
+        edit: false,
+      });
     });
   });
 
@@ -156,12 +179,20 @@ describe("agent-restrictions", () => {
       expect(isLeafAgent("executor")).toBe(true);
     });
 
-    it("returns false for unknown agents", () => {
-      expect(isLeafAgent("unknown-agent")).toBe(false);
+    it("returns true for unknown agents (fail-closed)", () => {
+      expect(isLeafAgent("unknown-agent")).toBe(true);
     });
 
-    it("returns false for empty string", () => {
-      expect(isLeafAgent("")).toBe(false);
+    it("returns true for empty string (fail-closed)", () => {
+      expect(isLeafAgent("")).toBe(true);
+    });
+
+    it("returns false for orchestrator in isLeafAgent", () => {
+      expect(isLeafAgent("orchestrator")).toBe(false);
+    });
+
+    it("returns false for conductor in isLeafAgent (can delegate)", () => {
+      expect(isLeafAgent("conductor")).toBe(false);
     });
 
     it("handles case-insensitive matching", () => {

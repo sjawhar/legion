@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { defineCommand, runMain } from "citty";
+import type { DaemonConfig } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { resolveTeamId } from "./team-resolver";
 
@@ -93,21 +94,42 @@ function resolveStateDir(teamId: string, stateDir?: string): string {
   return stateDir ?? path.join(os.homedir(), ".legion", teamId);
 }
 
-async function cmdStart(team: string, workspace: string, stateDir?: string): Promise<void> {
+interface StartOptions {
+  workspace: string;
+  stateDir?: string;
+  prompt?: string;
+}
+
+async function cmdStart(team: string, opts: StartOptions): Promise<void> {
   const teamId = await resolveTeamId(team);
-  const resolvedStateDir = resolveStateDir(teamId, stateDir);
+  const resolvedStateDir = resolveStateDir(teamId, opts.stateDir);
+
+  if (opts.prompt && opts.prompt.length > 10000) {
+    throw new CliError(
+      `Controller prompt exceeds maximum length of 10000 characters (got ${opts.prompt.length})`
+    );
+  }
+
+  if (opts.prompt && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(opts.prompt)) {
+    throw new CliError("Controller prompt contains invalid control characters");
+  }
 
   console.log(`Starting Legion for team: ${teamId}`);
-  console.log(`Workspace: ${workspace}`);
+  console.log(`Workspace: ${opts.workspace}`);
   console.log(`State directory: ${resolvedStateDir}`);
 
   fs.mkdirSync(resolvedStateDir, { recursive: true });
 
-  const handle = await startDaemon({
+  const overrides: Partial<DaemonConfig> = {
     teamId,
-    legionDir: workspace,
+    legionDir: opts.workspace,
     stateFilePath: path.join(resolvedStateDir, "workers.json"),
-  });
+  };
+  if (opts.prompt !== undefined) {
+    overrides.controllerPrompt = opts.prompt;
+  }
+
+  const handle = await startDaemon(overrides);
 
   console.log(`Daemon started on port ${handle.config.daemonPort}`);
   console.log(`\nTo check status: legion status ${team}`);
@@ -516,9 +538,18 @@ export const startCommand = defineCommand({
       default: process.cwd(),
     },
     "state-dir": { type: "string", description: "State directory path" },
+    prompt: {
+      type: "string",
+      alias: "p",
+      description: "Custom prompt appended to the controller's initial /legion-controller prompt",
+    },
   },
   async run({ args }) {
-    await cmdStart(args.team, args.workspace, args["state-dir"]);
+    await cmdStart(args.team, {
+      workspace: args.workspace,
+      stateDir: args["state-dir"],
+      prompt: args.prompt,
+    });
   },
 });
 

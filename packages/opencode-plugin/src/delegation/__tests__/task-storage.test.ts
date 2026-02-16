@@ -244,3 +244,39 @@ describe("symlink protection", () => {
     warnSpy.mockRestore();
   });
 });
+
+describe("schema validation", () => {
+  it("listTasks skips tasks with invalid schema", async () => {
+    const tasksDir = path.join(workspace, ".legion", "tasks");
+    fs.mkdirSync(tasksDir, { recursive: true });
+
+    // Valid JSON, but missing required fields (no status, no agent)
+    fs.writeFileSync(
+      path.join(tasksDir, "bg_invalid.json"),
+      JSON.stringify({ id: "bg_invalid", description: "missing fields" })
+    );
+    // Also write a valid task
+    await writeTask(workspace, makeTask({ id: "bg_valid" }));
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const tasks = await listTasks(workspace);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].id).toBe("bg_valid");
+    warnSpy.mockRestore();
+  });
+
+  it("readTask returns null for schema-invalid task", async () => {
+    const tasksDir = path.join(workspace, ".legion", "tasks");
+    fs.mkdirSync(tasksDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(tasksDir, "bg_badschema.json"),
+      JSON.stringify({ id: "bg_badschema", wrong: "shape" })
+    );
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const result = await readTask(workspace, "bg_badschema");
+    expect(result).toBeNull();
+    warnSpy.mockRestore();
+  });
+});

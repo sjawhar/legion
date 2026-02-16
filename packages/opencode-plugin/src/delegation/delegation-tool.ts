@@ -2,11 +2,12 @@ import type { ToolDefinition } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { createAgents } from "../agents";
 import type { PluginConfig } from "../config";
-import { isLeafAgent } from "./agent-restrictions";
 import type { BackgroundTaskManager } from "./background-manager";
 import { resolveCategory } from "./category-router";
 
 const z = tool.schema;
+
+const DELEGATOR_ALLOWLIST = new Set(["orchestrator", "conductor", "hephaestus"]);
 
 interface DelegationToolContext {
   agent?: string;
@@ -44,7 +45,7 @@ export function createDelegationTools(
     async execute(args, toolContext) {
       const context = toolContext as DelegationToolContext | undefined;
       const callingAgent = context?.agent;
-      if (callingAgent && isLeafAgent(callingAgent)) {
+      if (callingAgent && !DELEGATOR_ALLOWLIST.has(callingAgent.toLowerCase())) {
         return `Error: Agent '${callingAgent}' cannot delegate tasks. Only orchestrator-type agents can use background_task.`;
       }
 

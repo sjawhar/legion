@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PersistedWorkerStateSchema } from "./schemas";
 import type { WorkerEntry } from "./serve-manager";
 
 export interface CrashHistoryEntry {
@@ -31,6 +32,14 @@ function resolveHome(filePath: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+async function renameSafe(oldPath: string, newPath: string): Promise<void> {
+  try {
+    await rename(oldPath, newPath);
+  } catch {
+    // Ignore rename errors (file may have been deleted, etc.)
+  }
 }
 
 function normalizeState(raw: unknown): PersistedWorkerState {
@@ -66,10 +75,7 @@ function normalizeState(raw: unknown): PersistedWorkerState {
     return result;
   }
 
-  return {
-    workers: (raw ?? {}) as Record<string, WorkerEntry>,
-    crashHistory: {},
-  };
+  return { workers: {}, crashHistory: {} };
 }
 
 export async function readStateFile(filePath: string): Promise<PersistedWorkerState> {
@@ -79,7 +85,25 @@ export async function readStateFile(filePath: string): Promise<PersistedWorkerSt
     if (!raw.trim()) {
       return { workers: {}, crashHistory: {}, controller: undefined };
     }
-    return normalizeState(JSON.parse(raw));
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const corruptPath = `${resolvedPath}.corrupt.${timestamp}`;
+      await renameSafe(resolvedPath, corruptPath);
+      return { workers: {}, crashHistory: {} };
+    }
+
+    const normalized = normalizeState(parsed);
+    const validation = PersistedWorkerStateSchema.safeParse(normalized);
+
+    if (!validation.success) {
+      return { workers: {}, crashHistory: {} };
+    }
+
+    return validation.data;
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {

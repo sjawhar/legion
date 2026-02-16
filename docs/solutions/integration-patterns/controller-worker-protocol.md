@@ -12,7 +12,7 @@ related-issues: [LEG-122, LEG-125, LEG-128]
 
 See `legion-controller/SKILL.md` for the operational protocol. Key distinction:
 
-- **Dispatch** = new process + new session via `POST /workers`
+- **Dispatch** = new session on shared serve via `POST /workers` (idempotent, ~10ms)
 - **Resume** = prompt an existing session via `prompt_async` on the worker's port
 
 Resume preserves full conversation context — use it for feedback relay, address-comments, and retro.

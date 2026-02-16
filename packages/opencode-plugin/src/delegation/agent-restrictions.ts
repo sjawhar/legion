@@ -11,6 +11,13 @@ interface ToolRestrictions {
   background_cancel?: boolean;
 }
 
+const DEFAULT_RESTRICTIONS: ToolRestrictions = {
+  write: false,
+  edit: false,
+  background_task: false,
+  background_cancel: false,
+};
+
 const AGENT_RESTRICTIONS: Record<string, ToolRestrictions> = {
   explore: {
     write: false,
@@ -64,16 +71,21 @@ const AGENT_RESTRICTIONS: Record<string, ToolRestrictions> = {
     background_task: false,
     background_cancel: false,
   },
+  orchestrator: {},
+  conductor: {
+    write: false,
+    edit: false,
+  },
 };
 
 /**
  * Get tool restrictions for an agent.
  * Case-insensitive matching.
- * Unknown agents get empty restrictions (open by default).
+ * Unknown agents get default restrictions (fail-closed by default).
  */
 export function getAgentToolRestrictions(agentName: string): Record<string, boolean> {
   const normalized = agentName.toLowerCase();
-  return (AGENT_RESTRICTIONS[normalized] ?? {}) as Record<string, boolean>;
+  return (AGENT_RESTRICTIONS[normalized] ?? DEFAULT_RESTRICTIONS) as Record<string, boolean>;
 }
 
 /**
