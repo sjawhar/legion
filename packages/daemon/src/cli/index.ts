@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { defineCommand, runMain } from "citty";
-import type { DaemonConfig } from "../daemon/config";
+import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { resolveTeamId } from "./team-resolver";
 
@@ -105,15 +105,7 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
   const teamId = await resolveTeamId(team);
   const resolvedStateDir = resolveStateDir(teamId, opts.stateDir);
 
-  if (opts.prompt && opts.prompt.length > 10000) {
-    throw new CliError(
-      `Controller prompt exceeds maximum length of 10000 characters (got ${opts.prompt.length})`
-    );
-  }
-
-  if (opts.prompt && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(opts.prompt)) {
-    throw new CliError("Controller prompt contains invalid control characters");
-  }
+  validateControllerPrompt(opts.prompt);
 
   console.log(`Starting Legion for team: ${teamId}`);
   console.log(`Workspace: ${opts.workspace}`);
@@ -538,6 +530,9 @@ async function cmdCollectState(backend: string): Promise<void> {
   }
 
   const stdinText = await new Response(Bun.stdin.stream()).text();
+  if (!stdinText.trim()) {
+    throw new CliError("No input on stdin. Usage: echo '$JSON' | legion collect-state <backend>");
+  }
   let issues: unknown;
   try {
     issues = JSON.parse(stdinText);

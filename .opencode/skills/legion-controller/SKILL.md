@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when coordinating Legion workers across Linear issues, dispatching workers, monitoring progress, or routing triage items
+description: Use when coordinating Legion workers across issues, dispatching workers, monitoring progress, or routing triage items
 ---
 
 # Legion Controller
@@ -9,12 +9,12 @@ description: Use when coordinating Legion workers across Linear issues, dispatch
 > The state machine provides suggested actions and raw signals. This skill decides what
 > to do with them. Modify this file to change how issues flow through the pipeline.
 
-Persistent coordinator that loops forever, dispatching and resuming workers based on Linear issue state.
+Persistent coordinator that loops forever, dispatching and resuming workers based on issue state.
 
 ## Environment
 
 Required:
-- `LEGION_TEAM_ID` - Linear team UUID or GitHub project identifier
+- `LEGION_TEAM_ID` - team/project identifier (Linear UUID or GitHub `owner/project-number`)
 - `LEGION_ISSUE_BACKEND` - issue backend: `"linear"` or `"github"`
 - `LEGION_DIR` - path to default jj workspace
 - `LEGION_SHORT_ID` - short ID for daemon identification
@@ -67,7 +67,7 @@ ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'leng
 
 When both `user-input-needed` AND `user-feedback-given` labels present:
 1. Remove both labels
-2. **Resume** (not spawn) worker session with prompt to check Linear comments
+2. **Resume** (not spawn) worker session with prompt to check issue comments
 
 ### 3. Process worker-done
 
@@ -90,7 +90,7 @@ about what to do:
 
 | suggestedAction | Signals | Controller should... |
 |-----------------|---------|---------------------|
-| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for Linear auto-transition to Needs Review |
+| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for auto-transition to Needs Review (or transition explicitly if using GitHub backend) |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
 
@@ -117,7 +117,7 @@ correctly if they follow the naming convention.
 1. Worker crashed before creating PR
 2. PR creation failed silently
 3. Issue moved to wrong status manually
-4. Linear attachment wasn't added
+4. PR wasn't linked to issue (Linear attachment or GitHub linked PR)
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
 
@@ -130,7 +130,7 @@ GitHub API connectivity.
 
 The implementer does **not** use `worker-done`. Instead:
 1. Implementer opens a **draft PR** and exits
-2. Linear's GitHub integration auto-transitions the issue to Needs Review
+2. The issue transitions to Needs Review (Linear auto-transition, or controller transitions explicitly for GitHub)
 3. State machine sees: Needs Review, no `worker-done`, no live worker → `dispatch_reviewer`
 4. Controller runs the quality gate (below), then dispatches the reviewer
 
@@ -161,7 +161,7 @@ BIOME_EXIT=$?
 **If any fail:** Do NOT dispatch reviewer. Instead:
 1. Move issue back to In Progress
 2. Dispatch a fresh implementer with the failure output
-3. The implementer will fix, re-open/update the PR, and exit — Linear will auto-transition back to Needs Review
+3. The implementer will fix, re-open/update the PR, and exit — issue transitions back to Needs Review
 
 ### 4. Route Triage
 
@@ -234,7 +234,7 @@ legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --prompt "Custom instructions here"
 
 **Resume** = send prompt to existing worker:
 ```bash
-legion prompt "$ISSUE_IDENTIFIER" "Check Linear comments for user feedback"
+legion prompt "$ISSUE_IDENTIFIER" "Check issue comments for user feedback"
 ```
 
 If multiple workers exist for the same issue (different modes), specify mode:
@@ -273,21 +273,21 @@ Use these signals — don't independently verify worker liveness.
 
 ### 1. Trust the state machine
 
-The state machine checks worker liveness, PR status, labels, and draft state. Pipe Linear
-output directly to the CLI and route by `suggestedAction`. Don't independently check PRs,
+The state machine checks worker liveness, PR status, labels, and draft state. POST issue
+data to `/state/collect` and route by `suggestedAction`. Don't independently check PRs,
 ports, or process status — that's the state machine's job.
 
 For the full observability architecture and failure case studies, see `docs/solutions/daemon/controller-observability.md`.
 
 ### 2. Never reconstruct state machine input
 
-Pass Linear search output directly to the state CLI. Do not hand-craft JSON, filter
+Pass issue tracker output directly to `/state/collect`. Do not hand-craft JSON, filter
 issues, or inject your own assumptions about labels or status. The state machine's
 parser handles the raw format.
 
 ### 3. Fresh data every loop iteration
 
-Fetch issues from Linear at the start of every loop. Don't carry labels, statuses, or
+Fetch issues from the tracker at the start of every loop. Don't carry labels, statuses, or
 worker state between iterations — they go stale.
 
 ### 4. One PR per issue
@@ -313,8 +313,8 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 
 | Thought | What to do instead |
 |---------|--------------------|
-| "Let me construct the JSON for the state machine" | Pipe Linear output directly — no hand-crafting |
-| "I know the label/status from last iteration" | Fetch fresh from Linear. State goes stale between iterations. |
+| "Let me construct the JSON for the state machine" | POST tracker output to `/state/collect` directly — no hand-crafting |
+| "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
 | "The changes are lost" | Check local commits (`jj log`), open PRs (`gh pr list`), and worker workspaces before concluding anything is lost |
 | "I'll give the worker specific instructions" | State the mode and issue ID. Let the workflow guide the worker. |
 | "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |

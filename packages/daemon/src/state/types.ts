@@ -71,7 +71,7 @@ export const IssueStatus = {
   DONE: "Done" as IssueStatusLiteral,
 
   /**
-   * Map Linear's status names to our canonical names.
+   * Map status name aliases to canonical names.
    */
   ALIASES: {
     "In Review": "Needs Review" as IssueStatusLiteral,
@@ -162,13 +162,25 @@ export const GitHubPRRef = {
 };
 
 /**
- * Parsed issue data from Linear API response.
+ * Structured source reference for an issue.
+ * Preserves the full identity so API calls can target the exact issue.
+ */
+export interface IssueSource {
+  owner: string;
+  repo: string;
+  number: number;
+  url: string;
+}
+
+/**
+ * Parsed issue data from issue tracker API response.
  */
 export interface ParsedIssue {
   issueId: string;
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   prRef: GitHubPRRef | null;
+  source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
 
   // Computed properties (implemented as getters)
   readonly hasWorkerDone: boolean;
@@ -188,13 +200,15 @@ export function createParsedIssue(
   issueId: string,
   status: IssueStatusLiteral | string,
   labels: string[],
-  prRef: GitHubPRRef | null
+  prRef: GitHubPRRef | null,
+  source: IssueSource | null = null
 ): ParsedIssue {
   return {
     issueId,
     status,
     labels,
     prRef,
+    source,
 
     get hasWorkerDone() {
       return this.labels.includes("worker-done");
@@ -241,7 +255,7 @@ export interface FetchedIssueData {
   issueId: string;
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
-  hasPr: boolean; // True if Linear has a PR URL attached
+  hasPr: boolean; // True if issue has a linked PR
   prIsDraft: boolean | null; // null if no PR or couldn't check status
   hasLiveWorker: boolean;
   workerMode: string | null;
@@ -281,7 +295,7 @@ export interface CollectedStateDict {
 export interface IssueState {
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
-  hasPr: boolean; // Whether issue has a PR attached in Linear
+  hasPr: boolean; // Whether issue has a linked PR
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
   hasLiveWorker: boolean;
   workerMode: string | null;

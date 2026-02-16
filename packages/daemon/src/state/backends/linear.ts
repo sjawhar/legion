@@ -34,15 +34,21 @@ export interface LinearIssueRaw {
   status?: string;
   state?: LinearStateDict;
   labels?: string[] | LinearLabelsContainer;
-  attachments?: LinearAttachment[];
+  attachments?: LinearAttachment[] | { nodes: LinearAttachment[] };
 }
 
 export class LinearTracker implements IssueTracker {
   parseIssues(raw: unknown): ParsedIssue[] {
-    const linearIssues = raw as LinearIssueRaw[];
+    if (!Array.isArray(raw)) {
+      return [];
+    }
     const parsed: ParsedIssue[] = [];
 
-    for (const issue of linearIssues) {
+    for (const item of raw) {
+      if (typeof item !== "object" || item === null) {
+        continue;
+      }
+      const issue = item as LinearIssueRaw;
       const issueId = issue.identifier ?? "";
       if (!issueId) {
         continue;
@@ -79,14 +85,22 @@ export class LinearTracker implements IssueTracker {
       }
 
       let prRef: GitHubPRRefType | null = null;
-      let attachments = issue.attachments ?? [];
-      if (!Array.isArray(attachments)) {
-        attachments = [];
+      const attachmentsRaw = issue.attachments;
+      let attachments: LinearAttachment[] = [];
+      if (Array.isArray(attachmentsRaw)) {
+        attachments = attachmentsRaw;
+      } else if (
+        typeof attachmentsRaw === "object" &&
+        attachmentsRaw !== null &&
+        "nodes" in attachmentsRaw &&
+        Array.isArray((attachmentsRaw as { nodes?: unknown }).nodes)
+      ) {
+        attachments = (attachmentsRaw as { nodes: LinearAttachment[] }).nodes;
       }
       for (const attachment of attachments) {
         if (typeof attachment === "object" && attachment !== null) {
-          const url = attachment.url ?? "";
-          if (url.includes("github.com") && url.includes("/pull/")) {
+          const url = attachment.url;
+          if (typeof url === "string" && url.includes("github.com") && url.includes("/pull/")) {
             prRef = GitHubPRRef.fromUrl(url);
             if (prRef) {
               break;

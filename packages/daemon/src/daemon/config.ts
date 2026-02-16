@@ -44,7 +44,17 @@ export function validateControllerPrompt(prompt: string | undefined): void {
       `Controller prompt exceeds maximum length of 10000 characters (got ${prompt.length})`
     );
   }
-  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(prompt)) {
+  const hasControlChars = [...prompt].some((ch) => {
+    const code = ch.charCodeAt(0);
+    return (
+      (code >= 0 && code <= 8) ||
+      code === 11 ||
+      code === 12 ||
+      (code >= 14 && code <= 31) ||
+      code === 127
+    );
+  });
+  if (hasControlChars) {
     throw new Error("Controller prompt contains invalid control characters");
   }
 }
@@ -64,11 +74,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
 
   validateControllerPrompt(controllerPrompt);
 
-  const rawBackend = env.LEGION_ISSUE_BACKEND || "linear";
-  if (rawBackend !== "linear" && rawBackend !== "github") {
+  const rawBackend = env.LEGION_ISSUE_BACKEND;
+  if (rawBackend !== undefined && rawBackend !== "linear" && rawBackend !== "github") {
     throw new Error(`LEGION_ISSUE_BACKEND must be 'linear' or 'github' (got: ${rawBackend})`);
   }
-  const issueBackend = rawBackend as "linear" | "github";
+  const issueBackend = rawBackend === "github" ? "github" : "linear";
 
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),

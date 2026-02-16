@@ -18,7 +18,7 @@ skills/
 ├── github/
 │   └── SKILL.md          # GitHub CLI skill (embedded) — issue + PR operations
 ├── linear/
-│   └── SKILL.md          # Stream Linear MCP (embedded) — single tool, action dispatch
+│   └── SKILL.md          # Linear MCP (embedded) — single tool, action dispatch
 ├── legion-controller/
 │   └── SKILL.md          # Persistent loop: fetch → decide → dispatch → sleep 30s
 ├── legion-retro/
@@ -44,7 +44,7 @@ Set by daemon when spawning workers, consumed by skills:
 
 | Variable | Set By | Used By | Purpose |
 |----------|--------|---------|---------|
-| `LINEAR_TEAM_ID` | CLI/daemon | Controller + workers | Linear team UUID |
+| `LEGION_TEAM_ID` | CLI/daemon | Controller + workers | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
 | `LEGION_DIR` | CLI/daemon | Controller + workers | Default jj workspace path |
 | `LEGION_SHORT_ID` | Daemon | Controller | Instance ID for heartbeat |
 | `LEGION_DAEMON_PORT` | Daemon | Controller | HTTP API port (default 13370) |

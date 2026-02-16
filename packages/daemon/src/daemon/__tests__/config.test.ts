@@ -68,5 +68,9 @@ describe("daemon config", () => {
     it("throws for invalid backend", () => {
       expect(() => loadConfig({ LEGION_ISSUE_BACKEND: "jira" })).toThrow("LEGION_ISSUE_BACKEND");
     });
+
+    it("throws for empty string backend", () => {
+      expect(() => loadConfig({ LEGION_ISSUE_BACKEND: "" })).toThrow("LEGION_ISSUE_BACKEND");
+    });
   });
 });

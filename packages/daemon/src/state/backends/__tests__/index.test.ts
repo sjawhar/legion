@@ -17,7 +17,8 @@ describe("getBackend", () => {
   });
 
   it("throws for unknown backend", () => {
-    expect(() => getBackend("jira" as any)).toThrow("Unknown backend");
+    const invalidBackend = "jira" as "linear" | "github";
+    expect(() => getBackend(invalidBackend)).toThrow("Unknown backend");
   });
 
   it("github backend skips non-Issue content types", () => {

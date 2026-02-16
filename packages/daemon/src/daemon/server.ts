@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { type BackendName, getBackend } from "../state/backends/index";
+import { getBackend, isBackendName } from "../state/backends/index";
 import { buildCollectedState } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
 import {
@@ -354,25 +354,24 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
 
           const backend = payload.backend;
-          if (backend !== "linear" && backend !== "github") {
+          if (!isBackendName(backend)) {
             return badRequest("invalid_backend");
           }
 
           const issues = payload.issues;
-          if (!Array.isArray(issues)) {
+          if (issues === undefined || issues === null) {
             return badRequest("invalid_issues");
           }
 
           try {
-            const tracker = getBackend(backend as BackendName);
+            const tracker = getBackend(backend);
             const parsed = tracker.parseIssues(issues);
             const daemonUrl = `http://127.0.0.1:${server.port}`;
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.teamId);
             return jsonResponse(CollectedState.toDict(state));
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "unknown_error";
-            return serverError(message);
+          } catch {
+            return serverError("collect_failed");
           }
         }
 

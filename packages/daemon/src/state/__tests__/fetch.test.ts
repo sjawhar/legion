@@ -1,9 +1,8 @@
 /**
  * Tests for state fetch logic.
  *
- * Ported from Python tests:
- * - tests/test_state.py (TestParseLinearIssues, TestGetPrDraftStatusBatch,
- *   TestParseLinearIssuesEdgeCases, TestFetchAllIssueData, TestFetchAllIssueDataErrorHandling)
+ * Originally ported from Python tests. Linear-specific parsing tests
+ * have moved to backends/__tests__/linear.test.ts.
  */
 
 import { describe, expect, it, mock } from "bun:test";

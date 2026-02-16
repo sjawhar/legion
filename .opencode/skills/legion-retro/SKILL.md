@@ -23,7 +23,7 @@ A fresh subagent provides the outside perspective (see step 2).
 ### 1. Get PR URL
 
 ```bash
-PR_URL=$(gh pr view "$LINEAR_ISSUE_ID" --json url --jq '.url')
+PR_URL=$(gh pr view "$LEGION_ISSUE_ID" --json url --jq '.url')
 ```
 
 ### 2. Launch Background Subagent (Parallel)
@@ -31,12 +31,12 @@ PR_URL=$(gh pr view "$LINEAR_ISSUE_ID" --json url --jq '.url')
 Use `background_task` tool to spawn a fresh subagent:
 
 - **Category:** `unspecified-low`
-- **Description:** "Retro analysis for $LINEAR_ISSUE_ID"
+- **Description:** "Retro analysis for $LEGION_ISSUE_ID"
 - **Prompt:**
 
 > You are analyzing a completed PR to capture learnings.
 >
-> Issue: $LINEAR_ISSUE_ID
+> Issue: $LEGION_ISSUE_ID
 > PR: $PR_URL
 >
 > 1. Fetch the PR diff and description via gh pr view and gh pr diff
@@ -66,25 +66,41 @@ Check subagent completion before proceeding (you will be notified when backgroun
 Ensure all `docs/solutions/` files are committed and pushed:
 
 ```bash
-jj describe -m "$LINEAR_ISSUE_ID: retro learnings"
+jj describe -m "$LEGION_ISSUE_ID: retro learnings"
 jj git push
 ```
 
-### 6. Post Summary to Linear
+### 6. Post Summary to Issue
 
-Post a brief summary to the Linear issue so learnings are discoverable without checking the repo:
+Post a brief summary to the issue so learnings are discoverable without checking the repo:
 
-```
-linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="## Retro Complete
+If `LEGION_ISSUE_BACKEND=github`:
+
+```bash
+gh issue comment $ISSUE_NUMBER --body "## Retro Complete
 
 **Learnings documented in:**
 - [list docs/solutions/ files written]
 
 **Key takeaways:**
-- [1-3 bullet summary of the most important learnings]
-")
+- [1-3 bullet summary of the most important learnings]" -R $OWNER/$REPO
+```
+
+If `LEGION_ISSUE_BACKEND=linear`:
+
+```
+linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Retro Complete
+
+**Learnings documented in:**
+- [list docs/solutions/ files written]
+
+**Key takeaways:**
+- [1-3 bullet summary of the most important learnings]")
 ```
 
 ### 7. Signal Completion
 
-Add `worker-done` label to the Linear issue via MCP (see @../legion-worker/references/linear-labels.md), then exit.
+Add `worker-done` label to the issue, then exit:
+
+- If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
+- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`

@@ -1,13 +1,13 @@
 # State Module
 
-Issue state machine. Fetches data from Linear/GitHub/daemon, runs decision logic, outputs action recommendations. Invoked by the controller skill via stdin/stdout pipe.
+Issue state machine. Fetches data from issue tracker + daemon, runs decision logic, outputs action recommendations. Invoked by the controller skill via `POST /state/collect` or the legacy stdin/stdout pipe.
 
 ## Data Flow
 
 ```
-Linear JSON (stdin) → parseLinearIssues() → fetchAllIssueData() → buildCollectedState() → JSON (stdout)
-                                                    ↓
-                                        parallel: daemon /workers + gh api graphql
+POST /state/collect {backend, issues} → backend.parseIssues() → enrichParsedIssues() → buildCollectedState() → JSON
+                                                                        ↓
+                                                            parallel: daemon /workers + gh api graphql
 ```
 
 ## Files
@@ -15,9 +15,10 @@ Linear JSON (stdin) → parseLinearIssues() → fetchAllIssueData() → buildCol
 | File | Responsibility |
 |------|---------------|
 | `types.ts` | All domain types. `IssueStatus` (enum-like with `normalize()`), `WorkerMode`, `ActionType` (16 actions), `ParsedIssue`, `FetchedIssueData`, `IssueState`, `CollectedState`. Also `computeSessionId()` and `computeControllerSessionId()` — shared by daemon. |
-| `fetch.ts` | All I/O. `fetchAllIssueData()` orchestrates parallel fetches: `parseLinearIssues()` + `getLiveWorkers()` (daemon HTTP) + `getPrDraftStatusBatch()` (GitHub GraphQL with 3x retry). Accepts injectable `CommandRunner` for testing. |
+| `fetch.ts` | All I/O. `enrichParsedIssues()` enriches parsed issues with worker status + PR draft status. `fetchAllIssueData()` is the legacy wrapper that parses Linear JSON then enriches. `getLiveWorkers()` (daemon HTTP) + `getPrDraftStatusBatch()` (GitHub GraphQL with 3x retry). Accepts injectable `CommandRunner` for testing. |
 | `decision.ts` | Pure logic, zero I/O. `suggestAction(status, flags...)` → `ActionType`. `buildIssueState()` and `buildCollectedState()` assemble final output. `ACTION_TO_MODE` maps actions to worker modes. |
-| `cli.ts` | Entry point for pipe invocation: `echo $JSON | bun run packages/daemon/src/state/cli.ts --team-id X --daemon-url Y`. Reads stdin, calls fetch + decision, writes JSON to stdout. |
+| `cli.ts` | Legacy entry point for pipe invocation: `echo $JSON | bun run packages/daemon/src/state/cli.ts --team-id X --daemon-url Y`. Reads stdin, calls fetch + decision, writes JSON to stdout. Superseded by `POST /state/collect`. |
+| `backends/` | Pluggable issue tracker backends. `issue-tracker.ts` defines the `IssueTracker` interface. `linear.ts` and `github.ts` implement it. `index.ts` has the factory. |
 
 ## ActionType State Machine (decision.ts)
 

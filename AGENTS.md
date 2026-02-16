@@ -1,6 +1,6 @@
 # Legion
 
-Autonomous development swarm using OpenCode agents. Workers implement Linear issues in isolated jj workspaces, coordinated by a controller daemon.
+Autonomous development swarm using OpenCode agents. Workers implement issues in isolated jj workspaces, coordinated by a controller daemon. Supports Linear and GitHub Issues (via Projects V2) as backends.
 
 ## Architecture
 
@@ -9,7 +9,7 @@ The state machine provides **deterministic defaults + raw signals**. The control
 controller skill, not the TypeScript.
 
 - **TypeScript daemon** — thin substrate: spawns processes, tracks health, computes
-  deterministic session IDs, collects signals from Linear/GitHub/workers, suggests actions.
+  deterministic session IDs, collects signals from issue tracker/GitHub PRs/workers, suggests actions.
   The suggestions are testable defaults, not policy.
 - **Controller skill** — the customization point: reads suggested actions + raw signals,
   executes transitions, runs quality gates, handles edge cases. Users who want different
@@ -17,7 +17,7 @@ controller skill, not the TypeScript.
 - **Worker skills** — execute specific workflow phases (architect, plan, implement, review,
   merge). Retro runs via `/legion-retro` on the implement worker session.
 
-Skills invoke TypeScript via: HTTP API (`/workers`), piped CLI (`packages/daemon/src/state/cli.ts`), and environment variables. TypeScript never calls skills directly.
+Skills invoke TypeScript via: HTTP API (`/workers`, `/state/collect`), and environment variables. TypeScript never calls skills directly.
 
 ## Tech Stack
 
@@ -25,7 +25,7 @@ Skills invoke TypeScript via: HTTP API (`/workers`), piped CLI (`packages/daemon
 - **citty** for CLI, **Bun.serve** for HTTP daemon
 - **@opencode-ai/sdk** for programmatic OpenCode interaction
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
-- **jj (Jujutsu)** for version control, **Stream Linear** for issue tracking (skill-embedded MCP)
+- **jj (Jujutsu)** for version control, **Linear** or **GitHub Issues** for issue tracking
 
 ## Commands
 

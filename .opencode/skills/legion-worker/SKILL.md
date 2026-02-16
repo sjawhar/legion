@@ -80,8 +80,7 @@ gh issue comment $ISSUE_NUMBER --body "## Escalation
 If `LEGION_ISSUE_BACKEND=linear`:
 
 ```
-linear_linear(action="comment", id="$LEGION_ISSUE_ID", body="
-## Escalation
+linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Escalation
 
 **Phase:** [current mode - architect/plan/implement/review]
 **Completed:** [what work has been done so far]
@@ -97,8 +96,7 @@ linear_linear(action="comment", id="$LEGION_ISSUE_ID", body="
 ### Context
 - **Remaining estimate:** [rough scope of remaining work after unblock]
 - **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
-- **Branch:** [current branch name if applicable]
-")
+- **Branch:** [current branch name if applicable]")
 ```
 ```
 

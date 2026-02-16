@@ -71,7 +71,7 @@ async function sendPromptWithRetry(
   text: string,
   deps: { setTimeout: typeof globalThis.setTimeout }
 ): Promise<void> {
-  let lastError: Error | null = null;
+  let lastError: Error = new Error("All retry attempts failed");
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await client.session.promptAsync({
@@ -86,7 +86,7 @@ async function sendPromptWithRetry(
       }
     }
   }
-  throw lastError!;
+  throw lastError;
 }
 
 export async function startDaemon(
@@ -200,7 +200,11 @@ export async function startDaemon(
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
   } else {
-    const sessionId = computeControllerSessionId(config.teamId!);
+    const teamId = config.teamId;
+    if (!teamId) {
+      throw new Error("LEGION_TEAM_ID is required when no external controller session ID is set");
+    }
+    const sessionId = computeControllerSessionId(teamId);
     try {
       await resolvedDeps.serveManager.createSession(
         sharedServePort,

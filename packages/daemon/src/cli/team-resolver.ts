@@ -40,14 +40,14 @@ export async function resolveTeamId(teamRef: string, cacheDir?: string): Promise
     }
   }
 
-  const apiKey = process.env.LINEAR_API_KEY;
+  const apiKey = process.env.LINEAR_API_TOKEN;
   if (apiKey) {
     return await lookupTeamViaApi(teamRef, apiKey);
   }
 
   throw new Error(
     `'${teamRef}' is not a UUID.\n` +
-      `Run 'legion teams' to cache team mappings, or set LINEAR_API_KEY.`
+      `Run 'legion teams' to cache team mappings, or set LINEAR_API_TOKEN.`
   );
 }
 

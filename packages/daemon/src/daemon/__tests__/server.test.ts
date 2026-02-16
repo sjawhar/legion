@@ -413,8 +413,8 @@ describe("daemon server", () => {
           id: "PVTI_abc",
           content: {
             number: 42,
-            repository: "gh",
-            url: "https://github.com/o/gh/issues/42",
+            repository: "acme/widgets",
+            url: "https://github.com/acme/widgets/issues/42",
             type: "Issue",
           },
           status: "Todo",
@@ -428,7 +428,7 @@ describe("daemon server", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { issues: Record<string, unknown> };
       expect(body.issues).toBeDefined();
-      expect(body.issues["GH-42"]).toBeDefined();
+      expect(body.issues["acme-widgets-42"]).toBeDefined();
     });
 
     it("rejects invalid backend", async () => {

@@ -201,7 +201,7 @@ export async function getPrDraftStatusBatch(
 
   // Retry loop with exponential backoff (3 attempts)
   const maxAttempts = 3;
-  let lastError: GitHubAPIError | null = null;
+  let lastError: GitHubAPIError = new GitHubAPIError("All retry attempts failed");
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
@@ -253,7 +253,8 @@ export async function getPrDraftStatusBatch(
           ? (rawRepo as Record<string, unknown>)
           : {};
 
-      for (const [prAlias, [issueId]] of prAliasMap.get(repoAlias)!) {
+      const prAliases = prAliasMap.get(repoAlias) ?? new Map();
+      for (const [prAlias, [issueId]] of prAliases) {
         const rawPr = repoData[prAlias];
         const prData: { isDraft?: boolean } | null =
           rawPr !== null &&
@@ -275,24 +276,12 @@ export async function getPrDraftStatusBatch(
     return result;
   }
 
-  throw lastError!;
+  throw lastError;
 }
 
 // =============================================================================
 // Issue Parsing
 // =============================================================================
-
-/**
- * Parse Linear API response into structured data.
- *
- * Handles both MCP format (labels as string[]) and GraphQL format (labels.nodes).
- *
- * @param linearIssues - Raw issue dicts from Linear API
- * @returns List of parsed issues with normalized data
- */
-export function parseLinearIssues(linearIssues: LinearIssueRaw[]): ParsedIssue[] {
-  return new LinearTracker().parseIssues(linearIssues);
-}
 
 // =============================================================================
 // Main Data Fetching
@@ -357,7 +346,7 @@ export async function enrichParsedIssues(
  * - Daemon HTTP API (for live workers)
  * - GitHub PR draft status (fetched via gh api graphql)
  *
- * @param linearIssues - Raw issue dicts from Linear API
+ * @param linearIssues - Raw issue dicts from Linear API (legacy — use enrichParsedIssues for new code)
  * @param daemonUrl - Base URL of daemon HTTP API
  * @param runner - Command runner for testing
  * @returns List of fully fetched issue data
@@ -367,6 +356,6 @@ export async function fetchAllIssueData(
   daemonUrl: string,
   runner: CommandRunner = defaultRunner
 ): Promise<FetchedIssueData[]> {
-  const parsedIssues = parseLinearIssues(linearIssues);
+  const parsedIssues = new LinearTracker().parseIssues(linearIssues);
   return enrichParsedIssues(parsedIssues, daemonUrl, runner);
 }
