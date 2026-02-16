@@ -10,7 +10,7 @@
  * Ported from Python: src/legion/state/types.py
  */
 
-import { v5 as uuidv5, validate as validateUuid } from "uuid";
+import { v5 as uuidv5 } from "uuid";
 
 // =============================================================================
 // Status Constants and Normalization
@@ -339,6 +339,20 @@ export const CollectedState = {
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /**
+ * Fixed namespace UUID for deriving team ID namespaces.
+ * Used to convert arbitrary team ID strings into deterministic UUID namespaces.
+ */
+const LEGION_NAMESPACE = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+const LEGION_NAMESPACE_UUID = uuidv5(LEGION_NAMESPACE, "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+
+/**
+ * Convert any team ID string into a UUID namespace.
+ */
+function teamIdToNamespace(teamId: string): string {
+  return uuidv5(teamId, LEGION_NAMESPACE_UUID);
+}
+
+/**
  * Convert UUID to OpenCode session ID format: ses_ + 12 hex + 14 Base62.
  *
  * Uses the 16 bytes of the UUID deterministically:
@@ -369,18 +383,14 @@ function uuidToSessionId(uuid: string): string {
  * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
  * Pattern: ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
  *
- * @param teamId - Linear project UUID
+ * @param teamId - Team identifier (UUID or arbitrary string)
  * @param issueId - Issue identifier (e.g., "ENG-21")
  * @param mode - Worker mode (e.g., "implement", "review")
  * @returns Session ID string matching OpenCode format
- * @throws Error if teamId is not a valid UUID string
  */
 export function computeSessionId(teamId: string, issueId: string, mode: WorkerModeLiteral): string {
-  if (!validateUuid(teamId)) {
-    throw new Error(`Invalid UUID: ${teamId}`);
-  }
-
-  const uuid = uuidv5(`${issueId.toLowerCase()}:${mode}`, teamId);
+  const namespace = teamIdToNamespace(teamId);
+  const uuid = uuidv5(`${issueId.toLowerCase()}:${mode}`, namespace);
   return uuidToSessionId(uuid);
 }
 
@@ -389,15 +399,11 @@ export function computeSessionId(teamId: string, issueId: string, mode: WorkerMo
  *
  * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
  *
- * @param teamId - Linear team UUID (must be valid UUID string)
+ * @param teamId - Team identifier (UUID or arbitrary string)
  * @returns Session ID string matching OpenCode format
- * @throws Error if teamId is not a valid UUID string
  */
 export function computeControllerSessionId(teamId: string): string {
-  if (!validateUuid(teamId)) {
-    throw new Error(`Invalid UUID: ${teamId}`);
-  }
-
-  const uuid = uuidv5("controller", teamId);
+  const namespace = teamIdToNamespace(teamId);
+  const uuid = uuidv5("controller", namespace);
   return uuidToSessionId(uuid);
 }
