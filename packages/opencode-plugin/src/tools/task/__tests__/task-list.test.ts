@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { writeJsonAtomic } from "../storage";
+import { indexPathFor, writeTaskIndexAtomic } from "../task-index";
 import { createTaskListTool } from "../task-list";
 import type { Task } from "../types";
 
@@ -125,6 +126,24 @@ describe("task_list", () => {
     expect(ids).not.toContain("T-blocked");
   });
 
+  it("without ready filter, includes blocked tasks", async () => {
+    writeTask(tempDir, makeTask({ id: "T-dep", status: "completed" }));
+    writeTask(tempDir, makeTask({ id: "T-ready", status: "pending", blockedBy: ["T-dep"] }));
+    writeTask(
+      tempDir,
+      makeTask({ id: "T-blocked", status: "pending", blockedBy: ["T-still-pending"] })
+    );
+    writeTask(tempDir, makeTask({ id: "T-still-pending", status: "pending" }));
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({}, makeContext()));
+
+    const ids = result.tasks.map((t: { id: string }) => t.id);
+    expect(ids).toContain("T-ready");
+    expect(ids).toContain("T-blocked");
+    expect(ids).toContain("T-still-pending");
+  });
+
   it("missing dep = blocked (safe default)", async () => {
     writeTask(tempDir, makeTask({ id: "T-orphan", status: "pending", blockedBy: ["T-ghost"] }));
 
@@ -144,5 +163,100 @@ describe("task_list", () => {
 
     expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0].id).toBe("T-child");
+  });
+});
+
+describe("index-aware listing", () => {
+  it("skips reading completed task files when index exists", async () => {
+    for (let i = 0; i < 3; i++) {
+      writeTask(tempDir, makeTask({ id: `T-done-${i}`, status: "completed" }));
+    }
+    writeTask(tempDir, makeTask({ id: "T-active", status: "pending" }));
+
+    writeTaskIndexAtomic(indexPathFor(tempDir), {
+      version: 1,
+      entries: [{ id: "T-active", status: "pending" }],
+    });
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({}, makeContext()));
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].id).toBe("T-active");
+  });
+
+  it("resolves completed blockers not in index", async () => {
+    writeTask(tempDir, makeTask({ id: "T-dep", status: "completed" }));
+    writeTask(tempDir, makeTask({ id: "T-waiting", status: "pending", blockedBy: ["T-dep"] }));
+
+    writeTaskIndexAtomic(indexPathFor(tempDir), {
+      version: 1,
+      entries: [{ id: "T-waiting", status: "pending" }],
+    });
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({ ready: true }, makeContext()));
+
+    const ids = result.tasks.map((t: { id: string }) => t.id);
+    expect(ids).toContain("T-waiting");
+  });
+
+  it("treats missing blocker file as blocking even with index", async () => {
+    writeTask(tempDir, makeTask({ id: "T-orphan", status: "pending", blockedBy: ["T-ghost"] }));
+
+    writeTaskIndexAtomic(indexPathFor(tempDir), {
+      version: 1,
+      entries: [{ id: "T-orphan", status: "pending" }],
+    });
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({ ready: true }, makeContext()));
+
+    const ids = result.tasks.map((t: { id: string }) => t.id);
+    expect(ids).not.toContain("T-orphan");
+  });
+
+  it("falls back to full scan when no index exists", async () => {
+    writeTask(tempDir, makeTask({ id: "T-a", status: "pending" }));
+    writeTask(tempDir, makeTask({ id: "T-b", status: "in_progress" }));
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({}, makeContext()));
+
+    const ids = result.tasks.map((t: { id: string }) => t.id);
+    expect(ids).toContain("T-a");
+    expect(ids).toContain("T-b");
+  });
+
+  it("skips missing task files referenced in index", async () => {
+    writeTask(tempDir, makeTask({ id: "T-exists", status: "pending" }));
+    writeTaskIndexAtomic(indexPathFor(tempDir), {
+      version: 1,
+      entries: [
+        { id: "T-exists", status: "pending" },
+        { id: "T-missing", status: "pending" },
+      ],
+    });
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({}, makeContext()));
+
+    const ids = result.tasks.map((t: { id: string }) => t.id);
+    expect(ids).toContain("T-exists");
+    expect(ids).not.toContain("T-missing");
+  });
+
+  it("recovers from corrupted index by falling back to full scan", async () => {
+    writeTask(tempDir, makeTask({ id: "T-a", status: "pending" }));
+    writeTask(tempDir, makeTask({ id: "T-b", status: "in_progress" }));
+
+    fs.writeFileSync(indexPathFor(tempDir), "{invalid json");
+
+    const tool = createTaskListTool(tempDir);
+    const result = JSON.parse(await tool.execute({}, makeContext()));
+
+    const ids = result.tasks.map((t: { id: string }) => t.id);
+    expect(ids).toContain("T-a");
+    expect(ids).toContain("T-b");
   });
 });

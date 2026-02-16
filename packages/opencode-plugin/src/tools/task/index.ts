@@ -6,10 +6,23 @@ import { createTaskListTool } from "./task-list";
 import { createTaskUpdateTool } from "./task-update";
 
 export { detectCycle } from "./graph";
-export { readAllTasks } from "./task-list";
+export {
+  indexPathFor,
+  readTaskIndex,
+  upsertIndexEntry,
+  writeTaskIndexAtomic,
+} from "./task-index";
+export { readActiveTasks, readAllTasks } from "./task-list";
 export type { TodoInfo } from "./todo-sync";
 export { syncTaskTodoUpdate, syncTaskToTodo } from "./todo-sync";
-export type { Task, TaskCreateInput, TaskStatus, TaskUpdateInput } from "./types";
+export type {
+  Task,
+  TaskCreateInput,
+  TaskIndex,
+  TaskIndexEntry,
+  TaskStatus,
+  TaskUpdateInput,
+} from "./types";
 
 interface TaskTools {
   task_create: ToolDefinition;

@@ -6,6 +6,7 @@ import type { ToolContext } from "@opencode-ai/plugin";
 import { writeJsonAtomic } from "../storage";
 import { createTaskUpdateTool } from "../task-update";
 import type { Task } from "../types";
+import { MAX_DESCRIPTION_CHARS } from "../types";
 
 let tempDir: string;
 
@@ -145,5 +146,43 @@ describe("task_update", () => {
 
     expect(result.error).toBe("cycle_detected");
     expect(result.cycle).toBeTruthy();
+  });
+});
+
+describe("task_update guardrails", () => {
+  it("rejects oversized description update", async () => {
+    writeTask(tempDir, makeTask());
+    const tool = createTaskUpdateTool(undefined, tempDir);
+    const result = JSON.parse(
+      await tool.execute(
+        { id: "T-update-test", description: "x".repeat(MAX_DESCRIPTION_CHARS + 1) },
+        makeContext()
+      )
+    );
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toContain("description");
+  });
+
+  it("accepts description at the limit", async () => {
+    writeTask(tempDir, makeTask());
+    const tool = createTaskUpdateTool(undefined, tempDir);
+    const result = JSON.parse(
+      await tool.execute(
+        { id: "T-update-test", description: "x".repeat(MAX_DESCRIPTION_CHARS) },
+        makeContext()
+      )
+    );
+    expect(result.task).toBeTruthy();
+    expect(result.task.description).toHaveLength(MAX_DESCRIPTION_CHARS);
+  });
+
+  it("accepts empty description update", async () => {
+    writeTask(tempDir, makeTask());
+    const tool = createTaskUpdateTool(undefined, tempDir);
+    const result = JSON.parse(
+      await tool.execute({ id: "T-update-test", description: "" }, makeContext())
+    );
+    expect(result.task).toBeTruthy();
+    expect(result.task.description).toBe("");
   });
 });
