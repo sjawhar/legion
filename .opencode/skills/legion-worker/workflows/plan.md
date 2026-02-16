@@ -1,6 +1,6 @@
 # Plan Workflow
 
-Transform a Linear issue into a reviewed, executable implementation plan.
+Transform an issue into a reviewed, executable implementation plan.
 
 ## Workflow
 
@@ -17,7 +17,7 @@ digraph plan_workflow {
     executable [label="3. /superpowers/writing-plans"];
     review [label="4. /plan-review"];
     passed [label="Review passed?" shape=diamond];
-    post [label="5. Post to Linear"];
+    post [label="5. Post to Issue"];
     complete [label="6. Signal Completion"];
     exit_unclear [label="Exit (user-input-needed)"];
 
@@ -38,11 +38,19 @@ digraph plan_workflow {
 
 ### 1. Fetch the Issue
 
+If `LEGION_ISSUE_BACKEND=github`:
+
 ```
-linear_linear(action="get", id=$LINEAR_ISSUE_ID)
+gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO
 ```
 
-The `$LINEAR_ISSUE_ID` environment variable is set by the controller when spawning this worker.
+If `LEGION_ISSUE_BACKEND=linear`:
+
+```
+linear_linear(action="get", id=$LEGION_ISSUE_ID)
+```
+
+The `$LEGION_ISSUE_ID` environment variable is set by the controller when spawning this worker.
 
 Extract:
 - Title and description
@@ -56,7 +64,7 @@ Before researching and structuring the plan, run a pre-planning analysis to iden
 Spawn via background_task:
 - subagent_type: metis
 - run_in_background: true
-- description: "Pre-planning analysis for $LINEAR_ISSUE_ID"
+- description: "Pre-planning analysis for $LEGION_ISSUE_ID"
 - prompt: Start with "MODE: PRE_PLANNING" then include the issue title, description, acceptance criteria, and relevant comments. Ask Metis to identify: hidden assumptions, ambiguities with effort implications, scope traps, and AI-slop risks.
 
 Wait for the result via background_output.
@@ -92,7 +100,7 @@ Metis pre-analysis:
 [analysis output from step 1.5]
 
 Feature description:
-[Linear issue title + description + comments]
+[Issue title + description + comments]
 ```
 
 The skill handles:
@@ -102,8 +110,12 @@ The skill handles:
 - Structured plan creation
 
 **If the skill determines requirements are fundamentally unclear** (even after legion-oracle + assumptions):
-1. Add `user-input-needed` label via `linear_linear(action="update", ...)`
-2. Post a comment via `linear_linear(action="comment", ...)` explaining what needs clarification
+1. Add `user-input-needed` label:
+   - If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
+   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+2. Post a comment explaining what needs clarification:
+   - If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 3. Exit immediately - do NOT add `worker-done`
 
 ### 3. Invoke /superpowers/writing-plans
@@ -155,21 +167,31 @@ This spawns parallel cross-family reviewers:
 4. Repeat until no blocking issues remain
 
 **Max 3 iterations.** If still failing:
-1. Add `user-input-needed` label via `linear_linear(action="update", ...)`
-2. Post a comment explaining unresolved review issues
+1. Add `user-input-needed` label:
+   - If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
+   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+2. Post a comment explaining unresolved review issues:
+   - If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 3. Exit without `worker-done`
 
-**If a reviewer fails/times out:** Proceed with partial results. Note the missing review in the Linear comment.
+**If a reviewer fails/times out:** Proceed with partial results. Note the missing review in the issue comment.
 
-### 5. Post to Linear
+### 5. Post to Issue
 
-Use `linear_linear(action="comment", ...)` to post the **full executable plan** from step 3 (or revised after step 4).
+Post the **full executable plan** from step 3 (or revised after step 4):
 
-The complete `/superpowers:writing-plans` output goes directly into the Linear comment - all tasks, all code examples, all test commands.
+- If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+
+The complete `/superpowers:writing-plans` output goes directly into the issue comment - all tasks, all code examples, all test commands.
 
 ### 6. Signal Completion
 
-Add `worker-done` label to the Linear issue via `linear_linear(action="update", ...)`, then exit.
+Add `worker-done` label to the issue, then exit:
+
+- If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
+- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
 
 **CRITICAL:** Only add `worker-done` after successfully posting the plan. Never add this label if:
 - Requirements were unclear and could not be resolved (use `user-input-needed` instead)
@@ -180,13 +202,13 @@ Add `worker-done` label to the Linear issue via `linear_linear(action="update", 
 
 | Step | Action | Skill/Tool |
 |------|--------|------------|
-| Fetch | Get issue details | `linear_linear(action="get", ...)` |
+| Fetch | Get issue details | `gh issue view $ISSUE_NUMBER ...` or `linear_linear(action="get", ...)` |
 | Pre-Analysis | Identify risks | Metis agent (background) |
 | Research + Structure | Create plan | `/workflows:plan` (autonomous) |
 | Executable | Bite-sized tasks | `/superpowers/writing-plans` |
 | Validate | Review plan | `/plan-review` (iterate) |
-| Post | Full plan to issue | `linear_linear(action="comment", ...)` |
-| Complete | Add done label | `linear_linear(action="update", ...)` |
+| Post | Full plan to issue | `gh issue comment ...` or `linear_linear(action="comment", ...)` |
+| Complete | Add done label | `gh issue edit --add-label ...` or `linear_linear(action="update", ...)` |
 
 ## Autonomous Context Template
 

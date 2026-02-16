@@ -32,8 +32,8 @@ Review outcomes signaled via **PR draft status**, not labels:
 | Draft | PR needs work |
 
 ```bash
-gh pr ready "$LINEAR_ISSUE_ID"        # Mark approved
-gh pr ready "$LINEAR_ISSUE_ID" --undo # Mark changes requested
+gh pr ready "$LEGION_ISSUE_ID"        # Mark approved
+gh pr ready "$LEGION_ISSUE_ID" --undo # Mark changes requested
 ```
 
 **Critical ordering for reviewers:** Set draft status BEFORE `worker-done` on Linear.

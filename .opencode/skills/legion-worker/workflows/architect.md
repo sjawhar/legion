@@ -16,8 +16,16 @@ digraph {
 
 ### 1. Fetch Issue
 
+If `LEGION_ISSUE_BACKEND=github`:
+
 ```
-linear_linear(action="get", id=$LINEAR_ISSUE_ID)
+gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO
+```
+
+If `LEGION_ISSUE_BACKEND=linear`:
+
+```
+linear_linear(action="get", id=$LEGION_ISSUE_ID)
 ```
 
 Extract title, description, comments (included in get response), current labels.
@@ -96,7 +104,19 @@ Each criterion should answer: "How will we know this is done?"
 ## Sub-Issue Creation
 
 ```
-parent = linear_linear(action="get", id=$LINEAR_ISSUE_ID)
+If `LEGION_ISSUE_BACKEND=github`:
+
+```
+gh issue create --title "[Scoped title]" --body "## Acceptance Criteria
+- [ ] [Testable condition]
+
+Part of $LEGION_ISSUE_ID." -R $OWNER/$REPO
+```
+
+If `LEGION_ISSUE_BACKEND=linear`:
+
+```
+parent = linear_linear(action="get", id=$LEGION_ISSUE_ID)
 
 linear_linear(action="create",
   title: [Scoped title],
@@ -106,10 +126,11 @@ linear_linear(action="create",
     ## Acceptance Criteria
     - [ ] [Testable condition]
 
-    Part of $LINEAR_ISSUE_ID.,
+    Part of $LEGION_ISSUE_ID.,
   state: "Backlog",
   labels: ["worker-done"]
 )
+```
 ```
 
 Post comment to parent explaining the breakdown.
@@ -118,12 +139,20 @@ Post comment to parent explaining the breakdown.
 
 Labels array replaces all labels. Fetch current labels first:
 
+If `LEGION_ISSUE_BACKEND=github`:
+
 ```
-issue = linear_linear(action="get", id=$LINEAR_ISSUE_ID)
+gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
+```
+
+If `LEGION_ISSUE_BACKEND=linear`:
+
+```
+issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
 current_label_names = [label.name for label in issue.labels]
 
 linear_linear(action="update",
-  id: $LINEAR_ISSUE_ID,
+  id: $LEGION_ISSUE_ID,
   labels: current_label_names + ["worker-done"]
 )
 ```
@@ -147,6 +176,6 @@ linear_linear(action="update",
 |---------|------------|
 | Adding `worker-done` to parent after breakdown | Only children get it; parent stays unchanged |
 | Thinking "none" means remove labels from parent | "None" means don't add anything; keep existing labels |
-| Using identifier as `parentId` | Must use UUID from `get_issue` |
+| Using identifier as `parentId` | Must use UUID from `get_issue` (Linear only) |
 | Updating labels without fetching current | Fetch first, then append |
 | Forgetting to comment on parent after breakdown | Always post comment explaining which children were created |
