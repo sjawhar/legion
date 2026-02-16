@@ -10,15 +10,12 @@
  * Ported from Python: src/legion/state/fetch.py
  */
 
-import {
-  createParsedIssue,
-  type FetchedIssueData,
-  GitHubPRRef,
-  type GitHubPRRef as GitHubPRRefType,
-  IssueStatus,
-  type LinearIssueRaw,
-  type LinearLabelsContainer,
-  type ParsedIssue,
+import { LinearTracker } from "./backends/linear";
+import type {
+  FetchedIssueData,
+  GitHubPRRef as GitHubPRRefType,
+  LinearIssueRaw,
+  ParsedIssue,
 } from "./types";
 
 // =============================================================================
@@ -294,77 +291,64 @@ export async function getPrDraftStatusBatch(
  * @returns List of parsed issues with normalized data
  */
 export function parseLinearIssues(linearIssues: LinearIssueRaw[]): ParsedIssue[] {
-  const parsed: ParsedIssue[] = [];
-
-  for (const issue of linearIssues) {
-    const issueId = issue.identifier ?? "";
-    if (!issueId) {
-      continue;
-    }
-
-    // Extract and normalize status
-    // Linear MCP returns "status" as string, but raw API might return "state.name"
-    let rawStatus: string = issue.status ?? "";
-    if (!rawStatus) {
-      const stateObj = issue.state;
-      rawStatus = stateObj?.name ?? "";
-    }
-    const status = IssueStatus.normalize(rawStatus);
-
-    // Extract labels
-    // Linear MCP returns "labels" as list of strings, raw API might return "labels.nodes"
-    const labelsRaw = issue.labels;
-    let labels: string[] = [];
-
-    if (labelsRaw !== null && labelsRaw !== undefined) {
-      if (typeof labelsRaw === "object" && !Array.isArray(labelsRaw)) {
-        // Raw API format: {"nodes": [{"name": "label1"}, ...]}
-        const container = labelsRaw as LinearLabelsContainer;
-        const nodes = container.nodes ?? [];
-        if (Array.isArray(nodes)) {
-          labels = nodes
-            .filter(
-              (node): node is { name: string } =>
-                typeof node === "object" &&
-                node !== null &&
-                typeof (node as { name?: unknown }).name === "string" &&
-                Boolean((node as { name: string }).name)
-            )
-            .map((node) => node.name);
-        }
-      } else if (Array.isArray(labelsRaw)) {
-        // MCP format: ["label1", "label2"] - filter out empty/non-string values
-        labels = labelsRaw.filter((x): x is string => typeof x === "string" && x !== "");
-      }
-    }
-
-    // Extract PR reference from attachments
-    let prRef: GitHubPRRefType | null = null;
-    let attachments = issue.attachments ?? [];
-    if (!Array.isArray(attachments)) {
-      attachments = [];
-    }
-    for (const attachment of attachments) {
-      if (typeof attachment === "object" && attachment !== null) {
-        const url = attachment.url ?? "";
-        if (url.includes("github.com") && url.includes("/pull/")) {
-          prRef = GitHubPRRef.fromUrl(url);
-          if (prRef) {
-            break;
-          }
-        }
-      }
-    }
-
-    parsed.push(createParsedIssue(issueId, status, labels, prRef));
-  }
-
-  return parsed;
+  return new LinearTracker().parseIssues(linearIssues);
 }
 
 // =============================================================================
 // Main Data Fetching
 // =============================================================================
+
+export async function enrichParsedIssues(
+  parsedIssues: ParsedIssue[],
+  daemonUrl: string,
+  runner: CommandRunner = defaultRunner
+): Promise<FetchedIssueData[]> {
+  const prRefsForStatus: Record<string, GitHubPRRefType> = {};
+  for (const p of parsedIssues) {
+    if (p.needsPrStatus && p.prRef !== null) {
+      prRefsForStatus[p.issueId] = p.prRef;
+    }
+  }
+
+  let liveWorkers: Record<string, { mode: string; status: string }> = {};
+  let prDraftMap: Record<string, boolean | null> = {};
+
+  await Promise.all([
+    (async () => {
+      liveWorkers = await getLiveWorkers(daemonUrl);
+    })(),
+    (async () => {
+      if (Object.keys(prRefsForStatus).length === 0) {
+        return;
+      }
+      try {
+        prDraftMap = await getPrDraftStatusBatch(prRefsForStatus, runner);
+      } catch {
+        for (const issueId of Object.keys(prRefsForStatus)) {
+          prDraftMap[issueId] = null;
+        }
+      }
+    })(),
+  ]);
+
+  return parsedIssues.map((issue) => {
+    const workerInfo = liveWorkers[issue.issueId.toUpperCase()] ?? null;
+    return {
+      issueId: issue.issueId,
+      status: issue.status,
+      labels: issue.labels,
+      hasPr: issue.hasPr,
+      prIsDraft: prDraftMap[issue.issueId] ?? null,
+      hasLiveWorker: workerInfo !== null,
+      workerMode: workerInfo?.mode ?? null,
+      workerStatus: workerInfo?.status ?? null,
+      hasUserFeedback: issue.hasUserFeedback,
+      hasUserInputNeeded: issue.hasUserInputNeeded,
+      hasNeedsApproval: issue.hasNeedsApproval,
+      hasHumanApproved: issue.hasHumanApproved,
+    };
+  });
+}
 
 /**
  * Fetch all data for issues in parallel.
@@ -383,64 +367,6 @@ export async function fetchAllIssueData(
   daemonUrl: string,
   runner: CommandRunner = defaultRunner
 ): Promise<FetchedIssueData[]> {
-  // Phase 1: Parse issues (sync, fast)
   const parsedIssues = parseLinearIssues(linearIssues);
-
-  // Identify PRs that need draft status lookup
-  const prRefsForStatus: Record<string, GitHubPRRefType> = {};
-  for (const p of parsedIssues) {
-    if (p.needsPrStatus && p.prRef !== null) {
-      prRefsForStatus[p.issueId] = p.prRef;
-    }
-  }
-
-  // Phase 2: Fetch everything in parallel
-  let liveWorkers: Record<string, { mode: string; status: string }> = {};
-  let prDraftMap: Record<string, boolean | null> = {};
-
-  const fetchWorkers = async () => {
-    liveWorkers = await getLiveWorkers(daemonUrl);
-  };
-
-  const fetchPrDraftStatusSafe = async () => {
-    if (Object.keys(prRefsForStatus).length === 0) {
-      return;
-    }
-    try {
-      prDraftMap = await getPrDraftStatusBatch(prRefsForStatus, runner);
-    } catch {
-      // GitHub API failed - set all PRs to null (couldn't check)
-      for (const issueId of Object.keys(prRefsForStatus)) {
-        prDraftMap[issueId] = null;
-      }
-    }
-  };
-
-  await Promise.all([fetchWorkers(), fetchPrDraftStatusSafe()]);
-
-  // Phase 3: Build results
-  const results: FetchedIssueData[] = [];
-
-  for (const issue of parsedIssues) {
-    const workerInfo = liveWorkers[issue.issueId.toUpperCase()] ?? null;
-    const hasLiveWorker = workerInfo !== null;
-    const prIsDraft: boolean | null = prDraftMap[issue.issueId] ?? null;
-
-    results.push({
-      issueId: issue.issueId,
-      status: issue.status,
-      labels: issue.labels,
-      hasPr: issue.hasPr,
-      prIsDraft,
-      hasLiveWorker,
-      workerMode: workerInfo?.mode ?? null,
-      workerStatus: workerInfo?.status ?? null,
-      hasUserFeedback: issue.hasUserFeedback,
-      hasUserInputNeeded: issue.hasUserInputNeeded,
-      hasNeedsApproval: issue.hasNeedsApproval,
-      hasHumanApproved: issue.hasHumanApproved,
-    });
-  }
-
-  return results;
+  return enrichParsedIssues(parsedIssues, daemonUrl, runner);
 }

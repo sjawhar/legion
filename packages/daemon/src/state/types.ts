@@ -103,46 +103,6 @@ export const WorkerMode = {
   MERGE: "merge" as WorkerModeLiteral,
 } as const;
 
-// =============================================================================
-// External API Types (documenting what APIs return)
-// =============================================================================
-
-export interface LinearStateDict {
-  name: string;
-}
-
-export interface LinearLabelNode {
-  name: string;
-}
-
-export interface LinearLabelsContainer {
-  nodes: LinearLabelNode[];
-}
-
-export interface LinearIssue {
-  identifier: string;
-  state: LinearStateDict | null;
-  labels: LinearLabelsContainer | null;
-}
-
-export interface LinearAttachment {
-  url?: string;
-}
-
-/**
- * Raw Linear issue from API (MCP or GraphQL).
- *
- * Different APIs return different fields.
- * The identifier field is required for valid issues.
- */
-export interface LinearIssueRaw {
-  identifier?: string;
-  status?: string; // MCP format: status as string
-  state?: LinearStateDict; // GraphQL format: state.name
-  labels?: string[] | LinearLabelsContainer; // MCP: string[], GraphQL: {nodes: [...]}
-  attachments?: LinearAttachment[];
-}
-
 export interface GitHubLabel {
   name: string;
 }
@@ -150,6 +110,15 @@ export interface GitHubLabel {
 export interface GitHubPR {
   labels: GitHubLabel[] | null;
 }
+
+export type {
+  LinearAttachment,
+  LinearIssue,
+  LinearIssueRaw,
+  LinearLabelNode,
+  LinearLabelsContainer,
+  LinearStateDict,
+} from "./backends/linear";
 
 // =============================================================================
 // Internal Data Structures

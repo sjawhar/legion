@@ -1,5 +1,13 @@
 import { isAbsolute } from "node:path";
-import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
+import { type BackendName, getBackend } from "../state/backends/index";
+import { buildCollectedState } from "../state/decision";
+import { enrichParsedIssues } from "../state/fetch";
+import {
+  CollectedState,
+  computeSessionId,
+  WorkerMode,
+  type WorkerModeLiteral,
+} from "../state/types";
 import { createWorkerClient, type WorkerEntry } from "./serve-manager";
 import {
   type ControllerState,
@@ -334,6 +342,37 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             return jsonResponse(result.data);
           } catch {
             return badGateway();
+          }
+        }
+
+        if (method === "POST" && url.pathname === "/state/collect") {
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const backend = payload.backend;
+          if (backend !== "linear" && backend !== "github") {
+            return badRequest("invalid_backend");
+          }
+
+          const issues = payload.issues;
+          if (!Array.isArray(issues)) {
+            return badRequest("invalid_issues");
+          }
+
+          try {
+            const tracker = getBackend(backend as BackendName);
+            const parsed = tracker.parseIssues(issues);
+            const daemonUrl = `http://127.0.0.1:${server.port}`;
+            const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+            const state = buildCollectedState(issuesData, opts.teamId);
+            return jsonResponse(CollectedState.toDict(state));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "unknown_error";
+            return serverError(message);
           }
         }
 

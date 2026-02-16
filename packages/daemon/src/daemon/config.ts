@@ -12,6 +12,7 @@ export interface DaemonConfig {
   logDir: string;
   controllerSessionId?: string;
   controllerPrompt?: string;
+  issueBackend: "linear" | "github";
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -63,6 +64,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
 
   validateControllerPrompt(controllerPrompt);
 
+  const rawBackend = env.LEGION_ISSUE_BACKEND || "linear";
+  if (rawBackend !== "linear" && rawBackend !== "github") {
+    throw new Error(`LEGION_ISSUE_BACKEND must be 'linear' or 'github' (got: ${rawBackend})`);
+  }
+  const issueBackend = rawBackend as "linear" | "github";
+
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,
@@ -74,5 +81,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     logDir: path.join(stateDir, "logs"),
     controllerSessionId,
     controllerPrompt,
+    issueBackend,
   };
 }
