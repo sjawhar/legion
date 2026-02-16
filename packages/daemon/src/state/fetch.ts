@@ -95,7 +95,9 @@ export async function getLiveWorkers(
   daemonUrl: string
 ): Promise<Record<string, { mode: string; status: string }>> {
   try {
-    const response = await fetch(`${daemonUrl}/workers`);
+    const response = await fetch(`${daemonUrl}/workers`, {
+      signal: AbortSignal.timeout(5_000), // 5s — local daemon should respond fast
+    });
     if (!response.ok) {
       return {};
     }

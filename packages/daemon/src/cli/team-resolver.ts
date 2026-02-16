@@ -77,6 +77,7 @@ async function lookupTeamViaApi(teamRef: string, apiKey: string): Promise<string
         Authorization: apiKey,
       },
       body: payload,
+      signal: AbortSignal.timeout(15_000), // 15s for external API
     });
 
     const data = (await response.json()) as {
