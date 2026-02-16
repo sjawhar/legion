@@ -48,12 +48,14 @@ export async function defaultRunner(cmd: string[]): Promise<CommandResult> {
     stderr: "pipe",
   });
 
+  const killTimeout = setTimeout(() => proc.kill(), 30_000); // 30s for gh api graphql
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
 
   const exitCode = await proc.exited;
+  clearTimeout(killTimeout);
   return { stdout, stderr, exitCode };
 }
 

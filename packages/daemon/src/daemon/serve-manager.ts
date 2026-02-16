@@ -87,6 +87,7 @@ export async function createSession(
       "x-opencode-directory": encodeURIComponent(workspace),
     },
     body: JSON.stringify({ id: sessionId }),
+    signal: AbortSignal.timeout(10_000), // 10s — session creation is a local call
   });
   if (res.ok) {
     return;
