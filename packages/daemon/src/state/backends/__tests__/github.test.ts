@@ -137,6 +137,53 @@ describe("GitHubTracker.parseIssues", () => {
     expect(result[1].issueId).toBe("BACKEND-1");
   });
 
+  it("skips items with null elements in array", () => {
+    const result = tracker.parseIssues([null, undefined, 42, "string"]);
+    expect(result).toEqual([]);
+  });
+
+  it("skips items with missing content field", () => {
+    const items = [{ id: "PVTI_abc", status: "Todo", labels: [] }];
+    const result = tracker.parseIssues(items);
+    expect(result).toEqual([]);
+  });
+
+  it("skips items with empty repository string", () => {
+    const items = [
+      {
+        id: "PVTI_abc",
+        content: {
+          number: 42,
+          repository: "",
+          url: "https://github.com/o/r/issues/42",
+          type: "Issue",
+        },
+        status: "Todo",
+        labels: [],
+      },
+    ];
+    const result = tracker.parseIssues(items);
+    expect(result).toEqual([]);
+  });
+
+  it("skips items with invalid repo name characters", () => {
+    const items = [
+      {
+        id: "PVTI_abc",
+        content: {
+          number: 1,
+          repository: "owner/repo",
+          url: "...",
+          type: "Issue",
+        },
+        status: "Todo",
+        labels: [],
+      },
+    ];
+    const result = tracker.parseIssues(items);
+    expect(result).toEqual([]);
+  });
+
   it("returns empty array for empty input", () => {
     expect(tracker.parseIssues([])).toEqual([]);
   });

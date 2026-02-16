@@ -19,4 +19,21 @@ describe("getBackend", () => {
   it("throws for unknown backend", () => {
     expect(() => getBackend("jira" as any)).toThrow("Unknown backend");
   });
+
+  it("github backend skips non-Issue content types", () => {
+    const backend = getBackend("github");
+    const result = backend.parseIssues([
+      { id: "PVTI_1", content: { type: "DraftIssue" }, status: "Todo", labels: [] },
+    ]);
+    expect(result).toEqual([]);
+  });
+
+  it("linear backend parses Linear-format issues", () => {
+    const backend = getBackend("linear");
+    const result = backend.parseIssues([
+      { identifier: "ENG-1", state: { name: "Todo" }, labels: { nodes: [] } },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].issueId).toBe("ENG-1");
+  });
 });

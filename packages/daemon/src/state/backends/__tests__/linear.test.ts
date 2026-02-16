@@ -67,6 +67,35 @@ describe("LinearTracker.parseIssues", () => {
     const result = tracker.parseIssues(issues);
     expect(result[0].labels).toEqual([]);
   });
+
+  it("returns empty array for non-array input", () => {
+    expect(tracker.parseIssues(null)).toEqual([]);
+    expect(tracker.parseIssues(undefined)).toEqual([]);
+    expect(tracker.parseIssues("string")).toEqual([]);
+    expect(tracker.parseIssues(42)).toEqual([]);
+  });
+
+  it("skips null elements in array", () => {
+    const result = tracker.parseIssues([null, undefined, 42]);
+    expect(result).toEqual([]);
+  });
+
+  it("extracts PR ref from valid attachment URL", () => {
+    const issues = [
+      {
+        identifier: "ENG-1",
+        state: { name: "Needs Review" },
+        labels: { nodes: [{ name: "worker-done" }] },
+        attachments: [{ url: "https://github.com/owner/repo/pull/123" }],
+      },
+    ];
+    const result = tracker.parseIssues(issues);
+    expect(result).toHaveLength(1);
+    expect(result[0].prRef).not.toBeNull();
+    expect(result[0].prRef?.owner).toBe("owner");
+    expect(result[0].prRef?.repo).toBe("repo");
+    expect(result[0].prRef?.number).toBe(123);
+  });
 });
 
 describe("LinearTracker.parseIssues edge cases", () => {

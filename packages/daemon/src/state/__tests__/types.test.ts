@@ -86,6 +86,11 @@ describe("computeSessionId with non-UUID team ID", () => {
     expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   });
 
+  it("produces deterministic known output (golden value)", () => {
+    const result = computeSessionId("sjawhar/5", "gh-42", "implement");
+    expect(result).toBe("ses_5f6e229e023c20L4w2B1RNa3WZ");
+  });
+
   it("same non-UUID inputs produce same output", () => {
     const result1 = computeSessionId("sjawhar/5", "gh-42", "implement");
     const result2 = computeSessionId("sjawhar/5", "gh-42", "implement");

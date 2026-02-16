@@ -9,12 +9,14 @@
 import { describe, expect, it, mock } from "bun:test";
 import {
   type CommandRunner,
+  enrichParsedIssues,
   fetchAllIssueData,
   GitHubAPIError,
   getLiveWorkers,
   getPrDraftStatusBatch,
 } from "../fetch";
 import type { LinearIssueRaw } from "../types";
+import { createParsedIssue } from "../types";
 
 // =============================================================================
 // TestGetLiveWorkers (HTTP-based)
@@ -485,6 +487,45 @@ describe("fetchAllIssueData", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].issueId).toBe("ENG-21");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("enrichParsedIssues", () => {
+  it("enriches issues with worker status from daemon", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({ stdout: "", stderr: "", exitCode: 1 });
+      const issues = [createParsedIssue("ENG-21", "In Progress", ["worker-active"], null)];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+      expect(result).toHaveLength(1);
+      expect(result[0].issueId).toBe("ENG-21");
+      expect(result[0].hasLiveWorker).toBe(false);
+      expect(result[0].prIsDraft).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("handles GitHub-style issues with null prRef", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({ stdout: "", stderr: "", exitCode: 1 });
+      const issues = [createParsedIssue("GH-42", "Todo", [], null)];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+      expect(result).toHaveLength(1);
+      expect(result[0].prIsDraft).toBeNull();
+      expect(result[0].hasPr).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
     }
