@@ -170,7 +170,6 @@ export async function startDaemon(
     hostname: "127.0.0.1",
     teamId: config.teamId,
     legionDir: config.legionDir ?? "",
-    shortId: config.shortId ?? "default",
     serveManager: resolvedDeps.serveManager,
     sharedServePort,
     stateFilePath: config.stateFilePath,

@@ -114,8 +114,4 @@ export class LinearTracker implements IssueTracker {
 
     return parsed;
   }
-
-  async resolveTeamId(_ref: string): Promise<string> {
-    throw new Error("Not yet implemented — will be moved from team-resolver.ts");
-  }
 }

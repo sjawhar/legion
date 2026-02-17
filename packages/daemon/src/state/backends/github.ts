@@ -19,7 +19,10 @@ interface GitHubProjectItem {
   status?: string | null;
   labels?: string[] | null;
   "linked pull requests"?: string[] | null;
+  [key: string]: unknown;
 }
+
+const LINKED_PR_PATTERN = /^linked\s*pull\s*requests?$/i;
 
 function extractItems(raw: unknown): unknown[] {
   if (Array.isArray(raw)) {
@@ -42,6 +45,9 @@ function parseOwnerRepo(repository: string): { owner: string; repo: string } | n
   return { owner: parts[0], repo: parts[1] };
 }
 
+// Human-readable key and worker-ID component. Ambiguous for repos with
+// hyphens (e.g. "acme-my-widgets-42" could be acme/my-widgets or acme-my/widgets).
+// Use ParsedIssue.source for API calls — it carries the canonical owner/repo/number.
 function buildIssueId(owner: string, repo: string, number: number): string {
   const safeOwner = owner.toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const safeRepo = repo.toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -85,7 +91,15 @@ export class GitHubTracker implements IssueTracker {
       }
 
       let prRef: GitHubPRRefType | null = null;
-      const linkedPRs = typedItem["linked pull requests"];
+      let linkedPRs: unknown = typedItem["linked pull requests"];
+      if (!Array.isArray(linkedPRs)) {
+        for (const key of Object.keys(typedItem)) {
+          if (LINKED_PR_PATTERN.test(key)) {
+            linkedPRs = typedItem[key];
+            break;
+          }
+        }
+      }
       if (Array.isArray(linkedPRs)) {
         for (const prUrl of linkedPRs) {
           if (typeof prUrl === "string") {
@@ -106,9 +120,5 @@ export class GitHubTracker implements IssueTracker {
     }
 
     return parsed;
-  }
-
-  async resolveTeamId(_ref: string): Promise<string> {
-    throw new Error("Not yet implemented");
   }
 }

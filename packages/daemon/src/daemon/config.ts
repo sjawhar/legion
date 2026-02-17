@@ -5,7 +5,6 @@ export interface DaemonConfig {
   daemonPort: number;
   teamId?: string;
   legionDir?: string;
-  shortId?: string;
   checkIntervalMs: number;
   baseWorkerPort: number;
   stateFilePath: string;
@@ -84,7 +83,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,
     legionDir,
-    shortId: env.LEGION_SHORT_ID,
     checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
     stateFilePath,

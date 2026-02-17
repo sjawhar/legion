@@ -151,6 +151,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -171,6 +172,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -191,6 +193,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -211,6 +214,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -232,6 +236,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, teamId);
@@ -256,6 +261,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, teamId);
@@ -281,6 +287,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
     const stateTodo = buildIssueState(dataTodo, teamId);
     expect(stateTodo.suggestedAction).toBe("relay_user_feedback");
@@ -298,6 +305,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
     const stateReview = buildIssueState(dataReview, teamId);
     expect(stateReview.suggestedAction).toBe("relay_user_feedback");
@@ -317,6 +325,7 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -339,6 +348,7 @@ describe("approval gate", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -359,6 +369,7 @@ describe("approval gate", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: true,
       hasHumanApproved: true,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -379,6 +390,7 @@ describe("approval gate", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: true,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -401,6 +413,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -421,6 +434,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -441,6 +455,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -464,6 +479,7 @@ describe("orphan detection", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       };
 
       const state = buildIssueState(data, teamId);
@@ -485,6 +501,7 @@ describe("orphan detection", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -512,6 +529,7 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
       {
         issueId: "ENG-22",
@@ -526,6 +544,7 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
     ];
 
@@ -552,6 +571,7 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
     ];
 
@@ -579,6 +599,7 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
       {
         issueId: "ENG-22",
@@ -593,6 +614,7 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: true,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
       {
         issueId: "ENG-23",
@@ -607,6 +629,7 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: true,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
     ];
 

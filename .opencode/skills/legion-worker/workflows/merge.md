@@ -33,11 +33,11 @@ If rebase produces conflicts:
 
 **If conflicts are unresolvable:**
 - Add `user-input-needed` label to the issue
-  - If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-  - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
 - Post comment describing the conflict
-  - If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
-  - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 - Exit
 
 ### 4. Push
@@ -69,11 +69,11 @@ gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch
 
 **If merge fails with a permission error** (e.g., external repo you don't own):
 - Post a comment explaining the permission issue
-  - If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
-  - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 - Add `user-input-needed` label
-  - If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-  - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
 - Exit — the user needs to merge manually or grant access
 
 ### 7. Exit

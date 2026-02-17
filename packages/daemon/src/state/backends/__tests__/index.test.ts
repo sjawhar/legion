@@ -6,14 +6,12 @@ describe("getBackend", () => {
     const backend = getBackend("linear");
     expect(backend).toBeDefined();
     expect(typeof backend.parseIssues).toBe("function");
-    expect(typeof backend.resolveTeamId).toBe("function");
   });
 
   it("returns a GitHubTracker for 'github'", () => {
     const backend = getBackend("github");
     expect(backend).toBeDefined();
     expect(typeof backend.parseIssues).toBe("function");
-    expect(typeof backend.resolveTeamId).toBe("function");
   });
 
   it("throws for unknown backend", () => {

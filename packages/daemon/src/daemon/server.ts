@@ -29,7 +29,6 @@ export interface ServerOptions {
   hostname?: string;
   teamId: string;
   legionDir: string;
-  shortId: string;
   serveManager: ServeManagerInterface;
   sharedServePort: number;
   stateFilePath: string;
@@ -148,7 +147,6 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const issueId = payload.issueId;
             const mode = payload.mode;
             const workspace = payload.workspace;
-            const env = payload.env;
 
             if (
               typeof issueId !== "string" ||
@@ -163,16 +161,6 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const validModes = Object.values(WorkerMode);
             if (!validModes.includes(mode as WorkerModeLiteral)) {
               return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
-            }
-            if (env !== undefined) {
-              if (!isRecord(env)) {
-                return badRequest("invalid_env");
-              }
-              for (const [, val] of Object.entries(env)) {
-                if (typeof val !== "string") {
-                  return badRequest("env values must be strings");
-                }
-              }
             }
 
             const normalizedIssueId = issueId.toLowerCase();
@@ -359,7 +347,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
 
           const issues = payload.issues;
-          if (issues === undefined || issues === null) {
+          if (issues === undefined || issues === null || typeof issues !== "object") {
             return badRequest("invalid_issues");
           }
 
@@ -370,7 +358,9 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.teamId);
             return jsonResponse(CollectedState.toDict(state));
-          } catch {
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[collect] backend=${backend} error=${message}`);
             return serverError("collect_failed");
           }
         }

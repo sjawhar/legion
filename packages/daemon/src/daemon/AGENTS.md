@@ -8,7 +8,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 |--------|------|---------|
 | `GET` | `/health` | `{status, uptime, workerCount}` |
 | `GET` | `/workers` | List all `WorkerEntry[]` (controller NOT included — tracked separately) |
-| `POST` | `/workers` | Create session on shared serve — `{issueId, mode, workspace, env?}` → `{id, port, sessionId}` |
+| `POST` | `/workers` | Create session on shared serve — `{issueId, mode, workspace}` → `{id, port, sessionId}` |
 | `GET` | `/workers/:id` | Single worker details |
 | `PATCH` | `/workers/:id` | Update status (`running`, `dead`) |
 | `DELETE` | `/workers/:id` | Remove tracking (session goes idle naturally) |

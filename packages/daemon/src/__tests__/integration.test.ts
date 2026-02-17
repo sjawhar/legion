@@ -36,7 +36,6 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     hostname: "127.0.0.1",
     teamId: TEAM_ID,
     legionDir: tempDir,
-    shortId: "test",
     serveManager,
     sharedServePort,
     stateFilePath,
@@ -144,6 +143,7 @@ describe("Integration: state pipeline", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
       {
         issueId: "ENG-2",
@@ -158,6 +158,7 @@ describe("Integration: state pipeline", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        source: null,
       },
     ];
 

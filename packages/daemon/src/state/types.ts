@@ -72,25 +72,68 @@ export const IssueStatus = {
 
   /**
    * Map status name aliases to canonical names.
+   * Case-insensitive lookup is handled by normalize() — keys here
+   * should be in their most common casing for readability.
    */
   ALIASES: {
     "In Review": "Needs Review" as IssueStatusLiteral,
-  },
+  } as Record<string, IssueStatusLiteral>,
 
   /**
    * Normalize a raw status string to canonical form.
    *
-   * Returns the canonical IssueStatusLiteral if the raw value matches
-   * a known alias, otherwise returns the original string unchanged.
+   * Matching is case-insensitive: "in progress", "In progress",
+   * and "IN PROGRESS" all resolve to "In Progress".
+   *
+   * Resolution order:
+   *   1. Exact match against canonical status names
+   *   2. Case-insensitive match against canonical status names
+   *   3. Case-insensitive match against ALIASES
+   *   4. Return raw value unchanged
+   *
    * Returns empty string if raw is null.
    */
   normalize(raw: string | null): IssueStatusLiteral | string {
     if (raw === null) {
       return "";
     }
-    return IssueStatus.ALIASES[raw as keyof typeof IssueStatus.ALIASES] ?? raw;
+
+    // Fast path: exact alias match
+    const aliasHit = IssueStatus.ALIASES[raw];
+    if (aliasHit) {
+      return aliasHit;
+    }
+
+    // Case-insensitive lookup against canonical names + aliases
+    const lower = raw.toLowerCase();
+    const canonical = _lowercaseCanonicalMap.get(lower);
+    if (canonical) {
+      return canonical;
+    }
+    const aliasCanonical = _lowercaseAliasMap.get(lower);
+    if (aliasCanonical) {
+      return aliasCanonical;
+    }
+
+    return raw;
   },
 } as const;
+
+// Pre-built lowercase lookup maps (populated after IssueStatus is defined)
+const _lowercaseCanonicalMap = new Map<string, IssueStatusLiteral>([
+  ["triage", "Triage"],
+  ["icebox", "Icebox"],
+  ["backlog", "Backlog"],
+  ["todo", "Todo"],
+  ["in progress", "In Progress"],
+  ["needs review", "Needs Review"],
+  ["retro", "Retro"],
+  ["done", "Done"],
+]);
+
+const _lowercaseAliasMap = new Map<string, IssueStatusLiteral>(
+  Object.entries(IssueStatus.ALIASES).map(([k, v]) => [k.toLowerCase(), v])
+);
 
 /**
  * Worker mode constants for session ID computation.
@@ -264,6 +307,7 @@ export interface FetchedIssueData {
   hasUserInputNeeded: boolean;
   hasNeedsApproval: boolean;
   hasHumanApproved: boolean;
+  source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
 /**
@@ -280,6 +324,7 @@ export interface IssueStateDict {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  source: IssueSource | null;
 }
 
 /**
@@ -303,6 +348,7 @@ export interface IssueState {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
 export const IssueState = {
@@ -321,6 +367,7 @@ export const IssueState = {
       suggestedAction: state.suggestedAction,
       sessionId: state.sessionId,
       hasUserFeedback: state.hasUserFeedback,
+      source: state.source,
     };
     return dict;
   },

@@ -31,8 +31,8 @@ Resolve any conflicts before proceeding.
 
 Fetch issue and comments. The plan is in comments:
 
-- If `LEGION_ISSUE_BACKEND=github`: `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
-- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
+- **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
 
 ### 2. Invoke Skills (in order)
 

@@ -7,8 +7,9 @@ OpenCode skills that orchestrate the autonomous development loop. These are mark
 | Interface | Direction | Example |
 |-----------|-----------|---------|
 | HTTP API | Controller → Daemon | `curl -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect` |
-| Piped CLI | Controller → State | `echo $JSON \| bun run packages/daemon/src/state/cli.ts --team-id X` |
-| Env vars | Daemon → Worker | `LEGION_ISSUE_ID`, `LEGION_ISSUE_BACKEND`, `LEGION_DIR`, etc. |
+| Piped CLI (legacy) | Controller → State | `echo $JSON \| bun run packages/daemon/src/state/cli.ts --team-id X` — being replaced by `POST /state/collect` |
+| Env vars | Daemon → Controller | `LEGION_TEAM_ID`, `LEGION_DAEMON_PORT`, etc. |
+| Prompt context | Controller → Worker | Issue ID, mode, backend passed in dispatch/resume prompt text |
 | Issue backend | Worker → Linear/GitHub | `linear_linear(action="get"\|"update"\|"comment"\|"create"\|"search")` or `gh issue view/edit/comment` |
 
 ## Structure
@@ -40,16 +41,19 @@ skills/
 
 ## Environment Variables
 
-Set by daemon when spawning workers, consumed by skills:
+Process-level env vars inherited by the shared serve process. These configure the **controller** —
+workers receive all context (issue ID, mode, backend) via the dispatch prompt, not env vars.
 
 | Variable | Set By | Used By | Purpose |
 |----------|--------|---------|---------|
-| `LEGION_TEAM_ID` | CLI/daemon | Controller + workers | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
-| `LEGION_DIR` | CLI/daemon | Controller + workers | Default jj workspace path |
-| `LEGION_SHORT_ID` | Daemon | Controller | Instance ID for heartbeat |
+| `LEGION_TEAM_ID` | CLI/daemon | Controller | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
+| `LEGION_DIR` | CLI/daemon | Controller | Default jj workspace path |
+| `LEGION_SHORT_ID` | CLI/daemon | Controller | Instance ID for heartbeat |
 | `LEGION_DAEMON_PORT` | Daemon | Controller | HTTP API port (default 13370) |
-| `LEGION_ISSUE_ID` | Daemon | Workers | Issue identifier (e.g., `LEG-18`) |
-| `LEGION_ISSUE_BACKEND` | Daemon | Workers | Issue backend (`linear` or `github`) |
+| `LEGION_ISSUE_BACKEND` | CLI/daemon | Controller | Issue backend (`linear` or `github`) |
+
+All sessions on the shared serve share the same process environment. The controller includes
+backend and issue identity in every dispatch/resume prompt so workers are self-contained.
 
 ## Worker Lifecycle (SKILL.md)
 

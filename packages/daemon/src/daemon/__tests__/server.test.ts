@@ -58,7 +58,6 @@ describe("daemon server", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir,
-      shortId: "test",
       serveManager,
       sharedServePort,
       stateFilePath,
@@ -451,6 +450,17 @@ describe("daemon server", () => {
       expect(response.status).toBe(400);
     });
 
+    it("rejects non-object issues field", async () => {
+      await startTestServer();
+      for (const issues of ["string", 42, true]) {
+        const response = await requestJson("/state/collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "linear", issues }),
+        });
+        expect(response.status).toBe(400);
+      }
+    });
+
     it("returns empty state for empty issues array", async () => {
       await startTestServer();
       const response = await requestJson("/state/collect", {
@@ -474,7 +484,6 @@ describe("daemon server", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir ?? os.tmpdir(),
-      shortId: "test",
       serveManager,
       sharedServePort,
       stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),

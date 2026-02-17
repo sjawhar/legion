@@ -13,13 +13,13 @@ Signal outcome via PR draft status instead (draft = changes requested, ready = a
 
 Fetch the issue:
 
-If `LEGION_ISSUE_BACKEND=github`:
+**GitHub:**
 
 ```
 gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO
 ```
 
-If `LEGION_ISSUE_BACKEND=linear`:
+**Linear:**
 
 ```
 linear_linear(action="get", id=$LEGION_ISSUE_ID)
@@ -97,5 +97,5 @@ gh pr ready "$LEGION_ISSUE_ID"
 
 Add `worker-done` to the issue, then exit:
 
-- If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
-- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`

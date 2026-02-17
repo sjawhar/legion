@@ -51,6 +51,13 @@ digraph controller {
 ### 1. Fetch Issues
 
 ```bash
+# Derive OWNER and PROJECT_NUM from LEGION_TEAM_ID for GitHub backend
+# LEGION_TEAM_ID format for GitHub: "owner/project-number"
+if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+  OWNER="${LEGION_TEAM_ID%%/*}"
+  PROJECT_NUM="${LEGION_TEAM_ID##*/}"
+fi
+
 # Fetch issues based on backend
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
   ISSUES_JSON=$(gh project item-list $PROJECT_NUM --owner $OWNER --format json)
@@ -220,27 +227,55 @@ Then return to step 1.
 
 ## Dispatch vs Resume
 
-**Dispatch** = new worker:
+### Backend in Prompts
+
+Workers must know which backend they're on. The controller always includes the backend
+in dispatch and resume prompts so workers don't need to check environment variables.
+
+Build the backend suffix from `LEGION_ISSUE_BACKEND` and (for GitHub) the repo derived
+from the issue identifier:
+
+- **GitHub:** `(github backend, repo: $OWNER/$REPO)` — derive owner/repo from the issue
+  identifier (format: `owner-repo-number`, e.g. `acme-widgets-42` → `acme/widgets`)
+- **Linear:** `(linear backend)`
+
+### Dispatch (New Worker)
+
 ```bash
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE"
+# GitHub example:
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+
+# Linear example:
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (linear backend)"
 ```
 
 The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
 
-For custom prompts:
+For custom prompts, still include the backend suffix:
 ```bash
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --prompt "Custom instructions here"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --prompt "Custom instructions here (github backend, repo: $OWNER/$REPO)"
 ```
 
-**Resume** = send prompt to existing worker:
+### Resume (Prompt Existing Worker)
+
 ```bash
-legion prompt "$ISSUE_IDENTIFIER" "Check issue comments for user feedback"
+# User feedback relay (GitHub):
+legion prompt "$ISSUE_IDENTIFIER" \
+  "Check issue comments for user feedback (github backend, repo: $OWNER/$REPO)"
+
+# User feedback relay (Linear):
+legion prompt "$ISSUE_IDENTIFIER" \
+  "Check issue comments for user feedback (linear backend)"
+
+# PR changes requested (GitHub):
+legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+  "Address PR review comments (github backend, repo: $OWNER/$REPO)"
 ```
 
-If multiple workers exist for the same issue (different modes), specify mode:
-```bash
-legion prompt "$ISSUE_IDENTIFIER" --mode implement "Address PR review comments"
-```
+If multiple workers exist for the same issue (different modes), specify mode with `--mode`.
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
 
@@ -249,7 +284,13 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
 
 ```bash
-legion prompt "$ISSUE_IDENTIFIER" --mode implement "/legion-retro"
+# GitHub:
+legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+  "/legion-retro (github backend, repo: $OWNER/$REPO)"
+
+# Linear:
+legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+  "/legion-retro (linear backend)"
 ```
 
 **If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
@@ -316,7 +357,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "Let me construct the JSON for the state machine" | POST tracker output to `/state/collect` directly — no hand-crafting |
 | "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
 | "The changes are lost" | Check local commits (`jj log`), open PRs (`gh pr list`), and worker workspaces before concluding anything is lost |
-| "I'll give the worker specific instructions" | State the mode and issue ID. Let the workflow guide the worker. |
+| "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Let the workflow guide the worker. |
 | "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |
 | "I'll accumulate these changes into the existing PR" | One issue = one workspace = one branch = one PR. |
 
@@ -329,7 +370,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
 | Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
 | Process issue with live worker | Skip it - worker is already handling |
-| Give workers step-by-step fix instructions | State the mode and issue ID only. Let the workflow guide the worker. |
+| Give workers step-by-step fix instructions | State the mode, issue ID, and backend only. Let the workflow guide the worker. |
 | Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. Otherwise the state machine re-triggers on the next loop. |
 
 ## Status Flow

@@ -16,13 +16,13 @@ digraph {
 
 ### 1. Fetch Issue
 
-If `LEGION_ISSUE_BACKEND=github`:
+**GitHub:**
 
 ```
 gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO
 ```
 
-If `LEGION_ISSUE_BACKEND=linear`:
+**Linear:**
 
 ```
 linear_linear(action="get", id=$LEGION_ISSUE_ID)
@@ -103,8 +103,7 @@ Each criterion should answer: "How will we know this is done?"
 
 ## Sub-Issue Creation
 
-```
-If `LEGION_ISSUE_BACKEND=github`:
+**GitHub:**
 
 ```
 gh issue create --title "[Scoped title]" --body "## Acceptance Criteria
@@ -113,7 +112,7 @@ gh issue create --title "[Scoped title]" --body "## Acceptance Criteria
 Part of $LEGION_ISSUE_ID." -R $OWNER/$REPO
 ```
 
-If `LEGION_ISSUE_BACKEND=linear`:
+**Linear:**
 
 ```
 parent = linear_linear(action="get", id=$LEGION_ISSUE_ID)
@@ -131,7 +130,6 @@ linear_linear(action="create",
   labels: ["worker-done"]
 )
 ```
-```
 
 Post comment to parent explaining the breakdown.
 
@@ -139,13 +137,13 @@ Post comment to parent explaining the breakdown.
 
 Labels array replaces all labels. Fetch current labels first:
 
-If `LEGION_ISSUE_BACKEND=github`:
+**GitHub:**
 
 ```
 gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
 ```
 
-If `LEGION_ISSUE_BACKEND=linear`:
+**Linear:**
 
 ```
 issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)

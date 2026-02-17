@@ -38,19 +38,17 @@ digraph plan_workflow {
 
 ### 1. Fetch the Issue
 
-If `LEGION_ISSUE_BACKEND=github`:
+**GitHub:**
 
 ```
 gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO
 ```
 
-If `LEGION_ISSUE_BACKEND=linear`:
+**Linear:**
 
 ```
 linear_linear(action="get", id=$LEGION_ISSUE_ID)
 ```
-
-The `$LEGION_ISSUE_ID` environment variable is set by the controller when spawning this worker.
 
 Extract:
 - Title and description
@@ -111,11 +109,11 @@ The skill handles:
 
 **If the skill determines requirements are fundamentally unclear** (even after legion-oracle + assumptions):
 1. Add `user-input-needed` label:
-   - If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
 2. Post a comment explaining what needs clarification:
-   - If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
-   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+   - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 3. Exit immediately - do NOT add `worker-done`
 
 ### 3. Invoke /superpowers/writing-plans
@@ -168,11 +166,11 @@ This spawns parallel cross-family reviewers:
 
 **Max 3 iterations.** If still failing:
 1. Add `user-input-needed` label:
-   - If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
 2. Post a comment explaining unresolved review issues:
-   - If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
-   - If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+   - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 3. Exit without `worker-done`
 
 **If a reviewer fails/times out:** Proceed with partial results. Note the missing review in the issue comment.
@@ -181,8 +179,8 @@ This spawns parallel cross-family reviewers:
 
 Post the **full executable plan** from step 3 (or revised after step 4):
 
-- If `LEGION_ISSUE_BACKEND=github`: `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
-- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+- **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 
 The complete `/superpowers:writing-plans` output goes directly into the issue comment - all tasks, all code examples, all test commands.
 
@@ -190,8 +188,8 @@ The complete `/superpowers:writing-plans` output goes directly into the issue co
 
 Add `worker-done` label to the issue, then exit:
 
-- If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
-- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
 
 **CRITICAL:** Only add `worker-done` after successfully posting the plan. Never add this label if:
 - Requirements were unclear and could not be resolved (use `user-input-needed` instead)

@@ -74,7 +74,7 @@ jj git push
 
 Post a brief summary to the issue so learnings are discoverable without checking the repo:
 
-If `LEGION_ISSUE_BACKEND=github`:
+**GitHub:**
 
 ```bash
 gh issue comment $ISSUE_NUMBER --body "## Retro Complete
@@ -86,7 +86,7 @@ gh issue comment $ISSUE_NUMBER --body "## Retro Complete
 - [1-3 bullet summary of the most important learnings]" -R $OWNER/$REPO
 ```
 
-If `LEGION_ISSUE_BACKEND=linear`:
+**Linear:**
 
 ```
 linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Retro Complete
@@ -102,5 +102,5 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Retro Complete
 
 Add `worker-done` label to the issue, then exit:
 
-- If `LEGION_ISSUE_BACKEND=github`: `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
-- If `LEGION_ISSUE_BACKEND=linear`: `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`

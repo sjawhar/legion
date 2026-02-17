@@ -102,7 +102,7 @@ interface StartOptions {
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
-  const teamId = await resolveTeamId(team);
+  const teamId = await resolveTeamId(team, { backend: opts.backend });
   const resolvedStateDir = resolveStateDir(teamId, opts.stateDir);
 
   validateControllerPrompt(opts.prompt);
@@ -135,8 +135,8 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
   await new Promise(() => {});
 }
 
-async function cmdStop(team: string, stateDir?: string): Promise<void> {
-  const teamId = await resolveTeamId(team);
+async function cmdStop(team: string, stateDir?: string, backend?: string): Promise<void> {
+  const teamId = await resolveTeamId(team, { backend });
   const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Stopping Legion for team: ${teamId}`);
@@ -162,8 +162,8 @@ async function cmdStop(team: string, stateDir?: string): Promise<void> {
   }
 }
 
-async function cmdStatus(team: string, stateDir?: string): Promise<void> {
-  const teamId = await resolveTeamId(team);
+async function cmdStatus(team: string, stateDir?: string, backend?: string): Promise<void> {
+  const teamId = await resolveTeamId(team, { backend });
   const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Legion Status: ${teamId}`);
@@ -197,8 +197,8 @@ async function cmdStatus(team: string, stateDir?: string): Promise<void> {
   }
 }
 
-async function cmdAttach(team: string, issue: string): Promise<void> {
-  const teamId = await resolveTeamId(team);
+async function cmdAttach(team: string, issue: string, backend?: string): Promise<void> {
+  const teamId = await resolveTeamId(team, { backend });
 
   console.log(`Attaching to worker for issue: ${issue}`);
   console.log(`Team: ${teamId}`);
@@ -600,9 +600,14 @@ export const stopCommand = defineCommand({
   args: {
     team: { type: "positional", description: "Team key or UUID", required: true },
     "state-dir": { type: "string", description: "State directory path" },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
-    await cmdStop(args.team, args["state-dir"]);
+    await cmdStop(args.team, args["state-dir"], args.backend);
   },
 });
 
@@ -611,9 +616,14 @@ export const statusCommand = defineCommand({
   args: {
     team: { type: "positional", description: "Team key or UUID", required: true },
     "state-dir": { type: "string", description: "State directory path" },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
-    await cmdStatus(args.team, args["state-dir"]);
+    await cmdStatus(args.team, args["state-dir"], args.backend);
   },
 });
 
@@ -622,10 +632,15 @@ export const attachCommand = defineCommand({
   args: {
     team: { type: "positional", description: "Team key or UUID", required: true },
     issue: { type: "positional", description: "Issue key or identifier", required: true },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
     try {
-      await cmdAttach(args.team, args.issue);
+      await cmdAttach(args.team, args.issue, args.backend);
     } catch (e) {
       if (e instanceof CliError) {
         console.error(e.message);

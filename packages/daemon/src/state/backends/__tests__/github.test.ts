@@ -135,6 +135,22 @@ describe("GitHubTracker.parseIssues", () => {
     expect(result[0].hasPr).toBe(true);
   });
 
+  it("extracts PR refs with case-variant key names", () => {
+    const variants = ["Linked pull requests", "Linked Pull Requests", "linked pull request"];
+    for (const key of variants) {
+      const raw = {
+        items: [
+          makeItem({
+            [key]: ["https://github.com/acme/widgets/pull/100"],
+          }),
+        ],
+      };
+      const result = tracker.parseIssues(raw);
+      expect(result[0].prRef).not.toBeNull();
+      expect(result[0].prRef?.number).toBe(100);
+    }
+  });
+
   it("handles items without linked pull requests", () => {
     const raw = { items: [makeItem()] };
     const result = tracker.parseIssues(raw);

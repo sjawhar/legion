@@ -335,6 +335,7 @@ export async function enrichParsedIssues(
       hasUserInputNeeded: issue.hasUserInputNeeded,
       hasNeedsApproval: issue.hasNeedsApproval,
       hasHumanApproved: issue.hasHumanApproved,
+      source: issue.source,
     };
   });
 }

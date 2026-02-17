@@ -165,4 +165,27 @@ describe("resolveTeamId", () => {
     expect(result).toBe("cached-uuid");
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  test("returns GitHub project ref as-is when backend is github", async () => {
+    const result = await resolveTeamId("sjawhar/5", { cacheDir: testCacheDir, backend: "github" });
+    expect(result).toBe("sjawhar/5");
+  });
+
+  test("skips Linear resolution for github backend even with API key", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+    const mockFetch = mock(async () => {
+      throw new Error("Should not call Linear API for github backend");
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    const result = await resolveTeamId("my-org/42", { cacheDir: testCacheDir, backend: "github" });
+    expect(result).toBe("my-org/42");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test("uses Linear resolution when backend is not specified (backward compat)", async () => {
+    const uuid = "12345678-1234-1234-1234-123456789abc";
+    const result = await resolveTeamId(uuid, { cacheDir: testCacheDir });
+    expect(result).toBe(uuid);
+  });
 });

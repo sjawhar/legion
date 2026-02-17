@@ -137,8 +137,24 @@ describe("IssueStatus.normalize", () => {
     expect(IssueStatus.normalize("In Review")).toBe("Needs Review");
   });
 
+  it("normalizes case-insensitive canonical match", () => {
+    expect(IssueStatus.normalize("in progress")).toBe("In Progress");
+    expect(IssueStatus.normalize("In progress")).toBe("In Progress");
+    expect(IssueStatus.normalize("IN PROGRESS")).toBe("In Progress");
+    expect(IssueStatus.normalize("todo")).toBe("Todo");
+    expect(IssueStatus.normalize("BACKLOG")).toBe("Backlog");
+    expect(IssueStatus.normalize("needs review")).toBe("Needs Review");
+  });
+
+  it("normalizes case-insensitive alias match", () => {
+    expect(IssueStatus.normalize("in review")).toBe("Needs Review");
+    expect(IssueStatus.normalize("IN REVIEW")).toBe("Needs Review");
+  });
+
   it("returns unknown status unchanged", () => {
     expect(IssueStatus.normalize("Unknown")).toBe("Unknown");
+    expect(IssueStatus.normalize("Today")).toBe("Today");
+    expect(IssueStatus.normalize("Scrapped")).toBe("Scrapped");
   });
 
   it("returns empty string for null", () => {
