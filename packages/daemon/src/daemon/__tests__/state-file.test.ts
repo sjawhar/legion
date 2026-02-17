@@ -132,4 +132,39 @@ describe("state-file", () => {
     expect(state.crashHistory).toEqual(sampleState.crashHistory);
     expect(state.controller).toBeUndefined();
   });
+
+  it("recovers gracefully from corrupted JSON", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    const filePath = path.join(tempDir, "workers.json");
+
+    await writeFile(filePath, "NOT VALID JSON{{{");
+    const state = await readStateFile(filePath);
+
+    expect(state).toEqual({ workers: {}, crashHistory: {} });
+
+    // Original file should be renamed aside for debugging
+    const entries = await readdir(tempDir);
+    const corruptFiles = entries.filter((e) => e.includes(".corrupt."));
+    expect(corruptFiles.length).toBe(1);
+  });
+
+  it("recovers gracefully from schema-invalid JSON", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    const filePath = path.join(tempDir, "workers.json");
+
+    await writeFile(filePath, JSON.stringify({ workers: "not-a-record" }));
+    const state = await readStateFile(filePath);
+
+    expect(state).toEqual({ workers: {}, crashHistory: {} });
+  });
+
+  it("recovers gracefully from empty file", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    const filePath = path.join(tempDir, "workers.json");
+
+    await writeFile(filePath, "");
+    const state = await readStateFile(filePath);
+
+    expect(state).toEqual({ workers: {}, crashHistory: {}, controller: undefined });
+  });
 });

@@ -11,69 +11,36 @@ interface ToolRestrictions {
   background_cancel?: boolean;
 }
 
+const DEFAULT_RESTRICTIONS: ToolRestrictions = {
+  write: false,
+  edit: false,
+  background_task: false,
+  background_cancel: false,
+};
+
+const LEAF_AGENTS = ["explore", "explorer", "librarian", "oracle", "metis", "momus"];
+const NO_DELEGATION_AGENTS = ["multimodal", "multimodal-looker", "simplicity-reviewer", "executor"];
+
 const AGENT_RESTRICTIONS: Record<string, ToolRestrictions> = {
-  explore: {
+  ...Object.fromEntries(LEAF_AGENTS.map((name) => [name, DEFAULT_RESTRICTIONS])),
+  ...Object.fromEntries(
+    NO_DELEGATION_AGENTS.map((name) => [name, { background_task: false, background_cancel: false }])
+  ),
+  orchestrator: {},
+  conductor: {
     write: false,
     edit: false,
-    background_task: false,
-    background_cancel: false,
-  },
-  explorer: {
-    write: false,
-    edit: false,
-    background_task: false,
-    background_cancel: false,
-  },
-  librarian: {
-    write: false,
-    edit: false,
-    background_task: false,
-    background_cancel: false,
-  },
-  oracle: {
-    write: false,
-    edit: false,
-    background_task: false,
-    background_cancel: false,
-  },
-  metis: {
-    write: false,
-    edit: false,
-    background_task: false,
-    background_cancel: false,
-  },
-  momus: {
-    write: false,
-    edit: false,
-    background_task: false,
-    background_cancel: false,
-  },
-  multimodal: {
-    background_task: false,
-    background_cancel: false,
-  },
-  "multimodal-looker": {
-    background_task: false,
-    background_cancel: false,
-  },
-  "simplicity-reviewer": {
-    background_task: false,
-    background_cancel: false,
-  },
-  executor: {
-    background_task: false,
-    background_cancel: false,
   },
 };
 
 /**
  * Get tool restrictions for an agent.
  * Case-insensitive matching.
- * Unknown agents get empty restrictions (open by default).
+ * Unknown agents get default restrictions (fail-closed by default).
  */
 export function getAgentToolRestrictions(agentName: string): Record<string, boolean> {
   const normalized = agentName.toLowerCase();
-  return (AGENT_RESTRICTIONS[normalized] ?? {}) as Record<string, boolean>;
+  return { ...(AGENT_RESTRICTIONS[normalized] ?? DEFAULT_RESTRICTIONS) } as Record<string, boolean>;
 }
 
 /**

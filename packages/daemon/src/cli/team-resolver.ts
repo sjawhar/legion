@@ -77,7 +77,12 @@ async function lookupTeamViaApi(teamRef: string, apiKey: string): Promise<string
         Authorization: apiKey,
       },
       body: payload,
+      signal: AbortSignal.timeout(15_000), // 15s for external API
     });
+
+    if (!response.ok) {
+      throw new Error(`Linear API returned ${response.status} ${response.statusText}`);
+    }
 
     const data = (await response.json()) as {
       data?: { team?: { id: string; name: string } };

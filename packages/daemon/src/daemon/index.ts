@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
-import { type DaemonConfig, loadConfig } from "./config";
+import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
 import {
   createSession,
   createWorkerClient,
@@ -65,6 +65,30 @@ function resolveDependencies(
   };
 }
 
+async function sendPromptWithRetry(
+  client: ReturnType<typeof createWorkerClient>,
+  sessionId: string,
+  text: string,
+  deps: { setTimeout: typeof globalThis.setTimeout }
+): Promise<void> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await client.session.promptAsync({
+        sessionID: sessionId,
+        parts: [{ type: "text", text }],
+      });
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < 2) {
+        await new Promise((resolve) => deps.setTimeout(resolve, 100 * 2 ** attempt));
+      }
+    }
+  }
+  throw lastError!;
+}
+
 export async function startDaemon(
   overrides: Partial<DaemonConfig> = {},
   deps?: Partial<DaemonDependencies>
@@ -73,6 +97,7 @@ export async function startDaemon(
   if (!config.teamId) {
     throw new Error("Missing teamId for daemon");
   }
+  validateControllerPrompt(config.controllerPrompt);
   mkdirSync(config.logDir, { recursive: true });
   const resolvedDeps = resolveDependencies(config, deps);
 
@@ -182,15 +207,27 @@ export async function startDaemon(
         sessionId,
         config.legionDir ?? ""
       );
-      const client = createWorkerClient(sharedServePort, config.legionDir ?? "");
-      await client.session.promptAsync({
-        sessionID: sessionId,
-        parts: [{ type: "text", text: "/legion-controller" }],
-      });
       controllerState = { sessionId, port: sharedServePort };
-      console.log(`Controller started: session=${sessionId} port=${sharedServePort}`);
     } catch (error) {
-      console.error(`Failed to start controller: ${error}`);
+      console.error(`Failed to create controller session: ${error}`);
+    }
+
+    if (controllerState) {
+      const initialPrompt = config.controllerPrompt
+        ? `/legion-controller\n\n${config.controllerPrompt}`
+        : "/legion-controller";
+      try {
+        await sendPromptWithRetry(
+          createWorkerClient(sharedServePort, config.legionDir ?? ""),
+          sessionId,
+          initialPrompt,
+          resolvedDeps
+        );
+        console.log(`Controller started: session=${sessionId} port=${sharedServePort}`);
+      } catch (error) {
+        console.error(`Controller session created but prompt failed: ${error}`);
+        console.error("Health loop will retry on next tick.");
+      }
     }
   }
 
@@ -232,11 +269,12 @@ export async function startDaemon(
                   controllerState.sessionId,
                   config.legionDir ?? ""
                 );
-                const client = createWorkerClient(sharedServePort, config.legionDir ?? "");
-                await client.session.promptAsync({
-                  sessionID: controllerState.sessionId,
-                  parts: [{ type: "text", text: "/legion-controller" }],
-                });
+                await sendPromptWithRetry(
+                  createWorkerClient(sharedServePort, config.legionDir ?? ""),
+                  controllerState.sessionId,
+                  "/legion-controller",
+                  resolvedDeps
+                );
                 console.log(`Controller re-created: session=${controllerState.sessionId}`);
               } catch (error) {
                 console.error(`Failed to re-create controller session: ${error}`);

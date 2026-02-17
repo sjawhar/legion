@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { BackgroundTaskSchema } from "./schemas";
 import type { BackgroundTask } from "./types";
 
 const LEGION_DIR = ".legion";
@@ -61,7 +62,12 @@ export async function readTask(workspace: string, taskId: string): Promise<Backg
     }
 
     const data = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(data) as BackgroundTask;
+    const parsed = BackgroundTaskSchema.safeParse(JSON.parse(data));
+    if (!parsed.success) {
+      console.warn(`[task-storage] Invalid task schema ${taskId}: ${parsed.error.message}`);
+      return null;
+    }
+    return parsed.data as BackgroundTask;
   } catch (err: unknown) {
     if (isEnoent(err)) {
       return null;
@@ -100,8 +106,12 @@ export async function listTasks(workspace: string): Promise<BackgroundTask[]> {
       }
 
       const data = await fs.readFile(filePath, "utf-8");
-      const task = JSON.parse(data) as BackgroundTask;
-      tasks.push(task);
+      const result = BackgroundTaskSchema.safeParse(JSON.parse(data));
+      if (result.success) {
+        tasks.push(result.data as BackgroundTask);
+      } else {
+        console.warn(`[task-storage] Skipping invalid task ${entry}: ${result.error.message}`);
+      }
     } catch (err: unknown) {
       if (isEnoent(err)) {
         continue;

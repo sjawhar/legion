@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PersistedWorkerStateSchema } from "./schemas";
 import type { WorkerEntry } from "./serve-manager";
 
 export interface CrashHistoryEntry {
@@ -33,6 +34,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+async function moveCorruptFile(filePath: string): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const corruptPath = `${filePath}.corrupt.${timestamp}`;
+  try {
+    await rename(filePath, corruptPath);
+  } catch (err) {
+    console.warn(`[state-file] Failed to rename corrupt file ${filePath}:`, err);
+  }
+}
+
 function normalizeState(raw: unknown): PersistedWorkerState {
   if (isRecord(raw) && isRecord(raw.workers)) {
     const workers = raw.workers as Record<string, WorkerEntry>;
@@ -55,21 +66,20 @@ function normalizeState(raw: unknown): PersistedWorkerState {
           pid: typeof ctrl.pid === "number" ? ctrl.pid : undefined,
         };
       }
-    } else if (legacyController) {
-      result.controller = {
-        sessionId: legacyController.sessionId,
-        port: legacyController.port,
-        pid: legacyController.pid,
-      };
+    } else if (legacyController && isRecord(legacyController)) {
+      if (typeof legacyController.sessionId === "string") {
+        result.controller = {
+          sessionId: legacyController.sessionId,
+          port: typeof legacyController.port === "number" ? legacyController.port : undefined,
+          pid: typeof legacyController.pid === "number" ? legacyController.pid : undefined,
+        };
+      }
     }
 
     return result;
   }
 
-  return {
-    workers: (raw ?? {}) as Record<string, WorkerEntry>,
-    crashHistory: {},
-  };
+  return { workers: {}, crashHistory: {} };
 }
 
 export async function readStateFile(filePath: string): Promise<PersistedWorkerState> {
@@ -79,7 +89,27 @@ export async function readStateFile(filePath: string): Promise<PersistedWorkerSt
     if (!raw.trim()) {
       return { workers: {}, crashHistory: {}, controller: undefined };
     }
-    return normalizeState(JSON.parse(raw));
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      console.warn(`[state-file] Corrupt JSON in ${resolvedPath}, recovering to empty state`);
+      await moveCorruptFile(resolvedPath);
+      return { workers: {}, crashHistory: {} };
+    }
+
+    const normalized = normalizeState(parsed);
+    const validation = PersistedWorkerStateSchema.safeParse(normalized);
+
+    if (!validation.success) {
+      const issues = validation.error.issues.map((i) => i.message).join(", ");
+      console.warn(`[state-file] Schema validation failed for ${resolvedPath}: ${issues}`);
+      await moveCorruptFile(resolvedPath);
+      return { workers: {}, crashHistory: {} };
+    }
+
+    return validation.data;
   } catch (error) {
     const err = error as NodeJS.ErrnoException;
     if (err.code === "ENOENT") {

@@ -48,12 +48,20 @@ export async function defaultRunner(cmd: string[]): Promise<CommandResult> {
     stderr: "pipe",
   });
 
+  const killTimeout = setTimeout(() => {
+    try {
+      proc.kill();
+    } catch {
+      // Process may have already exited
+    }
+  }, 30_000); // 30s for gh api graphql
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
 
   const exitCode = await proc.exited;
+  clearTimeout(killTimeout);
   return { stdout, stderr, exitCode };
 }
 
@@ -93,7 +101,9 @@ export async function getLiveWorkers(
   daemonUrl: string
 ): Promise<Record<string, { mode: string; status: string }>> {
   try {
-    const response = await fetch(`${daemonUrl}/workers`);
+    const response = await fetch(`${daemonUrl}/workers`, {
+      signal: AbortSignal.timeout(5_000), // 5s — local daemon should respond fast
+    });
     if (!response.ok) {
       return {};
     }

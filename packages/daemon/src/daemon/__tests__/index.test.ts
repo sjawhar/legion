@@ -3,11 +3,16 @@ import type { WorkerEntry } from "../serve-manager";
 import type { PersistedWorkerState } from "../state-file";
 
 const promptAsyncCalls: Array<{ sessionID: string; parts: unknown[] }> = [];
+let promptAsyncFailures = 0;
 
 mock.module("@opencode-ai/sdk/v2", () => ({
   createOpencodeClient: () => ({
     session: {
       promptAsync: async (opts: { sessionID: string; parts: unknown[] }) => {
+        if (promptAsyncFailures > 0) {
+          promptAsyncFailures--;
+          throw new Error("session not ready");
+        }
         promptAsyncCalls.push(opts);
         return { data: { id: "prompt-1" } };
       },
@@ -50,6 +55,20 @@ const silentSetTimeout: typeof setTimeout = Object.assign(
 );
 const noopClearTimeout = (() => {}) as typeof clearTimeout;
 
+function filterControllerPrompts(
+  prompts: Array<{ sessionID: string; parts: unknown[] }>
+): Array<{ sessionID: string; parts: unknown[] }> {
+  return prompts.filter((p) =>
+    p.parts.some(
+      (part) =>
+        typeof part === "object" &&
+        part !== null &&
+        "text" in part &&
+        (part as { text: string }).text.startsWith("/legion-controller")
+    )
+  );
+}
+
 function makeServeManager(overrides?: {
   healthCheck?: (port: number) => Promise<boolean>;
   stopServeCalls?: number[];
@@ -80,6 +99,7 @@ describe("daemon entry", () => {
     process.exit = originalExit;
     globalThis.fetch = originalFetch;
     promptAsyncCalls.length = 0;
+    promptAsyncFailures = 0;
   });
 
   it("re-creates sessions for persisted workers on startup", async () => {
@@ -243,6 +263,200 @@ describe("daemon entry", () => {
       )
     );
     expect(controllerRePrompts.length).toBe(1);
+  });
+
+  it("appends controllerPrompt to initial /legion-controller prompt", async () => {
+    promptAsyncCalls.length = 0;
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+        controllerPrompt: "Do not start new work. Focus on LEG-137 only.",
+      },
+      {
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        writeStateFile: async () => {},
+        serveManager: makeServeManager(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    const controllerPrompts = filterControllerPrompts(promptAsyncCalls);
+    expect(controllerPrompts.length).toBe(1);
+
+    const text = (controllerPrompts[0].parts[0] as { text: string }).text;
+    expect(text).toBe("/legion-controller\n\nDo not start new work. Focus on LEG-137 only.");
+  });
+
+  it("sends plain /legion-controller when no controllerPrompt given", async () => {
+    promptAsyncCalls.length = 0;
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+      },
+      {
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        writeStateFile: async () => {},
+        serveManager: makeServeManager(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    const controllerPrompts = filterControllerPrompts(promptAsyncCalls);
+    expect(controllerPrompts.length).toBe(1);
+
+    const text = (controllerPrompts[0].parts[0] as { text: string }).text;
+    expect(text).toBe("/legion-controller");
+  });
+
+  it("does NOT append controllerPrompt on restart after serve crash", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        teamId: TEAM_ID,
+        controllerPrompt: "Do not start new work. Focus on LEG-137 only.",
+      },
+      {
+        readStateFile: async () => ({
+          workers: {},
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        serveManager: makeServeManager({
+          createSessionCalls,
+          healthCheck: async () => {
+            healthCallCount += 1;
+            if (healthCallCount === 1) {
+              return true;
+            }
+            if (healthCallCount === 2) {
+              return false;
+            }
+            return true;
+          },
+        }),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: originalFetch,
+      }
+    );
+
+    const promptsBefore = promptAsyncCalls.length;
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    const newPrompts = promptAsyncCalls.slice(promptsBefore);
+    const controllerRePrompts = filterControllerPrompts(newPrompts);
+    expect(controllerRePrompts.length).toBe(1);
+
+    const restartPromptText = (controllerRePrompts[0].parts[0] as { text: string }).text;
+    expect(restartPromptText).toBe("/legion-controller");
+    expect(restartPromptText).not.toContain("Do not start new work");
+  });
+
+  it("treats empty string controllerPrompt as no prompt", async () => {
+    promptAsyncCalls.length = 0;
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+        controllerPrompt: "",
+      },
+      {
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        writeStateFile: async () => {},
+        serveManager: makeServeManager(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    const controllerPrompts = filterControllerPrompts(promptAsyncCalls);
+    expect(controllerPrompts.length).toBe(1);
+
+    const text = (controllerPrompts[0].parts[0] as { text: string }).text;
+    expect(text).toBe("/legion-controller");
+  });
+
+  it("retries prompt delivery with backoff on transient failures", async () => {
+    promptAsyncCalls.length = 0;
+    promptAsyncFailures = 2;
+
+    const setTimeoutDelays: number[] = [];
+    const retrySetTimeout: typeof setTimeout = Object.assign(
+      ((callback: (...args: unknown[]) => void, delay?: number, ..._args: unknown[]) => {
+        if (delay !== undefined && delay < 1000) {
+          setTimeoutDelays.push(delay);
+          callback();
+        }
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+      },
+      {
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        writeStateFile: async () => {},
+        serveManager: makeServeManager(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: retrySetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    const controllerPrompts = filterControllerPrompts(promptAsyncCalls);
+    expect(controllerPrompts.length).toBe(1);
+    expect(setTimeoutDelays).toEqual([100, 200]);
   });
 
   it("registers signal handlers and shuts down cleanly", async () => {

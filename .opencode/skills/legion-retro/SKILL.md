@@ -87,4 +87,4 @@ linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="## Retro Complete
 
 ### 7. Signal Completion
 
-Add `worker-done` label to the Linear issue via MCP (see @references/linear-labels.md), then exit.
+Add `worker-done` label to the Linear issue via MCP (see @../legion-worker/references/linear-labels.md), then exit.

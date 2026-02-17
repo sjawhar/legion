@@ -16,7 +16,8 @@
   "dependencies": {
     "@opencode-ai/sdk": "https://github.com/sjawhar/opencode/releases/download/v1.2.4-post.2/opencode-ai-sdk-1.2.4-post.1.tgz",
     "citty": "^0.2.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "zod": "^3.24.4"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
