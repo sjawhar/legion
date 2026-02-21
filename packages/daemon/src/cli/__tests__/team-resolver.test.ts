@@ -93,15 +93,15 @@ describe("resolveTeamId", () => {
     const mockFetch = mock(async (url: string, options?: RequestInit) => {
       expect(url).toBe("https://api.linear.app/graphql");
       expect(options?.method).toBe("POST");
-      const body = JSON.parse(options?.body as string);
-      expect(body.variables.key).toBe("LEG");
 
       return new Response(
         JSON.stringify({
           data: {
-            team: {
-              id: "fetched-uuid-1234",
-              name: "Legion Team",
+            teams: {
+              nodes: [
+                { id: "fetched-uuid-1234", key: "LEG", name: "Legion Team" },
+                { id: "other-uuid", key: "ENG", name: "Engineering" },
+              ],
             },
           },
         }),
@@ -114,22 +114,31 @@ describe("resolveTeamId", () => {
     const result = await resolveTeamId("LEG", testCacheDir);
     expect(result).toBe("fetched-uuid-1234");
     expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // Verify cache was written
+    const cached = JSON.parse(fs.readFileSync(testCacheFile, "utf-8"));
+    expect(cached.LEG.id).toBe("fetched-uuid-1234");
+    expect(cached.ENG.id).toBe("other-uuid");
   });
 
-  test("throws error when API returns no team", async () => {
+  test("throws error when API returns no matching team", async () => {
     process.env.LINEAR_API_KEY = "test-api-key";
 
     globalThis.fetch = mock(async () => {
       return new Response(
         JSON.stringify({
-          data: {},
+          data: {
+            teams: {
+              nodes: [{ id: "some-uuid", key: "ENG", name: "Engineering" }],
+            },
+          },
         }),
         { status: 200 }
       );
     }) as any;
 
     await expect(resolveTeamId("NOTFOUND", testCacheDir)).rejects.toThrow(
-      "Team 'NOTFOUND' not found in Linear"
+      "Team 'NOTFOUND' not found. Available: ENG"
     );
   });
 
