@@ -26,7 +26,7 @@ describe("resolveTeamId", () => {
       fs.rmSync(testHome, { recursive: true, force: true });
     }
     process.env.HOME = originalHome;
-    delete process.env.LINEAR_API_KEY;
+    delete process.env.LINEAR_API_TOKEN;
   });
 
   test("returns UUID as-is when given valid UUID", async () => {
@@ -88,7 +88,7 @@ describe("resolveTeamId", () => {
   });
 
   test("looks up team via API when cache miss and API key present", async () => {
-    process.env.LINEAR_API_KEY = "test-api-key";
+    process.env.LINEAR_API_TOKEN = "test-api-key";
 
     const mockFetch = mock(async (url: string, options?: RequestInit) => {
       expect(url).toBe("https://api.linear.app/graphql");
@@ -109,7 +109,7 @@ describe("resolveTeamId", () => {
       );
     });
 
-    globalThis.fetch = mockFetch as any;
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
 
     const result = await resolveTeamId("LEG", testCacheDir);
     expect(result).toBe("fetched-uuid-1234");
@@ -117,7 +117,7 @@ describe("resolveTeamId", () => {
   });
 
   test("throws error when API returns no team", async () => {
-    process.env.LINEAR_API_KEY = "test-api-key";
+    process.env.LINEAR_API_TOKEN = "test-api-key";
 
     globalThis.fetch = mock(async () => {
       return new Response(
@@ -126,7 +126,7 @@ describe("resolveTeamId", () => {
         }),
         { status: 200 }
       );
-    }) as any;
+    }) as unknown as typeof fetch;
 
     await expect(resolveTeamId("NOTFOUND", testCacheDir)).rejects.toThrow(
       "Team 'NOTFOUND' not found in Linear"
@@ -134,11 +134,11 @@ describe("resolveTeamId", () => {
   });
 
   test("throws error when API request fails", async () => {
-    process.env.LINEAR_API_KEY = "test-api-key";
+    process.env.LINEAR_API_TOKEN = "test-api-key";
 
     globalThis.fetch = mock(async () => {
       throw new Error("Network error");
-    }) as any;
+    }) as unknown as typeof fetch;
 
     await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
       "Failed to look up team 'LEG'"
@@ -146,7 +146,7 @@ describe("resolveTeamId", () => {
   });
 
   test("prefers cache over API when team key exists in cache", async () => {
-    process.env.LINEAR_API_KEY = "test-api-key";
+    process.env.LINEAR_API_TOKEN = "test-api-key";
 
     const teams = {
       LEG: {
@@ -159,10 +159,33 @@ describe("resolveTeamId", () => {
     const mockFetch = mock(async () => {
       throw new Error("Should not call API when cache hit");
     });
-    globalThis.fetch = mockFetch as any;
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
 
     const result = await resolveTeamId("LEG", testCacheDir);
     expect(result).toBe("cached-uuid");
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test("returns GitHub project ref as-is when backend is github", async () => {
+    const result = await resolveTeamId("sjawhar/5", { cacheDir: testCacheDir, backend: "github" });
+    expect(result).toBe("sjawhar/5");
+  });
+
+  test("skips Linear resolution for github backend even with API key", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+    const mockFetch = mock(async () => {
+      throw new Error("Should not call Linear API for github backend");
+    });
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+
+    const result = await resolveTeamId("my-org/42", { cacheDir: testCacheDir, backend: "github" });
+    expect(result).toBe("my-org/42");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test("uses Linear resolution when backend is not specified (backward compat)", async () => {
+    const uuid = "12345678-1234-1234-1234-123456789abc";
+    const result = await resolveTeamId(uuid, { cacheDir: testCacheDir });
+    expect(result).toBe(uuid);
   });
 });

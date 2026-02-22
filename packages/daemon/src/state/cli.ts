@@ -1,11 +1,12 @@
 /**
  * State script CLI entry point.
  *
- * Reads Linear JSON from stdin, processes through fetchAllIssueData
- * and buildCollectedState, outputs JSON to stdout.
+ * Legacy CLI entry point. Reads issue JSON from stdin, processes through
+ * fetchAllIssueData and buildCollectedState, outputs JSON to stdout.
+ * Superseded by POST /state/collect on the daemon.
  *
  * Usage:
- *   echo '<linear-json>' | bun run packages/daemon/src/state/cli.ts --team-id <uuid> --daemon-url <url>
+ *   echo '<issue-json>' | bun run packages/daemon/src/state/cli.ts --team-id <id> --daemon-url <url>
  */
 
 import { buildCollectedState } from "./decision";
@@ -59,8 +60,8 @@ export function parseArgs(args: string[]): CliArgs {
 /**
  * Run the state collection pipeline.
  *
- * @param linearIssues - Raw Linear issues (parsed from stdin JSON)
- * @param teamId - Linear team UUID
+ * @param linearIssues - Raw issues (parsed from stdin JSON)
+ * @param teamId - Team/project identifier
  * @param daemonUrl - Daemon HTTP API URL
  * @param runner - Optional command runner for testing
  * @returns JSON string of CollectedState

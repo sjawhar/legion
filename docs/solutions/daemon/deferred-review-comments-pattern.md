@@ -37,8 +37,19 @@ Not all review comments need blocking fixes. For non-critical items:
 
 **Validation at trust boundaries.** The `isAbsolute(workspace)` check goes in the HTTP handler where external input enters — not deeper in `spawnServe` or `initializeSession` where the error would be confusing. `isAbsolute("")` returning `false` means the single check covers both relative paths and empty strings.
 
+**Test calibration for tiny changes.** Single test for the new validation path. No need to test every invalid variant (empty string, null, undefined) — `typeof` checks already cover those, and one example proves the guard works.
+
 **Decision documentation.** Inline comment explaining *why* SDK client caching was skipped — future readers know it was considered, not overlooked.
 
+## Anti-patterns Avoided
+
+- Over-testing: Didn't add tests for cases already covered by existing `typeof` checks
+- Over-documenting: Didn't write a separate doc explaining path validation philosophy
+- Scope creep: Didn't refactor all validation into a shared validator class
+- Staleness: Issue created and executed same day, so file/line references were still accurate
+
 ## Reusable Takeaway
+
+**For tiny PRs (< 30 lines, single concern):** skip planning phase, write test first, verify with full suite + type check, commit with issue reference.
 
 **For deferred review comments:** capture exact context in issue (PR number, file paths, line numbers), include priority from review, execute promptly before references drift.

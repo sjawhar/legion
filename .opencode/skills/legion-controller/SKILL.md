@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when coordinating Legion workers across Linear issues, dispatching workers, monitoring progress, or routing triage items
+description: Use when coordinating Legion workers across issues, dispatching workers, monitoring progress, or routing triage items
 ---
 
 # Legion Controller
@@ -9,12 +9,13 @@ description: Use when coordinating Legion workers across Linear issues, dispatch
 > The state machine provides suggested actions and raw signals. This skill decides what
 > to do with them. Modify this file to change how issues flow through the pipeline.
 
-Persistent coordinator that loops forever, dispatching and resuming workers based on Linear issue state.
+Persistent coordinator that loops forever, dispatching and resuming workers based on issue state.
 
 ## Environment
 
 Required:
-- `LINEAR_TEAM_ID` - Linear team UUID
+- `LEGION_TEAM_ID` - team/project identifier (Linear UUID or GitHub `owner/project-number`)
+- `LEGION_ISSUE_BACKEND` - issue backend: `"linear"` or `"github"`
 - `LEGION_DIR` - path to default jj workspace
 - `LEGION_SHORT_ID` - short ID for daemon identification
 - `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
@@ -50,26 +51,42 @@ digraph controller {
 ### 1. Fetch Issues
 
 ```bash
-LINEAR_JSON=$(linear_linear(action="search", query={"team": "$LINEAR_TEAM_ID"}))
+# Derive OWNER and PROJECT_NUM from LEGION_TEAM_ID for GitHub backend
+# LEGION_TEAM_ID format for GitHub: "owner/project-number"
+if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+  OWNER="${LEGION_TEAM_ID%%/*}"
+  PROJECT_NUM="${LEGION_TEAM_ID##*/}"
+fi
+
+# Fetch issues based on backend
+if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+  ISSUES_JSON=$(gh project item-list $PROJECT_NUM --owner $OWNER --format json)
+else
+  ISSUES_JSON=$(linear_linear(action="search", query={"team": "$LEGION_TEAM_ID"}))
+fi
+
 ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
 ```
 
-**CRITICAL:** Pass `LINEAR_JSON` directly to the state CLI in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both MCP and GraphQL formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
+**CRITICAL:** Pass `ISSUES_JSON` directly to the state endpoint in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both Linear and GitHub formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
 
 ### 2. Relay User Feedback (Highest Priority)
 
 When both `user-input-needed` AND `user-feedback-given` labels present:
 1. Remove both labels
-2. **Resume** (not spawn) worker session with prompt to check Linear comments
+2. **Resume** (not spawn) worker session with prompt to check issue comments
 
 ### 3. Process worker-done
 
-Run state script:
+Analyze via daemon:
 ```bash
-echo "$LINEAR_JSON" | bun run packages/daemon/src/state/cli.ts --team-id "$LINEAR_TEAM_ID" --daemon-url http://127.0.0.1:$LEGION_DAEMON_PORT
+COLLECTED=$(echo "$ISSUES_JSON" | jq -Rs --arg backend "$LEGION_ISSUE_BACKEND" \
+  '{"backend": $backend, "issues": (. | fromjson)}' | \
+  curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect \
+  -H 'Content-Type: application/json' --data @-)
 ```
 
-The state CLI returns JSON with both `suggestedAction` and raw signals:
+The state endpoint returns JSON with both `suggestedAction` and raw signals:
 - `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
 - `hasPr`, `prIsDraft` — PR state
 - `hasUserFeedback` — user interaction state
@@ -80,7 +97,7 @@ about what to do:
 
 | suggestedAction | Signals | Controller should... |
 |-----------------|---------|---------------------|
-| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for Linear auto-transition to Needs Review |
+| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for auto-transition to Needs Review (or transition explicitly if using GitHub backend) |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
 
@@ -91,11 +108,11 @@ The state machine returns a `suggestedAction`. Route by prefix:
 | Prefix | Intent | Controller action |
 |--------|--------|-------------------|
 | `dispatch_` | Spawn a new worker | `POST /workers` with mode from `ACTION_TO_MODE` |
-| `transition_to_` | Move issue to new status | Update Linear issue status |
+| `transition_to_` | Move issue to new status | Update issue status (Linear: `linear_linear(action="update", ...)`, GitHub: `gh api graphql` for status field) |
 | `resume_` | Send prompt to existing worker | Find worker by sessionId, send prompt |
 | `relay_` | Forward information | Relay user feedback to worker |
-| `add_` | Add label | Add the specified label to the issue |
-| `remove_` | Remove label + retry | Remove label, then re-evaluate |
+| `add_` | Add label | Add the specified label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --add-label`) |
+| `remove_` | Remove label + retry | Remove label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --remove-label`), then re-evaluate |
 | `retry_` | Wait | Do nothing this iteration, re-check next loop |
 | `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
 | `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
@@ -107,7 +124,7 @@ correctly if they follow the naming convention.
 1. Worker crashed before creating PR
 2. PR creation failed silently
 3. Issue moved to wrong status manually
-4. Linear attachment wasn't added
+4. PR wasn't linked to issue (Linear attachment or GitHub linked PR)
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
 
@@ -120,7 +137,7 @@ GitHub API connectivity.
 
 The implementer does **not** use `worker-done`. Instead:
 1. Implementer opens a **draft PR** and exits
-2. Linear's GitHub integration auto-transitions the issue to Needs Review
+2. The issue transitions to Needs Review (Linear auto-transition, or controller transitions explicitly for GitHub)
 3. State machine sees: Needs Review, no `worker-done`, no live worker → `dispatch_reviewer`
 4. Controller runs the quality gate (below), then dispatches the reviewer
 
@@ -151,7 +168,7 @@ BIOME_EXIT=$?
 **If any fail:** Do NOT dispatch reviewer. Instead:
 1. Move issue back to In Progress
 2. Dispatch a fresh implementer with the failure output
-3. The implementer will fix, re-open/update the PR, and exit — Linear will auto-transition back to Needs Review
+3. The implementer will fix, re-open/update the PR, and exit — issue transitions back to Needs Review
 
 ### 4. Route Triage
 
@@ -210,27 +227,55 @@ Then return to step 1.
 
 ## Dispatch vs Resume
 
-**Dispatch** = new worker:
+### Backend in Prompts
+
+Workers must know which backend they're on. The controller always includes the backend
+in dispatch and resume prompts so workers don't need to check environment variables.
+
+Build the backend suffix from `LEGION_ISSUE_BACKEND` and (for GitHub) the repo derived
+from the issue identifier:
+
+- **GitHub:** `(github backend, repo: $OWNER/$REPO)` — derive owner/repo from the issue
+  identifier (format: `owner-repo-number`, e.g. `acme-widgets-42` → `acme/widgets`)
+- **Linear:** `(linear backend)`
+
+### Dispatch (New Worker)
+
 ```bash
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE"
+# GitHub example:
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+
+# Linear example:
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (linear backend)"
 ```
 
 The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
 
-For custom prompts:
+For custom prompts, still include the backend suffix:
 ```bash
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --prompt "Custom instructions here"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --prompt "Custom instructions here (github backend, repo: $OWNER/$REPO)"
 ```
 
-**Resume** = send prompt to existing worker:
+### Resume (Prompt Existing Worker)
+
 ```bash
-legion prompt "$ISSUE_IDENTIFIER" "Check Linear comments for user feedback"
+# User feedback relay (GitHub):
+legion prompt "$ISSUE_IDENTIFIER" \
+  "Check issue comments for user feedback (github backend, repo: $OWNER/$REPO)"
+
+# User feedback relay (Linear):
+legion prompt "$ISSUE_IDENTIFIER" \
+  "Check issue comments for user feedback (linear backend)"
+
+# PR changes requested (GitHub):
+legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+  "Address PR review comments (github backend, repo: $OWNER/$REPO)"
 ```
 
-If multiple workers exist for the same issue (different modes), specify mode:
-```bash
-legion prompt "$ISSUE_IDENTIFIER" --mode implement "Address PR review comments"
-```
+If multiple workers exist for the same issue (different modes), specify mode with `--mode`.
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
 
@@ -239,7 +284,13 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
 
 ```bash
-legion prompt "$ISSUE_IDENTIFIER" --mode implement "/legion-retro"
+# GitHub:
+legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+  "/legion-retro (github backend, repo: $OWNER/$REPO)"
+
+# Linear:
+legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+  "/legion-retro (linear backend)"
 ```
 
 **If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
@@ -263,21 +314,21 @@ Use these signals — don't independently verify worker liveness.
 
 ### 1. Trust the state machine
 
-The state machine checks worker liveness, PR status, labels, and draft state. Pipe Linear
-output directly to the CLI and route by `suggestedAction`. Don't independently check PRs,
+The state machine checks worker liveness, PR status, labels, and draft state. POST issue
+data to `/state/collect` and route by `suggestedAction`. Don't independently check PRs,
 ports, or process status — that's the state machine's job.
 
 For the full observability architecture and failure case studies, see `docs/solutions/daemon/controller-observability.md`.
 
 ### 2. Never reconstruct state machine input
 
-Pass Linear search output directly to the state CLI. Do not hand-craft JSON, filter
+Pass issue tracker output directly to `/state/collect`. Do not hand-craft JSON, filter
 issues, or inject your own assumptions about labels or status. The state machine's
 parser handles the raw format.
 
 ### 3. Fresh data every loop iteration
 
-Fetch issues from Linear at the start of every loop. Don't carry labels, statuses, or
+Fetch issues from the tracker at the start of every loop. Don't carry labels, statuses, or
 worker state between iterations — they go stale.
 
 ### 4. One PR per issue
@@ -303,10 +354,10 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 
 | Thought | What to do instead |
 |---------|--------------------|
-| "Let me construct the JSON for the state machine" | Pipe Linear output directly — no hand-crafting |
-| "I know the label/status from last iteration" | Fetch fresh from Linear. State goes stale between iterations. |
+| "Let me construct the JSON for the state machine" | POST tracker output to `/state/collect` directly — no hand-crafting |
+| "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
 | "The changes are lost" | Check local commits (`jj log`), open PRs (`gh pr list`), and worker workspaces before concluding anything is lost |
-| "I'll give the worker specific instructions" | State the mode and issue ID. Let the workflow guide the worker. |
+| "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Let the workflow guide the worker. |
 | "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |
 | "I'll accumulate these changes into the existing PR" | One issue = one workspace = one branch = one PR. |
 
@@ -319,7 +370,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
 | Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
 | Process issue with live worker | Skip it - worker is already handling |
-| Give workers step-by-step fix instructions | State the mode and issue ID only. Let the workflow guide the worker. |
+| Give workers step-by-step fix instructions | State the mode, issue ID, and backend only. Let the workflow guide the worker. |
 | Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. Otherwise the state machine re-triggers on the next loop. |
 
 ## Status Flow

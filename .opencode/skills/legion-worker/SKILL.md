@@ -1,20 +1,31 @@
 ---
 name: legion-worker
-description: Use when dispatched by Legion controller to work on a Linear issue in a jj workspace
+description: Use when dispatched by Legion controller to work on an issue in a jj workspace
 ---
 
 # Legion Worker
 
 Router skill for Legion issue work. Dispatched by controller with a mode parameter.
 
-## Environment
+## Context from Prompt
 
-Required:
-- `LINEAR_ISSUE_ID` - issue identifier (e.g., `ENG-21`)
+The controller dispatches you with a prompt that includes your **issue ID**, **mode**, and **backend**:
+
+- **GitHub:** `/legion-worker implement mode for acme-widgets-42 (github backend, repo: acme/widgets)`
+- **Linear:** `/legion-worker plan mode for ENG-21 (linear backend)`
+
+Extract these values from the prompt. For GitHub issues, also derive the **owner**, **repo**,
+and **issue number** from the issue ID (format: `owner-repo-number`).
+
+Throughout this skill and its workflows, `$LEGION_ISSUE_ID`, `$ISSUE_NUMBER`, `$OWNER`, and
+`$REPO` are **placeholders** — substitute the values you extracted from your prompt context.
+Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands.
 
 ## Essential Rules
 
-1. **Read Linear issue first** - `linear_linear(action="get", id="$LINEAR_ISSUE_ID")`
+1. **Read issue first**
+   - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="get", id="$LEGION_ISSUE_ID")`
 2. **Use jj, not git** - changes auto-tracked (see jj safety rules below)
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
@@ -42,18 +53,18 @@ jj rebase -d main
 jj new  # Fresh commit for this session
 ```
 
-If you're resuming after user feedback, also read the Linear comments for the answer.
+If you're resuming after user feedback, also read the issue comments for the answer.
 
 ### Blocking on User Input
 
 When you need human input that the legion-oracle can't answer:
 
 1. Push your work: `jj git push`
-2. Post a structured escalation comment to Linear:
+2. Post a structured escalation comment to the issue:
 
+**GitHub:**
 ```
-linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="
-## Escalation
+gh issue comment $ISSUE_NUMBER --body "## Escalation
 
 **Phase:** [current mode - architect/plan/implement/review]
 **Completed:** [what work has been done so far]
@@ -69,8 +80,28 @@ linear_linear(action="comment", id="$LINEAR_ISSUE_ID", body="
 ### Context
 - **Remaining estimate:** [rough scope of remaining work after unblock]
 - **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
-- **Branch:** [current branch name if applicable]
-")
+- **Branch:** [current branch name if applicable]" -R $OWNER/$REPO
+```
+
+**Linear:**
+```
+linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Escalation
+
+**Phase:** [current mode - architect/plan/implement/review]
+**Completed:** [what work has been done so far]
+
+### Blocker
+[Specific question or decision needed — be precise]
+
+### Options Considered
+1. [Option A] — [trade-offs]
+2. [Option B] — [trade-offs]
+3. [Option C if applicable]
+
+### Context
+- **Remaining estimate:** [rough scope of remaining work after unblock]
+- **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
+- **Branch:** [current branch name if applicable]")
 ```
 
 3. Update labels: add `user-input-needed`, remove `worker-active`
@@ -112,8 +143,8 @@ Review signals outcome via PR draft status BEFORE `worker-done`:
 
 ## Research Before Escalating
 
-Before blocking on user input, workers should invoke `/legion-oracle [your question]` to search institutional knowledge (docs/solutions/, codebase patterns). Only escalate to the user (via Linear comment + label) if the legion-oracle cannot answer.
+Before blocking on user input, workers should invoke `/legion-oracle [your question]` to search institutional knowledge (docs/solutions/, codebase patterns). Only escalate to the user (via issue comment + label) if the legion-oracle cannot answer.
 
 ## Reference
 
-Label conventions: @references/linear-labels.md
+Label conventions: @references/linear-labels.md (Linear), @references/github-labels.md (GitHub)

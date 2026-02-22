@@ -11,9 +11,18 @@ Signal outcome via PR draft status instead (draft = changes requested, ready = a
 
 ### 1. Gather Context
 
-Fetch the Linear issue:
+Fetch the issue:
+
+**GitHub:**
+
 ```
-linear_linear(action="get", id=$LINEAR_ISSUE_ID)
+gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO
+```
+
+**Linear:**
+
+```
+linear_linear(action="get", id=$LEGION_ISSUE_ID)
 ```
 
 Extract:
@@ -23,7 +32,7 @@ Extract:
 
 Fetch the PR metadata:
 ```bash
-gh pr view "$LINEAR_ISSUE_ID" --json title,body,headRefName
+gh pr view "$LEGION_ISSUE_ID" --json title,body,headRefName
 ```
 
 **The code is already in the workspace** - review locally, no need to fetch diff remotely.
@@ -43,7 +52,7 @@ Pass the context gathered in step 1. The review skill will:
 Post a top-level PR comment with the review summary:
 
 ```bash
-gh pr comment "$LINEAR_ISSUE_ID" --body "## Review Summary
+gh pr comment "$LEGION_ISSUE_ID" --body "## Review Summary
 
 **CRITICAL (P1):** N issues
 **IMPORTANT (P2):** N issues
@@ -63,7 +72,7 @@ For each finding, post a line-level comment:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
   --method POST \
   --field body="**[SEVERITY]:** [description]" \
-  --field commit_id="$(gh pr view $LINEAR_ISSUE_ID --json headRefOid -q .headRefOid)" \
+  --field commit_id="$(gh pr view $LEGION_ISSUE_ID --json headRefOid -q .headRefOid)" \
   --field path="[file_path]" \
   --field line=[line_number]
 ```
@@ -78,12 +87,15 @@ Every review MUST set the PR draft status based on findings. This is how the con
 
 ```bash
 # If any CRITICAL/P1 issues found — convert to draft (changes requested):
-gh pr ready "$LINEAR_ISSUE_ID" --undo
+gh pr ready "$LEGION_ISSUE_ID" --undo
 
 # If no CRITICAL issues — mark ready for merge (approved):
-gh pr ready "$LINEAR_ISSUE_ID"
+gh pr ready "$LEGION_ISSUE_ID"
 ```
 
 ### 6. Signal Completion
 
-Add `worker-done` to the Linear issue (see @references/linear-labels.md), then exit.
+Add `worker-done` to the issue, then exit:
+
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`

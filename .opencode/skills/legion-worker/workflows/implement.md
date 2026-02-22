@@ -29,7 +29,10 @@ Resolve any conflicts before proceeding.
 
 ### 1. Load Plan
 
-Fetch issue and comments with `linear_linear(action="get", ...)`. The plan is in comments.
+Fetch issue and comments. The plan is in comments:
+
+- **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
 
 ### 2. Invoke Skills (in order)
 
@@ -88,7 +91,7 @@ If any check fails:
 
 Do NOT create a PR if any check fails — fix first.
 
-Record the results as evidence for the controller's quality gate verification. Include in your Linear comment:
+Record the results as evidence for the controller's quality gate verification. Include in your issue comment:
 ```
 CI Results: tests ✅ | tsc ✅ | biome ✅
 ```
@@ -101,7 +104,7 @@ After all checks pass, spawn a cross-family review session before creating the P
    - Category: `review-implementation`
    - Model: Specify an explicit model from a different provider (e.g., `google/gemini-3-pro` or `openai/gpt-5.2-codex`)
    - Prompt: Include:
-     - The original plan/requirements from the Linear issue
+    - The original plan/requirements from the issue
      - A summary of what was implemented
      - The diff (`jj diff`)
 
@@ -129,22 +132,22 @@ jj diff --stat --from main    # File count should match expectations — no unre
 If unrelated commits are in the ancestry, rebase to isolate your changes before creating the PR.
 
 ```bash
-jj describe -m "$LINEAR_ISSUE_ID: [description]"
-jj git push --named "$LINEAR_ISSUE_ID"=@
+jj describe -m "$LEGION_ISSUE_ID: [description]"
+jj git push --named "$LEGION_ISSUE_ID"=@
 
 gh pr create --draft \
-  --title "$LINEAR_ISSUE_ID: [title]" \
-  --body "Implements $LINEAR_ISSUE_ID
+  --title "$LEGION_ISSUE_ID: [title]" \
+  --body "Implements $LEGION_ISSUE_ID
 
 [summary]" \
-  --head "$LINEAR_ISSUE_ID"
+  --head "$LEGION_ISSUE_ID"
 ```
 
-Linear auto-associates the PR via the issue ID in the branch/title.
+The issue ID in the branch/title preserves traceability for the controller.
 
 ### 7. Exit
 
-Exit without adding labels. Opening PR auto-transitions issue in Linear.
+Exit without adding labels. The controller handles state transitions explicitly.
 
 ---
 

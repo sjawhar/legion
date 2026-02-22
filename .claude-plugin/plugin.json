@@ -1,7 +1,7 @@
 {
   "name": "legion",
   "version": "0.1.0",
-  "description": "OpenCode orchestration for Linear-driven autonomous development",
+  "description": "OpenCode orchestration for autonomous development",
   "author": {
     "name": "Sami Jawhar"
   },

@@ -1,144 +1,21 @@
 /**
  * Tests for state fetch logic.
  *
- * Ported from Python tests:
- * - tests/test_state.py (TestParseLinearIssues, TestGetPrDraftStatusBatch,
- *   TestParseLinearIssuesEdgeCases, TestFetchAllIssueData, TestFetchAllIssueDataErrorHandling)
+ * Originally ported from Python tests. Linear-specific parsing tests
+ * have moved to backends/__tests__/linear.test.ts.
  */
 
 import { describe, expect, it, mock } from "bun:test";
 import {
   type CommandRunner,
+  enrichParsedIssues,
   fetchAllIssueData,
   GitHubAPIError,
   getLiveWorkers,
   getPrDraftStatusBatch,
-  parseLinearIssues,
 } from "../fetch";
 import type { LinearIssueRaw } from "../types";
-
-// =============================================================================
-// TestParseLinearIssues
-// =============================================================================
-
-describe("parseLinearIssues", () => {
-  it("parses basic issue", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: { name: "In Progress" },
-        labels: { nodes: [{ name: "worker-done" }] },
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result).toHaveLength(1);
-    expect(result[0].issueId).toBe("ENG-21");
-    expect(result[0].status).toBe("In Progress");
-    expect(result[0].hasWorkerDone).toBe(true);
-  });
-
-  it("normalizes status (In Review → Needs Review)", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: { name: "In Review" },
-        labels: { nodes: [] },
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result[0].status).toBe("Needs Review");
-  });
-
-  it("skips issues without identifier", () => {
-    const issues: LinearIssueRaw[] = [
-      { state: { name: "Todo" }, labels: { nodes: [] } },
-      {
-        identifier: "ENG-21",
-        state: { name: "Todo" },
-        labels: { nodes: [] },
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result).toHaveLength(1);
-  });
-
-  it("handles null state", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: null as unknown as undefined,
-        labels: { nodes: [] },
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result[0].status).toBe("");
-  });
-
-  it("handles null labels", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: { name: "Todo" },
-        labels: null as unknown as undefined,
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result[0].labels).toEqual([]);
-  });
-});
-
-// =============================================================================
-// TestParseLinearIssuesEdgeCases
-// =============================================================================
-
-describe("parseLinearIssues edge cases", () => {
-  it("handles deeply nested nulls", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: { name: null as unknown as string },
-        labels: { nodes: null as unknown as [] },
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result).toHaveLength(1);
-    expect(result[0].status).toBe("");
-    expect(result[0].labels).toEqual([]);
-  });
-
-  it("handles labels with missing name", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: { name: "Todo" },
-        labels: {
-          nodes: [{ name: "worker-done" }, {} as { name: string }, { name: "urgent" }],
-        },
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result).toHaveLength(1);
-    expect(result[0].labels).toEqual(["worker-done", "urgent"]);
-  });
-
-  it("handles attachments with invalid URLs", () => {
-    const issues: LinearIssueRaw[] = [
-      {
-        identifier: "ENG-21",
-        state: { name: "Needs Review" },
-        labels: { nodes: [] },
-        attachments: [
-          { url: "https://example.com/not-a-pr" },
-          { url: "https://github.com/owner/repo/issues/123" },
-          { url: "not-even-a-url" },
-        ],
-      },
-    ];
-    const result = parseLinearIssues(issues);
-    expect(result).toHaveLength(1);
-    expect(result[0].prRef).toBeNull();
-  });
-});
+import { createParsedIssue } from "../types";
 
 // =============================================================================
 // TestGetLiveWorkers (HTTP-based)
@@ -609,6 +486,45 @@ describe("fetchAllIssueData", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].issueId).toBe("ENG-21");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("enrichParsedIssues", () => {
+  it("enriches issues with worker status from daemon", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({ stdout: "", stderr: "", exitCode: 1 });
+      const issues = [createParsedIssue("ENG-21", "In Progress", ["worker-active"], null)];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+      expect(result).toHaveLength(1);
+      expect(result[0].issueId).toBe("ENG-21");
+      expect(result[0].hasLiveWorker).toBe(false);
+      expect(result[0].prIsDraft).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("handles GitHub-style issues with null prRef", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({ stdout: "", stderr: "", exitCode: 1 });
+      const issues = [createParsedIssue("GH-42", "Todo", [], null)];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+      expect(result).toHaveLength(1);
+      expect(result[0].prIsDraft).toBeNull();
+      expect(result[0].hasPr).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
     }

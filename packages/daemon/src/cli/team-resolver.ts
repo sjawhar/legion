@@ -15,14 +15,28 @@ interface TeamsCache {
 }
 
 /**
- * Resolve a team reference to a UUID.
+ * Resolve a team reference to a stable ID.
  *
- * @param teamRef - Either a UUID or a team key (e.g., "LEG")
- * @param cacheDir - Optional cache directory (defaults to ~/.legion)
- * @returns The team UUID
+ * For GitHub backend, the team ref (e.g., "owner/project-number") is already the ID.
+ * For Linear backend, resolves team keys (e.g., "LEG") to UUIDs via cache or API.
+ *
+ * @param teamRef - Team identifier: UUID, team key (Linear), or owner/project-number (GitHub)
+ * @param options - Optional cache directory and backend
+ * @returns The team ID
  * @throws Error if team cannot be resolved
  */
-export async function resolveTeamId(teamRef: string, cacheDir?: string): Promise<string> {
+export async function resolveTeamId(
+  teamRef: string,
+  options?: string | { cacheDir?: string; backend?: string }
+): Promise<string> {
+  const cacheDir = typeof options === "string" ? options : options?.cacheDir;
+  const backend = typeof options === "string" ? undefined : options?.backend;
+
+  // GitHub backend: team ref is already the ID (owner/project-number)
+  if (backend === "github") {
+    return teamRef;
+  }
+
   if (UUID_PATTERN.test(teamRef)) {
     return teamRef;
   }
@@ -40,14 +54,14 @@ export async function resolveTeamId(teamRef: string, cacheDir?: string): Promise
     }
   }
 
-  const apiKey = process.env.LINEAR_API_KEY;
+  const apiKey = process.env.LINEAR_API_TOKEN;
   if (apiKey) {
     return await lookupTeamViaApi(teamRef, apiKey);
   }
 
   throw new Error(
     `'${teamRef}' is not a UUID.\n` +
-      `Run 'legion teams' to cache team mappings, or set LINEAR_API_KEY.`
+      `Run 'legion teams' to cache team mappings, or set LINEAR_API_TOKEN.`
   );
 }
 

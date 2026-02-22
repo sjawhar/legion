@@ -1,5 +1,13 @@
 import { isAbsolute } from "node:path";
-import { computeSessionId, WorkerMode, type WorkerModeLiteral } from "../state/types";
+import { getBackend, isBackendName } from "../state/backends/index";
+import { buildCollectedState } from "../state/decision";
+import { enrichParsedIssues } from "../state/fetch";
+import {
+  CollectedState,
+  computeSessionId,
+  WorkerMode,
+  type WorkerModeLiteral,
+} from "../state/types";
 import { createWorkerClient, type WorkerEntry } from "./serve-manager";
 import {
   type ControllerState,
@@ -21,7 +29,6 @@ export interface ServerOptions {
   hostname?: string;
   teamId: string;
   legionDir: string;
-  shortId: string;
   serveManager: ServeManagerInterface;
   sharedServePort: number;
   stateFilePath: string;
@@ -140,7 +147,6 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const issueId = payload.issueId;
             const mode = payload.mode;
             const workspace = payload.workspace;
-            const env = payload.env;
 
             if (
               typeof issueId !== "string" ||
@@ -155,16 +161,6 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const validModes = Object.values(WorkerMode);
             if (!validModes.includes(mode as WorkerModeLiteral)) {
               return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
-            }
-            if (env !== undefined) {
-              if (!isRecord(env)) {
-                return badRequest("invalid_env");
-              }
-              for (const [, val] of Object.entries(env)) {
-                if (typeof val !== "string") {
-                  return badRequest("env values must be strings");
-                }
-              }
             }
 
             const normalizedIssueId = issueId.toLowerCase();
@@ -334,6 +330,38 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             return jsonResponse(result.data);
           } catch {
             return badGateway();
+          }
+        }
+
+        if (method === "POST" && url.pathname === "/state/collect") {
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const backend = payload.backend;
+          if (!isBackendName(backend)) {
+            return badRequest("invalid_backend");
+          }
+
+          const issues = payload.issues;
+          if (issues === undefined || issues === null || typeof issues !== "object") {
+            return badRequest("invalid_issues");
+          }
+
+          try {
+            const tracker = getBackend(backend);
+            const parsed = tracker.parseIssues(issues);
+            const daemonUrl = `http://127.0.0.1:${server.port}`;
+            const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+            const state = buildCollectedState(issuesData, opts.teamId);
+            return jsonResponse(CollectedState.toDict(state));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[collect] backend=${backend} error=${message}`);
+            return serverError("collect_failed");
           }
         }
 

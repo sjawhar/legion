@@ -737,13 +737,13 @@ describe("cmdPrompt", () => {
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
-    await cmdPrompt("LEG-42", "Check the Linear comments", { daemonPort: 13376 });
+    await cmdPrompt("LEG-42", "Check the issue comments", { daemonPort: 13376 });
 
     expect(fetchMock.mock.calls.length).toBe(2);
     const [secondUrl, secondInit] = fetchMock.mock.calls[1] as FetchCall;
     expect(secondUrl.toString()).toBe("http://127.0.0.1:19000/session/s-42/prompt_async");
     expect(JSON.parse((secondInit as RequestInit).body as string)).toEqual({
-      parts: [{ type: "text", text: "Check the Linear comments" }],
+      parts: [{ type: "text", text: "Check the issue comments" }],
     });
   });
 
@@ -766,7 +766,7 @@ describe("cmdPrompt", () => {
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
-    await cmdPrompt("LEG-42", "Check the Linear comments", {
+    await cmdPrompt("LEG-42", "Check the issue comments", {
       daemonPort: 13377,
       mode: "implement",
     });
@@ -794,7 +794,7 @@ describe("cmdPrompt", () => {
 
     let caught: CliError | null = null;
     try {
-      await cmdPrompt("LEG-42", "Check the Linear comments", { daemonPort: 13378 });
+      await cmdPrompt("LEG-42", "Check the issue comments", { daemonPort: 13378 });
     } catch (error) {
       caught = error as CliError;
     }

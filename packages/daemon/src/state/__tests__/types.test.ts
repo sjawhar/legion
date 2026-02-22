@@ -7,7 +7,6 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { validate as validateUuid } from "uuid";
 import {
   computeControllerSessionId,
   computeSessionId,
@@ -45,10 +44,10 @@ describe("computeSessionId", () => {
     expect(result1).not.toBe(result2);
   });
 
-  it("throws error for invalid team id", () => {
+  it("accepts non-UUID team ID without throwing", () => {
     expect(() => {
       computeSessionId("not-a-valid-uuid", "ENG-21", "implement");
-    }).toThrow();
+    }).not.toThrow();
   });
 });
 
@@ -74,10 +73,57 @@ describe("computeControllerSessionId", () => {
     expect(controllerId).not.toBe(workerId);
   });
 
-  it("throws error for invalid team id", () => {
+  it("accepts non-UUID team ID without throwing", () => {
     expect(() => {
       computeControllerSessionId("not-a-valid-uuid");
-    }).toThrow();
+    }).not.toThrow();
+  });
+});
+
+describe("computeSessionId with non-UUID team ID", () => {
+  it("accepts a GitHub project ID string", () => {
+    const result = computeSessionId("sjawhar/5", "gh-42", "implement");
+    expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+  });
+
+  it("produces deterministic known output (golden value)", () => {
+    const result = computeSessionId("sjawhar/5", "gh-42", "implement");
+    expect(result).toBe("ses_5f6e229e023c20L4w2B1RNa3WZ");
+  });
+
+  it("same non-UUID inputs produce same output", () => {
+    const result1 = computeSessionId("sjawhar/5", "gh-42", "implement");
+    const result2 = computeSessionId("sjawhar/5", "gh-42", "implement");
+    expect(result1).toBe(result2);
+  });
+
+  it("different non-UUID team IDs produce different output", () => {
+    const result1 = computeSessionId("sjawhar/5", "gh-42", "implement");
+    const result2 = computeSessionId("sjawhar/6", "gh-42", "implement");
+    expect(result1).not.toBe(result2);
+  });
+
+  it("non-UUID team ID produces different output from UUID team ID", () => {
+    const uuidResult = computeSessionId(
+      "7b4f0862-b775-4cb0-9a67-85400c6f44a8",
+      "ENG-21",
+      "implement"
+    );
+    const stringResult = computeSessionId("sjawhar/5", "ENG-21", "implement");
+    expect(uuidResult).not.toBe(stringResult);
+  });
+});
+
+describe("computeControllerSessionId with non-UUID team ID", () => {
+  it("accepts a GitHub project ID string", () => {
+    const result = computeControllerSessionId("sjawhar/5");
+    expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+  });
+
+  it("same non-UUID input produces same output", () => {
+    const result1 = computeControllerSessionId("sjawhar/5");
+    const result2 = computeControllerSessionId("sjawhar/5");
+    expect(result1).toBe(result2);
   });
 });
 
@@ -91,8 +137,24 @@ describe("IssueStatus.normalize", () => {
     expect(IssueStatus.normalize("In Review")).toBe("Needs Review");
   });
 
+  it("normalizes case-insensitive canonical match", () => {
+    expect(IssueStatus.normalize("in progress")).toBe("In Progress");
+    expect(IssueStatus.normalize("In progress")).toBe("In Progress");
+    expect(IssueStatus.normalize("IN PROGRESS")).toBe("In Progress");
+    expect(IssueStatus.normalize("todo")).toBe("Todo");
+    expect(IssueStatus.normalize("BACKLOG")).toBe("Backlog");
+    expect(IssueStatus.normalize("needs review")).toBe("Needs Review");
+  });
+
+  it("normalizes case-insensitive alias match", () => {
+    expect(IssueStatus.normalize("in review")).toBe("Needs Review");
+    expect(IssueStatus.normalize("IN REVIEW")).toBe("Needs Review");
+  });
+
   it("returns unknown status unchanged", () => {
     expect(IssueStatus.normalize("Unknown")).toBe("Unknown");
+    expect(IssueStatus.normalize("Today")).toBe("Today");
+    expect(IssueStatus.normalize("Scrapped")).toBe("Scrapped");
   });
 
   it("returns empty string for null", () => {

@@ -155,6 +155,7 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     suggestedAction: action,
     sessionId,
     hasUserFeedback: data.hasUserFeedback,
+    source: data.source,
   };
 }
 

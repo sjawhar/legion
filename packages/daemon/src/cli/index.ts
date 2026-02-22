@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { defineCommand, runMain } from "citty";
-import type { DaemonConfig } from "../daemon/config";
+import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { resolveTeamId } from "./team-resolver";
 
@@ -98,27 +98,24 @@ interface StartOptions {
   workspace: string;
   stateDir?: string;
   prompt?: string;
+  backend?: string;
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
-  const teamId = await resolveTeamId(team);
+  const teamId = await resolveTeamId(team, { backend: opts.backend });
   const resolvedStateDir = resolveStateDir(teamId, opts.stateDir);
 
-  if (opts.prompt && opts.prompt.length > 10000) {
-    throw new CliError(
-      `Controller prompt exceeds maximum length of 10000 characters (got ${opts.prompt.length})`
-    );
-  }
-
-  if (opts.prompt && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(opts.prompt)) {
-    throw new CliError("Controller prompt contains invalid control characters");
-  }
+  validateControllerPrompt(opts.prompt);
 
   console.log(`Starting Legion for team: ${teamId}`);
   console.log(`Workspace: ${opts.workspace}`);
   console.log(`State directory: ${resolvedStateDir}`);
 
   fs.mkdirSync(resolvedStateDir, { recursive: true });
+
+  if (opts.backend) {
+    process.env.LEGION_ISSUE_BACKEND = opts.backend;
+  }
 
   const overrides: Partial<DaemonConfig> = {
     teamId,
@@ -138,8 +135,8 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
   await new Promise(() => {});
 }
 
-async function cmdStop(team: string, stateDir?: string): Promise<void> {
-  const teamId = await resolveTeamId(team);
+async function cmdStop(team: string, stateDir?: string, backend?: string): Promise<void> {
+  const teamId = await resolveTeamId(team, { backend });
   const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Stopping Legion for team: ${teamId}`);
@@ -165,8 +162,8 @@ async function cmdStop(team: string, stateDir?: string): Promise<void> {
   }
 }
 
-async function cmdStatus(team: string, stateDir?: string): Promise<void> {
-  const teamId = await resolveTeamId(team);
+async function cmdStatus(team: string, stateDir?: string, backend?: string): Promise<void> {
+  const teamId = await resolveTeamId(team, { backend });
   const resolvedStateDir = resolveStateDir(teamId, stateDir);
 
   console.log(`Legion Status: ${teamId}`);
@@ -200,8 +197,8 @@ async function cmdStatus(team: string, stateDir?: string): Promise<void> {
   }
 }
 
-async function cmdAttach(team: string, issue: string): Promise<void> {
-  const teamId = await resolveTeamId(team);
+async function cmdAttach(team: string, issue: string, backend?: string): Promise<void> {
+  const teamId = await resolveTeamId(team, { backend });
 
   console.log(`Attaching to worker for issue: ${issue}`);
   console.log(`Team: ${teamId}`);
@@ -527,6 +524,45 @@ async function cmdTeams(includeAll: boolean): Promise<void> {
   }
 }
 
+async function cmdCollectState(backend: string): Promise<void> {
+  if (backend !== "linear" && backend !== "github") {
+    throw new CliError(`Invalid backend: ${backend}. Must be 'linear' or 'github'.`);
+  }
+
+  const stdinText = await new Response(Bun.stdin.stream()).text();
+  if (!stdinText.trim()) {
+    throw new CliError("No input on stdin. Usage: echo '$JSON' | legion collect-state <backend>");
+  }
+  let issues: unknown;
+  try {
+    issues = JSON.parse(stdinText);
+  } catch {
+    throw new CliError("Failed to parse stdin as JSON");
+  }
+
+  const daemonPort = getDaemonPort();
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/state/collect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ backend, issues }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new CliError(`Daemon returned ${response.status}: ${body}`);
+    }
+
+    const result = await response.text();
+    process.stdout.write(`${result}\n`);
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`Could not connect to daemon at ${baseUrl}/state/collect. Is it running?`);
+  }
+}
+
 export const startCommand = defineCommand({
   meta: { name: "start", description: "Start the Legion swarm" },
   args: {
@@ -543,12 +579,18 @@ export const startCommand = defineCommand({
       alias: "p",
       description: "Custom prompt appended to the controller's initial /legion-controller prompt",
     },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
     await cmdStart(args.team, {
       workspace: args.workspace,
       stateDir: args["state-dir"],
       prompt: args.prompt,
+      backend: args.backend,
     });
   },
 });
@@ -558,9 +600,14 @@ export const stopCommand = defineCommand({
   args: {
     team: { type: "positional", description: "Team key or UUID", required: true },
     "state-dir": { type: "string", description: "State directory path" },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
-    await cmdStop(args.team, args["state-dir"]);
+    await cmdStop(args.team, args["state-dir"], args.backend);
   },
 });
 
@@ -569,9 +616,14 @@ export const statusCommand = defineCommand({
   args: {
     team: { type: "positional", description: "Team key or UUID", required: true },
     "state-dir": { type: "string", description: "State directory path" },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
-    await cmdStatus(args.team, args["state-dir"]);
+    await cmdStatus(args.team, args["state-dir"], args.backend);
   },
 });
 
@@ -580,10 +632,15 @@ export const attachCommand = defineCommand({
   args: {
     team: { type: "positional", description: "Team key or UUID", required: true },
     issue: { type: "positional", description: "Issue key or identifier", required: true },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
   },
   async run({ args }) {
     try {
-      await cmdAttach(args.team, args.issue);
+      await cmdAttach(args.team, args.issue, args.backend);
     } catch (e) {
       if (e instanceof CliError) {
         console.error(e.message);
@@ -684,6 +741,28 @@ export const resetCrashesCommand = defineCommand({
   },
 });
 
+export const collectStateCommand = defineCommand({
+  meta: { name: "collect-state", description: "Collect and analyze issue state via daemon" },
+  args: {
+    backend: {
+      type: "positional",
+      description: "Issue tracker backend (linear or github)",
+      required: true,
+    },
+  },
+  async run({ args }) {
+    try {
+      await cmdCollectState(args.backend);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
   subCommands: {
@@ -695,6 +774,7 @@ export const mainCommand = defineCommand({
     prompt: promptCommand,
     "reset-crashes": resetCrashesCommand,
     teams: teamsCommand,
+    "collect-state": collectStateCommand,
   },
 });
 

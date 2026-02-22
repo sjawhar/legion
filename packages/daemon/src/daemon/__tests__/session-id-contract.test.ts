@@ -42,7 +42,6 @@ describe("sessionId contract (daemon vs state)", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir,
-      shortId: "test",
       serveManager,
       sharedServePort,
       stateFilePath,

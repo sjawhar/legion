@@ -10,7 +10,7 @@
  * Ported from Python: src/legion/state/types.py
  */
 
-import { v5 as uuidv5, validate as validateUuid } from "uuid";
+import { v5 as uuidv5 } from "uuid";
 
 // =============================================================================
 // Status Constants and Normalization
@@ -71,26 +71,69 @@ export const IssueStatus = {
   DONE: "Done" as IssueStatusLiteral,
 
   /**
-   * Map Linear's status names to our canonical names.
+   * Map status name aliases to canonical names.
+   * Case-insensitive lookup is handled by normalize() — keys here
+   * should be in their most common casing for readability.
    */
   ALIASES: {
     "In Review": "Needs Review" as IssueStatusLiteral,
-  },
+  } as Record<string, IssueStatusLiteral>,
 
   /**
    * Normalize a raw status string to canonical form.
    *
-   * Returns the canonical IssueStatusLiteral if the raw value matches
-   * a known alias, otherwise returns the original string unchanged.
+   * Matching is case-insensitive: "in progress", "In progress",
+   * and "IN PROGRESS" all resolve to "In Progress".
+   *
+   * Resolution order:
+   *   1. Exact match against canonical status names
+   *   2. Case-insensitive match against canonical status names
+   *   3. Case-insensitive match against ALIASES
+   *   4. Return raw value unchanged
+   *
    * Returns empty string if raw is null.
    */
   normalize(raw: string | null): IssueStatusLiteral | string {
     if (raw === null) {
       return "";
     }
-    return IssueStatus.ALIASES[raw as keyof typeof IssueStatus.ALIASES] ?? raw;
+
+    // Fast path: exact alias match
+    const aliasHit = IssueStatus.ALIASES[raw];
+    if (aliasHit) {
+      return aliasHit;
+    }
+
+    // Case-insensitive lookup against canonical names + aliases
+    const lower = raw.toLowerCase();
+    const canonical = _lowercaseCanonicalMap.get(lower);
+    if (canonical) {
+      return canonical;
+    }
+    const aliasCanonical = _lowercaseAliasMap.get(lower);
+    if (aliasCanonical) {
+      return aliasCanonical;
+    }
+
+    return raw;
   },
 } as const;
+
+// Pre-built lowercase lookup maps (populated after IssueStatus is defined)
+const _lowercaseCanonicalMap = new Map<string, IssueStatusLiteral>([
+  ["triage", "Triage"],
+  ["icebox", "Icebox"],
+  ["backlog", "Backlog"],
+  ["todo", "Todo"],
+  ["in progress", "In Progress"],
+  ["needs review", "Needs Review"],
+  ["retro", "Retro"],
+  ["done", "Done"],
+]);
+
+const _lowercaseAliasMap = new Map<string, IssueStatusLiteral>(
+  Object.entries(IssueStatus.ALIASES).map(([k, v]) => [k.toLowerCase(), v])
+);
 
 /**
  * Worker mode constants for session ID computation.
@@ -103,46 +146,6 @@ export const WorkerMode = {
   MERGE: "merge" as WorkerModeLiteral,
 } as const;
 
-// =============================================================================
-// External API Types (documenting what APIs return)
-// =============================================================================
-
-export interface LinearStateDict {
-  name: string;
-}
-
-export interface LinearLabelNode {
-  name: string;
-}
-
-export interface LinearLabelsContainer {
-  nodes: LinearLabelNode[];
-}
-
-export interface LinearIssue {
-  identifier: string;
-  state: LinearStateDict | null;
-  labels: LinearLabelsContainer | null;
-}
-
-export interface LinearAttachment {
-  url?: string;
-}
-
-/**
- * Raw Linear issue from API (MCP or GraphQL).
- *
- * Different APIs return different fields.
- * The identifier field is required for valid issues.
- */
-export interface LinearIssueRaw {
-  identifier?: string;
-  status?: string; // MCP format: status as string
-  state?: LinearStateDict; // GraphQL format: state.name
-  labels?: string[] | LinearLabelsContainer; // MCP: string[], GraphQL: {nodes: [...]}
-  attachments?: LinearAttachment[];
-}
-
 export interface GitHubLabel {
   name: string;
 }
@@ -150,6 +153,15 @@ export interface GitHubLabel {
 export interface GitHubPR {
   labels: GitHubLabel[] | null;
 }
+
+export type {
+  LinearAttachment,
+  LinearIssue,
+  LinearIssueRaw,
+  LinearLabelNode,
+  LinearLabelsContainer,
+  LinearStateDict,
+} from "./backends/linear";
 
 // =============================================================================
 // Internal Data Structures
@@ -193,13 +205,25 @@ export const GitHubPRRef = {
 };
 
 /**
- * Parsed issue data from Linear API response.
+ * Structured source reference for an issue.
+ * Preserves the full identity so API calls can target the exact issue.
+ */
+export interface IssueSource {
+  owner: string;
+  repo: string;
+  number: number;
+  url: string;
+}
+
+/**
+ * Parsed issue data from issue tracker API response.
  */
 export interface ParsedIssue {
   issueId: string;
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   prRef: GitHubPRRef | null;
+  source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
 
   // Computed properties (implemented as getters)
   readonly hasWorkerDone: boolean;
@@ -219,13 +243,15 @@ export function createParsedIssue(
   issueId: string,
   status: IssueStatusLiteral | string,
   labels: string[],
-  prRef: GitHubPRRef | null
+  prRef: GitHubPRRef | null,
+  source: IssueSource | null = null
 ): ParsedIssue {
   return {
     issueId,
     status,
     labels,
     prRef,
+    source,
 
     get hasWorkerDone() {
       return this.labels.includes("worker-done");
@@ -272,7 +298,7 @@ export interface FetchedIssueData {
   issueId: string;
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
-  hasPr: boolean; // True if Linear has a PR URL attached
+  hasPr: boolean; // True if issue has a linked PR
   prIsDraft: boolean | null; // null if no PR or couldn't check status
   hasLiveWorker: boolean;
   workerMode: string | null;
@@ -281,6 +307,7 @@ export interface FetchedIssueData {
   hasUserInputNeeded: boolean;
   hasNeedsApproval: boolean;
   hasHumanApproved: boolean;
+  source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
 /**
@@ -297,6 +324,7 @@ export interface IssueStateDict {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  source: IssueSource | null;
 }
 
 /**
@@ -312,7 +340,7 @@ export interface CollectedStateDict {
 export interface IssueState {
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
-  hasPr: boolean; // Whether issue has a PR attached in Linear
+  hasPr: boolean; // Whether issue has a linked PR
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
   hasLiveWorker: boolean;
   workerMode: string | null;
@@ -320,6 +348,7 @@ export interface IssueState {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
 export const IssueState = {
@@ -338,6 +367,7 @@ export const IssueState = {
       suggestedAction: state.suggestedAction,
       sessionId: state.sessionId,
       hasUserFeedback: state.hasUserFeedback,
+      source: state.source,
     };
     return dict;
   },
@@ -370,6 +400,20 @@ export const CollectedState = {
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /**
+ * Fixed namespace UUID for deriving team ID namespaces.
+ * Used to convert arbitrary team ID strings into deterministic UUID namespaces.
+ */
+const LEGION_NAMESPACE = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+const LEGION_NAMESPACE_UUID = uuidv5(LEGION_NAMESPACE, "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+
+/**
+ * Convert any team ID string into a UUID namespace.
+ */
+function teamIdToNamespace(teamId: string): string {
+  return uuidv5(teamId, LEGION_NAMESPACE_UUID);
+}
+
+/**
  * Convert UUID to OpenCode session ID format: ses_ + 12 hex + 14 Base62.
  *
  * Uses the 16 bytes of the UUID deterministically:
@@ -400,18 +444,14 @@ function uuidToSessionId(uuid: string): string {
  * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
  * Pattern: ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
  *
- * @param teamId - Linear project UUID
+ * @param teamId - Team identifier (UUID or arbitrary string)
  * @param issueId - Issue identifier (e.g., "ENG-21")
  * @param mode - Worker mode (e.g., "implement", "review")
  * @returns Session ID string matching OpenCode format
- * @throws Error if teamId is not a valid UUID string
  */
 export function computeSessionId(teamId: string, issueId: string, mode: WorkerModeLiteral): string {
-  if (!validateUuid(teamId)) {
-    throw new Error(`Invalid UUID: ${teamId}`);
-  }
-
-  const uuid = uuidv5(`${issueId.toLowerCase()}:${mode}`, teamId);
+  const namespace = teamIdToNamespace(teamId);
+  const uuid = uuidv5(`${issueId.toLowerCase()}:${mode}`, namespace);
   return uuidToSessionId(uuid);
 }
 
@@ -420,15 +460,11 @@ export function computeSessionId(teamId: string, issueId: string, mode: WorkerMo
  *
  * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
  *
- * @param teamId - Linear team UUID (must be valid UUID string)
+ * @param teamId - Team identifier (UUID or arbitrary string)
  * @returns Session ID string matching OpenCode format
- * @throws Error if teamId is not a valid UUID string
  */
 export function computeControllerSessionId(teamId: string): string {
-  if (!validateUuid(teamId)) {
-    throw new Error(`Invalid UUID: ${teamId}`);
-  }
-
-  const uuid = uuidv5("controller", teamId);
+  const namespace = teamIdToNamespace(teamId);
+  const uuid = uuidv5("controller", namespace);
   return uuidToSessionId(uuid);
 }

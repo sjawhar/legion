@@ -58,7 +58,6 @@ describe("daemon server", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir,
-      shortId: "test",
       serveManager,
       sharedServePort,
       stateFilePath,
@@ -386,6 +385,94 @@ describe("daemon server", () => {
     expect(response.status).toBe(502);
   });
 
+  describe("POST /state/collect", () => {
+    it("returns collected state for linear backend", async () => {
+      await startTestServer();
+      const issues = [
+        {
+          identifier: "ENG-21",
+          state: { name: "Todo" },
+          labels: { nodes: [] },
+        },
+      ];
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "linear", issues }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { issues: Record<string, unknown> };
+      expect(body.issues).toBeDefined();
+      expect(body.issues["ENG-21"]).toBeDefined();
+    });
+
+    it("returns collected state for github backend", async () => {
+      await startTestServer();
+      const issues = [
+        {
+          id: "PVTI_abc",
+          content: {
+            number: 42,
+            repository: "acme/widgets",
+            url: "https://github.com/acme/widgets/issues/42",
+            type: "Issue",
+          },
+          status: "Todo",
+          labels: [],
+        },
+      ];
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github", issues }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { issues: Record<string, unknown> };
+      expect(body.issues).toBeDefined();
+      expect(body.issues["acme-widgets-42"]).toBeDefined();
+    });
+
+    it("rejects invalid backend", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "jira", issues: [] }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_backend");
+    });
+
+    it("rejects missing issues field", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "linear" }),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("rejects non-object issues field", async () => {
+      await startTestServer();
+      for (const issues of ["string", 42, true]) {
+        const response = await requestJson("/state/collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "linear", issues }),
+        });
+        expect(response.status).toBe(400);
+      }
+    });
+
+    it("returns empty state for empty issues array", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "linear", issues: [] }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { issues: Record<string, unknown> };
+      expect(body.issues).toEqual({});
+    });
+  });
+
   it("shuts down on request", async () => {
     let shutdownCalls = 0;
     await startTestServer();
@@ -397,7 +484,6 @@ describe("daemon server", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir ?? os.tmpdir(),
-      shortId: "test",
       serveManager,
       sharedServePort,
       stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),

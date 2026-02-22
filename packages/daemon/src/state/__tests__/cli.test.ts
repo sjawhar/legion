@@ -1,7 +1,7 @@
 /**
  * Tests for state CLI entry point.
  *
- * The CLI reads Linear JSON from stdin, accepts --team-id and --daemon-url args,
+ * The CLI reads issue JSON from stdin, accepts --team-id and --daemon-url args,
  * calls fetchAllIssueData then buildCollectedState, and outputs JSON to stdout.
  */
 

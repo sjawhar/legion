@@ -17,6 +17,7 @@ describe("decision regressions (known pipeline stalls)", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -37,6 +38,7 @@ describe("decision regressions (known pipeline stalls)", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
