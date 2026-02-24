@@ -112,6 +112,13 @@ export async function startDaemon(
       port: sharedServePort,
       workspace: config.legionDir ?? "",
       logDir: config.logDir,
+      env: {
+        LEGION_TEAM_ID: config.teamId ?? "",
+        LEGION_ISSUE_BACKEND: config.issueBackend,
+        LEGION_DIR: config.legionDir ?? "",
+        LEGION_SHORT_ID: (config.teamId ?? "legion").slice(0, 8),
+        LEGION_DAEMON_PORT: String(config.daemonPort),
+      },
     });
     sharedServePid = serve.pid;
     await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
@@ -203,30 +210,31 @@ export async function startDaemon(
     if (!teamId) {
       throw new Error("LEGION_TEAM_ID is required when no external controller session ID is set");
     }
-    const sessionId = computeControllerSessionId(teamId);
+    const requestedSessionId = computeControllerSessionId(teamId);
+    let actualSessionId: string | undefined;
     try {
-      await resolvedDeps.serveManager.createSession(
+      actualSessionId = await resolvedDeps.serveManager.createSession(
         sharedServePort,
-        sessionId,
+        requestedSessionId,
         config.legionDir ?? ""
       );
-      controllerState = { sessionId, port: sharedServePort };
+      controllerState = { sessionId: actualSessionId, port: sharedServePort };
     } catch (error) {
       console.error(`Failed to create controller session: ${error}`);
     }
 
-    if (controllerState) {
+    if (controllerState && actualSessionId) {
       const initialPrompt = config.controllerPrompt
         ? `/legion-controller\n\n${config.controllerPrompt}`
         : "/legion-controller";
       try {
         await sendPromptWithRetry(
           createWorkerClient(sharedServePort, config.legionDir ?? ""),
-          sessionId,
+          actualSessionId,
           initialPrompt,
           resolvedDeps
         );
-        console.log(`Controller started: session=${sessionId} port=${sharedServePort}`);
+        console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
       } catch (error) {
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
@@ -247,6 +255,13 @@ export async function startDaemon(
               port: sharedServePort,
               workspace: config.legionDir ?? "",
               logDir: config.logDir,
+              env: {
+                LEGION_TEAM_ID: config.teamId ?? "",
+                LEGION_ISSUE_BACKEND: config.issueBackend,
+                LEGION_DIR: config.legionDir ?? "",
+                LEGION_SHORT_ID: (config.teamId ?? "legion").slice(0, 8),
+                LEGION_DAEMON_PORT: String(config.daemonPort),
+              },
             });
             sharedServePid = serve.pid;
             await resolvedDeps.serveManager.waitForHealthy(sharedServePort);

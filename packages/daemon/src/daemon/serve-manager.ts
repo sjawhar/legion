@@ -78,7 +78,7 @@ export async function createSession(
   port: number,
   sessionId: string,
   workspace: string
-): Promise<void> {
+): Promise<string> {
   const baseUrl = `http://127.0.0.1:${port}`;
   const res = await fetch(`${baseUrl}/session`, {
     method: "POST",
@@ -87,14 +87,15 @@ export async function createSession(
       "x-opencode-directory": encodeURIComponent(workspace),
     },
     body: JSON.stringify({ id: sessionId }),
-    signal: AbortSignal.timeout(10_000), // 10s — session creation is a local call
+    signal: AbortSignal.timeout(10_000),
   });
   if (res.ok) {
-    return;
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return (body.id as string) ?? sessionId;
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 409 || body.name === "DuplicateIDError") {
-    return;
+    return sessionId;
   }
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);
 }

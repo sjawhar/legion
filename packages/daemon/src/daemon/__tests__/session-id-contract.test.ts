@@ -31,6 +31,7 @@ describe("sessionId contract (daemon vs state)", () => {
     const serveManager: ServeManagerInterface = {
       createSession: async (port, sessionId, workspace) => {
         createSessionCalls.push({ port, sessionId, workspace });
+        return sessionId;
       },
       healthCheck: async () => true,
     };

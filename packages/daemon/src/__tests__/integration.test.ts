@@ -25,8 +25,9 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
   const sharedServePort = randomPort();
 
   const serveManager = {
-    createSession: async (port: number, sessionId: string, workspace: string): Promise<void> => {
+    createSession: async (port: number, sessionId: string, workspace: string): Promise<string> => {
       createSessionCalls.push({ port, sessionId, workspace });
+      return sessionId;
     },
     healthCheck: async (): Promise<boolean> => true,
   };

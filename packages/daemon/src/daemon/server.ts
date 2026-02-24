@@ -20,7 +20,7 @@ import {
 type Server = ReturnType<typeof Bun.serve>;
 
 export interface ServeManagerInterface {
-  createSession(port: number, sessionId: string, workspace: string): Promise<void>;
+  createSession(port: number, sessionId: string, workspace: string): Promise<string>;
   healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
 }
 

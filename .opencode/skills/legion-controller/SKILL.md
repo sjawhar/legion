@@ -22,10 +22,16 @@ Required:
 
 ## Core Principle
 
-**Keep work moving forward.** Priority order:
+**Keep work moving forward — but only on opted-in issues.** Priority order:
 1. Unblock in-progress work (relay user feedback)
 2. Advance completed work (process worker-done)
 3. Start new work (triage, pull from Icebox)
+
+## Opt-In Filter
+
+**CRITICAL:** This board is shared with human developers. Only process issues that have the `legion` label. Ignore ALL issues without this label — they belong to humans.
+
+After fetching issues and collecting state, filter the results: skip any issue that does not have the `legion` label. Do not triage, dispatch, transition, or otherwise touch unlabeled issues.
 
 ## Algorithm
 
@@ -182,8 +188,8 @@ Controller routes Triage issues directly (no worker needed):
 
 ### 5. Pull from Icebox
 
-**If active workers < 10:**
-1. Get oldest Icebox item (FIFO)
+**If active workers < 1:**
+1. Get oldest Icebox item with `legion` label (FIFO)
 2. Move to Backlog
 3. Dispatch architect
 
@@ -208,7 +214,7 @@ mkdir -p ~/.legion/$LEGION_SHORT_ID && touch ~/.legion/$LEGION_SHORT_ID/heartbea
 Maintain in context:
 ```markdown
 ## Controller State
-**Active workers:** [count] / 10 max
+**Active workers:** [count] / 1 max
 ### Priority Queue
 - [ENG-XX] description
 ### In Progress

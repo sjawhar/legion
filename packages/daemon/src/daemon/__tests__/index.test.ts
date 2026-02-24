@@ -81,6 +81,7 @@ function makeServeManager(overrides?: {
     waitForHealthy: async () => {},
     createSession: async (port: number, sessionId: string, workspace: string) => {
       createSessionCalls.push({ port, sessionId, workspace });
+      return sessionId;
     },
     healthCheck: overrides?.healthCheck ?? (async () => true),
     stopServe: async (_port: number, _pid: number) => {
