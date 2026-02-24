@@ -1,26 +1,12 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
+import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
-import { type ServeManagerInterface, startServer } from "../server";
+import { startServer } from "../server";
 import { type PersistedWorkerState, writeStateFile } from "../state-file";
-
-let mockSessionStatus: (() => Promise<unknown>) | null = null;
-
-mock.module("@opencode-ai/sdk/v2", () => ({
-  createOpencodeClient: () => ({
-    session: {
-      status: async () => {
-        if (mockSessionStatus) {
-          return mockSessionStatus();
-        }
-        throw new Error("No mock configured");
-      },
-    },
-  }),
-}));
 
 const sharedServePort = 15500;
 
@@ -28,27 +14,44 @@ describe("daemon server", () => {
   let tempDir: string | null = null;
   let stopServer: (() => void) | null = null;
   let baseUrl = "";
-  let serveManager: ServeManagerInterface;
-  let createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+  let createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+  let sessionStatusHandler:
+    | ((sessionId: string) => Promise<{ data?: unknown; error?: unknown }>)
+    | null = null;
   const originalFetch = globalThis.fetch;
   const teamId = "123e4567-e89b-12d3-a456-426614174000";
 
-  async function startTestServer(options?: {
-    state?: PersistedWorkerState;
-    serveManagerOverrides?: Partial<ServeManagerInterface>;
-  }) {
-    createSessionCalls = [];
-    serveManager = {
-      createSession: async (port, sessionId, workspace) => {
-        createSessionCalls.push({ port, sessionId, workspace });
+  function makeAdapter(): RuntimeAdapter {
+    return {
+      start: async () => {},
+      stop: async () => {},
+      healthy: async () => true,
+      getPort: () => sharedServePort,
+      createSession: async (sessionId: string, workspace: string) => {
+        createSessionCalls.push({ sessionId, workspace });
         return sessionId;
       },
-      healthCheck: async () => true,
+      sendPrompt: async () => {},
+      getSessionStatus: async (sessionId: string) => {
+        if (sessionStatusHandler) {
+          return sessionStatusHandler(sessionId);
+        }
+        return { data: undefined };
+      },
     };
-    if (options?.serveManagerOverrides) {
-      serveManager = { ...serveManager, ...options.serveManagerOverrides };
-    }
+  }
 
+  async function startTestServer(options?: {
+    state?: PersistedWorkerState;
+    adapterOverrides?: Partial<RuntimeAdapter>;
+    runtime?: string;
+    tmuxSession?: string;
+  }) {
+    createSessionCalls = [];
+    let adapter = makeAdapter();
+    if (options?.adapterOverrides) {
+      adapter = { ...adapter, ...options.adapterOverrides };
+    }
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-server-"));
     const stateFilePath = path.join(tempDir, "workers.json");
     if (options?.state) {
@@ -59,9 +62,10 @@ describe("daemon server", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir,
-      serveManager,
-      sharedServePort,
+      adapter,
       stateFilePath,
+      runtime: options?.runtime,
+      tmuxSession: options?.tmuxSession,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -80,7 +84,7 @@ describe("daemon server", () => {
 
   afterEach(async () => {
     globalThis.fetch = originalFetch;
-    mockSessionStatus = null;
+    sessionStatusHandler = null;
     if (stopServer) {
       stopServer();
       stopServer = null;
@@ -91,7 +95,7 @@ describe("daemon server", () => {
     }
   });
 
-  it("returns health data", async () => {
+  it("returns health data with default runtime", async () => {
     await startTestServer();
     const response = await requestJson("/health");
     expect(response.status).toBe(200);
@@ -99,10 +103,25 @@ describe("daemon server", () => {
       status: string;
       uptime: number;
       workerCount: number;
+      runtime: string;
     };
     expect(body.status).toBe("ok");
     expect(typeof body.uptime).toBe("number");
     expect(body.workerCount).toBe(0);
+    expect(body.runtime).toBe("opencode");
+  });
+
+  it("returns health data with configured runtime and tmuxSession", async () => {
+    await startTestServer({ runtime: "claude-code", tmuxSession: "legion-abc123" });
+    const response = await requestJson("/health");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      status: string;
+      runtime: string;
+      tmuxSession?: string;
+    };
+    expect(body.runtime).toBe("claude-code");
+    expect(body.tmuxSession).toBe("legion-abc123");
   });
 
   it("lists workers", async () => {
@@ -156,7 +175,7 @@ describe("daemon server", () => {
     expect(body.sessionId).toBe(computeSessionId(teamId, "eng-42", "implement"));
 
     expect(createSessionCalls.length).toBe(1);
-    expect(createSessionCalls[0].port).toBe(sharedServePort);
+    expect(createSessionCalls[0].sessionId).toBe(computeSessionId(teamId, "eng-42", "implement"));
     expect(createSessionCalls[0].workspace).toBe("/tmp/work");
 
     const listResponse = await requestJson("/workers");
@@ -328,7 +347,7 @@ describe("daemon server", () => {
       sessionId: string;
     };
 
-    mockSessionStatus = async () => ({
+    sessionStatusHandler = async () => ({
       data: { status: "active", sessionId: created.sessionId },
     });
 
@@ -353,7 +372,7 @@ describe("daemon server", () => {
       sessionId: string;
     };
 
-    mockSessionStatus = async () => {
+    sessionStatusHandler = async () => {
       throw new Error("boom");
     };
 
@@ -377,7 +396,7 @@ describe("daemon server", () => {
       sessionId: string;
     };
 
-    mockSessionStatus = async () => ({
+    sessionStatusHandler = async () => ({
       data: undefined,
       error: { message: "internal server error" },
     });
@@ -474,6 +493,90 @@ describe("daemon server", () => {
     });
   });
 
+  describe("POST /workers/:id/prompt", () => {
+    const baseWorkerEntry: WorkerEntry = {
+      id: "leg-42-implement",
+      port: sharedServePort,
+      sessionId: computeSessionId(teamId, "leg-42", "implement"),
+      workspace: "/tmp/work",
+      startedAt: "2026-02-01T00:00:00.000Z",
+      status: "running",
+      crashCount: 0,
+      lastCrashAt: null,
+    };
+
+    it("sends prompt to worker via adapter", async () => {
+      const sendPromptCalls: Array<{ sessionId: string; text: string }> = [];
+      await startTestServer({
+        state: {
+          workers: { "leg-42-implement": { ...baseWorkerEntry, id: "leg-42-implement" } },
+          crashHistory: {},
+        },
+        adapterOverrides: {
+          sendPrompt: async (sessionId, text) => {
+            sendPromptCalls.push({ sessionId, text });
+          },
+        },
+      });
+
+      const response = await requestJson("/workers/leg-42-implement/prompt", {
+        method: "POST",
+        body: JSON.stringify({ text: "hello world" }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: boolean };
+      expect(body.ok).toBe(true);
+      expect(sendPromptCalls).toHaveLength(1);
+      expect(sendPromptCalls[0].sessionId).toBe(baseWorkerEntry.sessionId);
+      expect(sendPromptCalls[0].text).toBe("hello world");
+    });
+
+    it("returns 404 for unknown worker prompt", async () => {
+      await startTestServer();
+      const response = await requestJson("/workers/unknown/prompt", {
+        method: "POST",
+        body: JSON.stringify({ text: "hello" }),
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it("returns 400 for missing text in prompt", async () => {
+      await startTestServer({
+        state: {
+          workers: { "leg-42-implement": { ...baseWorkerEntry, id: "leg-42-implement" } },
+          crashHistory: {},
+        },
+      });
+      const response = await requestJson("/workers/leg-42-implement/prompt", {
+        method: "POST",
+        body: JSON.stringify({ notText: "hello" }),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("returns 500 when adapter.sendPrompt fails", async () => {
+      await startTestServer({
+        state: {
+          workers: { "leg-42-implement": { ...baseWorkerEntry, id: "leg-42-implement" } },
+          crashHistory: {},
+        },
+        adapterOverrides: {
+          sendPrompt: async () => {
+            throw new Error("session not found");
+          },
+        },
+      });
+      const response = await requestJson("/workers/leg-42-implement/prompt", {
+        method: "POST",
+        body: JSON.stringify({ text: "hello" }),
+      });
+      expect(response.status).toBe(500);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("Failed to send prompt");
+    });
+  });
+
   it("shuts down on request", async () => {
     let shutdownCalls = 0;
     await startTestServer();
@@ -485,8 +588,7 @@ describe("daemon server", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir ?? os.tmpdir(),
-      serveManager,
-      sharedServePort,
+      adapter: makeAdapter(),
       stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),
       shutdownFn: async () => {
         shutdownCalls += 1;

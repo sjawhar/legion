@@ -70,4 +70,20 @@ describe("daemon config", () => {
       expect(() => loadConfig({ LEGION_ISSUE_BACKEND: "" })).toThrow("LEGION_ISSUE_BACKEND");
     });
   });
+
+  describe("runtime config", () => {
+    it("defaults to opencode", () => {
+      const config = loadConfig({ LEGION_TEAM_ID: "test" });
+      expect(config.runtime).toBe("opencode");
+    });
+
+    it("reads from LEGION_RUNTIME env var", () => {
+      const config = loadConfig({ LEGION_TEAM_ID: "test", LEGION_RUNTIME: "claude-code" });
+      expect(config.runtime).toBe("claude-code");
+    });
+
+    it("rejects invalid runtime values", () => {
+      expect(() => loadConfig({ LEGION_TEAM_ID: "test", LEGION_RUNTIME: "invalid" })).toThrow();
+    });
+  });
 });
