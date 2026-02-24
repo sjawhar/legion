@@ -1,6 +1,6 @@
 # Implement Workflow
 
-Execute implementation using TDD with subagent-driven development.
+Execute implementation using TDD.
 
 ## Mode Detection
 
@@ -16,9 +16,16 @@ Trust the controller's explicit mode parameter.
 
 ## All Modes: Rebase First
 
+**jj:**
 ```bash
 jj git fetch
 jj rebase -d main
+```
+
+**git:**
+```bash
+git fetch origin
+git pull --rebase origin main
 ```
 
 Resolve any conflicts before proceeding.
@@ -38,37 +45,8 @@ Fetch issue and comments. The plan is in comments:
 
 1. `/superpowers/executing-plans` - Load and structure the plan
 2. `/superpowers/test-driven-development` - RED-GREEN-REFACTOR cycle
-3. `/superpowers/subagent-driven-development` - Parallel execution for independent tasks
 
-#### Parallel Execution with Task System
-
-When the plan contains independent tasks (annotated with parallelism information):
-
-1. **Create task graph:** For each task in the plan, use `task_create` with appropriate `blockedBy` edges based on the plan's dependency annotations.
-
-2. **Spawn worker sessions:** Create N subagent sessions (one per independent task group). Each session loops:
-   - `task_claim_next` — atomically claim the next ready task
-   - Execute the claimed task
-   - `task_update(status="completed")` — mark done
-   - Repeat until no ready tasks remain
-
-3. **Monitor progress:** Use `task_list` to track overall progress. The task system handles:
-   - **Dependency ordering:** Tasks only become "ready" when all `blockedBy` dependencies are completed/cancelled
-   - **Lock prevention:** `task_claim_next` atomically claims to prevent double-work
-   - **Lease recovery:** If a session crashes, expired leases are automatically reclaimed
-   - **Retry cap:** Tasks that fail 3 times are flagged for escalation
-
-4. **Convergence:** When `task_list` shows all tasks completed or cancelled, proceed to the next step (Analyze).
-
-**When to use parallel execution:**
-- Plan has 3+ independent tasks
-- Tasks don't share mutable state (different files/modules)
-- Each task is self-contained enough for an independent session
-
-**When to use sequential execution:**
-- Plan has mostly sequential dependencies
-- Tasks are small enough that parallelism overhead isn't worth it
-- Tasks share the same files (merge conflict risk)
+Execute plan steps sequentially. For independent tasks, work through them one at a time.
 
 ### 3. Analyze
 
@@ -96,45 +74,55 @@ Record the results as evidence for the controller's quality gate verification. I
 CI Results: tests ✅ | tsc ✅ | biome ✅
 ```
 
-### 5. Cross-Family Review
+### 5. Self-Review
 
-After all checks pass, spawn a cross-family review session before creating the PR.
+After all checks pass, review your own work before creating the PR:
 
-1. Spawn a review session using `background_task`:
-   - Category: `review-implementation`
-   - Model: Specify an explicit model from a different provider (e.g., `google/gemini-3-pro` or `openai/gpt-5.2-codex`)
-   - Prompt: Include:
-    - The original plan/requirements from the issue
-     - A summary of what was implemented
-     - The diff (`jj diff`)
+1. Review the diff against the original plan/requirements:
+   - **jj:** `jj diff`
+   - **git:** `git diff origin/main`
 
-2. The reviewer evaluates:
+2. Evaluate:
    - **Spec compliance:** Does the implementation match the plan requirements?
    - **Code quality:** Is the code clean, tested, and maintainable?
    - **Missing pieces:** Are there requirements from the plan that weren't implemented?
    - **Over-engineering:** Was anything built that wasn't requested?
 
-3. If the reviewer finds issues:
-   - Address each finding
-   - Re-run Pre-Ship Verification (step 4) after fixes
-   - You do NOT need to re-review — one cross-family pass is sufficient
-
-4. Only after addressing review findings, proceed to Ship.
+3. If you find issues, fix them and re-run Pre-Ship Verification (step 4).
 
 ### 6. Ship
 
 Before creating the PR, verify branch ancestry is clean:
+
+**jj:**
 ```bash
 jj log -r 'ancestors(@, 5)'  # Should show only your issue's commits on top of main
 jj diff --stat --from main    # File count should match expectations — no unrelated files
 ```
 
+**git:**
+```bash
+git log --oneline origin/main..HEAD  # Should show only your issue's commits
+git diff --stat origin/main           # File count should match expectations
+```
+
 If unrelated commits are in the ancestry, rebase to isolate your changes before creating the PR.
 
+**jj:**
 ```bash
 jj describe -m "$LEGION_ISSUE_ID: [description]"
 jj git push --named "$LEGION_ISSUE_ID"=@
+```
 
+**git:**
+```bash
+git add -A
+git commit -m "$LEGION_ISSUE_ID: [description]"
+git push -u origin HEAD
+```
+
+Then create the PR:
+```bash
 gh pr create --draft \
   --title "$LEGION_ISSUE_ID: [title]" \
   --body "Implements $LEGION_ISSUE_ID
@@ -174,9 +162,8 @@ Key behaviors:
 
 ### 2. Fix Issues
 
-Use TDD and subagent-driven development:
+Use TDD:
 - `/superpowers/test-driven-development`
-- `/superpowers/subagent-driven-development`
 
 ### 3. Verify
 
@@ -192,9 +179,9 @@ Fix any failures before pushing.
 
 ### 4. Push
 
-```bash
-jj git push
-```
+**jj:** `jj git push`
+
+**git:** `git add -A && git commit -m "$LEGION_ISSUE_ID: address review comments" && git push`
 
 ### 5. Reply to Comments
 

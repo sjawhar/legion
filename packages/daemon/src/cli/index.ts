@@ -41,6 +41,7 @@ interface DispatchOptions {
   daemonPort?: number;
   prompt?: string;
   workspace?: string;
+  vcs?: "jj" | "git";
 }
 
 interface PromptOptions {
@@ -99,6 +100,7 @@ interface StartOptions {
   stateDir?: string;
   prompt?: string;
   backend?: string;
+  vcs?: "jj" | "git";
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
@@ -115,6 +117,9 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
 
   if (opts.backend) {
     process.env.LEGION_ISSUE_BACKEND = opts.backend;
+  }
+  if (opts.vcs) {
+    process.env.LEGION_VCS = opts.vcs;
   }
 
   const overrides: Partial<DaemonConfig> = {
@@ -288,13 +293,26 @@ export async function cmdDispatch(
 
   if (!fs.existsSync(workspacePath)) {
     console.log(`Creating workspace: ${workspacePath}`);
-    const jjResult = Bun.spawnSync(
-      ["jj", "workspace", "add", workspacePath, "--name", issueLower, "-R", legionDir],
-      { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
-    );
-    if (jjResult.exitCode !== 0) {
-      const stderr = jjResult.stderr.toString();
-      throw new CliError(`Failed to create workspace: ${stderr}`);
+    const vcs = opts.vcs ?? process.env.LEGION_VCS ?? "git";
+    if (vcs === "jj") {
+      const jjResult = Bun.spawnSync(
+        ["jj", "workspace", "add", workspacePath, "--name", issueLower, "-R", legionDir],
+        { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
+      );
+      if (jjResult.exitCode !== 0) {
+        const stderr = jjResult.stderr.toString();
+        throw new CliError(`Failed to create workspace: ${stderr}`);
+      }
+    } else {
+      const branchName = `legion/${issueLower}`;
+      const gitResult = Bun.spawnSync(
+        ["git", "worktree", "add", "-B", branchName, workspacePath, "origin/main"],
+        { cwd: legionDir, stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
+      );
+      if (gitResult.exitCode !== 0) {
+        const stderr = gitResult.stderr.toString();
+        throw new CliError(`Failed to create workspace: ${stderr}`);
+      }
     }
   }
 
@@ -584,13 +602,21 @@ export const startCommand = defineCommand({
       alias: "b",
       description: "Issue tracker backend (linear or github)",
     },
+    vcs: {
+      type: "string",
+      description: "Version control system (jj or git, default: auto-detect)",
+    },
   },
   async run({ args }) {
+    if (args.vcs !== undefined && args.vcs !== "jj" && args.vcs !== "git") {
+      throw new CliError(`--vcs must be 'jj' or 'git' (got: ${args.vcs})`);
+    }
     await cmdStart(args.team, {
       workspace: args.workspace,
       stateDir: args["state-dir"],
       prompt: args.prompt,
       backend: args.backend,
+      vcs: args.vcs as "jj" | "git" | undefined,
     });
   },
 });
@@ -680,13 +706,21 @@ export const dispatchCommand = defineCommand({
     },
     prompt: { type: "string", description: "Custom initial prompt (default: /legion-worker)" },
     workspace: { type: "string", alias: "w", description: "Override workspace path" },
+    vcs: {
+      type: "string",
+      description: "Version control system (jj or git, default: auto-detect)",
+    },
   },
   async run({ args }) {
     try {
+      if (args.vcs !== undefined && args.vcs !== "jj" && args.vcs !== "git") {
+        throw new CliError(`--vcs must be 'jj' or 'git' (got: ${args.vcs})`);
+      }
       await cmdDispatch(args.issue, args.mode, {
         legionDir: process.env.LEGION_DIR,
         prompt: args.prompt,
         workspace: args.workspace,
+        vcs: args.vcs as "jj" | "git" | undefined,
       });
     } catch (e) {
       if (e instanceof CliError) {

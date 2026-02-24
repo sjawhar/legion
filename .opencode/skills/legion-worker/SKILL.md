@@ -1,6 +1,6 @@
 ---
 name: legion-worker
-description: Use when dispatched by Legion controller to work on an issue in a jj workspace
+description: Use when dispatched by Legion controller to work on an issue in an isolated workspace
 ---
 
 # Legion Worker
@@ -9,13 +9,14 @@ Router skill for Legion issue work. Dispatched by controller with a mode paramet
 
 ## Context from Prompt
 
-The controller dispatches you with a prompt that includes your **issue ID**, **mode**, and **backend**:
+The controller dispatches you with a prompt that includes your **issue ID**, **mode**, **backend**, and **VCS**:
 
-- **GitHub:** `/legion-worker implement mode for acme-widgets-42 (github backend, repo: acme/widgets)`
-- **Linear:** `/legion-worker plan mode for ENG-21 (linear backend)`
+- **GitHub:** `/legion-worker implement mode for acme-widgets-42 (github backend, repo: acme/widgets, vcs: git)`
+- **Linear:** `/legion-worker plan mode for ENG-21 (linear backend, vcs: jj)`
 
 Extract these values from the prompt. For GitHub issues, also derive the **owner**, **repo**,
-and **issue number** from the issue ID (format: `owner-repo-number`).
+and **issue number** from the issue ID (format: `owner-repo-number`). The **vcs** field tells
+you whether to use `jj` or `git` commands for version control operations.
 
 Throughout this skill and its workflows, `$LEGION_ISSUE_ID`, `$ISSUE_NUMBER`, `$OWNER`, and
 `$REPO` are **placeholders** — substitute the values you extracted from your prompt context.
@@ -26,7 +27,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 1. **Read issue first**
    - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="get", id="$LEGION_ISSUE_ID")`
-2. **Use jj, not git** - changes auto-tracked (see jj safety rules below)
+2. **Use your VCS** - jj or git as specified in your dispatch prompt (see VCS sections below)
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
@@ -45,12 +46,19 @@ You are executing work with an approved plan. Do NOT invoke the brainstorming or
 
 ### Starting
 
-Sync with main and create a fresh commit on your branch:
+Sync with main and prepare your branch:
 
+**jj:**
 ```bash
 jj git fetch
 jj rebase -d main
 jj new  # Fresh commit for this session
+```
+
+**git:**
+```bash
+git fetch origin
+git pull --rebase origin main
 ```
 
 If you're resuming after user feedback, also read the issue comments for the answer.
@@ -59,7 +67,7 @@ If you're resuming after user feedback, also read the issue comments for the ans
 
 When you need human input that the legion-oracle can't answer:
 
-1. Push your work: `jj git push`
+1. Push your work: `jj git push` (jj) or `git push` (git)
 2. Post a structured escalation comment to the issue:
 
 **GitHub:**
@@ -113,9 +121,9 @@ The controller will resume your session when the user responds.
 
 Always push before exiting:
 
-```bash
-jj git push
-```
+**jj:** `jj git push`
+
+**git:** `git add -A && git commit -m "$LEGION_ISSUE_ID: [description]" && git push`
 
 Then update labels:
 - Add `worker-done` if your mode requires it (see routing table)

@@ -99,6 +99,7 @@ function buildControllerEnv(config: DaemonConfig): Record<string, string> {
     LEGION_DIR: config.legionDir ?? "", // legionDir is genuinely optional
     LEGION_SHORT_ID: teamId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
+    LEGION_VCS: config.vcs,
   };
 }
 

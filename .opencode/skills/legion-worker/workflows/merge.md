@@ -12,15 +12,22 @@ Before doing anything, verify the PR is open and mergeable:
 gh pr view "$LEGION_ISSUE_ID" --json state,merged,mergeable
 ```
 
-- If **already merged**: verify changes are on main (`jj log --revisions main`), then exit cleanly.
+- If **already merged**: verify changes are on main (`jj log --revisions main` or `git log origin/main`), then exit cleanly.
 - If **closed without merge**: escalate with `user-input-needed` — something unexpected happened.
 - If **open**: proceed to step 2.
 
 ### 2. Rebase onto Main
 
+**jj:**
 ```bash
 jj git fetch
 jj rebase -d main
+```
+
+**git:**
+```bash
+git fetch origin
+git pull --rebase origin main
 ```
 
 ### 3. Resolve Conflicts
@@ -42,9 +49,9 @@ If rebase produces conflicts:
 
 ### 4. Push
 
-```bash
-jj git push
-```
+**jj:** `jj git push`
+
+**git:** `git push`
 
 ### 5. Wait for CI
 

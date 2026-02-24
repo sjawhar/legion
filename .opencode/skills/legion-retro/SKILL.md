@@ -5,18 +5,15 @@ description: Capture learnings from completed work via dual-perspective retrospe
 
 # Legion Retro
 
-Capture learnings from completed work via parallel compounding.
+Capture learnings from completed work.
 
 ## When This Runs
 
 The controller resumes the **implement worker's existing session** after PR approval, so you (the implementer) have full context of what was built and why. This is intentional — your perspective as the person who did the work is valuable.
 
-A fresh subagent provides the outside perspective (see step 2).
-
 ## Important
 
 - **NO rebasing** - unlike other workflows, do not rebase before starting
-- **Two perspectives** - fresh subagent (context-free) + you (full context)
 
 ## Workflow
 
@@ -26,28 +23,9 @@ A fresh subagent provides the outside perspective (see step 2).
 PR_URL=$(gh pr view "$LEGION_ISSUE_ID" --json url --jq '.url')
 ```
 
-### 2. Launch Background Subagent (Parallel)
+### 2. Capture Learnings
 
-Use `background_task` tool to spawn a fresh subagent:
-
-- **Category:** `unspecified-low`
-- **Description:** "Retro analysis for $LEGION_ISSUE_ID"
-- **Prompt:**
-
-> You are analyzing a completed PR to capture learnings.
->
-> Issue: $LEGION_ISSUE_ID
-> PR: $PR_URL
->
-> 1. Fetch the PR diff and description via gh pr view and gh pr diff
-> 2. Invoke /compound-engineering/workflows/compound to document learnings
-> 3. Write output to docs/solutions/ in the current directory
->
-> Focus on patterns that would help future implementations.
-
-### 3. Do Your Own Compound (In Parallel)
-
-While the subagent runs in background, invoke `/compound-engineering/workflows/compound` yourself.
+Invoke `/compound-engineering/workflows/compound` to document learnings.
 
 You have full implementation context - capture:
 - What was hard
@@ -57,17 +35,21 @@ You have full implementation context - capture:
 
 Write to `docs/solutions/`.
 
-### 4. Wait for Subagent
-
-Check subagent completion before proceeding (you will be notified when background task completes).
-
-### 5. Commit and Push Learnings
+### 3. Commit and Push Learnings
 
 Ensure all `docs/solutions/` files are committed and pushed:
 
+**jj:**
 ```bash
 jj describe -m "$LEGION_ISSUE_ID: retro learnings"
 jj git push
+```
+
+**git:**
+```bash
+git add docs/solutions/
+git commit -m "$LEGION_ISSUE_ID: retro learnings"
+git push
 ```
 
 ### 6. Post Summary to Issue

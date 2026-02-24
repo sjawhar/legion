@@ -70,4 +70,51 @@ describe("daemon config", () => {
       expect(() => loadConfig({ LEGION_ISSUE_BACKEND: "" })).toThrow("LEGION_ISSUE_BACKEND");
     });
   });
+
+  describe("vcs", () => {
+    it("defaults to git when no env and no legionDir", () => {
+      const config = loadConfig({});
+      expect(config.vcs).toBe("git");
+    });
+
+    it("reads LEGION_VCS=jj", () => {
+      const config = loadConfig({ LEGION_VCS: "jj" });
+      expect(config.vcs).toBe("jj");
+    });
+
+    it("reads LEGION_VCS=git", () => {
+      const config = loadConfig({ LEGION_VCS: "git" });
+      expect(config.vcs).toBe("git");
+    });
+
+    it("throws for invalid VCS value", () => {
+      expect(() => loadConfig({ LEGION_VCS: "svn" })).toThrow("LEGION_VCS");
+    });
+
+    it("auto-detects jj from .jj directory", () => {
+      const fs = require("node:fs");
+      const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "legion-vcs-"));
+      fs.mkdirSync(path.join(tmpDir, ".jj"));
+      const config = loadConfig({ LEGION_DIR: tmpDir });
+      expect(config.vcs).toBe("jj");
+      fs.rmSync(tmpDir, { recursive: true });
+    });
+
+    it("defaults to git when legionDir has no .jj", () => {
+      const fs = require("node:fs");
+      const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "legion-vcs-"));
+      const config = loadConfig({ LEGION_DIR: tmpDir });
+      expect(config.vcs).toBe("git");
+      fs.rmSync(tmpDir, { recursive: true });
+    });
+
+    it("explicit LEGION_VCS overrides auto-detection", () => {
+      const fs = require("node:fs");
+      const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "legion-vcs-"));
+      fs.mkdirSync(path.join(tmpDir, ".jj"));
+      const config = loadConfig({ LEGION_DIR: tmpDir, LEGION_VCS: "git" });
+      expect(config.vcs).toBe("git");
+      fs.rmSync(tmpDir, { recursive: true });
+    });
+  });
 });

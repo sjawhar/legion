@@ -404,7 +404,7 @@ describe("cmdDispatch", () => {
       );
     });
 
-    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13376 });
+    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13376, vcs: "jj" });
 
     const spawnCalls = (Bun.spawnSync as SpawnSyncMock).mock.calls;
     expect(spawnCalls.length).toBe(1);
@@ -418,6 +418,40 @@ describe("cmdDispatch", () => {
       "leg-42",
       "-R",
       legionDir,
+    ]);
+  });
+
+  it("creates git worktree when vcs is git and directory does not exist", async () => {
+    const tempDir = createTempDir();
+    const legionDir = path.join(tempDir, "legion");
+    fs.mkdirSync(legionDir);
+
+    installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-git" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    });
+
+    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13377, vcs: "git" });
+
+    const spawnCalls = (Bun.spawnSync as SpawnSyncMock).mock.calls;
+    expect(spawnCalls.length).toBe(1);
+    const spawnCall = spawnCalls[0] as SpawnSyncCall;
+    expect(spawnCall[0]).toEqual([
+      "git",
+      "worktree",
+      "add",
+      "-B",
+      "legion/leg-42",
+      path.join(tempDir, "leg-42"),
+      "origin/main",
     ]);
   });
 
