@@ -14,7 +14,6 @@ export class OpenCodeAdapter implements RuntimeAdapter {
 
   constructor(private readonly port: number) {}
 
-
   getPort(): number {
     return this.port;
   }

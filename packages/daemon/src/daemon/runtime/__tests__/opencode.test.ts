@@ -32,6 +32,5 @@ describe("OpenCodeAdapter", () => {
       const adapter = new OpenCodeAdapter(9999);
       expect(adapter.getPort()).toBe(9999);
     });
-});
-
+  });
 });

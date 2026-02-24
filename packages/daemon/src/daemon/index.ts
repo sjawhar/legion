@@ -28,7 +28,10 @@ function resolveDependencies(
   config: DaemonConfig,
   overrides?: Partial<DaemonDependencies>
 ): DaemonDependencies {
-  const defaultAdapter = createAdapter(config.runtime, { port: config.baseWorkerPort, shortId: config.teamId ?? "default" });
+  const defaultAdapter = createAdapter(config.runtime, {
+    port: config.baseWorkerPort,
+    shortId: config.teamId ?? "default",
+  });
   return {
     adapter: overrides?.adapter ?? defaultAdapter,
     startServer: overrides?.startServer ?? startServer,

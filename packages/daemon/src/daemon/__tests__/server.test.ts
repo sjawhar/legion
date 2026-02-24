@@ -493,7 +493,6 @@ describe("daemon server", () => {
     });
   });
 
-
   describe("POST /workers/:id/prompt", () => {
     const baseWorkerEntry: WorkerEntry = {
       id: "leg-42-implement",

@@ -329,7 +329,6 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
         }
 
-
         if (segments.length === 3 && segments[0] === "workers" && segments[2] === "prompt") {
           await stateLoaded;
           if (method !== "POST") {

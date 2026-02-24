@@ -103,10 +103,10 @@ describe("ClaudeCodeAdapter", () => {
       await adapter.sendPrompt("ses_1", "hello world");
 
       const sendKeysCall = calls.find(
-        (c) => c.includes("send-keys") && c.some((arg) => arg.includes("claude")),
+        (c) => c.includes("send-keys") && c.some((arg) => arg.includes("claude"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("claude"));
+      const cmdArg = sendKeysCall?.find((a) => a.includes("claude"));
       expect(cmdArg).toContain("--session-id");
       expect(cmdArg).toContain("ses_1");
       expect(cmdArg).toContain("--dangerously-skip-permissions");
@@ -120,11 +120,9 @@ describe("ClaudeCodeAdapter", () => {
       const adapter = new ClaudeCodeAdapter("sp2", spawn);
       await adapter.sendPrompt("ses_2", "do something");
 
-      const sendKeysCall = calls.find(
-        (c) => c.includes("send-keys") && c.includes("do something"),
-      );
+      const sendKeysCall = calls.find((c) => c.includes("send-keys") && c.includes("do something"));
       expect(sendKeysCall).toBeDefined();
-      expect(sendKeysCall!.join(" ")).not.toContain("--session-id");
+      expect(sendKeysCall?.join(" ")).not.toContain("--session-id");
     });
 
     it("resumes claude session when process exited", async () => {
@@ -142,7 +140,6 @@ describe("ClaudeCodeAdapter", () => {
         return { exitCode: 0, stdout: "" };
       };
 
-
       const spawnCalls: string[][] = [];
       const wrappedSpawn = (cmd: string[]): SpawnResult => {
         spawnCalls.push(cmd);
@@ -155,7 +152,7 @@ describe("ClaudeCodeAdapter", () => {
         (c) => c.includes("send-keys") && c.some((a) => a.includes("--resume"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("--resume"));
+      const cmdArg = sendKeysCall?.find((a) => a.includes("--resume"));
       expect(cmdArg).toContain("ses_3");
       expect(cmdArg).toContain("--dangerously-skip-permissions");
     });
@@ -189,10 +186,10 @@ describe("ClaudeCodeAdapter", () => {
       const adapter = new ClaudeCodeAdapter("t1", spawn);
       await adapter.sendPrompt("ses_1", "hello'; rm -rf /; echo '");
       const sendKeysCall = calls.find(
-        (c) => c.includes("send-keys") && c.some((a) => a.includes("claude")),
+        (c) => c.includes("send-keys") && c.some((a) => a.includes("claude"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("claude"))!;
+      const cmdArg = sendKeysCall?.find((a) => a.includes("claude"))!;
       expect(cmdArg).toContain("hello'\\''");
       expect(cmdArg).not.toMatch(/hello';/);
     });
@@ -219,10 +216,10 @@ describe("ClaudeCodeAdapter", () => {
       const adapter = new ClaudeCodeAdapter("t1e", wrappedSpawn);
       await adapter.sendPrompt("ses_1", "it's a test");
       const sendKeysCall = spawnCalls.find(
-        (c) => c.includes("send-keys") && c.some((a) => a.includes("--resume")),
+        (c) => c.includes("send-keys") && c.some((a) => a.includes("--resume"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("--resume"))!;
+      const cmdArg = sendKeysCall?.find((a) => a.includes("--resume"))!;
       expect(cmdArg).toContain("it'\\''s a test");
     });
 
@@ -241,7 +238,7 @@ describe("ClaudeCodeAdapter", () => {
       });
       const adapter = new ClaudeCodeAdapter("t3", spawn);
       await expect(adapter.createSession("ses_3", "/tmp/work")).rejects.toThrow(
-        "Failed to create tmux window",
+        "Failed to create tmux window"
       );
     });
 
@@ -250,10 +247,10 @@ describe("ClaudeCodeAdapter", () => {
       const adapter = new ClaudeCodeAdapter("t4", spawn);
       await adapter.start({ workspace: "/tmp/my workspace" });
       const cdCall = calls.find(
-        (c) => c.includes("send-keys") && c.some((a) => a.startsWith("cd ")),
+        (c) => c.includes("send-keys") && c.some((a) => a.startsWith("cd "))
       );
       expect(cdCall).toBeDefined();
-      expect(cdCall!.find((a) => a.startsWith("cd "))).toBe("cd '/tmp/my workspace'");
+      expect(cdCall?.find((a) => a.startsWith("cd "))).toBe("cd '/tmp/my workspace'");
     });
   });
 

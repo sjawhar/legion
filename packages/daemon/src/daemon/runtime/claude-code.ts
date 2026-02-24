@@ -7,7 +7,6 @@ type SpawnResult = {
 
 export type SpawnFn = (cmd: string[]) => SpawnResult;
 
-
 function shellEscape(s: string): string {
   return s.replace(/'/g, "'\\''");
 }
@@ -43,7 +42,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       throw new Error(`Failed to create tmux session: ${this.sessionName}`);
     }
     if (opts.workspace) {
-      this.spawn(["tmux", "send-keys", "-t", this.sessionName, `cd '${shellEscape(opts.workspace)}'`, "Enter"]);
+      this.spawn([
+        "tmux",
+        "send-keys",
+        "-t",
+        this.sessionName,
+        `cd '${shellEscape(opts.workspace)}'`,
+        "Enter",
+      ]);
     }
   }
 
@@ -57,7 +63,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   async createSession(sessionId: string, workspace: string): Promise<string> {
-    const newWindowResult = this.spawn(["tmux", "new-window", "-t", this.sessionName, "-n", sessionId, "-d"]);
+    const newWindowResult = this.spawn([
+      "tmux",
+      "new-window",
+      "-t",
+      this.sessionName,
+      "-n",
+      sessionId,
+      "-d",
+    ]);
     if (newWindowResult.exitCode !== 0) {
       throw new Error(`Failed to create tmux window for session ${sessionId}`);
     }
