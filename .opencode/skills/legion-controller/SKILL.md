@@ -199,8 +199,8 @@ For Done issues without live workers:
 ```bash
 WORKSPACES_DIR=$(dirname "$LEGION_DIR")
 ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-jj workspace forget "$ISSUE_LOWER" -R "$LEGION_DIR"
-rm -rf "$WORKSPACES_DIR/$ISSUE_LOWER"
+git -C "$LEGION_DIR" worktree remove "$WORKSPACES_DIR/$ISSUE_LOWER"
+git -C "$LEGION_DIR" branch -d "legion/$ISSUE_LOWER"
 ```
 
 ### 7. Write Heartbeat

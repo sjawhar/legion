@@ -385,11 +385,11 @@ describe("cmdDispatch", () => {
     ).rejects.toThrow(CliError);
   });
 
-  it("creates jj workspace when directory does not exist", async () => {
+  it("creates git worktree when directory does not exist", async () => {
     const tempDir = createTempDir();
     const legionDir = path.join(tempDir, "legion");
     fs.mkdirSync(legionDir);
-    // Do NOT create workspacePath — force jj workspace creation path
+    // Do NOT create workspacePath — force git worktree creation path
 
     installFetchMock((input: string | URL) => {
       const url = input.toString();
@@ -410,14 +410,12 @@ describe("cmdDispatch", () => {
     expect(spawnCalls.length).toBe(1);
     const spawnCall = spawnCalls[0] as SpawnSyncCall;
     expect(spawnCall[0]).toEqual([
-      "jj",
-      "workspace",
+      "git",
+      "worktree",
       "add",
+      "-b",
+      "legion/leg-42",
       path.join(tempDir, "leg-42"),
-      "--name",
-      "leg-42",
-      "-R",
-      legionDir,
     ]);
   });
 
@@ -483,7 +481,7 @@ describe("cmdDispatch", () => {
     ).rejects.toThrow("Daemon is not healthy");
   });
 
-  it("fails when jj workspace creation fails", () => {
+  it("fails when git worktree creation fails", () => {
     const tempDir = createTempDir();
     const legionDir = path.join(tempDir, "legion");
     fs.mkdirSync(legionDir);
@@ -493,7 +491,7 @@ describe("cmdDispatch", () => {
         ({
           exitCode: 1,
           stdout: Buffer.from(""),
-          stderr: Buffer.from("jj failed"),
+          stderr: Buffer.from("git worktree failed"),
           success: false,
           pid: 0,
           resourceUsage: {} as ReturnType<typeof Bun.spawnSync>["resourceUsage"],
@@ -510,7 +508,7 @@ describe("cmdDispatch", () => {
 
     return expect(
       cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13383 })
-    ).rejects.toThrow("Failed to create workspace: jj failed");
+    ).rejects.toThrow("Failed to create workspace: git worktree failed");
   });
 
   it("fails when daemon worker creation cannot connect", () => {

@@ -288,12 +288,13 @@ export async function cmdDispatch(
 
   if (!fs.existsSync(workspacePath)) {
     console.log(`Creating workspace: ${workspacePath}`);
-    const jjResult = Bun.spawnSync(
-      ["jj", "workspace", "add", workspacePath, "--name", issueLower, "-R", legionDir],
-      { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
+    const branch = `legion/${issueLower}`;
+    const worktreeResult = Bun.spawnSync(
+      ["git", "worktree", "add", "-b", branch, workspacePath],
+      { stdio: ["ignore", "pipe", "pipe"], cwd: legionDir, timeout: 30_000 }
     );
-    if (jjResult.exitCode !== 0) {
-      const stderr = jjResult.stderr.toString();
+    if (worktreeResult.exitCode !== 0) {
+      const stderr = worktreeResult.stderr.toString();
       throw new CliError(`Failed to create workspace: ${stderr}`);
     }
   }
