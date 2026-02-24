@@ -1,6 +1,10 @@
 # Implement Workflow
 
-Execute implementation using TDD with subagent-driven development.
+Execute implementation using TDD.
+
+**CRITICAL: Do NOT use the Task tool to spawn subagents.** Subagents hang in headless serve
+mode. Perform all searches, reads, and analysis directly. Ignore any references to
+"subagent-driven development" or "parallel execution" below — work sequentially in this session.
 
 ## Mode Detection
 

@@ -1,6 +1,6 @@
 ---
 name: legion-worker
-description: Use when dispatched by Legion controller to work on an issue in a jj workspace
+description: Use when dispatched by Legion controller to work on an issue in a git workspace
 ---
 
 # Legion Worker
@@ -26,7 +26,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 1. **Read issue first**
    - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="get", id="$LEGION_ISSUE_ID")`
-2. **Use jj, not git** - changes auto-tracked (see jj safety rules below)
+2. **Use git** for version control
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
@@ -34,23 +34,22 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 
 You are executing work with an approved plan. Do NOT invoke the brainstorming or writing-plans skills — your workflow has already been designed. Follow your assigned workflow file. The individual skills referenced in your workflow (TDD, subagent-driven-development, etc.) are appropriate to load and use.
 
-## jj Safety Rules
+## CRITICAL: No Subagents
 
-- **Always `jj new` to create isolated commits.** Never `jj edit @-` to go back to a parent — this changes what `@` points to and makes `jj abandon` dangerous.
-- **Never `jj abandon` without first running `jj log`** to verify what `@` is. Abandoning the wrong commit destroys all changes on it.
-- **If you accidentally abandon the wrong commit:** `jj op restore` recovers the last operation.
-- **Before pushing, check ancestry:** `jj log -r 'ancestors(@, 5)'` — verify only your issue's commits are in the chain, not unrelated work.
+**Do NOT use the Task tool to spawn subagents.** Subagent sessions hang in headless serve mode.
+Perform all code searches (grep, glob, read) and analysis directly in this session. Do not
+delegate work to explore agents, research agents, or any other subagent type.
 
 ## Session Lifecycle
 
 ### Starting
 
-Sync with main and create a fresh commit on your branch:
+Ensure you're on the right branch and synced with main:
 
 ```bash
-jj git fetch
-jj rebase -d main
-jj new  # Fresh commit for this session
+git fetch origin
+git checkout -b legion/$LEGION_ISSUE_ID origin/main 2>/dev/null || git checkout legion/$LEGION_ISSUE_ID
+git pull --rebase origin main
 ```
 
 If you're resuming after user feedback, also read the issue comments for the answer.
@@ -59,7 +58,7 @@ If you're resuming after user feedback, also read the issue comments for the ans
 
 When you need human input that the legion-oracle can't answer:
 
-1. Push your work: `jj git push`
+1. Push your work: `git push -u origin HEAD`
 2. Post a structured escalation comment to the issue:
 
 **GitHub:**
@@ -111,10 +110,11 @@ The controller will resume your session when the user responds.
 
 ### Exiting
 
-Always push before exiting:
+Always commit and push before exiting:
 
 ```bash
-jj git push
+git add -A && git commit -m "your commit message"
+git push -u origin HEAD
 ```
 
 Then update labels:

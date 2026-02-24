@@ -2,6 +2,10 @@
 
 Transform an issue into a reviewed, executable implementation plan.
 
+**CRITICAL: Do NOT use the Task tool to spawn subagents.** Subagents hang in headless serve
+mode. Perform all searches, reads, and analysis directly in this session. Ignore any references
+to "metis", "background_task", or "subagent" below — work sequentially.
+
 ## Workflow
 
 ```dot
