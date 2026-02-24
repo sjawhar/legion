@@ -203,10 +203,19 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               }
             }
 
-            const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
+            const requestedSessionId = computeSessionId(
+              opts.teamId,
+              issueId,
+              mode as WorkerModeLiteral
+            );
 
+            let sessionId: string;
             try {
-              await opts.serveManager.createSession(opts.sharedServePort, sessionId, opts.legionDir);
+              sessionId = await opts.serveManager.createSession(
+                opts.sharedServePort,
+                requestedSessionId,
+                opts.legionDir
+              );
             } catch (error) {
               return serverError(`Failed to create session: ${(error as Error).message}`);
             }

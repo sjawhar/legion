@@ -169,6 +169,35 @@ describe("daemon server", () => {
     expect(entryBody.port).toBe(sharedServePort);
   });
 
+  it("uses actual session ID returned by createSession", async () => {
+    const actualSessionId = "ses_actual_from_opencode";
+    await startTestServer({
+      serveManagerOverrides: {
+        createSession: async (port, sessionId, workspace) => {
+          createSessionCalls.push({ port, sessionId, workspace });
+          return actualSessionId;
+        },
+      },
+    });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-50",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { id: string; sessionId: string };
+    expect(body.sessionId).toBe(actualSessionId);
+
+    const entryResponse = await requestJson(`/workers/${body.id}`);
+    const entryBody = (await entryResponse.json()) as WorkerEntry;
+    expect(entryBody.sessionId).toBe(actualSessionId);
+  });
+
   it("rejects duplicate worker for same issue+mode", async () => {
     await startTestServer();
     const res1 = await requestJson("/workers", {
