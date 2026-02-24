@@ -15,29 +15,34 @@ function randomPort(min = 19900, max = 19999): number {
 
 interface TestServerContext {
   baseUrl: string;
-  createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }>;
+  createSessionCalls: Array<{ sessionId: string; workspace: string }>;
 }
 
 async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): Promise<void> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-integration-"));
   const stateFilePath = path.join(tempDir, "workers.json");
-  const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+  const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
   const sharedServePort = randomPort();
-
-  const serveManager = {
-    createSession: async (port: number, sessionId: string, workspace: string): Promise<void> => {
-      createSessionCalls.push({ port, sessionId, workspace });
+  const adapter = {
+    start: async (): Promise<void> => {},
+    stop: async (): Promise<void> => {},
+    healthy: async (): Promise<boolean> => true,
+    getPort: (): number => sharedServePort,
+    createSession: async (sessionId: string, workspace: string): Promise<string> => {
+      createSessionCalls.push({ sessionId, workspace });
+      return sessionId;
     },
-    healthCheck: async (): Promise<boolean> => true,
+    sendPrompt: async (): Promise<void> => {},
+    getSessionStatus: async (): Promise<{ data?: unknown; error?: unknown }> => ({
+      data: undefined,
+    }),
   };
-
   const { server, stop } = startServer({
     port: randomPort(),
     hostname: "127.0.0.1",
     teamId: TEAM_ID,
     legionDir: tempDir,
-    serveManager,
-    sharedServePort,
+    adapter,
     stateFilePath,
   });
 
@@ -98,7 +103,7 @@ describe("Integration: daemon HTTP lifecycle", () => {
       expect(typeof created.port).toBe("number");
       expect(created.sessionId).toBe(computeSessionId(TEAM_ID, "eng-100", "plan"));
       expect(createSessionCalls.length).toBe(1);
-      expect(createSessionCalls[0].port).toBe(created.port);
+      expect(createSessionCalls[0].sessionId).toBe(created.sessionId);
 
       const listResponse = await fetch(`${baseUrl}/workers`);
       expect(listResponse.ok).toBe(true);

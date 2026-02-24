@@ -8,7 +8,8 @@ import {
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
-import { createWorkerClient, type WorkerEntry } from "./serve-manager";
+import type { RuntimeAdapter } from "./runtime/types";
+import type { WorkerEntry } from "./serve-manager";
 import {
   type ControllerState,
   type CrashHistoryEntry,
@@ -19,22 +20,18 @@ import {
 
 type Server = ReturnType<typeof Bun.serve>;
 
-export interface ServeManagerInterface {
-  createSession(port: number, sessionId: string, workspace: string): Promise<void>;
-  healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
-}
-
 export interface ServerOptions {
   port?: number;
   hostname?: string;
   teamId: string;
   legionDir: string;
-  serveManager: ServeManagerInterface;
-  sharedServePort: number;
+  adapter: RuntimeAdapter;
   stateFilePath: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
   getControllerState?: () => ControllerState | undefined;
+  runtime?: string;
+  tmuxSession?: string;
 }
 
 interface ErrorResponse {
@@ -127,6 +124,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             status: "ok",
             uptime: Date.now() - startedAt,
             workerCount: workers.size,
+            runtime: opts.runtime ?? "opencode",
+            ...(opts.tmuxSession ? { tmuxSession: opts.tmuxSession } : {}),
           });
         }
 
@@ -206,14 +205,14 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
 
             try {
-              await opts.serveManager.createSession(opts.sharedServePort, sessionId, workspace);
+              await opts.adapter.createSession(sessionId, workspace);
             } catch (error) {
               return serverError(`Failed to create session: ${(error as Error).message}`);
             }
 
             const entry: WorkerEntry = {
               id: workerId,
-              port: opts.sharedServePort,
+              port: opts.adapter.getPort(),
               sessionId,
               workspace,
               startedAt: new Date().toISOString(),
@@ -227,7 +226,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
 
             return jsonResponse({
               id: entry.id,
-              port: opts.sharedServePort,
+              port: opts.adapter.getPort(),
               sessionId: entry.sessionId,
             });
           }
@@ -320,16 +319,43 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
 
           try {
-            // Client is lightweight (fetch wrapper); no caching needed at current
-            // polling frequency. Revisit if status endpoint becomes a hot path.
-            const client = createWorkerClient(entry.port, entry.workspace);
-            const result = await client.session.status();
+            const result = await opts.adapter.getSessionStatus(entry.sessionId);
             if (result.error || !result.data) {
               return badGateway();
             }
             return jsonResponse(result.data);
           } catch {
             return badGateway();
+          }
+        }
+
+
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "prompt") {
+          await stateLoaded;
+          if (method !== "POST") {
+            return notFound();
+          }
+          const id = segments[1].toLowerCase();
+          const entry = workers.get(id);
+          if (!entry) {
+            return notFound();
+          }
+
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+          const text = payload.text;
+          if (typeof text !== "string") {
+            return badRequest("missing_fields");
+          }
+          try {
+            await opts.adapter.sendPrompt(entry.sessionId, text);
+            return jsonResponse({ ok: true });
+          } catch (error) {
+            return serverError(`Failed to send prompt: ${(error as Error).message}`);
           }
         }
 

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
-import type { ServeManagerInterface } from "../server";
+import type { RuntimeAdapter } from "../runtime/types";
 import { startServer } from "../server";
 
 describe("sessionId contract (daemon vs state)", () => {
@@ -26,13 +26,19 @@ describe("sessionId contract (daemon vs state)", () => {
   });
 
   it("uses the same deterministic sessionId as the state machine (case-insensitive issue IDs)", async () => {
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
     const sharedServePort = 16500;
-    const serveManager: ServeManagerInterface = {
-      createSession: async (port, sessionId, workspace) => {
-        createSessionCalls.push({ port, sessionId, workspace });
+    const adapter: RuntimeAdapter = {
+      start: async () => {},
+      stop: async () => {},
+      healthy: async () => true,
+      getPort: () => sharedServePort,
+      createSession: async (sessionId: string, workspace: string) => {
+        createSessionCalls.push({ sessionId, workspace });
+        return sessionId;
       },
-      healthCheck: async () => true,
+      sendPrompt: async () => {},
+      getSessionStatus: async () => ({ data: undefined }),
     };
 
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-session-contract-"));
@@ -42,8 +48,7 @@ describe("sessionId contract (daemon vs state)", () => {
       hostname: "127.0.0.1",
       teamId,
       legionDir: tempDir,
-      serveManager,
-      sharedServePort,
+      adapter,
       stateFilePath,
     });
     stopServer = stop;
@@ -62,6 +67,6 @@ describe("sessionId contract (daemon vs state)", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { sessionId: string };
     expect(body.sessionId).toBe(computeSessionId(teamId, "ENG-42", "implement"));
-    expect(createSessionCalls[0].port).toBe(sharedServePort);
+    expect(createSessionCalls[0].sessionId).toBe(computeSessionId(teamId, "ENG-42", "implement"));
   });
 });

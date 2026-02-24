@@ -55,6 +55,8 @@ interface ResetCrashesOptions {
 interface DaemonHealth {
   running: boolean;
   workerCount?: number;
+  runtime?: string;
+  tmuxSession?: string;
 }
 
 export type TeamsCache = Record<string, TeamInfo>;
@@ -99,6 +101,7 @@ interface StartOptions {
   stateDir?: string;
   prompt?: string;
   backend?: string;
+  runtime?: string;
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
@@ -117,6 +120,9 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
     process.env.LEGION_ISSUE_BACKEND = opts.backend;
   }
 
+  if (opts.runtime) {
+    process.env.LEGION_RUNTIME = opts.runtime;
+  }
   const overrides: Partial<DaemonConfig> = {
     teamId,
     legionDir: opts.workspace,
@@ -235,17 +241,30 @@ async function cmdAttach(team: string, issue: string, backend?: string): Promise
     }
 
     const worker = matches[0];
+    // Check runtime from daemon health
+    const health = await checkDaemonHealth(daemonPort);
 
-    console.log(`Found worker on port ${worker.port}`);
-    console.log(`Attaching with: opencode attach http://localhost:${worker.port}`);
+    if (health.runtime === "claude-code" && health.tmuxSession) {
+      console.log(`Found worker: ${worker.id}`);
+      console.log(`Attaching with: tmux attach -t ${health.tmuxSession}`);
 
-    const child = spawn("opencode", ["attach", `http://localhost:${worker.port}`], {
-      stdio: "inherit",
-    });
+      const child = spawn("tmux", ["attach", "-t", health.tmuxSession], {
+        stdio: "inherit",
+      });
 
-    child.on("exit", (code) => {
-      process.exit(code ?? 0);
-    });
+      child.on("exit", (code) => {
+        process.exit(code ?? 0);
+      });
+    } else {
+      console.log(`Found worker on port ${worker.port}`);
+      console.log(`Attaching with: opencode attach http://localhost:${worker.port}`);
+      const child = spawn("opencode", ["attach", `http://localhost:${worker.port}`], {
+        stdio: "inherit",
+      });
+      child.on("exit", (code) => {
+        process.exit(code ?? 0);
+      });
+    }
   } catch (error) {
     if (error instanceof CliError) {
       throw error;
@@ -349,10 +368,10 @@ export async function cmdDispatch(
 
   const initialPrompt = opts.prompt ?? `/legion-worker ${mode} mode for ${issue}`;
   try {
-    await fetch(`http://127.0.0.1:${workerPort}/session/${sessionId}/prompt_async`, {
+    await fetch(`${baseUrl}/workers/${encodeURIComponent(workerId)}/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ parts: [{ type: "text", text: initialPrompt }] }),
+      body: JSON.stringify({ text: initialPrompt }),
     });
     console.log(`Prompt sent: ${initialPrompt}`);
   } catch (_error) {
@@ -422,11 +441,11 @@ export async function cmdPrompt(issue: string, prompt: string, opts: PromptOptio
 
   try {
     const promptResponse = await fetch(
-      `http://127.0.0.1:${worker.port}/session/${worker.sessionId}/prompt_async`,
+      `${baseUrl}/workers/${encodeURIComponent(worker.id)}/prompt`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ parts: [{ type: "text", text: prompt }] }),
+        body: JSON.stringify({ text: prompt }),
       }
     );
     if (!promptResponse.ok) {
@@ -482,11 +501,21 @@ async function checkDaemonHealth(port: number): Promise<DaemonHealth> {
     if (!response.ok) {
       return { running: false };
     }
-    const data = (await response.json()) as { status?: string; workerCount?: number };
+    const data = (await response.json()) as {
+      status?: string;
+      workerCount?: number;
+      runtime?: string;
+      tmuxSession?: string;
+    };
     if (data.status !== "ok") {
       return { running: false };
     }
-    return { running: true, workerCount: data.workerCount ?? 0 };
+    return {
+      running: true,
+      workerCount: data.workerCount ?? 0,
+      runtime: data.runtime,
+      tmuxSession: data.tmuxSession,
+    };
   } catch (_error) {
     return { running: false };
   }
@@ -584,6 +613,11 @@ export const startCommand = defineCommand({
       alias: "b",
       description: "Issue tracker backend (linear or github)",
     },
+    runtime: {
+      type: "string",
+      alias: "r",
+      description: "Agent runtime (opencode or claude-code)",
+    },
   },
   async run({ args }) {
     await cmdStart(args.team, {
@@ -591,6 +625,7 @@ export const startCommand = defineCommand({
       stateDir: args["state-dir"],
       prompt: args.prompt,
       backend: args.backend,
+      runtime: args.runtime,
     });
   },
 });

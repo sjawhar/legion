@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import type { PersistedWorkerState } from "../state-file";
 
@@ -69,23 +70,32 @@ function filterControllerPrompts(
   );
 }
 
-function makeServeManager(overrides?: {
-  healthCheck?: (port: number) => Promise<boolean>;
+function makeAdapter(overrides?: {
+  healthy?: () => Promise<boolean>;
   stopServeCalls?: number[];
-  createSessionCalls?: Array<{ port: number; sessionId: string; workspace: string }>;
-}) {
+  createSessionCalls?: Array<{ sessionId: string; workspace: string }>;
+}): RuntimeAdapter {
   const createSessionCalls = overrides?.createSessionCalls ?? [];
   const stopServeCalls = overrides?.stopServeCalls ?? [];
   return {
-    spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
-    waitForHealthy: async () => {},
-    createSession: async (port: number, sessionId: string, workspace: string) => {
-      createSessionCalls.push({ port, sessionId, workspace });
+    start: async () => {},
+    stop: async () => {
+      stopServeCalls.push(1);
     },
-    healthCheck: overrides?.healthCheck ?? (async () => true),
-    stopServe: async (_port: number, _pid: number) => {
-      stopServeCalls.push(_pid);
+    healthy: overrides?.healthy ?? (async () => true),
+    getPort: () => 13381,
+    createSession: async (sessionId: string, workspace: string) => {
+      createSessionCalls.push({ sessionId, workspace });
+      return sessionId;
     },
+    sendPrompt: async (sessionId: string, text: string) => {
+      if (promptAsyncFailures > 0) {
+        promptAsyncFailures--;
+        throw new Error("session not ready");
+      }
+      promptAsyncCalls.push({ sessionID: sessionId, parts: [{ type: "text", text }] });
+    },
+    getSessionStatus: async () => ({ data: undefined }),
   };
 }
 
@@ -103,7 +113,7 @@ describe("daemon entry", () => {
   });
 
   it("re-creates sessions for persisted workers on startup", async () => {
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -120,7 +130,7 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({ createSessionCalls }),
+        adapter: makeAdapter({ createSessionCalls }),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -148,7 +158,7 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -163,9 +173,9 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           createSessionCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             healthCallCount += 1;
             if (healthCallCount === 1) {
               return true;
@@ -203,7 +213,7 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -218,9 +228,9 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           createSessionCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             healthCallCount += 1;
             if (healthCallCount === 1) {
               return true;
@@ -277,7 +287,7 @@ describe("daemon entry", () => {
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -306,7 +316,7 @@ describe("daemon entry", () => {
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -335,7 +345,7 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -350,9 +360,9 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           createSessionCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             healthCallCount += 1;
             if (healthCallCount === 1) {
               return true;
@@ -401,7 +411,7 @@ describe("daemon entry", () => {
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -443,7 +453,7 @@ describe("daemon entry", () => {
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -497,9 +507,9 @@ describe("daemon entry", () => {
         writeStateFile: async (_path, state) => {
           finalState = state;
         },
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           stopServeCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             if (!startupHealthCheck) {
               startupHealthCheck = true;
               return false;
