@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import {
   createSession,
   createWorkerClient,
@@ -132,21 +132,68 @@ describe("serve-manager", () => {
         return new Response(JSON.stringify({ id: "ses_test" }), { status: 200 });
       }) as unknown as typeof fetch;
 
-      await createSession(13381, "ses_test123", "/home/user/workspace");
+      const createdSessionId = await createSession(13381, "ses_test123", "/home/user/workspace");
 
       expect(captured.url).toBe("http://127.0.0.1:13381/session");
       expect(captured.headers["x-opencode-directory"]).toBe(
         encodeURIComponent("/home/user/workspace")
       );
       expect(captured.body?.id).toBe("ses_test123");
+      expect(createdSessionId).toBe("ses_test");
     });
 
-    it("treats 409 DuplicateIDError as success", async () => {
+    it("returns requested ID on 409 DuplicateIDError", async () => {
       globalThis.fetch = (async () => {
         return new Response(JSON.stringify({ name: "DuplicateIDError" }), { status: 409 });
       }) as unknown as typeof fetch;
 
-      await createSession(13381, "ses_existing", "/tmp");
+      await expect(createSession(13381, "ses_existing", "/tmp")).resolves.toBe("ses_existing");
+    });
+
+    it("returns session ID from response body on success", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ id: "ses_actual" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_requested", "/tmp")).resolves.toBe("ses_actual");
+    });
+
+    it("throws when response body missing id field", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_requested", "/tmp")).rejects.toThrow(
+        "createSession: response body missing or invalid id field"
+      );
+    });
+
+    it("warns when returned ID differs from requested", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ id: "ses_actual" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+      const warn = mock(() => {});
+      const originalWarn = console.warn;
+      console.warn = warn;
+
+      try {
+        await expect(createSession(13381, "ses_requested", "/tmp")).resolves.toBe("ses_actual");
+      } finally {
+        console.warn = originalWarn;
+      }
+
+      expect(warn).toHaveBeenCalledWith(
+        "createSession: session ID mismatch: requested=ses_requested actual=ses_actual"
+      );
     });
 
     it("throws on other errors", async () => {
@@ -155,6 +202,44 @@ describe("serve-manager", () => {
       }) as unknown as typeof fetch;
 
       await expect(createSession(13381, "ses_fail", "/tmp")).rejects.toThrow(
+        "Failed to create session"
+      );
+    });
+
+    it("throws descriptive error on non-JSON 2xx response", async () => {
+      globalThis.fetch = (async () => {
+        return new Response("OK", { status: 200 });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_test", "/tmp")).rejects.toThrow(/not valid JSON.*200/);
+    });
+
+    it("409 with non-DuplicateIDError body throws", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "ConflictError" }), { status: 409 });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_test", "/tmp")).rejects.toThrow(
+        "Failed to create session"
+      );
+    });
+
+    it("409 with non-JSON body throws", async () => {
+      globalThis.fetch = (async () => {
+        return new Response("Conflict", { status: 409 });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_test", "/tmp")).rejects.toThrow(
+        "Failed to create session"
+      );
+    });
+
+    it("non-409 with DuplicateIDError body throws", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "DuplicateIDError" }), { status: 500 });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_test", "/tmp")).rejects.toThrow(
         "Failed to create session"
       );
     });
@@ -221,6 +306,17 @@ describe("serve-manager", () => {
       }) as unknown as typeof fetch;
 
       expect(await healthCheck(15001, 500)).toBe(false);
+    });
+
+    it("returns false when response body does not match schema", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ healthy: "true" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+
+      expect(await healthCheck(15002, 500)).toBe(false);
     });
   });
 

@@ -1,6 +1,7 @@
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
+import { HealthCheckResponseSchema, SessionCreateResponseSchema } from "./schemas";
 
 export interface SharedServeState {
   port: number;
@@ -78,7 +79,7 @@ export async function createSession(
   port: number,
   sessionId: string,
   workspace: string
-): Promise<void> {
+): Promise<string> {
   const baseUrl = `http://127.0.0.1:${port}`;
   const res = await fetch(`${baseUrl}/session`, {
     method: "POST",
@@ -90,11 +91,28 @@ export async function createSession(
     signal: AbortSignal.timeout(10_000), // 10s — session creation is a local call
   });
   if (res.ok) {
-    return;
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      throw new Error(`createSession: response was not valid JSON (status ${res.status})`);
+    }
+    const parsed = SessionCreateResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new Error(
+        `createSession: response body missing or invalid id field: ${JSON.stringify(body)}`
+      );
+    }
+    if (parsed.data.id !== sessionId) {
+      console.warn(
+        `createSession: session ID mismatch: requested=${sessionId} actual=${parsed.data.id}`
+      );
+    }
+    return parsed.data.id;
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (res.status === 409 || body.name === "DuplicateIDError") {
-    return;
+  if (res.status === 409 && body.name === "DuplicateIDError") {
+    return sessionId;
   }
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);
 }
@@ -144,8 +162,11 @@ export async function healthCheck(port: number, timeoutMs = 5000): Promise<boole
     if (!response.ok) {
       return false;
     }
-    const data = (await response.json()) as { healthy?: boolean };
-    return data.healthy === true;
+    const data = HealthCheckResponseSchema.safeParse(await response.json().catch(() => ({})));
+    if (!data.success) {
+      return false;
+    }
+    return data.data.healthy === true;
   } catch {
     return false;
   }

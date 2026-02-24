@@ -89,6 +89,19 @@ async function sendPromptWithRetry(
   throw lastError;
 }
 
+function buildControllerEnv(config: DaemonConfig): Record<string, string> {
+  // config.teamId is guaranteed non-empty by the startDaemon guard at line 107-109.
+  // The "" fallback is unreachable dead code — kept to satisfy the type checker.
+  const teamId = config.teamId ?? "";
+  return {
+    LEGION_TEAM_ID: teamId,
+    LEGION_ISSUE_BACKEND: config.issueBackend,
+    LEGION_DIR: config.legionDir ?? "", // legionDir is genuinely optional
+    LEGION_SHORT_ID: teamId.slice(0, 8),
+    LEGION_DAEMON_PORT: String(config.daemonPort),
+  };
+}
+
 export async function startDaemon(
   overrides: Partial<DaemonConfig> = {},
   deps?: Partial<DaemonDependencies>
@@ -109,6 +122,7 @@ export async function startDaemon(
     console.log(`Adopted existing shared serve on port ${sharedServePort}`);
   } else {
     const serve = await resolvedDeps.serveManager.spawnSharedServe({
+      env: buildControllerEnv(config),
       port: sharedServePort,
       workspace: config.legionDir ?? "",
       logDir: config.logDir,
@@ -203,30 +217,31 @@ export async function startDaemon(
     if (!teamId) {
       throw new Error("LEGION_TEAM_ID is required when no external controller session ID is set");
     }
-    const sessionId = computeControllerSessionId(teamId);
+    const requestedSessionId = computeControllerSessionId(teamId);
+    let actualSessionId: string | undefined;
     try {
-      await resolvedDeps.serveManager.createSession(
+      actualSessionId = await resolvedDeps.serveManager.createSession(
         sharedServePort,
-        sessionId,
+        requestedSessionId,
         config.legionDir ?? ""
       );
-      controllerState = { sessionId, port: sharedServePort };
+      controllerState = { sessionId: actualSessionId, port: sharedServePort };
     } catch (error) {
       console.error(`Failed to create controller session: ${error}`);
     }
 
-    if (controllerState) {
+    if (controllerState && actualSessionId) {
       const initialPrompt = config.controllerPrompt
         ? `/legion-controller\n\n${config.controllerPrompt}`
         : "/legion-controller";
       try {
         await sendPromptWithRetry(
           createWorkerClient(sharedServePort, config.legionDir ?? ""),
-          sessionId,
+          actualSessionId,
           initialPrompt,
           resolvedDeps
         );
-        console.log(`Controller started: session=${sessionId} port=${sharedServePort}`);
+        console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
       } catch (error) {
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
@@ -244,6 +259,7 @@ export async function startDaemon(
 
           try {
             const serve = await resolvedDeps.serveManager.spawnSharedServe({
+              env: buildControllerEnv(config),
               port: sharedServePort,
               workspace: config.legionDir ?? "",
               logDir: config.logDir,
@@ -267,18 +283,23 @@ export async function startDaemon(
 
             if (controllerState?.port) {
               try {
-                await resolvedDeps.serveManager.createSession(
+                const actualControllerSessionId = await resolvedDeps.serveManager.createSession(
                   sharedServePort,
                   controllerState.sessionId,
                   config.legionDir ?? ""
                 );
+                controllerState = {
+                  ...controllerState,
+                  sessionId: actualControllerSessionId,
+                  port: sharedServePort,
+                };
                 await sendPromptWithRetry(
                   createWorkerClient(sharedServePort, config.legionDir ?? ""),
-                  controllerState.sessionId,
+                  actualControllerSessionId,
                   "/legion-controller",
                   resolvedDeps
                 );
-                console.log(`Controller re-created: session=${controllerState.sessionId}`);
+                console.log(`Controller re-created: session=${actualControllerSessionId}`);
               } catch (error) {
                 console.error(`Failed to re-create controller session: ${error}`);
               }
