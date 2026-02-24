@@ -137,11 +137,14 @@ export async function startDaemon(
 
   for (const entry of Object.values(preState.workers)) {
     try {
-      await resolvedDeps.serveManager.createSession(
+      const actualId = await resolvedDeps.serveManager.createSession(
         sharedServePort,
         entry.sessionId,
         entry.workspace
       );
+      if (actualId !== entry.sessionId) {
+        console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
+      }
     } catch (error) {
       console.error(`Failed to re-create session for ${entry.id}: ${error}`);
     }
@@ -271,11 +274,16 @@ export async function startDaemon(
             const state = await resolvedDeps.readStateFile(config.stateFilePath);
             for (const entry of Object.values(state.workers)) {
               try {
-                await resolvedDeps.serveManager.createSession(
+                const actualId = await resolvedDeps.serveManager.createSession(
                   sharedServePort,
                   entry.sessionId,
                   entry.workspace
                 );
+                if (actualId !== entry.sessionId) {
+                  console.warn(
+                    `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
+                  );
+                }
               } catch {
                 // Best-effort session re-creation
               }

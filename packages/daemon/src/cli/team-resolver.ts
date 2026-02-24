@@ -47,7 +47,11 @@ export async function resolveTeamId(
 
   if (fs.existsSync(cacheFile)) {
     try {
-      const teams: TeamsCache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+      const raw: unknown = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("Invalid cache format");
+      }
+      const teams = raw as TeamsCache;
       const keyUpper = teamRef.toUpperCase();
       if (keyUpper in teams) {
         const team = teams[keyUpper];
@@ -108,7 +112,13 @@ async function lookupTeamViaApi(
       throw new Error(`Linear API returned ${response.status} ${response.statusText}`);
     }
 
-    const parsed = LinearTeamsResponseSchema.safeParse(await response.json());
+    let jsonBody: unknown;
+    try {
+      jsonBody = await response.json();
+    } catch {
+      throw new Error(`Linear API returned non-JSON response (status ${response.status})`);
+    }
+    const parsed = LinearTeamsResponseSchema.safeParse(jsonBody);
     if (!parsed.success) {
       throw new Error(`Linear API returned invalid response: ${parsed.error.message}`);
     }
@@ -129,7 +139,10 @@ async function lookupTeamViaApi(
     const cacheFile = path.join(cacheDir, "teams.json");
     let existingCache: TeamsCache = {};
     try {
-      existingCache = JSON.parse(fs.readFileSync(cacheFile, "utf-8")) as TeamsCache;
+      const raw: unknown = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+      if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+        existingCache = raw as TeamsCache;
+      }
     } catch {}
 
     const mergedCache: TeamsCache = { ...existingCache, ...teamsByKey };

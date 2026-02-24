@@ -681,4 +681,132 @@ describe("daemon entry", () => {
     expect(restartOpts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(restartOpts.env?.LEGION_DAEMON_PORT).toBe("13370");
   });
+  it("logs warning when worker session ID changes during startup re-creation", async () => {
+    const warnCalls: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = ((msg: string) => {
+      warnCalls.push(msg);
+    }) as typeof console.warn;
+
+    try {
+      await startDaemon(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          teamId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: {
+              [baseEntry.id]: baseEntry,
+            },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          serveManager: {
+            spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
+            waitForHealthy: async () => {},
+            createSession: async (_port: number, sessionId: string, _workspace: string) => {
+              if (sessionId === baseEntry.sessionId) {
+                return "ses_actual_different";
+              }
+              return sessionId;
+            },
+            healthCheck: async () => true,
+            stopServe: async () => {},
+          },
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      const mismatchWarnings = warnCalls.filter(
+        (msg) => msg.includes("session ID changed") || msg.includes(baseEntry.id)
+      );
+      expect(mismatchWarnings.length).toBeGreaterThan(0);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it("logs warning when worker session ID changes during health-loop restart", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    const warnCalls: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = ((msg: string) => {
+      warnCalls.push(msg);
+    }) as typeof console.warn;
+
+    try {
+      await startDaemon(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          teamId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [baseEntry.id]: baseEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          serveManager: {
+            spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
+            waitForHealthy: async () => {},
+            createSession: async (_port: number, sessionId: string, _workspace: string) => {
+              if (sessionId === baseEntry.sessionId) {
+                return "ses_actual_different_health";
+              }
+              return sessionId;
+            },
+            healthCheck: async () => {
+              healthCallCount += 1;
+              if (healthCallCount === 1) {
+                return true;
+              }
+              if (healthCallCount === 2) {
+                return false;
+              }
+              return true;
+            },
+            stopServe: async () => {},
+          },
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      if (!timeoutCallback) {
+        throw new Error("Expected health loop callback to be scheduled");
+      }
+      await (timeoutCallback as () => Promise<void>)();
+
+      const mismatchWarnings = warnCalls.filter(
+        (msg) => msg.includes("session ID changed") || msg.includes(baseEntry.id)
+      );
+      expect(mismatchWarnings.length).toBeGreaterThan(0);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });

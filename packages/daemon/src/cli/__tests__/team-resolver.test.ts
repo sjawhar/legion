@@ -186,6 +186,11 @@ describe("resolveTeamId", () => {
     await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow("auth error");
   });
 
+  // NOTE: The real API query filters by a single key (teams(filter: { key: { eq: $key } })),
+  // so it returns at most 1 team. This test validates the merge/caching logic with multiple
+  // teams as a theoretical edge case — if the API filter is ever broadened, this ensures
+  // cache merging still works correctly.
+
   test("caches all returned teams after successful API lookup", async () => {
     process.env.LINEAR_API_TOKEN = "test-api-key";
 
@@ -386,5 +391,40 @@ describe("resolveTeamId", () => {
       });
     }) as unknown as typeof fetch;
     await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow("Authentication required");
+  });
+
+  test("throws descriptive error when Linear returns non-JSON response", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    globalThis.fetch = mock(async () => {
+      return new Response("<html>502 Bad Gateway</html>", {
+        status: 200,
+        statusText: "OK",
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(/non-JSON response/);
+  });
+
+  test("non-object cache file (JSON array) falls through to API", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    fs.writeFileSync(testCacheFile, JSON.stringify([1, 2, 3]));
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [{ id: "leg-id", key: "LEG", name: "Legion" }],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await resolveTeamId("LEG", testCacheDir);
+    expect(result).toBe("leg-id");
   });
 });
