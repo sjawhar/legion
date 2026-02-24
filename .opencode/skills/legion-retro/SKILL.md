@@ -1,67 +1,47 @@
 ---
 name: legion-retro
-description: Capture learnings from completed work via dual-perspective retrospective. Invoked by resuming an implement worker session — the implementer has full context, and a fresh subagent provides an outside view.
+description: Capture learnings from completed work via retrospective. Invoked by resuming an implement worker session — the implementer has full context.
 ---
 
 # Legion Retro
 
-Capture learnings from completed work via parallel compounding.
+Capture learnings from completed work.
+
+**CRITICAL: Do NOT use the Task tool to spawn subagents.** Subagents hang in headless serve
+mode. Perform all analysis directly in this session.
 
 ## When This Runs
 
 The controller resumes the **implement worker's existing session** after PR approval, so you (the implementer) have full context of what was built and why. This is intentional — your perspective as the person who did the work is valuable.
 
-A fresh subagent provides the outside perspective (see step 2).
-
 ## Important
 
 - **NO rebasing** - unlike other workflows, do not rebase before starting
-- **Two perspectives** - fresh subagent (context-free) + you (full context)
+- **Single session** - do all analysis yourself (no subagents)
 
 ## Workflow
 
-### 1. Get PR URL
+### 1. Get PR URL and Diff
 
 ```bash
 PR_URL=$(gh pr view "$LEGION_ISSUE_ID" --json url --jq '.url')
+gh pr diff "$LEGION_ISSUE_ID"
 ```
 
-### 2. Launch Background Subagent (Parallel)
+### 2. Analyze and Document Learnings
 
-Use `background_task` tool to spawn a fresh subagent:
+Invoke `/compound-engineering/workflows/compound` to document learnings.
 
-- **Category:** `unspecified-low`
-- **Description:** "Retro analysis for $LEGION_ISSUE_ID"
-- **Prompt:**
-
-> You are analyzing a completed PR to capture learnings.
->
-> Issue: $LEGION_ISSUE_ID
-> PR: $PR_URL
->
-> 1. Fetch the PR diff and description via gh pr view and gh pr diff
-> 2. Invoke /compound-engineering/workflows/compound to document learnings
-> 3. Write output to docs/solutions/ in the current directory
->
-> Focus on patterns that would help future implementations.
-
-### 3. Do Your Own Compound (In Parallel)
-
-While the subagent runs in background, invoke `/compound-engineering/workflows/compound` yourself.
-
-You have full implementation context - capture:
+You have full implementation context — capture:
 - What was hard
 - What you would do differently
 - What patterns emerged
 - Decisions that weren't obvious from the code
+- Patterns that would help future implementations
 
 Write to `docs/solutions/`.
 
-### 4. Wait for Subagent
-
-Check subagent completion before proceeding (you will be notified when background task completes).
-
-### 5. Commit and Push Learnings
+### 3. Commit and Push Learnings
 
 Ensure all `docs/solutions/` files are committed and pushed:
 
@@ -77,7 +57,7 @@ git add -A && git commit -m "$LEGION_ISSUE_ID: retro learnings"
 git push
 ```
 
-### 6. Post Summary to Issue
+### 4. Post Summary to Issue
 
 Post a brief summary to the issue so learnings are discoverable without checking the repo:
 
@@ -105,7 +85,7 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Retro Complete
 - [1-3 bullet summary of the most important learnings]")
 ```
 
-### 7. Signal Completion
+### 5. Signal Completion
 
 Add `worker-done` label to the issue, then exit:
 

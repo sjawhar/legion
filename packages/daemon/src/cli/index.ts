@@ -100,7 +100,7 @@ interface StartOptions {
   stateDir?: string;
   prompt?: string;
   backend?: string;
-  vcs?: string;
+  vcs?: "jj" | "git";
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
@@ -299,7 +299,7 @@ export async function cmdDispatch(
       cmd = ["jj", "workspace", "add", "--name", issueLower, workspacePath];
     } else {
       const branch = `legion/${issueLower}`;
-      cmd = ["git", "worktree", "add", "-B", branch, workspacePath];
+      cmd = ["git", "worktree", "add", "-B", branch, workspacePath, "origin/main"];
     }
     const result = Bun.spawnSync(cmd, {
       stdio: ["ignore", "pipe", "pipe"],
@@ -604,12 +604,16 @@ export const startCommand = defineCommand({
     },
   },
   async run({ args }) {
+    const vcsArg = args.vcs;
+    if (vcsArg !== undefined && vcsArg !== "jj" && vcsArg !== "git") {
+      throw new CliError(`Invalid --vcs value: ${vcsArg}. Must be 'jj' or 'git'.`);
+    }
     await cmdStart(args.team, {
       workspace: args.workspace,
       stateDir: args["state-dir"],
       prompt: args.prompt,
       backend: args.backend,
-      vcs: args.vcs,
+      vcs: vcsArg,
     });
   },
 });
@@ -706,7 +710,10 @@ export const dispatchCommand = defineCommand({
   },
   async run({ args }) {
     try {
-      const vcsArg = args.vcs === "jj" || args.vcs === "git" ? args.vcs : undefined;
+      if (args.vcs !== undefined && args.vcs !== "jj" && args.vcs !== "git") {
+        throw new CliError(`Invalid --vcs value: ${args.vcs}. Must be 'jj' or 'git'.`);
+      }
+      const vcsArg = args.vcs as "jj" | "git" | undefined;
       await cmdDispatch(args.issue, args.mode, {
         legionDir: process.env.LEGION_DIR,
         prompt: args.prompt,

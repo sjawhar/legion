@@ -205,8 +205,8 @@ if [ "$LEGION_VCS" = "jj" ]; then
   cd "$LEGION_DIR" && jj workspace forget "$ISSUE_LOWER"
   rm -rf "$WORKSPACES_DIR/$ISSUE_LOWER"
 else
-  git -C "$LEGION_DIR" worktree remove "$WORKSPACES_DIR/$ISSUE_LOWER"
-  git -C "$LEGION_DIR" branch -d "legion/$ISSUE_LOWER"
+  git -C "$LEGION_DIR" worktree remove --force "$WORKSPACES_DIR/$ISSUE_LOWER"
+  git -C "$LEGION_DIR" branch -D "legion/$ISSUE_LOWER"
 fi
 ```
 

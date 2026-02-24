@@ -49,37 +49,8 @@ Fetch issue and comments. The plan is in comments:
 
 1. `/superpowers/executing-plans` - Load and structure the plan
 2. `/superpowers/test-driven-development` - RED-GREEN-REFACTOR cycle
-3. `/superpowers/subagent-driven-development` - Parallel execution for independent tasks
 
-#### Parallel Execution with Task System
-
-When the plan contains independent tasks (annotated with parallelism information):
-
-1. **Create task graph:** For each task in the plan, use `task_create` with appropriate `blockedBy` edges based on the plan's dependency annotations.
-
-2. **Spawn worker sessions:** Create N subagent sessions (one per independent task group). Each session loops:
-   - `task_claim_next` — atomically claim the next ready task
-   - Execute the claimed task
-   - `task_update(status="completed")` — mark done
-   - Repeat until no ready tasks remain
-
-3. **Monitor progress:** Use `task_list` to track overall progress. The task system handles:
-   - **Dependency ordering:** Tasks only become "ready" when all `blockedBy` dependencies are completed/cancelled
-   - **Lock prevention:** `task_claim_next` atomically claims to prevent double-work
-   - **Lease recovery:** If a session crashes, expired leases are automatically reclaimed
-   - **Retry cap:** Tasks that fail 3 times are flagged for escalation
-
-4. **Convergence:** When `task_list` shows all tasks completed or cancelled, proceed to the next step (Analyze).
-
-**When to use parallel execution:**
-- Plan has 3+ independent tasks
-- Tasks don't share mutable state (different files/modules)
-- Each task is self-contained enough for an independent session
-
-**When to use sequential execution:**
-- Plan has mostly sequential dependencies
-- Tasks are small enough that parallelism overhead isn't worth it
-- Tasks share the same files (merge conflict risk)
+Work through plan tasks sequentially. Use the task system (`task_create`, `task_update`) to track progress.
 
 ### 3. Analyze
 
@@ -107,30 +78,25 @@ Record the results as evidence for the controller's quality gate verification. I
 CI Results: tests ✅ | tsc ✅ | biome ✅
 ```
 
-### 5. Cross-Family Review
+### 5. Self-Review
 
-After all checks pass, spawn a cross-family review session before creating the PR.
+After all checks pass, review your own work before creating the PR.
 
-1. Spawn a review session using `background_task`:
-   - Category: `review-implementation`
-   - Model: Specify an explicit model from a different provider (e.g., `google/gemini-3-pro` or `openai/gpt-5.2-codex`)
-   - Prompt: Include:
-    - The original plan/requirements from the issue
-     - A summary of what was implemented
-     - The diff (`jj diff` for jj, `git diff origin/main` for git)
+1. Generate the diff:
+   - **jj:** `jj diff --from main`
+   - **git:** `git diff origin/main`
 
-2. The reviewer evaluates:
+2. Compare against the original plan/requirements from the issue. Evaluate:
    - **Spec compliance:** Does the implementation match the plan requirements?
    - **Code quality:** Is the code clean, tested, and maintainable?
    - **Missing pieces:** Are there requirements from the plan that weren't implemented?
    - **Over-engineering:** Was anything built that wasn't requested?
 
-3. If the reviewer finds issues:
+3. If you find issues:
    - Address each finding
    - Re-run Pre-Ship Verification (step 4) after fixes
-   - You do NOT need to re-review — one cross-family pass is sufficient
 
-4. Only after addressing review findings, proceed to Ship.
+4. Only after addressing findings, proceed to Ship.
 
 ### 6. Ship
 
@@ -203,9 +169,8 @@ Key behaviors:
 
 ### 2. Fix Issues
 
-Use TDD and subagent-driven development:
+Use TDD:
 - `/superpowers/test-driven-development`
-- `/superpowers/subagent-driven-development`
 
 ### 3. Verify
 

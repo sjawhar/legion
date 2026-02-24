@@ -89,13 +89,10 @@ export async function createSession(
     body: JSON.stringify({ id: sessionId }),
     signal: AbortSignal.timeout(10_000),
   });
-  if (res.ok) {
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return typeof body.id === "string" ? body.id : sessionId;
-  }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (res.status === 409 || body.name === "DuplicateIDError") {
-    return typeof body.id === "string" ? body.id : sessionId;
+  const actualId = typeof body.id === "string" ? body.id : sessionId;
+  if (res.ok || res.status === 409 || body.name === "DuplicateIDError") {
+    return actualId;
   }
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);
 }

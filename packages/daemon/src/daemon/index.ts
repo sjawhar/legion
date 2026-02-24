@@ -112,6 +112,7 @@ export async function startDaemon(
   mkdirSync(config.logDir, { recursive: true });
   const resolvedDeps = resolveDependencies(config, deps);
 
+  const legionDir = config.legionDir ?? "";
   const sharedServePort = config.baseWorkerPort;
   let sharedServePid = 0;
 
@@ -121,7 +122,7 @@ export async function startDaemon(
   } else {
     const serve = await resolvedDeps.serveManager.spawnSharedServe({
       port: sharedServePort,
-      workspace: config.legionDir ?? "",
+      workspace: legionDir,
       logDir: config.logDir,
       env: buildServeEnv(config),
     });
@@ -181,7 +182,7 @@ export async function startDaemon(
     port: config.daemonPort,
     hostname: "127.0.0.1",
     teamId: config.teamId,
-    legionDir: config.legionDir ?? "",
+    legionDir: legionDir,
     serveManager: resolvedDeps.serveManager,
     sharedServePort,
     stateFilePath: config.stateFilePath,
@@ -221,7 +222,7 @@ export async function startDaemon(
       actualSessionId = await resolvedDeps.serveManager.createSession(
         sharedServePort,
         requestedSessionId,
-        config.legionDir ?? ""
+        legionDir
       );
       controllerState = { sessionId: actualSessionId, port: sharedServePort };
     } catch (error) {
@@ -234,7 +235,7 @@ export async function startDaemon(
         : "/legion-controller";
       try {
         await sendPromptWithRetry(
-          createWorkerClient(sharedServePort, config.legionDir ?? ""),
+          createWorkerClient(sharedServePort, legionDir),
           actualSessionId,
           initialPrompt,
           resolvedDeps
@@ -258,7 +259,7 @@ export async function startDaemon(
           try {
             const serve = await resolvedDeps.serveManager.spawnSharedServe({
               port: sharedServePort,
-              workspace: config.legionDir ?? "",
+              workspace: legionDir,
               logDir: config.logDir,
               env: buildServeEnv(config),
             });
@@ -267,6 +268,7 @@ export async function startDaemon(
             console.log(`Shared serve restarted on port ${sharedServePort}`);
 
             const state = await resolvedDeps.readStateFile(config.stateFilePath);
+            let stateChanged = false;
             for (const entry of Object.values(state.workers)) {
               try {
                 const actualId = await resolvedDeps.serveManager.createSession(
@@ -278,10 +280,15 @@ export async function startDaemon(
                   console.log(
                     `Worker session ID changed: ${entry.sessionId} -> ${actualId}`
                   );
+                  entry.sessionId = actualId;
+                  stateChanged = true;
                 }
               } catch {
                 // Best-effort session re-creation
               }
+            }
+            if (stateChanged) {
+              await resolvedDeps.writeStateFile(config.stateFilePath, state);
             }
 
             if (controllerState?.port) {
@@ -289,11 +296,11 @@ export async function startDaemon(
                 const actualCtrlId = await resolvedDeps.serveManager.createSession(
                   sharedServePort,
                   controllerState.sessionId,
-                  config.legionDir ?? ""
+                  legionDir
                 );
                 controllerState = { sessionId: actualCtrlId, port: sharedServePort };
                 await sendPromptWithRetry(
-                  createWorkerClient(sharedServePort, config.legionDir ?? ""),
+                  createWorkerClient(sharedServePort, legionDir),
                   actualCtrlId,
                   "/legion-controller",
                   resolvedDeps

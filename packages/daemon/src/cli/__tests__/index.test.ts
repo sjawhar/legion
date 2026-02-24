@@ -416,6 +416,7 @@ describe("cmdDispatch", () => {
       "-B",
       "legion/leg-42",
       path.join(tempDir, "leg-42"),
+      "origin/main",
     ]);
   });
 
