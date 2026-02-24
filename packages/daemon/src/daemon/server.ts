@@ -206,7 +206,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
 
             try {
-              await opts.serveManager.createSession(opts.sharedServePort, sessionId, workspace);
+              await opts.serveManager.createSession(opts.sharedServePort, sessionId, opts.legionDir);
             } catch (error) {
               return serverError(`Failed to create session: ${(error as Error).message}`);
             }

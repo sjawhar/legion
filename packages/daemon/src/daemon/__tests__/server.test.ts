@@ -157,7 +157,7 @@ describe("daemon server", () => {
 
     expect(createSessionCalls.length).toBe(1);
     expect(createSessionCalls[0].port).toBe(sharedServePort);
-    expect(createSessionCalls[0].workspace).toBe("/tmp/work");
+    expect(createSessionCalls[0].workspace).toBe(tempDir);
 
     const listResponse = await requestJson("/workers");
     const listBody = (await listResponse.json()) as WorkerEntry[];
