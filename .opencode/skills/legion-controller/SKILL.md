@@ -16,7 +16,8 @@ Persistent coordinator that loops forever, dispatching and resuming workers base
 Required:
 - `LEGION_TEAM_ID` - team/project identifier (Linear UUID or GitHub `owner/project-number`)
 - `LEGION_ISSUE_BACKEND` - issue backend: `"linear"` or `"github"`
-- `LEGION_DIR` - path to default jj workspace
+- `LEGION_VCS` - version control system: `"jj"` or `"git"`
+- `LEGION_DIR` - path to default workspace
 - `LEGION_SHORT_ID` - short ID for daemon identification
 - `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
 
@@ -199,8 +200,14 @@ For Done issues without live workers:
 ```bash
 WORKSPACES_DIR=$(dirname "$LEGION_DIR")
 ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-git -C "$LEGION_DIR" worktree remove "$WORKSPACES_DIR/$ISSUE_LOWER"
-git -C "$LEGION_DIR" branch -d "legion/$ISSUE_LOWER"
+
+if [ "$LEGION_VCS" = "jj" ]; then
+  cd "$LEGION_DIR" && jj workspace forget "$ISSUE_LOWER"
+  rm -rf "$WORKSPACES_DIR/$ISSUE_LOWER"
+else
+  git -C "$LEGION_DIR" worktree remove "$WORKSPACES_DIR/$ISSUE_LOWER"
+  git -C "$LEGION_DIR" branch -d "legion/$ISSUE_LOWER"
+fi
 ```
 
 ### 7. Write Heartbeat
@@ -249,20 +256,20 @@ from the issue identifier:
 
 ```bash
 # GitHub example:
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --vcs "$LEGION_VCS" \
+  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO, vcs: $LEGION_VCS)"
 
 # Linear example:
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (linear backend)"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --vcs "$LEGION_VCS" \
+  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (linear backend, vcs: $LEGION_VCS)"
 ```
 
-The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
+The `dispatch` command handles: workspace creation (jj workspace add or git worktree add depending on VCS), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
 
-For custom prompts, still include the backend suffix:
+For custom prompts, still include the backend and VCS suffix:
 ```bash
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "Custom instructions here (github backend, repo: $OWNER/$REPO)"
+legion dispatch "$ISSUE_IDENTIFIER" "$MODE" --vcs "$LEGION_VCS" \
+  --prompt "Custom instructions here (github backend, repo: $OWNER/$REPO, vcs: $LEGION_VCS)"
 ```
 
 ### Resume (Prompt Existing Worker)
@@ -270,15 +277,15 @@ legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
 ```bash
 # User feedback relay (GitHub):
 legion prompt "$ISSUE_IDENTIFIER" \
-  "Check issue comments for user feedback (github backend, repo: $OWNER/$REPO)"
+  "Check issue comments for user feedback (github backend, repo: $OWNER/$REPO, vcs: $LEGION_VCS)"
 
 # User feedback relay (Linear):
 legion prompt "$ISSUE_IDENTIFIER" \
-  "Check issue comments for user feedback (linear backend)"
+  "Check issue comments for user feedback (linear backend, vcs: $LEGION_VCS)"
 
 # PR changes requested (GitHub):
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Address PR review comments (github backend, repo: $OWNER/$REPO)"
+  "Address PR review comments (github backend, repo: $OWNER/$REPO, vcs: $LEGION_VCS)"
 ```
 
 If multiple workers exist for the same issue (different modes), specify mode with `--mode`.
@@ -292,11 +299,11 @@ Retro is triggered by resuming the **implement worker's existing session** — t
 ```bash
 # GitHub:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "/legion-retro (github backend, repo: $OWNER/$REPO)"
+  "/legion-retro (github backend, repo: $OWNER/$REPO, vcs: $LEGION_VCS)"
 
 # Linear:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "/legion-retro (linear backend)"
+  "/legion-retro (linear backend, vcs: $LEGION_VCS)"
 ```
 
 **If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.

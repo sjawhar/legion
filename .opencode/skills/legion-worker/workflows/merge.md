@@ -12,24 +12,31 @@ Before doing anything, verify the PR is open and mergeable:
 gh pr view "$LEGION_ISSUE_ID" --json state,merged,mergeable
 ```
 
-- If **already merged**: verify changes are on main (`jj log --revisions main`), then exit cleanly.
+- If **already merged**: verify changes are on main (`jj log --revisions main` for jj, `git log origin/main` for git), then exit cleanly.
 - If **closed without merge**: escalate with `user-input-needed` — something unexpected happened.
 - If **open**: proceed to step 2.
 
 ### 2. Rebase onto Main
 
+**If VCS is `jj`:**
 ```bash
 jj git fetch
 jj rebase -d main
+```
+
+**If VCS is `git`:**
+```bash
+git fetch origin
+git rebase origin/main
 ```
 
 ### 3. Resolve Conflicts
 
 If rebase produces conflicts:
 
-1. Check status: `jj status`
+1. Check status: `jj status` (jj) or `git status` (git)
 2. Open each conflicted file and resolve markers
-3. Verify no conflicts remain: `jj status` shows clean state
+3. Verify no conflicts remain: `jj status` (jj) or `git status` (git) shows clean state
 
 **If conflicts are unresolvable:**
 - Add `user-input-needed` label to the issue
@@ -42,8 +49,14 @@ If rebase produces conflicts:
 
 ### 4. Push
 
+**If VCS is `jj`:**
 ```bash
 jj git push
+```
+
+**If VCS is `git`:**
+```bash
+git push
 ```
 
 ### 5. Wait for CI

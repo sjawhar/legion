@@ -65,6 +65,17 @@ function resolveDependencies(
   };
 }
 
+function buildServeEnv(config: DaemonConfig): Record<string, string> {
+  return {
+    LEGION_TEAM_ID: config.teamId ?? "",
+    LEGION_ISSUE_BACKEND: config.issueBackend,
+    LEGION_DIR: config.legionDir ?? "",
+    LEGION_SHORT_ID: (config.teamId ?? "legion").slice(0, 8),
+    LEGION_DAEMON_PORT: String(config.daemonPort),
+    LEGION_VCS: config.vcs,
+  };
+}
+
 async function sendPromptWithRetry(
   client: ReturnType<typeof createWorkerClient>,
   sessionId: string,
@@ -112,13 +123,7 @@ export async function startDaemon(
       port: sharedServePort,
       workspace: config.legionDir ?? "",
       logDir: config.logDir,
-      env: {
-        LEGION_TEAM_ID: config.teamId ?? "",
-        LEGION_ISSUE_BACKEND: config.issueBackend,
-        LEGION_DIR: config.legionDir ?? "",
-        LEGION_SHORT_ID: (config.teamId ?? "legion").slice(0, 8),
-        LEGION_DAEMON_PORT: String(config.daemonPort),
-      },
+      env: buildServeEnv(config),
     });
     sharedServePid = serve.pid;
     await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
@@ -255,13 +260,7 @@ export async function startDaemon(
               port: sharedServePort,
               workspace: config.legionDir ?? "",
               logDir: config.logDir,
-              env: {
-                LEGION_TEAM_ID: config.teamId ?? "",
-                LEGION_ISSUE_BACKEND: config.issueBackend,
-                LEGION_DIR: config.legionDir ?? "",
-                LEGION_SHORT_ID: (config.teamId ?? "legion").slice(0, 8),
-                LEGION_DAEMON_PORT: String(config.daemonPort),
-              },
+              env: buildServeEnv(config),
             });
             sharedServePid = serve.pid;
             await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
@@ -270,11 +269,16 @@ export async function startDaemon(
             const state = await resolvedDeps.readStateFile(config.stateFilePath);
             for (const entry of Object.values(state.workers)) {
               try {
-                await resolvedDeps.serveManager.createSession(
+                const actualId = await resolvedDeps.serveManager.createSession(
                   sharedServePort,
                   entry.sessionId,
                   entry.workspace
                 );
+                if (actualId !== entry.sessionId) {
+                  console.log(
+                    `Worker session ID changed: ${entry.sessionId} -> ${actualId}`
+                  );
+                }
               } catch {
                 // Best-effort session re-creation
               }
@@ -282,18 +286,19 @@ export async function startDaemon(
 
             if (controllerState?.port) {
               try {
-                await resolvedDeps.serveManager.createSession(
+                const actualCtrlId = await resolvedDeps.serveManager.createSession(
                   sharedServePort,
                   controllerState.sessionId,
                   config.legionDir ?? ""
                 );
+                controllerState = { sessionId: actualCtrlId, port: sharedServePort };
                 await sendPromptWithRetry(
                   createWorkerClient(sharedServePort, config.legionDir ?? ""),
-                  controllerState.sessionId,
+                  actualCtrlId,
                   "/legion-controller",
                   resolvedDeps
                 );
-                console.log(`Controller re-created: session=${controllerState.sessionId}`);
+                console.log(`Controller re-created: session=${actualCtrlId}`);
               } catch (error) {
                 console.error(`Failed to re-create controller session: ${error}`);
               }

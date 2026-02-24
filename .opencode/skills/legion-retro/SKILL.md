@@ -65,9 +65,16 @@ Check subagent completion before proceeding (you will be notified when backgroun
 
 Ensure all `docs/solutions/` files are committed and pushed:
 
+**If VCS is `jj`:**
 ```bash
 jj describe -m "$LEGION_ISSUE_ID: retro learnings"
 jj git push
+```
+
+**If VCS is `git`:**
+```bash
+git add -A && git commit -m "$LEGION_ISSUE_ID: retro learnings"
+git push
 ```
 
 ### 6. Post Summary to Issue

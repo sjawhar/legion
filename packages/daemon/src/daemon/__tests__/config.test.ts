@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../config";
@@ -68,6 +69,59 @@ describe("daemon config", () => {
 
     it("throws for empty string backend", () => {
       expect(() => loadConfig({ LEGION_ISSUE_BACKEND: "" })).toThrow("LEGION_ISSUE_BACKEND");
+    });
+  });
+
+  describe("vcs", () => {
+    it("defaults to git when no env var or legionDir", () => {
+      const config = loadConfig({});
+      expect(config.vcs).toBe("git");
+    });
+
+    it("reads LEGION_VCS=jj from env", () => {
+      const config = loadConfig({ LEGION_VCS: "jj" });
+      expect(config.vcs).toBe("jj");
+    });
+
+    it("reads LEGION_VCS=git from env", () => {
+      const config = loadConfig({ LEGION_VCS: "git" });
+      expect(config.vcs).toBe("git");
+    });
+
+    it("throws for invalid VCS value", () => {
+      expect(() => loadConfig({ LEGION_VCS: "svn" })).toThrow("LEGION_VCS");
+    });
+
+    it("auto-detects jj from .jj directory", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-vcs-"));
+      try {
+        fs.mkdirSync(path.join(tmpDir, ".jj"));
+        const config = loadConfig({ LEGION_DIR: tmpDir });
+        expect(config.vcs).toBe("jj");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("defaults to git when legionDir has no .jj", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-vcs-"));
+      try {
+        const config = loadConfig({ LEGION_DIR: tmpDir });
+        expect(config.vcs).toBe("git");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("env var takes precedence over auto-detection", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-vcs-"));
+      try {
+        fs.mkdirSync(path.join(tmpDir, ".jj"));
+        const config = loadConfig({ LEGION_DIR: tmpDir, LEGION_VCS: "git" });
+        expect(config.vcs).toBe("git");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 });

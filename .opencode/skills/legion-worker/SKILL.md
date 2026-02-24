@@ -9,13 +9,13 @@ Router skill for Legion issue work. Dispatched by controller with a mode paramet
 
 ## Context from Prompt
 
-The controller dispatches you with a prompt that includes your **issue ID**, **mode**, and **backend**:
+The controller dispatches you with a prompt that includes your **issue ID**, **mode**, **backend**, and **VCS**:
 
-- **GitHub:** `/legion-worker implement mode for acme-widgets-42 (github backend, repo: acme/widgets)`
-- **Linear:** `/legion-worker plan mode for ENG-21 (linear backend)`
+- **GitHub:** `/legion-worker implement mode for acme-widgets-42 (github backend, repo: acme/widgets, vcs: git)`
+- **Linear:** `/legion-worker plan mode for ENG-21 (linear backend, vcs: jj)`
 
 Extract these values from the prompt. For GitHub issues, also derive the **owner**, **repo**,
-and **issue number** from the issue ID (format: `owner-repo-number`).
+and **issue number** from the issue ID (format: `owner-repo-number`). The **VCS** value (`jj` or `git`) determines which version control commands to use.
 
 Throughout this skill and its workflows, `$LEGION_ISSUE_ID`, `$ISSUE_NUMBER`, `$OWNER`, and
 `$REPO` are **placeholders** — substitute the values you extracted from your prompt context.
@@ -26,7 +26,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 1. **Read issue first**
    - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="get", id="$LEGION_ISSUE_ID")`
-2. **Use git** for version control
+2. **Use the VCS from your prompt** (`jj` or `git`) for version control
 3. **Signal completion** - add `worker-done` label when done (see routing table)
 4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
@@ -46,6 +46,13 @@ delegate work to explore agents, research agents, or any other subagent type.
 
 Ensure you're on the right branch and synced with main:
 
+**If VCS is `jj`:**
+```bash
+jj git fetch
+jj rebase -d main
+```
+
+**If VCS is `git`:**
 ```bash
 git fetch origin
 git checkout -b legion/$LEGION_ISSUE_ID origin/main 2>/dev/null || git checkout legion/$LEGION_ISSUE_ID
@@ -58,7 +65,9 @@ If you're resuming after user feedback, also read the issue comments for the ans
 
 When you need human input that the legion-oracle can't answer:
 
-1. Push your work: `git push -u origin HEAD`
+1. Push your work:
+   - **jj:** `jj git push`
+   - **git:** `git push -u origin HEAD`
 2. Post a structured escalation comment to the issue:
 
 **GitHub:**
@@ -112,6 +121,13 @@ The controller will resume your session when the user responds.
 
 Always commit and push before exiting:
 
+**If VCS is `jj`:**
+```bash
+jj describe -m "your commit message"
+jj git push
+```
+
+**If VCS is `git`:**
 ```bash
 git add -A && git commit -m "your commit message"
 git push -u origin HEAD

@@ -91,11 +91,11 @@ export async function createSession(
   });
   if (res.ok) {
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return (body.id as string) ?? sessionId;
+    return typeof body.id === "string" ? body.id : sessionId;
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 409 || body.name === "DuplicateIDError") {
-    return sessionId;
+    return typeof body.id === "string" ? body.id : sessionId;
   }
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);
 }

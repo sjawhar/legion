@@ -25,7 +25,7 @@ Skills invoke TypeScript via: HTTP API (`/workers`, `/state/collect`), and envir
 - **citty** for CLI, **Bun.serve** for HTTP daemon
 - **@opencode-ai/sdk** for programmatic OpenCode interaction
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
-- **jj (Jujutsu)** for version control, **Linear** or **GitHub Issues** for issue tracking
+- **jj (Jujutsu)** or **git** for version control (configured per-team), **Linear** or **GitHub Issues** for issue tracking
 
 ## Commands
 
@@ -46,12 +46,13 @@ legion attach <team> <issue>  # Attach to worker
 
 ## Version Control
 
-**jj (Jujutsu), not git.** Changes auto-accumulate. Push directly.
+Configured per-team via `LEGION_VCS` env var (`jj` or `git`). Auto-detected from `.jj` directory if not set, defaults to `git`.
 
-| Task | Command |
-|------|---------|
-| Status / Log / Diff | `jj status` / `jj log` / `jj diff` |
-| Push / Fetch | `jj git push` / `jj git fetch` |
+| Task | jj | git |
+|------|-----|-----|
+| Status / Log / Diff | `jj status` / `jj log` / `jj diff` | `git status` / `git log` / `git diff` |
+| Push / Fetch | `jj git push` / `jj git fetch` | `git push` / `git fetch` |
+| Workspace creation | `jj workspace add` | `git worktree add` |
 
 ## WHERE TO LOOK
 

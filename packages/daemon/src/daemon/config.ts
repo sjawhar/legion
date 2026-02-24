@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,6 +13,7 @@ export interface DaemonConfig {
   controllerSessionId?: string;
   controllerPrompt?: string;
   issueBackend: "linear" | "github";
+  vcs: "jj" | "git";
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -79,6 +81,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   }
   const issueBackend = rawBackend === "github" ? "github" : "linear";
 
+  const rawVcs = env.LEGION_VCS;
+  if (rawVcs !== undefined && rawVcs !== "jj" && rawVcs !== "git") {
+    throw new Error(`LEGION_VCS must be 'jj' or 'git' (got: ${rawVcs})`);
+  }
+  let vcs: "jj" | "git";
+  if (rawVcs) {
+    vcs = rawVcs;
+  } else if (legionDir) {
+    vcs = existsSync(path.join(legionDir, ".jj")) ? "jj" : "git";
+  } else {
+    vcs = "git";
+  }
+
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,
@@ -90,5 +105,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     controllerSessionId,
     controllerPrompt,
     issueBackend,
+    vcs,
   };
 }

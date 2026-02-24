@@ -20,9 +20,16 @@ Trust the controller's explicit mode parameter.
 
 ## All Modes: Rebase First
 
+**If VCS is `jj`:**
 ```bash
 jj git fetch
 jj rebase -d main
+```
+
+**If VCS is `git`:**
+```bash
+git fetch origin
+git rebase origin/main
 ```
 
 Resolve any conflicts before proceeding.
@@ -110,7 +117,7 @@ After all checks pass, spawn a cross-family review session before creating the P
    - Prompt: Include:
     - The original plan/requirements from the issue
      - A summary of what was implemented
-     - The diff (`jj diff`)
+     - The diff (`jj diff` for jj, `git diff origin/main` for git)
 
 2. The reviewer evaluates:
    - **Spec compliance:** Does the implementation match the plan requirements?
@@ -128,17 +135,35 @@ After all checks pass, spawn a cross-family review session before creating the P
 ### 6. Ship
 
 Before creating the PR, verify branch ancestry is clean:
+
+**If VCS is `jj`:**
 ```bash
 jj log -r 'ancestors(@, 5)'  # Should show only your issue's commits on top of main
 jj diff --stat --from main    # File count should match expectations — no unrelated files
 ```
 
+**If VCS is `git`:**
+```bash
+git log --oneline origin/main..HEAD  # Should show only your issue's commits
+git diff --stat origin/main          # File count should match expectations
+```
+
 If unrelated commits are in the ancestry, rebase to isolate your changes before creating the PR.
 
+**If VCS is `jj`:**
 ```bash
 jj describe -m "$LEGION_ISSUE_ID: [description]"
 jj git push --named "$LEGION_ISSUE_ID"=@
+```
 
+**If VCS is `git`:**
+```bash
+git add -A && git commit -m "$LEGION_ISSUE_ID: [description]"
+git push -u origin HEAD
+```
+
+Then create the PR:
+```bash
 gh pr create --draft \
   --title "$LEGION_ISSUE_ID: [title]" \
   --body "Implements $LEGION_ISSUE_ID
@@ -196,8 +221,15 @@ Fix any failures before pushing.
 
 ### 4. Push
 
+**If VCS is `jj`:**
 ```bash
 jj git push
+```
+
+**If VCS is `git`:**
+```bash
+git add -A && git commit -m "address review comments"
+git push
 ```
 
 ### 5. Reply to Comments

@@ -47,20 +47,21 @@ workers receive all context (issue ID, mode, backend) via the dispatch prompt, n
 | Variable | Set By | Used By | Purpose |
 |----------|--------|---------|---------|
 | `LEGION_TEAM_ID` | CLI/daemon | Controller | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
-| `LEGION_DIR` | CLI/daemon | Controller | Default jj workspace path |
+| `LEGION_DIR` | CLI/daemon | Controller | Default workspace path |
 | `LEGION_SHORT_ID` | CLI/daemon | Controller | Instance ID for heartbeat |
 | `LEGION_DAEMON_PORT` | Daemon | Controller | HTTP API port (default 13370) |
 | `LEGION_ISSUE_BACKEND` | CLI/daemon | Controller | Issue backend (`linear` or `github`) |
+| `LEGION_VCS` | CLI/daemon | Controller | Version control system (`jj` or `git`, auto-detected from `.jj` dir, default `git`) |
 
 All sessions on the shared serve share the same process environment. The controller includes
 backend and issue identity in every dispatch/resume prompt so workers are self-contained.
 
 ## Worker Lifecycle (SKILL.md)
 
-1. **Start**: `jj git fetch && jj rebase -d main && jj new`
+1. **Start**: Sync with main (jj: `jj git fetch && jj rebase -d main`, git: `git fetch origin && git rebase origin/main`)
 2. **Work**: Execute workflow for the assigned mode
 3. **Block**: If stuck, try `/legion-oracle` first. If still stuck: push, post issue comment, add `user-input-needed`, remove `worker-active`, exit
-4. **Done**: `jj git push`, add `worker-done` (most modes), remove `worker-active`
+4. **Done**: Push (jj: `jj git push`, git: `git push`), add `worker-done` (most modes), remove `worker-active`
 
 ## Dispatch vs Resume
 
