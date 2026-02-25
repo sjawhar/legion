@@ -44,8 +44,8 @@ describe("writeTask + readTask", () => {
 
     const readBack = await readTask(workspace, task.id);
     expect(readBack).not.toBeNull();
-    expect(readBack!.id).toBe(task.id);
-    expect(readBack!.description).toBe("test task");
+    expect(readBack?.id).toBe(task.id);
+    expect(readBack?.description).toBe("test task");
   });
 
   it("overwrites existing task file on re-write", async () => {
@@ -57,8 +57,8 @@ describe("writeTask + readTask", () => {
     await writeTask(workspace, task);
 
     const readBack = await readTask(workspace, task.id);
-    expect(readBack!.status).toBe("completed");
-    expect(readBack!.completedAt).toBeDefined();
+    expect(readBack?.status).toBe("completed");
+    expect(readBack?.completedAt).toBeDefined();
   });
 });
 

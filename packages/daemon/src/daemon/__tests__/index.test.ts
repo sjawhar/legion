@@ -282,6 +282,7 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
         controllerPrompt: "Do not start new work. Focus on LEG-137 only.",
       },
       {
@@ -312,6 +313,7 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
       },
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
@@ -352,6 +354,7 @@ describe("daemon entry", () => {
         stateFilePath: "/tmp/daemon-workers.json",
         checkIntervalMs: 1000,
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
         controllerPrompt: "Do not start new work. Focus on LEG-137 only.",
       },
       {
@@ -406,6 +409,7 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
         controllerPrompt: "",
       },
       {
@@ -449,6 +453,7 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
       },
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
@@ -678,7 +683,7 @@ describe("daemon entry", () => {
           writeStateFile: async () => {},
           adapter: {
             ...makeAdapter({ healthy: async () => true }),
-            createSession: async (sessionId: string, workspace: string) => {
+            createSession: async (sessionId: string, _workspace: string) => {
               if (sessionId === baseEntry.sessionId) {
                 return "ses_actual_different";
               }
@@ -744,7 +749,7 @@ describe("daemon entry", () => {
                 return true;
               },
             }),
-            createSession: async (sessionId: string, workspace: string) => {
+            createSession: async (sessionId: string, _workspace: string) => {
               if (sessionId === baseEntry.sessionId) {
                 return "ses_actual_different_health";
               }

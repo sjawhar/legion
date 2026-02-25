@@ -47,7 +47,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
     }
     if (opts.workspace) {
-      this.spawn([
+      const cdResult = this.spawn([
         "tmux",
         "send-keys",
         "-t",
@@ -55,6 +55,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         `cd '${shellEscape(opts.workspace)}'`,
         "Enter",
       ]);
+      if (cdResult.exitCode !== 0) {
+        throw new Error(`Failed to send cd command to tmux session: ${this.sessionName}`);
+      }
     }
   }
 
@@ -80,7 +83,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (newWindowResult.exitCode !== 0) {
       throw new Error(`Failed to create tmux window for session ${sessionId}`);
     }
-    this.spawn([
+    const cdResult = this.spawn([
       "tmux",
       "send-keys",
       "-t",
@@ -88,6 +91,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       `cd '${shellEscape(workspace)}'`,
       "Enter",
     ]);
+    if (cdResult.exitCode !== 0) {
+      throw new Error(`Failed to send cd command to tmux window for session ${sessionId}`);
+    }
     return sessionId;
   }
 
@@ -95,14 +101,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const windowTarget = `${this.sessionName}:${sessionId}`;
     const alive = this.isProcessAlive(sessionId);
 
+    let result: SpawnResult;
     if (alive === "running") {
-      this.spawn(["tmux", "send-keys", "-t", windowTarget, text, "Enter"]);
+      result = this.spawn(["tmux", "send-keys", "-t", windowTarget, text, "Enter"]);
     } else if (alive === "exited") {
       const cmd = `claude --resume '${shellEscape(sessionId)}' -p '${shellEscape(text)}' --dangerously-skip-permissions`;
-      this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
+      result = this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
     } else {
       const cmd = `claude -p '${shellEscape(text)}' --session-id '${shellEscape(sessionId)}' --dangerously-skip-permissions`;
-      this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
+      result = this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(`Failed to send prompt to tmux window ${windowTarget}`);
     }
   }
 

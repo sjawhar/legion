@@ -20,11 +20,11 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Lint daemon
-        run: bunx biome check src/
+        run: bunx biome check --error-on-warnings src/
         working-directory: packages/daemon
 
       - name: Lint opencode-plugin
-        run: bunx biome check src/
+        run: bunx biome check --error-on-warnings src/
         working-directory: packages/opencode-plugin
 
   typecheck:

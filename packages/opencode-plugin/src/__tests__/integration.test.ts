@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
-import type { Project } from "@opencode-ai/sdk";
+import type { Event, Project } from "@opencode-ai/sdk";
 import { createAgents } from "../agents";
 import { loadPluginConfig } from "../config";
 import type { BackgroundTaskManager } from "../delegation";
@@ -698,21 +698,21 @@ describe("opencode-legion plugin", () => {
       const agents = createAgents();
       const conductor = agents.find((a) => a.name === "conductor");
       expect(conductor).toBeTruthy();
-      expect(conductor!.config.prompt).toContain("MUST NOT");
-      expect(conductor!.config.prompt).not.toMatch(/claude|anthropic|gpt|openai|gemini|google/i);
+      expect(conductor?.config.prompt).toContain("MUST NOT");
+      expect(conductor?.config.prompt).not.toMatch(/claude|anthropic|gpt|openai|gemini|google/i);
     });
 
     it("prompt mentions background_task for delegation", () => {
       const agents = createAgents();
       const conductor = agents.find((a) => a.name === "conductor");
       expect(conductor).toBeTruthy();
-      expect(conductor!.config.prompt).toContain("background_task");
+      expect(conductor?.config.prompt).toContain("background_task");
     });
 
     it("prompt is within token budget (<3000 tokens)", () => {
       const agents = createAgents();
       const conductor = agents.find((a) => a.name === "conductor");
-      expect(conductor!.config.prompt.length / 4).toBeLessThan(3000);
+      expect((conductor?.config.prompt.length ?? 0) / 4).toBeLessThan(3000);
     });
   });
 
@@ -783,10 +783,10 @@ describe("opencode-legion plugin", () => {
         await new Promise((r) => setTimeout(r, 20));
 
         expect(capturedPrompt).toBeTruthy();
-        expect(capturedPrompt!.agent).toBe("orchestrator");
-        expect(capturedPrompt!.pathId).toBe(sessionID);
-        expect(capturedPrompt!.directory).toBe(tempRoot);
-        expect(capturedPrompt!.model).toEqual({
+        expect(capturedPrompt?.agent).toBe("orchestrator");
+        expect(capturedPrompt?.pathId).toBe(sessionID);
+        expect(capturedPrompt?.directory).toBe(tempRoot);
+        expect(capturedPrompt?.model).toEqual({
           providerID: "anthropic",
           modelID: "claude-sonnet-4-20250514",
         });
@@ -1334,22 +1334,25 @@ describe("opencode-legion plugin", () => {
 
         const hooks = await OpenCodeLegion(ctx);
 
-        await hooks["tool.execute.before"]!(
+        await hooks["tool.execute.before"]?.(
           { tool: "slashcommand", sessionID: "ses1", callID: "1" },
           { args: { command: "stop-continuation" } }
         );
 
-        await hooks.event!({
+        await hooks.event?.({
           event: { type: "session.idle", properties: { sessionID: "ses1" } },
-        } as any);
+        } as { event: Event });
         await new Promise((r) => setTimeout(r, 50));
         expect(promptCount).toBe(0);
 
-        await hooks["chat.message"]!({ sessionID: "ses1" } as any, {} as any);
+        await hooks["chat.message"]?.(
+          { sessionID: "ses1" } as Parameters<NonNullable<(typeof hooks)["chat.message"]>>[0],
+          {} as Parameters<NonNullable<(typeof hooks)["chat.message"]>>[1]
+        );
 
-        await hooks.event!({
+        await hooks.event?.({
           event: { type: "session.idle", properties: { sessionID: "ses1" } },
-        } as any);
+        } as { event: Event });
         await new Promise((r) => setTimeout(r, 50));
         expect(promptCount).toBe(1);
       } finally {
@@ -1400,8 +1403,8 @@ describe("opencode-legion plugin", () => {
         await hook.event({ event: { type: "session.compacted", properties: { sessionID } } });
 
         expect(capturedRestoreCall).toBeTruthy();
-        expect(capturedRestoreCall!.sessionID).toBe(sessionID);
-        expect(capturedRestoreCall!.todos).toHaveLength(2);
+        expect(capturedRestoreCall?.sessionID).toBe(sessionID);
+        expect(capturedRestoreCall?.todos).toHaveLength(2);
       } finally {
         fs.rmSync(tempRoot, { recursive: true, force: true });
       }
@@ -1597,10 +1600,10 @@ describe("opencode-legion plugin", () => {
         expect(restoredTodos).toBeTruthy();
         expect(restoredTodos).toHaveLength(2);
         // Task 1 keeps the fresher "completed" status from current, not snapshot's "in_progress"
-        const task1 = restoredTodos!.find((t) => t.id === "1");
+        const task1 = restoredTodos?.find((t) => t.id === "1");
         expect(task1?.status).toBe("completed");
         // Task 2 was restored from snapshot
-        const task2 = restoredTodos!.find((t) => t.id === "2");
+        const task2 = restoredTodos?.find((t) => t.id === "2");
         expect(task2?.status).toBe("pending");
       } finally {
         fs.rmSync(tempRoot, { recursive: true, force: true });

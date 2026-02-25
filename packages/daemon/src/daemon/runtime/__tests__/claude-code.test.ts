@@ -141,7 +141,7 @@ describe("ClaudeCodeAdapter", () => {
         (c) => c.includes("send-keys") && c.some((arg) => arg.includes("claude"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("claude"));
+      const cmdArg = sendKeysCall?.find((a) => a.includes("claude"));
       expect(cmdArg).toContain("--session-id");
       expect(cmdArg).toContain("ses_1");
       expect(cmdArg).toContain("--dangerously-skip-permissions");
@@ -157,7 +157,7 @@ describe("ClaudeCodeAdapter", () => {
 
       const sendKeysCall = calls.find((c) => c.includes("send-keys") && c.includes("do something"));
       expect(sendKeysCall).toBeDefined();
-      expect(sendKeysCall!.join(" ")).not.toContain("--session-id");
+      expect(sendKeysCall?.join(" ")).not.toContain("--session-id");
     });
 
     it("resumes claude session when process exited", async () => {
@@ -187,9 +187,26 @@ describe("ClaudeCodeAdapter", () => {
         (c) => c.includes("send-keys") && c.some((a) => a.includes("--resume"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("--resume"));
+      const cmdArg = sendKeysCall?.find((a) => a.includes("--resume"));
       expect(cmdArg).toContain("ses_3");
       expect(cmdArg).toContain("--dangerously-skip-permissions");
+    });
+
+    it("throws when send-keys fails in sendPrompt", async () => {
+      const spawn = (cmd: string[]): SpawnResult => {
+        const key = cmd.join(" ");
+        if (key.includes("pane_current_command")) {
+          return { exitCode: 1, stdout: "" };
+        }
+        if (key.includes("send-keys")) {
+          return { exitCode: 1, stdout: "" };
+        }
+        return { exitCode: 0, stdout: "" };
+      };
+      const adapter = new ClaudeCodeAdapter("sf1", spawn);
+      await expect(adapter.sendPrompt("ses_fail", "test")).rejects.toThrow(
+        "Failed to send prompt to tmux window"
+      );
     });
   });
 
@@ -224,7 +241,7 @@ describe("ClaudeCodeAdapter", () => {
         (c) => c.includes("send-keys") && c.some((a) => a.includes("claude"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("claude"))!;
+      const cmdArg = sendKeysCall?.find((a) => a.includes("claude"));
       expect(cmdArg).toContain("hello'\\''");
       expect(cmdArg).not.toMatch(/hello';/);
     });
@@ -254,7 +271,7 @@ describe("ClaudeCodeAdapter", () => {
         (c) => c.includes("send-keys") && c.some((a) => a.includes("--resume"))
       );
       expect(sendKeysCall).toBeDefined();
-      const cmdArg = sendKeysCall!.find((a) => a.includes("--resume"))!;
+      const cmdArg = sendKeysCall?.find((a) => a.includes("--resume"));
       expect(cmdArg).toContain("it'\\''s a test");
     });
 
@@ -277,6 +294,40 @@ describe("ClaudeCodeAdapter", () => {
       );
     });
 
+    it("createSession throws on send-keys cd failure", async () => {
+      const spawn = (cmd: string[]): SpawnResult => {
+        const key = cmd.join(" ");
+        if (key.includes("new-window")) {
+          return { exitCode: 0, stdout: "" };
+        }
+        if (key.includes("send-keys")) {
+          return { exitCode: 1, stdout: "" };
+        }
+        return { exitCode: 0, stdout: "" };
+      };
+      const adapter = new ClaudeCodeAdapter("t5", spawn);
+      await expect(adapter.createSession("ses_5", "/tmp/work")).rejects.toThrow(
+        "Failed to send cd command to tmux window"
+      );
+    });
+
+    it("start() throws on send-keys cd failure", async () => {
+      const spawn = (cmd: string[]): SpawnResult => {
+        const key = cmd.join(" ");
+        if (key.includes("new-session")) {
+          return { exitCode: 0, stdout: "" };
+        }
+        if (key.includes("send-keys")) {
+          return { exitCode: 1, stdout: "" };
+        }
+        return { exitCode: 0, stdout: "" };
+      };
+      const adapter = new ClaudeCodeAdapter("t6", spawn);
+      await expect(adapter.start({ workspace: "/tmp/ws" })).rejects.toThrow(
+        "Failed to send cd command to tmux session"
+      );
+    });
+
     it("start() sends cd command with escaped workspace", async () => {
       const { spawn, calls } = makeSpawn();
       const adapter = new ClaudeCodeAdapter("t4", spawn);
@@ -285,7 +336,7 @@ describe("ClaudeCodeAdapter", () => {
         (c) => c.includes("send-keys") && c.some((a) => a.startsWith("cd "))
       );
       expect(cdCall).toBeDefined();
-      expect(cdCall!.find((a) => a.startsWith("cd "))).toBe("cd '/tmp/my workspace'");
+      expect(cdCall?.find((a) => a.startsWith("cd "))).toBe("cd '/tmp/my workspace'");
     });
   });
 
