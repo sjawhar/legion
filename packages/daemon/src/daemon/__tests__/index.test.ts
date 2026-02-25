@@ -81,6 +81,7 @@ function makeServeManager(overrides?: {
     waitForHealthy: async () => {},
     createSession: async (port: number, sessionId: string, workspace: string) => {
       createSessionCalls.push({ port, sessionId, workspace });
+      return sessionId;
     },
     healthCheck: overrides?.healthCheck ?? (async () => true),
     stopServe: async (_port: number, _pid: number) => {
@@ -540,5 +541,272 @@ describe("daemon entry", () => {
       throw new Error("Expected process exit to be called");
     }
     expect(exitCode as number).toBe(0);
+  });
+  it("passes controller env vars to spawnSharedServe on startup", async () => {
+    const spawnSharedServeCalls: Array<{
+      port: number;
+      workspace: string;
+      logDir?: string;
+      env?: Record<string, string>;
+    }> = [];
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+        legionDir: "/test/legion",
+        daemonPort: 13370,
+        issueBackend: "linear",
+      },
+      {
+        readStateFile: async () => ({
+          workers: {},
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        serveManager: {
+          spawnSharedServe: async (opts: {
+            port: number;
+            workspace: string;
+            logDir?: string;
+            env?: Record<string, string>;
+          }) => {
+            spawnSharedServeCalls.push(opts);
+            return { port: 13381, pid: 9999, status: "starting" as const };
+          },
+          waitForHealthy: async () => {},
+          createSession: async (_port: number, sessionId: string, _workspace: string) => sessionId,
+          healthCheck: async () => false,
+          stopServe: async () => {},
+        },
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    expect(spawnSharedServeCalls).toHaveLength(1);
+    const opts = spawnSharedServeCalls[0];
+    expect(opts.env).toBeDefined();
+    expect(opts.env?.LEGION_TEAM_ID).toBe(TEAM_ID);
+    expect(opts.env?.LEGION_ISSUE_BACKEND).toBe("linear");
+    expect(opts.env?.LEGION_DIR).toBe("/test/legion");
+    expect(opts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
+    expect(opts.env?.LEGION_DAEMON_PORT).toBe("13370");
+  });
+
+  it("passes controller env vars to spawnSharedServe on health restart", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    const spawnSharedServeCalls: Array<{
+      port: number;
+      workspace: string;
+      logDir?: string;
+      env?: Record<string, string>;
+    }> = [];
+
+    await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+        legionDir: "/test/legion",
+        daemonPort: 13370,
+        issueBackend: "github",
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: {},
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        serveManager: {
+          spawnSharedServe: async (opts: {
+            port: number;
+            workspace: string;
+            logDir?: string;
+            env?: Record<string, string>;
+          }) => {
+            spawnSharedServeCalls.push(opts);
+            return { port: 13381, pid: 9999, status: "starting" as const };
+          },
+          waitForHealthy: async () => {},
+          createSession: async (_port: number, sessionId: string, _workspace: string) => sessionId,
+          healthCheck: async () => {
+            healthCallCount += 1;
+            if (healthCallCount === 1) {
+              return false; // Trigger spawn on startup
+            }
+            if (healthCallCount === 2) {
+              return false; // Trigger restart in health loop
+            }
+            return true; // Healthy after restart
+          },
+          stopServe: async () => {},
+        },
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: originalFetch,
+      }
+    );
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    // Should have 2 calls: one on startup, one on restart
+    expect(spawnSharedServeCalls.length).toBeGreaterThanOrEqual(2);
+    const restartOpts = spawnSharedServeCalls[1];
+    expect(restartOpts.env).toBeDefined();
+    expect(restartOpts.env?.LEGION_TEAM_ID).toBe(TEAM_ID);
+    expect(restartOpts.env?.LEGION_ISSUE_BACKEND).toBe("github");
+    expect(restartOpts.env?.LEGION_DIR).toBe("/test/legion");
+    expect(restartOpts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
+    expect(restartOpts.env?.LEGION_DAEMON_PORT).toBe("13370");
+  });
+  it("logs warning when worker session ID changes during startup re-creation", async () => {
+    const warnCalls: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = ((msg: string) => {
+      warnCalls.push(msg);
+    }) as typeof console.warn;
+
+    try {
+      await startDaemon(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          teamId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: {
+              [baseEntry.id]: baseEntry,
+            },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          serveManager: {
+            spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
+            waitForHealthy: async () => {},
+            createSession: async (_port: number, sessionId: string, _workspace: string) => {
+              if (sessionId === baseEntry.sessionId) {
+                return "ses_actual_different";
+              }
+              return sessionId;
+            },
+            healthCheck: async () => true,
+            stopServe: async () => {},
+          },
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      const mismatchWarnings = warnCalls.filter(
+        (msg) => msg.includes("session ID changed") || msg.includes(baseEntry.id)
+      );
+      expect(mismatchWarnings.length).toBeGreaterThan(0);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  it("logs warning when worker session ID changes during health-loop restart", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    const warnCalls: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = ((msg: string) => {
+      warnCalls.push(msg);
+    }) as typeof console.warn;
+
+    try {
+      await startDaemon(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          teamId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [baseEntry.id]: baseEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          serveManager: {
+            spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
+            waitForHealthy: async () => {},
+            createSession: async (_port: number, sessionId: string, _workspace: string) => {
+              if (sessionId === baseEntry.sessionId) {
+                return "ses_actual_different_health";
+              }
+              return sessionId;
+            },
+            healthCheck: async () => {
+              healthCallCount += 1;
+              if (healthCallCount === 1) {
+                return true;
+              }
+              if (healthCallCount === 2) {
+                return false;
+              }
+              return true;
+            },
+            stopServe: async () => {},
+          },
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      if (!timeoutCallback) {
+        throw new Error("Expected health loop callback to be scheduled");
+      }
+      await (timeoutCallback as () => Promise<void>)();
+
+      const mismatchWarnings = warnCalls.filter(
+        (msg) => msg.includes("session ID changed") || msg.includes(baseEntry.id)
+      );
+      expect(mismatchWarnings.length).toBeGreaterThan(0);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });

@@ -31,3 +31,44 @@ export const PersistedWorkerStateSchema = z
     controller: ControllerStateSchema.optional(),
   })
   .passthrough();
+export const LinearTeamsResponseSchema = z
+  .object({
+    data: z
+      .object({
+        teams: z
+          .object({
+            nodes: z.array(
+              z
+                .object({
+                  id: z.string(),
+                  key: z.string(),
+                  name: z.string(),
+                })
+                .passthrough()
+            ),
+          })
+          .passthrough(),
+      })
+      .nullable()
+      .optional(),
+    errors: z.array(z.object({ message: z.string() }).passthrough()).optional(),
+  })
+  .passthrough();
+
+export type LinearTeamsResponse = z.infer<typeof LinearTeamsResponseSchema>;
+
+export const SessionCreateResponseSchema = z
+  .object({
+    id: z.string(),
+  })
+  .passthrough();
+
+export type SessionCreateResponse = z.infer<typeof SessionCreateResponseSchema>;
+
+export const HealthCheckResponseSchema = z
+  .object({
+    healthy: z.boolean(),
+  })
+  .passthrough();
+
+export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>;

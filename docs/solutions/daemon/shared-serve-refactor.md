@@ -29,7 +29,7 @@ The daemon uses a `DaemonDependencies` interface that's broader than the HTTP se
 ```typescript
 // HTTP server needs only these operations
 interface ServeManagerInterface {
-  createSession(port: number, sessionId: string, workspace: string): Promise<void>;
+  createSession(port: number, sessionId: string, workspace: string): Promise<string>;
   healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
 }
 
@@ -64,7 +64,7 @@ export async function createSession(
   port: number,
   sessionId: string,
   workspace: string,
-): Promise<void> {
+): Promise<string> {
   const res = await fetch(`${baseUrl}/session`, {
     method: "POST",
     headers: {
@@ -77,7 +77,7 @@ export async function createSession(
     return;
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (res.status === 409 || body.name === "DuplicateIDError") {
+  if (res.status === 409 && body.name === "DuplicateIDError") {
     return; // Idempotent — session already exists
   }
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);

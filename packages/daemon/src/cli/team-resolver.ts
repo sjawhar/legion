@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { LinearTeamsResponseSchema } from "../daemon/schemas";
 
 // UUID regex pattern
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -45,18 +46,24 @@ export async function resolveTeamId(
   const cacheFile = path.join(resolvedCacheDir, "teams.json");
 
   if (fs.existsSync(cacheFile)) {
-    const teams: TeamsCache = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
-    const keyUpper = teamRef.toUpperCase();
-    if (keyUpper in teams) {
-      const team = teams[keyUpper];
-      console.log(`Using cached: ${teamRef} → ${team.name} (${team.id})`);
-      return team.id;
-    }
+    try {
+      const raw: unknown = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("Invalid cache format");
+      }
+      const teams = raw as TeamsCache;
+      const keyUpper = teamRef.toUpperCase();
+      if (keyUpper in teams) {
+        const team = teams[keyUpper];
+        console.log(`Using cached: ${teamRef} → ${team.name} (${team.id})`);
+        return team.id;
+      }
+    } catch {}
   }
 
   const apiKey = process.env.LINEAR_API_TOKEN;
   if (apiKey) {
-    return await lookupTeamViaApi(teamRef, apiKey);
+    return await lookupTeamViaApi(teamRef, apiKey, resolvedCacheDir);
   }
 
   throw new Error(
@@ -68,12 +75,19 @@ export async function resolveTeamId(
 /**
  * Look up team via Linear GraphQL API.
  */
-async function lookupTeamViaApi(teamRef: string, apiKey: string): Promise<string> {
+async function lookupTeamViaApi(
+  teamRef: string,
+  apiKey: string,
+  cacheDir: string
+): Promise<string> {
   const query = `
-    query GetTeam($key: String!) {
-      team(key: $key) {
-        id
-        name
+    query GetTeamByKey($key: String!) {
+      teams(filter: { key: { eq: $key } }) {
+        nodes {
+          id
+          key
+          name
+        }
       }
     }
   `;
@@ -98,13 +112,56 @@ async function lookupTeamViaApi(teamRef: string, apiKey: string): Promise<string
       throw new Error(`Linear API returned ${response.status} ${response.statusText}`);
     }
 
-    const data = (await response.json()) as {
-      data?: { team?: { id: string; name: string } };
-    };
-    const team = data?.data?.team;
+    let jsonBody: unknown;
+    try {
+      jsonBody = await response.json();
+    } catch {
+      throw new Error(`Linear API returned non-JSON response (status ${response.status})`);
+    }
+    const parsed = LinearTeamsResponseSchema.safeParse(jsonBody);
+    if (!parsed.success) {
+      throw new Error(`Linear API returned invalid response: ${parsed.error.message}`);
+    }
 
+    if (parsed.data.errors && parsed.data.errors.length > 0) {
+      throw new Error(parsed.data.errors[0]?.message ?? "Linear API returned GraphQL errors");
+    }
+
+    if (!parsed.data.data) {
+      throw new Error("Linear API returned null data");
+    }
+
+    const teamsByKey: TeamsCache = {};
+    for (const node of parsed.data.data.teams.nodes) {
+      teamsByKey[node.key.toUpperCase()] = { id: node.id, name: node.name };
+    }
+
+    const cacheFile = path.join(cacheDir, "teams.json");
+    let existingCache: TeamsCache = {};
+    try {
+      const raw: unknown = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+      if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+        existingCache = raw as TeamsCache;
+      }
+    } catch {}
+
+    const mergedCache: TeamsCache = { ...existingCache, ...teamsByKey };
+
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify(mergedCache, null, 2));
+    } catch (error) {
+      console.warn(`Failed to write team cache to ${cacheFile}: ${String(error)}`);
+    }
+
+    const keyUpper = teamRef.toUpperCase();
+    const team = parsed.data.data.teams.nodes.find((node) => node.key.toUpperCase() === keyUpper);
     if (!team) {
-      throw new Error(`Team '${teamRef}' not found in Linear`);
+      const availableKeys = Object.keys(mergedCache).sort();
+      const availableKeysMessage = availableKeys.length > 0 ? availableKeys.join(", ") : "(none)";
+      throw new Error(
+        `Team '${teamRef}' not found in Linear. Available team keys: ${availableKeysMessage}`
+      );
     }
 
     console.log(`Resolved: ${teamRef} → ${team.name} (${team.id})`);

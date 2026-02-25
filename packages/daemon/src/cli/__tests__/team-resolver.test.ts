@@ -95,13 +95,13 @@ describe("resolveTeamId", () => {
       expect(options?.method).toBe("POST");
       const body = JSON.parse(options?.body as string);
       expect(body.variables.key).toBe("LEG");
+      expect(body.query).toContain("teams(filter: { key: { eq: $key } })");
 
       return new Response(
         JSON.stringify({
           data: {
-            team: {
-              id: "fetched-uuid-1234",
-              name: "Legion Team",
+            teams: {
+              nodes: [{ id: "fetched-uuid-1234", key: "LEG", name: "Legion Team" }],
             },
           },
         }),
@@ -122,14 +122,208 @@ describe("resolveTeamId", () => {
     globalThis.fetch = mock(async () => {
       return new Response(
         JSON.stringify({
-          data: {},
+          data: {
+            teams: {
+              nodes: [],
+            },
+          },
         }),
         { status: 200 }
       );
     }) as unknown as typeof fetch;
 
     await expect(resolveTeamId("NOTFOUND", testCacheDir)).rejects.toThrow(
-      "Team 'NOTFOUND' not found in Linear"
+      "Team 'NOTFOUND' not found in Linear. Available team keys: (none)"
+    );
+  });
+
+  test("error message shows previously-cached keys", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    fs.writeFileSync(
+      testCacheFile,
+      JSON.stringify(
+        {
+          ENG: { id: "eng-id", name: "Engineering" },
+          DES: { id: "des-id", name: "Design" },
+        },
+        null,
+        2
+      )
+    );
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(resolveTeamId("NOTFOUND", testCacheDir)).rejects.toThrow(
+      "Available team keys: DES, ENG"
+    );
+  });
+
+  test("throws error when GraphQL response includes errors array", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          errors: [{ message: "auth error" }],
+          data: null,
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow("auth error");
+  });
+
+  // NOTE: The real API query filters by a single key (teams(filter: { key: { eq: $key } })),
+  // so it returns at most 1 team. This test validates the merge/caching logic with multiple
+  // teams as a theoretical edge case — if the API filter is ever broadened, this ensures
+  // cache merging still works correctly.
+
+  test("caches all returned teams after successful API lookup", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [
+                { id: "fetched-uuid-1234", key: "LEG", name: "Legion Team" },
+                { id: "fetched-uuid-5678", key: "ENG", name: "Engineering Team" },
+              ],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await resolveTeamId("LEG", testCacheDir);
+    expect(result).toBe("fetched-uuid-1234");
+
+    const cached = JSON.parse(fs.readFileSync(testCacheFile, "utf-8"));
+    expect(cached).toEqual({
+      LEG: { id: "fetched-uuid-1234", name: "Legion Team" },
+      ENG: { id: "fetched-uuid-5678", name: "Engineering Team" },
+    });
+  });
+
+  test("merges new teams with existing cache", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    fs.writeFileSync(
+      testCacheFile,
+      JSON.stringify(
+        {
+          ENG: { id: "eng-id", name: "Engineering" },
+        },
+        null,
+        2
+      )
+    );
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [{ id: "leg-id", key: "LEG", name: "Legion" }],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await resolveTeamId("LEG", testCacheDir);
+    expect(result).toBe("leg-id");
+
+    const cached = JSON.parse(fs.readFileSync(testCacheFile, "utf-8"));
+    expect(cached).toEqual({
+      ENG: { id: "eng-id", name: "Engineering" },
+      LEG: { id: "leg-id", name: "Legion" },
+    });
+  });
+
+  test("cache write failure still resolves team", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [{ id: "leg-id", key: "LEG", name: "Legion" }],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const originalWriteFileSync = fs.writeFileSync;
+    fs.writeFileSync = mock(() => {
+      throw new Error("disk full");
+    }) as typeof fs.writeFileSync;
+
+    try {
+      await expect(resolveTeamId("LEG", testCacheDir)).resolves.toBe("leg-id");
+    } finally {
+      fs.writeFileSync = originalWriteFileSync;
+    }
+  });
+
+  test("corrupted cache file does not crash", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    fs.writeFileSync(testCacheFile, "not valid json");
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [{ id: "leg-id", key: "LEG", name: "Legion" }],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(resolveTeamId("LEG", testCacheDir)).resolves.toBe("leg-id");
+  });
+
+  test("throws error when API response fails schema validation", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [{ id: "fetched-uuid-1234", key: "LEG" }],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(
+      /Failed to look up team.*invalid response/s
     );
   });
 
@@ -187,5 +381,50 @@ describe("resolveTeamId", () => {
     const uuid = "12345678-1234-1234-1234-123456789abc";
     const result = await resolveTeamId(uuid, { cacheDir: testCacheDir });
     expect(result).toBe(uuid);
+  });
+
+  test("throws error when GraphQL response omits data field entirely", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+    globalThis.fetch = mock(async () => {
+      return new Response(JSON.stringify({ errors: [{ message: "Authentication required" }] }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow("Authentication required");
+  });
+
+  test("throws descriptive error when Linear returns non-JSON response", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    globalThis.fetch = mock(async () => {
+      return new Response("<html>502 Bad Gateway</html>", {
+        status: 200,
+        statusText: "OK",
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(resolveTeamId("LEG", testCacheDir)).rejects.toThrow(/non-JSON response/);
+  });
+
+  test("non-object cache file (JSON array) falls through to API", async () => {
+    process.env.LINEAR_API_TOKEN = "test-api-key";
+
+    fs.writeFileSync(testCacheFile, JSON.stringify([1, 2, 3]));
+
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            teams: {
+              nodes: [{ id: "leg-id", key: "LEG", name: "Legion" }],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await resolveTeamId("LEG", testCacheDir);
+    expect(result).toBe("leg-id");
   });
 });

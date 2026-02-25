@@ -41,6 +41,7 @@ describe("daemon server", () => {
     serveManager = {
       createSession: async (port, sessionId, workspace) => {
         createSessionCalls.push({ port, sessionId, workspace });
+        return sessionId;
       },
       healthCheck: async () => true,
     };

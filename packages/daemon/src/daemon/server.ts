@@ -20,7 +20,7 @@ import {
 type Server = ReturnType<typeof Bun.serve>;
 
 export interface ServeManagerInterface {
-  createSession(port: number, sessionId: string, workspace: string): Promise<void>;
+  createSession(port: number, sessionId: string, workspace: string): Promise<string>;
   healthCheck(port: number, timeoutMs?: number): Promise<boolean>;
 }
 
@@ -205,8 +205,13 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
 
             const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
 
+            let actualSessionId = sessionId;
             try {
-              await opts.serveManager.createSession(opts.sharedServePort, sessionId, workspace);
+              actualSessionId = await opts.serveManager.createSession(
+                opts.sharedServePort,
+                sessionId,
+                workspace
+              );
             } catch (error) {
               return serverError(`Failed to create session: ${(error as Error).message}`);
             }
@@ -214,7 +219,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const entry: WorkerEntry = {
               id: workerId,
               port: opts.sharedServePort,
-              sessionId,
+              sessionId: actualSessionId,
               workspace,
               startedAt: new Date().toISOString(),
               status: "running",
