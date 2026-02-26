@@ -2,6 +2,29 @@ import { afterEach, beforeEach, describe, expect, it, mock, test } from "bun:tes
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Mock child_process spawn to prevent actual process spawning in tests
+const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
+let spawnExitCode = 0;
+
+mock.module("node:child_process", () => ({
+  spawn: (cmd: string, args: string[], _opts?: unknown) => {
+    spawnCalls.push({ cmd, args });
+    const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
+    const child = {
+      on: (event: string, handler: (...a: unknown[]) => void) => {
+        if (!listeners[event]) listeners[event] = [];
+        listeners[event].push(handler);
+        if (event === "exit") {
+          handler(spawnExitCode);
+        }
+        return child;
+      },
+    };
+    return child;
+  },
+}));
+
 import {
   attachCommand,
   CliError,
@@ -254,7 +277,7 @@ describe("cmdDispatch", () => {
           })
         );
       }
-      if (url.endsWith("/session/s-1/prompt_async")) {
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
@@ -274,9 +297,9 @@ describe("cmdDispatch", () => {
     expect(body).toEqual({ issueId: "LEG-42", mode: "implement", workspace: workspacePath });
 
     const [promptUrl, promptInit] = fetchMock.mock.calls[2] as FetchCall;
-    expect(promptUrl.toString()).toBe("http://127.0.0.1:18000/session/s-1/prompt_async");
+    expect(promptUrl.toString()).toBe("http://127.0.0.1:13371/workers/leg-42-implement/prompt");
     expect(JSON.parse((promptInit as RequestInit).body as string)).toEqual({
-      parts: [{ type: "text", text: "/legion-worker implement mode for LEG-42" }],
+      text: "/legion-worker implement mode for LEG-42",
     });
   });
 
@@ -441,7 +464,7 @@ describe("cmdDispatch", () => {
           })
         );
       }
-      if (url.includes("/prompt_async")) {
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
         return Promise.reject(new Error("Connection refused"));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
@@ -598,6 +621,8 @@ describe("cmdAttach", () => {
   beforeEach(() => {
     console.log = mock(() => {}) as typeof console.log;
     console.error = mock(() => {}) as typeof console.error;
+    spawnCalls.length = 0;
+    spawnExitCode = 0;
     exitCode = undefined;
     process.exit = mock((code?: number) => {
       exitCode = code;
@@ -701,6 +726,82 @@ describe("cmdAttach", () => {
     expect(errorCalls.join("\n")).toContain("Failed to attach: boom");
     expect(exitCode).toBe(1);
   });
+
+  it("logs tmux attach command for claude-code runtime", async () => {
+    installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              status: "ok",
+              runtime: "claude-code",
+              tmuxSession: "legion-abc123",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )
+        );
+      }
+      if (url.endsWith("/workers")) {
+        return Promise.resolve(
+          new Response(JSON.stringify([{ id: "leg-42-implement", port: 2000 }]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      return Promise.reject(new Error(`Unexpected: ${url}`));
+    });
+
+    try {
+      await Promise.resolve(
+        runCommand(attachCommand, {
+          team: "12345678-1234-1234-1234-123456789abc",
+          issue: "leg-42-implement",
+        })
+      );
+    } catch {}
+
+    const logCalls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
+    expect(logCalls.join("\n")).toContain("tmux attach -t legion-abc123");
+    expect(spawnCalls.some((c) => c.cmd === "tmux" && c.args.includes("legion-abc123"))).toBe(true);
+  });
+
+  it("logs opencode attach command for opencode runtime", async () => {
+    installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ status: "ok", runtime: "opencode" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      if (url.endsWith("/workers")) {
+        return Promise.resolve(
+          new Response(JSON.stringify([{ id: "leg-42-implement", port: 2000 }]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      return Promise.reject(new Error(`Unexpected: ${url}`));
+    });
+
+    try {
+      await Promise.resolve(
+        runCommand(attachCommand, {
+          team: "12345678-1234-1234-1234-123456789abc",
+          issue: "leg-42-implement",
+        })
+      );
+    } catch {}
+
+    const logCalls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
+    expect(logCalls.join("\n")).toContain("opencode attach http://localhost:2000");
+    expect(spawnCalls.some((c) => c.cmd === "opencode")).toBe(true);
+  });
 });
 
 describe("cmdPrompt", () => {
@@ -732,7 +833,7 @@ describe("cmdPrompt", () => {
           )
         );
       }
-      if (url.endsWith("/session/s-42/prompt_async")) {
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
@@ -741,9 +842,9 @@ describe("cmdPrompt", () => {
 
     expect(fetchMock.mock.calls.length).toBe(2);
     const [secondUrl, secondInit] = fetchMock.mock.calls[1] as FetchCall;
-    expect(secondUrl.toString()).toBe("http://127.0.0.1:19000/session/s-42/prompt_async");
+    expect(secondUrl.toString()).toBe("http://127.0.0.1:13376/workers/leg-42-implement/prompt");
     expect(JSON.parse((secondInit as RequestInit).body as string)).toEqual({
-      parts: [{ type: "text", text: "Check the issue comments" }],
+      text: "Check the issue comments",
     });
   });
 
@@ -761,7 +862,7 @@ describe("cmdPrompt", () => {
           )
         );
       }
-      if (url.endsWith("/session/s-2/prompt_async")) {
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
         return Promise.resolve(new Response("{}", { status: 200 }));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
@@ -772,7 +873,7 @@ describe("cmdPrompt", () => {
     });
 
     const [secondUrl] = fetchMock.mock.calls[1] as FetchCall;
-    expect(secondUrl.toString()).toBe("http://127.0.0.1:19002/session/s-2/prompt_async");
+    expect(secondUrl.toString()).toBe("http://127.0.0.1:13377/workers/leg-42-implement/prompt");
   });
 
   it("fails when no worker found", async () => {
@@ -862,7 +963,7 @@ describe("cmdPrompt", () => {
           )
         );
       }
-      if (url.endsWith("/session/s-3/prompt_async")) {
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
         return Promise.resolve(new Response("", { status: 500 }));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
@@ -886,7 +987,7 @@ describe("cmdPrompt", () => {
           )
         );
       }
-      if (url.endsWith("/session/s-4/prompt_async")) {
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
         throw new Error("write failed");
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));

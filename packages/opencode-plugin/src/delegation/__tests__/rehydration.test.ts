@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { PluginInput } from "@opencode-ai/plugin";
 import { BackgroundTaskManager } from "../background-manager";
 import { writeTask } from "../task-storage";
 import type { BackgroundTask } from "../types";
@@ -35,7 +36,7 @@ function createManager(dir: string): BackgroundTaskManager {
       },
     },
     directory: dir,
-  } as any;
+  } as unknown as PluginInput;
   return new BackgroundTaskManager(mockCtx);
 }
 

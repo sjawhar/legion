@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import type { PersistedWorkerState } from "../state-file";
 
@@ -69,24 +70,32 @@ function filterControllerPrompts(
   );
 }
 
-function makeServeManager(overrides?: {
-  healthCheck?: (port: number) => Promise<boolean>;
+function makeAdapter(overrides?: {
+  healthy?: () => Promise<boolean>;
   stopServeCalls?: number[];
-  createSessionCalls?: Array<{ port: number; sessionId: string; workspace: string }>;
-}) {
+  createSessionCalls?: Array<{ sessionId: string; workspace: string }>;
+}): RuntimeAdapter {
   const createSessionCalls = overrides?.createSessionCalls ?? [];
   const stopServeCalls = overrides?.stopServeCalls ?? [];
   return {
-    spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
-    waitForHealthy: async () => {},
-    createSession: async (port: number, sessionId: string, workspace: string) => {
-      createSessionCalls.push({ port, sessionId, workspace });
+    start: async () => {},
+    stop: async () => {
+      stopServeCalls.push(1);
+    },
+    healthy: overrides?.healthy ?? (async () => true),
+    getPort: () => 13381,
+    createSession: async (sessionId: string, workspace: string) => {
+      createSessionCalls.push({ sessionId, workspace });
       return sessionId;
     },
-    healthCheck: overrides?.healthCheck ?? (async () => true),
-    stopServe: async (_port: number, _pid: number) => {
-      stopServeCalls.push(_pid);
+    sendPrompt: async (sessionId: string, text: string) => {
+      if (promptAsyncFailures > 0) {
+        promptAsyncFailures--;
+        throw new Error("session not ready");
+      }
+      promptAsyncCalls.push({ sessionID: sessionId, parts: [{ type: "text", text }] });
     },
+    getSessionStatus: async () => ({ data: undefined }),
   };
 }
 
@@ -104,7 +113,7 @@ describe("daemon entry", () => {
   });
 
   it("re-creates sessions for persisted workers on startup", async () => {
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -121,7 +130,7 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({ createSessionCalls }),
+        adapter: makeAdapter({ createSessionCalls }),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -149,7 +158,7 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -164,9 +173,9 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           createSessionCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             healthCallCount += 1;
             if (healthCallCount === 1) {
               return true;
@@ -204,7 +213,7 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
@@ -219,9 +228,9 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           createSessionCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             healthCallCount += 1;
             if (healthCallCount === 1) {
               return true;
@@ -273,12 +282,13 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
         controllerPrompt: "Do not start new work. Focus on LEG-137 only.",
       },
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -303,11 +313,12 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
       },
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -336,13 +347,14 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const createSessionCalls: Array<{ port: number; sessionId: string; workspace: string }> = [];
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
 
     await startDaemon(
       {
         stateFilePath: "/tmp/daemon-workers.json",
         checkIntervalMs: 1000,
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
         controllerPrompt: "Do not start new work. Focus on LEG-137 only.",
       },
       {
@@ -351,9 +363,9 @@ describe("daemon entry", () => {
           crashHistory: {},
         }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           createSessionCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             healthCallCount += 1;
             if (healthCallCount === 1) {
               return true;
@@ -397,12 +409,13 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
         controllerPrompt: "",
       },
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -440,11 +453,12 @@ describe("daemon entry", () => {
       {
         stateFilePath: "/tmp/daemon-workers.json",
         teamId: TEAM_ID,
+        controllerSessionId: undefined,
       },
       {
         readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: makeServeManager(),
+        adapter: makeAdapter(),
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
@@ -498,9 +512,9 @@ describe("daemon entry", () => {
         writeStateFile: async (_path, state) => {
           finalState = state;
         },
-        serveManager: makeServeManager({
+        adapter: makeAdapter({
           stopServeCalls,
-          healthCheck: async () => {
+          healthy: async () => {
             if (!startupHealthCheck) {
               startupHealthCheck = true;
               return false;
@@ -542,13 +556,9 @@ describe("daemon entry", () => {
     }
     expect(exitCode as number).toBe(0);
   });
-  it("passes controller env vars to spawnSharedServe on startup", async () => {
-    const spawnSharedServeCalls: Array<{
-      port: number;
-      workspace: string;
-      logDir?: string;
-      env?: Record<string, string>;
-    }> = [];
+  it("passes controller env vars to adapter.start on startup", async () => {
+    const startCalls: Array<{ workspace: string; logDir?: string; env?: Record<string, string> }> =
+      [];
 
     await startDaemon(
       {
@@ -559,25 +569,13 @@ describe("daemon entry", () => {
         issueBackend: "linear",
       },
       {
-        readStateFile: async () => ({
-          workers: {},
-          crashHistory: {},
-        }),
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: {
-          spawnSharedServe: async (opts: {
-            port: number;
-            workspace: string;
-            logDir?: string;
-            env?: Record<string, string>;
-          }) => {
-            spawnSharedServeCalls.push(opts);
-            return { port: 13381, pid: 9999, status: "starting" as const };
+        adapter: {
+          ...makeAdapter({ healthy: async () => false }),
+          start: async (opts) => {
+            startCalls.push(opts);
           },
-          waitForHealthy: async () => {},
-          createSession: async (_port: number, sessionId: string, _workspace: string) => sessionId,
-          healthCheck: async () => false,
-          stopServe: async () => {},
         },
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
@@ -589,8 +587,8 @@ describe("daemon entry", () => {
       }
     );
 
-    expect(spawnSharedServeCalls).toHaveLength(1);
-    const opts = spawnSharedServeCalls[0];
+    expect(startCalls).toHaveLength(1);
+    const opts = startCalls[0];
     expect(opts.env).toBeDefined();
     expect(opts.env?.LEGION_TEAM_ID).toBe(TEAM_ID);
     expect(opts.env?.LEGION_ISSUE_BACKEND).toBe("linear");
@@ -599,7 +597,7 @@ describe("daemon entry", () => {
     expect(opts.env?.LEGION_DAEMON_PORT).toBe("13370");
   });
 
-  it("passes controller env vars to spawnSharedServe on health restart", async () => {
+  it("passes controller env vars to adapter.start on health restart", async () => {
     let timeoutCallback: TimeoutCallback | null = null;
     const mockSetTimeout: typeof setTimeout = Object.assign(
       ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
@@ -610,12 +608,8 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const spawnSharedServeCalls: Array<{
-      port: number;
-      workspace: string;
-      logDir?: string;
-      env?: Record<string, string>;
-    }> = [];
+    const startCalls: Array<{ workspace: string; logDir?: string; env?: Record<string, string> }> =
+      [];
 
     await startDaemon(
       {
@@ -627,34 +621,20 @@ describe("daemon entry", () => {
         controllerSessionId: "ses_test",
       },
       {
-        readStateFile: async () => ({
-          workers: {},
-          crashHistory: {},
-        }),
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
         writeStateFile: async () => {},
-        serveManager: {
-          spawnSharedServe: async (opts: {
-            port: number;
-            workspace: string;
-            logDir?: string;
-            env?: Record<string, string>;
-          }) => {
-            spawnSharedServeCalls.push(opts);
-            return { port: 13381, pid: 9999, status: "starting" as const };
+        adapter: {
+          ...makeAdapter({
+            healthy: async () => {
+              healthCallCount += 1;
+              if (healthCallCount === 1) return false;
+              if (healthCallCount === 2) return false;
+              return true;
+            },
+          }),
+          start: async (opts) => {
+            startCalls.push(opts);
           },
-          waitForHealthy: async () => {},
-          createSession: async (_port: number, sessionId: string, _workspace: string) => sessionId,
-          healthCheck: async () => {
-            healthCallCount += 1;
-            if (healthCallCount === 1) {
-              return false; // Trigger spawn on startup
-            }
-            if (healthCallCount === 2) {
-              return false; // Trigger restart in health loop
-            }
-            return true; // Healthy after restart
-          },
-          stopServe: async () => {},
         },
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
@@ -666,14 +646,11 @@ describe("daemon entry", () => {
       }
     );
 
-    if (!timeoutCallback) {
-      throw new Error("Expected health loop callback to be scheduled");
-    }
+    if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
     await (timeoutCallback as () => Promise<void>)();
 
-    // Should have 2 calls: one on startup, one on restart
-    expect(spawnSharedServeCalls.length).toBeGreaterThanOrEqual(2);
-    const restartOpts = spawnSharedServeCalls[1];
+    expect(startCalls.length).toBeGreaterThanOrEqual(2);
+    const restartOpts = startCalls[1];
     expect(restartOpts.env).toBeDefined();
     expect(restartOpts.env?.LEGION_TEAM_ID).toBe(TEAM_ID);
     expect(restartOpts.env?.LEGION_ISSUE_BACKEND).toBe("github");
@@ -681,6 +658,7 @@ describe("daemon entry", () => {
     expect(restartOpts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(restartOpts.env?.LEGION_DAEMON_PORT).toBe("13370");
   });
+
   it("logs warning when worker session ID changes during startup re-creation", async () => {
     const warnCalls: string[] = [];
     const originalWarn = console.warn;
@@ -703,17 +681,14 @@ describe("daemon entry", () => {
             crashHistory: {},
           }),
           writeStateFile: async () => {},
-          serveManager: {
-            spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
-            waitForHealthy: async () => {},
-            createSession: async (_port: number, sessionId: string, _workspace: string) => {
+          adapter: {
+            ...makeAdapter({ healthy: async () => true }),
+            createSession: async (sessionId: string, _workspace: string) => {
               if (sessionId === baseEntry.sessionId) {
                 return "ses_actual_different";
               }
               return sessionId;
             },
-            healthCheck: async () => true,
-            stopServe: async () => {},
           },
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
@@ -765,26 +740,21 @@ describe("daemon entry", () => {
             crashHistory: {},
           }),
           writeStateFile: async () => {},
-          serveManager: {
-            spawnSharedServe: async () => ({ port: 13381, pid: 9999, status: "starting" as const }),
-            waitForHealthy: async () => {},
-            createSession: async (_port: number, sessionId: string, _workspace: string) => {
+          adapter: {
+            ...makeAdapter({
+              healthy: async () => {
+                healthCallCount += 1;
+                if (healthCallCount === 1) return true;
+                if (healthCallCount === 2) return false;
+                return true;
+              },
+            }),
+            createSession: async (sessionId: string, _workspace: string) => {
               if (sessionId === baseEntry.sessionId) {
                 return "ses_actual_different_health";
               }
               return sessionId;
             },
-            healthCheck: async () => {
-              healthCallCount += 1;
-              if (healthCallCount === 1) {
-                return true;
-              }
-              if (healthCallCount === 2) {
-                return false;
-              }
-              return true;
-            },
-            stopServe: async () => {},
           },
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
@@ -796,9 +766,7 @@ describe("daemon entry", () => {
         }
       );
 
-      if (!timeoutCallback) {
-        throw new Error("Expected health loop callback to be scheduled");
-      }
+      if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
       await (timeoutCallback as () => Promise<void>)();
 
       const mismatchWarnings = warnCalls.filter(

@@ -12,6 +12,7 @@ export interface DaemonConfig {
   controllerSessionId?: string;
   controllerPrompt?: string;
   issueBackend: "linear" | "github";
+  runtime: "opencode" | "claude-code";
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -79,6 +80,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   }
   const issueBackend = rawBackend === "github" ? "github" : "linear";
 
+  const rawRuntime = env.LEGION_RUNTIME;
+  if (rawRuntime !== undefined && rawRuntime !== "opencode" && rawRuntime !== "claude-code") {
+    throw new Error(`LEGION_RUNTIME must be 'opencode' or 'claude-code' (got: ${rawRuntime})`);
+  }
+  const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,
@@ -90,5 +96,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     controllerSessionId,
     controllerPrompt,
     issueBackend,
+    runtime,
   };
 }

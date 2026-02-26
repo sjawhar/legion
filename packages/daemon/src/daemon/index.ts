@@ -1,35 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
-import {
-  createSession,
-  createWorkerClient,
-  healthCheck,
-  type SharedServeOptions,
-  type SharedServeState,
-  spawnSharedServe,
-  stopServe,
-  waitForHealthy,
-} from "./serve-manager";
-import { type ServeManagerInterface, startServer } from "./server";
+import { createAdapter } from "./runtime";
+import type { RuntimeAdapter } from "./runtime/types";
+import { startServer } from "./server";
 import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
 
 type ServerHandle = ReturnType<typeof startServer>;
 
-interface DaemonServeManager extends ServeManagerInterface {
-  spawnSharedServe(opts: SharedServeOptions): Promise<SharedServeState>;
-  waitForHealthy(port: number, maxRetries?: number, delayMs?: number): Promise<void>;
-  stopServe(
-    port: number,
-    pid: number,
-    waitTimeoutMs?: number,
-    pollIntervalMs?: number,
-    disposeTimeoutMs?: number
-  ): Promise<void>;
-}
-
 interface DaemonDependencies {
-  serveManager: DaemonServeManager;
+  adapter: RuntimeAdapter;
   startServer: typeof startServer;
   readStateFile: typeof readStateFile;
   writeStateFile: typeof writeStateFile;
@@ -45,17 +25,15 @@ export interface DaemonHandle {
 }
 
 function resolveDependencies(
-  _config: DaemonConfig,
+  config: DaemonConfig,
   overrides?: Partial<DaemonDependencies>
 ): DaemonDependencies {
+  const defaultAdapter = createAdapter(config.runtime, {
+    port: config.baseWorkerPort,
+    shortId: config.teamId ?? "default",
+  });
   return {
-    serveManager: overrides?.serveManager ?? {
-      spawnSharedServe,
-      waitForHealthy,
-      createSession,
-      healthCheck,
-      stopServe,
-    },
+    adapter: overrides?.adapter ?? defaultAdapter,
     startServer: overrides?.startServer ?? startServer,
     readStateFile: overrides?.readStateFile ?? readStateFile,
     writeStateFile: overrides?.writeStateFile ?? writeStateFile,
@@ -66,7 +44,7 @@ function resolveDependencies(
 }
 
 async function sendPromptWithRetry(
-  client: ReturnType<typeof createWorkerClient>,
+  adapter: RuntimeAdapter,
   sessionId: string,
   text: string,
   deps: { setTimeout: typeof globalThis.setTimeout }
@@ -74,10 +52,7 @@ async function sendPromptWithRetry(
   let lastError: Error = new Error("All retry attempts failed");
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      await client.session.promptAsync({
-        sessionID: sessionId,
-        parts: [{ type: "text", text }],
-      });
+      await adapter.sendPrompt(sessionId, text);
       return;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -115,21 +90,17 @@ export async function startDaemon(
   const resolvedDeps = resolveDependencies(config, deps);
 
   const sharedServePort = config.baseWorkerPort;
-  let sharedServePid = 0;
 
-  const existingHealthy = await resolvedDeps.serveManager.healthCheck(sharedServePort);
+  const existingHealthy = await resolvedDeps.adapter.healthy();
   if (existingHealthy) {
     console.log(`Adopted existing shared serve on port ${sharedServePort}`);
   } else {
-    const serve = await resolvedDeps.serveManager.spawnSharedServe({
+    await resolvedDeps.adapter.start({
       env: buildControllerEnv(config),
-      port: sharedServePort,
       workspace: config.legionDir ?? "",
       logDir: config.logDir,
     });
-    sharedServePid = serve.pid;
-    await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
-    console.log(`Shared serve started on port ${sharedServePort} pid=${sharedServePid}`);
+    console.log(`Shared serve started on port ${sharedServePort}`);
   }
 
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -137,11 +108,7 @@ export async function startDaemon(
 
   for (const entry of Object.values(preState.workers)) {
     try {
-      const actualId = await resolvedDeps.serveManager.createSession(
-        sharedServePort,
-        entry.sessionId,
-        entry.workspace
-      );
+      const actualId = await resolvedDeps.adapter.createSession(entry.sessionId, entry.workspace);
       if (actualId !== entry.sessionId) {
         console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
       }
@@ -165,9 +132,7 @@ export async function startDaemon(
       healthTickTimeout = null;
     }
 
-    if (sharedServePid > 0) {
-      await resolvedDeps.serveManager.stopServe(sharedServePort, sharedServePid);
-    }
+    await resolvedDeps.adapter.stop();
 
     controllerState = undefined;
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -187,10 +152,12 @@ export async function startDaemon(
     hostname: "127.0.0.1",
     teamId: config.teamId,
     legionDir: config.legionDir ?? "",
-    serveManager: resolvedDeps.serveManager,
-    sharedServePort,
+    adapter: resolvedDeps.adapter,
     stateFilePath: config.stateFilePath,
     logDir: config.logDir,
+    runtime: config.runtime,
+    tmuxSession:
+      config.runtime === "claude-code" && config.teamId ? `legion-${config.teamId}` : undefined,
     getControllerState: () => controllerState,
     shutdownFn: async () => {
       resolvedDeps.setTimeout(async () => {
@@ -205,7 +172,7 @@ export async function startDaemon(
   if (config.controllerSessionId) {
     if (existingController && existingController.sessionId !== config.controllerSessionId) {
       if (existingController.port) {
-        const oldAlive = await resolvedDeps.serveManager.healthCheck(existingController.port);
+        const oldAlive = await resolvedDeps.adapter.healthy();
         if (oldAlive) {
           throw new Error(
             `Another controller is running (session=${existingController.sessionId})`
@@ -223,8 +190,7 @@ export async function startDaemon(
     const requestedSessionId = computeControllerSessionId(teamId);
     let actualSessionId: string | undefined;
     try {
-      actualSessionId = await resolvedDeps.serveManager.createSession(
-        sharedServePort,
+      actualSessionId = await resolvedDeps.adapter.createSession(
         requestedSessionId,
         config.legionDir ?? ""
       );
@@ -239,7 +205,7 @@ export async function startDaemon(
         : "/legion-controller";
       try {
         await sendPromptWithRetry(
-          createWorkerClient(sharedServePort, config.legionDir ?? ""),
+          resolvedDeps.adapter,
           actualSessionId,
           initialPrompt,
           resolvedDeps
@@ -255,27 +221,23 @@ export async function startDaemon(
   const scheduleHealthTick = () => {
     healthTickTimeout = resolvedDeps.setTimeout(async () => {
       try {
-        const serveHealthy = await resolvedDeps.serveManager.healthCheck(sharedServePort);
+        const serveHealthy = await resolvedDeps.adapter.healthy();
 
         if (!serveHealthy) {
           console.error("Shared serve is unhealthy, attempting restart...");
 
           try {
-            const serve = await resolvedDeps.serveManager.spawnSharedServe({
+            await resolvedDeps.adapter.start({
               env: buildControllerEnv(config),
-              port: sharedServePort,
               workspace: config.legionDir ?? "",
               logDir: config.logDir,
             });
-            sharedServePid = serve.pid;
-            await resolvedDeps.serveManager.waitForHealthy(sharedServePort);
             console.log(`Shared serve restarted on port ${sharedServePort}`);
 
             const state = await resolvedDeps.readStateFile(config.stateFilePath);
             for (const entry of Object.values(state.workers)) {
               try {
-                const actualId = await resolvedDeps.serveManager.createSession(
-                  sharedServePort,
+                const actualId = await resolvedDeps.adapter.createSession(
                   entry.sessionId,
                   entry.workspace
                 );
@@ -291,18 +253,22 @@ export async function startDaemon(
 
             if (controllerState?.port) {
               try {
-                const actualControllerSessionId = await resolvedDeps.serveManager.createSession(
-                  sharedServePort,
+                const actualControllerSessionId = await resolvedDeps.adapter.createSession(
                   controllerState.sessionId,
                   config.legionDir ?? ""
                 );
+                if (actualControllerSessionId !== controllerState.sessionId) {
+                  console.warn(
+                    `Controller: session ID changed ${controllerState.sessionId} -> ${actualControllerSessionId}`
+                  );
+                }
                 controllerState = {
                   ...controllerState,
                   sessionId: actualControllerSessionId,
                   port: sharedServePort,
                 };
                 await sendPromptWithRetry(
-                  createWorkerClient(sharedServePort, config.legionDir ?? ""),
+                  resolvedDeps.adapter,
                   actualControllerSessionId,
                   "/legion-controller",
                   resolvedDeps
