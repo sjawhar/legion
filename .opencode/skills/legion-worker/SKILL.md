@@ -27,8 +27,13 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="get", id="$LEGION_ISSUE_ID")`
 2. **Use jj, not git** - changes auto-tracked (see jj safety rules below)
-3. **Signal completion** - add `worker-done` label when done (see routing table)
-4. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
+3. **Only the implementer creates branches** - the implement workflow creates the branch and
+   opens the PR. Reviewers, retro, and closers push to the existing branch. Never create new
+   branches or bookmarks in review, retro, or merge workflows.
+   **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
+   lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
+4. **Signal completion** - add `worker-done` label when done (see routing table)
+5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
 ## Skill Discipline
 

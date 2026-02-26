@@ -136,56 +136,50 @@ GitHub API connectivity.
 ### Implement → Review Handoff
 
 The implementer does **not** use `worker-done`. Instead:
-1. Implementer opens a **draft PR** and exits
+1. Implementer opens a **draft PR**, verifies CI passes, and exits
 2. The issue transitions to Needs Review (Linear auto-transition, or controller transitions explicitly for GitHub)
 3. State machine sees: Needs Review, no `worker-done`, no live worker → `dispatch_reviewer`
-4. Controller runs the quality gate (below), then dispatches the reviewer
-
-### Quality Gate (Controller Policy)
-
-Before dispatching a reviewer, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
-
-**When to run:** Whenever about to execute a `dispatch_reviewer` action.
-
-**Trust but verify:** The implement workflow self-enforces checks before PR (step 4). The controller independently verifies.
-
+4. Controller dispatches the reviewer
+**Before dispatching reviewer, verify CI is passing:**
 ```bash
-WORKSPACES_DIR=$(dirname "$LEGION_DIR")
-ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-WORKSPACE_PATH="$WORKSPACES_DIR/$ISSUE_LOWER"
-
-cd "$WORKSPACE_PATH"
-bun test 2>&1
-TST_EXIT=$?
-bunx tsc --noEmit 2>&1
-TSC_EXIT=$?
-bunx biome check 2>&1
-BIOME_EXIT=$?
+gh pr checks "$LEGION_ISSUE_ID"
+```
+If any checks are failing, do NOT dispatch the reviewer. Instead:
+1. Move issue back to In Progress
+2. Re-dispatch an implementer with the CI failure output:
+```bash
+legion dispatch "$ISSUE_IDENTIFIER" implement \
+  --prompt "Invoke the /legion-worker skill for implement mode. CI is failing: [paste failure summary]. Fix and push. ($BACKEND_SUFFIX)"
 ```
 
-**If all pass** (exit codes 0): Proceed with dispatching the reviewer.
-
-**If any fail:** Do NOT dispatch reviewer. Instead:
-1. Move issue back to In Progress
-2. Dispatch a fresh implementer with the failure output
-3. The implementer will fix, re-open/update the PR, and exit — issue transitions back to Needs Review
+**CI is the implementer's responsibility.** The implement workflow requires passing CI before
+signaling completion. If CI is failing when the controller sees a PR, the implementer didn't
+finish — re-dispatch an implementer with the CI failure output. The reviewer should also check
+CI status and include it in the review.
 
 ### 4. Route Triage
+
+**Be ambitious. Prioritize user value. Keep work moving.**
+
+No issue is "too big" for Legion — that's what the architect phase is for. Large or complex
+issues go to Backlog where the architect breaks them down. Only route to Icebox if the issue
+is genuinely unclear (missing context, ambiguous requirements, needs user clarification).
 
 Controller routes Triage issues directly (no worker needed):
 
 | Assessment | Route To |
 |------------|----------|
 | Urgent AND clear requirements | Todo (dispatch planner) |
-| Clear but not urgent | Backlog |
-| Vague OR large OR needs breakdown | Icebox |
+| Clear requirements, any size | Backlog (architect breaks down if large) |
+| Ambiguous or missing context | Icebox (needs clarification) |
 
 ### 5. Pull from Icebox
 
 **If active workers < 10:**
-1. Get oldest Icebox item (FIFO)
-2. Move to Backlog
-3. Dispatch architect
+1. Check for Icebox items that have been clarified: look for `user-feedback-given` label OR new comments added since the issue was moved to Icebox
+2. If no clarified items exist, skip — leave Icebox items until users respond
+3. Move the oldest clarified item to Backlog
+4. Dispatch architect
 
 ### 6. Cleanup Done
 
@@ -241,17 +235,21 @@ from the issue identifier:
 
 ### Dispatch (New Worker)
 
+**Always use skill invocation (`/skill-name`), not file paths.** Workers load skills via the
+skill system. Pointing them at file paths bypasses skill loading and risks the worker not
+getting the full skill content.
+
 ```bash
 # GitHub example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
 
 # Linear example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "/legion-worker $MODE mode for $ISSUE_IDENTIFIER (linear backend)"
+  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (linear backend)"
 ```
 
-The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt (/legion-worker), and prints worker info.
+The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt, and prints worker info.
 
 For custom prompts, still include the backend suffix:
 ```bash
@@ -264,15 +262,11 @@ legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
 ```bash
 # User feedback relay (GitHub):
 legion prompt "$ISSUE_IDENTIFIER" \
-  "Check issue comments for user feedback (github backend, repo: $OWNER/$REPO)"
+  "Invoke the /legion-worker skill. Check issue comments for user feedback. (github backend, repo: $OWNER/$REPO)"
 
-# User feedback relay (Linear):
-legion prompt "$ISSUE_IDENTIFIER" \
-  "Check issue comments for user feedback (linear backend)"
-
-# PR changes requested (GitHub):
+# PR changes requested — tell them to invoke the skill, not give step-by-step fix instructions:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Address PR review comments (github backend, repo: $OWNER/$REPO)"
+  "Invoke the /legion-worker skill for implement mode. CI is failing on your PR — check the failures and fix. (github backend, repo: $OWNER/$REPO)"
 ```
 
 If multiple workers exist for the same issue (different modes), specify mode with `--mode`.
@@ -283,14 +277,16 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 
 Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
 
+**Use skill invocation for retro too:**
+
 ```bash
 # GitHub:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "/legion-retro (github backend, repo: $OWNER/$REPO)"
+  "Invoke the /legion-retro skill. (github backend, repo: $OWNER/$REPO)"
 
 # Linear:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "/legion-retro (linear backend)"
+  "Invoke the /legion-retro skill. (linear backend)"
 ```
 
 **If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
@@ -309,6 +305,27 @@ curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/status | jq '.'
 
 The state machine reports `hasLiveWorker`, `workerMode`, and `workerStatus` for each issue.
 Use these signals — don't independently verify worker liveness.
+
+### Forcing a Fresh Session
+
+Session IDs are **deterministic** — `computeSessionId(teamId, issueId, mode)` uses UUID v5.
+Same inputs always produce the same session ID. If the serve still has that session in
+memory, re-dispatching with the same issue ID and mode re-attaches to the existing session
+(the serve returns 409 DuplicateIDError, which the daemon treats as "reuse").
+
+This is normally desirable — it's how workers resume across prompts. If you genuinely
+need a fresh session, the daemon will need a session version incrementer (planned).
+
+### Don't Delete a Workspace While Workers May Resume
+
+**A worker whose workspace has been deleted cannot respond to prompts.** Every tool call
+fails because the working directory no longer exists. The session appears "busy" but
+produces no output — it looks like the worker is stalled, but the root cause is the
+missing workspace.
+
+This applies to both active workers AND idle workers you might want to resume later
+(e.g., for retro). Only delete workspaces during Cleanup Done (step 6) — after the
+issue is fully complete and no further prompts will be sent.
 
 ## Observability Rules
 
@@ -357,9 +374,12 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "Let me construct the JSON for the state machine" | POST tracker output to `/state/collect` directly — no hand-crafting |
 | "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
 | "The changes are lost" | Check local commits (`jj log`), open PRs (`gh pr list`), and worker workspaces before concluding anything is lost |
-| "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Let the workflow guide the worker. |
+| "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Invoke the skill. Let the workflow guide the worker. |
 | "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |
 | "I'll accumulate these changes into the existing PR" | One issue = one workspace = one branch = one PR. |
+| "This issue is too big/complex" | No issue is too big. That's what the architect phase is for. Route to Backlog. |
+| "The worker is busy, I'll wait" | Check the transcript. If the worker received prompts but produced no response, the workspace may have been deleted. A worker cannot function without its workspace. |
+| "CI can be fixed later" | CI is the implementer's responsibility. If CI is failing, the implementer isn't done — re-dispatch. |
 
 ## Common Mistakes
 
@@ -370,8 +390,11 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
 | Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
 | Process issue with live worker | Skip it - worker is already handling |
-| Give workers step-by-step fix instructions | State the mode, issue ID, and backend only. Let the workflow guide the worker. |
-| Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. Otherwise the state machine re-triggers on the next loop. |
+| Give workers step-by-step fix instructions | Invoke the skill. State the mode, issue ID, and backend only. |
+| Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. |
+| Classify issues as "too big" | Route to Backlog for architect breakdown. No issue is too big for Legion. |
+| Advance pipeline with CI failing | Re-dispatch implementer with CI failure output. Don't dispatch reviewer until CI passes. |
+| Delete a workspace to "reset" a worker | **Never delete a workspace while the worker might be resumed.** A deleted workspace silently kills the worker — prompts arrive but every tool call fails. Only delete during Cleanup Done. |
 
 ## Status Flow
 

@@ -70,6 +70,33 @@ When the plan contains independent tasks (annotated with parallelism information
 - Tasks are small enough that parallelism overhead isn't worth it
 - Tasks share the same files (merge conflict risk)
 
+#### Wave-Based Parallelism
+
+When a plan has both independent AND dependent tasks, group them into **waves**:
+
+```
+Wave 1 (parallel): T1 (jj.py), T2 (task_state.py), T3 (source_detection.py)
+  ↓ all complete
+Wave 2 (parallel): T4 (task_commands.py), T5 (merge_utils.py)
+  ↓ all complete  
+Wave 3 (parallel): T6 (tests), T7 (integration)
+```
+
+**The critical rule: never dispatch multiple subagents that edit the same file.**
+Concurrent edits to the same file cause silent overwrites — the last writer wins and
+earlier agents' work is lost. If two tasks both need to modify `task_commands.py`,
+they must be in the same wave (sequential) or one must `blockedBy` the other.
+
+**Grouping into waves:**
+1. List all tasks and which files they create or modify
+2. Tasks that touch disjoint files can run in parallel (same wave)
+3. Tasks that share a file must be sequential (different waves, with dependency edges)
+4. Within a wave, all tasks must complete before the next wave starts
+
+**Wave failure handling:** If a task in a wave fails, it follows the existing retry
+policy (3 attempts before escalation). Other tasks in the wave continue independently.
+The next wave does NOT start until all tasks in the current wave are completed or cancelled.
+
 ### 3. Analyze
 
 Invoke `/analyze` to run cleanup agents.
@@ -84,17 +111,20 @@ bunx tsc --noEmit # No type errors
 bunx biome check  # No lint/format issues
 ```
 
+**For Python code**, also run the project's Python checks:
+```bash
+cd meta/trajectory_labs  # or relevant Python package
+uv run ruff check --fix src/ tests/
+uv run ruff format src/ tests/
+uv run pytest
+```
+
 If any check fails:
 1. Fix the issues
 2. Re-run all checks
 3. Only proceed to Ship when all pass
 
 Do NOT create a PR if any check fails — fix first.
-
-Record the results as evidence for the controller's quality gate verification. Include in your issue comment:
-```
-CI Results: tests ✅ | tsc ✅ | biome ✅
-```
 
 ### 5. Cross-Family Review
 
@@ -145,7 +175,21 @@ gh pr create --draft \
 
 The issue ID in the branch/title preserves traceability for the controller.
 
-### 7. Exit
+### 7. Wait for CI
+
+After pushing, wait for CI to complete:
+```bash
+gh pr checks "$LEGION_ISSUE_ID" --watch
+```
+
+**If CI fails:** Read the failure logs, fix the issues, push again, and re-check.
+Do NOT exit with failing CI — it's your job to get CI green before the reviewer sees the PR.
+
+**Note:** Some repositories suppress CI on draft PRs. If `gh pr checks --watch` hangs
+with no checks reported, convert the PR to ready (`gh pr ready`), wait for CI, then
+convert back to draft (`gh pr ready --undo`) if needed.
+
+### 8. Exit
 
 Exit without adding labels. The controller handles state transitions explicitly.
 
@@ -195,6 +239,15 @@ Fix any failures before pushing.
 ```bash
 jj git push
 ```
+
+### 4.5. Wait for CI
+
+```bash
+gh pr checks "$LEGION_ISSUE_ID" --watch
+```
+
+**If CI fails:** Read the failure logs, fix the issues, push again, and re-check.
+Do NOT reply to comments or exit with failing CI.
 
 ### 5. Reply to Comments
 

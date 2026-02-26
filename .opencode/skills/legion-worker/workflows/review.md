@@ -47,6 +47,17 @@ Pass the context gathered in step 1. The review skill will:
 - Check against requirements
 - Identify issues by severity (CRITICAL/P1, IMPORTANT/P2, MINOR/P3)
 
+### 2.5. Check CI Status
+
+Check whether CI is passing on the PR:
+```bash
+gh pr checks "$LEGION_ISSUE_ID"
+```
+
+Include the CI status in your review summary (step 3). If CI is failing, note which
+checks are failing and treat it as a P1 issue — the implementer should have fixed this
+before opening the PR.
+
 ### 3. Post Summary Comment
 
 Post a top-level PR comment with the review summary:
@@ -99,3 +110,7 @@ Add `worker-done` to the issue, then exit:
 
 - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
+
+Then remove `worker-active`:
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
