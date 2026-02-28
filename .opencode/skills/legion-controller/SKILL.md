@@ -97,7 +97,7 @@ about what to do:
 
 | suggestedAction | Signals | Controller should... |
 |-----------------|---------|---------------------|
-| `skip` | `hasPr: true`, status: In Progress | PR opened; wait for auto-transition to Needs Review (or transition explicitly if using GitHub backend) |
+| `skip` | `hasPr: true`, status: In Progress | PR opened but no `worker-done` yet; wait for implementer to finish and add `worker-done` (which triggers testing gate) |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
 
@@ -133,18 +133,47 @@ don't dispatch a worker, don't transition status. The next loop iteration will r
 which will retry the GitHub API call. If this persists across multiple iterations, investigate the
 GitHub API connectivity.
 
-### Implement → Review Handoff
+### Implement → Testing → Review Handoff
 
-The implementer does **not** use `worker-done`. Instead:
-1. Implementer opens a **draft PR**, verifies CI passes, and exits
-2. The issue transitions to Needs Review (Linear auto-transition, or controller transitions explicitly for GitHub)
-3. State machine sees: Needs Review, no `worker-done`, no live worker → `dispatch_reviewer`
-4. Controller dispatches the reviewer
-**Before dispatching reviewer, verify CI is passing:**
+The implementer adds `worker-done` when finished:
+1. Implementer opens a **draft PR**, verifies CI passes, adds `worker-done`, and exits
+2. State machine sees: In Progress + `worker-done` → `transition_to_testing`
+3. Controller transitions issue to Testing status
+4. Controller runs the quality gate (below)
+5. If quality gate passes: dispatch tester
+6. If quality gate fails: move back to In Progress, dispatch fresh implementer with failure output
+
+After the tester runs:
+- **Test passed** (`test-passed` label): Controller removes `worker-done` and `test-passed` labels, transitions to Needs Review, dispatches reviewer (no additional quality gate needed)
+- **Test failed** (`test-failed` label): Controller removes `test-failed` and `worker-done` labels, transitions back to In Progress, resumes implementer session with test failure report from the PR comment
+
+### Review → Re-implementation → Testing Loop
+
+When the reviewer requests changes, the implementer's fixes **must go through testing again**:
+
+1. Reviewer converts PR to draft, adds `worker-done`
+2. State machine: `resume_implementer_for_changes`
+3. Controller **transitions issue to In Progress**, removes `worker-done`
+4. Controller resumes the implementer session with "Address PR review comments"
+5. Implementer fixes, pushes, adds `worker-done`
+6. State machine: In Progress + `worker-done` → `transition_to_testing`
+7. Tester verifies the fixes
+8. If tester passes → Needs Review → reviewer runs again
+
+**Critical:** The controller MUST transition to In Progress before resuming the implementer. If the issue stays in Needs Review and the implementer adds `worker-done`, the state machine will see `prIsDraft + worker-done` and suggest `resume_implementer_for_changes` again (infinite loop).
+
+### Quality Gate (Controller Policy)
+
+Before dispatching a tester, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
+
+**When to run:** Whenever about to execute a `dispatch_tester` action.
+
+**Before dispatching tester, verify CI is passing:**
 ```bash
 gh pr checks "$LEGION_ISSUE_ID"
 ```
-If any checks are failing, do NOT dispatch the reviewer. Instead:
+
+If any checks are failing, do NOT dispatch the tester. Instead:
 1. Move issue back to In Progress
 2. Re-dispatch an implementer with the CI failure output:
 ```bash
@@ -154,7 +183,7 @@ legion dispatch "$ISSUE_IDENTIFIER" implement \
 
 **CI is the implementer's responsibility.** The implement workflow requires passing CI before
 signaling completion. If CI is failing when the controller sees a PR, the implementer didn't
-finish — re-dispatch an implementer with the CI failure output. The reviewer should also check
+finish — re-dispatch an implementer with the CI failure output. The tester should also check
 CI status and include it in the review.
 
 ### 4. Route Triage
@@ -364,6 +393,8 @@ it impossible to track what's merged.
 | `user-feedback-given` | Human responded, controller resumes |
 | `needs-approval` | Architect done, waiting for human approval |
 | `human-approved` | Human approved, controller advances to planner |
+| `test-passed` | Tester verified behavior, controller advances to Needs Review |
+| `test-failed` | Tester found issues, controller returns to implementer |
 
 ## Red Flags — STOP and Verify
 
@@ -399,7 +430,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 ## Status Flow
 
 ```
-Triage ─┬─► Icebox ─► Backlog ─► Todo ─► In Progress ─► Needs Review ─► Retro ─► Done
-        ├─► Backlog ──────────────┘                          │
-        └─► Todo ─────────────────────────────────────────────┘
+Triage ─┬─► Icebox ─► Backlog ─► Todo ─► In Progress ─► Testing ─► Needs Review ─► Retro ─► Done
+        ├─► Backlog ──────────────┘           │                        │
+        └─► Todo ─────────────────────────────┴────────────────────────┘
 ```

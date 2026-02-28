@@ -101,6 +101,34 @@ Acceptance criteria must be **testable** - a human or CI can verify pass/fail.
 
 Each criterion should answer: "How will we know this is done?"
 
+Each criterion should also be **behaviorally verifiable** — a tester should be able to verify it by interacting with the running application, not just by reading code or running unit tests.
+
+## Testing Infrastructure Assessment
+
+After defining acceptance criteria, assess whether they can be verified against running infrastructure. Add a "Testing Infrastructure" section to your output:
+
+**For each acceptance criterion, evaluate:**
+- Can this be verified against a running application?
+- What infrastructure is needed? (local server, browser, database, seed data)
+- What's missing? (no docker-compose, no seed script, README doesn't explain how to run locally)
+
+**Example output:**
+
+```
+### Testing Infrastructure
+
+**Available:**
+- Local dev server via `bun run dev`
+- Seed data script at `scripts/seed.sh`
+
+**Gaps:**
+- No browser test harness (Playwright not configured)
+- README missing instructions for local database setup
+- No health check endpoint to verify server is ready
+```
+
+Flag gaps clearly so the user can address them before planning begins. If the project has no way to run locally at all, note this prominently.
+
 ## Sub-Issue Creation
 
 **GitHub:**

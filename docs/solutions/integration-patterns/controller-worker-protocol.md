@@ -45,21 +45,23 @@ The daemon computes deterministic session IDs: `computeSessionId(teamId, issueId
 - Session resumption after process restarts (sessions persist in SQLite)
 - `initializeSession` handles 409 Duplicate gracefully (session already exists = success)
 
-## Implement → Review Handoff
+## Implement → Testing → Review Handoff
 
-The implementer does NOT use `worker-done`. The flow is:
-1. Implementer opens a **draft PR** (branch and title contain issue ID)
-2. Linear's GitHub integration auto-transitions the issue to Needs Review
-3. State machine sees: Needs Review, no worker-done, no live worker → `dispatch_reviewer`
-4. Controller runs quality gate, then dispatches reviewer
+[HISTORICAL] This section predates the behavioral testing gate. The current flow is:
 
-This is the only handoff that relies on a side-channel (Linear's GitHub integration) rather than explicit label signaling.
+1. Implementer opens a **draft PR**, adds `worker-done`, and exits
+2. State machine: In Progress + `worker-done` → `transition_to_testing`
+3. Controller runs quality gate, dispatches tester
+4. Tester passes → `transition_to_needs_review`
+5. Controller dispatches reviewer
 
-## Review → Implement Feedback Loop
+The implementer now uses explicit `worker-done` signaling instead of relying on Linear's auto-transition side-channel.
+
+## Review → Implement → Testing Feedback Loop
 
 The reviewer signals via PR draft status:
 - **PR ready** (not draft) = approved → controller transitions to Retro
-- **PR draft** = changes requested → controller resumes implementer for address-comments
+- **PR draft** = changes requested → controller transitions to In Progress, resumes implementer. Implementer's fixes go through the testing gate again before returning to review.
 
 The reviewer MUST post specific review comments on the PR when requesting changes. Converting to draft without comments leaves the implementer with nothing to address.
 

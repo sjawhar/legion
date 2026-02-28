@@ -14,7 +14,7 @@ controller skill, not the TypeScript.
 - **Controller skill** — the customization point: reads suggested actions + raw signals,
   executes transitions, runs quality gates, handles edge cases. Users who want different
   workflows edit this file.
-- **Worker skills** — execute specific workflow phases (architect, plan, implement, review,
+- **Worker skills** — execute specific workflow phases (architect, plan, implement, test, review,
   merge). Retro runs via `/legion-retro` on the implement worker session.
 
 Skills invoke TypeScript via: HTTP API (`/workers`, `/state/collect`), and environment variables (controller only). Workers receive all context via dispatch prompts. TypeScript never calls skills directly.
@@ -33,7 +33,7 @@ Skills invoke TypeScript via: HTTP API (`/workers`, `/state/collect`), and envir
 bun install                   # Setup
 bunx biome check src/         # Lint
 bunx tsc --noEmit             # Type check
-bun test                      # Test (172 tests)
+bun test                      # Test (640 tests)
 ```
 
 ```bash
@@ -57,14 +57,14 @@ legion attach <team> <issue>  # Attach to worker
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add CLI command | `src/cli/index.ts` | citty `defineCommand` pattern |
-| Change HTTP API | `src/daemon/server.ts` | See @src/daemon/AGENTS.md |
-| Change state machine | `src/state/decision.ts` | See @src/state/AGENTS.md |
+| Add CLI command | `packages/daemon/src/cli/index.ts` | citty `defineCommand` pattern |
+| Change HTTP API | `packages/daemon/src/daemon/server.ts` | See @packages/daemon/src/daemon/AGENTS.md |
+| Change state machine | `packages/daemon/src/state/decision.ts` | See @packages/daemon/src/state/AGENTS.md |
 | Add worker workflow | `.opencode/skills/legion-worker/workflows/` | See @.opencode/skills/AGENTS.md |
 | Change controller loop | `.opencode/skills/legion-controller/SKILL.md` | See @.opencode/skills/AGENTS.md |
-| Modify issue types | `src/state/types.ts` | Shared by daemon + state |
-| Worker process mgmt | `src/daemon/serve-manager.ts` | Spawns `opencode serve` |
-| Port allocation | `src/daemon/ports.ts` | Sequential from base 13381 |
+| Modify issue types | `packages/daemon/src/state/types.ts` | Shared by daemon + state |
+| Worker process mgmt | `packages/daemon/src/daemon/serve-manager.ts` | Spawns `opencode serve` |
+| Port allocation | `packages/daemon/src/daemon/ports.ts` | Sequential from base 13381 |
 
 ## Conventions
 
@@ -79,21 +79,22 @@ legion attach <team> <issue>  # Attach to worker
 ## Issue Lifecycle
 
 ```
-Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In Progress ──► Needs Review ──► Retro ──► Done
-         │                  ^           ^            ^               │
-         │                  │           │            │               │
-         ├──────────────────┘           │            └───────────────┘
+Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In Progress ──► Testing ──► Needs Review ──► Retro ──► Done
+         │                  ^           ^            ^                             │
+         │                  │           │            │                             │
+         ├──────────────────┘           │            └─────────────────────────────┘
          │   (already spec-ready)       │            (changes requested)
          └──────────────────────────────┘
                     (urgent + clear)
-```
 
-**Worker modes:** architect → plan → implement → review → merge
+**Worker modes:** architect → plan → implement → test → review → merge
 **Retro:** invoked by resuming the implement worker session with `/legion-retro`
 
-**Labels:** `worker-done`, `worker-active`, `user-input-needed`, `user-feedback-given`
+**Labels:** `worker-done`, `worker-active`, `user-input-needed`, `user-feedback-given`, `test-passed`, `test-failed`
 
 **Review signaling:** PR draft status (not labels) — draft = changes requested, ready = approved.
+
+**Testing gate:** Behavioral testing is mandatory after every implementation phase — both fresh implementation AND review-requested changes go through the tester before reaching the reviewer.
 
 ## Documentation
 

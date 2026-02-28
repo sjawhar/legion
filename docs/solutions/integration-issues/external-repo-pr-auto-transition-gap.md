@@ -20,6 +20,8 @@ symptoms:
 date_solved: 2026-02-15
 ---
 
+[HISTORICAL] The implement workflow now uses explicit `worker-done` signaling instead of relying on auto-transition. This issue is largely resolved by the behavioral testing gate, though the detection pattern remains relevant for external repos.
+
 # External Repo PRs Don't Auto-Transition Linear Issues
 
 ## Problem

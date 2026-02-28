@@ -11,127 +11,148 @@ import { CollectedState, computeSessionId, type FetchedIssueData, IssueStatus } 
 
 describe("suggestAction", () => {
   it("todo_no_worker_done_no_live_worker dispatches planner", () => {
-    const action = suggestAction(IssueStatus.TODO, false, false, null, false);
+    const action = suggestAction(IssueStatus.TODO, false, false, null, false, false);
     expect(action).toBe("dispatch_planner");
   });
 
   it("todo_worker_done transitions to in progress", () => {
-    const action = suggestAction(IssueStatus.TODO, true, false, null, false);
+    const action = suggestAction(IssueStatus.TODO, true, false, null, false, false);
     expect(action).toBe("transition_to_in_progress");
   });
 
   it("in_progress_no_worker_no_done dispatches implementer", () => {
-    const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, false);
+    const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, false, false);
     expect(action).toBe("dispatch_implementer");
   });
 
-  it("in_progress_worker_done transitions to needs review", () => {
-    const action = suggestAction(IssueStatus.IN_PROGRESS, true, false, null, false);
-    expect(action).toBe("transition_to_needs_review");
+  it("in_progress_worker_done transitions to testing", () => {
+    const action = suggestAction(IssueStatus.IN_PROGRESS, true, false, null, false, false);
+    expect(action).toBe("transition_to_testing");
   });
 
   it("in_progress_with_live_worker skips", () => {
-    const action = suggestAction(IssueStatus.IN_PROGRESS, false, true, null, false);
+    const action = suggestAction(IssueStatus.IN_PROGRESS, false, true, null, false, false);
     expect(action).toBe("skip");
   });
 
   it("needs_review_approved transitions to retro", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, false, true);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, false, true, false);
     expect(action).toBe("transition_to_retro");
   });
 
   it("needs_review_changes_requested resumes implementer", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, true, true);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, true, true, false);
     expect(action).toBe("resume_implementer_for_changes");
   });
 
   it("needs_review_worker_done_has_pr_but_unknown_status retries pr check", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true, false);
     expect(action).toBe("retry_pr_check");
   });
 
   it("needs_review_worker_done_no_pr investigates", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, false);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, false, false);
     expect(action).toBe("investigate_no_pr");
   });
 
   it("needs_review_no_worker_done dispatches reviewer", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, false, null, false);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, false, null, false, false);
     expect(action).toBe("dispatch_reviewer");
   });
 
   it("needs_review_with_live_worker_no_done skips", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, true, null, false);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, true, null, false, false);
     expect(action).toBe("skip");
   });
 
   it("needs_review_worker_done_ignores_live_worker", () => {
-    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, true, false, true);
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, true, false, true, false);
     expect(action).toBe("transition_to_retro");
   });
 
   it("backlog_no_worker_done dispatches architect", () => {
-    const action = suggestAction(IssueStatus.BACKLOG, false, false, null, false);
+    const action = suggestAction(IssueStatus.BACKLOG, false, false, null, false, false);
     expect(action).toBe("dispatch_architect");
   });
 
   it("backlog_worker_done transitions to todo", () => {
     // suggestAction still returns transition_to_todo;
     // buildIssueState converts it to add_needs_approval
-    const action = suggestAction(IssueStatus.BACKLOG, true, false, null, false);
+    const action = suggestAction(IssueStatus.BACKLOG, true, false, null, false, false);
     expect(action).toBe("transition_to_todo");
   });
 
   it("backlog_with_live_worker skips", () => {
-    const action = suggestAction(IssueStatus.BACKLOG, false, true, null, false);
+    const action = suggestAction(IssueStatus.BACKLOG, false, true, null, false, false);
     expect(action).toBe("skip");
   });
 
   it("triage_skips", () => {
-    const action = suggestAction(IssueStatus.TRIAGE, false, false, null, false);
+    const action = suggestAction(IssueStatus.TRIAGE, false, false, null, false, false);
     expect(action).toBe("skip");
   });
 
   it("icebox_skips", () => {
-    const action = suggestAction(IssueStatus.ICEBOX, false, false, null, false);
+    const action = suggestAction(IssueStatus.ICEBOX, false, false, null, false, false);
     expect(action).toBe("skip");
   });
 
   it("retro_worker_done dispatches merger", () => {
-    const action = suggestAction(IssueStatus.RETRO, true, false, null, false);
+    const action = suggestAction(IssueStatus.RETRO, true, false, null, false, false);
     expect(action).toBe("dispatch_merger");
   });
 
   it("retro_without_live_worker_dispatches_implementer_for_retro", () => {
-    const action = suggestAction(IssueStatus.RETRO, false, false, null, false);
+    const action = suggestAction(IssueStatus.RETRO, false, false, null, false, false);
     expect(action).toBe("dispatch_implementer_for_retro");
   });
 
   it("retro_with_live_worker resumes implementer", () => {
-    const action = suggestAction(IssueStatus.RETRO, false, true, null, false);
+    const action = suggestAction(IssueStatus.RETRO, false, true, null, false, false);
     expect(action).toBe("resume_implementer_for_retro");
   });
 
   it("retry_pr_check_is_distinct_from_skip", () => {
-    const retry = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true);
-    const skip = suggestAction(IssueStatus.DONE, false, false, null, false);
+    const retry = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, null, true, false);
+    const skip = suggestAction(IssueStatus.DONE, false, false, null, false, false);
     expect(retry).toBe("retry_pr_check");
     expect(skip).toBe("skip");
     expect(retry).not.toBe(skip);
   });
 
   it("in_progress_has_pr_no_worker_done_no_live_worker_skips", () => {
-    const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, true);
+    const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, true, false);
     expect(action).toBe("skip");
   });
 
   it("done_always_skips", () => {
-    const action = suggestAction(IssueStatus.DONE, false, false, null, false);
+    const action = suggestAction(IssueStatus.DONE, false, false, null, false, false);
+    expect(action).toBe("skip");
+  });
+
+  // Testing status
+  it("testing_no_worker_done_no_live_worker_dispatches_tester", () => {
+    const action = suggestAction(IssueStatus.TESTING, false, false, null, false, false);
+    expect(action).toBe("dispatch_tester");
+  });
+
+  it("testing_worker_done_test_passed_transitions_to_needs_review", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, true, true);
+    expect(action).toBe("transition_to_needs_review");
+  });
+
+  it("testing_worker_done_test_failed_resumes_implementer", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, true, false);
+    expect(action).toBe("resume_implementer_for_test_failure");
+  });
+
+  it("testing_with_live_worker_skips", () => {
+    const action = suggestAction(IssueStatus.TESTING, false, true, null, false, false);
     expect(action).toBe("skip");
   });
 
   it("unknown_status_skips", () => {
-    const action = suggestAction("SomeUnknownStatus", false, false, null, false);
+    const action = suggestAction("SomeUnknownStatus", false, false, null, false, false);
     expect(action).toBe("skip");
   });
 });
@@ -151,6 +172,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -172,6 +195,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -193,6 +218,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -214,6 +241,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -236,13 +265,15 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
     const state = buildIssueState(data, teamId);
 
-    expect(state.suggestedAction).toBe("transition_to_needs_review");
-    const expectedSessionId = computeSessionId(teamId, "ENG-21", "review");
+    expect(state.suggestedAction).toBe("transition_to_testing");
+    const expectedSessionId = computeSessionId(teamId, "ENG-21", "test");
     expect(state.sessionId).toBe(expectedSessionId);
   });
 
@@ -261,6 +292,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -287,6 +320,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
     const stateTodo = buildIssueState(dataTodo, teamId);
@@ -305,6 +340,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
     const stateReview = buildIssueState(dataReview, teamId);
@@ -325,6 +362,8 @@ describe("buildIssueState", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -348,6 +387,8 @@ describe("approval gate", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -369,6 +410,8 @@ describe("approval gate", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: true,
       hasHumanApproved: true,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -390,6 +433,8 @@ describe("approval gate", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: true,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -413,6 +458,8 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -434,6 +481,8 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -455,6 +504,8 @@ describe("orphan detection", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -479,6 +530,8 @@ describe("orphan detection", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       };
 
@@ -501,6 +554,8 @@ describe("orphan detection", () => {
       hasUserInputNeeded: true,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -529,6 +584,8 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
       {
@@ -544,6 +601,8 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
     ];
@@ -553,7 +612,7 @@ describe("buildCollectedState", () => {
     expect("ENG-21" in state.issues).toBe(true);
     expect("ENG-22" in state.issues).toBe(true);
     expect(state.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");
-    expect(state.issues["ENG-22"].suggestedAction).toBe("transition_to_needs_review");
+    expect(state.issues["ENG-22"].suggestedAction).toBe("transition_to_testing");
   });
 
   it("to_dict_serializes_correctly", () => {
@@ -571,6 +630,8 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
     ];
@@ -599,6 +660,8 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
       {
@@ -614,6 +677,8 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: true,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
       {
@@ -629,6 +694,8 @@ describe("buildCollectedState", () => {
         hasUserInputNeeded: true,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
     ];
