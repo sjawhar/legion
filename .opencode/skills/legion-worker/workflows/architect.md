@@ -168,6 +168,10 @@ linear_linear(action="update",
 
 **Cross-family review requirement:** Before adding `worker-done` to any issue or sub-issue, the architect output must pass cross-family review (Section 4). This ensures acceptance criteria are testable, sub-issues are properly scoped, and nothing is missing from the original requirements.
 
+**Label cleanup:** After signaling completion, remove `worker-active`:
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
+
 ## Common Mistakes
 
 | Mistake | Correction |
