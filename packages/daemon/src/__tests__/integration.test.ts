@@ -148,6 +148,8 @@ describe("Integration: state pipeline", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
       {
@@ -163,6 +165,8 @@ describe("Integration: state pipeline", () => {
         hasUserInputNeeded: false,
         hasNeedsApproval: false,
         hasHumanApproved: false,
+        hasTestPassed: false,
+        hasTestFailed: false,
         source: null,
       },
     ];

@@ -132,11 +132,12 @@ Then update labels:
 |------|----------|-------------------|
 | `architect` | @workflows/architect.md | Yes (or on children) |
 | `plan` | @workflows/plan.md | Yes |
-| `implement` | @workflows/implement.md | No |
+| `implement` | @workflows/implement.md | Yes |
+| `test` | @workflows/test.md | Yes |
 | `review` | @workflows/review.md | Yes |
 | `merge` | @workflows/merge.md | No |
 
-**Lifecycle order:** architect → plan → implement → review → (implement if changes requested) → retro → merge
+**Lifecycle order:** architect → plan → implement → test → review → (implement → test if changes requested) → retro → merge
 
 **Retro** is not a mode — the controller resumes the implement worker's session with `/legion-retro`, preserving full implementation context. See the `legion-retro` skill.
 

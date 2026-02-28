@@ -150,6 +150,42 @@ The implementer will use these annotations to create a task graph with `blockedB
 - Minimize dependency chains — prefer wide, shallow graphs over deep sequential chains
 - When in doubt, mark as independent (the implementer can add dependencies if needed)
 
+#### Testing Plan
+
+After creating executable tasks, add a **Testing Plan** section to the plan output. The tester agent will use this to verify the implementation works end-to-end.
+
+**Required sections:**
+
+```
+## Testing Plan
+
+### Setup
+- [Concrete commands to boot the environment]
+- [e.g., `bun install && bun run dev`, `docker-compose up -d`]
+
+### Health Check
+- [How to verify the environment is ready]
+- [e.g., `curl -s http://localhost:3000/health` returns 200]
+- [Include timeout: retry for 30s before declaring failure]
+
+### Verification Steps
+For each acceptance criterion:
+1. **[Criterion name]**
+   - Action: [What to do — navigate to URL, run command, etc.]
+   - Expected: [What should happen — page shows X, API returns Y]
+   - Tool: [Playwright / curl / CLI]
+
+### Tools Needed
+- [List of tools the tester should use]
+- [e.g., Playwright for browser, curl for API, CLI for commands]
+```
+
+**Guidelines:**
+- Setup commands must be copy-pasteable — no placeholders the tester would need to figure out
+- Health checks should have a timeout (e.g., "retry for 30s")
+- Verification steps should be specific enough that a fresh agent with no implementation context can follow them
+- If infrastructure doesn't exist yet (architect flagged gaps), note what the implementer needs to create
+
 ### 4. Review with /plan-review
 
 After creating the executable plan, invoke `/plan-review` with the plan file path.

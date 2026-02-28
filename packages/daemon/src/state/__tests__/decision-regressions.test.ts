@@ -17,6 +17,8 @@ describe("decision regressions (known pipeline stalls)", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 
@@ -38,6 +40,8 @@ describe("decision regressions (known pipeline stalls)", () => {
       hasUserInputNeeded: false,
       hasNeedsApproval: false,
       hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
       source: null,
     };
 

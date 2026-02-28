@@ -25,6 +25,7 @@ export type IssueStatusLiteral =
   | "Backlog"
   | "Todo"
   | "In Progress"
+  | "Testing"
   | "Needs Review"
   | "Retro"
   | "Done";
@@ -32,7 +33,7 @@ export type IssueStatusLiteral =
 /**
  * Worker mode values for session ID computation.
  */
-export type WorkerModeLiteral = "architect" | "plan" | "implement" | "review" | "merge";
+export type WorkerModeLiteral = "architect" | "plan" | "implement" | "test" | "review" | "merge";
 
 /**
  * Action types for state machine transitions.
@@ -44,6 +45,9 @@ export type ActionType =
   | "dispatch_planner"
   | "dispatch_implementer"
   | "dispatch_implementer_for_retro"
+  | "dispatch_tester"
+  | "transition_to_testing"
+  | "resume_implementer_for_test_failure"
   | "dispatch_reviewer"
   | "dispatch_merger"
   | "resume_implementer_for_changes"
@@ -66,6 +70,7 @@ export const IssueStatus = {
   BACKLOG: "Backlog" as IssueStatusLiteral,
   TODO: "Todo" as IssueStatusLiteral,
   IN_PROGRESS: "In Progress" as IssueStatusLiteral,
+  TESTING: "Testing" as IssueStatusLiteral,
   NEEDS_REVIEW: "Needs Review" as IssueStatusLiteral,
   RETRO: "Retro" as IssueStatusLiteral,
   DONE: "Done" as IssueStatusLiteral,
@@ -126,6 +131,7 @@ const _lowercaseCanonicalMap = new Map<string, IssueStatusLiteral>([
   ["backlog", "Backlog"],
   ["todo", "Todo"],
   ["in progress", "In Progress"],
+  ["testing", "Testing"],
   ["needs review", "Needs Review"],
   ["retro", "Retro"],
   ["done", "Done"],
@@ -142,6 +148,7 @@ export const WorkerMode = {
   ARCHITECT: "architect" as WorkerModeLiteral,
   PLAN: "plan" as WorkerModeLiteral,
   IMPLEMENT: "implement" as WorkerModeLiteral,
+  TEST: "test" as WorkerModeLiteral,
   REVIEW: "review" as WorkerModeLiteral,
   MERGE: "merge" as WorkerModeLiteral,
 } as const;
@@ -232,6 +239,8 @@ export interface ParsedIssue {
   readonly hasWorkerActive: boolean;
   readonly hasNeedsApproval: boolean;
   readonly hasHumanApproved: boolean;
+  readonly hasTestPassed: boolean;
+  readonly hasTestFailed: boolean;
   readonly hasPr: boolean;
   readonly needsPrStatus: boolean;
 }
@@ -277,6 +286,14 @@ export function createParsedIssue(
       return this.labels.includes("human-approved");
     },
 
+    get hasTestPassed() {
+      return this.labels.includes("test-passed");
+    },
+
+    get hasTestFailed() {
+      return this.labels.includes("test-failed");
+    },
+
     get hasPr() {
       return this.prRef !== null;
     },
@@ -307,6 +324,8 @@ export interface FetchedIssueData {
   hasUserInputNeeded: boolean;
   hasNeedsApproval: boolean;
   hasHumanApproved: boolean;
+  hasTestPassed: boolean;
+  hasTestFailed: boolean;
   source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 

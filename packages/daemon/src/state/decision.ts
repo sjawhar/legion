@@ -22,7 +22,8 @@ export function suggestAction(
   hasWorkerDone: boolean,
   hasLiveWorker: boolean,
   prIsDraft: boolean | null,
-  hasPr: boolean
+  hasPr: boolean,
+  hasTestPassed: boolean
 ): ActionType {
   switch (status) {
     case IssueStatus.DONE:
@@ -52,7 +53,7 @@ export function suggestAction(
 
     case IssueStatus.IN_PROGRESS:
       if (hasWorkerDone) {
-        return "transition_to_needs_review";
+        return "transition_to_testing";
       }
       if (hasPr && !hasLiveWorker) {
         return "skip";
@@ -61,6 +62,18 @@ export function suggestAction(
         return "skip";
       }
       return "dispatch_implementer";
+
+    case IssueStatus.TESTING:
+      if (hasWorkerDone) {
+        if (hasTestPassed) {
+          return "transition_to_needs_review";
+        }
+        return "resume_implementer_for_test_failure";
+      }
+      if (hasLiveWorker) {
+        return "skip";
+      }
+      return "dispatch_tester";
 
     case IssueStatus.NEEDS_REVIEW:
       if (hasWorkerDone) {
@@ -113,6 +126,9 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   remove_worker_active_and_redispatch: WorkerMode.IMPLEMENT,
   add_needs_approval: WorkerMode.PLAN,
   retry_pr_check: WorkerMode.REVIEW,
+  dispatch_tester: WorkerMode.TEST,
+  transition_to_testing: WorkerMode.TEST,
+  resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
 };
 
 export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {
@@ -134,7 +150,8 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
       data.labels.includes("worker-done"),
       data.hasLiveWorker,
       data.prIsDraft,
-      data.hasPr
+      data.hasPr,
+      data.hasTestPassed ?? false
     );
     if (action === "transition_to_todo") {
       action = "add_needs_approval";

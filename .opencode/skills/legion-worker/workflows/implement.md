@@ -126,6 +126,18 @@ If any check fails:
 
 Do NOT create a PR if any check fails — fix first.
 
+### 4.5. Documentation
+
+For any user-facing behavior change, update relevant documentation before creating the PR:
+
+- **README** — if the feature changes setup, usage, or configuration
+- **Usage guides** — if the feature adds new user-facing functionality
+- **API docs** — if the feature changes or adds API endpoints
+- **Inline help** — if the feature adds CLI commands or options
+
+Documentation should explain **how to use** the feature, not just what changed in the code. A user reading only the docs should be able to understand and use the new functionality.
+
+Skip this step if the change is purely internal (refactoring, bug fix with no behavior change, test-only changes).
 ### 5. Cross-Family Review
 
 After all checks pass, spawn a cross-family review session before creating the PR.
@@ -191,7 +203,19 @@ convert back to draft (`gh pr ready --undo`) if needed.
 
 ### 8. Exit
 
-Exit without adding labels. The controller handles state transitions explicitly.
+Add `worker-done` label to signal the controller to transition to the Testing phase.
+
+**GitHub:**
+```
+gh issue edit $ISSUE_NUMBER --add-label "worker-done" --remove-label "worker-active" -R $OWNER/$REPO
+```
+
+**Linear:**
+```
+issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
+current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
+linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done"])
+```
 
 ---
 
@@ -255,4 +279,16 @@ Reply in PR comment threads acknowledging fixes. Reference specific changes made
 
 ### 6. Exit
 
-Exit without adding labels. Issue stays in Needs Review; controller will dispatch reviewer.
+Add `worker-done` label to signal the controller. The controller has already transitioned the issue to In Progress before resuming you, so `worker-done` will trigger the testing gate — your fixes get behaviorally verified before the reviewer sees them again.
+
+**GitHub:**
+```
+gh issue edit $ISSUE_NUMBER --add-label "worker-done" --remove-label "worker-active" -R $OWNER/$REPO
+```
+
+**Linear:**
+```
+issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
+current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
+linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done"])
+```

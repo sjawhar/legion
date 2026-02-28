@@ -32,6 +32,7 @@ skills/
     │   ├── architect.md   # Break down vague issues into spec-ready sub-issues
     │   ├── plan.md        # Create executable implementation plans (with review iterations)
     │   ├── implement.md   # TDD-driven coding, PR creation
+    │   ├── test.md        # Behavioral testing against running infrastructure
     │   ├── review.md      # Deep PR review with line-level comments
     │   └── merge.md       # Merge PR, handle CI, cleanup workspace
     └── references/
