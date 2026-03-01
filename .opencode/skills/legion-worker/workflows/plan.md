@@ -82,6 +82,49 @@ Metis pre-analysis:
 Create the implementation plan accounting for these findings.
 ```
 
+### 1.7. Inject Relevant Learnings
+
+Before invoking `/workflows:plan`, check the learnings index for applicable prior knowledge:
+
+1. **Read the index:**
+   ```bash
+   cat docs/solutions/index.json
+   ```
+   If the file doesn't exist or is invalid JSON, skip this step entirely — proceed to step 2.
+
+2. **Extract module/area keywords** from the issue title, description, and Metis analysis output. Look for references to:
+   - Source path segments (e.g., `packages/daemon/src/state/`, `serve-manager`)
+   - Module names (e.g., "daemon", "controller", "worker", "state")
+   - Component names (e.g., "serve-manager", "decision", "fetch")
+   - Feature areas (e.g., "skills", "linear", "github", "review", "retro")
+   - Integration concerns (e.g., "PR", "labels", "MCP")
+
+3. **Match keywords against index keys.** For each key in `.index`, check if any extracted keyword appears as a substring of the key (case-insensitive). Collect all matched learning file paths.
+
+4. **Deduplicate and rank** matched learnings:
+   - Remove duplicates (same file matched via multiple keys)
+   - Primary sort: key specificity — learnings matched via longer/more-specific keys rank higher (e.g., a match on `packages/daemon/src/state` outranks a match on `packages/daemon`)
+   - Tiebreaker: number of distinct key matches (more matches = more relevant)
+   - **Cap at 3 learnings maximum**
+
+5. **Read each matched learning file** (from `docs/solutions/<path>`). Extract the first meaningful paragraph after the title — skip YAML frontmatter (`---` blocks), skip headings, take the first paragraph of prose (typically the Problem or Overview section). Truncate excerpt to **300 characters**.
+
+6. **Add to `/workflows:plan` context** in step 2. Append this section to the autonomous context template, between the Metis pre-analysis and the feature description:
+
+   ```
+   Relevant learnings from prior work (preloaded from docs/solutions/index.json):
+
+   1. [docs/solutions/<path>]: <300-char excerpt>
+   2. [docs/solutions/<path>]: <300-char excerpt>
+   3. [docs/solutions/<path>]: <300-char excerpt>
+
+   Review these learnings for patterns and pitfalls relevant to this implementation.
+   ```
+
+**If no matches found:** Skip — do not add an empty "Relevant learnings" section.
+
+**If a matched file doesn't exist on disk:** Skip that entry silently (stale index entry from a file rename). Do not error.
+
 ### 2. Invoke /workflows:plan (Autonomous)
 
 Invoke `/workflows:plan` with this context:
