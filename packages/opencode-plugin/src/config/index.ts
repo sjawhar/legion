@@ -56,6 +56,15 @@ const RetryConfigSchema = z
   })
   .strict();
 
+const OutputCompressionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    thresholdBytes: z.number().optional(),
+    excludeTools: z.array(z.string()).optional(),
+    maxIndexSizeMB: z.number().optional(),
+  })
+  .strict();
+
 const PluginConfigSchema = z
   .object({
     $schema: z.string().optional(),
@@ -67,6 +76,7 @@ const PluginConfigSchema = z
     inactivityAlertMs: z.number().optional(),
     retry: RetryConfigSchema.optional(),
     taskRetentionMs: z.number().optional(),
+    outputCompression: OutputCompressionConfigSchema.optional(),
   })
   .passthrough();
 
@@ -87,6 +97,13 @@ export interface RetryConfig {
   fallbackModel?: string;
 }
 
+export interface OutputCompressionConfig {
+  enabled?: boolean;
+  thresholdBytes?: number;
+  excludeTools?: string[];
+  maxIndexSizeMB?: number;
+}
+
 export interface PluginConfig {
   agents?: {
     [agentName: string]: AgentOverrideConfig;
@@ -98,6 +115,7 @@ export interface PluginConfig {
   inactivityAlertMs?: number;
   retry?: RetryConfig;
   taskRetentionMs?: number;
+  outputCompression?: OutputCompressionConfig;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -184,6 +202,21 @@ function mergeRetry(base?: RetryConfig, override?: RetryConfig): RetryConfig | u
   return { ...base, ...override };
 }
 
+function mergeOutputCompression(
+  base?: OutputCompressionConfig,
+  override?: OutputCompressionConfig
+): OutputCompressionConfig | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return {
+    ...base,
+    ...override,
+    excludeTools: base.excludeTools || override.excludeTools
+      ? [...new Set([...(base.excludeTools ?? []), ...(override.excludeTools ?? [])])]
+      : undefined,
+  };
+}
+
 function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
   return {
     ...base,
@@ -193,6 +226,7 @@ function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
     permission: mergePermission(base.permission, override.permission),
     concurrency: mergeConcurrency(base.concurrency, override.concurrency),
     retry: mergeRetry(base.retry, override.retry),
+    outputCompression: mergeOutputCompression(base.outputCompression, override.outputCompression),
   };
 }
 

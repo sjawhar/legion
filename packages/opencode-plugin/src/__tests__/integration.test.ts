@@ -9,9 +9,11 @@ import { loadPluginConfig } from "../config";
 import type { BackgroundTaskManager } from "../delegation";
 import { createDelegationTools } from "../delegation";
 import { resolveCategory } from "../delegation/category-router";
+import { createOutputCompressionHook } from "../hooks/output-compression";
 import { createPreemptiveCompactionHook } from "../hooks/preemptive-compaction";
 import OpenCodeLegion from "../index";
 import { getModelOverlay } from "../overlays";
+import { createContextSearchTool } from "../tools/context-search";
 
 function writeJsonFile(filePath: string, data: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -1721,6 +1723,46 @@ describe("opencode-legion plugin", () => {
     it("exports default plugin function", async () => {
       const mod = await import("../index");
       expect(typeof mod.default).toBe("function");
+    });
+  });
+
+  describe("output compression e2e", () => {
+    it("compresses large output and retrieves via context_search", async () => {
+      const hook = createOutputCompressionHook({ thresholdBytes: 50 });
+      const store = hook.getStore();
+      const searchTool = createContextSearchTool(store);
+
+      const largeOutput = "Legion workers handle isolated jj workspaces.\n".repeat(30);
+      const output = { title: "bash", output: largeOutput, metadata: {} };
+      await hook["tool.execute.after"]?.(
+        { tool: "bash", sessionID: "session", callID: "c-1" },
+        output
+      );
+
+      expect(output.output).toContain("[Compressed]");
+      expect(output.output).toContain('"session:bash:c-1"');
+
+      const result = await searchTool.execute(
+        { queries: ["isolated workspaces"] },
+        createToolContext("/tmp")
+      );
+      expect(typeof result).toBe("string");
+      expect(result as string).toContain("isolated jj workspaces");
+      expect(result as string).toContain("bash:c-1");
+
+      hook.cleanup();
+    });
+
+    it("passes small outputs through without indexing", async () => {
+      const hook = createOutputCompressionHook({ thresholdBytes: 5000 });
+      const output = { title: "bash", output: "small", metadata: {} };
+      await hook["tool.execute.after"]?.({ tool: "bash", sessionID: "s-1", callID: "c-2" }, output);
+
+      expect(output.output).toBe("small");
+      expect(hook.getStats().passedThrough).toBe(1);
+      expect(hook.getStats().compressed).toBe(0);
+
+      hook.cleanup();
     });
   });
 });
