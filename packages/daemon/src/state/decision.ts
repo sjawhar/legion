@@ -191,7 +191,12 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
 
   // Use actual worker mode for skip actions when available
   let mode: WorkerModeLiteral;
-  if (action === "skip" && data.workerMode && VALID_WORKER_MODES.has(data.workerMode)) {
+  if (
+    action === "skip" &&
+    data.hasLiveWorker &&
+    data.workerMode &&
+    VALID_WORKER_MODES.has(data.workerMode)
+  ) {
     mode = data.workerMode as WorkerModeLiteral;
   } else {
     mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;

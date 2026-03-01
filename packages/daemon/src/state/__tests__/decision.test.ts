@@ -157,6 +157,143 @@ describe("suggestAction", () => {
   });
 });
 
+describe("suggestAction CI gating", () => {
+  it("needs_review_worker_done_ci_failing_resumes_implementer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("needs_review_worker_done_ci_pending_retries", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      "pending"
+    );
+    expect(action).toBe("retry_ci_check");
+  });
+
+  it("needs_review_worker_done_ci_passing_transitions_to_retro", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      "passing"
+    );
+    expect(action).toBe("transition_to_retro");
+  });
+
+  it("needs_review_worker_done_ci_null_transitions_to_retro", () => {
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, false, true, false, null);
+    expect(action).toBe("transition_to_retro");
+  });
+
+  it("needs_review_no_worker_done_ci_failing_resumes_implementer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      null,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("needs_review_no_worker_done_ci_pending_retries", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      null,
+      true,
+      false,
+      "pending"
+    );
+    expect(action).toBe("retry_ci_check");
+  });
+
+  it("needs_review_no_worker_done_ci_passing_dispatches_reviewer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      null,
+      true,
+      false,
+      "passing"
+    );
+    expect(action).toBe("dispatch_reviewer");
+  });
+
+  it("needs_review_no_worker_done_ci_null_dispatches_reviewer", () => {
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, false, null, true, false, null);
+    expect(action).toBe("dispatch_reviewer");
+  });
+
+  it("ci_check_not_done_when_pr_is_draft", () => {
+    // prIsDraft takes precedence — if PR is draft, redirect to implementer
+    // without checking CI
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      true,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("resume_implementer_for_changes");
+  });
+
+  it("ci_check_not_done_when_no_pr", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      null,
+      false,
+      false,
+      "failing"
+    );
+    expect(action).toBe("investigate_no_pr");
+  });
+
+  it("needs_review_live_worker_skips_regardless_of_ci", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      true,
+      null,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("skip");
+  });
+
+  it("existing_tests_work_without_ci_parameter", () => {
+    // Verify backward compat: omitting ciStatus defaults to null (proceed)
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, true, false, false, true, false);
+    expect(action).toBe("transition_to_retro");
+  });
+});
+
 describe("buildIssueState", () => {
   it("builds_state_with_action", () => {
     const data: FetchedIssueData = {

@@ -33,8 +33,8 @@ If rebase produces conflicts:
 
 **If conflicts are unresolvable:**
 - Add `user-input-needed` label to the issue
-  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
 - Post comment describing the conflict
   - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
   - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
@@ -72,8 +72,8 @@ gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch
   - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
   - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 - Add `user-input-needed` label
-  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
 - Exit — the user needs to merge manually or grant access
 
 ### 7. Close Issue
