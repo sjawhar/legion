@@ -95,7 +95,7 @@ export function suggestAction(
         return "dispatch_merger";
       }
       if (hasLiveWorker) {
-        return "resume_implementer_for_retro";
+        return "skip";
       }
       return "dispatch_implementer_for_retro";
 
