@@ -7,6 +7,7 @@
 
 import {
   type ActionType,
+  type CiStatusLiteral,
   type CollectedState,
   computeSessionId,
   type FetchedIssueData,
@@ -23,7 +24,8 @@ export function suggestAction(
   hasLiveWorker: boolean,
   prIsDraft: boolean | null,
   hasPr: boolean,
-  hasTestPassed: boolean
+  hasTestPassed: boolean,
+  ciStatus: CiStatusLiteral | null = null
 ): ActionType {
   switch (status) {
     case IssueStatus.DONE:
@@ -83,10 +85,22 @@ export function suggestAction(
         if (prIsDraft) {
           return "resume_implementer_for_changes";
         }
+        if (ciStatus === "failing") {
+          return "resume_implementer_for_ci_failure";
+        }
+        if (ciStatus === "pending") {
+          return "retry_ci_check";
+        }
         return "transition_to_retro";
       }
       if (hasLiveWorker) {
         return "skip";
+      }
+      if (hasPr && ciStatus === "failing") {
+        return "resume_implementer_for_ci_failure";
+      }
+      if (hasPr && ciStatus === "pending") {
+        return "retry_ci_check";
       }
       return "dispatch_reviewer";
 
@@ -119,10 +133,13 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   transition_to_needs_review: WorkerMode.REVIEW,
   transition_to_todo: WorkerMode.PLAN,
   transition_to_retro: WorkerMode.IMPLEMENT,
+  transition_to_done: WorkerMode.MERGE,
   relay_user_feedback: WorkerMode.IMPLEMENT,
   remove_worker_active_and_redispatch: WorkerMode.IMPLEMENT,
   add_needs_approval: WorkerMode.PLAN,
   retry_pr_check: WorkerMode.REVIEW,
+  resume_implementer_for_ci_failure: WorkerMode.IMPLEMENT,
+  retry_ci_check: WorkerMode.REVIEW,
   dispatch_tester: WorkerMode.TEST,
   transition_to_testing: WorkerMode.TEST,
   resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
@@ -164,7 +181,8 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
       data.hasLiveWorker,
       data.prIsDraft,
       data.hasPr,
-      data.hasTestPassed ?? false
+      data.hasTestPassed ?? false,
+      data.ciStatus
     );
     if (action === "transition_to_todo") {
       action = "add_needs_approval";
@@ -185,6 +203,7 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     labels: data.labels,
     hasPr: data.hasPr,
     prIsDraft: data.prIsDraft,
+    ciStatus: data.ciStatus,
     hasLiveWorker: data.hasLiveWorker,
     workerMode: data.workerMode,
     workerStatus: data.workerStatus,

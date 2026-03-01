@@ -668,6 +668,11 @@ describe("orphan detection", () => {
   it("orphan_action_mode_mapping", () => {
     expect("remove_worker_active_and_redispatch" in ACTION_TO_MODE).toBe(true);
   });
+
+  it("transition_to_done_is_in_action_to_mode", () => {
+    expect("transition_to_done" in ACTION_TO_MODE).toBe(true);
+    expect(ACTION_TO_MODE["transition_to_done"]).toBe("merge");
+  });
 });
 
 describe("buildCollectedState", () => {

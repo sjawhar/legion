@@ -483,8 +483,16 @@ export async function enrichParsedIssues(
     }
   }
 
+  const ciRefsForStatus: Record<string, GitHubPRRefType> = {};
+  for (const p of parsedIssues) {
+    if (p.needsCiStatus && p.prRef !== null) {
+      ciRefsForStatus[p.issueId] = p.prRef;
+    }
+  }
+
   let liveWorkers: Record<string, { mode: string; status: string }> = {};
   let prDraftMap: Record<string, boolean | null> = {};
+  let ciStatusMap: Record<string, CiStatusLiteral | null> = {};
 
   await Promise.all([
     (async () => {
@@ -502,6 +510,18 @@ export async function enrichParsedIssues(
         }
       }
     })(),
+    (async () => {
+      if (Object.keys(ciRefsForStatus).length === 0) {
+        return;
+      }
+      try {
+        ciStatusMap = await getCiStatusBatch(ciRefsForStatus, runner);
+      } catch {
+        for (const issueId of Object.keys(ciRefsForStatus)) {
+          ciStatusMap[issueId] = null;
+        }
+      }
+    })(),
   ]);
 
   return parsedIssues.map((issue) => {
@@ -512,6 +532,7 @@ export async function enrichParsedIssues(
       labels: issue.labels,
       hasPr: issue.hasPr,
       prIsDraft: prDraftMap[issue.issueId] ?? null,
+      ciStatus: ciStatusMap[issue.issueId] ?? null,
       hasLiveWorker: workerInfo !== null,
       workerMode: workerInfo?.mode ?? null,
       workerStatus: workerInfo?.status ?? null,

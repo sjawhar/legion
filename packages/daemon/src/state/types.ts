@@ -56,6 +56,7 @@ export type ActionType =
   | "transition_to_needs_review"
   | "transition_to_retro"
   | "transition_to_todo"
+  | "transition_to_done"
   | "relay_user_feedback"
   | "remove_worker_active_and_redispatch"
   | "add_needs_approval"

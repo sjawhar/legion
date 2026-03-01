@@ -11,9 +11,9 @@ import {
   enrichParsedIssues,
   fetchAllIssueData,
   GitHubAPIError,
+  getCiStatusBatch,
   getLiveWorkers,
   getPrDraftStatusBatch,
-  getCiStatusBatch,
 } from "../fetch";
 import type { LinearIssueRaw } from "../types";
 import { createParsedIssue } from "../types";
@@ -821,6 +821,106 @@ describe("enrichParsedIssues", () => {
       expect(result).toHaveLength(1);
       expect(result[0].prIsDraft).toBeNull();
       expect(result[0].hasPr).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("enriches issues with CI status from GitHub API", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
+    ) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async (cmd: string[]) => {
+        const queryArg = cmd[cmd.length - 1];
+        if (queryArg.includes("isDraft")) {
+          return {
+            stdout: JSON.stringify({ data: { repo0: { pr0: { isDraft: false } } } }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (queryArg.includes("statusCheckRollup")) {
+          return {
+            stdout: JSON.stringify({
+              data: {
+                repo0: {
+                  pr0: {
+                    commits: {
+                      nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+                    },
+                  },
+                },
+              },
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      };
+
+      const issues = [
+        createParsedIssue("ENG-21", "Needs Review", ["worker-done"], {
+          owner: "owner",
+          repo: "repo",
+          number: 1,
+        }),
+      ];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].ciStatus).toBe("passing");
+      expect(result[0].prIsDraft).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sets ciStatus to null when no PR", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({ stdout: "", stderr: "", exitCode: 1 });
+      const issues = [createParsedIssue("ENG-21", "Needs Review", [], null)];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].ciStatus).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sets ciStatus to null on API failure", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
+    ) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({
+        stdout: "",
+        stderr: "rate limited",
+        exitCode: 1,
+      });
+
+      const issues = [
+        createParsedIssue("ENG-21", "Needs Review", [], {
+          owner: "owner",
+          repo: "repo",
+          number: 1,
+        }),
+      ];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].ciStatus).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
     }
