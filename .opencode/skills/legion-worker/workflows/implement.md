@@ -179,10 +179,12 @@ jj git push --named "$LEGION_ISSUE_ID"=@
 
 gh pr create --draft \
   --title "$LEGION_ISSUE_ID: [title]" \
-  --body "Implements $LEGION_ISSUE_ID
+  --body "Closes #$ISSUE_NUMBER
 
+## Summary
 [summary]" \
-  --head "$LEGION_ISSUE_ID"
+  --head "$LEGION_ISSUE_ID" \
+  -R $OWNER/$REPO
 ```
 
 The issue ID in the branch/title preserves traceability for the controller.
