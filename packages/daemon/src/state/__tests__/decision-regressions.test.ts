@@ -26,7 +26,7 @@ describe("decision regressions (known pipeline stalls)", () => {
     expect(state.suggestedAction).toBe("dispatch_implementer");
   });
 
-  it("does not skip Retro when a worker exists (should resume retro work)", () => {
+  it("skips Retro when a live worker exists (worker is already running retro)", () => {
     const data: FetchedIssueData = {
       issueId: "ENG-22",
       status: "Retro",
@@ -46,6 +46,6 @@ describe("decision regressions (known pipeline stalls)", () => {
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
-    expect(state.suggestedAction).toBe("resume_implementer_for_retro");
+    expect(state.suggestedAction).toBe("skip");
   });
 });

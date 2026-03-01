@@ -14,6 +14,7 @@ import {
   getLiveWorkers,
   getPrDraftStatusBatch,
   getCiStatusBatch,
+} from "../fetch";
 import type { LinearIssueRaw } from "../types";
 import { createParsedIssue } from "../types";
 
