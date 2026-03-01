@@ -76,6 +76,22 @@ gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch
   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
 - Exit — the user needs to merge manually or grant access
 
-### 7. Exit
+### 7. Close Issue
 
-Exit without adding a label. The issue auto-closes when the PR merges. The controller will clean up the workspace.
+After successful merge, explicitly close the issue to transition to Done:
+
+**GitHub:**
+```bash
+gh issue close $ISSUE_NUMBER -R $OWNER/$REPO --comment "Closed via PR merge."
+```
+
+**Linear:**
+```
+linear_linear(action="update", id=$LEGION_ISSUE_ID, state="Done")
+```
+
+Then remove `worker-active` if present:
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
+
+> **Note:** GitHub auto-close may also fire when the PR merges, which is fine — closing an already-closed issue is a no-op. This explicit close is a safety net for cases where auto-close doesn't trigger (e.g., issue not linked to PR, Linear backend).
