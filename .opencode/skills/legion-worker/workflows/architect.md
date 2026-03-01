@@ -41,7 +41,7 @@ If still unclear, escalate.
 
 ### 3. Act
 
-**If unclear:** Add `user-input-needed` label, post comment with specific questions, exit.
+**If unclear:** Add `user-input-needed` label, remove `worker-active` label, post comment with specific questions, exit.
 
 **If too big:** Break down into sub-issues. Each sub-issue must be spec-ready:
 - Clear problem statement (what needs to change and why)
@@ -190,7 +190,7 @@ linear_linear(action="update",
 | Spec-ready | Cross-family review → incorporate feedback → Add `worker-done` to issue |
 | Fully broken down | Cross-family review → incorporate feedback → Add `worker-done` to each child, leave parent unchanged |
 | Partial breakdown | Cross-family review → incorporate feedback → Add `worker-done` to clear children, add `user-input-needed` to parent |
-| Unclear | Add `user-input-needed` to issue (no review needed) |
+| Unclear | Add `user-input-needed` to issue, remove `worker-active` (no review needed) |
 
 **After breakdown:** Parent keeps its existing labels. Do NOT add `worker-done` to parent - only children get it. Post comment to parent explaining what was created and what still needs clarification.
 

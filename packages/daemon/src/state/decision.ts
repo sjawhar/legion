@@ -55,9 +55,6 @@ export function suggestAction(
       if (hasWorkerDone) {
         return "transition_to_testing";
       }
-      if (hasPr && !hasLiveWorker) {
-        return "skip";
-      }
       if (hasLiveWorker) {
         return "skip";
       }

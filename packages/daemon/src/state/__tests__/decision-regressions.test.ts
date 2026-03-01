@@ -3,7 +3,7 @@ import { buildIssueState } from "../decision";
 import type { FetchedIssueData } from "../types";
 
 describe("decision regressions (known pipeline stalls)", () => {
-  it("does not re-dispatch implementer when an In Progress issue already has a PR", () => {
+  it("dispatches implementer when In Progress issue has PR but no live worker and no worker-done", () => {
     const data: FetchedIssueData = {
       issueId: "ENG-21",
       status: "In Progress",
@@ -23,7 +23,7 @@ describe("decision regressions (known pipeline stalls)", () => {
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
-    expect(state.suggestedAction).toBe("skip");
+    expect(state.suggestedAction).toBe("dispatch_implementer");
   });
 
   it("does not skip Retro when a worker exists (should resume retro work)", () => {

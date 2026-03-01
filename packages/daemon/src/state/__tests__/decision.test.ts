@@ -120,9 +120,9 @@ describe("suggestAction", () => {
     expect(retry).not.toBe(skip);
   });
 
-  it("in_progress_has_pr_no_worker_done_no_live_worker_skips", () => {
+  it("in_progress_has_pr_no_worker_done_no_live_worker_dispatches_implementer", () => {
     const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, true, false);
-    expect(action).toBe("skip");
+    expect(action).toBe("dispatch_implementer");
   });
 
   it("done_always_skips", () => {

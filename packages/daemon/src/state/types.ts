@@ -59,7 +59,18 @@ export type ActionType =
   | "relay_user_feedback"
   | "remove_worker_active_and_redispatch"
   | "add_needs_approval"
-  | "retry_pr_check";
+  | "retry_pr_check"
+  | "resume_implementer_for_ci_failure"
+  | "retry_ci_check";
+
+/**
+ * CI check status for a PR.
+ * - "passing": all checks succeeded
+ * - "failing": one or more checks failed
+ * - "pending": checks still running
+ * - null: no PR, no checks configured, or couldn't determine
+ */
+export type CiStatusLiteral = "passing" | "failing" | "pending";
 
 /**
  * Canonical issue status values with normalization.
@@ -243,6 +254,7 @@ export interface ParsedIssue {
   readonly hasTestFailed: boolean;
   readonly hasPr: boolean;
   readonly needsPrStatus: boolean;
+  readonly needsCiStatus: boolean;
 }
 
 /**
@@ -305,6 +317,13 @@ export function createParsedIssue(
         this.prRef !== null
       );
     },
+
+    get needsCiStatus() {
+      return (
+        this.status === IssueStatus.NEEDS_REVIEW &&
+        this.prRef !== null
+      );
+    },
   };
 }
 
@@ -317,6 +336,7 @@ export interface FetchedIssueData {
   labels: string[];
   hasPr: boolean; // True if issue has a linked PR
   prIsDraft: boolean | null; // null if no PR or couldn't check status
+  ciStatus: CiStatusLiteral | null; // null if no PR, no checks, or couldn't check
   hasLiveWorker: boolean;
   workerMode: string | null;
   workerStatus: string | null;
@@ -337,6 +357,7 @@ export interface IssueStateDict {
   labels: string[];
   hasPr: boolean;
   prIsDraft: boolean | null;
+  ciStatus: CiStatusLiteral | null;
   hasLiveWorker: boolean;
   workerMode: string | null;
   workerStatus: string | null;
@@ -361,6 +382,7 @@ export interface IssueState {
   labels: string[];
   hasPr: boolean; // Whether issue has a linked PR
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
+  ciStatus: CiStatusLiteral | null;
   hasLiveWorker: boolean;
   workerMode: string | null;
   workerStatus: string | null;
@@ -380,6 +402,7 @@ export const IssueState = {
       labels: state.labels,
       hasPr: state.hasPr,
       prIsDraft: state.prIsDraft,
+      ciStatus: state.ciStatus,
       hasLiveWorker: state.hasLiveWorker,
       workerMode: state.workerMode,
       workerStatus: state.workerStatus,
