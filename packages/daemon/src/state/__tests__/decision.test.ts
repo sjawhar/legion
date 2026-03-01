@@ -372,6 +372,60 @@ describe("buildIssueState", () => {
   });
 });
 
+  it("skip_with_live_worker_uses_actual_worker_mode_for_session_id", () => {
+    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Testing",
+      labels: [],
+      hasPr: true,
+      prIsDraft: null,
+      hasLiveWorker: true,
+      workerMode: "test",
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: false,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      source: null,
+    };
+
+    const state = buildIssueState(data, teamId);
+    expect(state.suggestedAction).toBe("skip");
+    // sessionId should use the tester's mode, not the default implement mode
+    const expectedSessionId = computeSessionId(teamId, "ENG-21", "test");
+    expect(state.sessionId).toBe(expectedSessionId);
+  });
+
+  it("skip_without_worker_mode_falls_back_to_action_to_mode", () => {
+    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Done",
+      labels: [],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: false,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      source: null,
+    };
+
+    const state = buildIssueState(data, teamId);
+    expect(state.suggestedAction).toBe("skip");
+    // No workerMode → falls back to ACTION_TO_MODE["skip"] = implement
+    const expectedSessionId = computeSessionId(teamId, "ENG-21", "implement");
+    expect(state.sessionId).toBe(expectedSessionId);
+  });
+
 describe("approval gate", () => {
   it("backlog_worker_done_adds_needs_approval", () => {
     const data: FetchedIssueData = {

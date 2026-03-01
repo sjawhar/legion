@@ -128,6 +128,15 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
 };
 
+const VALID_WORKER_MODES = new Set<string>([
+  WorkerMode.ARCHITECT,
+  WorkerMode.PLAN,
+  WorkerMode.IMPLEMENT,
+  WorkerMode.TEST,
+  WorkerMode.REVIEW,
+  WorkerMode.MERGE,
+]);
+
 export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {
   let action: ActionType;
 
@@ -162,7 +171,13 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     }
   }
 
-  const mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
+  // Use actual worker mode for skip actions when available
+  let mode: WorkerModeLiteral;
+  if (action === "skip" && data.workerMode && VALID_WORKER_MODES.has(data.workerMode)) {
+    mode = data.workerMode as WorkerModeLiteral;
+  } else {
+    mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
+  }
   const sessionId = computeSessionId(teamId, data.issueId, mode);
 
   return {
