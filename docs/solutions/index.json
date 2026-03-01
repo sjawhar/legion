@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "index": {
+    "packages/daemon/src/state": [
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/controller-observability.md",
+      "architecture-patterns/shared-state-file-ownership.md",
+      "integration-issues/github-graphql-pr-draft-status.md",
+      "integration-issues/external-repo-pr-auto-transition-gap.md",
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "packages/daemon/src/daemon/serve-manager": [
+      "daemon/opencode-serve-lifecycle.md",
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md",
+      "daemon/graceful-worker-shutdown.md"
+    ],
+    "packages/daemon/src/daemon/state-file": [
+      "architecture-patterns/shared-state-file-ownership.md",
+      "task-index-patterns.md"
+    ],
+    "packages/daemon/src/daemon": [
+      "daemon/worker-directory-fix.md",
+      "daemon/worker-directory-resolution.md",
+      "daemon/workspace-validation-retro.md",
+      "daemon/controller-observability.md",
+      "delegation/hardening-patterns.md",
+      "integration-patterns/controller-worker-protocol.md",
+      "architecture-patterns/task-index-retro.md",
+      "task-index-patterns.md"
+    ],
+    "packages/daemon/src/cli": ["daemon/controller-lifecycle-separation.md"],
+    "packages/daemon": [
+      "architecture-patterns/plugin-migration-assessment.md",
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    ".opencode/skills/legion-worker": [
+      "skill-patterns/worker-skill-failure-modes.md",
+      "daemon/deferred-review-comments-pattern.md",
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    ".opencode/skills/legion-controller": [
+      "integration-patterns/controller-worker-protocol.md",
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/controller-observability.md"
+    ],
+    ".opencode/skills/linear": ["integration-issues/linear-mcp-label-resolution.md"],
+    ".opencode/skills": [
+      "skill-patterns/parallel-subagent-background-execution.md",
+      "delegation/delegation-hardening-retro.md",
+      "delegation/hardening-patterns.md"
+    ],
+    "tests": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"]
+  }
+}
