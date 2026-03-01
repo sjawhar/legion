@@ -165,6 +165,7 @@ describe("buildIssueState", () => {
       labels: [],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -188,6 +189,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -211,6 +213,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -234,6 +237,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -258,6 +262,7 @@ describe("buildIssueState", () => {
       labels: ["user-feedback-given", "worker-done"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -285,6 +290,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -313,6 +319,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -333,6 +340,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -355,6 +363,7 @@ describe("buildIssueState", () => {
       labels: ["worker-done", "user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -372,59 +381,61 @@ describe("buildIssueState", () => {
   });
 });
 
-  it("skip_with_live_worker_uses_actual_worker_mode_for_session_id", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const data: FetchedIssueData = {
-      issueId: "ENG-21",
-      status: "Testing",
-      labels: [],
-      hasPr: true,
-      prIsDraft: null,
-      hasLiveWorker: true,
-      workerMode: "test",
-      workerStatus: null,
-      hasUserFeedback: false,
-      hasUserInputNeeded: false,
-      hasNeedsApproval: false,
-      hasHumanApproved: false,
-      hasTestPassed: false,
-      hasTestFailed: false,
-      source: null,
-    };
+it("skip_with_live_worker_uses_actual_worker_mode_for_session_id", () => {
+  const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+  const data: FetchedIssueData = {
+    issueId: "ENG-21",
+    status: "Testing",
+    labels: [],
+    hasPr: true,
+    prIsDraft: null,
+    ciStatus: null,
+    hasLiveWorker: true,
+    workerMode: "test",
+    workerStatus: null,
+    hasUserFeedback: false,
+    hasUserInputNeeded: false,
+    hasNeedsApproval: false,
+    hasHumanApproved: false,
+    hasTestPassed: false,
+    hasTestFailed: false,
+    source: null,
+  };
 
-    const state = buildIssueState(data, teamId);
-    expect(state.suggestedAction).toBe("skip");
-    // sessionId should use the tester's mode, not the default implement mode
-    const expectedSessionId = computeSessionId(teamId, "ENG-21", "test");
-    expect(state.sessionId).toBe(expectedSessionId);
-  });
+  const state = buildIssueState(data, teamId);
+  expect(state.suggestedAction).toBe("skip");
+  // sessionId should use the tester's mode, not the default implement mode
+  const expectedSessionId = computeSessionId(teamId, "ENG-21", "test");
+  expect(state.sessionId).toBe(expectedSessionId);
+});
 
-  it("skip_without_worker_mode_falls_back_to_action_to_mode", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const data: FetchedIssueData = {
-      issueId: "ENG-21",
-      status: "Done",
-      labels: [],
-      hasPr: false,
-      prIsDraft: null,
-      hasLiveWorker: false,
-      workerMode: null,
-      workerStatus: null,
-      hasUserFeedback: false,
-      hasUserInputNeeded: false,
-      hasNeedsApproval: false,
-      hasHumanApproved: false,
-      hasTestPassed: false,
-      hasTestFailed: false,
-      source: null,
-    };
+it("skip_without_worker_mode_falls_back_to_action_to_mode", () => {
+  const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+  const data: FetchedIssueData = {
+    issueId: "ENG-21",
+    status: "Done",
+    labels: [],
+    hasPr: false,
+    prIsDraft: null,
+    ciStatus: null,
+    hasLiveWorker: false,
+    workerMode: null,
+    workerStatus: null,
+    hasUserFeedback: false,
+    hasUserInputNeeded: false,
+    hasNeedsApproval: false,
+    hasHumanApproved: false,
+    hasTestPassed: false,
+    hasTestFailed: false,
+    source: null,
+  };
 
-    const state = buildIssueState(data, teamId);
-    expect(state.suggestedAction).toBe("skip");
-    // No workerMode → falls back to ACTION_TO_MODE["skip"] = implement
-    const expectedSessionId = computeSessionId(teamId, "ENG-21", "implement");
-    expect(state.sessionId).toBe(expectedSessionId);
-  });
+  const state = buildIssueState(data, teamId);
+  expect(state.suggestedAction).toBe("skip");
+  // No workerMode → falls back to ACTION_TO_MODE["skip"] = implement
+  const expectedSessionId = computeSessionId(teamId, "ENG-21", "implement");
+  expect(state.sessionId).toBe(expectedSessionId);
+});
 
 describe("approval gate", () => {
   it("backlog_worker_done_adds_needs_approval", () => {
@@ -434,6 +445,7 @@ describe("approval gate", () => {
       labels: ["worker-done"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -457,6 +469,7 @@ describe("approval gate", () => {
       labels: ["needs-approval", "human-approved"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -480,6 +493,7 @@ describe("approval gate", () => {
       labels: ["needs-approval"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -503,6 +517,7 @@ describe("approval gate", () => {
       labels: ["needs-approval", "worker-done"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -528,6 +543,7 @@ describe("approval gate", () => {
       labels: ["needs-approval"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -553,6 +569,7 @@ describe("orphan detection", () => {
       labels: ["worker-active"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -576,6 +593,7 @@ describe("orphan detection", () => {
       labels: ["worker-active"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: true,
       workerMode: null,
       workerStatus: null,
@@ -599,6 +617,7 @@ describe("orphan detection", () => {
       labels: [],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -625,6 +644,7 @@ describe("orphan detection", () => {
         labels: ["worker-active"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -649,6 +669,7 @@ describe("orphan detection", () => {
       labels: ["worker-active", "user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -671,7 +692,7 @@ describe("orphan detection", () => {
 
   it("transition_to_done_is_in_action_to_mode", () => {
     expect("transition_to_done" in ACTION_TO_MODE).toBe(true);
-    expect(ACTION_TO_MODE["transition_to_done"]).toBe("merge");
+    expect(ACTION_TO_MODE.transition_to_done).toBe("merge");
   });
 });
 
@@ -684,6 +705,7 @@ describe("buildCollectedState", () => {
         labels: [],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -701,6 +723,7 @@ describe("buildCollectedState", () => {
         labels: ["worker-done"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -730,6 +753,7 @@ describe("buildCollectedState", () => {
         labels: [],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -760,6 +784,7 @@ describe("buildCollectedState", () => {
         labels: [],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -777,6 +802,7 @@ describe("buildCollectedState", () => {
         labels: ["user-input-needed", "user-feedback-given"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -794,6 +820,7 @@ describe("buildCollectedState", () => {
         labels: ["user-input-needed"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,

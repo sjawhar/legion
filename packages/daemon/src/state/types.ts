@@ -320,10 +320,7 @@ export function createParsedIssue(
     },
 
     get needsCiStatus() {
-      return (
-        this.status === IssueStatus.NEEDS_REVIEW &&
-        this.prRef !== null
-      );
+      return this.status === IssueStatus.NEEDS_REVIEW && this.prRef !== null;
     },
   };
 }
