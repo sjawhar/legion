@@ -85,6 +85,43 @@ Write the integrated learnings to `docs/solutions/`. Optimize for **discoverabil
 - If all learnings are about one topic, write one doc
 - Don't write multiple docs just because there are multiple bullet points
 
+### 4.5. Update Learnings Index
+
+After writing learning files to `docs/solutions/`, update the learnings index so future plans can proactively find them:
+
+1. Get the PR's changed file paths:
+
+   **GitHub:**
+   ```bash
+   gh pr view "$LEGION_ISSUE_ID" --json files --jq '[.files[].path]' -R $OWNER/$REPO
+   ```
+
+   **Linear:**
+   ```bash
+   # Use the PR URL from step 2
+   gh pr view "$PR_URL" --json files --jq '[.files[].path]'
+   ```
+
+2. Read the current index:
+   ```bash
+   cat docs/solutions/index.json
+   ```
+
+3. For each learning file you just wrote:
+   - Extract **directory-level path prefixes** from the PR's changed files. Group to the 3rd or 4th path segment (e.g., `packages/daemon/src/state/decision.ts` → `packages/daemon/src/state`, `.opencode/skills/legion-worker/workflows/plan.md` → `.opencode/skills/legion-worker`).
+   - For each unique prefix, add the learning file path (relative to `docs/solutions/`) to that prefix's array in `index.json`. Create the key if it doesn't exist.
+   - Deduplicate: don't add a learning that's already listed under a key.
+
+4. Write the updated `docs/solutions/index.json`. Preserve all existing entries — only add new mappings.
+
+**Example:** If the PR changed `packages/daemon/src/state/decision.ts` and `.opencode/skills/legion-worker/workflows/plan.md`, and you wrote `docs/solutions/daemon/my-new-learning.md`:
+
+Add `"daemon/my-new-learning.md"` to these index keys (creating them if missing):
+- `"packages/daemon/src/state"`
+- `".opencode/skills/legion-worker"`
+
+**If `docs/solutions/index.json` doesn't exist or is invalid JSON:** Skip this step and note it in the issue comment. The index is advisory — its absence should never block the retro workflow.
+
 ### 5. Commit and Push Learnings
 
 Push to the **existing PR branch** — do NOT create a new branch or bookmark.
