@@ -441,6 +441,54 @@ describe("approval gate", () => {
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("skip");
   });
+
+  it("needs_approval_on_non_backlog_status_follows_normal_flow", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "In Progress",
+      labels: ["needs-approval", "worker-done"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: true,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      source: null,
+    };
+
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
+    // Should follow normal In Progress flow (worker-done → transition_to_testing)
+    // NOT be frozen by leaked needs-approval label
+    expect(state.suggestedAction).toBe("transition_to_testing");
+  });
+
+  it("needs_approval_on_todo_still_works", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Todo",
+      labels: ["needs-approval"],
+      hasPr: false,
+      prIsDraft: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: true,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      source: null,
+    };
+
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
+    expect(state.suggestedAction).toBe("skip");
+  });
 });
 
 describe("orphan detection", () => {

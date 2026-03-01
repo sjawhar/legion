@@ -137,9 +137,16 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     action = "skip";
   } else if (data.labels.includes("worker-active") && !data.hasLiveWorker) {
     action = "remove_worker_active_and_redispatch";
-  } else if (data.hasNeedsApproval && data.hasHumanApproved) {
+  } else if (
+    data.hasNeedsApproval &&
+    data.hasHumanApproved &&
+    (data.status === IssueStatus.BACKLOG || data.status === IssueStatus.TODO)
+  ) {
     action = "transition_to_todo";
-  } else if (data.hasNeedsApproval) {
+  } else if (
+    data.hasNeedsApproval &&
+    (data.status === IssueStatus.BACKLOG || data.status === IssueStatus.TODO)
+  ) {
     action = "skip";
   } else {
     action = suggestAction(
