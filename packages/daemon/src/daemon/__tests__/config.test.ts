@@ -48,7 +48,24 @@ describe("daemon config", () => {
   it("throws when controllerSessionId has invalid format", () => {
     expect(() => {
       loadConfig({ LEGION_CONTROLLER_SESSION_ID: "bad_value" });
-    }).toThrow("LEGION_CONTROLLER_SESSION_ID must start with 'ses_' (got: bad_value)");
+    }).toThrow("LEGION_CONTROLLER_SESSION_ID must be ses_ (got: bad_value)");
+  });
+
+  it("accepts UUID controllerSessionId when runtime is claude-code", () => {
+    const config = loadConfig({
+      LEGION_RUNTIME: "claude-code",
+      LEGION_CONTROLLER_SESSION_ID: "123e4567-e89b-12d3-a456-426614174000",
+    });
+    expect(config.controllerSessionId).toBe("123e4567-e89b-12d3-a456-426614174000");
+  });
+
+  it("rejects non-UUID controllerSessionId when runtime is claude-code", () => {
+    expect(() => {
+      loadConfig({
+        LEGION_RUNTIME: "claude-code",
+        LEGION_CONTROLLER_SESSION_ID: "ses_abc123",
+      });
+    }).toThrow("LEGION_CONTROLLER_SESSION_ID must be a valid UUID");
   });
 
   describe("issueBackend", () => {

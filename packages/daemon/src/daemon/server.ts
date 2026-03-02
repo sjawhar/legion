@@ -5,9 +5,11 @@ import { enrichParsedIssues } from "../state/fetch";
 import {
   CollectedState,
   computeSessionId,
+  type SessionIdFormat,
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
+import { runtimeToSessionFormat } from "./config";
 import type { RuntimeAdapter } from "./runtime/types";
 import type { WorkerEntry } from "./serve-manager";
 import {
@@ -202,7 +204,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               }
             }
 
-            const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
+            const sessionFormat = runtimeToSessionFormat((opts.runtime as "opencode" | "claude-code") ?? "opencode");
+            const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral, sessionFormat);
 
             let actualSessionId = sessionId;
             try {
@@ -382,7 +385,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const parsed = tracker.parseIssues(issues);
             const daemonUrl = `http://127.0.0.1:${server.port}`;
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
-            const state = buildCollectedState(issuesData, opts.teamId);
+            const collectFormat = runtimeToSessionFormat((opts.runtime as "opencode" | "claude-code") ?? "opencode");
+            const state = buildCollectedState(issuesData, opts.teamId, collectFormat);
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

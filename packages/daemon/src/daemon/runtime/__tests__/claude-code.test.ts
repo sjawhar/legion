@@ -130,7 +130,7 @@ describe("ClaudeCodeAdapter", () => {
   });
 
   describe("sendPrompt", () => {
-    it("launches fresh claude when no process running (none)", async () => {
+    it("tries --resume then falls back to --session-id when no process running (none)", async () => {
       const { spawn, calls } = makeSpawn({
         pane_current_command: { exitCode: 1, stdout: "" },
       });
@@ -142,6 +142,8 @@ describe("ClaudeCodeAdapter", () => {
       );
       expect(sendKeysCall).toBeDefined();
       const cmdArg = sendKeysCall?.find((a) => a.includes("claude"));
+      // Should try --resume first, fall back to --session-id
+      expect(cmdArg).toContain("--resume");
       expect(cmdArg).toContain("--session-id");
       expect(cmdArg).toContain("ses_1");
       expect(cmdArg).toContain("--dangerously-skip-permissions");
@@ -243,6 +245,7 @@ describe("ClaudeCodeAdapter", () => {
       expect(sendKeysCall).toBeDefined();
       const cmdArg = sendKeysCall?.find((a) => a.includes("claude"));
       expect(cmdArg).toContain("hello'\\''");
+      // The || separates resume from new-session fallback, not a shell injection
       expect(cmdArg).not.toMatch(/hello';/);
     });
 

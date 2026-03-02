@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import type { SessionIdFormat } from "../state/types";
 
 export interface DaemonConfig {
   daemonPort: number;
@@ -35,6 +36,15 @@ function resolveStateFilePath(legionDir?: string): string {
   return path.join(baseDir, ".legion", "daemon", "workers.json");
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(s: string): boolean {
+  return UUID_RE.test(s);
+}
+
+export function runtimeToSessionFormat(runtime: "opencode" | "claude-code"): SessionIdFormat {
+  return runtime === "claude-code" ? "uuid" : "opencode";
+}
+
 export function validateControllerPrompt(prompt: string | undefined): void {
   if (!prompt) {
     return;
@@ -66,10 +76,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const controllerSessionId = env.LEGION_CONTROLLER_SESSION_ID || undefined;
   const controllerPrompt = env.LEGION_CONTROLLER_PROMPT || undefined;
 
-  if (controllerSessionId && !controllerSessionId.startsWith("ses_")) {
-    throw new Error(
-      `LEGION_CONTROLLER_SESSION_ID must start with 'ses_' (got: ${controllerSessionId})`
-    );
+  const rawRuntime = env.LEGION_RUNTIME;
+  if (rawRuntime !== undefined && rawRuntime !== "opencode" && rawRuntime !== "claude-code") {
+    throw new Error(`LEGION_RUNTIME must be 'opencode' or 'claude-code' (got: ${rawRuntime})`);
+  }
+  const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
+
+  if (controllerSessionId) {
+    const validPrefix = runtime === "claude-code" ? isValidUuid(controllerSessionId) : controllerSessionId.startsWith("ses_");
+    if (!validPrefix) {
+      const expected = runtime === "claude-code" ? "a valid UUID" : "ses_";
+      throw new Error(
+        `LEGION_CONTROLLER_SESSION_ID must be ${expected} (got: ${controllerSessionId})`
+      );
+    }
   }
 
   validateControllerPrompt(controllerPrompt);
@@ -80,11 +100,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   }
   const issueBackend = rawBackend === "github" ? "github" : "linear";
 
-  const rawRuntime = env.LEGION_RUNTIME;
-  if (rawRuntime !== undefined && rawRuntime !== "opencode" && rawRuntime !== "claude-code") {
-    throw new Error(`LEGION_RUNTIME must be 'opencode' or 'claude-code' (got: ${rawRuntime})`);
-  }
-  const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
     teamId: env.LEGION_TEAM_ID,

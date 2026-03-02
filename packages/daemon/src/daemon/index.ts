@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
-import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import { type DaemonConfig, loadConfig, runtimeToSessionFormat, validateControllerPrompt } from "./config";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter } from "./runtime/types";
 import { startServer } from "./server";
@@ -187,7 +187,7 @@ export async function startDaemon(
     if (!teamId) {
       throw new Error("LEGION_TEAM_ID is required when no external controller session ID is set");
     }
-    const requestedSessionId = computeControllerSessionId(teamId);
+    const requestedSessionId = computeControllerSessionId(teamId, runtimeToSessionFormat(config.runtime));
     let actualSessionId: string | undefined;
     try {
       actualSessionId = await resolvedDeps.adapter.createSession(
