@@ -127,6 +127,50 @@ describe("computeControllerSessionId with non-UUID team ID", () => {
   });
 });
 
+describe("computeSessionId with uuid format (Claude Code)", () => {
+  const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it("returns raw UUID when format is uuid", () => {
+    const result = computeSessionId(teamId, "ENG-21", "implement", "uuid");
+    expect(result).toMatch(UUID_RE);
+  });
+
+  it("is deterministic", () => {
+    const r1 = computeSessionId(teamId, "ENG-21", "implement", "uuid");
+    const r2 = computeSessionId(teamId, "ENG-21", "implement", "uuid");
+    expect(r1).toBe(r2);
+  });
+
+  it("differs from opencode format for same inputs", () => {
+    const uuid = computeSessionId(teamId, "ENG-21", "implement", "uuid");
+    const ses = computeSessionId(teamId, "ENG-21", "implement", "opencode");
+    expect(uuid).not.toBe(ses);
+  });
+
+  it("different issues produce different UUIDs", () => {
+    const r1 = computeSessionId(teamId, "ENG-21", "implement", "uuid");
+    const r2 = computeSessionId(teamId, "ENG-22", "implement", "uuid");
+    expect(r1).not.toBe(r2);
+  });
+});
+
+describe("computeControllerSessionId with uuid format (Claude Code)", () => {
+  const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it("returns raw UUID when format is uuid", () => {
+    const result = computeControllerSessionId(teamId, "uuid");
+    expect(result).toMatch(UUID_RE);
+  });
+
+  it("is deterministic", () => {
+    const r1 = computeControllerSessionId(teamId, "uuid");
+    const r2 = computeControllerSessionId(teamId, "uuid");
+    expect(r1).toBe(r2);
+  });
+});
+
 describe("IssueStatus.normalize", () => {
   it("returns direct match unchanged", () => {
     expect(IssueStatus.normalize("Todo")).toBe("Todo");

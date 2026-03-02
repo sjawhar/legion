@@ -13,6 +13,7 @@ import {
   type IssueState,
   IssueStatus,
   type IssueStatusLiteral,
+  type SessionIdFormat,
   WorkerMode,
   type WorkerModeLiteral,
 } from "./types";
@@ -131,7 +132,11 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
 };
 
-export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {
+export function buildIssueState(
+  data: FetchedIssueData,
+  teamId: string,
+  sessionFormat: SessionIdFormat = "opencode",
+): IssueState {
   let action: ActionType;
 
   if (data.hasUserInputNeeded && data.hasUserFeedback) {
@@ -159,7 +164,7 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
   }
 
   const mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
-  const sessionId = computeSessionId(teamId, data.issueId, mode);
+  const sessionId = computeSessionId(teamId, data.issueId, mode, sessionFormat);
 
   return {
     status: data.status,
@@ -178,12 +183,13 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
 
 export function buildCollectedState(
   issuesData: FetchedIssueData[],
-  teamId: string
+  teamId: string,
+  sessionFormat: SessionIdFormat = "opencode",
 ): CollectedState {
   const result: CollectedState = { issues: {} };
 
   for (const data of issuesData) {
-    result.issues[data.issueId] = buildIssueState(data, teamId);
+    result.issues[data.issueId] = buildIssueState(data, teamId, sessionFormat);
   }
 
   return result;

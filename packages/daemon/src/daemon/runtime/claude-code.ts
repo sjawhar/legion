@@ -108,7 +108,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const cmd = `claude --resume '${shellEscape(sessionId)}' -p '${shellEscape(text)}' --dangerously-skip-permissions`;
       result = this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
     } else {
-      const cmd = `claude -p '${shellEscape(text)}' --session-id '${shellEscape(sessionId)}' --dangerously-skip-permissions`;
+      // Try --resume first (handles daemon restart when session exists in Claude's store),
+      // fall back to --session-id for truly new sessions.
+      const resumeCmd = `claude --resume '${shellEscape(sessionId)}' -p '${shellEscape(text)}' --dangerously-skip-permissions`;
+      const newCmd = `claude -p '${shellEscape(text)}' --session-id '${shellEscape(sessionId)}' --dangerously-skip-permissions`;
+      const cmd = `${resumeCmd} || ${newCmd}`;
       result = this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
     }
     if (result.exitCode !== 0) {

@@ -457,33 +457,40 @@ function uuidToSessionId(uuid: string): string {
   return `ses_${hexPart}${base62Chars.join("")}`;
 }
 
+export type SessionIdFormat = "opencode" | "uuid";
+
 /**
  * Compute deterministic session ID for a worker.
- *
- * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
- * Pattern: ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
  *
  * @param teamId - Team identifier (UUID or arbitrary string)
  * @param issueId - Issue identifier (e.g., "ENG-21")
  * @param mode - Worker mode (e.g., "implement", "review")
- * @returns Session ID string matching OpenCode format
+ * @param format - "opencode" for ses_ prefix format, "uuid" for raw UUID (Claude Code)
+ * @returns Session ID string
  */
-export function computeSessionId(teamId: string, issueId: string, mode: WorkerModeLiteral): string {
+export function computeSessionId(
+  teamId: string,
+  issueId: string,
+  mode: WorkerModeLiteral,
+  format: SessionIdFormat = "opencode",
+): string {
   const namespace = teamIdToNamespace(teamId);
   const uuid = uuidv5(`${issueId.toLowerCase()}:${mode}`, namespace);
-  return uuidToSessionId(uuid);
+  return format === "uuid" ? uuid : uuidToSessionId(uuid);
 }
 
 /**
  * Compute deterministic session ID for controller.
  *
- * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.
- *
  * @param teamId - Team identifier (UUID or arbitrary string)
- * @returns Session ID string matching OpenCode format
+ * @param format - "opencode" for ses_ prefix format, "uuid" for raw UUID (Claude Code)
+ * @returns Session ID string
  */
-export function computeControllerSessionId(teamId: string): string {
+export function computeControllerSessionId(
+  teamId: string,
+  format: SessionIdFormat = "opencode",
+): string {
   const namespace = teamIdToNamespace(teamId);
   const uuid = uuidv5("controller", namespace);
-  return uuidToSessionId(uuid);
+  return format === "uuid" ? uuid : uuidToSessionId(uuid);
 }
