@@ -31,4 +31,9 @@ export const COMPACTION_CONTEXT_TEMPLATE = `When summarizing this session, you M
 - Do NOT invent, add, or modify constraints
 - If no explicit constraints exist, write "None"
 
+## 7. Indexed Content
+- List any context_search sources that were indexed during this session
+- Preserve source labels so the agent can search after compaction
+- If no sources were indexed, write "None"
+
 This context is critical for maintaining continuity after compaction.`;
