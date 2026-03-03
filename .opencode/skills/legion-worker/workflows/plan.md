@@ -12,7 +12,7 @@ digraph plan_workflow {
     fetch [label="1. Fetch Issue"];
     metis [label="1.5. Metis Pre-Analysis"];
     critical [label="Critical ambiguities?" shape=diamond];
-    research_plan [label="2. /workflows:plan (autonomous)"];
+    research_plan [label="2. /ce:plan (autonomous)"];
     unclear [label="Requirements unclear?" shape=diamond];
     executable [label="3. /superpowers/writing-plans"];
     review [label="4. /plan-review"];
@@ -82,9 +82,9 @@ Metis pre-analysis:
 Create the implementation plan accounting for these findings.
 ```
 
-### 2. Invoke /workflows:plan (Autonomous)
+### 2. Invoke /ce:plan (Autonomous)
 
-Invoke `/workflows:plan` with this context:
+Invoke `/ce:plan` with this context:
 
 ```
 You are running autonomously without user interaction.
@@ -242,7 +242,7 @@ Then remove `worker-active`:
 |------|--------|------------|
 | Fetch | Get issue details | `gh issue view $ISSUE_NUMBER ...` or `linear_linear(action="get", ...)` |
 | Pre-Analysis | Identify risks | Metis agent (background) |
-| Research + Structure | Create plan | `/workflows:plan` (autonomous) |
+| Research + Structure | Create plan | `/ce:plan` (autonomous) |
 | Executable | Bite-sized tasks | `/superpowers/writing-plans` |
 | Validate | Review plan | `/plan-review` (iterate) |
 | Post | Full plan to issue | `gh issue comment ...` or `linear_linear(action="comment", ...)` |
@@ -271,4 +271,4 @@ Do NOT ask the user questions interactively. If uncertain:
 | Posting summary instead of full plan | Post complete executable plan from /superpowers/writing-plans |
 | Asking user questions | Use legion-oracle first, then assumptions, escalate only as last resort |
 | Skipping plan review iteration | Always iterate until /plan-review passes or max 3 attempts |
-| Ignoring Metis pre-analysis | Always pass Metis findings to /workflows:plan as context |
+| Ignoring Metis pre-analysis | Always pass Metis findings to /ce:plan as context |

@@ -39,7 +39,7 @@ gh pr view "$LEGION_ISSUE_ID" --json title,body,headRefName
 
 ### 2. Run Review
 
-Invoke `/compound-engineering/workflows/review` with the branch name.
+Invoke `/ce:review` with the branch name.
 
 Pass the context gathered in step 1. The review skill will:
 - Dispatch multiple reviewer agents in parallel
