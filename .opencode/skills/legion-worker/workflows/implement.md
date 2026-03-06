@@ -203,11 +203,31 @@ convert back to draft (`gh pr ready --undo`) if needed.
 
 ### 8. Exit
 
-Add `worker-done` label to signal the controller to transition to the Testing phase.
+**CRITICAL: The `worker-done` label is how the controller knows you finished.** If you skip this,
+the issue silently stalls and no one advances it. This is the MOST IMPORTANT step.
+
+First, verify the PR is still open (force-pushes can accidentally close PRs):
 
 **GitHub:**
+```bash
+PR_STATE=$(gh pr view $ISSUE_NUMBER --json state --jq '.state' -R $OWNER/$REPO 2>/dev/null)
+if [ "$PR_STATE" = "CLOSED" ]; then
+  gh pr reopen $ISSUE_NUMBER -R $OWNER/$REPO
+  echo "PR was accidentally closed by force-push, reopened"
+fi
 ```
+
+Then add the label and verify it was applied:
+
+**GitHub:**
+```bash
 gh issue edit $ISSUE_NUMBER --add-label "worker-done" --remove-label "worker-active" -R $OWNER/$REPO
+# Verify the label was actually applied
+LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '[.labels[].name] | join(",")' -R $OWNER/$REPO)
+if ! echo "$LABELS" | grep -q "worker-done"; then
+  echo "WARNING: worker-done label not applied, retrying"
+  gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
+fi
 ```
 
 **Linear:**
@@ -279,11 +299,31 @@ Reply in PR comment threads acknowledging fixes. Reference specific changes made
 
 ### 6. Exit
 
-Add `worker-done` label to signal the controller. The controller has already transitioned the issue to In Progress before resuming you, so `worker-done` will trigger the testing gate — your fixes get behaviorally verified before the reviewer sees them again.
+**CRITICAL: The `worker-done` label is how the controller knows you finished.** If you skip this,
+the issue silently stalls and no one advances it. This is the MOST IMPORTANT step.
+
+First, verify the PR is still open (force-pushes can accidentally close PRs):
 
 **GitHub:**
+```bash
+PR_STATE=$(gh pr view $ISSUE_NUMBER --json state --jq '.state' -R $OWNER/$REPO 2>/dev/null)
+if [ "$PR_STATE" = "CLOSED" ]; then
+  gh pr reopen $ISSUE_NUMBER -R $OWNER/$REPO
+  echo "PR was accidentally closed by force-push, reopened"
+fi
 ```
+
+Then add the label and verify it was applied:
+
+**GitHub:**
+```bash
 gh issue edit $ISSUE_NUMBER --add-label "worker-done" --remove-label "worker-active" -R $OWNER/$REPO
+# Verify the label was actually applied
+LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '[.labels[].name] | join(",")' -R $OWNER/$REPO)
+if ! echo "$LABELS" | grep -q "worker-done"; then
+  echo "WARNING: worker-done label not applied, retrying"
+  gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
+fi
 ```
 
 **Linear:**

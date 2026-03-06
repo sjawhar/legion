@@ -90,19 +90,33 @@ Write the integrated learnings to `docs/solutions/`. Optimize for **discoverabil
 Push to the **existing PR branch** — do NOT create a new branch or bookmark.
 The implementer already created the branch when opening the PR.
 
+**Critical: Create a new change first** — do NOT describe the current change, which
+contains the implementer's code. The retro docs go in a separate commit.
+
 ```bash
+jj new  # Create fresh change for retro docs (preserves implementer's commit)
+# ... write docs/solutions/ files ...
 jj describe -m "$LEGION_ISSUE_ID: retro learnings"
-jj git push  # Pushes to the existing tracked branch
+```
+
+Then ensure the bookmark includes this new change and push:
+
+```bash
+# Find the bookmark name (usually matches the issue ID or branch name)
+jj bookmark list
+# Move bookmark forward to include the retro change
+jj bookmark set "$BOOKMARK_NAME" -r @
+jj git push
 ```
 
 **If jj says there's no tracked branch:** The implementer should have created this branch.
 Verify whether the bookmark exists:
 ```bash
-jj bookmark list  # Should see a bookmark matching $LEGION_ISSUE_ID
+jj bookmark list  # Should see a bookmark matching the issue ID or branch name
 ```
-- **If the bookmark exists:** move it to the current change and push:
+- **If the bookmark exists but isn't at @:** move it forward and push:
   ```bash
-  jj bookmark set "$LEGION_ISSUE_ID" -r @
+  jj bookmark set "$BOOKMARK_NAME" -r @
   jj git push
   ```
 - **If the bookmark does NOT exist:** something went wrong — the implementer should have

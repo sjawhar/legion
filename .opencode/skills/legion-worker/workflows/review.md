@@ -106,11 +106,23 @@ gh pr ready "$LEGION_ISSUE_ID"
 
 ### 6. Signal Completion
 
-Add `worker-done` to the issue, then exit:
+**CRITICAL: The `worker-done` label is how the controller knows you finished.** If you skip this,
+the issue silently stalls. This is the MOST IMPORTANT step.
 
-- **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO`
-- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "worker-done"])`
+**GitHub:**
+```bash
+gh issue edit $ISSUE_NUMBER --add-label "worker-done" --remove-label "worker-active" -R $OWNER/$REPO
+# Verify the label was actually applied
+LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '[.labels[].name] | join(",")' -R $OWNER/$REPO)
+if ! echo "$LABELS" | grep -q "worker-done"; then
+  echo "WARNING: worker-done label not applied, retrying"
+  gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
+fi
+```
 
-Then remove `worker-active`:
-- **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
-- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
+**Linear:**
+```
+issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
+current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
+linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done"])
+```
