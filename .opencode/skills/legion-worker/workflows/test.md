@@ -166,11 +166,19 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Behavioral Test Re
 
 ### 7. Signal Completion
 
+**CRITICAL: The labels are how the controller knows you finished.** If you skip this,
+the issue silently stalls. This is the MOST IMPORTANT step.
+
 **If all criteria pass:**
 
 **GitHub:**
-```
+```bash
 gh issue edit $ISSUE_NUMBER --add-label "worker-done" --add-label "test-passed" --remove-label "worker-active" -R $OWNER/$REPO
+# Verify labels applied
+LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '[.labels[].name] | join(",")' -R $OWNER/$REPO)
+if ! echo "$LABELS" | grep -q "worker-done"; then
+  gh issue edit $ISSUE_NUMBER --add-label "worker-done" --add-label "test-passed" -R $OWNER/$REPO
+fi
 ```
 
 **Linear:**
@@ -183,8 +191,13 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 **If any criterion fails:**
 
 **GitHub:**
-```
+```bash
 gh issue edit $ISSUE_NUMBER --add-label "worker-done" --add-label "test-failed" --remove-label "worker-active" -R $OWNER/$REPO
+# Verify labels applied
+LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '[.labels[].name] | join(",")' -R $OWNER/$REPO)
+if ! echo "$LABELS" | grep -q "worker-done"; then
+  gh issue edit $ISSUE_NUMBER --add-label "worker-done" --add-label "test-failed" -R $OWNER/$REPO
+fi
 ```
 
 **Linear:**
@@ -193,8 +206,6 @@ issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
 current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
 linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done", "test-failed"])
 ```
-
-Exit immediately after signaling.
 
 ## Blocking on User Input
 
