@@ -211,9 +211,10 @@ function mergeOutputCompression(
   return {
     ...base,
     ...override,
-    excludeTools: base.excludeTools || override.excludeTools
-      ? [...new Set([...(base.excludeTools ?? []), ...(override.excludeTools ?? [])])]
-      : undefined,
+    excludeTools:
+      base.excludeTools || override.excludeTools
+        ? [...new Set([...(base.excludeTools ?? []), ...(override.excludeTools ?? [])])]
+        : undefined,
   };
 }
 

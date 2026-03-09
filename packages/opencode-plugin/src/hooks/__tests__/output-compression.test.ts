@@ -319,7 +319,7 @@ describe("createOutputCompressionHook", () => {
 
   it("Go panic output not compressed", async () => {
     const hook = makeHook({ thresholdBytes: 20 });
-    const raw = "goroutine 1 [running]:\nmain.main()\n\t/tmp/main.go:10 +0x40\n" + "x".repeat(200);
+    const raw = `goroutine 1 [running]:\nmain.main()\n\t/tmp/main.go:10 +0x40\n${"x".repeat(200)}`;
     const output = { title: "bash", output: raw, metadata: {} };
 
     await hook["tool.execute.after"]?.(
@@ -334,8 +334,7 @@ describe("createOutputCompressionHook", () => {
 
   it("Rust panic output not compressed", async () => {
     const hook = makeHook({ thresholdBytes: 20 });
-    const raw =
-      "thread 'main' panicked at 'index out of bounds':\nsrc/main.rs:5:10\n" + "x".repeat(200);
+    const raw = `thread 'main' panicked at 'index out of bounds':\nsrc/main.rs:5:10\n${"x".repeat(200)}`;
     const output = { title: "bash", output: raw, metadata: {} };
 
     await hook["tool.execute.after"]?.(
@@ -351,8 +350,7 @@ describe("createOutputCompressionHook", () => {
   it("false positive guard: Traceback past 2000 chars is compressed", async () => {
     const hook = makeHook({ thresholdBytes: 20 });
     const padding = "a".repeat(2100);
-    const raw =
-      padding + '\nTraceback (most recent call last):\n  File "main.py"\nValueError: boom';
+    const raw = `${padding}\nTraceback (most recent call last):\n  File "main.py"\nValueError: boom`;
     const output = { title: "bash", output: raw, metadata: {} };
 
     await hook["tool.execute.after"]?.(
