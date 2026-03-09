@@ -24,20 +24,24 @@ POST /state/collect {backend, issues} → backend.parseIssues() → enrichParsed
 
 The core of the controller's decision-making. Key transitions:
 
-| Status | worker-done? | live worker? | PR state | test labels | → Action |
-|--------|-------------|-------------|----------|-------------|----------|
+| Status | worker-done? | live worker? | PR state | CI status | → Action |
+|--------|-------------|-------------|----------|-----------|----------|
 | Backlog | yes | — | — | — | `transition_to_todo` |
 | Todo | no | no | — | — | `dispatch_planner` |
 | In Progress | yes | — | — | — | `transition_to_testing` |
 | Testing | no | no | — | — | `dispatch_tester` |
 | Testing | yes | — | — | test-passed | `transition_to_needs_review` |
 | Testing | yes | — | — | !test-passed | `resume_implementer_for_test_failure` |
-| Needs Review | yes | — | ready | — | `transition_to_retro` |
+| Needs Review | yes | — | ready | passing/null | `transition_to_retro` |
+| Needs Review | yes | — | ready | failing | `resume_implementer_for_ci_failure` |
+| Needs Review | yes | — | ready | pending | `retry_ci_check` |
 | Needs Review | yes | — | draft | — | `resume_implementer_for_changes` |
 | Needs Review | yes | — | no PR | — | `investigate_no_pr` |
 | Retro | yes | — | — | — | `dispatch_merger` |
 | Retro | no | yes | — | — | `skip` (live worker running) |
 | Retro | no | no | — | — | `dispatch_implementer_for_retro` |
+| Needs Review | no | no | — | failing | `resume_implementer_for_ci_failure` |
+| Needs Review | no | no | — | pending | `retry_ci_check` |
 | Any | — | yes | — | — | `skip` (worker already running) |
 
 **Note:** The state machine only checks `hasTestPassed` (presence of `test-passed` label). `hasTestFailed`/`test-failed` is computed and wired but not used in decision logic — it exists for human visibility and controller label cleanup. `worker-done` without `test-passed` is treated as failure regardless of whether `test-failed` is present.

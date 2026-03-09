@@ -11,6 +11,7 @@ import {
   enrichParsedIssues,
   fetchAllIssueData,
   GitHubAPIError,
+  getCiStatusBatch,
   getLiveWorkers,
   getPrDraftStatusBatch,
 } from "../fetch";
@@ -406,6 +407,301 @@ describe("getPrDraftStatusBatch", () => {
 });
 
 // =============================================================================
+// TestGetCiStatusBatch
+// =============================================================================
+
+describe("getCiStatusBatch", () => {
+  it("returns passing for SUCCESS status", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": "passing" });
+  });
+
+  it("returns failing for FAILURE status", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": "failing" });
+  });
+
+  it("returns failing for ERROR status", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "ERROR" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": "failing" });
+  });
+
+  it("returns pending for PENDING status", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": "pending" });
+  });
+
+  it("returns pending for EXPECTED status", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "EXPECTED" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": "pending" });
+  });
+
+  it("returns null when statusCheckRollup is null (no checks configured)", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: null } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": null });
+  });
+
+  it("returns null when commits nodes is empty", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: { nodes: [] },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": null });
+  });
+
+  it("returns null for missing PR", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = { data: { repo0: { pr0: null } } };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 999 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": null });
+  });
+
+  it("handles multiple PRs across repos", async () => {
+    const queriesReceived: string[] = [];
+    const runner: CommandRunner = async (cmd: string[]) => {
+      const query = cmd[cmd.length - 1];
+      queriesReceived.push(query);
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+              },
+            },
+          },
+          repo1: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      {
+        "ENG-21": { owner: "org", repo: "repo1", number: 1 },
+        "ENG-22": { owner: "org", repo: "repo2", number: 2 },
+      },
+      runner
+    );
+
+    expect(queriesReceived).toHaveLength(1);
+    expect(result).toEqual({ "ENG-21": "passing", "ENG-22": "failing" });
+  });
+
+  it("retries on failure with exponential backoff", async () => {
+    let callCount = 0;
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      callCount++;
+      if (callCount < 3) {
+        return { stdout: "", stderr: "rate limited", exitCode: 1 };
+      }
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": "passing" });
+    expect(callCount).toBe(3);
+  });
+
+  it("throws GitHubAPIError after all retries fail", async () => {
+    let callCount = 0;
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      callCount++;
+      return { stdout: "", stderr: "rate limited", exitCode: 1 };
+    };
+
+    await Promise.resolve(
+      expect(
+        getCiStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
+      ).rejects.toThrow(GitHubAPIError)
+    );
+    expect(callCount).toBe(3);
+  });
+
+  it("returns empty result for empty pr_refs", async () => {
+    let callCount = 0;
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      callCount++;
+      return { stdout: "{}", stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch({}, runner);
+    expect(result).toEqual({});
+    expect(callCount).toBe(0);
+  });
+
+  it("returns null for unknown status string", async () => {
+    const runner: CommandRunner = async (_cmd: string[]) => {
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              commits: {
+                nodes: [{ commit: { statusCheckRollup: { state: "UNKNOWN_VALUE" } } }],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+    expect(result).toEqual({ "ENG-21": null });
+  });
+});
+
+// =============================================================================
 // TestFetchAllIssueData
 // =============================================================================
 
@@ -525,6 +821,106 @@ describe("enrichParsedIssues", () => {
       expect(result).toHaveLength(1);
       expect(result[0].prIsDraft).toBeNull();
       expect(result[0].hasPr).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("enriches issues with CI status from GitHub API", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
+    ) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async (cmd: string[]) => {
+        const queryArg = cmd[cmd.length - 1];
+        if (queryArg.includes("isDraft")) {
+          return {
+            stdout: JSON.stringify({ data: { repo0: { pr0: { isDraft: false } } } }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (queryArg.includes("statusCheckRollup")) {
+          return {
+            stdout: JSON.stringify({
+              data: {
+                repo0: {
+                  pr0: {
+                    commits: {
+                      nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+                    },
+                  },
+                },
+              },
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      };
+
+      const issues = [
+        createParsedIssue("ENG-21", "Needs Review", ["worker-done"], {
+          owner: "owner",
+          repo: "repo",
+          number: 1,
+        }),
+      ];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].ciStatus).toBe("passing");
+      expect(result[0].prIsDraft).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sets ciStatus to null when no PR", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      throw new Error("Connection refused");
+    }) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({ stdout: "", stderr: "", exitCode: 1 });
+      const issues = [createParsedIssue("ENG-21", "Needs Review", [], null)];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].ciStatus).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("sets ciStatus to null on API failure", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify([]), { status: 200 })
+    ) as unknown as typeof fetch;
+
+    try {
+      const mockRunner: CommandRunner = async () => ({
+        stdout: "",
+        stderr: "rate limited",
+        exitCode: 1,
+      });
+
+      const issues = [
+        createParsedIssue("ENG-21", "Needs Review", [], {
+          owner: "owner",
+          repo: "repo",
+          number: 1,
+        }),
+      ];
+      const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].ciStatus).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
     }
