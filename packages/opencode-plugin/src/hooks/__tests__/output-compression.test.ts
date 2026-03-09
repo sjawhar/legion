@@ -183,4 +183,115 @@ describe("createOutputCompressionHook", () => {
     expect(store).toBeInstanceOf(ContentStore);
     expect(hook.getStore()).toBe(store);
   });
+
+  it("non-string output passes through without throwing", async () => {
+    const hook = makeHook({ thresholdBytes: 10 });
+    const output = {
+      title: "bash",
+      output: undefined as unknown as string,
+      metadata: {},
+    };
+
+    await hook["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "s-1", callID: "c-ns", args: {} },
+      output
+    );
+
+    expect(output.output).toBeUndefined();
+    expect(hook.getStats().passedThrough).toBe(1);
+  });
+
+  it("compression failure logs warning and preserves raw output", async () => {
+    const hook = makeHook({ thresholdBytes: 10 });
+    const store = hook.getStore();
+    const originalIndex = store.index.bind(store);
+    store.index = () => {
+      throw new Error("simulated failure");
+    };
+    const raw = "some large output\n".repeat(50);
+    const output = {
+      title: "bash",
+      output: raw,
+      metadata: {},
+    };
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await hook["tool.execute.after"]?.(
+        { tool: "bash", sessionID: "s-1", callID: "c-cf", args: {} },
+        output
+      );
+
+      expect(output.output).toBe(raw);
+      expect(hook.getStats().passedThrough).toBe(1);
+      expect(hook.getStats().compressed).toBe(0);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toBe(
+        "[legion-plugin] Output compression failed:"
+      );
+    } finally {
+      warnSpy.mockRestore();
+      store.index = originalIndex;
+    }
+  });
+
+  it("Python traceback output not compressed", async () => {
+    const hook = makeHook({ thresholdBytes: 20 });
+    const raw = "Traceback (most recent call last):\n  File \"main.py\", line 10\n    raise ValueError(\"boom\")\nValueError: boom\n" + "x".repeat(200);
+    const output = { title: "bash", output: raw, metadata: {} };
+
+    await hook["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "s-1", callID: "c-py", args: {} },
+      output
+    );
+
+    expect(output.output).toBe(raw);
+    expect(output.output).not.toContain("[Compressed]");
+    expect(hook.getStats().passedThrough).toBe(1);
+  });
+
+  it("Go panic output not compressed", async () => {
+    const hook = makeHook({ thresholdBytes: 20 });
+    const raw = "goroutine 1 [running]:\nmain.main()\n\t/tmp/main.go:10 +0x40\n" + "x".repeat(200);
+    const output = { title: "bash", output: raw, metadata: {} };
+
+    await hook["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "s-1", callID: "c-go", args: {} },
+      output
+    );
+
+    expect(output.output).toBe(raw);
+    expect(output.output).not.toContain("[Compressed]");
+    expect(hook.getStats().passedThrough).toBe(1);
+  });
+
+  it("Rust panic output not compressed", async () => {
+    const hook = makeHook({ thresholdBytes: 20 });
+    const raw = "thread 'main' panicked at 'index out of bounds':\nsrc/main.rs:5:10\n" + "x".repeat(200);
+    const output = { title: "bash", output: raw, metadata: {} };
+
+    await hook["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "s-1", callID: "c-rs", args: {} },
+      output
+    );
+
+    expect(output.output).toBe(raw);
+    expect(output.output).not.toContain("[Compressed]");
+    expect(hook.getStats().passedThrough).toBe(1);
+  });
+
+  it("false positive guard: Traceback past 2000 chars is compressed", async () => {
+    const hook = makeHook({ thresholdBytes: 20 });
+    const padding = "a".repeat(2100);
+    const raw = padding + "\nTraceback (most recent call last):\n  File \"main.py\"\nValueError: boom";
+    const output = { title: "bash", output: raw, metadata: {} };
+
+    await hook["tool.execute.after"]?.(
+      { tool: "bash", sessionID: "s-1", callID: "c-fp", args: {} },
+      output
+    );
+
+    expect(output.output).toContain("[Compressed]");
+    expect(hook.getStats().compressed).toBe(1);
+  });
 });

@@ -93,6 +93,24 @@ describe("ContentStore", () => {
     store.close();
   });
 
+  it("normalizes stronger BM25 matches to higher scores and orders results by relevance", () => {
+    const store = new ContentStore({ dbPath: makeDbPath() });
+    const normalize = (
+      store as unknown as { normalizeFtsScore: (raw: number, weight: number) => number }
+    ).normalizeFtsScore;
+
+    expect(normalize(-5.2, 1)).toBeGreaterThan(normalize(-0.2, 1));
+
+    store.index({ content: "legion legion legion workers", source: "high" });
+    store.index({ content: "legion workers", source: "low" });
+
+    const matches = store.search({ queries: ["legion workers"] });
+    expect(matches.length).toBeGreaterThan(1);
+    expect(matches[0]?.source).toBe("high");
+
+    store.close();
+  });
+
   it("filters results by source", () => {
     const store = new ContentStore({ dbPath: makeDbPath() });
     store.index({ content: "Alpha source content", source: "alpha" });
@@ -134,14 +152,67 @@ describe("ContentStore", () => {
     store.close();
   });
 
-  it("removes DB file on close", () => {
+  it("applies max-size cap using replacement bytes when re-indexing same source", () => {
+    const store = new ContentStore({ dbPath: makeDbPath(), maxSizeMB: 0.0012 });
+    const first = "a".repeat(500);
+    const replacement = "b".repeat(600);
+
+    store.index({ content: first, source: "sess-a:bash:call-1", session: "sess-a" });
+    expect(() => {
+      store.index({ content: replacement, source: "sess-a:bash:call-1", session: "sess-a" });
+    }).not.toThrow();
+
+    const stats = store.getStats();
+    expect(stats.totalBytes).toBe(Buffer.byteLength(replacement, "utf8"));
+    expect(stats.totalChunks).toBeGreaterThan(0);
+
+    store.close();
+  });
+
+  it("preserves existing content and stats when re-index transaction fails", () => {
+    const store = new ContentStore({ dbPath: makeDbPath() });
+    const source = "sess-x:bash:call-1";
+    const content = "original content stays indexed";
+    store.index({ content, source, session: "sess-x" });
+    const before = store.getStats();
+
+    (store as unknown as { db: { exec: (sql: string) => void } }).db.exec(
+      "DROP TABLE trigram_index"
+    );
+
+    expect(() => {
+      store.index({ content: "replacement should fail", source, session: "sess-x" });
+    }).toThrow();
+
+    const after = store.getStats();
+    expect(after.totalBytes).toBe(before.totalBytes);
+    expect(after.totalChunks).toBe(before.totalChunks);
+    expect(store.search({ queries: ["original"] })[0]?.source).toBe(source);
+
+    store.close();
+  });
+
+  it("removes DB and WAL sidecar files on close", () => {
     const dbPath = makeDbPath();
     const store = new ContentStore({ dbPath });
     store.index({ content: "cleanup content", source: "cleanup" });
 
+    const walPath = `${dbPath}-wal`;
+    const shmPath = `${dbPath}-shm`;
+    if (!fs.existsSync(walPath)) {
+      fs.writeFileSync(walPath, "");
+    }
+    if (!fs.existsSync(shmPath)) {
+      fs.writeFileSync(shmPath, "");
+    }
+
     expect(fs.existsSync(dbPath)).toBe(true);
+    expect(fs.existsSync(walPath)).toBe(true);
+    expect(fs.existsSync(shmPath)).toBe(true);
     store.close();
     expect(fs.existsSync(dbPath)).toBe(false);
+    expect(fs.existsSync(walPath)).toBe(false);
+    expect(fs.existsSync(shmPath)).toBe(false);
   });
 
   it("enforces max size cap", () => {
@@ -229,6 +300,38 @@ describe("ContentStore", () => {
     const sess2 = store.search({ queries: ["content"], session: "sess-2" });
     expect(sess2.length).toBeGreaterThan(0);
     expect(sess2[0]?.content).toContain("Beta");
+
+    store.close();
+  });
+
+  it("deletes only one session's indexed content and updates stats", () => {
+    const store = new ContentStore({ dbPath: makeDbPath() });
+
+    store.index({
+      content: "alpha session private payload",
+      source: "session-a:bash:1",
+      session: "session-a",
+    });
+    store.index({
+      content: "beta session private payload",
+      source: "session-b:bash:1",
+      session: "session-b",
+    });
+
+    const before = store.getStats();
+    expect(before.sources).toContain("session-a:bash:1");
+    expect(before.sources).toContain("session-b:bash:1");
+
+    store.deleteSession("session-a");
+
+    expect(store.search({ queries: ["private"], session: "session-a" })).toEqual([]);
+    expect(store.search({ queries: ["private"], session: "session-b" }).length).toBeGreaterThan(0);
+
+    const after = store.getStats();
+    expect(after.sources).not.toContain("session-a:bash:1");
+    expect(after.sources).toContain("session-b:bash:1");
+    expect(after.totalBytes).toBeLessThan(before.totalBytes);
+    expect(after.totalChunks).toBeLessThan(before.totalChunks);
 
     store.close();
   });

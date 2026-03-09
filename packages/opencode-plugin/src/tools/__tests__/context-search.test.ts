@@ -126,8 +126,6 @@ describe("context_search", () => {
 
     expect(receivedSession).toBe("session-1");
   });
-  });
-
 
   it("rejects limit of 0", async () => {
     const store = {
