@@ -109,8 +109,8 @@ The skill handles:
 
 **If the skill determines requirements are fundamentally unclear** (even after legion-oracle + assumptions):
 1. Add `user-input-needed` label:
-   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
 2. Post a comment explaining what needs clarification:
    - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
@@ -202,8 +202,8 @@ This spawns parallel cross-family reviewers:
 
 **Max 3 iterations.** If still failing:
 1. Add `user-input-needed` label:
-   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" -R $OWNER/$REPO`
-   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current + "user-input-needed"])`
+   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
 2. Post a comment explaining unresolved review issues:
    - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`

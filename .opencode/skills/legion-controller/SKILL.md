@@ -97,7 +97,7 @@ about what to do:
 
 | suggestedAction | Signals | Controller should... |
 |-----------------|---------|---------------------|
-| `skip` | `hasPr: true`, status: In Progress | PR opened but no `worker-done` yet; wait for implementer to finish and add `worker-done` (which triggers testing gate) |
+| `skip` | `hasPr: true`, status: In Progress, `hasLiveWorker: true` | Live implementer still working on PR; wait for it to finish |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
 
@@ -185,6 +185,20 @@ legion dispatch "$ISSUE_IDENTIFIER" implement \
 signaling completion. If CI is failing when the controller sees a PR, the implementer didn't
 finish — re-dispatch an implementer with the CI failure output. The tester should also check
 CI status and include it in the review.
+
+### Post-Merge Monitoring
+
+If an issue remains in Retro after the merger exits, verify PR merge status:
+```bash
+gh pr view "$LEGION_ISSUE_ID" --json state,merged
+```
+
+If the PR is merged but the issue isn't closed, close it explicitly:
+```bash
+gh issue close $ISSUE_NUMBER -R $OWNER/$REPO
+```
+
+This handles edge cases where the merge workflow's explicit close failed or where GitHub auto-close didn't trigger. The `transition_to_done` action type exists in the state machine for this purpose.
 
 ### 4. Route Triage
 

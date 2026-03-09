@@ -36,9 +36,17 @@ The core of the controller's decision-making. Key transitions:
 | Needs Review | yes | — | draft | — | `resume_implementer_for_changes` |
 | Needs Review | yes | — | no PR | — | `investigate_no_pr` |
 | Retro | yes | — | — | — | `dispatch_merger` |
+| Retro | no | yes | — | — | `skip` (live worker running) |
+| Retro | no | no | — | — | `dispatch_implementer_for_retro` |
 | Any | — | yes | — | — | `skip` (worker already running) |
 
 **Note:** The state machine only checks `hasTestPassed` (presence of `test-passed` label). `hasTestFailed`/`test-failed` is computed and wired but not used in decision logic — it exists for human visibility and controller label cleanup. `worker-done` without `test-passed` is treated as failure regardless of whether `test-failed` is present.
+
+**Hardening notes (from #65):**
+- `needs-approval` checks are scoped to Backlog/Todo statuses only — prevents blocking In Progress issues that happen to have the label.
+- In Progress no longer returns `skip` when `hasPr && !hasLiveWorker` — this caused a deadlock when workers died after creating a PR.
+- `skip` action uses the actual `workerMode` from the daemon (when available) for sessionId computation, instead of defaulting to `implement`.
+- `transition_to_done` action exists for explicit Done transitions (mapped to `merge` mode).
 
 ## Anti-Patterns
 

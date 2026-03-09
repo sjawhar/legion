@@ -55,9 +55,6 @@ export function suggestAction(
       if (hasWorkerDone) {
         return "transition_to_testing";
       }
-      if (hasPr && !hasLiveWorker) {
-        return "skip";
-      }
       if (hasLiveWorker) {
         return "skip";
       }
@@ -98,7 +95,7 @@ export function suggestAction(
         return "dispatch_merger";
       }
       if (hasLiveWorker) {
-        return "resume_implementer_for_retro";
+        return "skip";
       }
       return "dispatch_implementer_for_retro";
 
@@ -122,6 +119,7 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   transition_to_needs_review: WorkerMode.REVIEW,
   transition_to_todo: WorkerMode.PLAN,
   transition_to_retro: WorkerMode.IMPLEMENT,
+  transition_to_done: WorkerMode.MERGE,
   relay_user_feedback: WorkerMode.IMPLEMENT,
   remove_worker_active_and_redispatch: WorkerMode.IMPLEMENT,
   add_needs_approval: WorkerMode.PLAN,
@@ -130,6 +128,15 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   transition_to_testing: WorkerMode.TEST,
   resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
 };
+
+const VALID_WORKER_MODES = new Set<string>([
+  WorkerMode.ARCHITECT,
+  WorkerMode.PLAN,
+  WorkerMode.IMPLEMENT,
+  WorkerMode.TEST,
+  WorkerMode.REVIEW,
+  WorkerMode.MERGE,
+]);
 
 export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {
   let action: ActionType;
@@ -140,9 +147,16 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     action = "skip";
   } else if (data.labels.includes("worker-active") && !data.hasLiveWorker) {
     action = "remove_worker_active_and_redispatch";
-  } else if (data.hasNeedsApproval && data.hasHumanApproved) {
+  } else if (
+    data.hasNeedsApproval &&
+    data.hasHumanApproved &&
+    (data.status === IssueStatus.BACKLOG || data.status === IssueStatus.TODO)
+  ) {
     action = "transition_to_todo";
-  } else if (data.hasNeedsApproval) {
+  } else if (
+    data.hasNeedsApproval &&
+    (data.status === IssueStatus.BACKLOG || data.status === IssueStatus.TODO)
+  ) {
     action = "skip";
   } else {
     action = suggestAction(
@@ -158,7 +172,18 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
     }
   }
 
-  const mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
+  // Use actual worker mode for skip actions when available
+  let mode: WorkerModeLiteral;
+  if (
+    action === "skip" &&
+    data.hasLiveWorker &&
+    data.workerMode &&
+    VALID_WORKER_MODES.has(data.workerMode)
+  ) {
+    mode = data.workerMode as WorkerModeLiteral;
+  } else {
+    mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
+  }
   const sessionId = computeSessionId(teamId, data.issueId, mode);
 
   return {

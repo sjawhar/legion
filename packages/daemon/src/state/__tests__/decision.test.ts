@@ -107,9 +107,9 @@ describe("suggestAction", () => {
     expect(action).toBe("dispatch_implementer_for_retro");
   });
 
-  it("retro_with_live_worker resumes implementer", () => {
+  it("retro_with_live_worker_skips", () => {
     const action = suggestAction(IssueStatus.RETRO, false, true, null, false, false);
-    expect(action).toBe("resume_implementer_for_retro");
+    expect(action).toBe("skip");
   });
 
   it("retry_pr_check_is_distinct_from_skip", () => {
@@ -120,9 +120,9 @@ describe("suggestAction", () => {
     expect(retry).not.toBe(skip);
   });
 
-  it("in_progress_has_pr_no_worker_done_no_live_worker_skips", () => {
+  it("in_progress_has_pr_no_worker_done_no_live_worker_dispatches", () => {
     const action = suggestAction(IssueStatus.IN_PROGRESS, false, false, null, true, false);
-    expect(action).toBe("skip");
+    expect(action).toBe("dispatch_implementer");
   });
 
   it("done_always_skips", () => {
