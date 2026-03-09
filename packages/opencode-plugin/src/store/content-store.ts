@@ -239,7 +239,7 @@ export class ContentStore {
   }
 
   close(): void {
-    this.db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     this.db.close();
     const dbFiles = [this.dbPath, `${this.dbPath}-wal`, `${this.dbPath}-shm`];
     for (const dbFile of dbFiles) {
@@ -259,20 +259,6 @@ export class ContentStore {
     this.db.exec(
       "CREATE VIRTUAL TABLE IF NOT EXISTS trigram_index USING fts5(source UNINDEXED, session UNINDEXED, title, content, tokenize='trigram');"
     );
-  }
-
-  private deleteSource(source: string): void {
-    const prevChunks = this.sourceChunks.get(source) ?? 0;
-    const prevBytes = this.sourceBytes.get(source) ?? 0;
-    this.totalChunks -= prevChunks;
-    this.totalBytes -= prevBytes;
-    this.sourceChunks.delete(source);
-    this.sourceBytes.delete(source);
-    this.sources.delete(source);
-    const porterDelete = this.db.query("DELETE FROM porter_index WHERE source = ?");
-    const trigramDelete = this.db.query("DELETE FROM trigram_index WHERE source = ?");
-    porterDelete.run(source);
-    trigramDelete.run(source);
   }
 
   private searchPorter(
