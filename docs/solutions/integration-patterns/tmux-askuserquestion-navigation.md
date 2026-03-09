@@ -11,7 +11,6 @@ tags:
   - automation
   - cli-interaction
 module: claude-code-cli
-component: interactive-prompts
 symptoms:
   - "tmux send-keys not selecting option"
   - "claude code remote control"
@@ -20,7 +19,7 @@ symptoms:
   - "claude code tmux automation"
   - "select non-default option claude code"
   - "Down key tmux claude"
-slug: tmux-askuserquestion-navigation
+status: active
 ---
 
 # Navigating AskUserQuestion Dialogs in Claude Code via tmux

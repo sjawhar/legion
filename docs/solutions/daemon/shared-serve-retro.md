@@ -1,3 +1,20 @@
+---
+title: Shared Serve Refactor — Implementer Retro
+category: daemon
+tags:
+  - shared-serve
+  - opencode-serve
+  - dependency-injection
+  - testing
+  - crash-recovery
+  - sessions
+date: 2026-02-15
+status: active
+module: daemon
+related_issues:
+  - "LEG-136"
+---
+
 # Shared Serve Refactor — Implementer Retro
 
 **Issue:** LEG-136

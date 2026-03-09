@@ -10,13 +10,13 @@ tags:
   - error-handling
   - graphql
 module: streamlinear
-component: linear-core
 symptoms:
   - labels parameter silently ignored in update/create actions
-  - "No updates provided" error when labels were the only update
+  - '"No updates provided" error when labels were the only update'
   - label names not resolved to IDs for Linear API
   - stale cache missing recently created labels
-date_solved: 2026-02-15
+date: 2026-02-15
+status: active
 ---
 
 # Linear MCP Label Resolution with Cache Refresh on Miss

@@ -1,15 +1,19 @@
 ---
-module: Legion Testing
+title: "Best Practice: Prefer autospec=True Over AsyncMock in pytest-mock"
+category: best-practices
+tags:
+  - pytest-mock
+  - autospec
+  - asyncmock
+  - testing
+  - mocking
+  - python
 date: 2026-02-02
-problem_type: best_practice
-component: testing_framework
+status: active
+module: legion-testing
 symptoms:
   - "Using new_callable=mocker.AsyncMock when autospec=True alone works"
   - "Verbose mocking patterns for async functions"
-root_cause: missing_validation
-resolution_type: code_fix
-severity: medium
-tags: [pytest-mock, autospec, asyncmock, testing, mocking, python]
 ---
 
 # Best Practice: Prefer autospec=True Over AsyncMock in pytest-mock

@@ -2,8 +2,16 @@
 title: "OpenCode Serve Process Lifecycle"
 date: 2026-02-15
 category: daemon
-tags: [opencode, serve, process-management, SIGTERM, dispose]
-related-issues: [LEG-130, LEG-131]
+tags:
+  - opencode
+  - serve
+  - process-management
+  - SIGTERM
+  - dispose
+related_issues:
+  - "LEG-130"
+  - "LEG-131"
+status: active
 ---
 
 # OpenCode Serve Process Lifecycle

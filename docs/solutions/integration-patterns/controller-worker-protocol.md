@@ -2,8 +2,13 @@
 title: "Controller-Worker Communication Protocol"
 date: 2026-02-15
 category: integration-patterns
-tags: [controller, worker, dispatch, resume, protocol]
-related-issues: [LEG-122, LEG-125, LEG-128]
+tags:
+  - controller
+  - worker
+  - dispatch
+  - resume
+  - protocol
+status: active
 ---
 
 # Controller-Worker Communication Protocol

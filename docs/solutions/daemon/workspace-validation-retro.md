@@ -1,3 +1,18 @@
+---
+title: Workspace Validation Retro
+category: daemon
+tags:
+  - workspace-validation
+  - deferred-review-comments
+  - pr-workflow
+  - validation
+date: 2026-02-15
+status: active
+module: daemon
+related_issues:
+  - "LEG-129"
+---
+
 # Workspace Validation Retro (LEG-129)
 
 **Context:** Deferred review comments from PR #42 - add validation for workspace paths + document caching decision.

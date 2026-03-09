@@ -2,8 +2,14 @@
 title: "Worker Directory Fix: Explicit Directory Passing to OpenCode"
 date: 2026-02-15
 category: daemon
-tags: [opencode-sdk, jj-workspaces, worker-spawning, directory-resolution]
-related-issues: [LEG-125]
+tags:
+  - opencode-sdk
+  - jj-workspaces
+  - worker-spawning
+  - directory-resolution
+related_issues:
+  - "LEG-125"
+status: active
 ---
 
 # Worker Directory Fix: Explicit Directory Passing to OpenCode

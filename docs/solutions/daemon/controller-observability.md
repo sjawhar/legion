@@ -2,8 +2,18 @@
 title: "Controller Observability: Trust the System, Not Your Assumptions"
 date: 2026-02-15
 category: daemon
-tags: [controller, observability, state-machine, debugging]
-related-issues: [LEG-122, LEG-124, LEG-125, LEG-128, LEG-130]
+tags:
+  - controller
+  - observability
+  - state-machine
+  - debugging
+related_issues:
+  - "LEG-122"
+  - "LEG-124"
+  - "LEG-125"
+  - "LEG-128"
+  - "LEG-130"
+status: active
 ---
 
 # Controller Observability: Trust the System, Not Your Assumptions

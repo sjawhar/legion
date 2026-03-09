@@ -1,3 +1,20 @@
+---
+title: Shared Serve Refactor
+category: daemon
+tags:
+  - shared-serve
+  - opencode-serve
+  - architecture
+  - process-management
+  - dependency-injection
+  - sessions
+date: 2026-02-15
+status: active
+module: daemon
+related_issues:
+  - "LEG-136"
+---
+
 # Shared Serve Refactor
 
 **Problem:** Per-worker `opencode serve` spawning caused 3-4s startup overhead, zombie processes, port allocation bugs, PID tracking issues, and complex `killWorker` failure modes.

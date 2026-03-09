@@ -1,6 +1,6 @@
 ---
 title: Refactoring monolithic state module to async package architecture
-created: 2026-02-01
+date: 2026-02-01
 category: architecture-patterns
 tags:
   - async
@@ -25,6 +25,7 @@ symptoms:
   - difficult to write unit tests due to tight coupling
   - mixed concerns making code hard to maintain
 related_issues: []
+status: active
 ---
 
 # Refactoring Sync Module to Async Package Architecture

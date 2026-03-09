@@ -1,3 +1,19 @@
+---
+title: Delegation Hardening Patterns
+category: delegation
+tags:
+  - delegation
+  - task-persistence
+  - agent-restrictions
+  - config-schema
+  - file-based-storage
+  - atomic-writes
+date: 2026-02-15
+status: active
+module: delegation
+related_issues:
+  - "LEG-133"
+---
 # Delegation Hardening Patterns
 
 **Issue**: LEG-133  

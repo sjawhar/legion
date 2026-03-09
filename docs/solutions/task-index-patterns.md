@@ -1,3 +1,17 @@
+---
+title: File-Based Index Optimization Patterns
+category: general
+tags:
+  - file-based-index
+  - caching
+  - performance
+  - active-index
+  - task-persistence
+  - fallback-pattern
+date: 2026-02-15
+status: active
+module: daemon
+---
 # File-Based Index Optimization Patterns
 
 **Context:** PR #51 optimized task persistence by adding an `active-index.json` file to avoid full directory scans on hot paths (list, claim). This document captures concrete patterns for similar file-based index optimizations.
