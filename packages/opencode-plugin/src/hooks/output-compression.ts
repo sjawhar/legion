@@ -1,5 +1,6 @@
 import type { OutputCompressionConfig } from "../config";
 import { ContentStore } from "../store/content-store";
+import { isRecord, resolveSessionID } from "./utils";
 
 const DEFAULT_THRESHOLD_BYTES = 5000;
 const DEFAULT_MAX_INDEX_SIZE_MB = 50;
@@ -40,7 +41,13 @@ function isErrorLikeOutput(text: string): boolean {
 }
 
 export function createOutputCompressionHook(config: OutputCompressionConfig = {}) {
-  const store = new ContentStore({ maxSizeMB: config.maxIndexSizeMB ?? DEFAULT_MAX_INDEX_SIZE_MB });
+  let store: ContentStore | null = null;
+  const getOrCreateStore = (): ContentStore => {
+    if (!store) {
+      store = new ContentStore({ maxSizeMB: config.maxIndexSizeMB ?? DEFAULT_MAX_INDEX_SIZE_MB });
+    }
+    return store;
+  };
   const thresholdBytes = config.thresholdBytes ?? DEFAULT_THRESHOLD_BYTES;
   const excludedTools = new Set([...DEFAULT_EXCLUDED_TOOLS, ...(config.excludeTools ?? [])]);
 
@@ -83,7 +90,8 @@ export function createOutputCompressionHook(config: OutputCompressionConfig = {}
 
     const source = `${input.sessionID}:${input.tool}:${input.callID}`;
     try {
-      const indexed = store.index({ content: rawOutput, source, session: input.sessionID });
+      const activeStore = getOrCreateStore();
+      const indexed = activeStore.index({ content: rawOutput, source, session: input.sessionID });
       const topTerms = indexed.vocabulary.join(", ");
       const suggestedQueries = indexed.vocabulary.slice(0, 3).join(", ");
       output.output = [
@@ -99,10 +107,25 @@ export function createOutputCompressionHook(config: OutputCompressionConfig = {}
     }
   };
 
+  const event = async ({
+    event,
+  }: {
+    event: { type: string; properties?: unknown };
+  }): Promise<void> => {
+    const props = isRecord(event.properties) ? event.properties : undefined;
+
+    if (event.type === "session.deleted") {
+      const sessionID = resolveSessionID(props);
+      if (sessionID && store) {
+        store.deleteSession(sessionID);
+      }
+    }
+  };
+
   // Clean up SQLite DB on process exit (DB is process-scoped)
   const cleanup = () => {
     try {
-      store.close();
+      store?.close();
     } catch {
       // best-effort cleanup
     }
@@ -111,6 +134,7 @@ export function createOutputCompressionHook(config: OutputCompressionConfig = {}
 
   return {
     "tool.execute.after": toolExecuteAfter,
+    event,
     getStore: () => store,
     getStats: (): CompressionStats => ({ ...stats }),
     cleanup,

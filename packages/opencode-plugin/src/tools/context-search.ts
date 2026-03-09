@@ -4,7 +4,7 @@ import type { ContentStore } from "../store/content-store";
 
 const z = tool.schema;
 
-export function createContextSearchTool(store: ContentStore): ToolDefinition {
+export function createContextSearchTool(getStore: () => ContentStore | null): ToolDefinition {
   return tool({
     description:
       "Search content indexed from previous large tool outputs. " +
@@ -12,7 +12,11 @@ export function createContextSearchTool(store: ContentStore): ToolDefinition {
       "Note: Search uses word tokenization, so file paths, flags (--verbose), and symbols (Error:) are split into individual words. " +
       "Use words from paths as search terms for best results.",
     args: {
-      queries: z.array(z.string()).min(1).max(10).describe("Search queries (batch multiple in one call)"),
+      queries: z
+        .array(z.string())
+        .min(1)
+        .max(10)
+        .describe("Search queries (batch multiple in one call)"),
       source: z
         .string()
         .optional()
@@ -23,7 +27,11 @@ export function createContextSearchTool(store: ContentStore): ToolDefinition {
       try {
         const typedArgs = args as { queries: string[]; source?: string; limit?: number };
         const limit = typedArgs.limit ?? 3;
-        const results = store.search({
+        const activeStore = getStore();
+        if (!activeStore) {
+          return "No indexed content available.";
+        }
+        const results = activeStore.search({
           queries: typedArgs.queries,
           source: typedArgs.source,
           session: ctx.sessionID,
@@ -35,14 +43,14 @@ export function createContextSearchTool(store: ContentStore): ToolDefinition {
         }
 
         return results
-          .map(
-            (result) => {
-              const content = result.content.length > 2000
-                ? result.content.slice(0, 2000) + "\n[...truncated — use a more specific query to get full content]"
+          .map((result) => {
+            const content =
+              result.content.length > 2000
+                ? result.content.slice(0, 2000) +
+                  "\n[...truncated — use a more specific query to get full content]"
                 : result.content;
-              return `--- [${result.source}] ${result.title} (score: ${result.score.toFixed(2)}) ---\n${content}`;
-            }
-          )
+            return `--- [${result.source}] ${result.title} (score: ${result.score.toFixed(2)}) ---\n${content}`;
+          })
           .join("\n\n");
       } catch (error) {
         return `Error: ${error instanceof Error ? error.message : String(error)}`;

@@ -85,7 +85,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
   });
   const preemptiveCompactionHook = createPreemptiveCompactionHook(ctx);
   const outputCompressionHook = createOutputCompressionHook(pluginConfig.outputCompression ?? {});
-  const contextSearchTool = createContextSearchTool(outputCompressionHook.getStore());
+  const contextSearchTool = createContextSearchTool(outputCompressionHook.getStore);
   const sessionRecoveryHook = createSessionRecoveryHook(ctx);
   const stopContinuationGuardHook = createStopContinuationGuardHook();
   const compactionTodoPreserver = createCompactionTodoPreserverHook(ctx);
@@ -145,6 +145,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       await preemptiveCompactionHook.event?.(input as GenericEventInput);
       await stopContinuationGuardHook.event(input as GenericEventInput);
       await compactionTodoPreserver.event(input as GenericEventInput);
+      await outputCompressionHook.event(input as GenericEventInput);
       await todoContinuationEnforcer.event(input as GenericEventInput);
 
       const { event } = input;

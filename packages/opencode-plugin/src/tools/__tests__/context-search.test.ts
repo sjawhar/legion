@@ -16,6 +16,10 @@ function makeContext(): ToolContext {
   };
 }
 
+function safeParseSchema(schema: unknown, value: unknown): { success: boolean } {
+  return (schema as { safeParse: (input: unknown) => { success: boolean } }).safeParse(value);
+}
+
 describe("context_search", () => {
   it("returns formatted results when store has matching content", async () => {
     const store = {
@@ -29,7 +33,7 @@ describe("context_search", () => {
       ],
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     const result = await tool.execute({ queries: ["line 1"] }, makeContext());
 
     expect(result).toContain("--- [bash:call123] Chunk 1 (score: 0.88) ---");
@@ -42,12 +46,19 @@ describe("context_search", () => {
       search: () => [],
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     const result = await tool.execute({ queries: ["missing"] }, makeContext());
 
     expect(result).toBe(
       "No matching content found. Try different search terms or check available sources with context_search."
     );
+  });
+
+  it("returns no indexed content when store is unavailable", async () => {
+    const tool = createContextSearchTool(() => null);
+    const result = await tool.execute({ queries: ["missing"] }, makeContext());
+
+    expect(result).toBe("No indexed content available.");
   });
 
   it("passes source filter through to store", async () => {
@@ -61,7 +72,7 @@ describe("context_search", () => {
       },
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     await tool.execute({ queries: ["worker"], source: "bash:call123" }, makeContext());
 
     expect(receivedSource).toBe("bash:call123");
@@ -77,7 +88,7 @@ describe("context_search", () => {
       },
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     await tool.execute({ queries: ["worker"], limit: 7 }, makeContext());
 
     expect(receivedLimit).toBe(7);
@@ -90,7 +101,7 @@ describe("context_search", () => {
       },
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     const result = await tool.execute({ queries: ["worker"] }, makeContext());
 
     expect(result).toBe("Error: store unavailable");
@@ -105,7 +116,7 @@ describe("context_search", () => {
       },
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     await tool.execute({ queries: ["worker"] }, makeContext());
 
     expect(receivedLimit).toBe(3);
@@ -120,7 +131,7 @@ describe("context_search", () => {
       },
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     const ctx = makeContext();
     await tool.execute({ queries: ["worker"] }, ctx);
 
@@ -136,7 +147,7 @@ describe("context_search", () => {
       },
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     await tool.execute({ queries: ["test"], limit: 5 }, makeContext());
 
     expect(receivedLimit).toBe(5);
@@ -155,7 +166,7 @@ describe("context_search", () => {
       ],
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     const result = await tool.execute({ queries: ["test"] }, makeContext());
 
     expect(result).toContain("[...truncated — use a more specific query to get full content]");
@@ -176,7 +187,7 @@ describe("context_search", () => {
       ],
     } as unknown as ContentStore;
 
-    const tool = createContextSearchTool(store);
+    const tool = createContextSearchTool(() => store);
     const result = await tool.execute({ queries: ["test"] }, makeContext());
 
     expect(result).toContain(content);
@@ -186,45 +197,45 @@ describe("context_search", () => {
   describe("Zod schema validation", () => {
     it("rejects limit of 0", () => {
       const store = {} as unknown as ContentStore;
-      const tool = createContextSearchTool(store);
-      const result = tool.args.limit?.safeParse(0);
+      const tool = createContextSearchTool(() => store);
+      const result = safeParseSchema(tool.args.limit, 0);
       expect(result?.success).toBe(false);
     });
 
     it("rejects limit of 11", () => {
       const store = {} as unknown as ContentStore;
-      const tool = createContextSearchTool(store);
-      const result = tool.args.limit?.safeParse(11);
+      const tool = createContextSearchTool(() => store);
+      const result = safeParseSchema(tool.args.limit, 11);
       expect(result?.success).toBe(false);
     });
 
     it("accepts limit of 5", () => {
       const store = {} as unknown as ContentStore;
-      const tool = createContextSearchTool(store);
-      const result = tool.args.limit?.safeParse(5);
+      const tool = createContextSearchTool(() => store);
+      const result = safeParseSchema(tool.args.limit, 5);
       expect(result?.success).toBe(true);
     });
 
     it("rejects queries with 0 items", () => {
       const store = {} as unknown as ContentStore;
-      const tool = createContextSearchTool(store);
-      const result = tool.args.queries.safeParse([]);
+      const tool = createContextSearchTool(() => store);
+      const result = safeParseSchema(tool.args.queries, []);
       expect(result.success).toBe(false);
     });
 
     it("accepts queries with 10 items", () => {
       const store = {} as unknown as ContentStore;
-      const tool = createContextSearchTool(store);
+      const tool = createContextSearchTool(() => store);
       const queries = Array.from({ length: 10 }, (_, i) => `query${i}`);
-      const result = tool.args.queries.safeParse(queries);
+      const result = safeParseSchema(tool.args.queries, queries);
       expect(result.success).toBe(true);
     });
 
     it("rejects queries with 11 items", () => {
       const store = {} as unknown as ContentStore;
-      const tool = createContextSearchTool(store);
+      const tool = createContextSearchTool(() => store);
       const queries = Array.from({ length: 11 }, (_, i) => `query${i}`);
-      const result = tool.args.queries.safeParse(queries);
+      const result = safeParseSchema(tool.args.queries, queries);
       expect(result.success).toBe(false);
     });
   });

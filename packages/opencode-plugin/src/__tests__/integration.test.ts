@@ -1727,10 +1727,19 @@ describe("opencode-legion plugin", () => {
   });
 
   describe("output compression e2e", () => {
+    it("context_search returns no indexed content before first compression", async () => {
+      const hook = createOutputCompressionHook({ thresholdBytes: 50 });
+      const searchTool = createContextSearchTool(hook.getStore);
+
+      const result = await searchTool.execute({ queries: ["anything"] }, createToolContext("/tmp"));
+      expect(result).toBe("No indexed content available.");
+
+      hook.cleanup();
+    });
+
     it("compresses large output and retrieves via context_search", async () => {
       const hook = createOutputCompressionHook({ thresholdBytes: 50 });
-      const store = hook.getStore();
-      const searchTool = createContextSearchTool(store);
+      const searchTool = createContextSearchTool(hook.getStore);
 
       const largeOutput = "Legion workers handle isolated jj workspaces.\n".repeat(30);
       const output = { title: "bash", output: largeOutput, metadata: {} };
@@ -1761,6 +1770,33 @@ describe("opencode-legion plugin", () => {
       expect(output.output).toBe("small");
       expect(hook.getStats().passedThrough).toBe(1);
       expect(hook.getStats().compressed).toBe(0);
+
+      hook.cleanup();
+    });
+
+    it("session.deleted clears only that session's indexed content", async () => {
+      const hook = createOutputCompressionHook({ thresholdBytes: 50 });
+
+      await hook["tool.execute.after"]?.(
+        { tool: "bash", sessionID: "s-1", callID: "c-1" },
+        { title: "bash", output: "session one needle\n".repeat(30), metadata: {} }
+      );
+      await hook["tool.execute.after"]?.(
+        { tool: "bash", sessionID: "s-2", callID: "c-2" },
+        { title: "bash", output: "session two marker\n".repeat(30), metadata: {} }
+      );
+
+      await hook.event({
+        event: { type: "session.deleted", properties: { info: { id: "s-1" } } },
+      });
+
+      const store = hook.getStore();
+      expect(store).not.toBeNull();
+      if (!store) {
+        throw new Error("expected store to exist after compression");
+      }
+      expect(store.search({ queries: ["needle"], session: "s-1" })).toHaveLength(0);
+      expect(store.search({ queries: ["marker"], session: "s-2" }).length).toBeGreaterThan(0);
 
       hook.cleanup();
     });
