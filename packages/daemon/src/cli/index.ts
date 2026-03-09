@@ -710,7 +710,7 @@ export const dispatchCommand = defineCommand({
     },
     mode: {
       type: "positional",
-      description: "Worker mode (architect, plan, implement, review, merge)",
+      description: "Worker mode (architect, plan, implement, test, review, merge)",
       required: true,
     },
     prompt: { type: "string", description: "Custom initial prompt (default: /legion-worker)" },

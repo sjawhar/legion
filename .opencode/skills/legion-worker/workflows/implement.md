@@ -12,6 +12,20 @@ Trust the controller's explicit mode parameter.
 
 > **Note:** The daemon API mode is always `implement`. The sub-mode (fresh vs address-comments) is conveyed in the controller's prompt text, not the API call.
 
+## Tools Referenced
+
+This workflow references environment-provided tools. These are available in the OpenCode runtime, not defined in this repo:
+
+| Tool | Source | Purpose |
+|------|--------|---------|
+| `task_create` | OpenCode task system | Create a task with dependencies (`blockedBy`) |
+| `task_claim_next` | OpenCode task system | Atomically claim the next ready task |
+| `task_update` | OpenCode task system | Mark task completed/failed |
+| `task_list` | OpenCode task system | List tasks and their status |
+| `background_task` | OpenCode agent system | Spawn a background subagent |
+| `/analyze` | `sjawhar/analyze` skill | Run code quality agents on recent changes |
+
+The task system enables parallel execution with dependency ordering. If these tools are unavailable in your environment, execute tasks sequentially following the plan's dependency annotations.
 ---
 
 ## All Modes: Rebase First
