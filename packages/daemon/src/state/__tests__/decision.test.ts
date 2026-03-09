@@ -155,6 +155,77 @@ describe("suggestAction", () => {
     const action = suggestAction("SomeUnknownStatus", false, false, null, false, false);
     expect(action).toBe("skip");
   });
+
+  // CI status gating in Needs Review
+  it("needs_review_worker_done_ready_pr_ci_failing_resumes_implementer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("needs_review_worker_done_ready_pr_ci_pending_retries", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      "pending"
+    );
+    expect(action).toBe("retry_ci_check");
+  });
+
+  it("needs_review_worker_done_ready_pr_ci_passing_transitions_to_retro", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      "passing"
+    );
+    expect(action).toBe("transition_to_retro");
+  });
+
+  it("needs_review_no_worker_ci_failing_resumes_implementer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      null,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("needs_review_no_worker_ci_pending_retries", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      null,
+      true,
+      false,
+      "pending"
+    );
+    expect(action).toBe("retry_ci_check");
+  });
+
+  it("needs_review_no_worker_no_ci_dispatches_reviewer", () => {
+    const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, false, null, true, false, null);
+    expect(action).toBe("dispatch_reviewer");
+  });
 });
 
 describe("buildIssueState", () => {
@@ -165,6 +236,7 @@ describe("buildIssueState", () => {
       labels: [],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -188,6 +260,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -211,6 +284,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -234,6 +308,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -258,6 +333,7 @@ describe("buildIssueState", () => {
       labels: ["user-feedback-given", "worker-done"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -285,6 +361,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -313,6 +390,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -333,6 +411,7 @@ describe("buildIssueState", () => {
       labels: ["user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -355,6 +434,7 @@ describe("buildIssueState", () => {
       labels: ["worker-done", "user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -380,6 +460,7 @@ describe("approval gate", () => {
       labels: ["worker-done"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -403,6 +484,7 @@ describe("approval gate", () => {
       labels: ["needs-approval", "human-approved"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -426,6 +508,7 @@ describe("approval gate", () => {
       labels: ["needs-approval"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -451,6 +534,7 @@ describe("orphan detection", () => {
       labels: ["worker-active"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -474,6 +558,7 @@ describe("orphan detection", () => {
       labels: ["worker-active"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: true,
       workerMode: null,
       workerStatus: null,
@@ -497,6 +582,7 @@ describe("orphan detection", () => {
       labels: [],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -523,6 +609,7 @@ describe("orphan detection", () => {
         labels: ["worker-active"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -547,6 +634,7 @@ describe("orphan detection", () => {
       labels: ["worker-active", "user-input-needed", "user-feedback-given"],
       hasPr: false,
       prIsDraft: null,
+      ciStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -577,6 +665,7 @@ describe("buildCollectedState", () => {
         labels: [],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -594,6 +683,7 @@ describe("buildCollectedState", () => {
         labels: ["worker-done"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -623,6 +713,7 @@ describe("buildCollectedState", () => {
         labels: [],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -653,6 +744,7 @@ describe("buildCollectedState", () => {
         labels: [],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -670,6 +762,7 @@ describe("buildCollectedState", () => {
         labels: ["user-input-needed", "user-feedback-given"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -687,6 +780,7 @@ describe("buildCollectedState", () => {
         labels: ["user-input-needed"],
         hasPr: false,
         prIsDraft: null,
+        ciStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
