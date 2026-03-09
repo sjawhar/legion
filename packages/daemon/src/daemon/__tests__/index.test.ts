@@ -547,7 +547,10 @@ describe("daemon entry", () => {
     if (!finalState) {
       throw new Error("Expected final state to be written");
     }
-    expect((finalState as PersistedWorkerState).workers).toEqual({});
+    expect((finalState as PersistedWorkerState).workers).toEqual({
+      [baseEntry.id]: baseEntry,
+      [secondEntry.id]: secondEntry,
+    });
     expect((finalState as PersistedWorkerState).crashHistory).toEqual({
       [secondEntry.id]: { crashCount: 2, lastCrashAt: "2026-02-02T02:00:00.000Z" },
     });
@@ -555,6 +558,57 @@ describe("daemon entry", () => {
       throw new Error("Expected process exit to be called");
     }
     expect(exitCode as number).toBe(0);
+  });
+
+  it("preserves workers in state file when stopped via handle.stop()", async () => {
+    let savedState: PersistedWorkerState | null = null;
+
+    const handle = await startDaemon(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        teamId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: {
+            [baseEntry.id]: baseEntry,
+            [secondEntry.id]: secondEntry,
+          },
+          crashHistory: {
+            [secondEntry.id]: { crashCount: 1, lastCrashAt: "2026-02-02T02:00:00.000Z" },
+          },
+        }),
+        writeStateFile: async (_path, state) => {
+          savedState = state;
+        },
+        adapter: makeAdapter(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    await handle.stop();
+
+    if (!savedState) {
+      throw new Error("Expected final state to be written");
+    }
+    const state = savedState as PersistedWorkerState;
+    // Workers preserved
+    expect(state.workers[baseEntry.id]).toBeDefined();
+    expect(state.workers[secondEntry.id]).toBeDefined();
+    // Crash history preserved
+    expect(state.crashHistory[secondEntry.id]).toEqual({
+      crashCount: 1,
+      lastCrashAt: "2026-02-02T02:00:00.000Z",
+    });
+    // Controller cleared (daemon-owned)
+    expect(state.controller).toBeUndefined();
   });
   it("passes controller env vars to adapter.start on startup", async () => {
     const startCalls: Array<{ workspace: string; logDir?: string; env?: Record<string, string> }> =

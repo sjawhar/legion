@@ -137,7 +137,7 @@ export async function startDaemon(
     controllerState = undefined;
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
     await resolvedDeps.writeStateFile(config.stateFilePath, {
-      workers: {},
+      workers: state.workers,
       crashHistory: state.crashHistory,
       controller: undefined,
     });
