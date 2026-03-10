@@ -196,4 +196,86 @@ describe("PluginConfig", () => {
     expect(config.retry?.maxRetries).toBe(1);
     expect(config.taskRetentionMs).toBe(3600000);
   });
+
+  it("merges outputCompression excludeTools with union semantics", async () => {
+    const userConfigPath = path.join(tempHomeDir, ".config", "opencode", "opencode-legion.json");
+    writeConfigFile(userConfigPath, {
+      outputCompression: {
+        enabled: true,
+        excludeTools: ["edit", "write"],
+      },
+    });
+
+    const repoConfigPath = path.join(tempDir, ".opencode", "opencode-legion.json");
+    writeConfigFile(repoConfigPath, {
+      outputCompression: {
+        excludeTools: ["bash", "write"],
+      },
+    });
+
+    const config = await loadPluginConfig(tempDir, { homeDir: tempHomeDir });
+
+    expect(config.outputCompression?.excludeTools).toEqual(["edit", "write", "bash"]);
+  });
+
+  it("preserves base excludeTools when override has none", async () => {
+    const userConfigPath = path.join(tempHomeDir, ".config", "opencode", "opencode-legion.json");
+    writeConfigFile(userConfigPath, {
+      outputCompression: {
+        enabled: true,
+        excludeTools: ["edit"],
+      },
+    });
+
+    const repoConfigPath = path.join(tempDir, ".opencode", "opencode-legion.json");
+    writeConfigFile(repoConfigPath, {
+      outputCompression: {
+        enabled: false,
+      },
+    });
+
+    const config = await loadPluginConfig(tempDir, { homeDir: tempHomeDir });
+
+    expect(config.outputCompression?.excludeTools).toEqual(["edit"]);
+  });
+
+  it("uses override excludeTools when base has none", async () => {
+    const userConfigPath = path.join(tempHomeDir, ".config", "opencode", "opencode-legion.json");
+    writeConfigFile(userConfigPath, {
+      outputCompression: {
+        enabled: true,
+      },
+    });
+
+    const repoConfigPath = path.join(tempDir, ".opencode", "opencode-legion.json");
+    writeConfigFile(repoConfigPath, {
+      outputCompression: {
+        excludeTools: ["bash"],
+      },
+    });
+
+    const config = await loadPluginConfig(tempDir, { homeDir: tempHomeDir });
+
+    expect(config.outputCompression?.excludeTools).toEqual(["bash"]);
+  });
+
+  it("returns undefined excludeTools when neither base nor override has it", async () => {
+    const userConfigPath = path.join(tempHomeDir, ".config", "opencode", "opencode-legion.json");
+    writeConfigFile(userConfigPath, {
+      outputCompression: {
+        enabled: true,
+      },
+    });
+
+    const repoConfigPath = path.join(tempDir, ".opencode", "opencode-legion.json");
+    writeConfigFile(repoConfigPath, {
+      outputCompression: {
+        thresholdBytes: 1000,
+      },
+    });
+
+    const config = await loadPluginConfig(tempDir, { homeDir: tempHomeDir });
+
+    expect(config.outputCompression?.excludeTools).toBeUndefined();
+  });
 });

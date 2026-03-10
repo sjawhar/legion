@@ -10,6 +10,7 @@ import { createBackgroundNotificationHook } from "./hooks/background-notificatio
 import { COMPACTION_CONTEXT_TEMPLATE } from "./hooks/compaction-context-injector";
 import { createCompactionTodoPreserverHook } from "./hooks/compaction-todo-preserver";
 import { nonInteractiveEnvHook } from "./hooks/non-interactive-env";
+import { createOutputCompressionHook } from "./hooks/output-compression";
 import { createPreemptiveCompactionHook } from "./hooks/preemptive-compaction";
 import { createSessionRecoveryHook } from "./hooks/session-recovery";
 import { createStopContinuationGuardHook } from "./hooks/stop-continuation-guard";
@@ -19,6 +20,7 @@ import { createTodoContinuationEnforcerHook } from "./hooks/todo-continuation-en
 import { isRecord, resolveSessionID } from "./hooks/utils";
 import { getModelOverlay } from "./overlays";
 import { createSessionTools } from "./tools";
+import { createContextSearchTool } from "./tools/context-search";
 import { createTaskTools } from "./tools/task";
 
 const DEFAULT_GLOBAL_PERMISSION: PermissionConfig = {
@@ -82,6 +84,8 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     }
   });
   const preemptiveCompactionHook = createPreemptiveCompactionHook(ctx);
+  const outputCompressionHook = createOutputCompressionHook(pluginConfig.outputCompression ?? {});
+  const contextSearchTool = createContextSearchTool(outputCompressionHook.getStore);
   const sessionRecoveryHook = createSessionRecoveryHook(ctx);
   const stopContinuationGuardHook = createStopContinuationGuardHook();
   const compactionTodoPreserver = createCompactionTodoPreserverHook(ctx);
@@ -141,6 +145,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       await preemptiveCompactionHook.event?.(input as GenericEventInput);
       await stopContinuationGuardHook.event(input as GenericEventInput);
       await compactionTodoPreserver.event(input as GenericEventInput);
+      await outputCompressionHook.event(input as GenericEventInput);
       await todoContinuationEnforcer.event(input as GenericEventInput);
 
       const { event } = input;
@@ -174,6 +179,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       ...delegationTools,
       ...sessionTools,
       ...taskTools,
+      context_search: contextSearchTool,
     },
     "chat.params": async (input, output) => {
       anthropicEffortHook(input, output);
@@ -195,6 +201,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       }
     },
     "tool.execute.after": async (input, output) => {
+      await outputCompressionHook["tool.execute.after"]?.(input, output);
       await preemptiveCompactionHook["tool.execute.after"]?.(input, output);
     },
     "chat.message": async (input) => {
