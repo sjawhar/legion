@@ -7,8 +7,7 @@
       "architecture-patterns/shared-state-file-ownership.md",
       "integration-issues/github-graphql-pr-draft-status.md",
       "integration-issues/external-repo-pr-auto-transition-gap.md",
-      "integration-issues/linear-mcp-label-resolution.md",
-      "deterministic-session-ids.md"
+      "integration-issues/linear-mcp-label-resolution.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
       "daemon/opencode-serve-lifecycle.md",
@@ -28,12 +27,10 @@
       "delegation/hardening-patterns.md",
       "integration-patterns/controller-worker-protocol.md",
       "architecture-patterns/task-index-retro.md",
-      "task-index-patterns.md",
-      "deterministic-session-ids.md"
+      "task-index-patterns.md"
     ],
     "packages/daemon/src/cli": [
-      "daemon/controller-lifecycle-separation.md",
-      "deterministic-session-ids.md"
+      "daemon/controller-lifecycle-separation.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",

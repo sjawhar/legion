@@ -58,6 +58,11 @@ interface StringArg {
   default?: string;
 }
 
+interface NumberArg {
+  type: string;
+  alias?: string;
+}
+
 interface BooleanArg {
   type: string;
   default?: boolean;
@@ -69,6 +74,10 @@ interface RunnableCommand {
 
 type FetchCall = [string | URL, RequestInit?];
 type FetchMock = ReturnType<typeof mock> & typeof fetch;
+
+function createTempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "legion-cli-"));
+}
 
 function installFetchMock(
   impl: (input: string | URL, init?: RequestInit) => Promise<Response>
@@ -166,6 +175,7 @@ describe("citty command definitions", () => {
     const prompt = args.prompt as StringArg;
     const workspace = args.workspace as StringArg;
     const repo = args.repo as StringArg;
+    const version = args.version as NumberArg;
     expect(issue.type).toBe("positional");
     expect(issue.required).toBe(true);
     expect(mode.type).toBe("positional");
@@ -175,6 +185,8 @@ describe("citty command definitions", () => {
     expect(workspace.alias).toBe("w");
     expect(repo.type).toBe("string");
     expect(repo.alias).toBe("r");
+    expect(version.type).toBe("string");
+    expect(version.alias).toBe("v");
   });
 
   test("prompt command args are defined", async () => {
@@ -310,6 +322,53 @@ describe("cmdDispatch", () => {
     return expect(cmdDispatch("LEG-42", "implement", { daemonPort: 13372 })).rejects.toThrow(
       "Either --repo or --workspace is required"
     );
+  });
+
+  it("threads version into worker creation request", async () => {
+    const tempDir = createTempDir();
+    const legionDir = path.join(tempDir, "legion");
+    fs.mkdirSync(legionDir);
+
+    const fetchMock = installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      if (url.endsWith("/workers")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-v2" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13387, version: 2 });
+
+    const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
+    const body = JSON.parse((postInit as RequestInit).body as string) as {
+      issueId: string;
+      mode: string;
+      workspace: string;
+      version: number;
+    };
+    expect(body).toEqual({
+      issueId: "LEG-42",
+      mode: "implement",
+      workspace: legionDir,
+      version: 2,
+    });
+  });
+
+  it("rejects invalid version values", () => {
+    return expect(
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13370, version: -1 })
+    ).rejects.toThrow("Invalid version");
   });
 
   it("fails gracefully when daemon is not running", async () => {

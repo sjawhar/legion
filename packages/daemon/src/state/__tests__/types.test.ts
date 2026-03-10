@@ -44,6 +44,20 @@ describe("computeSessionId", () => {
     expect(result1).not.toBe(result2);
   });
 
+  it("different version produces different output", () => {
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement", 0);
+    const result2 = computeSessionId(legionId, "ENG-21", "implement", 1);
+    expect(result1).not.toBe(result2);
+  });
+
+  it("same explicit version produces same output", () => {
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement", 2);
+    const result2 = computeSessionId(legionId, "ENG-21", "implement", 2);
+    expect(result1).toBe(result2);
+  });
+
   it("accepts non-UUID legion ID without throwing", () => {
     expect(() => {
       computeSessionId("not-a-valid-uuid", "ENG-21", "implement");

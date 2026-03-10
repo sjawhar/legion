@@ -494,6 +494,7 @@ function uuidToSessionId(uuid: string): string {
  * @param legionId - Legion identifier (UUID or arbitrary string)
  * @param issueId - Issue identifier (e.g., "ENG-21")
  * @param mode - Worker mode (e.g., "implement", "review")
+ * @param version - Dispatch version used to force fresh session IDs (default: 0)
  * @returns Session ID string matching OpenCode format
  */
 export function computeSessionId(
