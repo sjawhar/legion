@@ -2,8 +2,14 @@
 title: Separating Manager Lifecycle from Managed Entities
 date: 2026-02-15
 category: daemon
-tags: [architecture, lifecycle, state-management, testing]
-related-issues: [LEG-122]
+tags:
+  - architecture
+  - lifecycle
+  - state-management
+  - testing
+related_issues:
+  - "LEG-122"
+status: active
 ---
 
 # Separating Manager Lifecycle from Managed Entities

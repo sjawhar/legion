@@ -1,3 +1,20 @@
+---
+title: Delegation Hardening — Implementer Retro
+category: delegation
+tags:
+  - delegation
+  - concurrency
+  - task-persistence
+  - finalize-pattern
+  - stale-detection
+  - testing
+  - resource-accounting
+date: 2026-02-15
+status: active
+module: delegation
+related_issues:
+  - "LEG-133"
+---
 # Delegation Hardening — Implementer Retro
 
 ## Context

@@ -2,9 +2,14 @@
 title: Graceful Worker Shutdown via HTTP Dispose
 date: 2026-02-15
 category: daemon
-tags: [process-management, cleanup, testing, defense-in-depth]
-related-issues: [LEG-130]
-related-prs: [46]
+tags:
+  - process-management
+  - cleanup
+  - testing
+  - defense-in-depth
+related_issues:
+  - "LEG-130"
+status: active
 ---
 
 # Graceful Worker Shutdown via HTTP Dispose

@@ -82,6 +82,57 @@ Metis pre-analysis:
 Create the implementation plan accounting for these findings.
 ```
 
+### 1.7. Inject Relevant Learnings
+
+Before invoking `/ce:plan`, check the learnings index for applicable prior knowledge:
+
+1. **Read the index:**
+   ```bash
+   cat docs/solutions/index.json
+   ```
+   If the file doesn't exist or is invalid JSON, skip this step entirely — proceed to step 2.
+
+2. **Extract module/area keywords** from the issue title, description, and Metis analysis output. Look for references to:
+   - Source path segments (e.g., `packages/daemon/src/state/`, `serve-manager`)
+   - Module names (e.g., "daemon", "controller", "worker", "state")
+   - Component names (e.g., "serve-manager", "decision", "fetch")
+   - Feature areas (e.g., "skills", "linear", "github", "review", "retro")
+   - Integration concerns (e.g., "PR", "labels", "MCP")
+   - Domain concepts and error keywords from the issue
+
+3. **Match keywords against index keys** using two modes:
+   - **Path matching**: For each key in `.index` that does NOT start with `tag:`, check if any extracted keyword appears as a substring of the key (case-insensitive). Collect all matched learning file paths.
+   - **Tag matching**: For each key that starts with `tag:`, extract the tag name (e.g., `tag:race-condition` → `race-condition`). Check if any extracted keyword matches the tag name (case-insensitive). Collect matched learning file paths.
+
+4. **Deduplicate and rank** matched learnings:
+   - Remove duplicates (same file matched via multiple keys)
+   - **Status filter**: For each candidate, read its YAML front matter `status` field. Exclude any file with `status: superseded`. If file doesn't exist or has no front matter, include it (graceful degradation).
+   - **Primary rank: tag overlap** — For each remaining candidate, read its `tags` front matter field. Count how many of its tags appear in the issue's extracted keywords (case-insensitive). Higher overlap = higher rank.
+   - **Secondary rank: key specificity** — Learnings matched via longer/more-specific keys rank higher (e.g., a match on `packages/daemon/src/state` outranks a match on `packages/daemon`)
+   - **Tertiary rank: match count** — Number of distinct key matches (more matches = more relevant)
+   - **Cap at 3 learnings maximum**
+
+5. **Read each matched learning file** (from `docs/solutions/<path>`). For each file:
+   - Read YAML front matter: extract `title` and `tags` fields
+   - Skip past front matter (`---` blocks) and headings, take the first paragraph of prose (typically the Problem or Overview section)
+   - Prepend structured header: `[{title} | tags: {comma-separated tags}]`
+   - Truncate entire output (header + prose) to **350 characters**
+
+6. **Add to `/ce:plan` context** in step 2. Append this section to the autonomous context template, between the Metis pre-analysis and the feature description:
+
+   ```
+   Relevant learnings from prior work (preloaded from docs/solutions/index.json):
+
+   1. [docs/solutions/<path>]: [{title} | tags: {tag1}, {tag2}] <prose excerpt> (350 chars max total)
+   2. [docs/solutions/<path>]: [{title} | tags: {tag1}, {tag2}] <prose excerpt>
+   3. [docs/solutions/<path>]: [{title} | tags: {tag1}, {tag2}] <prose excerpt>
+
+   Review these learnings for patterns and pitfalls relevant to this implementation.
+   ```
+
+**If no matches found:** Skip — do not add an empty "Relevant learnings" section.
+
+**If a matched file doesn't exist on disk:** Skip that entry silently (stale index entry from a file rename). Do not error.
 ### 2. Invoke /ce:plan (Autonomous)
 
 Invoke `/ce:plan` with this context:

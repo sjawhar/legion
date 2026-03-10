@@ -2,8 +2,14 @@
 title: "Worker Directory Resolution via x-opencode-directory Header"
 date: 2026-02-15
 category: daemon
-tags: [opencode-sdk, jj-workspaces, session-management, worker-isolation]
-related-issues: [LEG-125]
+tags:
+  - opencode-sdk
+  - jj-workspaces
+  - session-management
+  - worker-isolation
+related_issues:
+  - "LEG-125"
+status: active
 ---
 
 # Worker Directory Resolution

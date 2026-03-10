@@ -10,14 +10,13 @@ tags:
   - skill-authoring
   - opencode
 module: legion-worker
-component: workflows
 symptoms:
   - "how to run subagents in parallel"
   - "background task execution in workflows"
   - "Task tool not found"
   - "parallel compound execution"
   - "fresh context subagent"
-slug: parallel-subagent-background-execution
+status: active
 ---
 
 # Parallel Subagent Execution with Background Tasks

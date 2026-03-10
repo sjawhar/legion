@@ -10,13 +10,13 @@ tags:
   - draft-status
   - batching
 module: legion.state
-component: fetch/decision
 symptoms:
   - needed to detect PR review outcome for worker dispatch
   - PR labels required worker to manage label state
   - race conditions possible with label-based signaling
   - extra API call needed to apply labels
-date_solved: 2026-02-01
+date: 2026-02-01
+status: active
 ---
 
 # Using PR Draft Status Instead of Labels for Review Signaling

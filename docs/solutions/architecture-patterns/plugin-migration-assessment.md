@@ -2,7 +2,12 @@
 title: "oh-my-opencode → opencode-legion Migration Assessment"
 date: 2026-02-15
 category: architecture-patterns
-tags: [plugin, migration, oh-my-opencode, opencode-legion]
+tags:
+  - plugin
+  - migration
+  - oh-my-opencode
+  - opencode-legion
+status: active
 ---
 
 # oh-my-opencode → opencode-legion Migration Assessment

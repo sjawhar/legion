@@ -1,6 +1,6 @@
 ---
 title: Shared state file with multiple writers — callback consolidation pattern
-created: 2026-02-15
+date: 2026-02-15
 category: architecture-patterns
 tags:
   - state-file
@@ -17,6 +17,7 @@ symptoms:
   - read-after-write returns stale data because intervening write clobbered it
 related_issues:
   - LEG-122
+status: active
 ---
 
 # Shared State File with Multiple Writers

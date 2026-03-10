@@ -3,7 +3,7 @@ title: "Worker Skill Failure Modes and Fixes"
 date: 2026-02-15
 category: skill-patterns
 tags: [workers, skills, implement, review, merge, retro, failure-modes]
-related-issues: [LEG-122, LEG-125, LEG-128, LEG-129, LEG-130]
+status: active
 ---
 
 # Worker Skill Failure Modes and Fixes

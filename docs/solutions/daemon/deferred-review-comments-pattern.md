@@ -2,8 +2,14 @@
 title: "Pattern: Tracking and Executing Deferred PR Review Comments"
 date: 2026-02-15
 category: daemon
-tags: [code-review, cleanup, workflow-pattern]
-related-issues: [LEG-129, LEG-125]
+tags:
+  - code-review
+  - cleanup
+  - workflow-pattern
+related_issues:
+  - "LEG-129"
+  - "LEG-125"
+status: active
 ---
 
 # Pattern: Tracking and Executing Deferred PR Review Comments

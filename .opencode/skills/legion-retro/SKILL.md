@@ -85,6 +85,88 @@ Write the integrated learnings to `docs/solutions/`. Optimize for **discoverabil
 - If all learnings are about one topic, write one doc
 - Don't write multiple docs just because there are multiple bullet points
 
+### Canonical Front Matter Schema
+
+All learning files in `docs/solutions/` must use this schema:
+
+```yaml
+---
+title: "Descriptive title matching or closely tracking the H1"  # REQUIRED
+category: subdirectory-name  # REQUIRED — must match parent dir (exception: "general" for root-level files)
+tags:  # REQUIRED — YAML list format (NOT inline [])
+  - tag-one
+  - tag-two
+date: YYYY-MM-DD  # REQUIRED — when learning was created/written
+status: active  # REQUIRED — "active" or "superseded"
+module: legion-module-name  # OPTIONAL — which Legion module (e.g., daemon, state, worker)
+related_issues:  # OPTIONAL — underscore, not dash. YAML list.
+  - "LEG-123"
+symptoms:  # OPTIONAL — search phrases for discovery
+  - "exact error message or symptom description"
+---
+```
+
+**Required fields**: `title`, `category`, `tags`, `date`, `status`
+
+**Status semantics**:
+- `active`: current, useful learning — inject into planner context
+- `superseded`: replaced by a newer learning (reference the replacing doc in a comment or prose)
+- Note: docs marked `[HISTORICAL]` (outdated code references but valid patterns) are still `status: active`
+
+**Field normalization rules** (when writing or editing learning files):
+- `created` or `date_solved` → use `date`
+- `related-issues` (dashed) → use `related_issues` (underscored)
+- Inline `[tag1, tag2]` tags → convert to YAML list format
+- Drop: `slug`, `problem_type`, `root_cause`, `resolution_type`, `severity`, `component`, `related-prs`
+- Root-level files (not in a subdirectory) use `category: general`
+
+### 4.5. Update Learnings Index
+
+If you wrote no learning files in step 4 (e.g., mechanical change with no new patterns), skip this step.
+
+After writing learning files to `docs/solutions/`, update the learnings index so future plans can proactively find them:
+
+1. Get the PR's changed file paths:
+
+   **GitHub:**
+   ```bash
+   gh pr view "$LEGION_ISSUE_ID" --json files --jq '[.files[].path]' -R $OWNER/$REPO
+   ```
+
+   **Linear:**
+   ```bash
+   # Use the PR URL from step 2
+   gh pr view "$PR_URL" --json files --jq '[.files[].path]'
+   ```
+
+2. Read the current index:
+   ```bash
+   cat docs/solutions/index.json
+   ```
+
+3. For each learning file you just wrote:
+   - Extract **directory-level path prefixes** from the PR's changed files. Match against existing index keys where possible; for new areas, use the directory-level prefix that represents the subsystem boundary (e.g., `packages/daemon/src/state/decision.ts` → `packages/daemon/src/state`, `.opencode/skills/legion-worker/workflows/plan.md` → `.opencode/skills/legion-worker`).
+   - For each unique prefix, add the learning file path (relative to `docs/solutions/`) to that prefix's array in `index.json`. Create the key if it doesn't exist.
+   - Deduplicate: don't add a learning that's already listed under a key.
+
+4. Write the updated `docs/solutions/index.json`. Preserve all existing entries — only add new mappings.
+
+**Soft cap (~10 per key)**: After adding new entries, check if any key's array exceeds 10 entries. If it does, trim to 10 by:
+1. Read each learning file's YAML front matter `status` field. If file doesn't exist or has no front matter, treat as `active`.
+2. Remove entries whose file has `status: superseded` first, oldest by `date` field first.
+3. If still >10 after removing all superseded, remove oldest `active` entries by `date`.
+4. This trim applies only to the key being updated — do NOT remove entries from other keys.
+
+Note: "Preserve all existing entries — only add new mappings" means don't remove entries from OTHER keys. The soft cap may trim entries from the key being updated.
+
+**Example:** If the PR changed `packages/daemon/src/state/decision.ts` and `.opencode/skills/legion-worker/workflows/plan.md`, and you wrote `docs/solutions/daemon/my-new-learning.md`:
+
+Add `"daemon/my-new-learning.md"` to these index keys (creating them if missing):
+- `"packages/daemon/src/state"`
+- `".opencode/skills/legion-worker"`
+
+**If `docs/solutions/index.json` doesn't exist or is invalid JSON:** Skip this step and note it in the issue comment. The index is advisory — its absence should never block the retro workflow.
+
 ### 5. Commit and Push Learnings
 
 Push to the **existing PR branch** — do NOT create a new branch or bookmark.

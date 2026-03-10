@@ -10,14 +10,14 @@ tags:
   - worker-lifecycle
   - controller-dispatch
 module: legion-worker
-component: workflows/implement
 symptoms:
   - controller keeps re-dispatching implement workers for same issue
   - issue stuck in "In Progress" after PR is created
   - auto-transition not firing after PR creation
   - worker-active label not being removed
   - multiple implement sessions for same completed issue
-date_solved: 2026-02-15
+date: 2026-02-15
+status: active
 ---
 
 [HISTORICAL] The implement workflow now uses explicit `worker-done` signaling instead of relying on auto-transition. This issue is largely resolved by the behavioral testing gate, though the detection pattern remains relevant for external repos.

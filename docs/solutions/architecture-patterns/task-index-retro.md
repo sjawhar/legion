@@ -1,3 +1,20 @@
+---
+title: Task Index Performance — Implementer Retro
+category: architecture-patterns
+tags:
+  - task-index
+  - file-based-index
+  - caching
+  - bootstrap-bug
+  - parallel-subagents
+  - performance
+date: 2026-02-15
+status: active
+module: daemon
+related_issues:
+  - LEG-51
+---
+
 # Task Index Performance — Implementer Retro
 
 **PR:** https://github.com/sjawhar/legion/pull/51
