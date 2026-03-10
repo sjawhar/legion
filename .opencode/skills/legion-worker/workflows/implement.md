@@ -187,6 +187,10 @@ jj diff --stat --from main    # File count should match expectations — no unre
 
 If unrelated commits are in the ancestry, rebase to isolate your changes before creating the PR.
 
+**CRITICAL: The PR body MUST include `Closes #$ISSUE_NUMBER`.** This is how GitHub links PRs to
+issues and auto-closes them on merge. Without it, merged PRs leave orphaned issues that stall
+the pipeline. This is NOT optional.
+
 ```bash
 jj describe -m "$LEGION_ISSUE_ID: [description]"
 jj git push --named "$LEGION_ISSUE_ID"=@
@@ -199,6 +203,11 @@ gh pr create --draft \
 [summary]" \
   --head "$LEGION_ISSUE_ID" \
   -R $OWNER/$REPO
+```
+
+**Verify the PR body contains the closing keyword** after creation:
+```bash
+gh pr view $LEGION_ISSUE_ID --json body --jq '.body' -R $OWNER/$REPO | grep -q 'Closes #'
 ```
 
 The issue ID in the branch/title preserves traceability for the controller.

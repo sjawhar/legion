@@ -40,7 +40,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
   const { server, stop } = startServer({
     port: randomPort(),
     hostname: "127.0.0.1",
-    teamId: TEAM_ID,
+    legionId: TEAM_ID,
     legionDir: tempDir,
     adapter,
     stateFilePath,

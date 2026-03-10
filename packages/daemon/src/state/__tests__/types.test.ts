@@ -17,70 +17,98 @@ import {
 
 describe("computeSessionId", () => {
   it("returns OpenCode-format session ID", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const result = computeSessionId(teamId, "ENG-21", "implement");
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result = computeSessionId(legionId, "ENG-21", "implement");
 
     expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   });
 
   it("same inputs produce same output", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const result1 = computeSessionId(teamId, "ENG-21", "implement");
-    const result2 = computeSessionId(teamId, "ENG-21", "implement");
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement");
+    const result2 = computeSessionId(legionId, "ENG-21", "implement");
     expect(result1).toBe(result2);
   });
 
   it("different issue produces different output", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const result1 = computeSessionId(teamId, "ENG-21", "implement");
-    const result2 = computeSessionId(teamId, "ENG-22", "implement");
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement");
+    const result2 = computeSessionId(legionId, "ENG-22", "implement");
     expect(result1).not.toBe(result2);
   });
 
   it("different mode produces different output", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const result1 = computeSessionId(teamId, "ENG-21", "implement");
-    const result2 = computeSessionId(teamId, "ENG-21", "review");
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement");
+    const result2 = computeSessionId(legionId, "ENG-21", "review");
     expect(result1).not.toBe(result2);
   });
 
-  it("accepts non-UUID team ID without throwing", () => {
+  it("accepts non-UUID legion ID without throwing", () => {
     expect(() => {
       computeSessionId("not-a-valid-uuid", "ENG-21", "implement");
     }).not.toThrow();
+  });
+
+  it("version 0 produces same output as no version", () => {
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement");
+    const result2 = computeSessionId(legionId, "ENG-21", "implement", 0);
+    expect(result1).toBe(result2);
+  });
+
+  it("version > 0 produces different output", () => {
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement");
+    const result2 = computeSessionId(legionId, "ENG-21", "implement", 1);
+    expect(result1).not.toBe(result2);
+  });
+
+  it("different versions produce different outputs", () => {
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement", 1);
+    const result2 = computeSessionId(legionId, "ENG-21", "implement", 2);
+    expect(result1).not.toBe(result2);
+  });
+
+  it("version is deterministic", () => {
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeSessionId(legionId, "ENG-21", "implement", 1);
+    const result2 = computeSessionId(legionId, "ENG-21", "implement", 1);
+    expect(result1).toBe(result2);
   });
 });
 
 describe("computeControllerSessionId", () => {
   it("returns OpenCode-format session ID", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const result = computeControllerSessionId(teamId);
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result = computeControllerSessionId(legionId);
 
     expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   });
 
   it("same input produces same output", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const result1 = computeControllerSessionId(teamId);
-    const result2 = computeControllerSessionId(teamId);
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const result1 = computeControllerSessionId(legionId);
+    const result2 = computeControllerSessionId(legionId);
     expect(result1).toBe(result2);
   });
 
   it("different from worker session id", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
-    const controllerId = computeControllerSessionId(teamId);
-    const workerId = computeSessionId(teamId, "ENG-21", "implement");
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const controllerId = computeControllerSessionId(legionId);
+    const workerId = computeSessionId(legionId, "ENG-21", "implement");
     expect(controllerId).not.toBe(workerId);
   });
 
-  it("accepts non-UUID team ID without throwing", () => {
+  it("accepts non-UUID legion ID without throwing", () => {
     expect(() => {
       computeControllerSessionId("not-a-valid-uuid");
     }).not.toThrow();
   });
 });
 
-describe("computeSessionId with non-UUID team ID", () => {
+describe("computeSessionId with non-UUID legion ID", () => {
   it("accepts a GitHub project ID string", () => {
     const result = computeSessionId("sjawhar/5", "gh-42", "implement");
     expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
@@ -97,13 +125,13 @@ describe("computeSessionId with non-UUID team ID", () => {
     expect(result1).toBe(result2);
   });
 
-  it("different non-UUID team IDs produce different output", () => {
+  it("different non-UUID legion IDs produce different output", () => {
     const result1 = computeSessionId("sjawhar/5", "gh-42", "implement");
     const result2 = computeSessionId("sjawhar/6", "gh-42", "implement");
     expect(result1).not.toBe(result2);
   });
 
-  it("non-UUID team ID produces different output from UUID team ID", () => {
+  it("non-UUID legion ID produces different output from UUID legion ID", () => {
     const uuidResult = computeSessionId(
       "7b4f0862-b775-4cb0-9a67-85400c6f44a8",
       "ENG-21",
@@ -114,7 +142,7 @@ describe("computeSessionId with non-UUID team ID", () => {
   });
 });
 
-describe("computeControllerSessionId with non-UUID team ID", () => {
+describe("computeControllerSessionId with non-UUID legion ID", () => {
   it("accepts a GitHub project ID string", () => {
     const result = computeControllerSessionId("sjawhar/5");
     expect(result).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
@@ -153,8 +181,12 @@ describe("IssueStatus.normalize", () => {
 
   it("returns unknown status unchanged", () => {
     expect(IssueStatus.normalize("Unknown")).toBe("Unknown");
-    expect(IssueStatus.normalize("Today")).toBe("Today");
     expect(IssueStatus.normalize("Scrapped")).toBe("Scrapped");
+  });
+
+  it("normalizes Today to Todo", () => {
+    expect(IssueStatus.normalize("Today")).toBe("Todo");
+    expect(IssueStatus.normalize("today")).toBe("Todo");
   });
 
   it("returns empty string for null", () => {

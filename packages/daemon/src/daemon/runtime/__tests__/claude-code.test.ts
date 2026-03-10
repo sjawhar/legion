@@ -53,7 +53,7 @@ describe("ClaudeCodeAdapter", () => {
       const adapter = new ClaudeCodeAdapter("test", spawn);
       await adapter.start({
         workspace: "/tmp/ws",
-        env: { LEGION_TEAM_ID: "abc", LEGION_DIR: "/test" },
+        env: { LEGION_ID: "abc", LEGION_DAEMON_PORT: "13370" },
       });
       const envCalls = calls.filter((c) => c[1] === "set-environment");
       expect(envCalls).toHaveLength(2);
@@ -62,7 +62,7 @@ describe("ClaudeCodeAdapter", () => {
         "set-environment",
         "-t",
         "legion-test",
-        "LEGION_TEAM_ID",
+        "LEGION_ID",
         "abc",
       ]);
       expect(envCalls[1]).toEqual([
@@ -70,8 +70,8 @@ describe("ClaudeCodeAdapter", () => {
         "set-environment",
         "-t",
         "legion-test",
-        "LEGION_DIR",
-        "/test",
+        "LEGION_DAEMON_PORT",
+        "13370",
       ]);
     });
 

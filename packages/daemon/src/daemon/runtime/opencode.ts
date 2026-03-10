@@ -55,6 +55,12 @@ export class OpenCodeAdapter implements RuntimeAdapter {
   async getSessionStatus(sessionId: string): Promise<{ data?: unknown; error?: unknown }> {
     const client = createWorkerClient(this.port, this.workspaces.get(sessionId) ?? "");
     const result = await client.session.status();
-    return result;
+    if (result.error || !result.data) {
+      return result;
+    }
+    // session.status() returns a map of ALL sessions — filter to just the requested one
+    const allStatuses = result.data as Record<string, unknown>;
+    const sessionStatus = allStatuses[sessionId];
+    return { data: sessionStatus ?? { type: "idle" } };
   }
 }

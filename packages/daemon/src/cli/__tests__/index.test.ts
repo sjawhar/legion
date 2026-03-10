@@ -25,6 +25,7 @@ mock.module("node:child_process", () => ({
   },
 }));
 
+import { resolveLegionPaths } from "../../daemon/paths";
 import {
   attachCommand,
   CliError,
@@ -33,13 +34,13 @@ import {
   cmdResetCrashes,
   dispatchCommand,
   getDaemonPort,
-  loadTeamsCache,
+  legionsCommand,
+  loadLegionsCache,
   promptCommand,
   resetCrashesCommand,
   startCommand,
   statusCommand,
   stopCommand,
-  teamsCommand,
 } from "../index";
 
 interface CommandWithArgs {
@@ -68,8 +69,6 @@ interface RunnableCommand {
 
 type FetchCall = [string | URL, RequestInit?];
 type FetchMock = ReturnType<typeof mock> & typeof fetch;
-type SpawnSyncMock = ReturnType<typeof mock> & typeof Bun.spawnSync;
-type SpawnSyncCall = Parameters<typeof Bun.spawnSync>;
 
 function installFetchMock(
   impl: (input: string | URL, init?: RequestInit) => Promise<Response>
@@ -79,25 +78,6 @@ function installFetchMock(
   }) as FetchMock;
   globalThis.fetch = fetchMock;
   return fetchMock;
-}
-
-function installSpawnSyncMock(
-  impl?: (...args: Parameters<typeof Bun.spawnSync>) => ReturnType<typeof Bun.spawnSync>
-): SpawnSyncMock {
-  const implementation =
-    impl ??
-    ((..._args: Parameters<typeof Bun.spawnSync>): ReturnType<typeof Bun.spawnSync> =>
-      ({
-        exitCode: 0,
-        stdout: Buffer.from(""),
-        stderr: Buffer.from(""),
-        success: true,
-        pid: 0,
-        resourceUsage: {} as ReturnType<typeof Bun.spawnSync>["resourceUsage"],
-      }) as ReturnType<typeof Bun.spawnSync>);
-  const spawnSyncMock = mock(implementation) as SpawnSyncMock;
-  Bun.spawnSync = spawnSyncMock;
-  return spawnSyncMock;
 }
 
 async function runCommand(command: unknown, args: Record<string, unknown>): Promise<void> {
@@ -173,7 +153,7 @@ describe("citty command definitions", () => {
   });
 
   test("teams command args are defined", async () => {
-    const args = await resolveArgs(teamsCommand);
+    const args = await resolveArgs(legionsCommand);
     const all = args.all as BooleanArg;
     expect(all.type).toBe("boolean");
     expect(all.default).toBe(false);
@@ -185,6 +165,7 @@ describe("citty command definitions", () => {
     const mode = args.mode as PositionalArg;
     const prompt = args.prompt as StringArg;
     const workspace = args.workspace as StringArg;
+    const repo = args.repo as StringArg;
     expect(issue.type).toBe("positional");
     expect(issue.required).toBe(true);
     expect(mode.type).toBe("positional");
@@ -192,6 +173,8 @@ describe("citty command definitions", () => {
     expect(prompt.type).toBe("string");
     expect(workspace.type).toBe("string");
     expect(workspace.alias).toBe("w");
+    expect(repo.type).toBe("string");
+    expect(repo.alias).toBe("r");
   });
 
   test("prompt command args are defined", async () => {
@@ -219,46 +202,24 @@ describe("citty command definitions", () => {
 
 describe("cmdDispatch", () => {
   const originalFetch = globalThis.fetch;
-  const originalSpawnSync = Bun.spawnSync;
   const originalLog = console.log;
   const originalError = console.error;
   const originalWarn = console.warn;
-  const tempDirs: string[] = [];
-
-  const createTempDir = () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-dispatch-"));
-    tempDirs.push(dir);
-    return dir;
-  };
 
   beforeEach(() => {
     console.log = mock(() => {}) as typeof console.log;
     console.error = mock(() => {}) as typeof console.error;
     console.warn = mock(() => {}) as typeof console.warn;
-    installSpawnSyncMock();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    Bun.spawnSync = originalSpawnSync;
     console.log = originalLog;
     console.error = originalError;
     console.warn = originalWarn;
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop();
-      if (dir && fs.existsSync(dir)) {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    }
   });
 
-  it("dispatches worker via daemon API and sends initial prompt", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
+  it("dispatches worker via daemon API with repo and sends initial prompt", async () => {
     const fetchMock = installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -282,7 +243,10 @@ describe("cmdDispatch", () => {
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
-    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13371 });
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13371,
+      repo: "sjawhar/legion",
+    });
 
     expect(fetchMock.mock.calls.length).toBe(3);
     const [postUrl, postInit] = fetchMock.mock.calls[1] as FetchCall;
@@ -292,9 +256,13 @@ describe("cmdDispatch", () => {
     const body = JSON.parse(postInitResolved.body as string) as {
       issueId: string;
       mode: string;
-      workspace: string;
+      repo: string;
     };
-    expect(body).toEqual({ issueId: "LEG-42", mode: "implement", workspace: workspacePath });
+    expect(body).toEqual({
+      issueId: "LEG-42",
+      mode: "implement",
+      repo: "sjawhar/legion",
+    });
 
     const [promptUrl, promptInit] = fetchMock.mock.calls[2] as FetchCall;
     expect(promptUrl.toString()).toBe("http://127.0.0.1:13371/workers/leg-42-implement/prompt");
@@ -303,13 +271,7 @@ describe("cmdDispatch", () => {
     });
   });
 
-  it("derives workspace path from legionDir and issue identifier", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
+  it("uses workspace for backward compatibility when provided", async () => {
     const fetchMock = installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -322,7 +284,10 @@ describe("cmdDispatch", () => {
         })
       );
     });
-    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13372 });
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13372,
+      workspace: "/tmp/legacy-workspace",
+    });
 
     const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
     const body = JSON.parse((postInit as RequestInit).body as string) as {
@@ -330,32 +295,34 @@ describe("cmdDispatch", () => {
       mode: string;
       workspace: string;
     };
-    expect(body.workspace).toBe(workspacePath);
+    expect(body.workspace).toBe("/tmp/legacy-workspace");
+  });
+
+  it("fails when neither repo nor workspace is provided", () => {
+    installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    return expect(cmdDispatch("LEG-42", "implement", { daemonPort: 13372 })).rejects.toThrow(
+      "Either --repo or --workspace is required"
+    );
   });
 
   it("fails gracefully when daemon is not running", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     installFetchMock(() => {
       throw new Error("ECONNREFUSED");
     });
 
     return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13373 })
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13373, repo: "sjawhar/legion" })
     ).rejects.toThrow(CliError);
   });
 
   it("reports 409 when worker already exists", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     const fetchMock = installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -373,18 +340,12 @@ describe("cmdDispatch", () => {
         )
       );
     });
-    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13374 });
+    await cmdDispatch("LEG-42", "implement", { daemonPort: 13374, repo: "sjawhar/legion" });
 
     expect(fetchMock.mock.calls.length).toBe(2);
   });
 
   it("reports 429 when crash limit exceeded", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -404,53 +365,11 @@ describe("cmdDispatch", () => {
     });
 
     return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13375 })
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13375, repo: "sjawhar/legion" })
     ).rejects.toThrow(CliError);
   });
 
-  it("creates jj workspace when directory does not exist", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    fs.mkdirSync(legionDir);
-    // Do NOT create workspacePath — force jj workspace creation path
-
-    installFetchMock((input: string | URL) => {
-      const url = input.toString();
-      if (url.endsWith("/health")) {
-        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-5" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })
-      );
-    });
-
-    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13376 });
-
-    const spawnCalls = (Bun.spawnSync as SpawnSyncMock).mock.calls;
-    expect(spawnCalls.length).toBe(1);
-    const spawnCall = spawnCalls[0] as SpawnSyncCall;
-    expect(spawnCall[0]).toEqual([
-      "jj",
-      "workspace",
-      "add",
-      path.join(tempDir, "leg-42"),
-      "--name",
-      "leg-42",
-      "-R",
-      legionDir,
-    ]);
-  });
-
   it("warns but succeeds when prompt delivery fails", async () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -470,7 +389,10 @@ describe("cmdDispatch", () => {
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
 
-    await cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13377 });
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13377,
+      repo: "sjawhar/legion",
+    });
 
     const warnCalls = (console.warn as ReturnType<typeof mock>).mock.calls.flat();
     expect(warnCalls).toContain("Worker spawned but prompt delivery failed. Send manually:");
@@ -489,10 +411,6 @@ describe("cmdDispatch", () => {
   });
 
   it("fails when daemon health check is unhealthy", () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    fs.mkdirSync(legionDir);
-
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -502,47 +420,11 @@ describe("cmdDispatch", () => {
     });
 
     return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13382 })
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13382, repo: "sjawhar/legion" })
     ).rejects.toThrow("Daemon is not healthy");
   });
 
-  it("fails when jj workspace creation fails", () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    fs.mkdirSync(legionDir);
-
-    installSpawnSyncMock(
-      (..._args: Parameters<typeof Bun.spawnSync>): ReturnType<typeof Bun.spawnSync> =>
-        ({
-          exitCode: 1,
-          stdout: Buffer.from(""),
-          stderr: Buffer.from("jj failed"),
-          success: false,
-          pid: 0,
-          resourceUsage: {} as ReturnType<typeof Bun.spawnSync>["resourceUsage"],
-        }) as ReturnType<typeof Bun.spawnSync>
-    );
-
-    installFetchMock((input: string | URL) => {
-      const url = input.toString();
-      if (url.endsWith("/health")) {
-        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
-      }
-      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
-    });
-
-    return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13383 })
-    ).rejects.toThrow("Failed to create workspace: jj failed");
-  });
-
   it("fails when daemon worker creation cannot connect", () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -555,17 +437,11 @@ describe("cmdDispatch", () => {
     });
 
     return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13384 })
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13384, repo: "sjawhar/legion" })
     ).rejects.toThrow("Could not connect to daemon");
   });
 
   it("fails when daemon returns non-JSON response", () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -578,17 +454,11 @@ describe("cmdDispatch", () => {
     });
 
     return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13385 })
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13385, repo: "sjawhar/legion" })
     ).rejects.toThrow("Daemon returned non-JSON response (status 200)");
   });
 
   it("fails when daemon returns non-OK status", () => {
-    const tempDir = createTempDir();
-    const legionDir = path.join(tempDir, "legion");
-    const workspacePath = path.join(tempDir, "leg-42");
-    fs.mkdirSync(legionDir);
-    fs.mkdirSync(workspacePath);
-
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -606,7 +476,7 @@ describe("cmdDispatch", () => {
     });
 
     return expect(
-      cmdDispatch("LEG-42", "implement", { legionDir, daemonPort: 13386 })
+      cmdDispatch("LEG-42", "implement", { daemonPort: 13386, repo: "sjawhar/legion" })
     ).rejects.toThrow('Failed to dispatch: {"error":"nope"}');
   });
 });
@@ -1068,24 +938,172 @@ describe("cmdResetCrashes", () => {
 });
 
 describe("getDaemonPort", () => {
-  test("returns default port when env unset", () => {
-    expect(getDaemonPort({} as NodeJS.ProcessEnv)).toBe(13370);
+  test("returns default port when env unset", async () => {
+    expect(await getDaemonPort()).toBe(13370);
   });
 
-  test("returns env port when valid", () => {
-    expect(getDaemonPort({ LEGION_DAEMON_PORT: "14400" } as NodeJS.ProcessEnv)).toBe(14400);
+  test("returns env port when valid", async () => {
+    const originalPort = process.env.LEGION_DAEMON_PORT;
+    process.env.LEGION_DAEMON_PORT = "14400";
+    try {
+      expect(await getDaemonPort()).toBe(14400);
+    } finally {
+      if (originalPort === undefined) {
+        delete process.env.LEGION_DAEMON_PORT;
+      } else {
+        process.env.LEGION_DAEMON_PORT = originalPort;
+      }
+    }
   });
 
-  test("falls back when env port invalid", () => {
-    expect(getDaemonPort({ LEGION_DAEMON_PORT: "not-a-number" } as NodeJS.ProcessEnv)).toBe(13370);
+  test("falls back when env port invalid", async () => {
+    const originalPort = process.env.LEGION_DAEMON_PORT;
+    process.env.LEGION_DAEMON_PORT = "not-a-number";
+    try {
+      expect(await getDaemonPort()).toBe(13370);
+    } finally {
+      if (originalPort === undefined) {
+        delete process.env.LEGION_DAEMON_PORT;
+      } else {
+        process.env.LEGION_DAEMON_PORT = originalPort;
+      }
+    }
+  });
+
+  test("reads daemon port from legions registry when projectId provided", async () => {
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "legion-state-home-"));
+    const originalStateHome = process.env.XDG_STATE_HOME;
+    const originalPort = process.env.LEGION_DAEMON_PORT;
+
+    delete process.env.LEGION_DAEMON_PORT;
+    process.env.XDG_STATE_HOME = stateHome;
+    const legionsFile = path.join(stateHome, "legion", "legions.json");
+    fs.mkdirSync(path.dirname(legionsFile), { recursive: true });
+    fs.writeFileSync(
+      legionsFile,
+      JSON.stringify(
+        {
+          "sjawhar/42": {
+            port: 15555,
+            servePort: 15566,
+            pid: process.pid,
+            startedAt: "2026-01-01T00:00:00.000Z",
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    try {
+      expect(await getDaemonPort("sjawhar/42")).toBe(15555);
+    } finally {
+      fs.rmSync(stateHome, { recursive: true, force: true });
+      if (originalStateHome === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = originalStateHome;
+      }
+      if (originalPort === undefined) {
+        delete process.env.LEGION_DAEMON_PORT;
+      } else {
+        process.env.LEGION_DAEMON_PORT = originalPort;
+      }
+    }
+  });
+
+  describe("characterization: getDaemonPort", () => {
+    test("returns port from registry when project entry exists", async () => {
+      const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "legion-state-home-"));
+      const originalStateHome = process.env.XDG_STATE_HOME;
+      const originalPort = process.env.LEGION_DAEMON_PORT;
+
+      delete process.env.LEGION_DAEMON_PORT;
+      process.env.XDG_STATE_HOME = stateHome;
+      const legionsFile = path.join(stateHome, "legion", "legions.json");
+      fs.mkdirSync(path.dirname(legionsFile), { recursive: true });
+      fs.writeFileSync(
+        legionsFile,
+        JSON.stringify(
+          {
+            "acme/77": {
+              port: 16666,
+              servePort: 17777,
+              pid: process.pid,
+              startedAt: "2026-01-01T00:00:00.000Z",
+            },
+          },
+          null,
+          2
+        )
+      );
+
+      try {
+        expect(await getDaemonPort("acme/77")).toBe(16666);
+      } finally {
+        fs.rmSync(stateHome, { recursive: true, force: true });
+        if (originalStateHome === undefined) {
+          delete process.env.XDG_STATE_HOME;
+        } else {
+          process.env.XDG_STATE_HOME = originalStateHome;
+        }
+        if (originalPort === undefined) {
+          delete process.env.LEGION_DAEMON_PORT;
+        } else {
+          process.env.LEGION_DAEMON_PORT = originalPort;
+        }
+      }
+    });
+
+    test("returns default port when registry has no project entry", async () => {
+      const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "legion-state-home-"));
+      const originalStateHome = process.env.XDG_STATE_HOME;
+      const originalPort = process.env.LEGION_DAEMON_PORT;
+
+      delete process.env.LEGION_DAEMON_PORT;
+      process.env.XDG_STATE_HOME = stateHome;
+      const legionsFile = path.join(stateHome, "legion", "legions.json");
+      fs.mkdirSync(path.dirname(legionsFile), { recursive: true });
+      fs.writeFileSync(
+        legionsFile,
+        JSON.stringify(
+          {
+            "acme/77": {
+              port: 16666,
+              servePort: 17777,
+              pid: process.pid,
+              startedAt: "2026-01-01T00:00:00.000Z",
+            },
+          },
+          null,
+          2
+        )
+      );
+
+      try {
+        expect(await getDaemonPort("missing/project")).toBe(13370);
+      } finally {
+        fs.rmSync(stateHome, { recursive: true, force: true });
+        if (originalStateHome === undefined) {
+          delete process.env.XDG_STATE_HOME;
+        } else {
+          process.env.XDG_STATE_HOME = originalStateHome;
+        }
+        if (originalPort === undefined) {
+          delete process.env.LEGION_DAEMON_PORT;
+        } else {
+          process.env.LEGION_DAEMON_PORT = originalPort;
+        }
+      }
+    });
   });
 });
 
-describe("loadTeamsCache", () => {
+describe("loadLegionsCache", () => {
   test("returns null when cache missing", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cache-"));
     try {
-      expect(loadTeamsCache(tempDir)).toBeNull();
+      expect(loadLegionsCache(tempDir)).toBeNull();
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -1094,16 +1112,95 @@ describe("loadTeamsCache", () => {
   test("loads teams cache from disk", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cache-"));
     try {
-      const cacheFile = path.join(tempDir, "teams.json");
+      const cacheFile = path.join(tempDir, "project-cache.json");
       const payload = {
         LEG: { id: "uuid-123", name: "Legion" },
       };
       fs.writeFileSync(cacheFile, JSON.stringify(payload, null, 2));
 
-      const result = loadTeamsCache(tempDir);
+      const result = loadLegionsCache(tempDir);
       expect(result).toEqual(payload);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("CLI XDG path migration", () => {
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const originalError = console.error;
+
+  beforeEach(() => {
+    console.log = mock(() => {}) as typeof console.log;
+    console.error = mock(() => {}) as typeof console.error;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    console.error = originalError;
+  });
+
+  test("cmdStart path derivation uses XDG, not legacy dotdir", () => {
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "legion-xdg-start-"));
+    const originalStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = stateHome;
+
+    try {
+      const legionId = "12345678-1234-1234-1234-123456789abc";
+      // This is the exact same call cmdStart makes after the XDG migration
+      const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
+
+      // Verify paths are XDG-based, not legacy
+      expect(instancePaths.workersFile).toContain(stateHome);
+      expect(instancePaths.workersFile).not.toContain(".legion");
+      expect(instancePaths.legionStateDir).toContain(stateHome);
+      expect(instancePaths.legionStateDir).not.toContain(".legion");
+    } finally {
+      if (originalStateHome === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = originalStateHome;
+      }
+      fs.rmSync(stateHome, { recursive: true, force: true });
+    }
+  });
+
+  test("cmdStatus reads state from XDG path, not legacy path", async () => {
+    const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "legion-xdg-status-"));
+    const originalStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = stateHome;
+
+    try {
+      const legionId = "12345678-1234-1234-1234-123456789abc";
+      const legionStateDir = path.join(stateHome, "legion", "legions", legionId);
+      fs.mkdirSync(legionStateDir, { recursive: true });
+      const workersFile = path.join(legionStateDir, "workers.json");
+      fs.writeFileSync(workersFile, JSON.stringify([]));
+
+      // Mock fetch to simulate daemon not running
+      installFetchMock(() => {
+        throw new Error("ECONNREFUSED");
+      });
+
+      await runCommand(statusCommand, { team: legionId });
+
+      // Verify console.log mentions the XDG state file path
+      const logCalls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
+      const stateFileLog = logCalls.find(
+        (line: unknown) => typeof line === "string" && line.includes("State file:")
+      ) as string | undefined;
+      expect(stateFileLog).toBeDefined();
+      expect(stateFileLog).toContain(stateHome);
+      expect(stateFileLog).not.toContain(".legion");
+    } finally {
+      if (originalStateHome === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = originalStateHome;
+      }
+      fs.rmSync(stateHome, { recursive: true, force: true });
     }
   });
 });

@@ -14,9 +14,8 @@ Persistent coordinator that loops forever, dispatching and resuming workers base
 ## Environment
 
 Required:
-- `LEGION_TEAM_ID` - team/project identifier (Linear UUID or GitHub `owner/project-number`)
+- `LEGION_ID` - team/project identifier (Linear UUID or GitHub `owner/project-number`)
 - `LEGION_ISSUE_BACKEND` - issue backend: `"linear"` or `"github"`
-- `LEGION_DIR` - path to default jj workspace
 - `LEGION_SHORT_ID` - short ID for daemon identification
 - `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
 
@@ -51,18 +50,18 @@ digraph controller {
 ### 1. Fetch Issues
 
 ```bash
-# Derive OWNER and PROJECT_NUM from LEGION_TEAM_ID for GitHub backend
-# LEGION_TEAM_ID format for GitHub: "owner/project-number"
+# Derive OWNER and PROJECT_NUM from LEGION_ID for GitHub backend
+# LEGION_ID format for GitHub: "owner/project-number"
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
-  OWNER="${LEGION_TEAM_ID%%/*}"
-  PROJECT_NUM="${LEGION_TEAM_ID##*/}"
+  OWNER="${LEGION_ID%%/*}"
+  PROJECT_NUM="${LEGION_ID##*/}"
 fi
 
 # Fetch issues based on backend
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
   ISSUES_JSON=$(gh project item-list $PROJECT_NUM --owner $OWNER --format json)
 else
-  ISSUES_JSON=$(linear_linear(action="search", query={"team": "$LEGION_TEAM_ID"}))
+  ISSUES_JSON=$(linear_linear(action="search", query={"team": "$LEGION_ID"}))
 fi
 
 ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
@@ -178,6 +177,7 @@ If any checks are failing, do NOT dispatch the tester. Instead:
 2. Re-dispatch an implementer with the CI failure output:
 ```bash
 legion dispatch "$ISSUE_IDENTIFIER" implement \
+  --repo "$OWNER/$REPO" \
   --prompt "Invoke the /legion-worker skill for implement mode. CI is failing: [paste failure summary]. Fix and push. ($BACKEND_SUFFIX)"
 ```
 
@@ -228,16 +228,15 @@ Controller routes Triage issues directly (no worker needed):
 
 For Done issues without live workers:
 ```bash
-WORKSPACES_DIR=$(dirname "$LEGION_DIR")
-ISSUE_LOWER=$(echo "$ISSUE_IDENTIFIER" | tr '[:upper:]' '[:lower:]')
-jj workspace forget "$ISSUE_LOWER" -R "$LEGION_DIR"
-rm -rf "$WORKSPACES_DIR/$ISSUE_LOWER"
+curl -s -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/workspace" \
+  -H 'Content-Type: application/json' \
+  -d '{"repo": "'"'$OWNER/$REPO'"'"}'
 ```
 
 ### 7. Write Heartbeat
 
 ```bash
-mkdir -p ~/.legion/$LEGION_SHORT_ID && touch ~/.legion/$LEGION_SHORT_ID/heartbeat
+The daemon handles heartbeat writing automatically. No manual heartbeat step needed.
 ```
 
 ### 8. Update To-Do List
@@ -285,6 +284,7 @@ getting the full skill content.
 ```bash
 # GitHub example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --repo "$OWNER/$REPO" \
   --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
 
 # Linear example:
@@ -297,6 +297,7 @@ The `dispatch` command handles: workspace creation (jj workspace add), daemon AP
 For custom prompts, still include the backend suffix:
 ```bash
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
+  --repo "$OWNER/$REPO" \
   --prompt "Custom instructions here (github backend, repo: $OWNER/$REPO)"
 ```
 
@@ -349,16 +350,45 @@ curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/status | jq '.'
 The state machine reports `hasLiveWorker`, `workerMode`, and `workerStatus` for each issue.
 Use these signals — don't independently verify worker liveness.
 
-### Forcing a Fresh Session
+### Session Versioning (Escape Hatch Only)
 
 Session IDs are **deterministic** — `computeSessionId(teamId, issueId, mode)` uses UUID v5.
 Same inputs always produce the same session ID. If the serve still has that session in
 memory, re-dispatching with the same issue ID and mode re-attaches to the existing session
 (the serve returns 409 DuplicateIDError, which the daemon treats as "reuse").
 
-This is normally desirable — it's how workers resume across prompts. If you genuinely
-need a fresh session, the daemon will need a session version incrementer (planned).
+**This is by design — session reuse preserves the worker's full context.** A worker that has
+been reading code, making changes, and iterating on review feedback carries all that context
+in its session. Re-dispatching without a version increment reconnects to that session, so
+the worker continues where it left off.
 
+The `--version` flag on `legion dispatch` exists **only as an escape hatch** for unrecoverable
+sessions — e.g., the session is corrupted, the serve crashed and lost the session, or the
+workspace was deleted and recreated. **Do NOT increment versions during normal pipeline
+operation.** Each version increment creates a completely fresh session that has zero context
+about the issue, the codebase changes, or prior work.
+
+**NEVER do this:**
+```bash
+# WRONG: Incrementing version on every dispatch throws away all worker context
+legion dispatch issue-123 implement --version 1 --prompt "Fix review feedback"
+# Later...
+legion dispatch issue-123 implement --version 2 --prompt "Fix CI"
+# Later...
+legion dispatch issue-123 implement --version 3 --prompt "Fix more things"
+```
+
+**Do this instead:**
+```bash
+# CORRECT: Same version (or no version) = worker resumes with full context
+legion dispatch issue-123 implement --prompt "Fix review feedback"
+# Later...
+legion dispatch issue-123 implement --prompt "Fix CI"  # Same session, worker remembers everything
+```
+
+A context-less worker is dangerous — it doesn't understand the branch topology, prior
+changes, or conventions established during earlier work. This can lead to destructive
+actions like force-pushing to the wrong branch.
 ### Don't Delete a Workspace While Workers May Resume
 
 **A worker whose workspace has been deleted cannot respond to prompts.** Every tool call
@@ -425,6 +455,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "This issue is too big/complex" | No issue is too big. That's what the architect phase is for. Route to Backlog. |
 | "The worker is busy, I'll wait" | Check the transcript. If the worker received prompts but produced no response, the workspace may have been deleted. A worker cannot function without its workspace. |
 | "CI can be fixed later" | CI is the implementer's responsibility. If CI is failing, the implementer isn't done — re-dispatch. |
+| "This worker keeps failing, let me increment the version" | **NEVER increment `--version` during normal operation.** Version increments destroy all worker context. Re-dispatch without version — the worker resumes with full context of prior work. Version is an escape hatch for unrecoverable sessions only. |
 
 ## Common Mistakes
 
@@ -440,6 +471,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Classify issues as "too big" | Route to Backlog for architect breakdown. No issue is too big for Legion. |
 | Advance pipeline with CI failing | Re-dispatch implementer with CI failure output. Don't dispatch reviewer until CI passes. |
 | Delete a workspace to "reset" a worker | **Never delete a workspace while the worker might be resumed.** A deleted workspace silently kills the worker — prompts arrive but every tool call fails. Only delete during Cleanup Done. |
+| Increment `--version` on every dispatch | **Never increment version during normal pipeline operation.** Each increment creates a fresh session with zero context. A context-less worker is dangerous — it can push to wrong branches, overwrite work, or break the repo. Only use `--version` when a session is truly unrecoverable (serve crash, corrupted session). |
 
 ## Status Flow
 

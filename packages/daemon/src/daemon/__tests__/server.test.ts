@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
+import type { LegionPaths } from "../paths";
+import type { RepoManagerDeps } from "../repo-manager";
 import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import { startServer } from "../server";
@@ -19,7 +21,7 @@ describe("daemon server", () => {
     | ((sessionId: string) => Promise<{ data?: unknown; error?: unknown }>)
     | null = null;
   const originalFetch = globalThis.fetch;
-  const teamId = "123e4567-e89b-12d3-a456-426614174000";
+  const legionId = "123e4567-e89b-12d3-a456-426614174000";
 
   function makeAdapter(): RuntimeAdapter {
     return {
@@ -44,6 +46,8 @@ describe("daemon server", () => {
   async function startTestServer(options?: {
     state?: PersistedWorkerState;
     adapterOverrides?: Partial<RuntimeAdapter>;
+    paths?: LegionPaths;
+    repoManagerDeps?: RepoManagerDeps;
     runtime?: string;
     tmuxSession?: string;
   }) {
@@ -60,9 +64,11 @@ describe("daemon server", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
-      teamId,
+      legionId,
       legionDir: tempDir,
+      paths: options?.paths,
       adapter,
+      repoManagerDeps: options?.repoManagerDeps,
       stateFilePath,
       runtime: options?.runtime,
       tmuxSession: options?.tmuxSession,
@@ -141,6 +147,20 @@ describe("daemon server", () => {
     expect(response.status).toBe(400);
   });
 
+  it("rejects worker creation when both repo and workspace are missing", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-50",
+        mode: "implement",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("missing repo or workspace");
+  });
+
   it("rejects relative workspace paths", async () => {
     await startTestServer();
     const response = await requestJson("/workers", {
@@ -172,10 +192,10 @@ describe("daemon server", () => {
     const body = (await response.json()) as { id: string; port: number; sessionId: string };
     expect(body.id).toBe("eng-42-implement");
     expect(body.port).toBe(sharedServePort);
-    expect(body.sessionId).toBe(computeSessionId(teamId, "eng-42", "implement"));
+    expect(body.sessionId).toBe(computeSessionId(legionId, "eng-42", "implement"));
 
     expect(createSessionCalls.length).toBe(1);
-    expect(createSessionCalls[0].sessionId).toBe(computeSessionId(teamId, "eng-42", "implement"));
+    expect(createSessionCalls[0].sessionId).toBe(computeSessionId(legionId, "eng-42", "implement"));
     expect(createSessionCalls[0].workspace).toBe("/tmp/work");
 
     const listResponse = await requestJson("/workers");
@@ -186,6 +206,189 @@ describe("daemon server", () => {
     expect(entryResponse.status).toBe(200);
     const entryBody = (await entryResponse.json()) as WorkerEntry;
     expect(entryBody.port).toBe(sharedServePort);
+  });
+
+  it("creates workers from repo by resolving workspace path", async () => {
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const runJjCalls: string[][] = [];
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async (args: string[]) => {
+        runJjCalls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => false,
+      rmDir: async () => {},
+    };
+    await startTestServer({ paths, repoManagerDeps });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "acme-widgets-77",
+        mode: "implement",
+        repo: "acme/widgets",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(createSessionCalls.length).toBe(1);
+    expect(createSessionCalls[0].workspace).toBe(
+      "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-77"
+    );
+    expect(runJjCalls).toEqual([
+      [
+        "git",
+        "clone",
+        "https://github.com/acme/widgets",
+        "/tmp/legion-data/repos/github.com/acme/widgets",
+      ],
+      [
+        "workspace",
+        "add",
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-77",
+        "--name",
+        "acme-widgets-77",
+        "-R",
+        "/tmp/legion-data/repos/github.com/acme/widgets",
+      ],
+    ]);
+  });
+
+  it("creates workers from legacy workspace payload", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-78",
+        mode: "implement",
+        workspace: "/tmp/legacy-workspace",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(createSessionCalls.length).toBe(1);
+    expect(createSessionCalls[0].workspace).toBe("/tmp/legacy-workspace");
+  });
+
+  describe("characterization: POST /workers routing", () => {
+    it("with only repo resolves workspace and creates worker", async () => {
+      const paths: LegionPaths = {
+        dataDir: "/tmp/legion-data",
+        stateDir: "/tmp/legion-state",
+        reposDir: "/tmp/legion-data/repos",
+        workspacesDir: "/tmp/legion-data/workspaces",
+        legionsFile: "/tmp/legion-state/legions.json",
+        forLegion: (projectId: string) => ({
+          legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+          workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+          logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+          workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+        }),
+        repoClonePath: (host: string, owner: string, repo: string) =>
+          `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+      };
+      const repoManagerDeps: RepoManagerDeps = {
+        runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        exists: async () => false,
+        rmDir: async () => {},
+      };
+      await startTestServer({ paths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-80",
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(createSessionCalls).toHaveLength(1);
+      expect(createSessionCalls[0].workspace).toBe(
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-80"
+      );
+    });
+
+    it("with only workspace uses it directly", async () => {
+      await startTestServer();
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-80",
+          mode: "implement",
+          workspace: "/tmp/characterization-workspace",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(createSessionCalls).toHaveLength(1);
+      expect(createSessionCalls[0].workspace).toBe("/tmp/characterization-workspace");
+    });
+
+    it("with neither repo nor workspace returns 400", async () => {
+      await startTestServer();
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-81", mode: "implement" }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "missing repo or workspace" });
+    });
+  });
+
+  it("returns 500 when repo fetch fails", async () => {
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 128, stdout: "", stderr: "Permission denied (publickey)" }),
+      exists: async () => true,
+      rmDir: async () => {},
+    };
+    await startTestServer({ paths, repoManagerDeps });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "acme-widgets-99",
+        mode: "implement",
+        repo: "acme/widgets",
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("Failed to resolve workspace");
   });
 
   it("rejects duplicate worker for same issue+mode", async () => {
@@ -209,7 +412,7 @@ describe("daemon server", () => {
     const existing: WorkerEntry = {
       id: "eng-1-implement",
       port: sharedServePort,
-      sessionId: computeSessionId(teamId, "eng-1", "implement"),
+      sessionId: computeSessionId(legionId, "eng-1", "implement"),
       workspace: "/tmp",
       startedAt: "2026-02-01T00:00:00.000Z",
       status: "running",
@@ -329,6 +532,61 @@ describe("daemon server", () => {
     const listResponse = await requestJson("/workers");
     const listBody = (await listResponse.json()) as WorkerEntry[];
     expect(listBody).toEqual([]);
+  });
+
+  it("cleans worker workspace by repo", async () => {
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const runJjCalls: string[][] = [];
+    const rmDirCalls: string[] = [];
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async (args: string[]) => {
+        runJjCalls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async (workspacePath: string) => {
+        rmDirCalls.push(workspacePath);
+      },
+    };
+    await startTestServer({ paths, repoManagerDeps });
+
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-79",
+        mode: "implement",
+        workspace: "/tmp/worker-79",
+      }),
+    });
+    const created = (await createResponse.json()) as { id: string };
+
+    const cleanupResponse = await requestJson(`/workers/${created.id}/workspace`, {
+      method: "DELETE",
+      body: JSON.stringify({ repo: "acme/widgets" }),
+    });
+
+    expect(cleanupResponse.status).toBe(200);
+    expect(await cleanupResponse.json()).toEqual({ status: "cleaned" });
+    expect(runJjCalls).toEqual([
+      ["workspace", "forget", "eng-79", "-R", "/tmp/legion-data/repos/github.com/acme/widgets"],
+    ]);
+    expect(rmDirCalls).toEqual([
+      "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/eng-79",
+    ]);
   });
 
   it("returns status from worker", async () => {
@@ -497,7 +755,7 @@ describe("daemon server", () => {
     const baseWorkerEntry: WorkerEntry = {
       id: "leg-42-implement",
       port: sharedServePort,
-      sessionId: computeSessionId(teamId, "leg-42", "implement"),
+      sessionId: computeSessionId(legionId, "leg-42", "implement"),
       workspace: "/tmp/work",
       startedAt: "2026-02-01T00:00:00.000Z",
       status: "running",
@@ -586,7 +844,7 @@ describe("daemon server", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
-      teamId,
+      legionId,
       legionDir: tempDir ?? os.tmpdir(),
       adapter: makeAdapter(),
       stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),
@@ -607,5 +865,120 @@ describe("daemon server", () => {
     await startTestServer();
     const response = await requestJson("/nope");
     expect(response.status).toBe(404);
+  });
+
+  describe("POST /state/fetch-and-collect", () => {
+    it("rejects invalid backend", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "invalid-backend", legionId: "team-123" }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_backend");
+    });
+
+    it("rejects linear backend with github-only message", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "linear", legionId: "team-123" }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("fetch-and-collect only supports github backend currently");
+    });
+
+    it("rejects missing backend field", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ legionId: "owner/123" }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_backend");
+    });
+
+    it("rejects invalid JSON body", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: "not-json",
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_json");
+    });
+
+    it("rejects github backend with invalid legionId format", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github", legionId: "no-slash" }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_team_id: expected owner/project-number");
+    });
+
+    it("rejects github backend with non-numeric project number", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github", legionId: "owner/abc" }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_team_id: project number not a number");
+    });
+
+    it("returns 500 when github fetch fails (no real API)", async () => {
+      await startTestServer();
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github", legionId: "owner/123" }),
+      });
+      expect(response.status).toBe(500);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("fetch_and_collect_failed");
+    });
+  });
+
+  describe("persistState serialization", () => {
+    it("concurrent state writes produce valid JSON", async () => {
+      await startTestServer();
+
+      // Register multiple workers concurrently to trigger parallel persistState calls
+      const concurrentRequests = Array.from({ length: 5 }, (_, i) =>
+        requestJson("/workers", {
+          method: "POST",
+          body: JSON.stringify({
+            issueId: `SERIAL-${i}`,
+            mode: "implement",
+            workspace: `/tmp/ws-${i}`,
+          }),
+        })
+      );
+
+      const responses = await Promise.all(concurrentRequests);
+      for (const response of responses) {
+        expect(response.status).toBe(200);
+      }
+
+      // Give a tick for any trailing async writes to complete
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Read the state file directly and verify it's valid JSON
+      const raw = await readFile(path.join(tempDir ?? os.tmpdir(), "workers.json"), "utf-8");
+      const parsed = JSON.parse(raw) as PersistedWorkerState;
+      expect(parsed).toBeDefined();
+      expect(typeof parsed.workers).toBe("object");
+
+      // All 5 workers should be present in the final state
+      const workerIds = Object.keys(parsed.workers);
+      expect(workerIds.length).toBe(5);
+    });
   });
 });

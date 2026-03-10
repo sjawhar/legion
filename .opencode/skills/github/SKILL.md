@@ -25,7 +25,7 @@ gh project item-list $PROJECT_NUM --owner $OWNER --format json
 ```
 
 **Parameters:**
-- `$PROJECT_NUM`: Project number (from `LEGION_TEAM_ID` format: `owner/project-number`)
+- `$PROJECT_NUM`: Project number (from `LEGION_ID` format: `owner/project-number`)
 - `$OWNER`: Repository owner
 - `--format json`: Returns structured data for parsing
 
@@ -182,7 +182,7 @@ gh issue create --title "Feature: Add dark mode" --body "User request from #789"
 - **Labels are additive**: Use `--add-label` and `--remove-label` separately (unlike Linear which replaces all)
 - **Status updates require Projects V2 GraphQL** — not just issue labels
 - **PR association is automatic** — GitHub links issues and PRs natively
-- **`$OWNER` and `$REPO` come from `LEGION_TEAM_ID`** (format: `owner/project-number`)
+- **`$OWNER` and `$REPO` come from `LEGION_ID`** (format: `owner/project-number`)
 - **Field/option IDs must be cached** by the controller after first resolution
 
 ## Error Handling

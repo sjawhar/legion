@@ -6,7 +6,9 @@ import path from "node:path";
 import { defineCommand, runMain } from "citty";
 import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
-import { resolveTeamId } from "./team-resolver";
+import { findLegionByProjectId } from "../daemon/legions-registry";
+import { resolveLegionPaths } from "../daemon/paths";
+import { resolveLegionId } from "./legion-resolver";
 
 export class CliError extends Error {
   constructor(
@@ -21,7 +23,7 @@ export class CliError extends Error {
 const DEFAULT_DAEMON_PORT = 13370;
 const SAFE_IDENTIFIER_RE = /^[a-zA-Z0-9_-]+$/;
 
-interface TeamInfo {
+interface LegionInfo {
   id: string;
   name: string;
 }
@@ -37,10 +39,13 @@ interface WorkerStatusInfo extends WorkerInfo {
 }
 
 interface DispatchOptions {
+  // Legacy transition fallback for dispatching without explicit --workspace.
   legionDir?: string;
   daemonPort?: number;
   prompt?: string;
+  repo?: string;
   workspace?: string;
+  version?: number;
 }
 
 interface PromptOptions {
@@ -59,13 +64,23 @@ interface DaemonHealth {
   tmuxSession?: string;
 }
 
-export type TeamsCache = Record<string, TeamInfo>;
+export type LegionsCache = Record<string, LegionInfo>;
 
-export function getDaemonPort(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.LEGION_DAEMON_PORT;
+export async function getDaemonPort(projectId?: string): Promise<number> {
+  const raw = process.env.LEGION_DAEMON_PORT;
   if (!raw) {
+    if (!projectId) {
+      return DEFAULT_DAEMON_PORT;
+    }
+
+    const paths = resolveLegionPaths(process.env, os.homedir());
+    const entry = await findLegionByProjectId(paths.legionsFile, projectId);
+    if (entry) {
+      return entry.port;
+    }
     return DEFAULT_DAEMON_PORT;
   }
+
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) {
     return DEFAULT_DAEMON_PORT;
@@ -73,8 +88,10 @@ export function getDaemonPort(env: NodeJS.ProcessEnv = process.env): number {
   return parsed;
 }
 
-export function loadTeamsCache(cacheDir = path.join(os.homedir(), ".legion")): TeamsCache | null {
-  const cacheFile = path.join(cacheDir, "teams.json");
+export function loadLegionsCache(
+  cacheDir = resolveLegionPaths(process.env, os.homedir()).stateDir
+): LegionsCache | null {
+  const cacheFile = path.join(cacheDir, "project-cache.json");
   if (!fs.existsSync(cacheFile)) {
     return null;
   }
@@ -86,35 +103,30 @@ export function loadTeamsCache(cacheDir = path.join(os.homedir(), ".legion")): T
 
   const parsed = JSON.parse(raw) as unknown;
   if (!parsed || typeof parsed !== "object") {
-    throw new Error(`Invalid teams cache at ${cacheFile}`);
+    throw new Error(`Invalid legions cache at ${cacheFile}`);
   }
 
-  return parsed as TeamsCache;
-}
-
-function resolveStateDir(teamId: string, stateDir?: string): string {
-  return stateDir ?? path.join(os.homedir(), ".legion", teamId);
+  return parsed as LegionsCache;
 }
 
 interface StartOptions {
   workspace: string;
-  stateDir?: string;
   prompt?: string;
   backend?: string;
   runtime?: string;
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
-  const teamId = await resolveTeamId(team, { backend: opts.backend });
-  const resolvedStateDir = resolveStateDir(teamId, opts.stateDir);
+  const legionId = await resolveLegionId(team, { backend: opts.backend });
+  const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
 
   validateControllerPrompt(opts.prompt);
 
-  console.log(`Starting Legion for team: ${teamId}`);
+  console.log(`Starting legion: ${legionId}`);
   console.log(`Workspace: ${opts.workspace}`);
-  console.log(`State directory: ${resolvedStateDir}`);
+  console.log(`State directory: ${instancePaths.legionStateDir}`);
 
-  fs.mkdirSync(resolvedStateDir, { recursive: true });
+  fs.mkdirSync(instancePaths.legionStateDir, { recursive: true });
 
   if (opts.backend) {
     process.env.LEGION_ISSUE_BACKEND = opts.backend;
@@ -124,9 +136,9 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
     process.env.LEGION_RUNTIME = opts.runtime;
   }
   const overrides: Partial<DaemonConfig> = {
-    teamId,
+    legionId,
     legionDir: opts.workspace,
-    stateFilePath: path.join(resolvedStateDir, "workers.json"),
+    stateFilePath: instancePaths.workersFile,
   };
   if (opts.prompt !== undefined) {
     overrides.controllerPrompt = opts.prompt;
@@ -141,19 +153,19 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
   await new Promise(() => {});
 }
 
-async function cmdStop(team: string, stateDir?: string, backend?: string): Promise<void> {
-  const teamId = await resolveTeamId(team, { backend });
-  const resolvedStateDir = resolveStateDir(teamId, stateDir);
+async function cmdStop(team: string, _stateDir?: string, backend?: string): Promise<void> {
+  const legionId = await resolveLegionId(team, { backend });
+  const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
 
-  console.log(`Stopping Legion for team: ${teamId}`);
+  console.log(`Stopping legion: ${legionId}`);
 
-  const stateFilePath = path.join(resolvedStateDir, "workers.json");
+  const stateFilePath = instancePaths.workersFile;
   if (!fs.existsSync(stateFilePath)) {
     console.log("No state file found. Daemon may not be running.");
     return;
   }
 
-  const daemonPort = getDaemonPort();
+  const daemonPort = await getDaemonPort(legionId);
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/shutdown`, {
       method: "POST",
@@ -168,14 +180,14 @@ async function cmdStop(team: string, stateDir?: string, backend?: string): Promi
   }
 }
 
-async function cmdStatus(team: string, stateDir?: string, backend?: string): Promise<void> {
-  const teamId = await resolveTeamId(team, { backend });
-  const resolvedStateDir = resolveStateDir(teamId, stateDir);
+async function cmdStatus(team: string, _stateDir?: string, backend?: string): Promise<void> {
+  const legionId = await resolveLegionId(team, { backend });
+  const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
 
-  console.log(`Legion Status: ${teamId}`);
+  console.log(`Legion Status: ${legionId}`);
   console.log("=".repeat(40));
 
-  const daemonPort = getDaemonPort();
+  const daemonPort = await getDaemonPort(legionId);
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (response.ok) {
@@ -192,7 +204,7 @@ async function cmdStatus(team: string, stateDir?: string, backend?: string): Pro
     console.log("Daemon: NOT RUNNING");
   }
 
-  const stateFilePath = path.join(resolvedStateDir, "workers.json");
+  const stateFilePath = instancePaths.workersFile;
   if (fs.existsSync(stateFilePath)) {
     const stat = fs.statSync(stateFilePath);
     const age = Math.floor((Date.now() - stat.mtimeMs) / 1000);
@@ -204,12 +216,12 @@ async function cmdStatus(team: string, stateDir?: string, backend?: string): Pro
 }
 
 async function cmdAttach(team: string, issue: string, backend?: string): Promise<void> {
-  const teamId = await resolveTeamId(team, { backend });
+  const legionId = await resolveLegionId(team, { backend });
 
   console.log(`Attaching to worker for issue: ${issue}`);
-  console.log(`Team: ${teamId}`);
+  console.log(`Legion: ${legionId}`);
 
-  const daemonPort = getDaemonPort();
+  const daemonPort = await getDaemonPort(legionId);
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (!response.ok) {
@@ -285,8 +297,7 @@ export async function cmdDispatch(
   if (!SAFE_IDENTIFIER_RE.test(mode)) {
     throw new CliError(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
   }
-  const daemonPort = opts.daemonPort ?? getDaemonPort();
-  const legionDir = opts.legionDir ?? process.env.LEGION_DIR ?? process.cwd();
+  const daemonPort = opts.daemonPort ?? (await getDaemonPort());
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
 
   // Verify daemon is reachable before creating workspace to avoid orphan directories
@@ -302,19 +313,16 @@ export async function cmdDispatch(
     throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/health`);
   }
 
-  const issueLower = issue.toLowerCase();
-  const workspacePath = opts.workspace ?? path.join(path.dirname(legionDir), issueLower);
-
-  if (!fs.existsSync(workspacePath)) {
-    console.log(`Creating workspace: ${workspacePath}`);
-    const jjResult = Bun.spawnSync(
-      ["jj", "workspace", "add", workspacePath, "--name", issueLower, "-R", legionDir],
-      { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 }
-    );
-    if (jjResult.exitCode !== 0) {
-      const stderr = jjResult.stderr.toString();
-      throw new CliError(`Failed to create workspace: ${stderr}`);
-    }
+  const body: Record<string, unknown> = { issueId: issue, mode, version: opts.version };
+  if (opts.repo) {
+    body.repo = opts.repo;
+  } else if (opts.workspace) {
+    body.workspace = opts.workspace;
+  } else if (opts.legionDir) {
+    // Legacy: map LEGION_DIR to workspace while repo-based dispatch migration completes.
+    body.workspace = opts.legionDir;
+  } else {
+    throw new CliError("Either --repo or --workspace is required");
   }
 
   let response: Response;
@@ -322,23 +330,23 @@ export async function cmdDispatch(
     response = await fetch(`${baseUrl}/workers`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ issueId: issue, mode, workspace: workspacePath }),
+      body: JSON.stringify(body),
     });
   } catch (_error) {
     throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/workers`);
   }
 
-  let body: Record<string, unknown>;
+  let responseBody: Record<string, unknown>;
   try {
-    body = (await response.json()) as Record<string, unknown>;
+    responseBody = (await response.json()) as Record<string, unknown>;
   } catch {
     throw new CliError(`Daemon returned non-JSON response (status ${response.status})`);
   }
 
   if (response.status === 409) {
-    console.log(`Worker already running: ${body.id}`);
-    console.log(`  port: ${body.port}`);
-    console.log(`  session: ${body.sessionId}`);
+    console.log(`Worker already running: ${responseBody.id}`);
+    console.log(`  port: ${responseBody.port}`);
+    console.log(`  session: ${responseBody.sessionId}`);
     console.log(
       `\nTo resume: legion prompt ${issue} "${
         opts.prompt ?? `/legion-worker ${mode} mode for ${issue}`
@@ -349,18 +357,18 @@ export async function cmdDispatch(
 
   if (response.status === 429) {
     throw new CliError(
-      `Crash limit exceeded for ${body.id} (${body.crashCount} crashes)\n` +
+      `Crash limit exceeded for ${responseBody.id} (${responseBody.crashCount} crashes)\n` +
         `Reset with: legion reset-crashes ${issue} ${mode}`
     );
   }
 
   if (!response.ok) {
-    throw new CliError(`Failed to dispatch: ${JSON.stringify(body)}`);
+    throw new CliError(`Failed to dispatch: ${JSON.stringify(responseBody)}`);
   }
 
-  const workerId = body.id as string;
-  const workerPort = body.port as number;
-  const sessionId = body.sessionId as string;
+  const workerId = responseBody.id as string;
+  const workerPort = responseBody.port as number;
+  const sessionId = responseBody.sessionId as string;
 
   console.log(`Worker dispatched: ${workerId}`);
   console.log(`  port: ${workerPort}`);
@@ -379,14 +387,14 @@ export async function cmdDispatch(
     console.warn(`  legion prompt ${issue} "${initialPrompt}"`);
   }
 
-  console.log(`\nTo attach: legion attach <team> ${issue}`);
+  console.log(`\nTo attach: legion attach <legion> ${issue}`);
 }
 
 export async function cmdPrompt(issue: string, prompt: string, opts: PromptOptions): Promise<void> {
   if (!SAFE_IDENTIFIER_RE.test(issue)) {
     throw new CliError(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
   }
-  const daemonPort = opts.daemonPort ?? getDaemonPort();
+  const daemonPort = opts.daemonPort ?? (await getDaemonPort());
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
 
   let workers: WorkerStatusInfo[];
@@ -471,7 +479,7 @@ export async function cmdResetCrashes(
   if (!SAFE_IDENTIFIER_RE.test(mode)) {
     throw new CliError(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
   }
-  const daemonPort = opts?.daemonPort ?? getDaemonPort();
+  const daemonPort = opts?.daemonPort ?? (await getDaemonPort());
   const workerId = `${issue.toLowerCase()}-${mode}`;
 
   try {
@@ -521,18 +529,20 @@ async function checkDaemonHealth(port: number): Promise<DaemonHealth> {
   }
 }
 
-async function cmdTeams(includeAll: boolean): Promise<void> {
-  const cache = loadTeamsCache();
+async function cmdLegions(includeAll: boolean): Promise<void> {
+  const cache = loadLegionsCache();
   if (!cache || Object.keys(cache).length === 0) {
-    console.log("No teams cached. Start a swarm first.");
+    console.log("No legions cached. Start a swarm first.");
     return;
   }
 
-  const daemonPort = getDaemonPort();
-  const health = await checkDaemonHealth(daemonPort);
   const entries = await Promise.all(
     Object.entries(cache).map(async ([key, team]) => {
-      const stateFilePath = path.join(os.homedir(), ".legion", team.id, "workers.json");
+      const daemonPort = await getDaemonPort(team.id);
+      const health = await checkDaemonHealth(daemonPort);
+      const stateFilePath = resolveLegionPaths(process.env, os.homedir()).forLegion(
+        team.id
+      ).workersFile;
       if (!fs.existsSync(stateFilePath)) {
         return { key, team, running: false, workerCount: 0 };
       }
@@ -542,11 +552,11 @@ async function cmdTeams(includeAll: boolean): Promise<void> {
 
   const filtered = includeAll ? entries : entries.filter((entry) => entry.running);
   if (filtered.length === 0) {
-    console.log("No active daemons. Use --all to show cached teams.");
+    console.log("No active daemons. Use --all to show cached legions.");
     return;
   }
 
-  console.log("Teams:");
+  console.log("Legions:");
   for (const entry of filtered) {
     const status = entry.running ? `RUNNING (workers: ${entry.workerCount})` : "STOPPED";
     console.log(`  ${entry.key}: ${entry.team.name} (${entry.team.id}) - ${status}`);
@@ -569,7 +579,7 @@ async function cmdCollectState(backend: string): Promise<void> {
     throw new CliError("Failed to parse stdin as JSON");
   }
 
-  const daemonPort = getDaemonPort();
+  const daemonPort = await getDaemonPort();
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
 
   try {
@@ -595,7 +605,7 @@ async function cmdCollectState(backend: string): Promise<void> {
 export const startCommand = defineCommand({
   meta: { name: "start", description: "Start the Legion swarm" },
   args: {
-    team: { type: "positional", description: "Team key or UUID", required: true },
+    team: { type: "positional", description: "Legion key or UUID", required: true },
     workspace: {
       type: "string",
       alias: "w",
@@ -622,7 +632,6 @@ export const startCommand = defineCommand({
   async run({ args }) {
     await cmdStart(args.team, {
       workspace: args.workspace,
-      stateDir: args["state-dir"],
       prompt: args.prompt,
       backend: args.backend,
       runtime: args.runtime,
@@ -633,7 +642,7 @@ export const startCommand = defineCommand({
 export const stopCommand = defineCommand({
   meta: { name: "stop", description: "Stop the Legion swarm" },
   args: {
-    team: { type: "positional", description: "Team key or UUID", required: true },
+    team: { type: "positional", description: "Legion key or UUID", required: true },
     "state-dir": { type: "string", description: "State directory path" },
     backend: {
       type: "string",
@@ -649,7 +658,7 @@ export const stopCommand = defineCommand({
 export const statusCommand = defineCommand({
   meta: { name: "status", description: "Show Legion swarm status" },
   args: {
-    team: { type: "positional", description: "Team key or UUID", required: true },
+    team: { type: "positional", description: "Legion key or UUID", required: true },
     "state-dir": { type: "string", description: "State directory path" },
     backend: {
       type: "string",
@@ -665,7 +674,7 @@ export const statusCommand = defineCommand({
 export const attachCommand = defineCommand({
   meta: { name: "attach", description: "Attach to a worker session" },
   args: {
-    team: { type: "positional", description: "Team key or UUID", required: true },
+    team: { type: "positional", description: "Legion key or UUID", required: true },
     issue: { type: "positional", description: "Issue key or identifier", required: true },
     backend: {
       type: "string",
@@ -686,17 +695,17 @@ export const attachCommand = defineCommand({
   },
 });
 
-export const teamsCommand = defineCommand({
-  meta: { name: "teams", description: "List teams and their daemon status" },
+export const legionsCommand = defineCommand({
+  meta: { name: "teams", description: "List legions and their daemon status" },
   args: {
     all: {
       type: "boolean",
-      description: "Include cached teams without running daemons",
+      description: "Include cached legions without running daemons",
       default: false,
     },
   },
   async run({ args }) {
-    await cmdTeams(args.all);
+    await cmdLegions(args.all);
   },
 });
 
@@ -714,14 +723,24 @@ export const dispatchCommand = defineCommand({
       required: true,
     },
     prompt: { type: "string", description: "Custom initial prompt (default: /legion-worker)" },
+    repo: { type: "string", alias: "r", description: "Repository (owner/repo)" },
     workspace: { type: "string", alias: "w", description: "Override workspace path" },
+    version: { type: "string", description: "Session version (default: 0)" },
   },
   async run({ args }) {
     try {
+      const parsedVersion =
+        args.version !== undefined && args.version !== "" ? Number(args.version) : undefined;
+      if (parsedVersion !== undefined && (!Number.isInteger(parsedVersion) || parsedVersion < 0)) {
+        throw new CliError(`Invalid --version: ${args.version} (must be a non-negative integer)`);
+      }
       await cmdDispatch(args.issue, args.mode, {
+        // Legacy transition: keep LEGION_DIR fallback for users not passing --workspace.
         legionDir: process.env.LEGION_DIR,
         prompt: args.prompt,
+        repo: args.repo,
         workspace: args.workspace,
+        version: parsedVersion,
       });
     } catch (e) {
       if (e instanceof CliError) {
@@ -808,7 +827,7 @@ export const mainCommand = defineCommand({
     dispatch: dispatchCommand,
     prompt: promptCommand,
     "reset-crashes": resetCrashesCommand,
-    teams: teamsCommand,
+    teams: legionsCommand,
     "collect-state": collectStateCommand,
   },
 });

@@ -1,6 +1,13 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import {
+  allocatePort,
+  readLegionsRegistry,
+  removeLegionEntry,
+  writeLegionEntry,
+} from "./legions-registry";
+import { isPortFree } from "./ports";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter } from "./runtime/types";
 import { startServer } from "./server";
@@ -18,6 +25,13 @@ interface DaemonDependencies {
   clearTimeout: typeof clearTimeout;
 }
 
+interface DaemonOverrides extends Partial<DaemonConfig> {
+  readLegionsRegistry?: typeof readLegionsRegistry;
+  allocatePort?: typeof allocatePort;
+  writeLegionEntry?: typeof writeLegionEntry;
+  removeLegionEntry?: typeof removeLegionEntry;
+}
+
 export interface DaemonHandle {
   server: ServerHandle["server"];
   stop: () => Promise<void>;
@@ -30,7 +44,7 @@ function resolveDependencies(
 ): DaemonDependencies {
   const defaultAdapter = createAdapter(config.runtime, {
     port: config.baseWorkerPort,
-    shortId: config.teamId ?? "default",
+    shortId: config.legionId ?? "default",
   });
   return {
     adapter: overrides?.adapter ?? defaultAdapter,
@@ -65,31 +79,65 @@ async function sendPromptWithRetry(
 }
 
 function buildControllerEnv(config: DaemonConfig): Record<string, string> {
-  // config.teamId is guaranteed non-empty by the startDaemon guard at line 107-109.
+  // config.legionId is guaranteed non-empty by the startDaemon guard at line 107-109.
   // The "" fallback is unreachable dead code — kept to satisfy the type checker.
-  const teamId = config.teamId ?? "";
+  const legionId = config.legionId ?? "";
   return {
-    LEGION_TEAM_ID: teamId,
+    LEGION_ID: legionId,
     LEGION_ISSUE_BACKEND: config.issueBackend,
-    LEGION_DIR: config.legionDir ?? "", // legionDir is genuinely optional
-    LEGION_SHORT_ID: teamId.slice(0, 8),
+    LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
   };
 }
 
 export async function startDaemon(
-  overrides: Partial<DaemonConfig> = {},
+  overrides: DaemonOverrides = {},
   deps?: Partial<DaemonDependencies>
 ): Promise<DaemonHandle> {
-  const config = { ...loadConfig(), ...overrides };
-  if (!config.teamId) {
-    throw new Error("Missing teamId for daemon");
+  const {
+    readLegionsRegistry: readLegionsRegistryOverride,
+    allocatePort: allocatePortOverride,
+    writeLegionEntry: writeLegionEntryOverride,
+    removeLegionEntry: removeLegionEntryOverride,
+    ...configOverrides
+  } = overrides;
+
+  const readLegionsRegistryFn = readLegionsRegistryOverride ?? readLegionsRegistry;
+  const allocatePortFn = allocatePortOverride ?? allocatePort;
+  const writeLegionEntryFn = writeLegionEntryOverride ?? writeLegionEntry;
+  const removeLegionEntryFn = removeLegionEntryOverride ?? removeLegionEntry;
+
+  let config = { ...loadConfig(), ...configOverrides };
+  const legionId = config.legionId;
+  if (!legionId) {
+    throw new Error("Missing legionId for daemon");
   }
   validateControllerPrompt(config.controllerPrompt);
   mkdirSync(config.logDir, { recursive: true });
+
+  const registry = await readLegionsRegistryFn(config.paths.legionsFile);
+  const { daemonPort, servePort } = allocatePortFn(registry);
+
+  let actualDaemonPort = daemonPort;
+  while (!(await isPortFree(actualDaemonPort))) {
+    actualDaemonPort++;
+  }
+
+  let actualServePort = servePort;
+  while (!(await isPortFree(actualServePort))) {
+    actualServePort++;
+  }
+
+  config = {
+    ...config,
+    daemonPort: actualDaemonPort,
+    baseWorkerPort: actualServePort,
+  };
+
   const resolvedDeps = resolveDependencies(config, deps);
 
   const sharedServePort = config.baseWorkerPort;
+  const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
 
   const existingHealthy = await resolvedDeps.adapter.healthy();
   if (existingHealthy) {
@@ -97,7 +145,7 @@ export async function startDaemon(
   } else {
     await resolvedDeps.adapter.start({
       env: buildControllerEnv(config),
-      workspace: config.legionDir ?? "",
+      workspace: controllerWorkspace,
       logDir: config.logDir,
     });
     console.log(`Shared serve started on port ${sharedServePort}`);
@@ -132,6 +180,10 @@ export async function startDaemon(
       healthTickTimeout = null;
     }
 
+    try {
+      await removeLegionEntryFn(config.paths.legionsFile, legionId);
+    } catch {}
+
     await resolvedDeps.adapter.stop();
 
     controllerState = undefined;
@@ -147,25 +199,55 @@ export async function startDaemon(
     }
   };
 
-  const { server, stop } = resolvedDeps.startServer({
-    port: config.daemonPort,
-    hostname: "127.0.0.1",
-    teamId: config.teamId,
-    legionDir: config.legionDir ?? "",
-    adapter: resolvedDeps.adapter,
-    stateFilePath: config.stateFilePath,
-    logDir: config.logDir,
-    runtime: config.runtime,
-    tmuxSession:
-      config.runtime === "claude-code" && config.teamId ? `legion-${config.teamId}` : undefined,
-    getControllerState: () => controllerState,
-    shutdownFn: async () => {
-      resolvedDeps.setTimeout(async () => {
-        await shutdown(true);
-      }, 100);
-    },
-  });
+  let server: ServerHandle["server"];
+  let stop: ServerHandle["stop"];
+  let bindAttempts = 0;
+
+  while (true) {
+    try {
+      const serverHandle = resolvedDeps.startServer({
+        port: config.daemonPort,
+        hostname: "127.0.0.1",
+        legionId,
+        projectId: legionId,
+        legionDir: config.legionDir,
+        paths: config.paths,
+        adapter: resolvedDeps.adapter,
+        stateFilePath: config.stateFilePath,
+        logDir: config.logDir,
+        runtime: config.runtime,
+        tmuxSession:
+          config.runtime === "claude-code" && config.legionId
+            ? `legion-${config.legionId}`
+            : undefined,
+        getControllerState: () => controllerState,
+        shutdownFn: async () => {
+          resolvedDeps.setTimeout(async () => {
+            await shutdown(true);
+          }, 100);
+        },
+      });
+      server = serverHandle.server;
+      stop = serverHandle.stop;
+      break;
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      bindAttempts++;
+      if (err.code !== "EADDRINUSE" || bindAttempts >= 5) {
+        throw error;
+      }
+      config = { ...config, daemonPort: config.daemonPort + 1 };
+    }
+  }
+
   stopServer = stop;
+
+  await writeLegionEntryFn(config.paths.legionsFile, legionId, {
+    port: config.daemonPort,
+    servePort: sharedServePort,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  });
 
   const existingController = controllerState;
 
@@ -183,16 +265,12 @@ export async function startDaemon(
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
   } else {
-    const teamId = config.teamId;
-    if (!teamId) {
-      throw new Error("LEGION_TEAM_ID is required when no external controller session ID is set");
-    }
-    const requestedSessionId = computeControllerSessionId(teamId);
+    const requestedSessionId = computeControllerSessionId(legionId);
     let actualSessionId: string | undefined;
     try {
       actualSessionId = await resolvedDeps.adapter.createSession(
         requestedSessionId,
-        config.legionDir ?? ""
+        controllerWorkspace
       );
       controllerState = { sessionId: actualSessionId, port: sharedServePort };
     } catch (error) {
@@ -229,7 +307,7 @@ export async function startDaemon(
           try {
             await resolvedDeps.adapter.start({
               env: buildControllerEnv(config),
-              workspace: config.legionDir ?? "",
+              workspace: controllerWorkspace,
               logDir: config.logDir,
             });
             console.log(`Shared serve restarted on port ${sharedServePort}`);
@@ -255,7 +333,7 @@ export async function startDaemon(
               try {
                 const actualControllerSessionId = await resolvedDeps.adapter.createSession(
                   controllerState.sessionId,
-                  config.legionDir ?? ""
+                  controllerWorkspace
                 );
                 if (actualControllerSessionId !== controllerState.sessionId) {
                   console.warn(

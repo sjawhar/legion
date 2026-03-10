@@ -22,7 +22,7 @@ describe("parseArgs", () => {
       "--daemon-url",
       "http://localhost:3000",
     ]);
-    expect(args.teamId).toBe("00000000-0000-0000-0000-000000000000");
+    expect(args.legionId).toBe("00000000-0000-0000-0000-000000000000");
     expect(args.daemonUrl).toBe("http://localhost:3000");
   });
 
