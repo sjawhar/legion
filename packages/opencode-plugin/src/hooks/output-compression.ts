@@ -13,6 +13,10 @@ const DEFAULT_EXCLUDED_TOOLS = new Set([
   "switch_agent",
 ]);
 
+// LINE#ID prefixes (e.g. "734#QH|") are added by the Read tool for the Edit tool.
+// Strip them before indexing to avoid polluting FTS with line numbers and hash tags.
+const LINE_ID_PATTERN = /^\d+#[A-Z]{2}\|/gm;
+
 export interface CompressionStats {
   compressed: number;
   bytesSaved: number;
@@ -91,7 +95,12 @@ export function createOutputCompressionHook(config: OutputCompressionConfig = {}
     const source = `${input.sessionID}:${input.tool}:${input.callID}`;
     try {
       const activeStore = getOrCreateStore();
-      const indexed = activeStore.index({ content: rawOutput, source, session: input.sessionID });
+      const cleanContent = rawOutput.replace(LINE_ID_PATTERN, "");
+      const indexed = activeStore.index({
+        content: cleanContent,
+        source,
+        session: input.sessionID,
+      });
       const topTerms = indexed.vocabulary.join(", ");
       const suggestedQueries = indexed.vocabulary.slice(0, 3).join(", ");
       output.output = [

@@ -361,4 +361,35 @@ describe("createOutputCompressionHook", () => {
     expect(output.output).toContain("[Compressed]");
     expect(hook.getStats().compressed).toBe(1);
   });
+
+  it("strips LINE#ID prefixes before indexing content", async () => {
+    const hook = makeHook({ thresholdBytes: 20 });
+    // Simulate Read tool output with LINE#ID prefixes
+    const lines = Array.from({ length: 40 }, (_, i) => {
+      const hash = "ABCDEFGHIJKLMNOP".slice(i % 14, (i % 14) + 2);
+      return `${i + 1}#${hash}|Line ${i + 1} content about unique-marker-${i}`;
+    });
+    const raw = lines.join("\n");
+    const output = { title: "read", output: raw, metadata: {} };
+
+    await hook["tool.execute.after"]?.(
+      { tool: "read", sessionID: "s-1", callID: "c-lineid", args: {} },
+      output
+    );
+
+    expect(output.output).toContain("[Compressed]");
+
+    // Verify indexed content does NOT contain LINE#ID prefixes
+    const store = hook.getStore();
+    expect(store).not.toBeNull();
+    if (!store) throw new Error("expected store");
+
+    const results = store.search({ queries: ["unique-marker"], session: "s-1" });
+    expect(results.length).toBeGreaterThan(0);
+    // Content should have the actual text, not LINE#ID prefixes
+    for (const result of results) {
+      expect(result.content).not.toMatch(/^\d+#[A-Z]{2}\|/m);
+      expect(result.content).toContain("unique-marker");
+    }
+  });
 });
