@@ -48,15 +48,76 @@ interface GitHubProjectItemsPage {
         };
       };
     };
+    user?: {
+      projectV2?: {
+        items: {
+          pageInfo: {
+            hasNextPage: boolean;
+            endCursor: string | null;
+          };
+          nodes: GitHubProjectItemNode[];
+        };
+      };
+    };
   };
   errors?: Array<{ message: string }>;
 }
 
 const ITEMS_PER_PAGE = 100;
 
-const QUERY = `
+const ORG_QUERY = `
 query($owner: String!, $number: Int!, $first: Int!, $after: String) {
   organization(login: $owner) {
+    projectV2(number: $number) {
+      items(first: $first, after: $after) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              name
+            }
+          }
+          labels: fieldValueByName(name: "Labels") {
+            ... on ProjectV2ItemFieldLabelValue {
+              labels(first: 20) {
+                nodes { name }
+              }
+            }
+          }
+          content {
+            __typename
+            ... on Issue {
+              number
+              title
+              url
+              repository { nameWithOwner }
+              linkedPullRequests: closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
+                nodes { url }
+              }
+            }
+            ... on PullRequest {
+              number
+              title
+              url
+              repository { nameWithOwner }
+            }
+            ... on DraftIssue {
+              title
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const USER_QUERY = `
+query($owner: String!, $number: Int!, $first: Int!, $after: String) {
+  user(login: $owner) {
     projectV2(number: $number) {
       items(first: $first, after: $after) {
         pageInfo {
@@ -160,7 +221,60 @@ function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown>
 }
 
 /**
+ * Execute a GraphQL query with fallback from organization to user.
+ *
+ * @param query - The GraphQL query string
+ * @param owner - GitHub organization or user
+ * @param projectNumber - Project number (from the URL)
+ * @param cursor - Pagination cursor
+ * @param runner - Command runner (for testing)
+ * @returns GraphQL response
+ */
+async function executeGraphQLQuery(
+  query: string,
+  owner: string,
+  projectNumber: number,
+  cursor: string | null,
+  runner: CommandRunner
+): Promise<GitHubProjectItemsPage> {
+  const cmd: string[] = [
+    "gh",
+    "api",
+    "graphql",
+    "-f",
+    `query=${query}`,
+    "-f",
+    `owner=${owner}`,
+    "-F",
+    `number=${projectNumber}`,
+    "-F",
+    `first=${ITEMS_PER_PAGE}`,
+  ];
+  if (cursor) {
+    cmd.push("-f", `after=${cursor}`);
+  }
+
+  const result: CommandResult = await runner(cmd);
+
+  if (result.exitCode !== 0) {
+    throw new Error(`GitHub GraphQL query failed (exit ${result.exitCode}): ${result.stderr}`);
+  }
+
+  let response: GitHubProjectItemsPage;
+  try {
+    response = JSON.parse(result.stdout) as GitHubProjectItemsPage;
+  } catch {
+    throw new Error(`Failed to parse GraphQL response: ${result.stdout.slice(0, 200)}`);
+  }
+
+  return response;
+}
+
+/**
  * Fetch all items from a GitHub Project V2 using cursor-based GraphQL pagination.
+ *
+ * Tries organization query first, falls back to user query if the authenticated
+ * user is not a member of the organization.
  *
  * @param owner - GitHub organization or user
  * @param projectNumber - Project number (from the URL)
@@ -175,54 +289,79 @@ export async function fetchGitHubProjectItems(
   const allItems: Record<string, unknown>[] = [];
   let cursor: string | null = null;
   let hasNextPage = true;
+  let useUserQuery = false;
 
   while (hasNextPage) {
-    const variables: Record<string, unknown> = {
-      owner,
-      number: projectNumber,
-      first: ITEMS_PER_PAGE,
-    };
-    if (cursor) {
-      variables.after = cursor;
-    }
-
-    const cmd: string[] = [
-      "gh",
-      "api",
-      "graphql",
-      "-f",
-      `query=${QUERY}`,
-      "-f",
-      `owner=${owner}`,
-      "-F",
-      `number=${projectNumber}`,
-      "-F",
-      `first=${ITEMS_PER_PAGE}`,
-    ];
-    if (cursor) {
-      cmd.push("-f", `after=${cursor}`);
-    }
-
-    const result: CommandResult = await runner(cmd);
-
-    if (result.exitCode !== 0) {
-      throw new Error(`GitHub GraphQL query failed (exit ${result.exitCode}): ${result.stderr}`);
-    }
-
+    // Try organization query first, fall back to user query
     let response: GitHubProjectItemsPage;
-    try {
-      response = JSON.parse(result.stdout) as GitHubProjectItemsPage;
-    } catch {
-      throw new Error(`Failed to parse GraphQL response: ${result.stdout.slice(0, 200)}`);
+    let items:
+      | {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          nodes: GitHubProjectItemNode[];
+        }
+      | undefined;
+
+    if (!useUserQuery) {
+      try {
+        response = await executeGraphQLQuery(ORG_QUERY, owner, projectNumber, cursor, runner);
+
+        if (response.errors?.length) {
+          // Check if the error is about organization access
+          const hasOrgAccessError = response.errors.some(
+            (error) =>
+              error.message.includes("Could not resolve to an Organization") ||
+              error.message.includes("not a member")
+          );
+
+          if (hasOrgAccessError) {
+            // Fall back to user query
+            useUserQuery = true;
+            response = await executeGraphQLQuery(USER_QUERY, owner, projectNumber, cursor, runner);
+            items = response.data?.user?.projectV2?.items;
+          } else {
+            throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
+          }
+        } else {
+          items = response.data?.organization?.projectV2?.items;
+        }
+      } catch (error) {
+        // If organization query fails completely with access-related error, try user query
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const isAccessError =
+          errorMessage.includes("Forbidden") ||
+          errorMessage.includes("not a member") ||
+          errorMessage.includes("Could not resolve to an Organization");
+
+        if (isAccessError) {
+          useUserQuery = true;
+          response = await executeGraphQLQuery(USER_QUERY, owner, projectNumber, cursor, runner);
+
+          if (response.errors?.length) {
+            throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
+          }
+
+          items = response.data?.user?.projectV2?.items;
+        } else {
+          // Re-throw non-access errors
+          throw error;
+        }
+      }
+    } else {
+      // Use user query
+      response = await executeGraphQLQuery(USER_QUERY, owner, projectNumber, cursor, runner);
+
+      if (response.errors?.length) {
+        throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
+      }
+
+      items = response.data?.user?.projectV2?.items;
     }
 
-    if (response.errors?.length) {
-      throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
-    }
-
-    const items = response.data?.organization?.projectV2?.items;
     if (!items) {
-      throw new Error("Unexpected GraphQL response structure — missing projectV2.items");
+      const queryType = useUserQuery ? "user" : "organization";
+      throw new Error(
+        `Unexpected GraphQL response structure — missing ${queryType}.projectV2.items`
+      );
     }
 
     for (const node of items.nodes) {
