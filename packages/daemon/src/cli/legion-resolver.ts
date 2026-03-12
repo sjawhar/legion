@@ -1,49 +1,50 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveLegionPaths } from "../daemon/paths";
 import { LinearTeamsResponseSchema } from "../daemon/schemas";
 
 // UUID regex pattern
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-interface TeamInfo {
+interface LegionInfo {
   id: string;
   name: string;
 }
 
-interface TeamsCache {
-  [key: string]: TeamInfo;
+interface LegionsCache {
+  [key: string]: LegionInfo;
 }
 
 /**
- * Resolve a team reference to a stable ID.
+ * Resolve a legion reference to a stable ID.
  *
- * For GitHub backend, the team ref (e.g., "owner/project-number") is already the ID.
- * For Linear backend, resolves team keys (e.g., "LEG") to UUIDs via cache or API.
+ * For GitHub backend, the legion ref (e.g., "owner/project-number") is already the ID.
+ * For Linear backend, resolves legion keys (e.g., "LEG") to UUIDs via cache or API.
  *
- * @param teamRef - Team identifier: UUID, team key (Linear), or owner/project-number (GitHub)
+ * @param legionRef - Legion identifier: UUID, team key (Linear), or owner/project-number (GitHub)
  * @param options - Optional cache directory and backend
- * @returns The team ID
- * @throws Error if team cannot be resolved
+ * @returns The legion ID
+ * @throws Error if legion cannot be resolved
  */
-export async function resolveTeamId(
-  teamRef: string,
+export async function resolveLegionId(
+  legionRef: string,
   options?: string | { cacheDir?: string; backend?: string }
 ): Promise<string> {
   const cacheDir = typeof options === "string" ? options : options?.cacheDir;
   const backend = typeof options === "string" ? undefined : options?.backend;
 
-  // GitHub backend: team ref is already the ID (owner/project-number)
+  // GitHub backend: legion ref is already the ID (owner/project-number)
   if (backend === "github") {
-    return teamRef;
+    return legionRef;
   }
 
-  if (UUID_PATTERN.test(teamRef)) {
-    return teamRef;
+  if (UUID_PATTERN.test(legionRef)) {
+    return legionRef;
   }
 
-  const resolvedCacheDir = cacheDir ?? path.join(os.homedir(), ".legion");
-  const cacheFile = path.join(resolvedCacheDir, "teams.json");
+  const resolvedCacheDir = cacheDir ?? resolveLegionPaths(process.env, os.homedir()).stateDir;
+  const cacheFile = path.join(resolvedCacheDir, "project-cache.json");
 
   if (fs.existsSync(cacheFile)) {
     try {
@@ -51,32 +52,32 @@ export async function resolveTeamId(
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
         throw new Error("Invalid cache format");
       }
-      const teams = raw as TeamsCache;
-      const keyUpper = teamRef.toUpperCase();
-      if (keyUpper in teams) {
-        const team = teams[keyUpper];
-        console.log(`Using cached: ${teamRef} → ${team.name} (${team.id})`);
-        return team.id;
+      const legions = raw as LegionsCache;
+      const keyUpper = legionRef.toUpperCase();
+      if (keyUpper in legions) {
+        const legion = legions[keyUpper];
+        console.log(`Using cached: ${legionRef} → ${legion.name} (${legion.id})`);
+        return legion.id;
       }
     } catch {}
   }
 
   const apiKey = process.env.LINEAR_API_TOKEN;
   if (apiKey) {
-    return await lookupTeamViaApi(teamRef, apiKey, resolvedCacheDir);
+    return await lookupLegionViaApi(legionRef, apiKey, resolvedCacheDir);
   }
 
   throw new Error(
-    `'${teamRef}' is not a UUID.\n` +
-      `Run 'legion teams' to cache team mappings, or set LINEAR_API_TOKEN.`
+    `'${legionRef}' is not a UUID.\n` +
+      `Run 'legion teams' to cache legion mappings, or set LINEAR_API_TOKEN.`
   );
 }
 
 /**
- * Look up team via Linear GraphQL API.
+ * Look up legion via Linear GraphQL API.
  */
-async function lookupTeamViaApi(
-  teamRef: string,
+async function lookupLegionViaApi(
+  legionRef: string,
   apiKey: string,
   cacheDir: string
 ): Promise<string> {
@@ -94,7 +95,7 @@ async function lookupTeamViaApi(
 
   const payload = JSON.stringify({
     query,
-    variables: { key: teamRef.toUpperCase() },
+    variables: { key: legionRef.toUpperCase() },
   });
 
   try {
@@ -131,44 +132,44 @@ async function lookupTeamViaApi(
       throw new Error("Linear API returned null data");
     }
 
-    const teamsByKey: TeamsCache = {};
+    const legionsByKey: LegionsCache = {};
     for (const node of parsed.data.data.teams.nodes) {
-      teamsByKey[node.key.toUpperCase()] = { id: node.id, name: node.name };
+      legionsByKey[node.key.toUpperCase()] = { id: node.id, name: node.name };
     }
 
-    const cacheFile = path.join(cacheDir, "teams.json");
-    let existingCache: TeamsCache = {};
+    const cacheFile = path.join(cacheDir, "project-cache.json");
+    let existingCache: LegionsCache = {};
     try {
       const raw: unknown = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
       if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
-        existingCache = raw as TeamsCache;
+        existingCache = raw as LegionsCache;
       }
     } catch {}
 
-    const mergedCache: TeamsCache = { ...existingCache, ...teamsByKey };
+    const mergedCache: LegionsCache = { ...existingCache, ...legionsByKey };
 
     try {
       fs.mkdirSync(cacheDir, { recursive: true });
       fs.writeFileSync(cacheFile, JSON.stringify(mergedCache, null, 2));
     } catch (error) {
-      console.warn(`Failed to write team cache to ${cacheFile}: ${String(error)}`);
+      console.warn(`Failed to write legion cache to ${cacheFile}: ${String(error)}`);
     }
 
-    const keyUpper = teamRef.toUpperCase();
-    const team = parsed.data.data.teams.nodes.find((node) => node.key.toUpperCase() === keyUpper);
-    if (!team) {
+    const keyUpper = legionRef.toUpperCase();
+    const legion = parsed.data.data.teams.nodes.find((node) => node.key.toUpperCase() === keyUpper);
+    if (!legion) {
       const availableKeys = Object.keys(mergedCache).sort();
       const availableKeysMessage = availableKeys.length > 0 ? availableKeys.join(", ") : "(none)";
       throw new Error(
-        `Team '${teamRef}' not found in Linear. Available team keys: ${availableKeysMessage}`
+        `Legion '${legionRef}' not found in Linear. Available legion keys: ${availableKeysMessage}`
       );
     }
 
-    console.log(`Resolved: ${teamRef} → ${team.name} (${team.id})`);
-    return team.id;
+    console.log(`Resolved: ${legionRef} → ${legion.name} (${legion.id})`);
+    return legion.id;
   } catch (error) {
     throw new Error(
-      `Failed to look up team '${teamRef}': ${error instanceof Error ? error.message : String(error)}`
+      `Failed to look up legion '${legionRef}': ${error instanceof Error ? error.message : String(error)}`
     );
   }
 }

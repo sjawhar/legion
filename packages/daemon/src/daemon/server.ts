@@ -2,12 +2,20 @@ import { isAbsolute } from "node:path";
 import { getBackend, isBackendName } from "../state/backends/index";
 import { buildCollectedState } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
+import { fetchGitHubProjectItems } from "../state/github-fetch";
 import {
   CollectedState,
   computeSessionId,
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
+import type { LegionPaths } from "./paths";
+import {
+  cleanupWorkspace,
+  ensureWorkspace,
+  parseIssueRepo,
+  type RepoManagerDeps,
+} from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
 import type { WorkerEntry } from "./serve-manager";
 import {
@@ -23,9 +31,12 @@ type Server = ReturnType<typeof Bun.serve>;
 export interface ServerOptions {
   port?: number;
   hostname?: string;
-  teamId: string;
-  legionDir: string;
+  legionId: string;
+  projectId?: string;
+  legionDir?: string;
+  paths?: LegionPaths;
   adapter: RuntimeAdapter;
+  repoManagerDeps?: RepoManagerDeps;
   stateFilePath: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
@@ -78,6 +89,16 @@ async function parseJson(request: Request): Promise<Record<string, unknown>> {
   }
 }
 
+function extractIssueIdFromWorkerId(workerId: string): string | null {
+  for (const mode of Object.values(WorkerMode)) {
+    const suffix = `-${mode}`;
+    if (workerId.endsWith(suffix)) {
+      return workerId.slice(0, -suffix.length);
+    }
+  }
+  return null;
+}
+
 export function startServer(opts: ServerOptions): { server: Server; stop: () => void } {
   const hostname = opts.hostname ?? "127.0.0.1";
   const port = opts.port ?? 13370;
@@ -85,16 +106,23 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
 
+  let pendingWrite: Promise<void> = Promise.resolve();
+
   const persistState = async (): Promise<void> => {
-    const state: PersistedWorkerState = { workers: {}, crashHistory: {} };
-    for (const [id, entry] of workers.entries()) {
-      state.workers[id] = entry;
-    }
-    for (const [id, history] of crashHistory.entries()) {
-      state.crashHistory[id] = history;
-    }
-    state.controller = opts.getControllerState?.();
-    await writeStateFile(opts.stateFilePath, state);
+    const doWrite = async () => {
+      const state: PersistedWorkerState = { workers: {}, crashHistory: {} };
+      for (const [id, entry] of workers.entries()) {
+        state.workers[id] = entry;
+      }
+      for (const [id, history] of crashHistory.entries()) {
+        state.crashHistory[id] = history;
+      }
+      state.controller = opts.getControllerState?.();
+      await writeStateFile(opts.stateFilePath, state);
+    };
+
+    pendingWrite = pendingWrite.then(doWrite, doWrite);
+    await pendingWrite;
   };
 
   const loadState = async (): Promise<void> => {
@@ -145,21 +173,54 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
 
             const issueId = payload.issueId;
             const mode = payload.mode;
+            const repo = payload.repo;
             const workspace = payload.workspace;
+            const version = typeof payload.version === "number" ? payload.version : 0;
 
-            if (
-              typeof issueId !== "string" ||
-              typeof mode !== "string" ||
-              typeof workspace !== "string"
-            ) {
+            if (typeof issueId !== "string" || typeof mode !== "string") {
               return badRequest("missing_fields");
             }
-            if (!isAbsolute(workspace)) {
-              return badRequest("workspace must be an absolute path");
+            if (typeof repo === "string" && typeof workspace === "string") {
+              return badRequest(
+                "repo and workspace are mutually exclusive — provide one or neither"
+              );
+            }
+            if (typeof repo !== "string" && typeof workspace !== "string") {
+              return badRequest("missing repo or workspace");
             }
             const validModes = Object.values(WorkerMode);
             if (!validModes.includes(mode as WorkerModeLiteral)) {
               return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
+            }
+
+            let resolvedWorkspace: string | null = null;
+            if (typeof repo === "string") {
+              if (!opts.paths) {
+                return badRequest("repo_resolution_unavailable");
+              }
+              const repoRef = parseIssueRepo(repo);
+              if (!repoRef) {
+                return badRequest("invalid_repo: expected owner/repo");
+              }
+              try {
+                resolvedWorkspace = await ensureWorkspace(
+                  opts.paths,
+                  opts.legionId,
+                  issueId,
+                  repoRef,
+                  opts.repoManagerDeps
+                );
+              } catch (error) {
+                return serverError(`Failed to resolve workspace: ${(error as Error).message}`);
+              }
+            } else if (typeof workspace === "string") {
+              if (!isAbsolute(workspace)) {
+                return badRequest("workspace must be an absolute path");
+              }
+              resolvedWorkspace = workspace;
+            }
+            if (!resolvedWorkspace) {
+              return badRequest("missing repo or workspace");
             }
 
             const normalizedIssueId = issueId.toLowerCase();
@@ -202,11 +263,16 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               }
             }
 
-            const sessionId = computeSessionId(opts.teamId, issueId, mode as WorkerModeLiteral);
+            const sessionId = computeSessionId(
+              opts.legionId,
+              issueId,
+              mode as WorkerModeLiteral,
+              version
+            );
 
             let actualSessionId = sessionId;
             try {
-              actualSessionId = await opts.adapter.createSession(sessionId, workspace);
+              actualSessionId = await opts.adapter.createSession(sessionId, resolvedWorkspace);
             } catch (error) {
               return serverError(`Failed to create session: ${(error as Error).message}`);
             }
@@ -215,11 +281,12 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               id: workerId,
               port: opts.adapter.getPort(),
               sessionId: actualSessionId,
-              workspace,
+              workspace: resolvedWorkspace,
               startedAt: new Date().toISOString(),
               status: "running",
               crashCount: crashHistoryEntry?.crashCount ?? 0,
               lastCrashAt: crashHistoryEntry?.lastCrashAt ?? null,
+              version,
             };
 
             workers.set(entry.id, entry);
@@ -242,6 +309,55 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           crashHistory.delete(workerId);
           await persistState();
           return jsonResponse({ reset: true, id: workerId });
+        }
+
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "workspace") {
+          await stateLoaded;
+          if (method !== "DELETE") {
+            return notFound();
+          }
+          const workerId = segments[1].toLowerCase();
+          const entry = workers.get(workerId);
+          if (!entry) {
+            return notFound();
+          }
+          if (!opts.paths) {
+            return badRequest("workspace_cleanup_unavailable");
+          }
+
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const repo = payload.repo;
+          if (typeof repo !== "string") {
+            return badRequest("missing_fields");
+          }
+          const repoRef = parseIssueRepo(repo);
+          if (!repoRef) {
+            return badRequest("invalid_repo: expected owner/repo");
+          }
+          const issueId = extractIssueIdFromWorkerId(entry.id);
+          if (!issueId) {
+            return badRequest("invalid_worker_id");
+          }
+
+          try {
+            await cleanupWorkspace(
+              opts.paths,
+              opts.legionId,
+              issueId,
+              repoRef,
+              opts.repoManagerDeps
+            );
+          } catch (error) {
+            return serverError(`Failed to cleanup workspace: ${(error as Error).message}`);
+          }
+
+          return jsonResponse({ status: "cleaned" });
         }
 
         if (segments.length === 2 && segments[0] === "workers") {
@@ -382,12 +498,56 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const parsed = tracker.parseIssues(issues);
             const daemonUrl = `http://127.0.0.1:${server.port}`;
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
-            const state = buildCollectedState(issuesData, opts.teamId);
+            const state = buildCollectedState(issuesData, opts.legionId);
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[collect] backend=${backend} error=${message}`);
             return serverError("collect_failed");
+          }
+        }
+
+        if (method === "POST" && url.pathname === "/state/fetch-and-collect") {
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const backend = payload.backend;
+          if (!isBackendName(backend)) {
+            return badRequest("invalid_backend");
+          }
+
+          try {
+            let rawIssues: unknown;
+            if (backend === "github") {
+              const legionId = (payload.legionId as string) ?? opts.legionId;
+              const parts = legionId.split("/");
+              if (parts.length !== 2 || !parts[1]) {
+                return badRequest("invalid_team_id: expected owner/project-number");
+              }
+              const [owner, numStr] = parts;
+              const projectNumber = Number(numStr);
+              if (!Number.isFinite(projectNumber)) {
+                return badRequest("invalid_team_id: project number not a number");
+              }
+              rawIssues = await fetchGitHubProjectItems(owner, projectNumber);
+            } else {
+              return badRequest("fetch-and-collect only supports github backend currently");
+            }
+
+            const tracker = getBackend(backend);
+            const parsed = tracker.parseIssues(rawIssues);
+            const daemonUrl = `http://127.0.0.1:${server.port}`;
+            const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+            const state = buildCollectedState(issuesData, opts.legionId);
+            return jsonResponse(CollectedState.toDict(state));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
+            return serverError(`fetch_and_collect_failed: ${message}`);
           }
         }
 

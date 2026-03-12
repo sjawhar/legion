@@ -1,10 +1,13 @@
 import os from "node:os";
 import path from "node:path";
+import type { LegionPaths } from "./paths";
+import { resolveLegionPaths } from "./paths";
 
 export interface DaemonConfig {
   daemonPort: number;
-  teamId?: string;
+  legionId?: string;
   legionDir?: string;
+  paths: LegionPaths;
   checkIntervalMs: number;
   baseWorkerPort: number;
   stateFilePath: string;
@@ -15,7 +18,7 @@ export interface DaemonConfig {
   runtime: "opencode" | "claude-code";
 }
 
-const DEFAULT_DAEMON_PORT = 13370;
+const BASE_DAEMON_PORT = 13370;
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const DEFAULT_BASE_WORKER_PORT = 13381;
 
@@ -28,11 +31,6 @@ function parseNumber(value: string | undefined, fallback: number): number {
     return fallback;
   }
   return parsed;
-}
-
-function resolveStateFilePath(legionDir?: string): string {
-  const baseDir = legionDir ?? os.homedir();
-  return path.join(baseDir, ".legion", "daemon", "workers.json");
 }
 
 export function validateControllerPrompt(prompt: string | undefined): void {
@@ -61,8 +59,14 @@ export function validateControllerPrompt(prompt: string | undefined): void {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const legionDir = env.LEGION_DIR;
-  const stateFilePath = resolveStateFilePath(legionDir);
-  const stateDir = path.dirname(stateFilePath);
+  const legionId = env.LEGION_ID;
+  const paths = resolveLegionPaths(env, os.homedir());
+  const stateFilePath = legionId
+    ? paths.forLegion(legionId).workersFile
+    : path.join(paths.stateDir, "daemon", "workers.json");
+  const logDir = legionId
+    ? paths.forLegion(legionId).logDir
+    : path.join(paths.stateDir, "daemon", "logs");
   const controllerSessionId = env.LEGION_CONTROLLER_SESSION_ID || undefined;
   const controllerPrompt = env.LEGION_CONTROLLER_PROMPT || undefined;
 
@@ -86,13 +90,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   }
   const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
   return {
-    daemonPort: parseNumber(env.LEGION_DAEMON_PORT, DEFAULT_DAEMON_PORT),
-    teamId: env.LEGION_TEAM_ID,
+    daemonPort: parseNumber(env.LEGION_DAEMON_PORT, BASE_DAEMON_PORT),
+    legionId,
     legionDir,
+    paths,
     checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
     stateFilePath,
-    logDir: path.join(stateDir, "logs"),
+    logDir,
     controllerSessionId,
     controllerPrompt,
     issueBackend,

@@ -18,7 +18,7 @@ import { CollectedState, type LinearIssueRaw } from "./types";
 // =============================================================================
 
 export interface CliArgs {
-  teamId: string;
+  legionId: string;
   daemonUrl: string;
 }
 
@@ -30,12 +30,12 @@ export interface CliArgs {
  * @throws Error if required arguments are missing
  */
 export function parseArgs(args: string[]): CliArgs {
-  let teamId: string | null = null;
+  let legionId: string | null = null;
   let daemonUrl: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--team-id" && i + 1 < args.length) {
-      teamId = args[i + 1];
+      legionId = args[i + 1];
       i++;
     } else if (args[i] === "--daemon-url" && i + 1 < args.length) {
       daemonUrl = args[i + 1];
@@ -43,14 +43,14 @@ export function parseArgs(args: string[]): CliArgs {
     }
   }
 
-  if (!teamId) {
+  if (!legionId) {
     throw new Error("Missing required argument: --team-id <uuid>");
   }
   if (!daemonUrl) {
     throw new Error("Missing required argument: --daemon-url <url>");
   }
 
-  return { teamId, daemonUrl };
+  return { legionId, daemonUrl };
 }
 
 // =============================================================================
@@ -61,19 +61,19 @@ export function parseArgs(args: string[]): CliArgs {
  * Run the state collection pipeline.
  *
  * @param linearIssues - Raw issues (parsed from stdin JSON)
- * @param teamId - Team/project identifier
+ * @param legionId - Team/project identifier
  * @param daemonUrl - Daemon HTTP API URL
  * @param runner - Optional command runner for testing
  * @returns JSON string of CollectedState
  */
 export async function runPipeline(
   linearIssues: LinearIssueRaw[],
-  teamId: string,
+  legionId: string,
   daemonUrl: string,
   runner?: CommandRunner
 ): Promise<string> {
   const issuesData = await fetchAllIssueData(linearIssues, daemonUrl, runner);
-  const state = buildCollectedState(issuesData, teamId);
+  const state = buildCollectedState(issuesData, legionId);
   return JSON.stringify(CollectedState.toDict(state));
 }
 
@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const output = await runPipeline(linearIssues, args.teamId, args.daemonUrl);
+  const output = await runPipeline(linearIssues, args.legionId, args.daemonUrl);
   process.stdout.write(`${output}\n`);
 }
 

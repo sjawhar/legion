@@ -8,7 +8,7 @@ OpenCode skills that orchestrate the autonomous development loop. These are mark
 |-----------|-----------|---------|
 | HTTP API | Controller → Daemon | `curl -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect` |
 | Piped CLI (legacy) | Controller → State | `echo $JSON \| bun run packages/daemon/src/state/cli.ts --team-id X` — being replaced by `POST /state/collect` |
-| Env vars | Daemon → Controller | `LEGION_TEAM_ID`, `LEGION_DAEMON_PORT`, etc. |
+| Env vars | Daemon → Controller | `LEGION_ID`, `LEGION_DAEMON_PORT`, etc. |
 | Prompt context | Controller → Worker | Issue ID, mode, backend passed in dispatch/resume prompt text |
 | Issue backend | Worker → Linear/GitHub | `linear_linear(action="get"\|"update"\|"comment"\|"create"\|"search")` or `gh issue view/edit/comment` |
 
@@ -47,7 +47,7 @@ workers receive all context (issue ID, mode, backend) via the dispatch prompt, n
 
 | Variable | Set By | Used By | Purpose |
 |----------|--------|---------|---------|
-| `LEGION_TEAM_ID` | CLI/daemon | Controller | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
+| `LEGION_ID` | CLI/daemon | Controller | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
 | `LEGION_DIR` | CLI/daemon | Controller | Default jj workspace path |
 | `LEGION_SHORT_ID` | CLI/daemon | Controller | Instance ID for heartbeat |
 | `LEGION_DAEMON_PORT` | Daemon | Controller | HTTP API port (default 13370) |

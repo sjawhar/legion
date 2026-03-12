@@ -58,7 +58,15 @@ Create each spec-ready sub-issue with `worker-done` label.
 
 This unblocks work on clear pieces while getting answers on unclear ones.
 
-**If spec-ready:** Ensure acceptance criteria are present and testable, add `worker-done` label. Exit.
+**If spec-ready:** Refine the acceptance criteria, add testing infrastructure assessment, and
+**update the issue body** with the complete designed spec. The issue body is the canonical
+record of what this issue is — it must reflect the architect's output, not just the original
+rough description.
+
+- **GitHub:** `gh issue edit $ISSUE_NUMBER --body "[refined spec with acceptance criteria and testing infrastructure]" -R $OWNER/$REPO`
+- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, description="[refined spec]")`
+
+Then add `worker-done` label. Exit.
 
 ### 4. Cross-Family Review
 

@@ -326,7 +326,7 @@ describe("buildIssueState", () => {
   });
 
   it("feedback_without_input_needed_follows_normal_flow", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
     const data: FetchedIssueData = {
       issueId: "ENG-21",
       status: "In Progress",
@@ -346,15 +346,15 @@ describe("buildIssueState", () => {
       source: null,
     };
 
-    const state = buildIssueState(data, teamId);
+    const state = buildIssueState(data, legionId);
 
     expect(state.suggestedAction).toBe("transition_to_testing");
-    const expectedSessionId = computeSessionId(teamId, "ENG-21", "test");
+    const expectedSessionId = computeSessionId(legionId, "ENG-21", "test");
     expect(state.sessionId).toBe(expectedSessionId);
   });
 
   it("relay_feedback_computes_correct_session_id", () => {
-    const teamId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
+    const legionId = "7b4f0862-b775-4cb0-9a67-85400c6f44a8";
     const data: FetchedIssueData = {
       issueId: "ENG-21",
       status: "In Progress",
@@ -374,15 +374,15 @@ describe("buildIssueState", () => {
       source: null,
     };
 
-    const state = buildIssueState(data, teamId);
+    const state = buildIssueState(data, legionId);
 
-    const expectedSessionId = computeSessionId(teamId, "ENG-21", "implement");
+    const expectedSessionId = computeSessionId(legionId, "ENG-21", "implement");
     expect(state.sessionId).toBe(expectedSessionId);
     expect(state.suggestedAction).toBe("relay_user_feedback");
   });
 
   it("relay_feedback_in_different_statuses", () => {
-    const teamId = "00000000-0000-0000-0000-000000000000";
+    const legionId = "00000000-0000-0000-0000-000000000000";
 
     const dataTodo: FetchedIssueData = {
       issueId: "ENG-21",
@@ -402,7 +402,7 @@ describe("buildIssueState", () => {
       hasTestFailed: false,
       source: null,
     };
-    const stateTodo = buildIssueState(dataTodo, teamId);
+    const stateTodo = buildIssueState(dataTodo, legionId);
     expect(stateTodo.suggestedAction).toBe("relay_user_feedback");
 
     const dataReview: FetchedIssueData = {
@@ -423,7 +423,7 @@ describe("buildIssueState", () => {
       hasTestFailed: false,
       source: null,
     };
-    const stateReview = buildIssueState(dataReview, teamId);
+    const stateReview = buildIssueState(dataReview, legionId);
     expect(stateReview.suggestedAction).toBe("relay_user_feedback");
   });
 
@@ -600,7 +600,7 @@ describe("orphan detection", () => {
   });
 
   it("orphan_detected_in_various_statuses", () => {
-    const teamId = "00000000-0000-0000-0000-000000000000";
+    const legionId = "00000000-0000-0000-0000-000000000000";
 
     for (const status of ["Todo", "In Progress", "Backlog", "Needs Review"]) {
       const data: FetchedIssueData = {
@@ -622,7 +622,7 @@ describe("orphan detection", () => {
         source: null,
       };
 
-      const state = buildIssueState(data, teamId);
+      const state = buildIssueState(data, legionId);
       expect(state.suggestedAction).toBe("remove_worker_active_and_redispatch");
     }
   });
@@ -736,7 +736,7 @@ describe("buildCollectedState", () => {
   });
 
   it("relay_feedback_with_multiple_issues", () => {
-    const teamId = "00000000-0000-0000-0000-000000000000";
+    const legionId = "00000000-0000-0000-0000-000000000000";
     const issuesData: FetchedIssueData[] = [
       {
         issueId: "ENG-21",
@@ -794,7 +794,7 @@ describe("buildCollectedState", () => {
       },
     ];
 
-    const state = buildCollectedState(issuesData, teamId);
+    const state = buildCollectedState(issuesData, legionId);
 
     expect(Object.keys(state.issues)).toHaveLength(3);
     expect(state.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");

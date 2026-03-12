@@ -26,6 +26,7 @@ export interface WorkerEntry {
   status: "starting" | "running" | "stopped" | "dead";
   crashCount: number;
   lastCrashAt: string | null;
+  version?: number;
 }
 
 export function createWorkerClient(port: number, workspace: string): OpencodeClient {

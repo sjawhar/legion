@@ -11,7 +11,7 @@ describe("sessionId contract (daemon vs state)", () => {
   let stopServer: (() => void) | null = null;
 
   const originalFetch = globalThis.fetch;
-  const teamId = "123e4567-e89b-12d3-a456-426614174000";
+  const legionId = "123e4567-e89b-12d3-a456-426614174000";
 
   afterEach(async () => {
     globalThis.fetch = originalFetch;
@@ -46,7 +46,7 @@ describe("sessionId contract (daemon vs state)", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
-      teamId,
+      legionId,
       legionDir: tempDir,
       adapter,
       stateFilePath,
@@ -66,7 +66,7 @@ describe("sessionId contract (daemon vs state)", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { sessionId: string };
-    expect(body.sessionId).toBe(computeSessionId(teamId, "ENG-42", "implement"));
-    expect(createSessionCalls[0].sessionId).toBe(computeSessionId(teamId, "ENG-42", "implement"));
+    expect(body.sessionId).toBe(computeSessionId(legionId, "ENG-42", "implement"));
+    expect(createSessionCalls[0].sessionId).toBe(computeSessionId(legionId, "ENG-42", "implement"));
   });
 });

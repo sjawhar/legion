@@ -155,7 +155,7 @@ const VALID_WORKER_MODES = new Set<string>([
   WorkerMode.MERGE,
 ]);
 
-export function buildIssueState(data: FetchedIssueData, teamId: string): IssueState {
+export function buildIssueState(data: FetchedIssueData, legionId: string): IssueState {
   let action: ActionType;
 
   if (data.hasUserInputNeeded && data.hasUserFeedback) {
@@ -202,7 +202,7 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
   } else {
     mode = ACTION_TO_MODE[action] ?? WorkerMode.IMPLEMENT;
   }
-  const sessionId = computeSessionId(teamId, data.issueId, mode);
+  const sessionId = computeSessionId(legionId, data.issueId, mode);
 
   return {
     status: data.status,
@@ -222,12 +222,12 @@ export function buildIssueState(data: FetchedIssueData, teamId: string): IssueSt
 
 export function buildCollectedState(
   issuesData: FetchedIssueData[],
-  teamId: string
+  legionId: string
 ): CollectedState {
   const result: CollectedState = { issues: {} };
 
   for (const data of issuesData) {
-    result.issues[data.issueId] = buildIssueState(data, teamId);
+    result.issues[data.issueId] = buildIssueState(data, legionId);
   }
 
   return result;
