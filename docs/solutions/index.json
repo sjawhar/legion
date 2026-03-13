@@ -8,6 +8,7 @@
       "integration-issues/github-graphql-pr-draft-status.md",
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "integration-issues/linear-mcp-label-resolution.md",
+      "deterministic-session-ids.md"
       "github-api/graphql-org-user-fallback.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
@@ -28,9 +29,13 @@
       "delegation/hardening-patterns.md",
       "integration-patterns/controller-worker-protocol.md",
       "architecture-patterns/task-index-retro.md",
-      "task-index-patterns.md"
+      "task-index-patterns.md",
+      "deterministic-session-ids.md"
     ],
-    "packages/daemon/src/cli": ["daemon/controller-lifecycle-separation.md"],
+    "packages/daemon/src/cli": [
+      "daemon/controller-lifecycle-separation.md",
+      "deterministic-session-ids.md"
+    ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
       "architecture-patterns/sync-to-async-modular-refactoring.md",

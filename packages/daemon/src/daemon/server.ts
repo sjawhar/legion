@@ -188,6 +188,15 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             if (typeof repo !== "string" && typeof workspace !== "string") {
               return badRequest("missing repo or workspace");
             }
+            if (
+              version !== undefined &&
+              (typeof version !== "number" ||
+                !Number.isInteger(version) ||
+                !Number.isSafeInteger(version) ||
+                version < 0)
+            ) {
+              return badRequest("version must be a non-negative integer");
+            }
             const validModes = Object.values(WorkerMode);
             if (!validModes.includes(mode as WorkerModeLiteral)) {
               return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);

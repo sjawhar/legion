@@ -408,6 +408,50 @@ describe("daemon server", () => {
     expect(body.error).toBe("worker_already_exists");
   });
 
+  it("creates different session IDs for different versions", async () => {
+    await startTestServer();
+
+    const version1 = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-88", mode: "implement", workspace: "/tmp", version: 1 }),
+    });
+    expect(version1.status).toBe(200);
+    const version1Body = (await version1.json()) as { id: string; sessionId: string };
+
+    await requestJson(`/workers/${version1Body.id}`, { method: "DELETE" });
+
+    const version2 = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-88", mode: "implement", workspace: "/tmp", version: 2 }),
+    });
+    expect(version2.status).toBe(200);
+    const version2Body = (await version2.json()) as { sessionId: string };
+
+    expect(version1Body.sessionId).not.toBe(version2Body.sessionId);
+  });
+
+  it("keeps session IDs deterministic for same version", async () => {
+    await startTestServer();
+
+    const first = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-89", mode: "implement", workspace: "/tmp", version: 2 }),
+    });
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { id: string; sessionId: string };
+
+    await requestJson(`/workers/${firstBody.id}`, { method: "DELETE" });
+
+    const second = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "ENG-89", mode: "implement", workspace: "/tmp", version: 2 }),
+    });
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as { sessionId: string };
+
+    expect(firstBody.sessionId).toBe(secondBody.sessionId);
+  });
+
   it("loads persisted workers from state file", async () => {
     const existing: WorkerEntry = {
       id: "eng-1-implement",

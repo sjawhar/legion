@@ -1,0 +1,430 @@
+{
+  "version": 1,
+  "index": {
+    "packages/daemon/src/state": [
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/controller-observability.md",
+      "architecture-patterns/shared-state-file-ownership.md",
+      "integration-issues/github-graphql-pr-draft-status.md",
+      "integration-issues/external-repo-pr-auto-transition-gap.md",
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "packages/daemon/src/daemon/serve-manager": [
+      "daemon/opencode-serve-lifecycle.md",
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md",
+      "daemon/graceful-worker-shutdown.md"
+    ],
+    "packages/daemon/src/daemon/state-file": [
+      "architecture-patterns/shared-state-file-ownership.md",
+      "task-index-patterns.md"
+    ],
+    "packages/daemon/src/daemon": [
+      "daemon/worker-directory-fix.md",
+      "daemon/worker-directory-resolution.md",
+      "daemon/workspace-validation-retro.md",
+      "daemon/controller-observability.md",
+      "delegation/hardening-patterns.md",
+      "integration-patterns/controller-worker-protocol.md",
+      "architecture-patterns/task-index-retro.md",
+      "task-index-patterns.md"
+    ],
+    "packages/daemon/src/cli": [
+      "daemon/controller-lifecycle-separation.md"
+    ],
+    "packages/daemon": [
+      "architecture-patterns/plugin-migration-assessment.md",
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    ".opencode/skills/legion-worker": [
+      "skill-patterns/worker-skill-failure-modes.md",
+      "daemon/deferred-review-comments-pattern.md",
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    ".opencode/skills/legion-controller": [
+      "integration-patterns/controller-worker-protocol.md",
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/controller-observability.md"
+    ],
+    ".opencode/skills/linear": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    ".opencode/skills": [
+      "skill-patterns/parallel-subagent-background-execution.md",
+      "delegation/delegation-hardening-retro.md",
+      "delegation/hardening-patterns.md"
+    ],
+    "tests": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:SIGTERM": [
+      "daemon/opencode-serve-lifecycle.md"
+    ],
+    "tag:active-index": [
+      "task-index-patterns.md"
+    ],
+    "tag:agent-restrictions": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:aiofiles": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:alru-cache": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:anyio": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:architecture": [
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/shared-serve-refactor.md"
+    ],
+    "tag:askuserquestion": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:async": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:asyncmock": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:atomic-writes": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:auto-transition": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:automation": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:autospec": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:background-tasks": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:batch-queries": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:batching": [
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:bootstrap-bug": [
+      "architecture-patterns/task-index-retro.md"
+    ],
+    "tag:caching": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "architecture-patterns/task-index-retro.md",
+      "integration-issues/linear-mcp-label-resolution.md",
+      "task-index-patterns.md"
+    ],
+    "tag:callback-pattern": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:claude-code": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:cleanup": [
+      "daemon/deferred-review-comments-pattern.md",
+      "daemon/graceful-worker-shutdown.md"
+    ],
+    "tag:cli-interaction": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:code-review": [
+      "daemon/deferred-review-comments-pattern.md"
+    ],
+    "tag:concurrency": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:config-schema": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:controller": [
+      "daemon/controller-observability.md",
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:controller-dispatch": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:crash-recovery": [
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:daemon": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:debugging": [
+      "daemon/controller-observability.md"
+    ],
+    "tag:defense-in-depth": [
+      "daemon/graceful-worker-shutdown.md"
+    ],
+    "tag:deferred-review-comments": [
+      "daemon/workspace-validation-retro.md"
+    ],
+    "tag:delegation": [
+      "delegation/delegation-hardening-retro.md",
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:dependency-injection": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:directory-resolution": [
+      "daemon/worker-directory-fix.md"
+    ],
+    "tag:dispatch": [
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:dispose": [
+      "daemon/opencode-serve-lifecycle.md"
+    ],
+    "tag:draft-status": [
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:error-handling": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:external-repos": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:failure-modes": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:fallback-pattern": [
+      "task-index-patterns.md"
+    ],
+    "tag:file-based-index": [
+      "architecture-patterns/task-index-retro.md",
+      "task-index-patterns.md"
+    ],
+    "tag:file-based-storage": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:finalize-pattern": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:github": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md",
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:graphql": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "integration-issues/github-graphql-pr-draft-status.md",
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:implement": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:jj-workspaces": [
+      "daemon/worker-directory-fix.md",
+      "daemon/worker-directory-resolution.md"
+    ],
+    "tag:keyboard-navigation": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:labels": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:lifecycle": [
+      "daemon/controller-lifecycle-separation.md"
+    ],
+    "tag:lifecycle-separation": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:linear": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md",
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:mcp": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:merge": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:migration": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:mocking": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:modular-architecture": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:n-plus-one": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:name-resolution": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:observability": [
+      "daemon/controller-observability.md"
+    ],
+    "tag:oh-my-opencode": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:opencode": [
+      "daemon/opencode-serve-lifecycle.md",
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:opencode-legion": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:opencode-sdk": [
+      "daemon/worker-directory-fix.md",
+      "daemon/worker-directory-resolution.md"
+    ],
+    "tag:opencode-serve": [
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:parallel-execution": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:parallel-subagents": [
+      "architecture-patterns/task-index-retro.md"
+    ],
+    "tag:performance": [
+      "architecture-patterns/task-index-retro.md",
+      "task-index-patterns.md"
+    ],
+    "tag:persistence": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:plugin": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:pr-review": [
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:pr-workflow": [
+      "daemon/workspace-validation-retro.md"
+    ],
+    "tag:process-management": [
+      "daemon/graceful-worker-shutdown.md",
+      "daemon/opencode-serve-lifecycle.md",
+      "daemon/shared-serve-refactor.md"
+    ],
+    "tag:protocol": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:pull-requests": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md",
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:pytest-mock": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:python": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:race-condition": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:refactoring": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:remote-control": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:resource-accounting": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:resume": [
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:retro": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:review": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:serve": [
+      "daemon/opencode-serve-lifecycle.md"
+    ],
+    "tag:session-management": [
+      "daemon/worker-directory-resolution.md"
+    ],
+    "tag:sessions": [
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:shared-serve": [
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:skill-authoring": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:skills": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:stale-detection": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:state-file": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:state-machine": [
+      "daemon/controller-observability.md",
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:state-management": [
+      "daemon/controller-lifecycle-separation.md"
+    ],
+    "tag:subagents": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:task-index": [
+      "architecture-patterns/task-index-retro.md"
+    ],
+    "tag:task-persistence": [
+      "delegation/delegation-hardening-retro.md",
+      "delegation/hardening-patterns.md",
+      "task-index-patterns.md"
+    ],
+    "tag:testability": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:testing": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md",
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/graceful-worker-shutdown.md",
+      "daemon/shared-serve-retro.md",
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:tmux": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:validation": [
+      "daemon/workspace-validation-retro.md"
+    ],
+    "tag:worker": [
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:worker-isolation": [
+      "daemon/worker-directory-resolution.md"
+    ],
+    "tag:worker-lifecycle": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:worker-spawning": [
+      "daemon/worker-directory-fix.md"
+    ],
+    "tag:workers": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:workflow-design": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:workflow-pattern": [
+      "daemon/deferred-review-comments-pattern.md"
+    ],
+    "tag:workspace-validation": [
+      "daemon/workspace-validation-retro.md"
+    ]
+  }
+}

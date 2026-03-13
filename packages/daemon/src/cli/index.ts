@@ -297,6 +297,12 @@ export async function cmdDispatch(
   if (!SAFE_IDENTIFIER_RE.test(mode)) {
     throw new CliError(`Invalid mode: ${mode} (must match [a-zA-Z0-9_-]+)`);
   }
+  if (
+    opts.version !== undefined &&
+    (!Number.isInteger(opts.version) || opts.version < 0 || !Number.isSafeInteger(opts.version))
+  ) {
+    throw new CliError("Invalid version: must be a non-negative integer");
+  }
   const daemonPort = opts.daemonPort ?? (await getDaemonPort());
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
 
@@ -725,14 +731,22 @@ export const dispatchCommand = defineCommand({
     prompt: { type: "string", description: "Custom initial prompt (default: /legion-worker)" },
     repo: { type: "string", alias: "r", description: "Repository (owner/repo)" },
     workspace: { type: "string", alias: "w", description: "Override workspace path" },
-    version: { type: "string", description: "Session version (default: 0)" },
+    version: {
+      type: "string",
+      alias: "v",
+      description:
+        "Session version override for fresh dispatch (e.g., --version 1, then --version 2)",
+    },
   },
   async run({ args }) {
     try {
-      const parsedVersion =
-        args.version !== undefined && args.version !== "" ? Number(args.version) : undefined;
-      if (parsedVersion !== undefined && (!Number.isInteger(parsedVersion) || parsedVersion < 0)) {
-        throw new CliError(`Invalid --version: ${args.version} (must be a non-negative integer)`);
+      let version: number | undefined;
+      if (args.version !== undefined) {
+        const parsed = Number(args.version);
+        if (!Number.isInteger(parsed) || parsed < 0 || !Number.isSafeInteger(parsed)) {
+          throw new CliError("Invalid version: must be a non-negative integer");
+        }
+        version = parsed;
       }
       await cmdDispatch(args.issue, args.mode, {
         // Legacy transition: keep LEGION_DIR fallback for users not passing --workspace.
@@ -740,7 +754,7 @@ export const dispatchCommand = defineCommand({
         prompt: args.prompt,
         repo: args.repo,
         workspace: args.workspace,
-        version: parsedVersion,
+        version,
       });
     } catch (e) {
       if (e instanceof CliError) {
