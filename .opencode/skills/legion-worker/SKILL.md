@@ -32,7 +32,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    branches or bookmarks in review, retro, or merge workflows.
    **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
    lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
-4. **Signal completion** - add `worker-done` label when done (see routing table)
+4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
 ## Skill Discipline
@@ -60,6 +60,18 @@ jj new  # Fresh commit for this session
 
 If you're resuming after user feedback, also read the issue comments for the answer.
 
+### Required Startup Todos
+
+**Before starting any workflow work**, create these todos (adapt the signal todo to your mode):
+
+1. Your workflow-specific work items (from the workflow file)
+2. A **signal completion** todo as the LAST item:
+   - `Signal completion: push changes, add worker-done label, remove worker-active label`
+   - Keep this todo `pending` until you have actually run the label commands and verified they succeeded
+   - **Do not mark this complete early** — it is your contract with the controller
+
+The signal completion todo ensures you never finish a session without updating labels.
+If you are about to stop or exit for any reason, check whether this todo is still pending — if so, do it now.
 ### Blocking on User Input
 
 When you need human input that the legion-oracle can't answer:
