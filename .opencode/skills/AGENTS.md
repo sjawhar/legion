@@ -63,6 +63,8 @@ backend and issue identity in every dispatch/resume prompt so workers are self-c
 3. **Block**: If stuck, try `/legion-oracle` first. If still stuck: push, post issue comment, add `user-input-needed`, remove `worker-active`, exit
 4. **Done**: `jj git push`, add `worker-done` (most modes), remove `worker-active`
 
+**Handoff Data**: Workers emit structured handoff data at phase boundaries using `legion handoff write`. Subsequent workers read this data using `legion handoff read`. Data is stored in `.legion/` on the issue's branch (per-phase JSON files: architect.json, plan.json, implement.json, test.json, review.json, retro.json).
+
 ## Dispatch vs Resume
 
 - **Dispatch** = `POST /workers` → new session on shared serve (idempotent, deterministic session ID)
