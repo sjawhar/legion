@@ -347,9 +347,14 @@ DEVIATIONS_COUNT=$(echo "$HANDOFF" | jq -r '(.implementer.deviations // []) | le
 
 if [ "$SKIP_RETRO" = "true" ] && [ "$TRICKY_PARTS_COUNT" = "0" ] && [ "$DEVIATIONS_COUNT" = "0" ]; then
   echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
-  legion dispatch "$ISSUE_IDENTIFIER" merge \
-    --repo "$OWNER/$REPO" \
-    --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+  if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+    legion dispatch "$ISSUE_IDENTIFIER" merge \
+      --repo "$OWNER/$REPO" \
+      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+  else
+    legion dispatch "$ISSUE_IDENTIFIER" merge \
+      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (linear backend)"
+  fi
 else
   echo "Running full pipeline: retro required (missing/corrupt hints or skip conditions unmet)"
   # Proceed with normal retro resume below
