@@ -37,6 +37,14 @@ gh pr view "$LEGION_ISSUE_ID" --json title,body,headRefName
 
 **The code is already in the workspace** - review locally, no need to fetch diff remotely.
 
+Also read all prior handoffs for full context chain:
+
+```bash
+legion handoff read 2>/dev/null || echo '{}'
+```
+
+If present, implementer's `trickyParts` and `deviations` can highlight areas to review more carefully. This is advisory.
+
 ### 2. Run Review
 
 Invoke `/ce:review` with the branch name.
@@ -89,6 +97,31 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
 ```
 
 Group related issues when they affect the same area.
+
+### 4.5. Write Handoff Data
+
+Write handoff data (non-blocking) — BEFORE setting PR draft status:
+
+```bash
+legion handoff write --phase review --data '{
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "verdict": "approved",
+  "keyFindings": [
+    {"severity": "P2", "file": "src/auth.ts", "description": "Missing null check on line 45"},
+    {"severity": "P2", "file": "src/session.ts", "description": "Session TTL should be configurable"}
+  ]
+}' 2>/dev/null || true
+```
+
+Replace the example counts and findings with actual review results:
+- `critical`: count of CRITICAL/P1 issues found
+- `important`: count of IMPORTANT/P2 issues found
+- `minor`: count of MINOR/P3 suggestions found
+- `verdict`: "approved" if no CRITICAL issues, "changes_requested" if any CRITICAL issues found
+- `keyFindings`: list of `{"severity": "P1"|"P2"|"P3", "file": "path", "description": "..."}`
+
 
 ### 5. Set PR Draft Status
 
