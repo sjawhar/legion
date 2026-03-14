@@ -21,6 +21,19 @@ A fresh subagent provides the outside perspective (see step 2).
 
 ## Workflow
 
+### 0.5. Read Implementer Handoff (Advisory)
+
+```bash
+IMPLEMENT_HANDOFF=$(legion handoff read --phase implement 2>/dev/null || echo '{}')
+```
+
+If the implementer handoff is present, it provides additional signal for the skip decision:
+
+- If `trickyParts` is empty AND `deviations` is empty AND `openQuestions` is empty → strengthens the case for a no-op retro
+- If any of those fields have content → strengthens the case for a full retro doc
+- This is additional signal only — the retro agent still makes the final decision
+
+
 ### 1. Assess Whether a Retro Doc is Warranted
 
 Not every PR needs documentation. Ask:
@@ -28,6 +41,7 @@ Not every PR needs documentation. Ask:
 - Were there decisions that aren't obvious from the code?
 - Did patterns emerge that would help future work?
 - Were there gotchas that someone else would hit?
+- Also consider: does the implementer handoff report any `trickyParts`, `deviations`, or `openQuestions`? If present, these are strong indicators that a retro doc would be valuable.
 
 If the answer to all of these is no, skip to step 6 (post a brief summary comment) and step 7 (signal completion).
 
@@ -38,6 +52,12 @@ gh issue comment $ISSUE_NUMBER --body "## Retro Complete
 No significant learnings — mechanical change (find-and-replace / formatting / dependency bump)." -R $OWNER/$REPO
 ```
 For Linear, use `linear_linear(action="comment", ...)` with the same body.
+
+# Write minimal handoff to signal retro skipped (non-blocking)
+legion handoff write --phase retro --data '{
+  "skipped": true,
+  "reason": "no significant learnings"
+}' 2>/dev/null || true
 
 ### 2. Get PR URL and Launch Background Subagent
 
@@ -189,6 +209,16 @@ jj bookmark list
 # Move bookmark forward to include the retro change
 jj bookmark set "$BOOKMARK_NAME" -r @
 jj git push
+```
+
+After pushing, write the retro handoff to signal completion (non-blocking):
+
+```bash
+# Write retro handoff with doc paths (non-blocking)
+legion handoff write --phase retro --data '{
+  "skipped": false,
+  "docsCreated": ["docs/solutions/path/to/file.md"]
+}' 2>/dev/null || true
 ```
 
 **If jj says there's no tracked branch:** The implementer should have created this branch.
