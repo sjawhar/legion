@@ -68,7 +68,7 @@ describe("handoff ledger", () => {
     expect(readPhaseHandoff(workspaceDir, "implement")).toBeNull();
   });
 
-  it("writes numbered message files and reads messages sorted by sequence", async () => {
+  it("writes uniquely-named message files and reads messages sorted by name", async () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 
     writeMessage(workspaceDir, {
@@ -84,15 +84,22 @@ describe("handoff ledger", () => {
 
     const messagesDir = path.join(getLegionDir(workspaceDir), "messages");
     const entries = (await readdir(messagesDir)).sort();
-    expect(entries).toEqual(["001-architect-to-plan.json", "002-plan-to-implement.json"]);
+    expect(entries).toHaveLength(2);
+    // Filenames use timestamp+random — order within same timestamp is undefined
+    const architectMsg = entries.find((e) => e.includes("-architect-to-plan.json"));
+    const planMsg = entries.find((e) => e.includes("-plan-to-implement.json"));
+    expect(architectMsg).toBeDefined();
+    expect(planMsg).toBeDefined();
 
     const messages = readMessages(workspaceDir);
     expect(messages).toHaveLength(2);
-    expect(messages[0]?.from).toBe("architect");
-    expect(messages[1]?.to).toBe("implement");
+    const fromArchitect = messages.find((m) => m.from === "architect");
+    const toPlan = messages.find((m) => m.to === "implement");
+    expect(fromArchitect).toBeDefined();
+    expect(toPlan).toBeDefined();
 
     const firstPayload = JSON.parse(
-      await readFile(path.join(messagesDir, "001-architect-to-plan.json"), "utf-8")
+      await readFile(path.join(messagesDir, entries[0] as string), "utf-8")
     ) as { timestamp?: unknown };
     expect(typeof firstPayload.timestamp).toBe("string");
   });

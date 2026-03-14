@@ -392,6 +392,7 @@ Key fields:
 - `deviations`: List of deviations from the plan with rationale for each
 - `openQuestions`: Unresolved questions or concerns for downstream phases
 - `subPlanningNeeded`: Boolean — set to `true` if discovered complexity was greater than planned
+
 ### 6. Exit
 
 **CRITICAL: The `worker-done` label is how the controller knows you finished.** If you skip this,

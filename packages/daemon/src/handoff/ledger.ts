@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -5,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -26,7 +28,14 @@ function ensureDir(dir: string): void {
 function atomicWriteJson(filePath: string, data: unknown): void {
   const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf-8");
-  renameSync(tempPath, filePath);
+  try {
+    renameSync(tempPath, filePath);
+  } catch (e) {
+    try {
+      unlinkSync(tempPath);
+    } catch {}
+    throw e;
+  }
 }
 
 function getMessagesDir(workspaceDir: string): string {
@@ -37,14 +46,11 @@ function getPhaseFilePath(workspaceDir: string, phase: HandoffPhase): string {
   return path.join(getLegionDir(workspaceDir), PHASE_FILE_NAMES[phase]);
 }
 
-function getNextMessageSequence(messagesDir: string): string {
-  try {
-    const entries = readdirSync(messagesDir, { withFileTypes: true });
-    const count = entries.filter((entry) => entry.isFile()).length + 1;
-    return String(count).padStart(3, "0");
-  } catch {
-    return "001";
-  }
+function generateMessageId(): string {
+  const now = new Date();
+  const ts = now.toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const rand = randomBytes(4).toString("hex");
+  return `${ts}-${rand}`;
 }
 
 export function getLegionDir(workspaceDir: string): string {
@@ -55,7 +61,9 @@ export function ensureLegionDir(workspaceDir: string): void {
   try {
     ensureDir(getLegionDir(workspaceDir));
     ensureDir(getMessagesDir(workspaceDir));
-  } catch {}
+  } catch (e) {
+    console.error("[handoff] Failed to create .legion/ directory:", e);
+  }
 }
 
 export function writePhaseHandoff<T extends object>(
@@ -72,7 +80,9 @@ export function writePhaseHandoff<T extends object>(
       completed: new Date().toISOString(),
     };
     atomicWriteJson(getPhaseFilePath(workspaceDir, phase), payload);
-  } catch {}
+  } catch (e) {
+    console.error(`[handoff] Failed to write ${phase} handoff:`, e);
+  }
 }
 
 export function readPhaseHandoff(workspaceDir: string, phase: HandoffPhase): PhaseHandoff | null {
@@ -110,14 +120,16 @@ export function writeMessage(workspaceDir: string, msg: Omit<HandoffMessage, "ti
   try {
     ensureLegionDir(workspaceDir);
     const messagesDir = getMessagesDir(workspaceDir);
-    const sequence = getNextMessageSequence(messagesDir);
-    const fileName = `${sequence}-${msg.from}-to-${msg.to}.json`;
+    const msgId = generateMessageId();
+    const fileName = `${msgId}-${msg.from}-to-${msg.to}.json`;
     const payload: HandoffMessage = {
       ...msg,
       timestamp: new Date().toISOString(),
     };
     atomicWriteJson(path.join(messagesDir, fileName), payload);
-  } catch {}
+  } catch (e) {
+    console.error(`[handoff] Failed to write message ${msg.from}->${msg.to}:`, e);
+  }
 }
 
 export function readMessages(workspaceDir: string): HandoffMessage[] {

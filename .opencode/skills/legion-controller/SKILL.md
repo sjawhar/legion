@@ -341,9 +341,9 @@ Before dispatching retro, consume routing hints conservatively:
 # Fallback read from current directory:
 HANDOFF=$(legion handoff read 2>/dev/null || echo '{}')
 
-SKIP_RETRO=$(echo "$HANDOFF" | jq -r '.routingHints.skipRetro // false')
-TRICKY_PARTS_COUNT=$(echo "$HANDOFF" | jq -r '(.implementer.trickyParts // []) | length')
-DEVIATIONS_COUNT=$(echo "$HANDOFF" | jq -r '(.implementer.deviations // []) | length')
+SKIP_RETRO=$(echo "$HANDOFF" | jq -r '.plan.routingHints.skipRetro // false')
+TRICKY_PARTS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.trickyParts // []) | length')
+DEVIATIONS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.deviations // []) | length')
 
 if [ "$SKIP_RETRO" = "true" ] && [ "$TRICKY_PARTS_COUNT" = "0" ] && [ "$DEVIATIONS_COUNT" = "0" ]; then
   echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
