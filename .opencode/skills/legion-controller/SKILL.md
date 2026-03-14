@@ -486,6 +486,47 @@ it impossible to track what's merged.
 | `test-passed` | Tester verified behavior, controller advances to Needs Review |
 | `test-failed` | Tester found issues, controller returns to implementer |
 
+### Label Batching Pattern
+
+Combine multiple label changes on the same issue into a single `gh issue edit` call to reduce GitHub API calls:
+
+**Instead of multiple calls:**
+```bash
+gh issue edit $ISSUE_NUMBER --remove-label "worker-done" -R $OWNER/$REPO
+gh issue edit $ISSUE_NUMBER --remove-label "test-passed" -R $OWNER/$REPO
+```
+
+**Use a single batched call:**
+```bash
+gh issue edit $ISSUE_NUMBER \
+  --remove-label "worker-done" \
+  --remove-label "test-passed" \
+  -R $OWNER/$REPO
+```
+
+**Combined add + remove:**
+```bash
+# Remove worker-done and test-passed, add nothing (clean up after test pass → needs review)
+gh issue edit $ISSUE_NUMBER \
+  --remove-label "worker-done" \
+  --remove-label "test-passed" \
+  -R $OWNER/$REPO
+
+# Remove worker-done and worker-active, add nothing (after processing)
+gh issue edit $ISSUE_NUMBER \
+  --remove-label "worker-done" \
+  --remove-label "worker-active" \
+  -R $OWNER/$REPO
+```
+
+**When dispatching a worker, combine worker-active:**
+```bash
+# Add worker-active in same call as status update where possible
+gh issue edit $ISSUE_NUMBER --add-label "worker-active" -R $OWNER/$REPO
+```
+
+This reduces GitHub API calls from N individual calls to 1 batched call per label group.
+
 ## Red Flags — STOP and Verify
 
 If you catch yourself thinking any of these, STOP. You're about to make a mistake.

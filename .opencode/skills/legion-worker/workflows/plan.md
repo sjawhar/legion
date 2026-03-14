@@ -324,6 +324,8 @@ legion handoff write --phase plan \
 - "Complex feature — 2 parallel implementers recommended, full pipeline"
 - "Dependency bump — skip retro"
 
+**Implementers may flag complexity:** If during implementation the implementer discovers the task is more complex than anticipated, they can set `subPlanningNeeded: true` in their handoff, along with `discoveredComplexity` notes and `suggestedSubWorkers`. This builds the dataset for future recursive sub-planning support.
+**Implementers may flag complexity:** If during implementation the implementer discovers the task is more complex than anticipated, they can set `subPlanningNeeded: true` in their handoff, along with `discoveredComplexity` notes and `suggestedSubWorkers`. This builds the dataset for future recursive sub-planning support.
 
 ### 6. Signal Completion
 
