@@ -42,6 +42,8 @@ export function validatePhaseHandoff(value: unknown): PhaseHandoff | null {
     return null;
   }
 
+  // TODO: When bumping to v2, add a migration path for v1 data instead of rejecting it.
+  // Currently all v1 data becomes invisible on a version bump.
   if (value.schemaVersion !== HANDOFF_SCHEMA_VERSION) {
     return null;
   }

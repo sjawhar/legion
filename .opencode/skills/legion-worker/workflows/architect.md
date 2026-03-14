@@ -104,7 +104,7 @@ legion handoff write --phase architect --data '{
   "components": ["list", "of", "affected", "components"],
   "subIssues": ["issue-id-1", "issue-id-2"],
   "routingHints": {
-    "complexity": "<low|medium|high>",
+    "complexity": "<trivial|small|medium|large>",
     "estimatedImplementers": 1,
     "skipTest": false,
     "skipRetro": false
