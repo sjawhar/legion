@@ -42,6 +42,7 @@ legion status <team>          # Check status
 legion stop <team>            # Stop swarm
 legion teams                  # List cached teams
 legion attach <team> <issue>  # Attach to worker
+legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
 ```
 
 ## Version Control
@@ -65,6 +66,7 @@ legion attach <team> <issue>  # Attach to worker
 | Modify issue types | `packages/daemon/src/state/types.ts` | Shared by daemon + state |
 | Worker process mgmt | `packages/daemon/src/daemon/serve-manager.ts` | Spawns `opencode serve` |
 | Port allocation | `packages/daemon/src/daemon/ports.ts` | Sequential from base 13381 |
+| Handoff ledger | `.legion/` on issue branch | Per-phase JSON files written by workers |
 
 ## Conventions
 
