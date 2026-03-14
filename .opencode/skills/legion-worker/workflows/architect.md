@@ -93,6 +93,35 @@ Before signaling completion, spawn a cross-family review session to validate the
 
 4. Only after incorporating review feedback, proceed to signal completion.
 
+## 5. Signal Handoff
+
+Before signaling completion, write handoff data for downstream workers. This data is advisory — downstream workers can read it but are not required to act on it.
+
+```bash
+# Write handoff data (non-blocking — if this fails, continue)
+legion handoff write --phase architect --data '{
+  "scope": "<small|medium|large>",
+  "components": ["list", "of", "affected", "components"],
+  "subIssues": ["issue-id-1", "issue-id-2"],
+  "routingHints": {
+    "complexity": "<trivial|small|medium|large>",
+    "estimatedImplementers": 1,
+    "skipTest": false,
+    "skipRetro": false
+  },
+  "concerns": ["list", "of", "concerns"]
+}' 2>/dev/null || true
+```
+
+**Fields:**
+- `scope`: Overall scope assessment (small/medium/large)
+- `components`: List of affected components or modules
+- `subIssues`: IDs of any sub-issues created during breakdown
+- `routingHints`: Guidance for downstream workers (complexity, estimated implementers, skip flags)
+- `concerns`: Any architectural concerns or gotchas identified
+
+The `|| true` ensures the handoff write doesn't block workflow completion if the CLI fails.
+
 ## What Makes Good Acceptance Criteria
 
 Acceptance criteria must be **testable** - a human or CI can verify pass/fail.
@@ -191,7 +220,7 @@ linear_linear(action="update",
 )
 ```
 
-## Completion Signals
+## 6. Completion Signals
 
 | Outcome | Action |
 |---------|--------|

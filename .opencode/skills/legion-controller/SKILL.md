@@ -213,8 +213,13 @@ Controller routes Triage issues directly (no worker needed):
 | Assessment | Route To |
 |------------|----------|
 | Urgent AND clear requirements | Todo (dispatch planner) |
+| Bug label + clear reproduction steps + no architectural uncertainty | Todo (skip architect — dispatch planner directly) |
 | Clear requirements, any size | Backlog (architect breaks down if large) |
 | Ambiguous or missing context | Icebox (needs clarification) |
+
+The skip-architect rule only applies when ALL conditions are met: `bug` label present,
+description contains clear reproduction steps, and the change is scoped to a single
+component. When in doubt, route to Backlog.
 
 ### 5. Pull from Icebox
 
@@ -321,6 +326,41 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 
 Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
 
+Before dispatching retro, consume routing hints conservatively:
+
+- The handoff read should use the workspace path if available (from the daemon's
+  `/workers` response), or the current working directory as fallback.
+- **Default: full pipeline.** If handoff data is missing, unreadable, or routing hints are
+  unknown, dispatch retro normally. The skip only fires when ALL conditions are explicitly
+  met.
+
+```bash
+# Optional workspace-aware read (if worker metadata includes workspace path):
+# HANDOFF=$(legion handoff read --workspace "$WORKSPACE_PATH" 2>/dev/null || echo '{}')
+
+# Fallback read from current directory:
+HANDOFF=$(legion handoff read 2>/dev/null || echo '{}')
+
+SKIP_RETRO=$(echo "$HANDOFF" | jq -r '.plan.routingHints.skipRetro // false')
+TRICKY_PARTS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.trickyParts // []) | length')
+DEVIATIONS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.deviations // []) | length')
+
+if [ "$SKIP_RETRO" = "true" ] && [ "$TRICKY_PARTS_COUNT" = "0" ] && [ "$DEVIATIONS_COUNT" = "0" ]; then
+  echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
+  if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+    legion dispatch "$ISSUE_IDENTIFIER" merge \
+      --repo "$OWNER/$REPO" \
+      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+  else
+    legion dispatch "$ISSUE_IDENTIFIER" merge \
+      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (linear backend)"
+  fi
+else
+  echo "Running full pipeline: retro required (missing/corrupt hints or skip conditions unmet)"
+  # Proceed with normal retro resume below
+fi
+```
+
 **Use skill invocation for retro too:**
 
 ```bash
@@ -334,6 +374,12 @@ legion prompt "$ISSUE_IDENTIFIER" --mode implement \
 ```
 
 **If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
+
+**ADAPTIVE ROUTING GUARDRAILS — MUST NEVER BE SKIPPED:**
+- Testing phase CANNOT be skipped — tester ALWAYS runs
+- Routing hints are ADVISORY — labels, PR state, daemon state remain authoritative
+- When hints are missing/corrupt: fall back to full pipeline
+- When multiple hints conflict: fall back to full pipeline
 
 ## Worker Inspection
 
@@ -439,6 +485,47 @@ it impossible to track what's merged.
 | `human-approved` | Human approved, controller advances to planner |
 | `test-passed` | Tester verified behavior, controller advances to Needs Review |
 | `test-failed` | Tester found issues, controller returns to implementer |
+
+### Label Batching Pattern
+
+Combine multiple label changes on the same issue into a single `gh issue edit` call to reduce GitHub API calls:
+
+**Instead of multiple calls:**
+```bash
+gh issue edit $ISSUE_NUMBER --remove-label "worker-done" -R $OWNER/$REPO
+gh issue edit $ISSUE_NUMBER --remove-label "test-passed" -R $OWNER/$REPO
+```
+
+**Use a single batched call:**
+```bash
+gh issue edit $ISSUE_NUMBER \
+  --remove-label "worker-done" \
+  --remove-label "test-passed" \
+  -R $OWNER/$REPO
+```
+
+**Combined add + remove:**
+```bash
+# Remove worker-done and test-passed, add nothing (clean up after test pass → needs review)
+gh issue edit $ISSUE_NUMBER \
+  --remove-label "worker-done" \
+  --remove-label "test-passed" \
+  -R $OWNER/$REPO
+
+# Remove worker-done and worker-active, add nothing (after processing)
+gh issue edit $ISSUE_NUMBER \
+  --remove-label "worker-done" \
+  --remove-label "worker-active" \
+  -R $OWNER/$REPO
+```
+
+**When dispatching a worker, combine worker-active:**
+```bash
+# Add worker-active in same call as status update where possible
+gh issue edit $ISSUE_NUMBER --add-label "worker-active" -R $OWNER/$REPO
+```
+
+This reduces GitHub API calls from N individual calls to 1 batched call per label group.
 
 ## Red Flags — STOP and Verify
 

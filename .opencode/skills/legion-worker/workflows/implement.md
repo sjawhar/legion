@@ -48,6 +48,16 @@ Fetch issue and comments. The plan is in comments:
 - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
 
+### 1.5. Read Prior Handoffs (Advisory)
+
+Read any prior handoffs from architect or plan phases (non-blocking):
+
+```bash
+legion handoff read 2>/dev/null || echo '{}'
+```
+
+If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
+
 ### 2. Invoke Skills (in order)
 
 1. `/superpowers/executing-plans` - Load and structure the plan
@@ -226,6 +236,27 @@ Do NOT exit with failing CI — it's your job to get CI green before the reviewe
 with no checks reported, convert the PR to ready (`gh pr ready`), wait for CI, then
 convert back to draft (`gh pr ready --undo`) if needed.
 
+### 7.5. Write Handoff Data
+
+Write handoff data for downstream phases (non-blocking):
+
+```bash
+legion handoff write --phase implement --data '{
+  "filesChanged": ["src/file1.ts", "src/file2.ts"],
+  "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
+  "deviations": ["List any deviations from the plan with rationale"],
+  "openQuestions": ["Unresolved questions for downstream phases"],
+  "subPlanningNeeded": false
+}' 2>/dev/null || true
+```
+
+Key fields:
+- `filesChanged`: List of files created or modified during implementation
+- `trickyParts`: Notes about what was difficult or required special handling
+- `deviations`: List of deviations from the plan with rationale for each
+- `openQuestions`: Unresolved questions or concerns for downstream phases
+- `subPlanningNeeded`: Boolean — set to `true` if discovered complexity was greater than planned
+
 ### 8. Exit
 
 **CRITICAL: The `worker-done` label is how the controller knows you finished.** If you skip this,
@@ -280,6 +311,16 @@ If the PR was converted to draft but has no review comments in either location, 
 
 Otherwise, invoke `/superpowers/receiving-code-review` to evaluate and prioritize feedback.
 
+### 1.5. Read Prior Handoffs (Advisory)
+
+Read any prior handoffs from architect or plan phases (non-blocking):
+
+```bash
+legion handoff read 2>/dev/null || echo '{}'
+```
+
+If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
+
 Key behaviors:
 - Verify suggestions against codebase before implementing
 - Push back with technical reasoning if wrong
@@ -321,6 +362,27 @@ Do NOT reply to comments or exit with failing CI.
 ### 5. Reply to Comments
 
 Reply in PR comment threads acknowledging fixes. Reference specific changes made.
+
+### 5.5. Write Handoff Data
+
+Write handoff data for downstream phases (non-blocking):
+
+```bash
+legion handoff write --phase implement --data '{
+  "filesChanged": ["src/file1.ts", "src/file2.ts"],
+  "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
+  "deviations": ["List any deviations from the plan with rationale"],
+  "openQuestions": ["Unresolved questions for downstream phases"],
+  "subPlanningNeeded": false
+}' 2>/dev/null || true
+```
+
+Key fields:
+- `filesChanged`: List of files created or modified during implementation
+- `trickyParts`: Notes about what was difficult or required special handling
+- `deviations`: List of deviations from the plan with rationale for each
+- `openQuestions`: Unresolved questions or concerns for downstream phases
+- `subPlanningNeeded`: Boolean — set to `true` if discovered complexity was greater than planned
 
 ### 6. Exit
 

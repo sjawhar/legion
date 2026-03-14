@@ -12,19 +12,22 @@ digraph plan_workflow {
     fetch [label="1. Fetch Issue"];
     metis [label="1.5. Metis Pre-Analysis"];
     critical [label="Critical ambiguities?" shape=diamond];
+    handoff_read [label="1.8. Architect Handoff"];
     research_plan [label="2. /ce:plan (autonomous)"];
     unclear [label="Requirements unclear?" shape=diamond];
     executable [label="3. /superpowers/writing-plans"];
     review [label="4. /plan-review"];
     passed [label="Review passed?" shape=diamond];
     post [label="5. Post to Issue"];
+    handoff_write [label="5.5. Write Handoff"];
     complete [label="6. Signal Completion"];
     exit_unclear [label="Exit (user-input-needed)"];
 
     fetch -> metis;
     metis -> critical;
     critical -> exit_unclear [label="yes: requires human input"];
-    critical -> research_plan [label="no: pass to planner"];
+    critical -> handoff_read [label="no: pass to planner"];
+    handoff_read -> research_plan;
     research_plan -> unclear;
     unclear -> exit_unclear [label="yes: after legion-oracle + assumptions exhausted"];
     unclear -> executable [label="no"];
@@ -32,7 +35,8 @@ digraph plan_workflow {
     review -> passed;
     passed -> review [label="no: fix issues, re-review"];
     passed -> post [label="yes"];
-    post -> complete;
+    post -> handoff_write;
+    handoff_write -> complete;
 }
 ```
 
@@ -133,6 +137,17 @@ Before invoking `/ce:plan`, check the learnings index for applicable prior knowl
 **If no matches found:** Skip — do not add an empty "Relevant learnings" section.
 
 **If a matched file doesn't exist on disk:** Skip that entry silently (stale index entry from a file rename). Do not error.
+
+### 1.8. Read Architect Handoff (if available)
+
+```bash
+legion handoff read --phase architect 2>/dev/null || echo '{}'
+```
+
+If architect handoff is present, use `routingHints` and `concerns` to inform planning. This is advisory only — proceed even if the file is missing or empty.
+
+Pass any architect routing hints to `/ce:plan` context in step 2 alongside Metis analysis and learnings.
+
 ### 2. Invoke /ce:plan (Autonomous)
 
 Invoke `/ce:plan` with this context:
@@ -271,6 +286,46 @@ Post the **full executable plan** from step 3 (or revised after step 4):
 
 The complete `/superpowers:writing-plans` output goes directly into the issue comment - all tasks, all code examples, all test commands.
 
+### 5.5. Write Handoff Data
+
+After posting the plan, write handoff data for downstream phases:
+
+```bash
+legion handoff write --phase plan \
+  --data '{
+    "taskCount": 5,
+    "independentTasks": 3,
+    "routingHints": {
+      "complexity": "small",
+      "estimatedImplementers": 1,
+      "skipTest": false,
+      "skipRetro": false,
+      "skipArchitect": false
+    },
+    "concerns": ["Race condition in state transitions noted by Metis"],
+    "learningsUsed": ["docs/solutions/state/race-conditions.md"],
+    "workflowRecommendation": "Standard pipeline — all phases needed"
+  }' 2>/dev/null || true
+```
+
+**Fields:**
+- `taskCount`: Number of tasks in the executable plan
+- `independentTasks`: Number of tasks marked as independent (can parallelize)
+- `routingHints`: Planner's assessment of complexity and pipeline needs
+- `concerns`: Combined concerns from Metis analysis and planner judgment
+- `learningsUsed`: List of `docs/solutions/` files injected in step 1.7
+- `workflowRecommendation`: Freeform text for future adaptive routing
+
+**This step is non-blocking.** If the handoff write fails, it must not prevent completion. The `|| true` ensures the workflow continues.
+
+**workflowRecommendation examples:**
+- "Standard pipeline — all phases needed"
+- "Simple bug fix — skip retro, single implementer"
+- "Complex feature — 2 parallel implementers recommended, full pipeline"
+- "Dependency bump — skip retro"
+
+**Implementers may flag complexity:** If during implementation the implementer discovers the task is more complex than anticipated, they can set `subPlanningNeeded: true` in their handoff, along with `discoveredComplexity` notes and `suggestedSubWorkers`. This builds the dataset for future recursive sub-planning support.
+
 ### 6. Signal Completion
 
 Add `worker-done` label to the issue, then exit:
@@ -293,10 +348,12 @@ Then remove `worker-active`:
 |------|--------|------------|
 | Fetch | Get issue details | `gh issue view $ISSUE_NUMBER ...` or `linear_linear(action="get", ...)` |
 | Pre-Analysis | Identify risks | Metis agent (background) |
+| Architect Handoff | Read prior phase hints | `legion handoff read --phase architect` |
 | Research + Structure | Create plan | `/ce:plan` (autonomous) |
 | Executable | Bite-sized tasks | `/superpowers/writing-plans` |
 | Validate | Review plan | `/plan-review` (iterate) |
 | Post | Full plan to issue | `gh issue comment ...` or `linear_linear(action="comment", ...)` |
+| Write Handoff | Capture plan metadata | `legion handoff write --phase plan` |
 | Complete | Add done label | `gh issue edit --add-label ...` or `linear_linear(action="update", ...)` |
 
 ## Autonomous Context Template
