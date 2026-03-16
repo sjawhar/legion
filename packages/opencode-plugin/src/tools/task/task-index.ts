@@ -9,7 +9,7 @@ import {
   TaskSchema,
 } from "./types";
 
-export const INDEX_FILENAME = "active-index.json";
+const INDEX_FILENAME = "active-index.json";
 
 export function indexPathFor(taskDir: string): string {
   return join(taskDir, INDEX_FILENAME);

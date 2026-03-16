@@ -66,21 +66,21 @@ interface LikeRow {
   title: string;
 }
 
-export interface IndexResult {
+interface IndexResult {
   chunkCount: number;
   byteCount: number;
   vocabulary: string[];
   source: string;
 }
 
-export interface SearchResult {
+interface SearchResult {
   content: string;
   source: string;
   title: string;
   score: number;
 }
 
-export interface ContentStoreStats {
+interface ContentStoreStats {
   totalChunks: number;
   totalBytes: number;
   sources: string[];

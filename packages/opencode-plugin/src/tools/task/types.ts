@@ -38,8 +38,6 @@ export const TaskGetInputSchema = z.object({
   id: z.string(),
 });
 
-export type TaskGetInput = z.infer<typeof TaskGetInputSchema>;
-
 export const TaskUpdateInputSchema = z.object({
   id: z.string(),
   subject: z.string().optional(),
@@ -53,14 +51,6 @@ export const TaskUpdateInputSchema = z.object({
 });
 
 export type TaskUpdateInput = z.infer<typeof TaskUpdateInputSchema>;
-
-export const TaskListInputSchema = z.object({
-  status: TaskStatusSchema.optional(),
-  parentID: z.string().optional(),
-  ready: z.boolean().optional(),
-});
-
-export type TaskListInput = z.infer<typeof TaskListInputSchema>;
 
 /** Status values that satisfy a dependency (unblock downstream tasks). */
 export const SATISFYING_STATUSES: ReadonlySet<TaskStatus> = new Set(["completed", "cancelled"]);

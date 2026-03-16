@@ -40,7 +40,6 @@ export function createDelegationTools(
         .optional()
         .describe("Specific agent name (e.g. executor, explorer, oracle)"),
       description: z.string().describe("Short task description (5-10 words)"),
-      run_in_background: z.boolean().optional().default(true),
     },
     async execute(args, toolContext) {
       const context = toolContext as DelegationToolContext | undefined;

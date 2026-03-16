@@ -56,7 +56,6 @@ export function createSessionTools(client: OpencodeClient, directory: string): S
       session_id: z.string().describe("Session ID to read"),
       limit: z.number().optional().describe("Maximum number of messages to return"),
       include_todos: z.boolean().optional().describe("Include todo list if available"),
-      include_transcript: z.boolean().optional().describe("Include transcript log if available"),
     },
     execute: async (args) => {
       try {
@@ -64,7 +63,6 @@ export function createSessionTools(client: OpencodeClient, directory: string): S
           session_id: string;
           limit?: number;
           include_todos?: boolean;
-          include_transcript?: boolean;
         };
 
         const sessionResult = await client.session.get({
