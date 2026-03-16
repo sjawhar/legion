@@ -8,7 +8,7 @@
       "integration-issues/github-graphql-pr-draft-status.md",
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "integration-issues/linear-mcp-label-resolution.md",
-      "deterministic-session-ids.md"
+      "deterministic-session-ids.md",
       "github-api/graphql-org-user-fallback.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
@@ -39,7 +39,17 @@
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
       "architecture-patterns/sync-to-async-modular-refactoring.md",
-      "integration-patterns/tmux-askuserquestion-navigation.md"
+      "integration-patterns/tmux-askuserquestion-navigation.md",
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin/src/delegation": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin/src/tools/task": [
+      "best-practices/typescript-dead-code-audit.md"
     ],
     ".opencode/skills/legion-worker": [
       "skill-patterns/worker-skill-failure-modes.md",
@@ -89,7 +99,8 @@
     "tag:claude-code": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:cleanup": [
       "daemon/deferred-review-comments-pattern.md",
-      "daemon/graceful-worker-shutdown.md"
+      "daemon/graceful-worker-shutdown.md",
+      "best-practices/typescript-dead-code-audit.md"
     ],
     "tag:cli-interaction": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:code-review": ["daemon/deferred-review-comments-pattern.md"],
@@ -188,7 +199,13 @@
     "tag:pytest-mock": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
     "tag:python": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
     "tag:race-condition": ["architecture-patterns/shared-state-file-ownership.md"],
-    "tag:refactoring": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
+    "tag:dead-code": ["best-practices/typescript-dead-code-audit.md"],
+    "tag:noUnusedLocals": ["best-practices/typescript-dead-code-audit.md"],
+    "tag:barrel-exports": ["best-practices/typescript-dead-code-audit.md"],
+    "tag:refactoring": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "best-practices/typescript-dead-code-audit.md"
+    ],
     "tag:remote-control": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:resource-accounting": ["delegation/delegation-hardening-retro.md"],
     "tag:resume": ["integration-patterns/controller-worker-protocol.md"],
