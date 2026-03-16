@@ -17,7 +17,7 @@ const DEFAULT_EXCLUDED_TOOLS = new Set([
 // Strip them before indexing to avoid polluting FTS with line numbers and hash tags.
 const LINE_ID_PATTERN = /^\d+#[A-Z]{2}\|/gm;
 
-export interface CompressionStats {
+interface CompressionStats {
   compressed: number;
   bytesSaved: number;
   passedThrough: number;

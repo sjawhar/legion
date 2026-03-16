@@ -21,8 +21,6 @@ export interface PersistedWorkerState {
   controller?: ControllerState;
 }
 
-export type WorkerState = Record<string, WorkerEntry>;
-
 function resolveHome(filePath: string): string {
   if (filePath.startsWith("~/")) {
     return path.join(os.homedir(), filePath.slice(2));

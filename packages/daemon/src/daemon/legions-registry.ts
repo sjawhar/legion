@@ -3,14 +3,14 @@ import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/pr
 import path from "node:path";
 import { LegionsRegistrySchema } from "./schemas";
 
-export interface LegionEntry {
+interface LegionEntry {
   port: number;
   servePort: number;
   pid: number;
   startedAt: string;
 }
 
-export type LegionsRegistry = Record<string, LegionEntry>;
+type LegionsRegistry = Record<string, LegionEntry>;
 
 const BASE_DAEMON_PORT = 13370;
 const BASE_SERVE_PORT = 13381;
@@ -123,7 +123,7 @@ async function writeRegistry(filePath: string, registry: LegionsRegistry): Promi
   await rename(tempPath, filePath);
 }
 
-export async function withRegistryLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+async function withRegistryLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = `${filePath}.lock`;
   const start = Date.now();
   let delayMs = 50;

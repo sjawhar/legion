@@ -295,7 +295,7 @@ function extractMessageIndex(error: unknown): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
-export function detectErrorType(error: unknown): ErrorType | null {
+function detectErrorType(error: unknown): ErrorType | null {
   const message = getErrorMessage(error);
 
   if (
@@ -427,7 +427,7 @@ async function resumeSession(
     .catch(() => {});
 }
 
-export interface SessionRecoveryHook {
+interface SessionRecoveryHook {
   handleSessionRecovery: (info: MessageInfo) => Promise<boolean>;
   isRecoverableError: (error: unknown) => boolean;
   isRecovering: (sessionID: string) => boolean;

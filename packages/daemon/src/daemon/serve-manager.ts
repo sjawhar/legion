@@ -3,13 +3,13 @@ import { join } from "node:path";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { HealthCheckResponseSchema, SessionCreateResponseSchema } from "./schemas";
 
-export interface SharedServeState {
+interface SharedServeState {
   port: number;
   pid: number;
   status: "starting" | "running" | "dead";
 }
 
-export interface SharedServeOptions {
+interface SharedServeOptions {
   port: number;
   workspace: string;
   logDir?: string;
