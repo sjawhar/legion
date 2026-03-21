@@ -89,7 +89,10 @@ Follow the testing plan's setup instructions:
 
 1. Run the setup commands from the testing plan
 2. Run the health check to verify the environment is ready (retry for up to 30s)
-3. If the environment fails to boot, that is a test failure — skip to step 6 with the boot error as evidence
+3. If the environment fails to boot, distinguish **transient infrastructure failures** from **real code bugs**:
+   - **Transient** (stale containers, port conflicts, timeout, missing dependency cache): clean up and retry once. If it fails again with the same transient error, try a different setup approach (e.g., rebuild, clear cache, restart Docker).
+   - **Real bug** (crash with stack trace, config error, missing file from the PR): that is a test failure — skip to step 6 with the boot error as evidence.
+   - If unsure: retry once. If the same error recurs, treat it as a real bug.
 
 ```bash
 # Example — use the actual health check from the testing plan, not this literal URL
@@ -98,6 +101,11 @@ for i in $(seq 1 30); do
   sleep 1
 done
 ```
+
+**Long-running commands:** Some verification commands (eval runs, build pipelines, integration suites) exceed the bash tool's default timeout (~120s). If a command is killed by timeout:
+- Re-run with a longer `timeout` parameter if supported by your tool
+- Or run in tmux: `tmux new-session -d -s test '<command>'`, then poll with `tmux capture-pane -t test -p | tail -5`
+- Do NOT treat a timeout as a test failure — it means the command didn't finish, not that it failed
 
 ### 5. Execute Acceptance Criteria
 
@@ -225,3 +233,4 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 | Testing on main instead of the PR branch | Check out the PR branch first |
 | Escalating when tests fail | Test failures are expected outcomes, not blockers |
 | Booting the app when spec compliance failed | If the code doesn't attempt to implement the spec, fail immediately |
+| Giving up after one infrastructure failure | Retry with cleanup. Transient failures (timeouts, stale state) are common — only fail after confirming the error is from the PR code, not the environment |
