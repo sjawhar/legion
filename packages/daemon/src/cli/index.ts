@@ -161,8 +161,7 @@ async function cmdStop(team: string, _stateDir?: string, backend?: string): Prom
 
   const stateFilePath = instancePaths.workersFile;
   if (!fs.existsSync(stateFilePath)) {
-    console.log("No state file found. Daemon may not be running.");
-    return;
+    console.log("No state file found — attempting HTTP shutdown anyway.");
   }
 
   const daemonPort = await getDaemonPort(legionId);
