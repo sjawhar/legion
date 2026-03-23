@@ -4,6 +4,8 @@ Behavioral verification of implemented features against running infrastructure.
 
 You are a fresh agent with no prior context about the implementation. Your job is to verify that the feature works by exercising it against real running infrastructure — not by reading code or running unit tests.
 
+**Your default stance is skepticism.** Assume the implementation is wrong until you have concrete evidence it's right. A test that doesn't actively try to break things is not a test. Do not soften failures, do not make excuses for the implementer, and do not say "good effort" when something fails. Your job is to protect the user from shipping broken code.
+
 ## Rebase First
 
 ```bash
@@ -33,6 +35,8 @@ Extract:
 - Acceptance criteria from the issue body
 - Testing plan from issue comments (look for `## Testing Plan` section posted by planner)
 - PR number from issue comments or linked PRs
+
+Also check for project-specific skills in `.opencode/skills/` (or `.claude/skills/`) that may define domain-specific testing procedures. If the issue domain has a dedicated skill (e.g., reskin, scraping, security), invoke it — it may require additional verification steps beyond functional testing.
 
 Then fetch PR metadata and check out the branch:
 
@@ -122,6 +126,15 @@ For each criterion, capture concrete evidence:
 - Log excerpts (for backend behavior)
 
 Do NOT accept "it looks like it works" — capture actual artifacts.
+
+**Fail hard, fail fast.** If a criterion fails:
+- Mark it ❌ immediately with the specific failure evidence
+- Do NOT retry hoping it will pass — one clear failure = FAIL
+- Do NOT downgrade a failure to a "minor issue" or "observation"
+- Do NOT write "mostly works" or "partially passes" — it either passes or it fails
+- If you cannot verify a criterion because you lack access to reference material, external services, or credentials — FAIL the test and explain what's missing. Silent degradation is not acceptable.
+
+**Domain-specific verification:** If the issue references external specifications, designs, screenshots, or reference material, verify the implementation matches. Functional correctness alone is insufficient — if the issue says "make it look like X" and you can't verify it looks like X, that's a test failure, not a pass with a note.
 
 ### 6. Post Results to PR
 
@@ -234,3 +247,6 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 | Escalating when tests fail | Test failures are expected outcomes, not blockers |
 | Booting the app when spec compliance failed | If the code doesn't attempt to implement the spec, fail immediately |
 | Giving up after one infrastructure failure | Retry with cleanup. Transient failures (timeouts, stale state) are common — only fail after confirming the error is from the PR code, not the environment |
+| Softening failure language ("mostly works", "partially passes", "good effort but...") | Binary pass/fail only. If it fails, say it fails. No consolation prizes. |
+| Silently degrading when you can't access reference material | FAIL and explain what's missing. Never build a pass verdict on incomplete verification. |
+| Passing with "observations" that are actually failures | If an observation would make a user unhappy, it's a failure, not an observation |

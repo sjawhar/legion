@@ -48,6 +48,15 @@ Fetch issue and comments. The plan is in comments:
 - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
 
+### 1.5. Check for Project-Specific Skills
+
+Before implementing, check if the repo has skills relevant to this work:
+
+1. List available skills in `.opencode/skills/` (or `.claude/skills/`) beyond standard Legion workflows
+2. Match skills to the issue domain — if the plan or issue references a specific workflow, there may be a skill for it
+3. Invoke any relevant skills before or during implementation
+4. Check AGENTS.md and CLAUDE.md for project-specific conventions (coding standards, testing requirements, domain-specific processes)
+
 ### 2. Invoke Skills (in order)
 
 1. `/superpowers/executing-plans` - Load and structure the plan

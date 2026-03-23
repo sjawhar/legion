@@ -30,6 +30,8 @@ linear_linear(action="get", id=$LEGION_ISSUE_ID)
 
 Extract title, description, comments (included in get response), current labels.
 
+Also check for project-specific skills in `.opencode/skills/` (or `.claude/skills/`) that may be relevant to this issue's domain. Note any relevant skills in your output so downstream workers (planner, implementer, tester) know to use them.
+
 ### 2. Assess
 
 **Is it clear?** Does it have testable acceptance criteria and no unresolved questions?
