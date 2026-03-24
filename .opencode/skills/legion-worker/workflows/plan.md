@@ -55,6 +55,17 @@ Extract:
 - Comments with additional context
 - Acceptance criteria if present
 
+### 1.2. Check for Project-Specific Skills
+
+Before diving into planning, check if the repo has skills relevant to this work:
+
+1. List available skills: look for project-specific skills beyond the standard Legion workflows
+2. Read the issue title, description, and labels — do any skills match the domain? (e.g., a "reskin" issue might have a `/reskin-environment` skill)
+3. If relevant skills exist, note them for inclusion in the plan — the implementer and tester will need to know about them
+4. Include any relevant skill invocations in the testing plan (step 3) so downstream workers use them
+
+Also check AGENTS.md and CLAUDE.md for project-specific conventions that should inform the plan.
+
 ### 1.5. Pre-Planning Analysis (Metis)
 
 Before researching and structuring the plan, run a pre-planning analysis to identify risks that could derail the planner.

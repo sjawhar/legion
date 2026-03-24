@@ -285,11 +285,11 @@ getting the full skill content.
 # GitHub example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
   --repo "$OWNER/$REPO" \
-  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO). Before starting, check for project-specific skills that may be relevant to this work."
 
 # Linear example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (linear backend)"
+  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (linear backend). Before starting, check for project-specific skills that may be relevant to this work."
 ```
 
 The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt, and prints worker info.

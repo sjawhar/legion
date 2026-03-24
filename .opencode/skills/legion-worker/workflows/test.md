@@ -4,6 +4,8 @@ Behavioral verification of implemented features against running infrastructure.
 
 You are a fresh agent with no prior context about the implementation. Your job is to verify that the feature works by exercising it against real running infrastructure — not by reading code or running unit tests.
 
+**Your default stance is skepticism.** Assume the implementation is wrong until you have concrete evidence it's right. A test that doesn't actively try to break things is not a test. Do not soften failures, do not make excuses for the implementer, and do not say "good effort" when something fails. Your job is to protect the user from shipping broken code.
+
 ## Rebase First
 
 ```bash
@@ -33,6 +35,8 @@ Extract:
 - Acceptance criteria from the issue body
 - Testing plan from issue comments (look for `## Testing Plan` section posted by planner)
 - PR number from issue comments or linked PRs
+
+Also check for repo-specific skills that may define domain-specific testing procedures. If the issue domain has a dedicated skill (e.g., frontend, backend, security, performance), invoke it — it may require additional verification steps beyond functional testing.
 
 Then fetch PR metadata and check out the branch:
 
@@ -72,6 +76,20 @@ The subagent reads the actual diff and verifies each acceptance criterion has co
 **If ✅ spec compliant:** proceed to step 3.
 
 **If ❌ issues found:** include the findings in your test results and **fail immediately** — skip booting the environment. There's no point smoke-testing code that doesn't even attempt to implement the spec.
+
+### 2.5. Critique the Tests
+
+Before running the app, review the **implementer's tests** with a critical eye. Unit tests passing and CI green is necessary but not sufficient. Look for:
+
+- **Excessive mocking**: Are tests mocking out the very thing they should be testing? A test that mocks the database, the API, the filesystem, and the business logic is testing nothing.
+- **Circular logic**: Does the test just re-implement the production code and assert they match? That proves consistency, not correctness.
+- **Happy-path-only coverage**: Are there tests for error cases, edge cases, and boundary conditions? If every test is `expect(result).toBe(expectedValue)` with no failure scenarios, the test suite is decorative.
+- **Missing integration tests**: Are there only unit tests when the feature clearly requires integration testing (e.g., API endpoints, database queries, multi-component flows)?
+- **Hardcoded expected values**: Are expected values copied from implementation output rather than derived from the spec? This just locks in whatever the code happens to do, right or wrong.
+
+**Include your test critique in the PR comment.** If the tests are weak, that's a finding — note it as a P2 issue. The implementer should have tests that actually catch regressions, not tests that give a false sense of coverage.
+
+**This does NOT replace running the app.** Test critique tells you whether the safety net is real. Smoke testing (steps 4-5) tells you whether the feature actually works. Both are required.
 
 ### 3. Read the Documentation
 
@@ -123,6 +141,15 @@ For each criterion, capture concrete evidence:
 
 Do NOT accept "it looks like it works" — capture actual artifacts.
 
+**Fail hard, fail fast.** If a criterion fails:
+- Mark it ❌ immediately with the specific failure evidence
+- Do NOT retry hoping it will pass — one clear failure = FAIL
+- Do NOT downgrade a failure to a "minor issue" or "observation"
+- Do NOT write "mostly works" or "partially passes" — it either passes or it fails
+- If you cannot verify a criterion because you lack access to reference material, external services, or credentials — FAIL the test and explain what's missing. Silent degradation is not acceptable.
+
+**Domain-specific verification:** If the issue references external specifications, designs, screenshots, or reference material, verify the implementation matches. Functional correctness alone is insufficient — if the issue says "make it look like X" and you can't verify it looks like X, that's a test failure, not a pass with a note.
+
 ### 6. Post Results to PR
 
 Post a structured comment on the PR:
@@ -139,6 +166,11 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 | Criterion | Status | Evidence |
 |-----------|--------|----------|
 | [criterion 1] | ✅/❌ | [output/screenshot] |
+
+### Test Quality Critique
+- [Are the implementer's tests meaningful or decorative?]
+- [Excessive mocking? Circular logic? Happy-path-only?]
+- [Missing integration/edge-case coverage?]
 
 ### Documentation Feedback
 - [Was it easy to understand the feature from docs?]
@@ -162,6 +194,11 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Behavioral Test Re
 | Criterion | Status | Evidence |
 |-----------|--------|----------|
 | [criterion 1] | ✅/❌ | [output/screenshot] |
+
+### Test Quality Critique
+- [Are the implementer's tests meaningful or decorative?]
+- [Excessive mocking? Circular logic? Happy-path-only?]
+- [Missing integration/edge-case coverage?]
 
 ### Documentation Feedback
 - [Was it easy to understand the feature from docs?]
@@ -225,7 +262,7 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 
 | Mistake | Correction |
 |---------|------------|
-| Trusting unit test results instead of running the app | Boot the environment and exercise actual behavior |
+| Seeing green CI and declaring the feature works | CI passing means the implementer's tests pass. You still need to boot the app and verify the feature yourself. Unit tests are the implementer's safety net, not yours. |
 | Skipping documentation review | Always read docs first — you're the first "user" |
 | Accepting "it works" without evidence | Capture screenshots, command output, log excerpts |
 | Adding `test-passed` AND `test-failed` | Only one — pass or fail, never both |
@@ -234,3 +271,7 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 | Escalating when tests fail | Test failures are expected outcomes, not blockers |
 | Booting the app when spec compliance failed | If the code doesn't attempt to implement the spec, fail immediately |
 | Giving up after one infrastructure failure | Retry with cleanup. Transient failures (timeouts, stale state) are common — only fail after confirming the error is from the PR code, not the environment |
+| Softening failure language ("mostly works", "partially passes", "good effort but...") | Binary pass/fail only. If it fails, say it fails. No consolation prizes. |
+| Silently degrading on environment, infrastructure, or access issues | FAIL and explain what's missing. Never build a pass verdict on incomplete verification. |
+| Passing with "observations" that are actually failures | If an observation would make a user unhappy, it's a failure, not an observation |
+| Skipping test critique because CI is green | Review the actual test code. Heavily mocked tests, circular logic, and happy-path-only suites are P2 findings. |

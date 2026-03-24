@@ -2,6 +2,8 @@
 
 Deep PR review with line-level comments. Code is already local in the workspace.
 
+**Your job is to protect the codebase.** Be direct, be specific, and do not soften your findings. If the code is wrong, say it's wrong. If a requirement was dropped, that's a CRITICAL issue — not a suggestion. Do not praise the implementer for effort. Focus exclusively on whether the code meets the requirements and is correct.
+
 ## Constraint
 
 **Cannot approve/request changes via GitHub API** - same user as PR author.
@@ -29,6 +31,11 @@ Extract:
 - Original requirements from description
 - Implementation plan (from comments)
 - Acceptance criteria
+- Project-specific skills that define domain-specific quality standards (check `.opencode/skills/` or `.claude/skills/`)
+
+**Verify every acceptance criterion has corresponding implementation.** If an acceptance criterion from the issue is not addressed in the diff, that is a CRITICAL/P1 issue — the implementer dropped a requirement.
+
+**Check for silent shortcuts:** Did the implementer skip hard parts, leave TODOs, hardcode values that should be dynamic, or implement a simpler version of what was asked? These are P1 issues, not suggestions.
 
 Fetch the PR metadata:
 ```bash
@@ -126,3 +133,13 @@ issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
 current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
 linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done"])
 ```
+
+## Common Mistakes
+
+| Mistake | Correction |
+|---------|------------|
+| Approving with "minor" issues that are actually P1 | If it breaks behavior or drops a requirement, it's CRITICAL. Severity inflation is better than severity deflation. |
+| Reviewing only code quality, not spec compliance | Check every acceptance criterion against the diff. Missing requirements are the most common failure mode. |
+| Softening language ("consider", "might want to", "could improve") | Be direct: "This is wrong because X. Fix it." |
+| Passing a PR that has CI failures | CI failures are P1. The implementer's job was to ship with green CI. |
+| Not checking for dropped requirements | Cross-reference every acceptance criterion. A missing criterion is a CRITICAL issue. |
