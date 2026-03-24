@@ -140,7 +140,6 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 |---------|------------|
 | Approving with "minor" issues that are actually P1 | If it breaks behavior or drops a requirement, it's CRITICAL. Severity inflation is better than severity deflation. |
 | Reviewing only code quality, not spec compliance | Check every acceptance criterion against the diff. Missing requirements are the most common failure mode. |
-| Flagging pre-existing issues as new | Scope review to the diff. If an issue predates this PR, don't block on it — but do note it as a P3. |
 | Softening language ("consider", "might want to", "could improve") | Be direct: "This is wrong because X. Fix it." |
 | Passing a PR that has CI failures | CI failures are P1. The implementer's job was to ship with green CI. |
 | Not checking for dropped requirements | Cross-reference every acceptance criterion. A missing criterion is a CRITICAL issue. |

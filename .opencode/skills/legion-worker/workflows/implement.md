@@ -52,7 +52,7 @@ Fetch issue and comments. The plan is in comments:
 
 Before implementing, check if the repo has skills relevant to this work:
 
-1. List available skills in `.opencode/skills/` (or `.claude/skills/`) beyond standard Legion workflows
+1. List available skills in the repo beyond standard Legion workflows
 2. Match skills to the issue domain — if the plan or issue references a specific workflow, there may be a skill for it
 3. Invoke any relevant skills before or during implementation
 4. Check AGENTS.md and CLAUDE.md for project-specific conventions (coding standards, testing requirements, domain-specific processes)

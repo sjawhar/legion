@@ -36,7 +36,7 @@ Extract:
 - Testing plan from issue comments (look for `## Testing Plan` section posted by planner)
 - PR number from issue comments or linked PRs
 
-Also check for project-specific skills in `.opencode/skills/` (or `.claude/skills/`) that may define domain-specific testing procedures. If the issue domain has a dedicated skill (e.g., reskin, scraping, security), invoke it — it may require additional verification steps beyond functional testing.
+Also check for repo-specific skills that may define domain-specific testing procedures. If the issue domain has a dedicated skill (e.g., frontend, backend, security, performance), invoke it — it may require additional verification steps beyond functional testing.
 
 Then fetch PR metadata and check out the branch:
 
@@ -248,5 +248,5 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 | Booting the app when spec compliance failed | If the code doesn't attempt to implement the spec, fail immediately |
 | Giving up after one infrastructure failure | Retry with cleanup. Transient failures (timeouts, stale state) are common — only fail after confirming the error is from the PR code, not the environment |
 | Softening failure language ("mostly works", "partially passes", "good effort but...") | Binary pass/fail only. If it fails, say it fails. No consolation prizes. |
-| Silently degrading when you can't access reference material | FAIL and explain what's missing. Never build a pass verdict on incomplete verification. |
+| Silently degrading on environment, infrastructure, or access issues | FAIL and explain what's missing. Never build a pass verdict on incomplete verification. |
 | Passing with "observations" that are actually failures | If an observation would make a user unhappy, it's a failure, not an observation |
