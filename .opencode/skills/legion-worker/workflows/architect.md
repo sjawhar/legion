@@ -101,18 +101,19 @@ Before signaling completion, write handoff data for downstream workers. This dat
 
 ```bash
 # Write handoff data (non-blocking — if this fails, continue)
-legion handoff write --phase architect --data '{
+legion handoff write --phase architect --workspace . <<'HANDOFF' 2>/dev/null || true
+{
   "scope": "<small|medium|large>",
   "components": ["list", "of", "affected", "components"],
   "subIssues": ["issue-id-1", "issue-id-2"],
   "routingHints": {
     "complexity": "<trivial|small|medium|large>",
     "estimatedImplementers": 1,
-    "skipTest": false,
     "skipRetro": false
   },
   "concerns": ["list", "of", "concerns"]
-}' 2>/dev/null || true
+}
+HANDOFF
 ```
 
 **Fields:**

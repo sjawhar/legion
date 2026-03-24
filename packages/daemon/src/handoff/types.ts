@@ -1,7 +1,7 @@
 export type HandoffPhase = "architect" | "plan" | "implement" | "test" | "review" | "retro";
 
 export interface RoutingHints {
-  skipTest?: boolean;
+  /** @deprecated skipTest is not supported — tester ALWAYS runs */
   skipRetro?: boolean;
   skipArchitect?: boolean;
   complexity?: "trivial" | "small" | "medium" | "large";

@@ -63,10 +63,18 @@ Note the missing plan in your results — the planner workflow should have produ
 Also read the implementer handoff if available:
 
 ```bash
-legion handoff read --phase implement 2>/dev/null || echo '{}'
+legion handoff read --phase implement --workspace . 2>/dev/null || echo '{}'
 ```
 
 If present, note the `trickyParts`, `deviations`, and `openQuestions` to focus your testing accordingly. This is advisory — test all acceptance criteria regardless.
+
+Also check for cross-phase messages from earlier workers:
+
+```bash
+legion handoff messages --workspace . 2>/dev/null || echo '[]'
+```
+
+Messages may contain important context, warnings, or clarifications from the architect, planner, or implementer that aren't captured in the phase handoff data.
 
 ### 2. Spec Compliance Check
 
@@ -195,13 +203,15 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 Write handoff data for the next phase (non-blocking):
 
 ```bash
-legion handoff write --phase test --data '{
+legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
+{
   "passed": <count of criteria that passed>,
   "failed": <count of criteria that failed>,
   "failures": [{"criterion": "...", "evidence": "..."}],
   "documentationFeedback": "<text about doc quality>",
   "observations": ["<edge case or UX issue>"]
-}' 2>/dev/null || true
+}
+HANDOFF
 ```
 
 **Linear:**

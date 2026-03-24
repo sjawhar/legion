@@ -47,10 +47,18 @@ gh pr view "$LEGION_ISSUE_ID" --json title,body,headRefName
 Also read all prior handoffs for full context chain:
 
 ```bash
-legion handoff read 2>/dev/null || echo '{}'
+legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
 If present, implementer's `trickyParts` and `deviations` can highlight areas to review more carefully. This is advisory.
+
+Also check for cross-phase messages:
+
+```bash
+legion handoff messages --workspace . 2>/dev/null || echo '[]'
+```
+
+Messages may contain warnings, blockers, or context from earlier workers.
 
 ### 2. Run Review
 
@@ -110,7 +118,8 @@ Group related issues when they affect the same area.
 Write handoff data (non-blocking) — BEFORE setting PR draft status:
 
 ```bash
-legion handoff write --phase review --data '{
+legion handoff write --phase review --workspace . <<'HANDOFF' 2>/dev/null || true
+{
   "critical": 0,
   "important": 2,
   "minor": 3,
@@ -119,7 +128,8 @@ legion handoff write --phase review --data '{
     {"severity": "P2", "file": "src/auth.ts", "description": "Missing null check on line 45"},
     {"severity": "P2", "file": "src/session.ts", "description": "Session TTL should be configurable"}
   ]
-}' 2>/dev/null || true
+}
+HANDOFF
 ```
 
 Replace the example counts and findings with actual review results:

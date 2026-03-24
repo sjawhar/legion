@@ -61,7 +61,7 @@ jj new  # Fresh commit for this session
 Optionally read prior handoff data (advisory, non-blocking):
 
 ```bash
-legion handoff read 2>/dev/null || echo '{}'
+legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
 Prior phase data (from architect, plan, implement, etc.) is available in `.legion/` on this branch. Reading it is optional — individual workflow files handle phase-specific handoff reads. This note is a reminder that this data exists. Never block on missing handoff data.

@@ -152,7 +152,7 @@ Before invoking `/ce:plan`, check the learnings index for applicable prior knowl
 ### 1.8. Read Architect Handoff (if available)
 
 ```bash
-legion handoff read --phase architect 2>/dev/null || echo '{}'
+legion handoff read --phase architect --workspace . 2>/dev/null || echo '{}'
 ```
 
 If architect handoff is present, use `routingHints` and `concerns` to inform planning. This is advisory only — proceed even if the file is missing or empty.
@@ -302,21 +302,21 @@ The complete `/superpowers:writing-plans` output goes directly into the issue co
 After posting the plan, write handoff data for downstream phases:
 
 ```bash
-legion handoff write --phase plan \
-  --data '{
-    "taskCount": 5,
-    "independentTasks": 3,
-    "routingHints": {
-      "complexity": "small",
-      "estimatedImplementers": 1,
-      "skipTest": false,
-      "skipRetro": false,
-      "skipArchitect": false
-    },
-    "concerns": ["Race condition in state transitions noted by Metis"],
-    "learningsUsed": ["docs/solutions/state/race-conditions.md"],
-    "workflowRecommendation": "Standard pipeline — all phases needed"
-  }' 2>/dev/null || true
+legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
+  {
+  "taskCount": 5,
+  "independentTasks": 3,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1,
+    "skipRetro": false,
+    "skipArchitect": false
+  },
+  "concerns": ["Race condition in state transitions noted by Metis"],
+  "learningsUsed": ["docs/solutions/state/race-conditions.md"],
+  "workflowRecommendation": "Standard pipeline — all phases needed"
+    }
+  HANDOFF
 ```
 
 **Fields:**

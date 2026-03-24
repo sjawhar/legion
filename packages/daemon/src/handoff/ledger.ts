@@ -98,7 +98,8 @@ export function readPhaseHandoff(workspaceDir: string, phase: HandoffPhase): Pha
       return null;
     }
     return handoff;
-  } catch {
+  } catch (e) {
+    console.error(`[handoff] Failed to read ${phase} handoff:`, e);
     return null;
   }
 }
@@ -157,11 +158,14 @@ export function readMessages(workspaceDir: string): HandoffMessage[] {
         if (message) {
           messages.push(message);
         }
-      } catch {}
+      } catch (e) {
+        console.error(`[handoff] Failed to read message file:`, e);
+      }
     }
 
     return messages;
-  } catch {
+  } catch (e) {
+    console.error("[handoff] Failed to read messages directory:", e);
     return [];
   }
 }

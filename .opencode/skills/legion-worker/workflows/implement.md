@@ -62,7 +62,7 @@ Before implementing, check if the repo has skills relevant to this work:
 Read any prior handoffs from architect or plan phases (non-blocking):
 
 ```bash
-legion handoff read 2>/dev/null || echo '{}'
+legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
 If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
@@ -250,13 +250,15 @@ convert back to draft (`gh pr ready --undo`) if needed.
 Write handoff data for downstream phases (non-blocking):
 
 ```bash
-legion handoff write --phase implement --data '{
+legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || true
+{
   "filesChanged": ["src/file1.ts", "src/file2.ts"],
   "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
   "deviations": ["List any deviations from the plan with rationale"],
   "openQuestions": ["Unresolved questions for downstream phases"],
   "subPlanningNeeded": false
-}' 2>/dev/null || true
+}
+HANDOFF
 ```
 
 Key fields:
@@ -325,7 +327,7 @@ Otherwise, invoke `/superpowers/receiving-code-review` to evaluate and prioritiz
 Read any prior handoffs from architect or plan phases (non-blocking):
 
 ```bash
-legion handoff read 2>/dev/null || echo '{}'
+legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
 If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
@@ -377,13 +379,15 @@ Reply in PR comment threads acknowledging fixes. Reference specific changes made
 Write handoff data for downstream phases (non-blocking):
 
 ```bash
-legion handoff write --phase implement --data '{
+legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || true
+{
   "filesChanged": ["src/file1.ts", "src/file2.ts"],
   "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
   "deviations": ["List any deviations from the plan with rationale"],
   "openQuestions": ["Unresolved questions for downstream phases"],
   "subPlanningNeeded": false
-}' 2>/dev/null || true
+}
+HANDOFF
 ```
 
 Key fields:

@@ -82,22 +82,27 @@ describe("handoff command", () => {
     console.error = originalError;
   });
 
-  it("defines write/read/message subcommands and required args", async () => {
+  it("defines write/read/message/messages subcommands and required args", async () => {
     const write = getSubCommand(handoffCommand, "write");
     const read = getSubCommand(handoffCommand, "read");
     const message = getSubCommand(handoffCommand, "message");
+    const messages = getSubCommand(handoffCommand, "messages");
 
     const writeArgs = await resolveArgs(write);
     const readArgs = await resolveArgs(read);
     const messageArgs = await resolveArgs(message);
+    const messagesArgs = await resolveArgs(messages);
 
     expect((writeArgs.phase as StringArg).type).toBe("string");
     expect((writeArgs.phase as StringArg).required).toBe(true);
     expect((writeArgs.data as StringArg).type).toBe("string");
-    expect((writeArgs.data as StringArg).required).toBe(true);
+    expect((writeArgs.workspace as StringArg).type).toBe("string");
 
     expect((readArgs.phase as StringArg).type).toBe("string");
     expect((readArgs.phase as StringArg).required).toBeFalsy();
+    expect((readArgs.workspace as StringArg).type).toBe("string");
+
+    expect((messagesArgs.workspace as StringArg).type).toBe("string");
 
     expect((messageArgs.from as StringArg).type).toBe("string");
     expect((messageArgs.from as StringArg).required).toBe(true);
@@ -105,6 +110,7 @@ describe("handoff command", () => {
     expect((messageArgs.to as StringArg).required).toBe(true);
     expect((messageArgs.body as StringArg).type).toBe("string");
     expect((messageArgs.body as StringArg).required).toBe(true);
+    expect((messageArgs.workspace as StringArg).type).toBe("string");
   });
 
   it("writes phase handoff JSON with auto-populated fields", async () => {
@@ -191,5 +197,54 @@ describe("handoff command", () => {
     expect(exitCode).toBe(1);
     const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
     expect(errors.join("\n")).toContain("Invalid JSON");
+  });
+
+  it("reads handoff messages via messages subcommand", async () => {
+    const message = getSubCommand(handoffCommand, "message");
+    const messages = getSubCommand(handoffCommand, "messages");
+
+    await runCommand(message, { from: "plan", to: "implement", body: "ready" });
+    await runCommand(messages, {});
+
+    const calls = (console.log as ReturnType<typeof mock>).mock.calls;
+    const output = calls[calls.length - 1]?.[0] as string;
+    const parsed = JSON.parse(output) as Array<Record<string, unknown>>;
+
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.from).toBe("plan");
+    expect(parsed[0]?.to).toBe("implement");
+    expect(parsed[0]?.body).toBe("ready");
+  });
+
+  it("uses --workspace instead of cwd when provided", async () => {
+    const otherDir = createTempDir();
+    const write = getSubCommand(handoffCommand, "write");
+    const read = getSubCommand(handoffCommand, "read");
+
+    await runCommand(write, { phase: "plan", data: '{"taskCount":7}', workspace: otherDir });
+
+    // Should NOT be in cwd
+    expect(fs.existsSync(path.join(tempDir, ".legion", "plan.json"))).toBe(false);
+    // Should be in the specified workspace
+    expect(fs.existsSync(path.join(otherDir, ".legion", "plan.json"))).toBe(true);
+
+    await runCommand(read, { phase: "plan", workspace: otherDir });
+    const calls = (console.log as ReturnType<typeof mock>).mock.calls;
+    const output = calls[calls.length - 1]?.[0] as string;
+    const parsed = JSON.parse(output) as Record<string, unknown>;
+    expect(parsed.taskCount).toBe(7);
+
+    fs.rmSync(otherDir, { recursive: true, force: true });
+  });
+
+  it("rejects reserved fields in handoff data", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    try {
+      await runCommand(write, { phase: "plan", data: '{"schemaVersion": 2}' });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
+    expect(errors.join("\n")).toContain("not allowed");
   });
 });

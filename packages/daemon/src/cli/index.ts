@@ -10,6 +10,7 @@ import { findLegionByProjectId } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
 import {
   readAllHandoffs,
+  readMessages,
   readPhaseHandoff,
   writeMessage,
   writePhaseHandoff,
@@ -26,6 +27,18 @@ export class CliError extends Error {
     super(message);
     this.name = "CliError";
   }
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of Bun.stdin.stream()) {
+    chunks.push(Buffer.from(chunk));
+  }
+  const text = Buffer.concat(chunks).toString("utf-8").trim();
+  if (!text) {
+    throw new CliError("No data provided via --data or stdin");
+  }
+  return text;
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -883,13 +896,24 @@ export const handoffCommand = defineCommand({
       meta: { name: "write", description: "Write phase handoff data" },
       args: {
         phase: { type: "string", required: true, description: "Handoff phase" },
-        data: { type: "string", required: true, description: "JSON string of phase fields" },
+        data: {
+          type: "string",
+          description: "JSON string of phase fields (reads stdin if omitted)",
+        },
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
       },
       async run({ args }) {
         try {
           const phase = requireHandoffPhase(args.phase, "phase");
-          const data = parseHandoffData(args.data);
-          writePhaseHandoff(process.cwd(), phase, data);
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          let rawData: string;
+          if (args.data) {
+            rawData = args.data as string;
+          } else {
+            rawData = await readStdin();
+          }
+          const data = parseHandoffData(rawData);
+          writePhaseHandoff(workspaceDir, phase, data);
         } catch (e) {
           if (e instanceof CliError) {
             console.error(e.message);
@@ -903,13 +927,34 @@ export const handoffCommand = defineCommand({
       meta: { name: "read", description: "Read phase handoff data" },
       args: {
         phase: { type: "string", description: "Optional handoff phase" },
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
       },
       async run({ args }) {
         try {
+          const workspaceDir = (args.workspace as string) || process.cwd();
           const output = args.phase
-            ? readPhaseHandoff(process.cwd(), requireHandoffPhase(args.phase, "phase"))
-            : readAllHandoffs(process.cwd());
+            ? readPhaseHandoff(workspaceDir, requireHandoffPhase(args.phase, "phase"))
+            : readAllHandoffs(workspaceDir);
           console.log(JSON.stringify(output, null, 2));
+        } catch (e) {
+          if (e instanceof CliError) {
+            console.error(e.message);
+            process.exit(e.code);
+          }
+          throw e;
+        }
+      },
+    }),
+    messages: defineCommand({
+      meta: { name: "messages", description: "Read cross-phase handoff messages" },
+      args: {
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
+      },
+      async run({ args }) {
+        try {
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          const messages = readMessages(workspaceDir);
+          console.log(JSON.stringify(messages, null, 2));
         } catch (e) {
           if (e instanceof CliError) {
             console.error(e.message);
@@ -925,6 +970,7 @@ export const handoffCommand = defineCommand({
         from: { type: "string", required: true, description: "Source phase" },
         to: { type: "string", required: true, description: "Destination phase" },
         body: { type: "string", required: true, description: "Message body" },
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
       },
       async run({ args }) {
         try {
@@ -933,8 +979,8 @@ export const handoffCommand = defineCommand({
           if (!args.body) {
             throw new CliError("Missing required argument: --body");
           }
-
-          writeMessage(process.cwd(), {
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          writeMessage(workspaceDir, {
             from,
             to,
             body: args.body,

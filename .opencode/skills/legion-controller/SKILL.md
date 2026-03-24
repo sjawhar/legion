@@ -335,11 +335,11 @@ Before dispatching retro, consume routing hints conservatively:
   met.
 
 ```bash
-# Optional workspace-aware read (if worker metadata includes workspace path):
-# HANDOFF=$(legion handoff read --workspace "$WORKSPACE_PATH" 2>/dev/null || echo '{}')
+# Get the worker's workspace path from the daemon API:
+WORKSPACE_PATH=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID | jq -r '.workspace')
 
-# Fallback read from current directory:
-HANDOFF=$(legion handoff read 2>/dev/null || echo '{}')
+# Read handoff data from the worker's workspace:
+HANDOFF=$(legion handoff read --workspace "$WORKSPACE_PATH" 2>/dev/null || echo '{}')
 
 SKIP_RETRO=$(echo "$HANDOFF" | jq -r '.plan.routingHints.skipRetro // false')
 TRICKY_PARTS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.trickyParts // []) | length')
