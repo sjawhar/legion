@@ -89,7 +89,7 @@ Before running the app, review the **implementer's tests** with a critical eye. 
 
 **Include your test critique in the PR comment.** If the tests are weak, that's a finding — note it as a P2 issue. The implementer should have tests that actually catch regressions, not tests that give a false sense of coverage.
 
-**This does NOT replace running the app.** Test critique tells you whether the safety net is real. Smoke testing (steps 4-5) tells you whether the feature actually works. Both are required.
+**This does NOT replace running the app.** Test critique tells you whether the implementer's safety net is real. Steps 4-5 (booting the app and walking through acceptance criteria as a user) are the actual test. You MUST do both.
 
 ### 3. Read the Documentation
 
@@ -125,15 +125,16 @@ done
 - Or run in tmux: `tmux new-session -d -s test '<command>'`, then poll with `tmux capture-pane -t test -p | tail -5`
 - Do NOT treat a timeout as a test failure — it means the command didn't finish, not that it failed
 
-### 5. Execute Acceptance Criteria
+### 5. Execute Acceptance Criteria (This Is the Actual Test)
 
-Work through each criterion from the testing plan. Use appropriate tools:
+**Everything before this step is preliminary. This is your real job.** Boot the app, use the feature as a real user would, and walk through every acceptance criterion end-to-end. If you haven't actually launched the application and interacted with the feature, you haven't tested anything.
+
+For each acceptance criterion, simulate the user story: navigate to the relevant screen, perform the action, verify the outcome. Use appropriate tools:
 
 - **Playwright / agent-browser** for web UIs (navigate, click, fill forms, verify results)
 - **curl / HTTP requests** for APIs (hit endpoints, verify responses)
 - **CLI commands** for command-line tools (run commands, verify output)
 - **Subprocess execution** for scripts, build tools
-
 For each criterion, capture concrete evidence:
 - Screenshots (for UI tests)
 - Command output (for CLI/API tests)
