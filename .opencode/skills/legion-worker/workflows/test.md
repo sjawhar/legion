@@ -77,6 +77,20 @@ The subagent reads the actual diff and verifies each acceptance criterion has co
 
 **If ❌ issues found:** include the findings in your test results and **fail immediately** — skip booting the environment. There's no point smoke-testing code that doesn't even attempt to implement the spec.
 
+### 2.5. Critique the Tests
+
+Before running the app, review the **implementer's tests** with a critical eye. Unit tests passing and CI green is necessary but not sufficient. Look for:
+
+- **Excessive mocking**: Are tests mocking out the very thing they should be testing? A test that mocks the database, the API, the filesystem, and the business logic is testing nothing.
+- **Circular logic**: Does the test just re-implement the production code and assert they match? That proves consistency, not correctness.
+- **Happy-path-only coverage**: Are there tests for error cases, edge cases, and boundary conditions? If every test is `expect(result).toBe(expectedValue)` with no failure scenarios, the test suite is decorative.
+- **Missing integration tests**: Are there only unit tests when the feature clearly requires integration testing (e.g., API endpoints, database queries, multi-component flows)?
+- **Hardcoded expected values**: Are expected values copied from implementation output rather than derived from the spec? This just locks in whatever the code happens to do, right or wrong.
+
+**Include your test critique in the PR comment.** If the tests are weak, that's a finding — note it as a P2 issue. The implementer should have tests that actually catch regressions, not tests that give a false sense of coverage.
+
+**This does NOT replace running the app.** Test critique tells you whether the safety net is real. Smoke testing (steps 4-5) tells you whether the feature actually works. Both are required.
+
 ### 3. Read the Documentation
 
 Before doing anything else, try to understand the feature from the repo's documentation alone.
@@ -153,6 +167,11 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 |-----------|--------|----------|
 | [criterion 1] | ✅/❌ | [output/screenshot] |
 
+### Test Quality Critique
+- [Are the implementer's tests meaningful or decorative?]
+- [Excessive mocking? Circular logic? Happy-path-only?]
+- [Missing integration/edge-case coverage?]
+
 ### Documentation Feedback
 - [Was it easy to understand the feature from docs?]
 - [Were setup instructions accurate?]
@@ -175,6 +194,11 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Behavioral Test Re
 | Criterion | Status | Evidence |
 |-----------|--------|----------|
 | [criterion 1] | ✅/❌ | [output/screenshot] |
+
+### Test Quality Critique
+- [Are the implementer's tests meaningful or decorative?]
+- [Excessive mocking? Circular logic? Happy-path-only?]
+- [Missing integration/edge-case coverage?]
 
 ### Documentation Feedback
 - [Was it easy to understand the feature from docs?]
@@ -238,7 +262,7 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 
 | Mistake | Correction |
 |---------|------------|
-| Trusting unit test results instead of running the app | Boot the environment and exercise actual behavior |
+| Seeing green CI and declaring the feature works | CI passing means the implementer's tests pass. You still need to boot the app and verify the feature yourself. Unit tests are the implementer's safety net, not yours. |
 | Skipping documentation review | Always read docs first — you're the first "user" |
 | Accepting "it works" without evidence | Capture screenshots, command output, log excerpts |
 | Adding `test-passed` AND `test-failed` | Only one — pass or fail, never both |
@@ -250,3 +274,4 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 | Softening failure language ("mostly works", "partially passes", "good effort but...") | Binary pass/fail only. If it fails, say it fails. No consolation prizes. |
 | Silently degrading on environment, infrastructure, or access issues | FAIL and explain what's missing. Never build a pass verdict on incomplete verification. |
 | Passing with "observations" that are actually failures | If an observation would make a user unhappy, it's a failure, not an observation |
+| Skipping test critique because CI is green | Review the actual test code. Heavily mocked tests, circular logic, and happy-path-only suites are P2 findings. |
