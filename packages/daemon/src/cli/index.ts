@@ -8,6 +8,15 @@ import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { findLegionByProjectId } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
+import {
+  readAllHandoffs,
+  readMessages,
+  readPhaseHandoff,
+  writeMessage,
+  writePhaseHandoff,
+} from "../handoff/ledger";
+import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
+import type { HandoffPhase } from "../handoff/types";
 import { resolveLegionId } from "./legion-resolver";
 
 export class CliError extends Error {
@@ -18,6 +27,18 @@ export class CliError extends Error {
     super(message);
     this.name = "CliError";
   }
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of Bun.stdin.stream()) {
+    chunks.push(Buffer.from(chunk));
+  }
+  const text = Buffer.concat(chunks).toString("utf-8").trim();
+  if (!text) {
+    throw new CliError("No data provided via --data or stdin");
+  }
+  return text;
 }
 
 const DEFAULT_DAEMON_PORT = 13370;
@@ -607,6 +628,44 @@ async function cmdCollectState(backend: string): Promise<void> {
   }
 }
 
+function requireHandoffPhase(value: string | undefined, argName: string): HandoffPhase {
+  if (!value) {
+    throw new CliError(`Missing required argument: --${argName}`);
+  }
+
+  if (!isHandoffPhase(value)) {
+    throw new CliError(`Invalid phase: ${value}. Must be one of: ${HANDOFF_PHASES.join(", ")}`);
+  }
+
+  return value;
+}
+
+function parseHandoffData(data: string | undefined): Record<string, unknown> {
+  if (!data) {
+    throw new CliError("Missing required argument: --data");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    throw new CliError("Invalid JSON in --data");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CliError("Invalid --data: must be a JSON object");
+  }
+
+  const payload = parsed as Record<string, unknown>;
+  if ("schemaVersion" in payload || "phase" in payload || "completed" in payload) {
+    throw new CliError(
+      "Invalid --data: schemaVersion, phase, and completed are auto-populated and not allowed"
+    );
+  }
+
+  return payload;
+}
+
 export const startCommand = defineCommand({
   meta: { name: "start", description: "Start the Legion swarm" },
   args: {
@@ -830,6 +889,114 @@ export const collectStateCommand = defineCommand({
   },
 });
 
+export const handoffCommand = defineCommand({
+  meta: { name: "handoff", description: "Read and write local handoff files" },
+  subCommands: {
+    write: defineCommand({
+      meta: { name: "write", description: "Write phase handoff data" },
+      args: {
+        phase: { type: "string", required: true, description: "Handoff phase" },
+        data: {
+          type: "string",
+          description: "JSON string of phase fields (reads stdin if omitted)",
+        },
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
+      },
+      async run({ args }) {
+        try {
+          const phase = requireHandoffPhase(args.phase, "phase");
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          let rawData: string;
+          if (args.data) {
+            rawData = args.data as string;
+          } else {
+            rawData = await readStdin();
+          }
+          const data = parseHandoffData(rawData);
+          writePhaseHandoff(workspaceDir, phase, data);
+        } catch (e) {
+          if (e instanceof CliError) {
+            console.error(e.message);
+            process.exit(e.code);
+          }
+          throw e;
+        }
+      },
+    }),
+    read: defineCommand({
+      meta: { name: "read", description: "Read phase handoff data" },
+      args: {
+        phase: { type: "string", description: "Optional handoff phase" },
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
+      },
+      async run({ args }) {
+        try {
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          const output = args.phase
+            ? readPhaseHandoff(workspaceDir, requireHandoffPhase(args.phase, "phase"))
+            : readAllHandoffs(workspaceDir);
+          console.log(JSON.stringify(output, null, 2));
+        } catch (e) {
+          if (e instanceof CliError) {
+            console.error(e.message);
+            process.exit(e.code);
+          }
+          throw e;
+        }
+      },
+    }),
+    messages: defineCommand({
+      meta: { name: "messages", description: "Read cross-phase handoff messages" },
+      args: {
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
+      },
+      async run({ args }) {
+        try {
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          const messages = readMessages(workspaceDir);
+          console.log(JSON.stringify(messages, null, 2));
+        } catch (e) {
+          if (e instanceof CliError) {
+            console.error(e.message);
+            process.exit(e.code);
+          }
+          throw e;
+        }
+      },
+    }),
+    message: defineCommand({
+      meta: { name: "message", description: "Write a cross-phase handoff message" },
+      args: {
+        from: { type: "string", required: true, description: "Source phase" },
+        to: { type: "string", required: true, description: "Destination phase" },
+        body: { type: "string", required: true, description: "Message body" },
+        workspace: { type: "string", description: "Workspace directory (defaults to cwd)" },
+      },
+      async run({ args }) {
+        try {
+          const from = requireHandoffPhase(args.from, "from");
+          const to = requireHandoffPhase(args.to, "to");
+          if (!args.body) {
+            throw new CliError("Missing required argument: --body");
+          }
+          const workspaceDir = (args.workspace as string) || process.cwd();
+          writeMessage(workspaceDir, {
+            from,
+            to,
+            body: args.body,
+          });
+        } catch (e) {
+          if (e instanceof CliError) {
+            console.error(e.message);
+            process.exit(e.code);
+          }
+          throw e;
+        }
+      },
+    }),
+  },
+});
+
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
   subCommands: {
@@ -842,6 +1009,7 @@ export const mainCommand = defineCommand({
     "reset-crashes": resetCrashesCommand,
     teams: legionsCommand,
     "collect-state": collectStateCommand,
+    handoff: handoffCommand,
   },
 });
 

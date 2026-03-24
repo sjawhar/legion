@@ -60,6 +60,22 @@ jj new $PR_BRANCH  # Use the headRefName from the PR metadata
 
 Note the missing plan in your results — the planner workflow should have produced one.
 
+Also read the implementer handoff if available:
+
+```bash
+legion handoff read --phase implement --workspace . 2>/dev/null || echo '{}'
+```
+
+If present, note the `trickyParts`, `deviations`, and `openQuestions` to focus your testing accordingly. This is advisory — test all acceptance criteria regardless.
+
+Also check for cross-phase messages from earlier workers:
+
+```bash
+legion handoff messages --workspace . 2>/dev/null || echo '[]'
+```
+
+Messages may contain important context, warnings, or clarifications from the architect, planner, or implementer that aren't captured in the phase handoff data.
+
 ### 2. Spec Compliance Check
 
 Before booting anything, verify the code even attempts to address the spec. Dispatch a spec compliance subagent using the template from `/superpowers/subagent-driven-development` (spec-reviewer-prompt.md):
@@ -180,6 +196,22 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 
 ### Observations
 - [UX issues, error messages, edge cases noticed]" -R $OWNER/$REPO
+```
+
+### 6.5. Write Handoff Data
+
+Write handoff data for the next phase (non-blocking):
+
+```bash
+legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
+{
+  "passed": <count of criteria that passed>,
+  "failed": <count of criteria that failed>,
+  "failures": [{"criterion": "...", "evidence": "..."}],
+  "documentationFeedback": "<text about doc quality>",
+  "observations": ["<edge case or UX issue>"]
+}
+HANDOFF
 ```
 
 **Linear:**
