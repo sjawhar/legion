@@ -35,7 +35,8 @@ export async function resolveLegionId(
   const backend = typeof options === "string" ? undefined : options?.backend;
 
   // GitHub backend: legion ref is already the ID (owner/project-number)
-  if (backend === "github") {
+  // Auto-detect GitHub format: contains '/' and ends with a number (e.g., 'owner/2')
+  if (backend === "github" || /^[^/]+\/\d+$/.test(legionRef)) {
     return legionRef;
   }
 
