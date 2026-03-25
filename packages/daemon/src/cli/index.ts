@@ -63,6 +63,7 @@ interface DispatchOptions {
   // Legacy transition fallback for dispatching without explicit --workspace.
   legionDir?: string;
   daemonPort?: number;
+  env?: Record<string, string>;
   prompt?: string;
   repo?: string;
   workspace?: string;
@@ -340,6 +341,9 @@ export async function cmdDispatch(
   }
 
   const body: Record<string, unknown> = { issueId: issue, mode, version: opts.version };
+  if (opts.env && Object.keys(opts.env).length > 0) {
+    body.env = opts.env;
+  }
   if (opts.repo) {
     body.repo = opts.repo;
   } else if (opts.workspace) {
@@ -789,6 +793,11 @@ export const dispatchCommand = defineCommand({
     prompt: { type: "string", description: "Custom initial prompt (default: /legion-worker)" },
     repo: { type: "string", alias: "r", description: "Repository (owner/repo)" },
     workspace: { type: "string", alias: "w", description: "Override workspace path" },
+    env: {
+      type: "string",
+      alias: "e",
+      description: "Environment variable (KEY=VALUE, repeatable)",
+    },
     version: {
       type: "string",
       alias: "v",
@@ -806,9 +815,34 @@ export const dispatchCommand = defineCommand({
         }
         version = parsed;
       }
+
+      let env: Record<string, string> | undefined;
+      if (args.env !== undefined) {
+        env = {};
+        const segments = args.env.split(",");
+        for (const rawSegment of segments) {
+          const segment = rawSegment.trim();
+          const separatorIndex = segment.indexOf("=");
+          if (separatorIndex === -1) {
+            throw new CliError(
+              "Invalid --env format: expected KEY=VALUE or comma-separated KEY=VALUE pairs"
+            );
+          }
+
+          const key = segment.slice(0, separatorIndex).trim();
+          if (!key) {
+            throw new CliError("Invalid --env format: key must be non-empty");
+          }
+
+          const value = segment.slice(separatorIndex + 1);
+          env[key] = value;
+        }
+      }
+
       await cmdDispatch(args.issue, args.mode, {
         // Legacy transition: keep LEGION_DIR fallback for users not passing --workspace.
         legionDir: process.env.LEGION_DIR,
+        env,
         prompt: args.prompt,
         repo: args.repo,
         workspace: args.workspace,

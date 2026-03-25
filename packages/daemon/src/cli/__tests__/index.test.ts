@@ -189,6 +189,14 @@ describe("citty command definitions", () => {
     expect(version.alias).toBe("v");
   });
 
+  test("dispatch command args include env", async () => {
+    const args = await resolveArgs(dispatchCommand);
+    const env = args.env as StringArg;
+
+    expect(env.type).toBe("string");
+    expect(env.alias).toBe("e");
+  });
+
   test("prompt command args are defined", async () => {
     const args = await resolveArgs(promptCommand);
     const issue = args.issue as PositionalArg;
@@ -363,6 +371,112 @@ describe("cmdDispatch", () => {
       workspace: legionDir,
       version: 2,
     });
+  });
+
+  it("cmdDispatch forwards env to POST /workers body", async () => {
+    const fetchMock = installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      if (url.endsWith("/workers")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-env" }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
+        );
+      }
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13388,
+      repo: "sjawhar/legion",
+      env: { KEY1: "VALUE1", KEY2: "VALUE2" },
+    });
+
+    const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
+    const body = JSON.parse((postInit as RequestInit).body as string) as {
+      env?: Record<string, string>;
+    };
+
+    expect(body.env).toEqual({ KEY1: "VALUE1", KEY2: "VALUE2" });
+  });
+
+  it("cmdDispatch omits env from body when not provided", async () => {
+    const fetchMock = installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      if (url.endsWith("/workers")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-no-env" }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
+        );
+      }
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13389,
+      repo: "sjawhar/legion",
+    });
+
+    const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
+    const body = JSON.parse((postInit as RequestInit).body as string) as Record<string, unknown>;
+
+    expect(body).not.toHaveProperty("env");
+  });
+
+  it("cmdDispatch with empty env object does not include env in body", async () => {
+    const fetchMock = installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      if (url.endsWith("/workers")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-empty-env" }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
+        );
+      }
+      if (url.endsWith("/workers/leg-42-implement/prompt")) {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13398,
+      repo: "sjawhar/legion",
+      env: {},
+    });
+
+    const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
+    const body = JSON.parse((postInit as RequestInit).body as string) as Record<string, unknown>;
+
+    expect(body).not.toHaveProperty("env");
   });
 
   it("rejects invalid version values", () => {

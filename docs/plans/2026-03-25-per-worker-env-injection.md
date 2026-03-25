@@ -546,8 +546,23 @@ _ENV_FILE="$(mktemp)" && \
 Where `ISSUE_ID` and `MODE` are the values you extracted from the dispatch prompt in the "Context from Prompt" section above. For example, if dispatched with "plan mode for sjawhar-legion-106", then `ISSUE_ID=sjawhar-legion-106` and `MODE=plan`.
 ```
 
-- [ ] **Step 2: QA note (manual)**
-No additional automated test for this task. Validate manually that SKILL.md startup instructions are coherent, use prompt-derived issue/mode, avoid `eval`, gracefully tolerate daemon unavailability, and match the `GET /workers/:id/env` response contract from Task 1.
+- [ ] **Step 2: Verify SKILL.md changes**
+
+Run: `grep -A 20 'Load per-worker environment' .opencode/skills/legion-worker/SKILL.md`
+Expected output must contain:
+- `WORKER_ID=` construction from `ISSUE_ID` and `MODE` (lowercased)
+- `curl -fsS` to `http://127.0.0.1:${LEGION_DAEMON_PORT}/workers/${WORKER_ID}/env`
+- `mktemp` + `source` pattern (no `eval`)
+- `rm -f` cleanup of temp file
+
+Run: `grep -c 'eval' .opencode/skills/legion-worker/SKILL.md`
+Expected: 0 matches in the startup section (no eval usage)
+
+Smoke test the env export Bun snippet (standalone, no daemon needed):
+```bash
+echo '{"env":{"GH_TOKEN":"test123","BAD KEY":"skip"}}' | bun -e 'const {env}=JSON.parse(await Bun.stdin.text());for(const [k,v] of Object.entries(env)){if(/^[A-Za-z_]\w*$/.test(k))console.log(`export ${k}=${JSON.stringify(v)}`)}'
+```
+Expected output: `export GH_TOKEN="test123"` (one line; `BAD KEY` is silently skipped)
 
 - [ ] **Step 3: Describe and advance**
 ```bash
@@ -586,9 +601,11 @@ jj new
 3. Run focused regression check:
    - `bun test`
    - Expect: full repository test suite PASS
-4. Manual startup-doc smoke check:
-   - Confirm SKILL.md startup snippet derives `WORKER_ID` from prompt-derived `ISSUE_ID`/`MODE`
-   - Confirm env load uses curl → temp file → source (no `eval`) and is non-blocking if daemon is unreachable
+4. SKILL.md env bootstrap verification:
+   - Run: `grep -A 20 'Load per-worker environment' .opencode/skills/legion-worker/SKILL.md`
+   - Expect: curl → mktemp → source → rm pattern, no `eval`, prompt-derived WORKER_ID
+   - Run: `echo '{"env":{"KEY":"val"}}' | bun -e 'const {env}=JSON.parse(await Bun.stdin.text());for(const [k,v] of Object.entries(env)){if(/^[A-Za-z_]\w*$/.test(k))console.log("export "+k+"="+JSON.stringify(v))}'`
+   - Expect: `export KEY="val"`
 
 ### Tools Needed
 - Bun (`bun`, `bun test`)
