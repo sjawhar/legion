@@ -4,10 +4,11 @@ Deep PR review with line-level comments. Code is already local in the workspace.
 
 **Your job is to protect the codebase.** Be direct, be specific, and do not soften your findings. If the code is wrong, say it's wrong. If a requirement was dropped, that's a CRITICAL issue — not a suggestion. Do not praise the implementer for effort. Focus exclusively on whether the code meets the requirements and is correct.
 
-## Constraint
+## Identity
 
-**Cannot approve/request changes via GitHub API** - same user as PR author.
-Signal outcome via PR draft status instead (draft = changes requested, ready = approved).
+When GitHub Apps are configured, you run as `legion-review[bot]` — a separate identity from
+the implementer (`legion-impl[bot]`). This means you CAN use GitHub's native review API.
+If Apps are not configured, fall back to PR draft status signaling (legacy).
 
 ## Workflow
 
@@ -160,18 +161,29 @@ Replace the example counts and findings with actual review results:
 You MUST attempt the handoff write before setting PR draft status or signaling completion. The `|| true` ensures CLI failures don't block you, but skipping this step entirely is not acceptable. If the write fails, note it in your PR comment.
 
 
-### 5. Set PR Draft Status
+### 5. Submit Review
 
-**Order matters:** Set draft status BEFORE `worker-done` to avoid race condition with controller.
+**Order matters:** Submit review BEFORE `worker-done` to avoid race condition with controller.
 
-Every review MUST set the PR draft status based on findings. This is how the controller knows the review outcome.
+Every review MUST signal its outcome. Use native GitHub review when running under a separate identity:
 
 ```bash
-# If any CRITICAL/P1 issues found — convert to draft (changes requested):
-gh pr ready "$LEGION_ISSUE_ID" --undo
-
-# If no CRITICAL issues — mark ready for merge (approved):
-gh pr ready "$LEGION_ISSUE_ID"
+# Check if running as App-based reviewer (LEGION_APP_ROLE set by daemon credential injection)
+if [ "$LEGION_APP_ROLE" = "review" ]; then
+  # Native review — running as legion-review[bot], separate identity from implementer
+  if [[ $CRITICAL_COUNT -gt 0 ]]; then
+    gh pr review "$LEGION_ISSUE_ID" --request-changes --body "Changes requested: $CRITICAL_COUNT critical issue(s) found. See review comments." -R $OWNER/$REPO
+  else
+    gh pr review "$LEGION_ISSUE_ID" --approve --body "Approved. No critical issues found." -R $OWNER/$REPO
+  fi
+else
+  # Legacy fallback — same identity as implementer, can't use review API
+  if [[ $CRITICAL_COUNT -gt 0 ]]; then
+    gh pr ready "$LEGION_ISSUE_ID" --undo -R $OWNER/$REPO
+  else
+    gh pr ready "$LEGION_ISSUE_ID" -R $OWNER/$REPO
+  fi
+fi
 ```
 
 ### 6. Signal Completion
