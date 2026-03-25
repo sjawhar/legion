@@ -208,6 +208,124 @@ describe("daemon server", () => {
     expect(entryBody.port).toBe(sharedServePort);
   });
 
+  it("GET /workers/{id}/env returns stored env vars", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-420",
+        mode: "implement",
+        workspace: "/tmp/work-420",
+        env: { DEBUG: "1", TEAM: "daemon" },
+      }),
+    });
+    expect(createResponse.status).toBe(200);
+    const created = (await createResponse.json()) as { id: string };
+
+    const response = await requestJson(`/workers/${created.id}/env`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ env: { DEBUG: "1", TEAM: "daemon" } });
+  });
+
+  it("GET /workers/{id}/env returns empty object when worker has no env", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-421",
+        mode: "implement",
+        workspace: "/tmp/work-421",
+      }),
+    });
+    expect(createResponse.status).toBe(200);
+    const created = (await createResponse.json()) as { id: string };
+
+    const response = await requestJson(`/workers/${created.id}/env`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ env: {} });
+  });
+
+  it("GET /workers/{id}/env returns 404 for unknown worker", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers/not-real/env");
+    expect(response.status).toBe(404);
+  });
+
+  it("POST /workers with env stores vars retrievable via GET /workers/{id}/env", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-422",
+        mode: "implement",
+        workspace: "/tmp/work-422",
+        env: { LOG_LEVEL: "debug" },
+      }),
+    });
+    expect(createResponse.status).toBe(200);
+    const created = (await createResponse.json()) as { id: string };
+
+    const envResponse = await requestJson(`/workers/${created.id}/env`);
+    expect(envResponse.status).toBe(200);
+    expect(await envResponse.json()).toEqual({ env: { LOG_LEVEL: "debug" } });
+  });
+
+  it("does not persist worker env vars to disk", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-423",
+        mode: "implement",
+        workspace: "/tmp/work-423",
+        env: { SECRET_TOKEN: "abc123" },
+      }),
+    });
+    expect(createResponse.status).toBe(200);
+
+    const raw = await readFile(path.join(tempDir ?? os.tmpdir(), "workers.json"), "utf-8");
+    const parsed = JSON.parse(raw) as PersistedWorkerState;
+    const ids = Object.keys(parsed.workers);
+    expect(ids.length).toBe(1);
+    expect(Object.hasOwn(parsed.workers[ids[0]], "env")).toBe(false);
+  });
+
+  it("keeps env vars isolated per worker", async () => {
+    await startTestServer();
+
+    const firstCreate = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-424",
+        mode: "implement",
+        workspace: "/tmp/work-424",
+        env: { WORKER_ENV: "alpha" },
+      }),
+    });
+    expect(firstCreate.status).toBe(200);
+    const first = (await firstCreate.json()) as { id: string };
+
+    const secondCreate = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-425",
+        mode: "implement",
+        workspace: "/tmp/work-425",
+        env: { WORKER_ENV: "beta" },
+      }),
+    });
+    expect(secondCreate.status).toBe(200);
+    const second = (await secondCreate.json()) as { id: string };
+
+    const firstEnv = await requestJson(`/workers/${first.id}/env`);
+    const secondEnv = await requestJson(`/workers/${second.id}/env`);
+
+    expect(firstEnv.status).toBe(200);
+    expect(secondEnv.status).toBe(200);
+    expect(await firstEnv.json()).toEqual({ env: { WORKER_ENV: "alpha" } });
+    expect(await secondEnv.json()).toEqual({ env: { WORKER_ENV: "beta" } });
+  });
+
   it("creates workers from repo by resolving workspace path", async () => {
     const paths: LegionPaths = {
       dataDir: "/tmp/legion-data",

@@ -77,6 +77,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Object.values(value).every((entry) => typeof entry === "string");
+}
+
 async function parseJson(request: Request): Promise<Record<string, unknown>> {
   try {
     const payload = await request.json();
@@ -112,7 +119,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
     const doWrite = async () => {
       const state: PersistedWorkerState = { workers: {}, crashHistory: {} };
       for (const [id, entry] of workers.entries()) {
-        state.workers[id] = entry;
+        const { env: _env, ...rest } = entry;
+        state.workers[id] = rest;
       }
       for (const [id, history] of crashHistory.entries()) {
         state.crashHistory[id] = history;
@@ -175,10 +183,14 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const mode = payload.mode;
             const repo = payload.repo;
             const workspace = payload.workspace;
+            const env = payload.env;
             const version = typeof payload.version === "number" ? payload.version : 0;
 
             if (typeof issueId !== "string" || typeof mode !== "string") {
               return badRequest("missing_fields");
+            }
+            if (env !== undefined && !isStringRecord(env)) {
+              return badRequest("invalid_env");
             }
             if (typeof repo === "string" && typeof workspace === "string") {
               return badRequest(
@@ -296,6 +308,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               crashCount: crashHistoryEntry?.crashCount ?? 0,
               lastCrashAt: crashHistoryEntry?.lastCrashAt ?? null,
               version,
+              env,
             };
 
             workers.set(entry.id, entry);
@@ -318,6 +331,19 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           crashHistory.delete(workerId);
           await persistState();
           return jsonResponse({ reset: true, id: workerId });
+        }
+
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "env") {
+          await stateLoaded;
+          if (method !== "GET") {
+            return notFound();
+          }
+          const id = segments[1].toLowerCase();
+          const entry = workers.get(id);
+          if (!entry) {
+            return notFound();
+          }
+          return jsonResponse({ env: entry.env ?? {} });
         }
 
         if (segments.length === 3 && segments[0] === "workers" && segments[2] === "workspace") {

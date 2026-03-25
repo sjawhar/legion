@@ -22,6 +22,7 @@ export interface WorkerEntry {
   pid?: number;
   sessionId: string;
   workspace: string;
+  env?: Record<string, string>;
   startedAt: string;
   status: "starting" | "running" | "stopped" | "dead";
   crashCount: number;
