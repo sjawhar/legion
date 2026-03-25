@@ -29,6 +29,24 @@ export class CliError extends Error {
   }
 }
 
+export function parseEnvJson(raw: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CliError("Invalid --env value: must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CliError("Invalid --env value: must be a JSON object");
+  }
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== "string") {
+      throw new CliError(`Invalid --env value: key "${key}" must have a string value`);
+    }
+  }
+  return parsed as Record<string, string>;
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of Bun.stdin.stream()) {
@@ -796,7 +814,7 @@ export const dispatchCommand = defineCommand({
     env: {
       type: "string",
       alias: "e",
-      description: "Environment variable (KEY=VALUE, repeatable)",
+      description: 'Worker env as JSON object (e.g. --env \'{"KEY":"VALUE"}\')',
     },
     version: {
       type: "string",
@@ -818,25 +836,7 @@ export const dispatchCommand = defineCommand({
 
       let env: Record<string, string> | undefined;
       if (args.env !== undefined) {
-        env = {};
-        const segments = args.env.split(",");
-        for (const rawSegment of segments) {
-          const segment = rawSegment.trim();
-          const separatorIndex = segment.indexOf("=");
-          if (separatorIndex === -1) {
-            throw new CliError(
-              "Invalid --env format: expected KEY=VALUE or comma-separated KEY=VALUE pairs"
-            );
-          }
-
-          const key = segment.slice(0, separatorIndex).trim();
-          if (!key) {
-            throw new CliError("Invalid --env format: key must be non-empty");
-          }
-
-          const value = segment.slice(separatorIndex + 1);
-          env[key] = value;
-        }
+        env = parseEnvJson(args.env);
       }
 
       await cmdDispatch(args.issue, args.mode, {

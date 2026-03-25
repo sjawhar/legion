@@ -36,6 +36,7 @@ import {
   getDaemonPort,
   legionsCommand,
   loadLegionsCache,
+  parseEnvJson,
   promptCommand,
   resetCrashesCommand,
   startCommand,
@@ -477,6 +478,24 @@ describe("cmdDispatch", () => {
     const body = JSON.parse((postInit as RequestInit).body as string) as Record<string, unknown>;
 
     expect(body).not.toHaveProperty("env");
+  });
+
+  it("rejects --env with invalid JSON", () => {
+    expect(() => parseEnvJson("{not-json}")).toThrow("Invalid --env value: must be valid JSON");
+  });
+
+  it("rejects --env with non-string values", () => {
+    expect(() => parseEnvJson('{"KEY":123}')).toThrow(
+      'Invalid --env value: key "KEY" must have a string value'
+    );
+  });
+
+  it("rejects --env with array value", () => {
+    expect(() => parseEnvJson('["a","b"]')).toThrow("Invalid --env value: must be a JSON object");
+  });
+
+  it("parses valid --env JSON object", () => {
+    expect(parseEnvJson('{"KEY":"VALUE"}')).toEqual({ KEY: "VALUE" });
   });
 
   it("rejects invalid version values", () => {

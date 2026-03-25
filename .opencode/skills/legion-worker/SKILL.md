@@ -61,10 +61,13 @@ jj new  # Fresh commit for this session
 Optionally fetch per-worker environment variables from the daemon (non-blocking):
 
 ```bash
-# Fetch and export per-worker env vars (requires LEGION_DAEMON_PORT and WORKER_ID)
-if [ -n "$LEGION_DAEMON_PORT" ] && [ -n "$WORKER_ID" ]; then
+# Fetch and export per-worker env vars (requires LEGION_DAEMON_PORT)
+# ISSUE_ID and MODE are extracted from your dispatch prompt (see "Context from Prompt" above).
+# Example: dispatched with "implement mode for sjawhar-legion-106" → ISSUE_ID=sjawhar-legion-106, MODE=implement
+if [ -n "$LEGION_DAEMON_PORT" ]; then
+  _WORKER_ID="$(echo "${ISSUE_ID}-${MODE}" | tr '[:upper:]' '[:lower:]')"
   _ENV_FILE=$(mktemp) && \
-    curl -fsS "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/env" 2>/dev/null \
+    curl -fsS "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$_WORKER_ID/env" 2>/dev/null \
     | jq -r '.env // {} | to_entries[] | "export " + .key + "=" + (.value | @sh)' \
     > "$_ENV_FILE" && \
     . "$_ENV_FILE"; \
@@ -72,9 +75,9 @@ if [ -n "$LEGION_DAEMON_PORT" ] && [ -n "$WORKER_ID" ]; then
 fi
 ```
 
-The daemon stores per-worker env vars passed via `legion dispatch --env KEY=VALUE`. This step
-retrieves them so tools like `gh` and `jj` see role-specific credentials. If the endpoint is
-unavailable or returns empty, the worker proceeds with the shared process environment.
+The daemon stores per-worker env vars passed via `legion dispatch --env '{"KEY":"VALUE"}'`.
+This step retrieves them so tools like `gh` and `jj` see role-specific credentials. If the
+endpoint is unavailable or returns empty, the worker proceeds with the shared process environment.
 
 Optionally read prior handoff data (advisory, non-blocking):
 

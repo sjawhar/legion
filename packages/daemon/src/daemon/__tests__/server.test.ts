@@ -358,6 +358,29 @@ describe("daemon server", () => {
     expect(await secondEnv.json()).toEqual({ env: { WORKER_ENV: "beta" } });
   });
 
+  it("PATCH /workers/{id} response does not leak env", async () => {
+    await startTestServer();
+    const createResponse = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-428",
+        mode: "implement",
+        workspace: "/tmp/work-428",
+        env: { SECRET: "should-not-leak" },
+      }),
+    });
+    expect(createResponse.status).toBe(200);
+    const created = (await createResponse.json()) as { id: string };
+
+    const patchResponse = await requestJson(`/workers/${created.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "stopped" }),
+    });
+    expect(patchResponse.status).toBe(200);
+    const patchBody = (await patchResponse.json()) as Record<string, unknown>;
+    expect(patchBody).not.toHaveProperty("env");
+  });
+
   it("creates workers from repo by resolving workspace path", async () => {
     const paths: LegionPaths = {
       dataDir: "/tmp/legion-data",

@@ -447,7 +447,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               });
             }
             await persistState();
-            return jsonResponse(updated);
+            const { env: _patchEnv, ...safe } = updated;
+            return jsonResponse(safe);
           }
           if (method === "DELETE") {
             crashHistory.set(id, {
