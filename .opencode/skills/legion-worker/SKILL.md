@@ -58,6 +58,23 @@ jj rebase -d main
 jj new  # Fresh commit for this session
 ```
 
+Optionally fetch per-worker environment variables from the daemon (non-blocking):
+
+```bash
+# Fetch and export per-worker env vars (requires LEGION_DAEMON_PORT and WORKER_ID)
+if [ -n "$LEGION_DAEMON_PORT" ] && [ -n "$WORKER_ID" ]; then
+  ENV_JSON=$(curl -s "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/env" 2>/dev/null)
+  if [ $? -eq 0 ] && echo "$ENV_JSON" | grep -q '"env"'; then
+    # Export each key-value pair from the env object
+    eval $(echo "$ENV_JSON" | jq -r '.env // {} | to_entries[] | "export \(.key)=\(.value)"' 2>/dev/null) || true
+  fi
+fi
+```
+
+The daemon stores per-worker env vars passed via `legion dispatch --env KEY=VALUE`. This step
+retrieves them so tools like `gh` and `jj` see role-specific credentials. If the endpoint is
+unavailable or returns empty, the worker proceeds with the shared process environment.
+
 Optionally read prior handoff data (advisory, non-blocking):
 
 ```bash

@@ -289,7 +289,6 @@ return jsonResponse({
 if (segments.length === 3 && segments[0] === "workers" && segments[2] === "env") {
   await stateLoaded;
   if (method !== "GET") {
-  if (method !== "GET") {
     return new Response("Method Not Allowed", {
       status: 405,
       headers: { Allow: "GET" },
