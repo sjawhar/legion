@@ -9,6 +9,7 @@ import {
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
+import type { RoleName } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
   cleanupWorkspace,
@@ -28,6 +29,12 @@ import {
 
 type Server = ReturnType<typeof Bun.serve>;
 
+interface CredentialsProvider {
+  getCredentials(role: RoleName): Promise<{ token: string; expiresAt: string } | null>;
+  isConfigured(role: RoleName): boolean;
+  getGitIdentity(role: RoleName): { name: string; email: string } | null;
+}
+
 export interface ServerOptions {
   port?: number;
   hostname?: string;
@@ -43,6 +50,7 @@ export interface ServerOptions {
   getControllerState?: () => ControllerState | undefined;
   runtime?: string;
   tmuxSession?: string;
+  tokenManager?: CredentialsProvider;
 }
 
 interface ErrorResponse {
@@ -52,6 +60,11 @@ interface ErrorResponse {
 const JSON_HEADERS = { "content-type": "application/json" };
 const MAX_CRASHES = 3;
 const ONE_HOUR_MS = 60 * 60 * 1000;
+const VALID_CREDENTIAL_ROLES: RoleName[] = ["impl", "review", "ops"];
+
+function isRoleName(value: string): value is RoleName {
+  return VALID_CREDENTIAL_ROLES.includes(value as RoleName);
+}
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: JSON_HEADERS });
@@ -563,6 +576,34 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
         if (method === "POST" && url.pathname === "/shutdown") {
           await opts.shutdownFn?.();
           return jsonResponse({ status: "shutting_down" });
+        }
+
+        if (method === "GET" && segments.length === 2 && segments[0] === "credentials") {
+          const role = segments[1];
+          if (!isRoleName(role)) {
+            return badRequest("invalid_role");
+          }
+          if (!opts.tokenManager) {
+            return badRequest("github_apps_not_configured");
+          }
+          if (!opts.tokenManager.isConfigured(role)) {
+            return notFound("role_not_configured");
+          }
+
+          try {
+            const result = await opts.tokenManager.getCredentials(role);
+            if (!result) {
+              return notFound("role_not_configured");
+            }
+            const gitIdentity = opts.tokenManager.getGitIdentity(role);
+            return jsonResponse({
+              token: result.token,
+              expiresAt: result.expiresAt,
+              ...(gitIdentity ? { gitIdentity } : {}),
+            });
+          } catch {
+            return serverError("token_generation_failed");
+          }
         }
 
         return notFound();

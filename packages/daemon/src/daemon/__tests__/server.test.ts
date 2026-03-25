@@ -43,6 +43,22 @@ describe("daemon server", () => {
     };
   }
 
+  function makeTokenManager(overrides?: {
+    getCredentials?: (role: string) => Promise<{ token: string; expiresAt: string } | null>;
+    isConfigured?: (role: string) => boolean;
+    getGitIdentity?: (role: string) => { name: string; email: string } | null;
+  }): {
+    getCredentials: (role: string) => Promise<{ token: string; expiresAt: string } | null>;
+    isConfigured: (role: string) => boolean;
+    getGitIdentity: (role: string) => { name: string; email: string } | null;
+  } {
+    return {
+      getCredentials: overrides?.getCredentials ?? (async () => null),
+      isConfigured: overrides?.isConfigured ?? (() => false),
+      getGitIdentity: overrides?.getGitIdentity ?? (() => null),
+    };
+  }
+
   async function startTestServer(options?: {
     state?: PersistedWorkerState;
     adapterOverrides?: Partial<RuntimeAdapter>;
@@ -50,6 +66,11 @@ describe("daemon server", () => {
     repoManagerDeps?: RepoManagerDeps;
     runtime?: string;
     tmuxSession?: string;
+    tokenManager?: {
+      getCredentials: (role: string) => Promise<{ token: string; expiresAt: string } | null>;
+      isConfigured: (role: string) => boolean;
+      getGitIdentity: (role: string) => { name: string; email: string } | null;
+    };
   }) {
     createSessionCalls = [];
     let adapter = makeAdapter();
@@ -61,7 +82,7 @@ describe("daemon server", () => {
     if (options?.state) {
       await writeStateFile(stateFilePath, options.state);
     }
-    const { server, stop } = startServer({
+    const serverOptions = {
       port: 0,
       hostname: "127.0.0.1",
       legionId,
@@ -72,7 +93,10 @@ describe("daemon server", () => {
       stateFilePath,
       runtime: options?.runtime,
       tmuxSession: options?.tmuxSession,
-    });
+      ...(options?.tokenManager ? { tokenManager: options.tokenManager } : {}),
+    };
+
+    const { server, stop } = startServer(serverOptions);
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
   }
@@ -876,6 +900,76 @@ describe("daemon server", () => {
       expect(response.status).toBe(500);
       const body = (await response.json()) as { error: string };
       expect(body.error).toContain("Failed to send prompt");
+    });
+  });
+
+  describe("GET /credentials/{role}", () => {
+    it("returns 400 for invalid role", async () => {
+      await startTestServer();
+      const response = await requestJson("/credentials/invalid");
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid_role" });
+    });
+
+    it("returns 400 when token manager not configured", async () => {
+      await startTestServer();
+      const response = await requestJson("/credentials/impl");
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "github_apps_not_configured" });
+    });
+
+    it("returns 404 when role not configured", async () => {
+      const tokenManager = makeTokenManager({
+        isConfigured: (role) => role === "impl",
+      });
+      await startTestServer({ tokenManager });
+      const response = await requestJson("/credentials/review");
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "role_not_configured" });
+    });
+
+    it("returns token for configured role", async () => {
+      const expiresAt = "2026-03-25T12:00:00.000Z";
+      const tokenManager = makeTokenManager({
+        isConfigured: (role) => role === "impl",
+        getCredentials: async (role) =>
+          role === "impl"
+            ? {
+                token: "ghs_abc123",
+                expiresAt,
+              }
+            : null,
+        getGitIdentity: (role) =>
+          role === "impl"
+            ? { name: "legion-impl[bot]", email: "123+legion-impl[bot]@users.noreply.github.com" }
+            : null,
+      });
+      await startTestServer({ tokenManager });
+
+      const response = await requestJson("/credentials/impl");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        token: "ghs_abc123",
+        expiresAt,
+        gitIdentity: {
+          name: "legion-impl[bot]",
+          email: "123+legion-impl[bot]@users.noreply.github.com",
+        },
+      });
+    });
+
+    it("returns 500 on token generation failure", async () => {
+      const tokenManager = makeTokenManager({
+        isConfigured: () => true,
+        getCredentials: async () => {
+          throw new Error("boom");
+        },
+      });
+      await startTestServer({ tokenManager });
+
+      const response = await requestJson("/credentials/impl");
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "token_generation_failed" });
     });
   });
 

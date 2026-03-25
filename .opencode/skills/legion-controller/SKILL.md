@@ -280,6 +280,56 @@ from the issue identifier:
   identifier (format: `owner-repo-number`, e.g. `acme-widgets-42` → `acme/widgets`)
 - **Linear:** `(linear backend)`
 
+### GitHub App Credentials (Worker Identity)
+
+When GitHub App credentials are configured on the daemon, each worker mode maps to a
+specific role identity. The daemon manages token generation and caching — the controller
+just fetches the right credential before dispatch.
+
+**Mode-to-role mapping:**
+
+| Mode | Role | App Name |
+|------|------|----------|
+| `implement`, `merge` | `impl` | `legion-impl` |
+| `review` | `review` | `legion-review` |
+| `test`, `architect`, `plan` | `ops` | `legion-ops` |
+
+**Before dispatching a worker (GitHub backend only):**
+
+```bash
+# Map mode to role
+case "$MODE" in
+  implement|merge) ROLE="impl" ;;
+  review) ROLE="review" ;;
+  test|architect|plan) ROLE="ops" ;;
+esac
+
+# Fetch credential from daemon (returns JSON with token + gitIdentity, or 404 if not configured)
+CRED=$(curl -sf http://127.0.0.1:$LEGION_DAEMON_PORT/credentials/$ROLE 2>/dev/null)
+if [ -n "$CRED" ]; then
+  GH_TOKEN=$(echo "$CRED" | jq -r '.token')
+  # Git identity from the response
+  GIT_AUTHOR_NAME=$(echo "$CRED" | jq -r '.gitIdentity.name')
+  GIT_AUTHOR_EMAIL=$(echo "$CRED" | jq -r '.gitIdentity.email')
+  GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+  GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+fi
+```
+
+**Credential env vars for workers:**
+- `GH_TOKEN` — GitHub App installation token (short-lived, ~1 hour)
+- `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` — `<app-name>[bot]` (e.g., `legion-impl[bot]`)
+- `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_EMAIL` — `<app-id>+<app-name>[bot]@users.noreply.github.com`
+
+**Important constraints:**
+- Never call `gh auth login`, `git config --global`, or write to `~/.config/gh/` or `~/.gitconfig`
+- All identity is set via environment variables only
+- If credentials are not configured for a role, fall back to ambient credentials (the
+  user's personal token) — the daemon's `/credentials/{role}` endpoint returns 404 for
+  unconfigured roles
+- Tokens expire after ~1 hour; the daemon refreshes automatically when within 5 minutes
+  of expiry, so always fetch fresh before dispatch
+
 ### Dispatch (New Worker)
 
 **Always use skill invocation (`/skill-name`), not file paths.** Workers load skills via the

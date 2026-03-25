@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import { TokenManager } from "./github-apps";
 import {
   allocatePort,
   readLegionsRegistry,
@@ -134,6 +135,8 @@ export async function startDaemon(
     baseWorkerPort: actualServePort,
   };
 
+  const tokenManager = config.githubApps ? new TokenManager(config.githubApps) : undefined;
+
   const resolvedDeps = resolveDependencies(config, deps);
 
   const sharedServePort = config.baseWorkerPort;
@@ -221,6 +224,7 @@ export async function startDaemon(
             ? `legion-${config.legionId}`
             : undefined,
         getControllerState: () => controllerState,
+        tokenManager,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);

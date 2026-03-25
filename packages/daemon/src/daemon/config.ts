@@ -3,6 +3,18 @@ import path from "node:path";
 import type { LegionPaths } from "./paths";
 import { resolveLegionPaths } from "./paths";
 
+export interface GitHubAppCredentials {
+  appId: string;
+  privateKeyPath: string;
+  installationId: string;
+}
+
+export interface GitHubAppsConfig {
+  impl?: GitHubAppCredentials;
+  review?: GitHubAppCredentials;
+  ops?: GitHubAppCredentials;
+}
+
 export interface DaemonConfig {
   daemonPort: number;
   legionId?: string;
@@ -16,6 +28,7 @@ export interface DaemonConfig {
   controllerPrompt?: string;
   issueBackend: "linear" | "github";
   runtime: "opencode" | "claude-code";
+  githubApps?: GitHubAppsConfig;
 }
 
 const BASE_DAEMON_PORT = 13370;
@@ -31,6 +44,22 @@ function parseNumber(value: string | undefined, fallback: number): number {
     return fallback;
   }
   return parsed;
+}
+
+function parseGitHubAppRole(
+  appId: string | undefined,
+  privateKeyPath: string | undefined,
+  installationId: string | undefined
+): GitHubAppCredentials | undefined {
+  if (!appId || !privateKeyPath || !installationId) {
+    return undefined;
+  }
+
+  return {
+    appId,
+    privateKeyPath,
+    installationId,
+  };
 }
 
 export function validateControllerPrompt(prompt: string | undefined): void {
@@ -89,6 +118,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     throw new Error(`LEGION_RUNTIME must be 'opencode' or 'claude-code' (got: ${rawRuntime})`);
   }
   const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
+
+  const githubApps: GitHubAppsConfig = {
+    impl: parseGitHubAppRole(
+      env.LEGION_GITHUB_APP_IMPL_ID,
+      env.LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH,
+      env.LEGION_GITHUB_APP_IMPL_INSTALLATION_ID
+    ),
+    review: parseGitHubAppRole(
+      env.LEGION_GITHUB_APP_REVIEW_ID,
+      env.LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY_PATH,
+      env.LEGION_GITHUB_APP_REVIEW_INSTALLATION_ID
+    ),
+    ops: parseGitHubAppRole(
+      env.LEGION_GITHUB_APP_OPS_ID,
+      env.LEGION_GITHUB_APP_OPS_PRIVATE_KEY_PATH,
+      env.LEGION_GITHUB_APP_OPS_INSTALLATION_ID
+    ),
+  };
+
+  const hasGithubAppRoles =
+    githubApps.impl !== undefined ||
+    githubApps.review !== undefined ||
+    githubApps.ops !== undefined;
+
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, BASE_DAEMON_PORT),
     legionId,
@@ -102,5 +155,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     controllerPrompt,
     issueBackend,
     runtime,
+    githubApps: hasGithubAppRoles ? githubApps : undefined,
   };
 }
