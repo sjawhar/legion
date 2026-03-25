@@ -251,6 +251,38 @@ describe("daemon server", () => {
     expect(response.status).toBe(404);
   });
 
+  it("rejects POST /workers with env as array", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-426",
+        mode: "implement",
+        workspace: "/tmp/work-426",
+        env: ["not", "a", "record"],
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("invalid_env");
+  });
+
+  it("rejects POST /workers with non-string env values", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-427",
+        mode: "implement",
+        workspace: "/tmp/work-427",
+        env: { KEY: 123 },
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("invalid_env");
+  });
+
   it("POST /workers with env stores vars retrievable via GET /workers/{id}/env", async () => {
     await startTestServer();
     const createResponse = await requestJson("/workers", {

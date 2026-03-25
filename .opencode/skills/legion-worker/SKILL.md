@@ -63,11 +63,12 @@ Optionally fetch per-worker environment variables from the daemon (non-blocking)
 ```bash
 # Fetch and export per-worker env vars (requires LEGION_DAEMON_PORT and WORKER_ID)
 if [ -n "$LEGION_DAEMON_PORT" ] && [ -n "$WORKER_ID" ]; then
-  ENV_JSON=$(curl -s "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/env" 2>/dev/null)
-  if [ $? -eq 0 ] && echo "$ENV_JSON" | grep -q '"env"'; then
-    # Export each key-value pair from the env object
-    eval $(echo "$ENV_JSON" | jq -r '.env // {} | to_entries[] | "export \(.key)=\(.value)"' 2>/dev/null) || true
-  fi
+  _ENV_FILE=$(mktemp) && \
+    curl -fsS "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/env" 2>/dev/null \
+    | jq -r '.env // {} | to_entries[] | "export " + .key + "=" + (.value | @sh)' \
+    > "$_ENV_FILE" && \
+    . "$_ENV_FILE"; \
+    rm -f "$_ENV_FILE"
 fi
 ```
 

@@ -78,7 +78,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
-  if (!isRecord(value)) {
+  if (!isRecord(value) || Array.isArray(value)) {
     return false;
   }
   return Object.values(value).every((entry) => typeof entry === "string");
@@ -168,7 +168,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
         if (segments.length === 1 && segments[0] === "workers") {
           if (method === "GET") {
             await stateLoaded;
-            return jsonResponse(Array.from(workers.values()));
+            return jsonResponse(Array.from(workers.values()).map(({ env: _, ...rest }) => rest));
           }
           if (method === "POST") {
             await stateLoaded;
@@ -403,7 +403,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             return notFound();
           }
           if (method === "GET") {
-            return jsonResponse(entry);
+            const { env: _, ...rest } = entry;
+            return jsonResponse(rest);
           }
           if (method === "PATCH") {
             let payload: Record<string, unknown>;
