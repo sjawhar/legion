@@ -67,6 +67,15 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 
 If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
 
+**Skill loading from plan handoff:** If the plan handoff includes a `requiredSkills.implement` array, invoke each listed skill before proceeding to step 2. This front-loads skills the planner identified as relevant, and replaces the independent skill discovery in step 1.5 for this run.
+
+    # Example: if plan handoff contains requiredSkills.implement: ["reskin-environment", "task-workflow"]
+    # Invoke each skill:
+    # /reskin-environment
+    # /task-workflow
+
+If `requiredSkills` is absent or the plan handoff is missing, proceed with step 1.5's independent skill discovery as the fallback (current behavior, no regression).
+
 ### 2. Invoke Skills (in order)
 
 1. `/superpowers/executing-plans` - Load and structure the plan

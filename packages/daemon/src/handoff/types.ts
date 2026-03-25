@@ -8,6 +8,12 @@ export interface RoutingHints {
   estimatedImplementers?: number;
 }
 
+export interface RequiredSkills {
+  implement?: string[];
+  test?: string[];
+  review?: string[];
+}
+
 export interface BaseHandoff {
   schemaVersion: 1;
   phase: HandoffPhase;
@@ -31,6 +37,7 @@ export interface PlanHandoff extends BaseHandoff {
   concerns?: string[];
   learningsUsed?: string[];
   workflowRecommendation?: string;
+  requiredSkills?: RequiredSkills;
 }
 
 export interface ImplementHandoff extends BaseHandoff {

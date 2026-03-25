@@ -52,6 +52,10 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 
 If present, implementer's `trickyParts` and `deviations` can highlight areas to review more carefully. This is advisory.
 
+**Skill loading from plan handoff:** If the plan handoff includes a `requiredSkills.review` array, invoke each listed skill before proceeding to step 2. This replaces the manual skill check above for this run.
+
+If `requiredSkills` is absent or the plan handoff is missing, rely on the manual skill check above as the fallback (current behavior, no regression).
+
 Also check for cross-phase messages:
 
 ```bash

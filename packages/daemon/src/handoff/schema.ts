@@ -52,6 +52,15 @@ const architectSchema = baseHandoffSchema.extend({
   concerns: z.array(z.string()).optional(),
 });
 
+const requiredSkillsSchema = z
+  .object({
+    implement: z.array(z.string()).optional(),
+    test: z.array(z.string()).optional(),
+    review: z.array(z.string()).optional(),
+  })
+  .passthrough()
+  .optional();
+
 const planSchema = baseHandoffSchema.extend({
   phase: z.literal("plan"),
   taskCount: z.number().optional(),
@@ -60,6 +69,7 @@ const planSchema = baseHandoffSchema.extend({
   concerns: z.array(z.string()).optional(),
   learningsUsed: z.array(z.string()).optional(),
   workflowRecommendation: z.string().optional(),
+  requiredSkills: requiredSkillsSchema,
 });
 
 const implementSchema = baseHandoffSchema.extend({
