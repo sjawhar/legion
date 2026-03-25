@@ -9,6 +9,8 @@ import {
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
+import type { TokenManager } from "./github-apps";
+import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
   cleanupWorkspace,
@@ -17,7 +19,7 @@ import {
   type RepoManagerDeps,
 } from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
-import type { WorkerEntry } from "./serve-manager";
+import type { WorkerEntry as BaseWorkerEntry } from "./serve-manager";
 import {
   type ControllerState,
   type CrashHistoryEntry,
@@ -28,6 +30,9 @@ import {
 
 type Server = ReturnType<typeof Bun.serve>;
 
+interface WorkerEntry extends BaseWorkerEntry {
+  env?: Record<string, string>;
+}
 export interface ServerOptions {
   port?: number;
   hostname?: string;
@@ -43,6 +48,8 @@ export interface ServerOptions {
   getControllerState?: () => ControllerState | undefined;
   runtime?: string;
   tmuxSession?: string;
+  getWorkerAdapter?: (mode: WorkerModeLiteral) => RuntimeAdapter;
+  tokenManager?: TokenManager;
 }
 
 interface ErrorResponse {
@@ -94,6 +101,15 @@ function extractIssueIdFromWorkerId(workerId: string): string | null {
     const suffix = `-${mode}`;
     if (workerId.endsWith(suffix)) {
       return workerId.slice(0, -suffix.length);
+    }
+  }
+  return null;
+}
+
+function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
+  for (const mode of Object.values(WorkerMode)) {
+    if (workerId.endsWith(`-${mode}`)) {
+      return mode;
     }
   }
   return null;
@@ -160,7 +176,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
         if (segments.length === 1 && segments[0] === "workers") {
           if (method === "GET") {
             await stateLoaded;
-            return jsonResponse(Array.from(workers.values()));
+            const safeWorkers = Array.from(workers.values()).map(({ env: _env, ...rest }) => rest);
+            return jsonResponse(safeWorkers);
           }
           if (method === "POST") {
             await stateLoaded;
@@ -176,6 +193,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             const repo = payload.repo;
             const workspace = payload.workspace;
             const version = typeof payload.version === "number" ? payload.version : 0;
+            const envPayload = payload.env;
 
             if (typeof issueId !== "string" || typeof mode !== "string") {
               return badRequest("missing_fields");
@@ -279,16 +297,52 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               version
             );
 
+            const workerAdapter =
+              opts.getWorkerAdapter?.(mode as WorkerModeLiteral) ?? opts.adapter;
+
+            // Auto-inject role credentials when GitHub Apps configured
+            let workerEnv: Record<string, string> | undefined = isRecord(envPayload)
+              ? (envPayload as Record<string, string>)
+              : undefined;
+            if (workerEnv) {
+              for (const [k, v] of Object.entries(workerEnv)) {
+                if (typeof v !== "string") {
+                  return badRequest(`env values must be strings (key "${k}")`);
+                }
+              }
+            }
+            if (opts.tokenManager) {
+              try {
+                const role = modeToRole(mode);
+                if (opts.tokenManager.isConfigured(role)) {
+                  const cred = await opts.tokenManager.getToken(role);
+                  workerEnv = {
+                    ...workerEnv,
+                    GH_TOKEN: cred.token,
+                    GIT_AUTHOR_NAME: cred.gitIdentity.name,
+                    GIT_AUTHOR_EMAIL: cred.gitIdentity.email,
+                    GIT_COMMITTER_NAME: cred.gitIdentity.name,
+                    GIT_COMMITTER_EMAIL: cred.gitIdentity.email,
+                    LEGION_APP_ROLE: role,
+                  };
+                }
+              } catch (error) {
+                console.error(
+                  `Failed to inject role credentials for ${mode}: ${(error as Error).message}`
+                );
+              }
+            }
+
             let actualSessionId = sessionId;
             try {
-              actualSessionId = await opts.adapter.createSession(sessionId, resolvedWorkspace);
+              actualSessionId = await workerAdapter.createSession(sessionId, resolvedWorkspace);
             } catch (error) {
               return serverError(`Failed to create session: ${(error as Error).message}`);
             }
 
             const entry: WorkerEntry = {
               id: workerId,
-              port: opts.adapter.getPort(),
+              port: workerAdapter.getPort(),
               sessionId: actualSessionId,
               workspace: resolvedWorkspace,
               startedAt: new Date().toISOString(),
@@ -296,6 +350,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               crashCount: crashHistoryEntry?.crashCount ?? 0,
               lastCrashAt: crashHistoryEntry?.lastCrashAt ?? null,
               version,
+              ...(workerEnv ? { env: workerEnv } : {}),
             };
 
             workers.set(entry.id, entry);
@@ -303,7 +358,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
 
             return jsonResponse({
               id: entry.id,
-              port: opts.adapter.getPort(),
+              port: workerAdapter.getPort(),
               sessionId: entry.sessionId,
             });
           }
@@ -369,6 +424,30 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           return jsonResponse({ status: "cleaned" });
         }
 
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "env") {
+          await stateLoaded;
+          if (method !== "GET") {
+            return notFound();
+          }
+          const id = segments[1].toLowerCase();
+          const entry = workers.get(id);
+          if (!entry) {
+            return notFound();
+          }
+          const safeEnv: Record<string, string> = {};
+          for (const [k, v] of Object.entries(entry.env ?? {})) {
+            if (
+              k !== "GH_TOKEN" &&
+              !k.startsWith("GIT_AUTHOR_") &&
+              !k.startsWith("GIT_COMMITTER_") &&
+              k !== "LEGION_APP_ROLE"
+            ) {
+              safeEnv[k] = v;
+            }
+          }
+          return jsonResponse({ env: safeEnv });
+        }
+
         if (segments.length === 2 && segments[0] === "workers") {
           await stateLoaded;
           const id = segments[1].toLowerCase();
@@ -377,7 +456,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             return notFound();
           }
           if (method === "GET") {
-            return jsonResponse(entry);
+            const { env: _getEnv, ...safeEntry } = entry;
+            return jsonResponse(safeEntry);
           }
           if (method === "PATCH") {
             let payload: Record<string, unknown>;
@@ -420,7 +500,8 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               });
             }
             await persistState();
-            return jsonResponse(updated);
+            const { env: _patchEnv, ...safeUpdated } = updated;
+            return jsonResponse(safeUpdated);
           }
           if (method === "DELETE") {
             crashHistory.set(id, {
@@ -445,7 +526,11 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
           }
 
           try {
-            const result = await opts.adapter.getSessionStatus(entry.sessionId);
+            const statusMode = extractModeFromWorkerId(entry.id);
+            const statusAdapter = statusMode
+              ? (opts.getWorkerAdapter?.(statusMode) ?? opts.adapter)
+              : opts.adapter;
+            const result = await statusAdapter.getSessionStatus(entry.sessionId);
             if (result.error || !result.data) {
               return badGateway();
             }
@@ -477,12 +562,18 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             return badRequest("missing_fields");
           }
           try {
-            await opts.adapter.sendPrompt(entry.sessionId, text);
+            const promptMode = extractModeFromWorkerId(entry.id);
+            const promptAdapter = promptMode
+              ? (opts.getWorkerAdapter?.(promptMode) ?? opts.adapter)
+              : opts.adapter;
+            await promptAdapter.sendPrompt(entry.sessionId, text);
             return jsonResponse({ ok: true });
           } catch (error) {
             return serverError(`Failed to send prompt: ${(error as Error).message}`);
           }
         }
+
+        // Credential endpoint removed — credentials are auto-injected in POST /workers
 
         if (method === "POST" && url.pathname === "/state/collect") {
           let payload: Record<string, unknown>;

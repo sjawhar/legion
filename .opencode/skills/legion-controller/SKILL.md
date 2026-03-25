@@ -280,6 +280,38 @@ from the issue identifier:
   identifier (format: `owner-repo-number`, e.g. `acme-widgets-42` → `acme/widgets`)
 - **Linear:** `(linear backend)`
 
+### GitHub App Credentials (Worker Identity)
+
+When GitHub App credentials are configured on the daemon, each worker mode maps to a
+specific role identity. The daemon **automatically injects** role-specific credentials
+into each worker's env during `POST /workers` — the controller does not need to fetch
+or pass credentials manually.
+
+**Mode-to-role mapping (handled by daemon):**
+
+| Mode | Role | App Name |
+|------|------|----------|
+| `implement`, `merge` | `impl` | `legion-impl` |
+| `review` | `review` | `legion-review` |
+| `test`, `architect`, `plan` | `ops` | `legion-ops` |
+
+**How it works:**
+1. Controller dispatches worker normally (no credential handling needed)
+2. Daemon's `POST /workers` automatically:
+   - Maps mode → role
+   - Generates a fresh installation token for that role
+   - Stores `GH_TOKEN`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*` in worker's env
+3. Worker startup sequence fetches env from `GET /workers/{id}/env`
+4. Worker uses role-specific identity for all `gh` and `jj` operations
+
+**Important constraints:**
+- Never call `gh auth login`, `git config --global`, or write to `~/.config/gh/` or `~/.gitconfig`
+- Credential injection is automatic — no `--env` flag needed for credentials
+- If credentials are not configured for a role, workers use ambient credentials
+- Tokens expire after ~1 hour; the daemon refreshes automatically
+- Workers on separate role serves cannot access other roles' credentials (process isolation)
+- Private key paths are scrubbed from all serve environments
+
 ### Dispatch (New Worker)
 
 **Always use skill invocation (`/skill-name`), not file paths.** Workers load skills via the

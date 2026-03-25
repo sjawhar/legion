@@ -113,4 +113,85 @@ describe("daemon config", () => {
       expect(() => loadConfig({ LEGION_ID: "test", LEGION_RUNTIME: "invalid" })).toThrow();
     });
   });
+
+  describe("githubApps", () => {
+    it("is undefined when no github app env vars are set", () => {
+      const config = loadConfig({});
+      expect(config.githubApps).toBeUndefined();
+    });
+
+    it("loads a single configured role when all role vars are present", () => {
+      const config = loadConfig({
+        LEGION_GITHUB_APP_IMPL_ID: "12345",
+        LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
+        LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "777",
+      });
+
+      expect(config.githubApps).toEqual({
+        impl: {
+          appId: "12345",
+          privateKeyPath: "/tmp/impl.pem",
+          installationId: "777",
+        },
+      });
+    });
+
+    it("loads all configured roles simultaneously", () => {
+      const config = loadConfig({
+        LEGION_GITHUB_APP_IMPL_ID: "111",
+        LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
+        LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "222",
+        LEGION_GITHUB_APP_REVIEW_ID: "333",
+        LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY_PATH: "/tmp/review.pem",
+        LEGION_GITHUB_APP_REVIEW_INSTALLATION_ID: "444",
+        LEGION_GITHUB_APP_OPS_ID: "555",
+        LEGION_GITHUB_APP_OPS_PRIVATE_KEY_PATH: "/tmp/ops.pem",
+        LEGION_GITHUB_APP_OPS_INSTALLATION_ID: "666",
+      });
+
+      expect(config.githubApps).toEqual({
+        impl: {
+          appId: "111",
+          privateKeyPath: "/tmp/impl.pem",
+          installationId: "222",
+        },
+        review: {
+          appId: "333",
+          privateKeyPath: "/tmp/review.pem",
+          installationId: "444",
+        },
+        ops: {
+          appId: "555",
+          privateKeyPath: "/tmp/ops.pem",
+          installationId: "666",
+        },
+      });
+    });
+
+    it("does not load partially configured role", () => {
+      const config = loadConfig({
+        LEGION_GITHUB_APP_IMPL_ID: "12345",
+      });
+
+      expect(config.githubApps).toBeUndefined();
+    });
+
+    it("loads only fully configured roles from mixed env", () => {
+      const config = loadConfig({
+        LEGION_GITHUB_APP_IMPL_ID: "111",
+        LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
+        LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "222",
+        LEGION_GITHUB_APP_REVIEW_ID: "333",
+        // review missing PRIVATE_KEY_PATH and INSTALLATION_ID
+      });
+
+      expect(config.githubApps).toEqual({
+        impl: {
+          appId: "111",
+          privateKeyPath: "/tmp/impl.pem",
+          installationId: "222",
+        },
+      });
+    });
+  });
 });

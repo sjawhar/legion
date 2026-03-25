@@ -29,6 +29,28 @@ export class CliError extends Error {
   }
 }
 
+export function parseEnvJson(raw: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CliError("Invalid --env value: must be valid JSON");
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CliError("Invalid --env value: must be a JSON object");
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value !== "string") {
+      throw new CliError(`Invalid --env value: key "${key}" must have a string value`);
+    }
+  }
+
+  return obj as Record<string, string>;
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of Bun.stdin.stream()) {
@@ -67,6 +89,7 @@ interface DispatchOptions {
   repo?: string;
   workspace?: string;
   version?: number;
+  env?: Record<string, string>;
 }
 
 interface PromptOptions {
@@ -349,6 +372,9 @@ export async function cmdDispatch(
     body.workspace = opts.legionDir;
   } else {
     throw new CliError("Either --repo or --workspace is required");
+  }
+  if (opts.env) {
+    body.env = opts.env;
   }
 
   let response: Response;
@@ -795,6 +821,10 @@ export const dispatchCommand = defineCommand({
       description:
         "Session version override for fresh dispatch (e.g., --version 1, then --version 2)",
     },
+    env: {
+      type: "string",
+      description: 'Worker env as JSON object (e.g. --env \'{"KEY":"VALUE"}\')',
+    },
   },
   async run({ args }) {
     try {
@@ -806,14 +836,18 @@ export const dispatchCommand = defineCommand({
         }
         version = parsed;
       }
-      await cmdDispatch(args.issue, args.mode, {
-        // Legacy transition: keep LEGION_DIR fallback for users not passing --workspace.
+      const dispatchOpts: DispatchOptions = {
         legionDir: process.env.LEGION_DIR,
         prompt: args.prompt,
         repo: args.repo,
         workspace: args.workspace,
         version,
-      });
+      };
+      if (args.env) {
+        const envObj = parseEnvJson(args.env as string);
+        dispatchOpts.env = envObj;
+      }
+      await cmdDispatch(args.issue, args.mode, dispatchOpts);
     } catch (e) {
       if (e instanceof CliError) {
         console.error(e.message);
