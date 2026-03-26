@@ -55,7 +55,15 @@ Extract:
 - Testing plan from issue comments (look for `## Testing Plan` section posted by planner)
 - PR number from issue comments or linked PRs
 
-Also check for repo-specific skills that may define domain-specific testing procedures. If the issue domain has a dedicated skill (e.g., frontend, backend, security, performance), invoke it — it may require additional verification steps beyond functional testing.
+**Mandatory: Discover and invoke repo-specific skills.**
+
+You MUST list all available skills in the project's skill directories (`.opencode/skills/`, `.claude/skills/`, or equivalent) and invoke any that match the domain of your test. Specifically look for:
+
+- **`smoke-testing`** — Required when changes touch environments, infrastructure, or eval pipeline. Runs the real system on the deployment platform, not just local tests.
+- **`testing`** — May define repo-specific test conventions, fixtures, and verification requirements beyond what this generic workflow covers.
+- **`pr-screenshots`** — Required for uploading visual evidence. Screenshots saved to local paths (`/tmp/...`) are NOT acceptable in PR comments — upload them and use the resulting URLs.
+
+Do not skip this step. You are a fresh agent with no prior knowledge of repo conventions. These skills contain critical domain-specific requirements that you will miss without reading them. If the testing plan from the planner lists specific skills to invoke, follow that list.
 
 **Skill loading from plan handoff:** Read the plan handoff for pre-identified testing skills:
 
@@ -266,6 +274,18 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 - require_specific_task: [true/false] — [evidence]
 - require_taiga_evidence: [true/false] — [Taiga URL or not required]" -R $OWNER/$REPO
 ```
+
+### PR Evidence Checklist
+
+Before posting your results comment, verify it meets these evidence standards:
+
+- [ ] **No local file paths** — PR comment contains zero references to `/tmp/`, local filesystem paths, or non-URL screenshot references. All evidence must be accessible to remote reviewers.
+- [ ] **Uploaded screenshots** — If visual evidence was captured, screenshots were uploaded via the repo's screenshot/evidence skill (e.g., `/pr-screenshots`) and referenced by durable URL, not local path.
+- [ ] **Smoke test / CI URLs** — If smoke tests or deployment-platform runs were executed, include the job URLs in the comment.
+- [ ] **Eval pipeline output** — If the repo has an eval pipeline (e.g., `tl run`) and it was exercised, include the command and score output.
+- [ ] **Local evidence is supplementary** — Local test output (Playwright, headless Chrome, pytest) supplements but does not replace deployment-platform evidence when the repo has a smoke-testing skill.
+
+If any checklist item is not met, fix the comment before posting. Evidence that reviewers cannot access is not evidence.
 
 ### 6.5. Write Handoff Data
 
