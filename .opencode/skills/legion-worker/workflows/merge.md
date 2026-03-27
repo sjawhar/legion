@@ -40,6 +40,8 @@ If rebase produces conflicts:
   - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 - Exit
 
+**Protected files:** The `.legion/` directory contains handoff data between pipeline phases. These files are intentional and must be preserved during merge — do not remove them or add `.legion/` to `.gitignore`.
+
 ### 4. Push
 
 ```bash
