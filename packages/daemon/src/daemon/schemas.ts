@@ -55,15 +55,11 @@ export const LinearTeamsResponseSchema = z
   })
   .passthrough();
 
-export type LinearTeamsResponse = z.infer<typeof LinearTeamsResponseSchema>;
-
 export const SessionCreateResponseSchema = z
   .object({
     id: z.string(),
   })
   .passthrough();
-
-export type SessionCreateResponse = z.infer<typeof SessionCreateResponseSchema>;
 
 export const HealthCheckResponseSchema = z
   .object({
@@ -79,5 +75,3 @@ export const LegionEntrySchema = z.object({
 });
 
 export const LegionsRegistrySchema = z.record(z.string(), LegionEntrySchema);
-
-export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>;

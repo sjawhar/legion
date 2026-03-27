@@ -10,11 +10,6 @@ export interface BackgroundTask {
   error?: string;
   createdAt: number;
   completedAt?: number;
-  retryCount?: number;
-  concurrencyKey?: string;
-  lastMessageCount?: number;
-  lastActivityAt?: number;
-  staleAlertSent?: boolean;
 }
 
 export interface LaunchOptions {
@@ -23,6 +18,5 @@ export interface LaunchOptions {
   description: string;
   parentSessionId?: string;
   model?: string;
-  skills?: string[];
   systemPrompt?: string;
 }

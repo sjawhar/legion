@@ -172,22 +172,7 @@ export const WorkerMode = {
   MERGE: "merge" as WorkerModeLiteral,
 } as const;
 
-export interface GitHubLabel {
-  name: string;
-}
-
-export interface GitHubPR {
-  labels: GitHubLabel[] | null;
-}
-
-export type {
-  LinearAttachment,
-  LinearIssue,
-  LinearIssueRaw,
-  LinearLabelNode,
-  LinearLabelsContainer,
-  LinearStateDict,
-} from "./backends/linear";
+export type { LinearIssueRaw } from "./backends/linear";
 
 // =============================================================================
 // Internal Data Structures
@@ -357,7 +342,7 @@ export interface FetchedIssueData {
 /**
  * Serialized form of IssueState.
  */
-export interface IssueStateDict {
+interface IssueStateDict {
   status: IssueStatusLiteral | string;
   labels: string[];
   hasPr: boolean;
@@ -375,7 +360,7 @@ export interface IssueStateDict {
 /**
  * Serialized form of CollectedState.
  */
-export interface CollectedStateDict {
+interface CollectedStateDict {
   issues: Record<string, IssueStateDict>;
 }
 

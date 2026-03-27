@@ -21,10 +21,5 @@ export const BackgroundTaskSchema = z
     error: z.string().optional(),
     createdAt: z.number(),
     completedAt: z.number().optional(),
-    retryCount: z.number().optional(),
-    concurrencyKey: z.string().optional(),
-    lastMessageCount: z.number().optional(),
-    lastActivityAt: z.number().optional(),
-    staleAlertSent: z.boolean().optional(),
   })
   .passthrough();

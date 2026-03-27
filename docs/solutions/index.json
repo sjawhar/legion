@@ -43,7 +43,17 @@
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
       "architecture-patterns/sync-to-async-modular-refactoring.md",
-      "integration-patterns/tmux-askuserquestion-navigation.md"
+      "integration-patterns/tmux-askuserquestion-navigation.md",
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin/src/delegation": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin/src/tools/task": [
+      "best-practices/typescript-dead-code-audit.md"
     ],
     ".opencode/skills/legion-worker": [
       "skill-patterns/worker-skill-failure-modes.md",
@@ -140,7 +150,8 @@
     ],
     "tag:cleanup": [
       "daemon/deferred-review-comments-pattern.md",
-      "daemon/graceful-worker-shutdown.md"
+      "daemon/graceful-worker-shutdown.md",
+      "best-practices/typescript-dead-code-audit.md"
     ],
     "tag:cli-interaction": [
       "integration-patterns/tmux-askuserquestion-navigation.md"
@@ -332,60 +343,38 @@
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "integration-issues/github-graphql-pr-draft-status.md"
     ],
-    "tag:pytest-mock": [
-      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+     "tag:pytest-mock": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
+     "tag:python": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
+     "tag:race-condition": ["architecture-patterns/shared-state-file-ownership.md"],
+    "tag:dead-code": [
+      "best-practices/typescript-dead-code-audit.md"
     ],
-    "tag:python": [
-      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    "tag:noUnusedLocals": [
+      "best-practices/typescript-dead-code-audit.md"
     ],
-    "tag:race-condition": [
-      "architecture-patterns/shared-state-file-ownership.md"
+    "tag:barrel-exports": [
+      "best-practices/typescript-dead-code-audit.md"
     ],
     "tag:refactoring": [
-      "architecture-patterns/sync-to-async-modular-refactoring.md"
+      "architecture-patterns/sync-to-async-modular-refactoring.md",
+      "best-practices/typescript-dead-code-audit.md"
     ],
-    "tag:remote-control": [
-      "integration-patterns/tmux-askuserquestion-navigation.md"
-    ],
-    "tag:resource-accounting": [
-      "delegation/delegation-hardening-retro.md"
-    ],
-    "tag:resume": [
-      "integration-patterns/controller-worker-protocol.md"
-    ],
-    "tag:retro": [
-      "skill-patterns/worker-skill-failure-modes.md"
-    ],
-    "tag:review": [
-      "skill-patterns/worker-skill-failure-modes.md"
-    ],
-    "tag:serve": [
-      "daemon/opencode-serve-lifecycle.md"
-    ],
+     "tag:remote-control": ["integration-patterns/tmux-askuserquestion-navigation.md"],
+     "tag:resource-accounting": ["delegation/delegation-hardening-retro.md"],
+     "tag:resume": ["integration-patterns/controller-worker-protocol.md"],
+     "tag:retro": ["skill-patterns/worker-skill-failure-modes.md"],
+     "tag:review": ["skill-patterns/worker-skill-failure-modes.md"],
+     "tag:serve": ["daemon/opencode-serve-lifecycle.md"],
     "tag:session-management": [
       "daemon/worker-directory-resolution.md",
       "controller/controller-session-anti-patterns.md"
     ],
-    "tag:sessions": [
-      "daemon/shared-serve-refactor.md",
-      "daemon/shared-serve-retro.md"
-    ],
-    "tag:shared-serve": [
-      "daemon/shared-serve-refactor.md",
-      "daemon/shared-serve-retro.md"
-    ],
-    "tag:skill-authoring": [
-      "skill-patterns/parallel-subagent-background-execution.md"
-    ],
-    "tag:skills": [
-      "skill-patterns/worker-skill-failure-modes.md"
-    ],
-    "tag:stale-detection": [
-      "delegation/delegation-hardening-retro.md"
-    ],
-    "tag:state-file": [
-      "architecture-patterns/shared-state-file-ownership.md"
-    ],
+     "tag:sessions": ["daemon/shared-serve-refactor.md", "daemon/shared-serve-retro.md"],
+     "tag:shared-serve": ["daemon/shared-serve-refactor.md", "daemon/shared-serve-retro.md"],
+     "tag:skill-authoring": ["skill-patterns/parallel-subagent-background-execution.md"],
+     "tag:skills": ["skill-patterns/worker-skill-failure-modes.md"],
+     "tag:stale-detection": ["delegation/delegation-hardening-retro.md"],
+     "tag:state-file": ["architecture-patterns/shared-state-file-ownership.md"],
     "tag:state-machine": [
       "daemon/controller-observability.md",
       "integration-issues/github-graphql-pr-draft-status.md"
