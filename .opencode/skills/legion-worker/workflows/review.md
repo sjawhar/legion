@@ -64,6 +64,16 @@ legion handoff messages --workspace . 2>/dev/null || echo '[]'
 
 Messages may contain warnings, blockers, or context from earlier workers.
 
+### 1.5. Protected Files — Do NOT Flag
+
+The `.legion/` directory contains **structured handoff data** committed intentionally as part of the Legion pipeline. Files include: `architect.json`, `plan.json`, `implement.json`, `test.json`, `review.json`, `retro.json`.
+
+- They carry context between pipeline phases (architect → planner → implementer → tester → reviewer)
+- They provide human reviewers with visibility into what information was passed between agents
+- They are NOT build artifacts, NOT tooling debris, and must NOT be added to `.gitignore`
+
+**Do NOT flag `.legion/` files for removal or suggest gitignoring them.** They are part of the PR deliverable.
+
 ### 2. Run Review
 
 Invoke `/ce:review` with the branch name.
@@ -190,3 +200,4 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 | Softening language ("consider", "might want to", "could improve") | Be direct: "This is wrong because X. Fix it." |
 | Passing a PR that has CI failures | CI failures are P1. The implementer's job was to ship with green CI. |
 | Not checking for dropped requirements | Cross-reference every acceptance criterion. A missing criterion is a CRITICAL issue. |
+| Flagging `.legion/` handoff files for removal | `.legion/` files are intentional pipeline data committed by design. Do NOT suggest removing them or adding `.legion/` to `.gitignore`. |

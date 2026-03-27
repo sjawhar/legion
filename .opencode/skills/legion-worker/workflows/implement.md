@@ -215,6 +215,8 @@ jj diff --stat --from main    # File count should match expectations — no unre
 
 If unrelated commits are in the ancestry, rebase to isolate your changes before creating the PR.
 
+**Note:** `.legion/` handoff files (written in step 7.5) are expected in the diff — they are part of the PR deliverable, not build artifacts. Do not remove them or add `.legion/` to `.gitignore`.
+
 **CRITICAL: The PR body MUST include `Closes #$ISSUE_NUMBER`.** This is how GitHub links PRs to
 issues and auto-closes them on merge. Without it, merged PRs leave orphaned issues that stall
 the pipeline. This is NOT optional.
