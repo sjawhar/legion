@@ -109,7 +109,11 @@ gh pr comment "$LEGION_ISSUE_ID" --body "## Review Summary
 [Brief verdict: approved to merge / needs changes]
 
 ---
-[Detailed summary of key findings]"
+[Detailed summary of key findings]
+
+### Evidence
+- CI status: [paste \`gh pr checks\` output]
+- [For each P1/P2: code snippet showing the issue, or test output demonstrating the problem]"
 ```
 
 ### 4. Post Line-Level Comments
@@ -153,6 +157,8 @@ Replace the example counts and findings with actual review results:
 - `verdict`: "approved" if no CRITICAL issues, "changes_requested" if any CRITICAL issues found
 - `keyFindings`: list of `{"severity": "P1"|"P2"|"P3", "file": "path", "description": "..."}`
 
+You MUST attempt the handoff write before setting PR draft status or signaling completion. The `|| true` ensures CLI failures don't block you, but skipping this step entirely is not acceptable. If the write fails, note it in your PR comment.
+
 
 ### 5. Set PR Draft Status
 
@@ -172,6 +178,14 @@ gh pr ready "$LEGION_ISSUE_ID"
 
 **CRITICAL: The `worker-done` label is how the controller knows you finished.** If you skip this,
 the issue silently stalls. This is the MOST IMPORTANT step.
+
+Before adding labels, verify:
+1. Summary comment posted (step 3)
+2. Line-level comments posted (step 4)
+3. Handoff write attempted (step 4.5)
+4. PR draft status set (step 5)
+
+If any were skipped, go back and do them.
 
 **GitHub:**
 ```bash
@@ -201,3 +215,4 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 | Passing a PR that has CI failures | CI failures are P1. The implementer's job was to ship with green CI. |
 | Not checking for dropped requirements | Cross-reference every acceptance criterion. A missing criterion is a CRITICAL issue. |
 | Flagging `.legion/` handoff files for removal | `.legion/` files are intentional pipeline data committed by design. Do NOT suggest removing them or adding `.legion/` to `.gitignore`. |
+| Posting review findings without evidence | Include code snippets, CI output, or reproduction steps for every P1/P2 finding. |
