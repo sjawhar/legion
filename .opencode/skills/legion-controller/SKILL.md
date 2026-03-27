@@ -22,9 +22,44 @@ Required:
 ## Core Principle
 
 **Keep work moving forward.** Priority order:
+0. Respond to user messages (always first)
 1. Unblock in-progress work (relay user feedback)
 2. Advance completed work (process worker-done)
 3. Start new work (triage, pull from Icebox)
+
+
+### User Interaction Priority
+
+At the start of each loop iteration, check if the user has sent a direct question or new instructions.
+
+- If yes: **STOP** the current iteration, answer the user FIRST, then resume
+- Never continue looping while an unanswered user question is pending
+- If mid-dispatch, finish the dispatch, then respond immediately
+
+This rule is about answering user questions directed AT the controller. It is distinct from Step 2 (Relay User Feedback), which relays user comments TO workers via issue labels.
+
+### Autonomy vs Approval
+
+**Principle:** Act decisively within your authority. Scale caution to blast radius.
+
+**Heuristic:** "If you are wrong, how bad is it?" Dispatching an unnecessary planner wastes tokens. Merging a broken fix breaks the pipeline for the whole team.
+
+| Operation | Autonomous? | Notes |
+|-----------|-------------|-------|
+| Rebase branches | Yes | Just do it |
+| Phase transitions | Yes | Follow the pipeline |
+| Dispatch/resume workers | Yes | That's your job |
+| Resolve merge conflicts | Yes | Don't block on conflicts |
+| Label changes | Yes | Follow label conventions |
+| Move issues between statuses | Yes | Follow the state machine |
+| Merge PR to main | **NO** | Requires explicit user approval |
+
+**Merge approval flow:** When all Pre-Merge Gate conditions are met, post a readiness comment and add `needs-approval` label. Wait for user approval before dispatching merger.
+
+The controller MUST NOT ask "should I continue?" for routine operations. Act on everything within your authority. Only escalate when:
+1. The decision is irreversible (merge to main)
+2. There is genuine stakeholder disagreement
+3. The situation is not covered by existing rules
 
 ## Algorithm
 
@@ -40,12 +75,33 @@ digraph controller {
     cleanup [label="6. Cleanup Done"];
     heartbeat [label="7. Heartbeat"];
     todo [label="8. Update To-Do"];
-    sleep [label="9. Sleep 30s"];
-    start -> fetch -> feedback -> worker_done -> triage -> icebox -> cleanup -> heartbeat -> todo -> sleep -> fetch;
+    wait [label="9. Wait for Poller"];
+    start -> fetch -> feedback -> worker_done -> triage -> icebox -> cleanup -> heartbeat -> todo -> wait -> fetch;
 }
 ```
 
 **Do not exit.** Loop continuously.
+
+### Polling Architecture
+
+The 9-step loop describes WHAT the controller does. Execution uses background polling via `task(run_in_background=true)`:
+
+1. **Main thread** — handles user messages, makes routing decisions, acts on poller reports. MUST never call `sleep` or block.
+2. **Background poller** — a persistent background task that fetches issues, posts to `/state/collect`, and reports state changes every ~60 seconds.
+3. **Lifecycle:** Launch poller at session start. Check poller health each time the main thread processes a report — if the poller has stopped or timed out, re-launch immediately. The poller is disposable — cancel and re-launch freely.
+
+**Rules:**
+- Main thread MUST never call `sleep`
+- All polling via background tasks — main thread stays free for user instructions
+- When poller reports a state change, main thread acts synchronously then returns to idle
+- Polling output MUST NOT clutter the controller transcript — background agents keep noise out of the human's view
+
+**Responses are for the human.** Keep responses conversational and scannable:
+- Summarize worker status in tables, not raw JSON
+- Always end status updates with "Needs your attention" and "Autonomous" sections
+- Never dump raw `curl` output or JSON into the transcript
+
+**Fallback:** If background tasks are unavailable, process all 9 steps without any `sleep`, then end turn. External runtime re-invokes the controller.
 
 ### 1. Fetch Issues
 
@@ -69,7 +125,7 @@ ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'leng
 
 **CRITICAL:** Pass `ISSUES_JSON` directly to the state endpoint in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both Linear and GitHub formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
 
-### 2. Relay User Feedback (Highest Priority)
+### 2. Relay User Feedback
 
 When both `user-input-needed` AND `user-feedback-given` labels present:
 1. Remove both labels
@@ -161,6 +217,31 @@ When the reviewer requests changes, the implementer's fixes **must go through te
 
 **Critical:** The controller MUST transition to In Progress before resuming the implementer. If the issue stays in Needs Review and the implementer adds `worker-done`, the state machine will see `prIsDraft + worker-done` and suggest `resume_implementer_for_changes` again (infinite loop).
 
+
+### Pipeline Integrity
+
+Pipeline phases MUST run in order: architect → plan → implement → test → review → retro → merge.
+
+**MUST NOT skip:**
+- **Testing** — the tester ALWAYS runs after implementation, including after review-requested changes
+- **Review** — the reviewer ALWAYS runs after testing passes
+
+**MAY skip (with conditions):**
+- **Architect** — ONLY when ALL conditions are met: `bug` label present, description contains clear reproduction steps, AND the change is scoped to a single component. This exception is documented in the Route Triage table — do not contradict it.
+- **Retro** — ONLY when ALL skip conditions are met per the routing hints (see Retro section)
+
+Simple issues go through every phase — they just go through faster. Complexity is not a reason to skip phases.
+
+### Role Boundary
+
+The controller MUST NOT:
+- Run `jj` commands (version control is worker work)
+- Edit files or write code
+- Run `gh pr merge` directly (dispatch a merge worker)
+- Run tests (dispatch a tester)
+
+The controller dispatches workers. Workers do the work. If you are about to touch code, branches, or PRs directly — stop and dispatch the appropriate worker instead.
+
 ### Quality Gate (Controller Policy)
 
 Before dispatching a tester, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
@@ -185,6 +266,31 @@ legion dispatch "$ISSUE_IDENTIFIER" implement \
 signaling completion. If CI is failing when the controller sees a PR, the implementer didn't
 finish — re-dispatch an implementer with the CI failure output. The tester should also check
 CI status and include it in the review.
+
+
+### Pre-Merge Gate
+
+Before requesting merge approval, verify ALL conditions:
+
+| # | Condition | Verification |
+|---|-----------|-------------|
+| 1 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID"` — all checks must show ✓ |
+| 2 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft` returns `false` |
+| 3 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep test-passed` |
+| 4 | Issue has been through retro (or skipped via routing hints) | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
+| 5 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep -v user-input-needed` — must NOT match |
+
+If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
+
+**When all conditions pass:** Post a readiness comment to the issue and add the `needs-approval` label. Wait for user approval before dispatching the merger.
+
+**Human override:** If the user explicitly authorizes a merge despite unmet conditions (e.g., "merge it, skip retro"), proceed. Log which conditions were overridden in the merge dispatch prompt:
+
+```bash
+legion dispatch "$ISSUE_IDENTIFIER" merge \
+  --repo "$OWNER/$REPO" \
+  --prompt "Invoke the /legion-worker skill for merge mode. Override: user approved with unmet conditions: [list waived conditions]. ($BACKEND_SUFFIX)"
+```
 
 ### Post-Merge Monitoring
 
@@ -258,13 +364,11 @@ Maintain in context:
 - [ENG-ZZ] user-input-needed
 ```
 
-### 9. Sleep and Loop
+### 9. Wait for Poller
 
-```bash
-sleep 30
-```
+The background poller handles timing. The main thread does not sleep — it processes poller reports as they arrive and returns to idle between reports. See **Polling Architecture** above.
 
-Then return to step 1.
+If operating in fallback mode (no background tasks), end turn here. The external runtime re-invokes the controller for the next iteration.
 
 ## Dispatch vs Resume
 
@@ -481,7 +585,7 @@ it impossible to track what's merged.
 | `worker-active` | Worker dispatched and running |
 | `user-input-needed` | Blocked on human, controller skips |
 | `user-feedback-given` | Human responded, controller resumes |
-| `needs-approval` | Architect done, waiting for human approval |
+| `needs-approval` | Waiting for human approval (architect output or merge readiness) |
 | `human-approved` | Human approved, controller advances to planner |
 | `test-passed` | Tester verified behavior, controller advances to Needs Review |
 | `test-failed` | Tester found issues, controller returns to implementer |
@@ -535,7 +639,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 |---------|--------------------|
 | "Let me construct the JSON for the state machine" | POST tracker output to `/state/collect` directly — no hand-crafting |
 | "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
-| "The changes are lost" | Check local commits (`jj log`), open PRs (`gh pr list`), and worker workspaces before concluding anything is lost |
+| "The changes are lost" | Check open PRs (`gh pr list`), worker workspaces (daemon API), and issue comments before concluding anything is lost. Do NOT run `jj` — dispatch a worker to check version control. |
 | "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Invoke the skill. Let the workflow guide the worker. |
 | "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |
 | "I'll accumulate these changes into the existing PR" | One issue = one workspace = one branch = one PR. |
@@ -543,6 +647,13 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "The worker is busy, I'll wait" | Check the transcript. If the worker received prompts but produced no response, the workspace may have been deleted. A worker cannot function without its workspace. |
 | "CI can be fixed later" | CI is the implementer's responsibility. If CI is failing, the implementer isn't done — re-dispatch. |
 | "This worker keeps failing, let me increment the version" | **NEVER increment `--version` during normal operation.** Version increments destroy all worker context. Re-dispatch without version — the worker resumes with full context of prior work. Version is an escape hatch for unrecoverable sessions only. |
+| "Let me skip planning, the issue is simple enough" | STOP. Every phase runs. No exceptions. |
+| "Testing isn't needed, it's a trivial change" | STOP. The tester ALWAYS runs. |
+| "Let me skip retro, the PR is clean" | Check routing hints. Only skip when ALL conditions met. |
+| "Let me just merge this PR directly" | STOP. Dispatch a merge worker. |
+| "I'll rebase and push this fix" | STOP. Dispatch an implementer. |
+| "I'll run the tests myself" | STOP. Dispatch a tester. |
+| "Let me quickly edit this file" | STOP. You're doing worker work. Dispatch the appropriate worker. |
 
 ## Common Mistakes
 
@@ -551,7 +662,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Spawn new worker for user feedback | **Resume** existing session via HTTP API |
 | Skip Icebox when capacity exists | Pull oldest Icebox item if workers < 10 |
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
-| Exit after processing all issues | **Never exit** - loop forever with 30s sleep |
+| Exit after processing all issues | **Never exit** - loop continuously via background polling (see Polling Architecture) |
 | Process issue with live worker | Skip it - worker is already handling |
 | Give workers step-by-step fix instructions | Invoke the skill. State the mode, issue ID, and backend only. |
 | Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. |
@@ -559,6 +670,8 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Advance pipeline with CI failing | Re-dispatch implementer with CI failure output. Don't dispatch reviewer until CI passes. |
 | Delete a workspace to "reset" a worker | **Never delete a workspace while the worker might be resumed.** A deleted workspace silently kills the worker — prompts arrive but every tool call fails. Only delete during Cleanup Done. |
 | Increment `--version` on every dispatch | **Never increment version during normal pipeline operation.** Each increment creates a fresh session with zero context. A context-less worker is dangerous — it can push to wrong branches, overwrite work, or break the repo. Only use `--version` when a session is truly unrecoverable (serve crash, corrupted session). |
+| Running `jj`, `gh pr merge`, or editing files | Controllers dispatch workers. Never touch code/branches/PRs directly. |
+| Skipping phases because "it's simple" | Every phase runs. Simple issues just go through faster. |
 
 ## Status Flow
 
