@@ -166,6 +166,8 @@ For each criterion, capture concrete evidence:
 - Command output (for CLI/API tests)
 - Log excerpts (for backend behavior)
 
+> **EVIDENCE GATE:** Every acceptance criterion in your PR comment MUST include at least one concrete artifact: screenshot, command output, log excerpt, or — for non-behavioral criteria verifiable only by reading code — "Verified by code inspection: [file:line]". A test result without evidence is not a valid test. One artifact may cover multiple related criteria if explicitly noted. Local file paths are NOT evidence — the reviewer cannot access your filesystem.
+
 Do NOT accept "it looks like it works" — capture actual artifacts.
 
 **Fail hard, fail fast.** If a criterion fails:
@@ -192,7 +194,7 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 ### Results
 | Criterion | Status | Evidence |
 |-----------|--------|----------|
-| [criterion 1] | ✅/❌ | [output/screenshot] |
+| [criterion 1] | ✅/❌ | [REQUIRED: screenshot/output/log/code-ref] |
 
 ### Test Quality Critique
 - [Are the implementer's tests meaningful or decorative?]
@@ -224,6 +226,8 @@ legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
 HANDOFF
 ```
 
+You **MUST** attempt the handoff write before signaling completion. The `|| true` ensures CLI failures don't block you, but skipping this step entirely is not acceptable. If the write fails, note it in your PR comment. Note: handoff plumbing between phases may not be fully operational yet (#124) — the attempt is what matters, establishing the habit so that when the plumbing is fixed, data flows automatically.
+
 **Linear:**
 
 **Linear** (posts to issue — Linear doesn't have PR-level comments):
@@ -236,7 +240,7 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Behavioral Test Re
 ### Results
 | Criterion | Status | Evidence |
 |-----------|--------|----------|
-| [criterion 1] | ✅/❌ | [output/screenshot] |
+| [criterion 1] | ✅/❌ | [REQUIRED: screenshot/output/log/code-ref] |
 
 ### Test Quality Critique
 - [Are the implementer's tests meaningful or decorative?]
@@ -256,6 +260,13 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Behavioral Test Re
 
 **CRITICAL: The labels are how the controller knows you finished.** If you skip this,
 the issue silently stalls. This is the MOST IMPORTANT step.
+
+
+**Pre-signal checklist — verify before adding labels:**
+1. PR results posted (step 6)
+2. Handoff write attempted (step 6.5)
+
+If either was skipped, go back and do it now.
 
 **If all criteria pass:**
 
@@ -318,3 +329,4 @@ Do NOT escalate for test failures — those are expected outcomes, not blockers.
 | Silently degrading on environment, infrastructure, or access issues | FAIL and explain what's missing. Never build a pass verdict on incomplete verification. |
 | Passing with "observations" that are actually failures | If an observation would make a user unhappy, it's a failure, not an observation |
 | Skipping test critique because CI is green | Review the actual test code. Heavily mocked tests, circular logic, and happy-path-only suites are P2 findings. |
+| Posting results without evidence artifacts | Every criterion needs at least one: screenshot, command output, log, or code reference. Local file paths are not evidence — the reviewer cannot access your filesystem. "It works" is not evidence. |
