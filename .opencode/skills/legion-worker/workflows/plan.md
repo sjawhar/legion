@@ -65,10 +65,23 @@ Before diving into planning, check if the repo has skills relevant to this work:
 
 1. List available skills: look for project-specific skills beyond the standard Legion workflows
 2. Read the issue title, description, and labels — do any skills match the domain? (e.g., a "reskin" issue might have a `/reskin-environment` skill)
-3. If relevant skills exist, note them for inclusion in the plan — the implementer and tester will need to know about them
+3. If relevant skills exist, **categorize each by downstream phase**:
+   - **implement**: Skills that describe how to build, create, or code something (build tools, frameworks, coding standards)
+   - **test**: Skills that describe how to verify, test, or validate something (testing tools, QA procedures, smoke testing)
+   - **review**: Skills that describe review criteria or quality standards (code review, security review, accessibility)
+   - Skills may apply to multiple phases — include them in each applicable category
 4. Include any relevant skill invocations in the testing plan (step 3) so downstream workers use them
 
 Also check AGENTS.md and CLAUDE.md for project-specific conventions that should inform the plan.
+
+**Output of this step:** A categorized skill list to carry forward to steps 5 and 5.5:
+
+    Required Skills:
+    - implement: [skill-name-1, skill-name-2]
+    - test: [skill-name-3]
+    - review: [skill-name-4]
+
+If no relevant skills are found beyond standard Legion workflows, note "No project-specific skills identified" and omit the `requiredSkills` field from the handoff.
 
 ### 1.5. Pre-Planning Analysis (Metis)
 
@@ -295,7 +308,24 @@ Post the **full executable plan** from step 3 (or revised after step 4):
 - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
 
-The complete `/superpowers:writing-plans` output goes directly into the issue comment - all tasks, all code examples, all test commands.
+The complete `/superpowers:writing-plans` output goes directly into the issue comment — all tasks, all code examples, all test commands.
+
+**If project-specific skills were identified in step 1.2**, append a "Required Skills" section to the posted plan:
+
+    ## Required Skills
+
+    The following project-specific skills should be loaded by downstream workers:
+
+    | Phase | Skills |
+    |-------|--------|
+    | Implement | `skill-name-1`, `skill-name-2` |
+    | Test | `skill-name-3` |
+    | Review | `skill-name-4` |
+
+    Workers: invoke these skills at the start of your workflow before beginning work.
+    If a skill is unavailable in your environment, proceed without it.
+
+This section is informational for human readers. The structured data is in the handoff (step 5.5).
 
 ### 5.5. Write Handoff Data
 
@@ -314,7 +344,12 @@ legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
   },
   "concerns": ["Race condition in state transitions noted by Metis"],
   "learningsUsed": ["docs/solutions/state/race-conditions.md"],
-  "workflowRecommendation": "Standard pipeline — all phases needed"
+  "workflowRecommendation": "Standard pipeline — all phases needed",
+  "requiredSkills": {
+    "implement": ["reskin-environment", "task-workflow"],
+    "test": ["smoke-testing"],
+    "review": ["design-review"]
+  }
     }
   HANDOFF
 ```
@@ -326,6 +361,10 @@ legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
 - `concerns`: Combined concerns from Metis analysis and planner judgment
 - `learningsUsed`: List of `docs/solutions/` files injected in step 1.7
 - `workflowRecommendation`: Freeform text for future adaptive routing
+- `requiredSkills`: Per-phase skill arrays from step 1.2 (optional — omit if no project-specific skills found)
+  - `implement`: Skills the implementer should invoke before coding
+  - `test`: Skills the tester should invoke before verification
+  - `review`: Skills the reviewer should invoke before review
 
 **This step is non-blocking.** If the handoff write fails, it must not prevent completion. The `|| true` ensures the workflow continues.
 

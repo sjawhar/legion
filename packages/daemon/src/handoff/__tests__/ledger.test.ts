@@ -45,6 +45,67 @@ describe("handoff ledger", () => {
     expect(all.architect).toBeUndefined();
   });
 
+  it("writes and reads plan handoffs with requiredSkills", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+
+    writePhaseHandoff(workspaceDir, "plan", {
+      taskCount: 5,
+      independentTasks: 3,
+      requiredSkills: {
+        implement: ["reskin-environment", "task-workflow"],
+        test: ["smoke-testing"],
+        review: ["design-review"],
+      },
+    });
+
+    const all = readAllHandoffs(workspaceDir);
+    const plan = all.plan;
+    expect(plan).toBeDefined();
+    if (plan?.phase === "plan") {
+      expect(plan.requiredSkills).toEqual({
+        implement: ["reskin-environment", "task-workflow"],
+        test: ["smoke-testing"],
+        review: ["design-review"],
+      });
+    }
+  });
+
+  it("accepts plan handoffs with partial requiredSkills", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+
+    writePhaseHandoff(workspaceDir, "plan", {
+      taskCount: 2,
+      requiredSkills: {
+        implement: ["some-skill"],
+      },
+    });
+
+    const all = readAllHandoffs(workspaceDir);
+    const plan = all.plan;
+    expect(plan).toBeDefined();
+    if (plan?.phase === "plan") {
+      expect(plan.requiredSkills).toEqual({
+        implement: ["some-skill"],
+      });
+    }
+  });
+
+  it("accepts plan handoffs without requiredSkills (backward compat)", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+
+    writePhaseHandoff(workspaceDir, "plan", {
+      taskCount: 3,
+      concerns: ["no skills needed"],
+    });
+
+    const all = readAllHandoffs(workspaceDir);
+    const plan = all.plan;
+    expect(plan).toBeDefined();
+    if (plan?.phase === "plan") {
+      expect(plan.requiredSkills).toBeUndefined();
+    }
+  });
+
   it("fails open on missing, corrupt, or schema-mismatched phase files", async () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 

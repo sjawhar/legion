@@ -38,6 +38,16 @@ Extract:
 
 Also check for repo-specific skills that may define domain-specific testing procedures. If the issue domain has a dedicated skill (e.g., frontend, backend, security, performance), invoke it — it may require additional verification steps beyond functional testing.
 
+**Skill loading from plan handoff:** Read the plan handoff for pre-identified testing skills:
+
+```bash
+legion handoff read --phase plan --workspace . 2>/dev/null || echo '{}'
+```
+
+If the plan handoff includes a `requiredSkills.test` array, invoke each listed skill before proceeding. This replaces the repo-specific skill check above for this run.
+
+If `requiredSkills` is absent or the plan handoff is missing, rely on the repo-specific skill check above as the fallback (current behavior, no regression).
+
 Then fetch PR metadata and check out the branch:
 
 **GitHub:**
