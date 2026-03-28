@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { parseImportSpecifiers } from "./parser";
-import type { CodebaseIndex, ModuleDependencyEntry } from "./types";
+import { parseExportedSymbols, parseImportSpecifiers } from "./parser";
+import type { CodebaseIndex, ExportedSymbol, ModuleDependencyEntry, TestMapping } from "./types";
 import { CODEBASE_INDEX_VERSION } from "./types";
 
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"];
@@ -10,6 +10,57 @@ const SKIP_DIRS = new Set(["node_modules", ".git", ".jj", "dist", "build"]);
 
 function isSourceFile(filePath: string): boolean {
   return SOURCE_EXTENSIONS.includes(path.extname(filePath));
+}
+
+function isTestFile(relativeFilePath: string): boolean {
+  if (/\.(test|spec)\.[jt]sx?$/.test(relativeFilePath)) {
+    return true;
+  }
+
+  return /(^|\/)__tests__\/.*\.[jt]sx?$/.test(relativeFilePath);
+}
+
+function buildTestMapping(
+  allRelativePaths: string[],
+  dependencyGraph: Record<string, ModuleDependencyEntry>
+): TestMapping {
+  const sourceFiles = allRelativePaths.filter((relativePath) => !isTestFile(relativePath));
+  const testFiles = allRelativePaths.filter((relativePath) => isTestFile(relativePath));
+  const sourceFileSet = new Set(sourceFiles);
+  const sourceToTests: Record<string, string[]> = {};
+  const testToSources: Record<string, string[]> = {};
+
+  for (const sourceFile of sourceFiles) {
+    sourceToTests[sourceFile] = [];
+  }
+
+  for (const testFile of testFiles) {
+    const directImports = dependencyGraph[testFile]?.imports ?? [];
+    const mappedSources = new Set<string>();
+
+    for (const importedFile of directImports) {
+      if (!sourceFileSet.has(importedFile)) {
+        continue;
+      }
+      mappedSources.add(importedFile);
+    }
+
+    const sources = [...mappedSources].sort((a, b) => a.localeCompare(b));
+    testToSources[testFile] = sources;
+
+    for (const sourceFile of sources) {
+      sourceToTests[sourceFile]?.push(testFile);
+    }
+  }
+
+  for (const tests of Object.values(sourceToTests)) {
+    tests.sort((a, b) => a.localeCompare(b));
+  }
+
+  return {
+    sourceToTests,
+    testToSources,
+  };
 }
 
 export async function listSourceFiles(rootDir: string): Promise<string[]> {
@@ -69,11 +120,17 @@ async function resolveRelativeImport(
 
 export interface BuildDependencyGraphOptions {
   warn?: (message: string) => void;
+  hotspotHistoryLimit?: number;
+  hotspotCommandRunner?: (
+    rootDir: string,
+    args: string[]
+  ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 }
 
 interface ParsedModuleEntry {
   relativeFilePath: string;
   dependencies: ModuleDependencyEntry;
+  apiSurface: ExportedSymbol[];
   mtimeMs: number;
 }
 
@@ -105,6 +162,7 @@ async function parseModuleFile(
       imports,
       externals: parsed.externals,
     },
+    apiSurface: parseExportedSymbols(source),
     mtimeMs: stats.mtimeMs,
   };
 }
@@ -115,17 +173,26 @@ export async function buildDependencyGraph(
 ): Promise<CodebaseIndex> {
   const sourceFiles = await listSourceFiles(rootDir);
   const dependencyGraph: Record<string, ModuleDependencyEntry> = {};
+  const apiSurface: Record<string, ExportedSymbol[]> = {};
   const mtimes: Record<string, number> = {};
+  const indexedRelativePaths: string[] = [];
 
   for (const absolutePath of sourceFiles) {
     const parsed = await parseModuleFile(rootDir, absolutePath, options);
     dependencyGraph[parsed.relativeFilePath] = parsed.dependencies;
+    apiSurface[parsed.relativeFilePath] = parsed.apiSurface;
     mtimes[parsed.relativeFilePath] = parsed.mtimeMs;
+    indexedRelativePaths.push(parsed.relativeFilePath);
   }
+
+  const testMapping = buildTestMapping(indexedRelativePaths, dependencyGraph);
 
   return {
     version: CODEBASE_INDEX_VERSION,
     dependencyGraph,
+    apiSurface,
+    testMapping,
+    hotspots: [],
     metadata: {
       generatedAt: new Date().toISOString(),
       rootDir,
@@ -142,6 +209,7 @@ export async function updateDependencyGraphIncremental(
   const rootDir = current.metadata.rootDir;
   const sourceFiles = await listSourceFiles(rootDir);
   const nextGraph: Record<string, ModuleDependencyEntry> = {};
+  const nextApiSurface: Record<string, ExportedSymbol[]> = {};
   const nextMtimes: Record<string, number> = {};
   const sourceByRelativePath = new Map<string, string>();
 
@@ -161,8 +229,10 @@ export async function updateDependencyGraphIncremental(
     const previousMtime = current.metadata.mtimes[relativePath];
     if (previousMtime !== undefined && previousMtime === mtimeMs) {
       const existing = current.dependencyGraph[relativePath];
-      if (existing) {
+      const existingApiSurface = current.apiSurface[relativePath];
+      if (existing && existingApiSurface) {
         nextGraph[relativePath] = existing;
+        nextApiSurface[relativePath] = existingApiSurface;
         nextMtimes[relativePath] = previousMtime;
         continue;
       }
@@ -170,12 +240,18 @@ export async function updateDependencyGraphIncremental(
 
     const parsed = await parseModuleFile(rootDir, absolutePath, options);
     nextGraph[relativePath] = parsed.dependencies;
+    nextApiSurface[relativePath] = parsed.apiSurface;
     nextMtimes[relativePath] = parsed.mtimeMs;
   }
+
+  const testMapping = buildTestMapping([...sourceByRelativePath.keys()], nextGraph);
 
   return {
     version: CODEBASE_INDEX_VERSION,
     dependencyGraph: nextGraph,
+    apiSurface: nextApiSurface,
+    testMapping,
+    hotspots: current.hotspots,
     metadata: {
       generatedAt: new Date().toISOString(),
       rootDir,

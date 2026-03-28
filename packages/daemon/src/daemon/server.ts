@@ -184,6 +184,12 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
               opts.indexManager?.getResponse() ?? {
                 version: 1,
                 dependencyGraph: {},
+                apiSurface: {},
+                testMapping: {
+                  sourceToTests: {},
+                  testToSources: {},
+                },
+                hotspots: [],
                 metadata: {},
               }
             );
