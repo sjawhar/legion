@@ -238,9 +238,26 @@ If unrelated commits are in the ancestry, rebase to isolate your changes before 
 
 **Note:** `.legion/` handoff files (written in step 7.5) are expected in the diff — they are part of the PR deliverable, not build artifacts. Do not remove them or add `.legion/` to `.gitignore`.
 
-**CRITICAL: The PR body MUST include `Closes #$ISSUE_NUMBER`.** This is how GitHub links PRs to
-issues and auto-closes them on merge. Without it, merged PRs leave orphaned issues that stall
-the pipeline. This is NOT optional.
+**CRITICAL: The PR body MUST include closing keywords for every issue addressed by the PR.**
+At minimum include `Closes #$ISSUE_NUMBER` (the dispatched issue). If the plan or issue context
+indicates additional issues are fixed by the same PR, add one `Closes #<number>` line for each.
+Missing keywords leave orphaned issues and stall the pipeline.
+
+Before creating the PR, build the required closing-keyword list:
+
+```bash
+# Always include the dispatched issue
+REQUIRED_CLOSES="$ISSUE_NUMBER"
+
+# Add additional issue numbers from plan/issue context when this PR closes more issues.
+# Example:
+# REQUIRED_CLOSES="$REQUIRED_CLOSES 101 102"
+
+CLOSES_BLOCK=""
+for n in $REQUIRED_CLOSES; do
+  CLOSES_BLOCK="${CLOSES_BLOCK}Closes #${n}\n"
+done
+```
 
 ```bash
 jj describe -m "$LEGION_ISSUE_ID: [description]"
@@ -248,7 +265,7 @@ jj git push --named "$LEGION_ISSUE_ID"=@
 
 gh pr create --draft \
   --title "$LEGION_ISSUE_ID: [title]" \
-  --body "Closes #$ISSUE_NUMBER
+  --body "${CLOSES_BLOCK}
 
 ## Summary
 [summary]
@@ -258,9 +275,15 @@ gh pr create --draft \
   -R $OWNER/$REPO
 ```
 
-**Verify the PR body contains the closing keyword** after creation:
+**Verify the PR body contains all required closing keywords** after creation:
 ```bash
-gh pr view $LEGION_ISSUE_ID --json body --jq '.body' -R $OWNER/$REPO | grep -q 'Closes #'
+PR_BODY=$(gh pr view $LEGION_ISSUE_ID --json body --jq '.body' -R $OWNER/$REPO)
+for n in $REQUIRED_CLOSES; do
+  echo "$PR_BODY" | grep -q "Closes #$n" || {
+    echo "Missing closing keyword: Closes #$n"
+    exit 1
+  }
+done
 ```
 
 The issue ID in the branch/title preserves traceability for the controller.
