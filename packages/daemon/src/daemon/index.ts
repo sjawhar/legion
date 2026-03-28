@@ -1,6 +1,11 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { CodebaseIndexManager } from "../index/manager";
+import {
+  CODEBASE_INDEX_VERSION,
+  type CodebaseIndex,
+  createEmptyCodebaseIndexResponse,
+} from "../index/types";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
 import { modeToRole, TokenManager } from "./github-apps";
@@ -48,6 +53,33 @@ function resolveCodebaseIndexPath(config: DaemonConfig, legionId: string): strin
   }
 
   return path.join(config.paths.forLegion(legionId).legionStateDir, "index.json");
+}
+
+interface RuntimeIndexManager {
+  initialize: () => Promise<CodebaseIndex>;
+  incrementalUpdate: () => Promise<CodebaseIndex>;
+  rebuild: () => Promise<CodebaseIndex>;
+  getResponse: () => ReturnType<typeof createEmptyCodebaseIndexResponse> | CodebaseIndex;
+}
+
+function createNoopIndexManager(): RuntimeIndexManager {
+  const emptyIndex: CodebaseIndex = {
+    version: CODEBASE_INDEX_VERSION,
+    dependencyGraph: {},
+    metadata: {
+      generatedAt: new Date(0).toISOString(),
+      rootDir: "",
+      fileCount: 0,
+      mtimes: {},
+    },
+  };
+
+  return {
+    initialize: async () => emptyIndex,
+    incrementalUpdate: async () => emptyIndex,
+    rebuild: async () => emptyIndex,
+    getResponse: () => createEmptyCodebaseIndexResponse(),
+  };
 }
 
 function resolveDependencies(
@@ -150,11 +182,17 @@ export async function startDaemon(
 
   const sharedServePort = config.baseWorkerPort;
   const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
-  const indexManager = new CodebaseIndexManager(
-    config.legionDir ?? process.cwd(),
-    resolveCodebaseIndexPath(config, legionId),
-    { warn: (message) => console.warn(message) }
-  );
+  const hasIndexRoot = !!config.legionDir && existsSync(config.legionDir);
+  if (config.legionDir && !hasIndexRoot) {
+    console.warn(`Codebase index skipped: LEGION_DIR does not exist (${config.legionDir})`);
+  }
+
+  const indexManager: RuntimeIndexManager =
+    hasIndexRoot && config.legionDir
+      ? new CodebaseIndexManager(config.legionDir, resolveCodebaseIndexPath(config, legionId), {
+          warn: (message) => console.warn(message),
+        })
+      : createNoopIndexManager();
 
   const existingHealthy = await resolvedDeps.adapter.healthy();
   if (existingHealthy) {
@@ -206,9 +244,11 @@ export async function startDaemon(
     }
   }
 
-  const startedIndexBuildAt = Date.now();
-  await indexManager.initialize();
-  console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
+  if (hasIndexRoot) {
+    const startedIndexBuildAt = Date.now();
+    await indexManager.initialize();
+    console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
+  }
 
   let shuttingDown = false;
   let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
