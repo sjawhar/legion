@@ -70,13 +70,25 @@ jj new $PR_BRANCH  # Use the headRefName from the PR metadata
 
 Note the missing plan in your results — the planner workflow should have produced one.
 
-Also read the implementer handoff if available:
+Also read all prior handoffs for full context chain:
 
 ```bash
-legion handoff read --phase implement --workspace . 2>/dev/null || echo '{}'
+legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
-If present, note the `trickyParts`, `deviations`, and `openQuestions` to focus your testing accordingly. This is advisory — test all acceptance criteria regardless.
+Use this precedence order when handoff/context sources overlap:
+1. Issue body acceptance criteria (primary)
+2. Issue comments testing plan (`## Testing Plan`) (primary)
+3. Implement handoff (`trickyParts`, `deviations`, `openQuestions`) (implementation context)
+4. Plan handoff (`concerns`, `workflowRecommendation`) (advisory, additive)
+
+If present, note implement handoff `trickyParts`, `deviations`, and `openQuestions` to focus your testing accordingly.
+
+If present, use plan handoff `concerns` to shape stress/edge scenarios (for example, if the planner flagged race conditions, include concurrent-path verification).
+
+If present, follow relevant plan handoff `workflowRecommendation` guidance while executing tests.
+
+Plan handoff fields are optional/advisory — absence must not block execution. Continue with issue acceptance criteria and implement handoff context.
 
 Also check for cross-phase messages from earlier workers:
 
