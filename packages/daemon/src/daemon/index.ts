@@ -66,6 +66,12 @@ function createNoopIndexManager(): RuntimeIndexManager {
   const emptyIndex: CodebaseIndex = {
     version: CODEBASE_INDEX_VERSION,
     dependencyGraph: {},
+    apiSurface: {},
+    testMapping: {
+      sourceToTests: {},
+      testToSources: {},
+    },
+    hotspots: [],
     metadata: {
       generatedAt: new Date(0).toISOString(),
       rootDir: "",
