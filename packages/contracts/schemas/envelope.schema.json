@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://legion.dev/schemas/envelope.schema.json",
+  "type": "object",
+  "required": [
+    "event_id",
+    "source",
+    "source_event_id",
+    "topic",
+    "dedupe_key",
+    "issued_at",
+    "payload_summary",
+    "trace_id"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "source": {
+      "type": "string",
+      "enum": ["agent", "github", "slack", "whatsapp"]
+    },
+    "source_event_id": { "type": "string", "minLength": 1 },
+    "topic": { "type": "string", "minLength": 1 },
+    "dedupe_key": { "type": "string", "minLength": 1 },
+    "issued_at": { "type": "integer" },
+    "expires_at": { "type": "integer" },
+    "payload_summary": { "type": "string", "minLength": 1 },
+    "payload_ref": { "type": "string" },
+    "trace_id": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,12 @@
+services:
+  github:
+    build:
+      context: ../..
+      dockerfile: docker/github.Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PORT: ${ENVOY_GITHUB_PORT:-9010}
+      ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID}
+      NATS_URLS: ${NATS_URLS}
+      ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET}

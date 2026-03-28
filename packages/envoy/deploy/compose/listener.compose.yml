@@ -1,0 +1,21 @@
+services:
+  listener:
+    build:
+      context: ../..
+      dockerfile: docker/listener.Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      HOME: ${ENVOY_HOME}
+      PORT: ${ENVOY_LISTENER_PORT:-9020}
+      ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID}
+      NATS_URLS: ${NATS_URLS}
+      ENVOY_REGISTRY_DIR: ${ENVOY_REGISTRY_DIR}
+      ENVOY_HOST_BRIDGE: 127.0.0.1
+      ENVOY_OPENCODE_BIN: ${ENVOY_OPENCODE_BIN}
+      ENVOY_XDG_CONFIG_HOME: ${ENVOY_HOME}/.config
+      ENVOY_XDG_DATA_HOME: ${ENVOY_HOME}/.local/share
+      ENVOY_XDG_CACHE_HOME: ${ENVOY_HOME}/.cache
+    volumes:
+      - ${ENVOY_REGISTRY_DIR}:${ENVOY_REGISTRY_DIR}:ro
+      - ${ENVOY_HOME}:${ENVOY_HOME}
