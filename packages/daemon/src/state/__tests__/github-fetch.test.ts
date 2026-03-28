@@ -59,6 +59,87 @@ describe("fetchGitHubProjectItems", () => {
     });
   });
 
+  it("paginates organization project items and returns all pages", async () => {
+    let callCount = 0;
+    const mockRunner: CommandRunner = async (cmd: string[]) => {
+      callCount++;
+      const queryArg = cmd.find((arg) => arg.startsWith("query="));
+      expect(queryArg).toContain("organization(login:");
+
+      if (callCount === 1) {
+        expect(cmd).not.toContain("after=");
+        return {
+          stdout: JSON.stringify({
+            data: {
+              organization: {
+                projectV2: {
+                  items: {
+                    pageInfo: { hasNextPage: true, endCursor: "cursor1" },
+                    nodes: [
+                      {
+                        id: "item1",
+                        fieldValueByName: { name: "Todo" },
+                        labels: { labels: { nodes: [] } },
+                        content: {
+                          __typename: "Issue",
+                          number: 1,
+                          title: "Issue 1",
+                          url: "https://github.com/testorg/repo/issues/1",
+                          repository: { nameWithOwner: "testorg/repo" },
+                          linkedPullRequests: { nodes: [] },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+
+      expect(cmd).toContain("after=cursor1");
+      return {
+        stdout: JSON.stringify({
+          data: {
+            organization: {
+              projectV2: {
+                items: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    {
+                      id: "item2",
+                      fieldValueByName: { name: "In Progress" },
+                      labels: { labels: { nodes: [] } },
+                      content: {
+                        __typename: "Issue",
+                        number: 2,
+                        title: "Issue 2",
+                        url: "https://github.com/testorg/repo/issues/2",
+                        repository: { nameWithOwner: "testorg/repo" },
+                        linkedPullRequests: { nodes: [] },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+
+    const result = await fetchGitHubProjectItems("testorg", 1, mockRunner);
+    expect(callCount).toBe(2);
+    expect(result.items).toHaveLength(2);
+    expect((result.items[0].content as { number: number }).number).toBe(1);
+    expect((result.items[1].content as { number: number }).number).toBe(2);
+  });
+
   it("falls back to user query when organization query returns access error", async () => {
     let callCount = 0;
     const mockRunner: CommandRunner = async (cmd: string[]) => {
@@ -265,6 +346,57 @@ describe("fetchGitHubProjectItems", () => {
     expect((result.items[1].content as { number: number }).number).toBe(2);
   });
 
+  it("throws when pageInfo hasNextPage is true but endCursor is null", async () => {
+    let callCount = 0;
+    const mockRunner: CommandRunner = async (cmd: string[]) => {
+      callCount++;
+      const queryArg = cmd.find((arg) => arg.startsWith("query="));
+      expect(queryArg).toContain("organization(login:");
+
+      return {
+        stdout: JSON.stringify({
+          data: {
+            organization: {
+              projectV2: {
+                items: {
+                  pageInfo: { hasNextPage: true, endCursor: null },
+                  nodes: [
+                    {
+                      id: "item1",
+                      fieldValueByName: { name: "Todo" },
+                      labels: { labels: { nodes: [] } },
+                      content: {
+                        __typename: "Issue",
+                        number: 1,
+                        title: "Issue 1",
+                        url: "https://github.com/testorg/repo/issues/1",
+                        repository: { nameWithOwner: "testorg/repo" },
+                        linkedPullRequests: { nodes: [] },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+
+    try {
+      await fetchGitHubProjectItems("testorg", 1, mockRunner);
+      throw new Error("Expected fetchGitHubProjectItems to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        "GraphQL pagination error: hasNextPage=true but endCursor is null"
+      );
+    }
+    expect(callCount).toBe(1);
+  });
+
   it("throws error when both organization and user queries fail", async () => {
     let callCount = 0;
     const mockRunner: CommandRunner = async (cmd: string[]) => {
@@ -287,9 +419,13 @@ describe("fetchGitHubProjectItems", () => {
       }
     };
 
-    await expect(fetchGitHubProjectItems("nonexistent", 1, mockRunner)).rejects.toThrow(
-      "GraphQL errors: User not found"
-    );
+    try {
+      await fetchGitHubProjectItems("nonexistent", 1, mockRunner);
+      throw new Error("Expected fetchGitHubProjectItems to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("GraphQL errors: User not found");
+    }
 
     expect(callCount).toBe(2);
   });
@@ -308,8 +444,12 @@ describe("fetchGitHubProjectItems", () => {
       };
     };
 
-    await expect(fetchGitHubProjectItems("testorg", 1, mockRunner)).rejects.toThrow(
-      "GraphQL errors: Rate limit exceeded"
-    );
+    try {
+      await fetchGitHubProjectItems("testorg", 1, mockRunner);
+      throw new Error("Expected fetchGitHubProjectItems to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("GraphQL errors: Rate limit exceeded");
+    }
   });
 });

@@ -373,6 +373,10 @@ export async function fetchGitHubProjectItems(
 
     hasNextPage = items.pageInfo.hasNextPage;
     cursor = items.pageInfo.endCursor;
+
+    if (hasNextPage && !cursor) {
+      throw new Error("GraphQL pagination error: hasNextPage=true but endCursor is null");
+    }
   }
 
   return { items: allItems };
