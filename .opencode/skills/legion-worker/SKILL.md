@@ -59,6 +59,18 @@ jj rebase -d main
 jj new  # Fresh commit for this session
 ```
 
+Load repo-specific config from workspace root (if present):
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Then:
+- Recognize and apply keys documented in @references/config.md
+- Echo recognized keys + effective values before workflow-specific work
+- If file is missing or malformed, proceed with defaults (no errors)
+- Ignore unknown keys
+
 Fetch per-worker environment variables from the daemon (non-blocking):
 
 ```bash

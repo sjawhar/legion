@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import type { CodebaseIndexResponse } from "../index/types";
 import { getBackend, isBackendName } from "../state/backends/index";
 import { buildCollectedState } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
@@ -50,6 +51,10 @@ export interface ServerOptions {
   tmuxSession?: string;
   getWorkerAdapter?: (mode: WorkerModeLiteral) => RuntimeAdapter;
   tokenManager?: TokenManager;
+  indexManager?: {
+    getResponse: () => CodebaseIndexResponse;
+    rebuild: () => Promise<CodebaseIndexResponse>;
+  };
 }
 
 interface ErrorResponse {
@@ -171,6 +176,32 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
             runtime: opts.runtime ?? "opencode",
             ...(opts.tmuxSession ? { tmuxSession: opts.tmuxSession } : {}),
           });
+        }
+
+        if (url.pathname === "/index") {
+          if (method === "GET") {
+            return jsonResponse(
+              opts.indexManager?.getResponse() ?? {
+                version: 1,
+                dependencyGraph: {},
+                metadata: {},
+              }
+            );
+          }
+
+          if (method === "POST") {
+            if (!opts.indexManager) {
+              return serverError("index_manager_unavailable");
+            }
+            return jsonResponse(await opts.indexManager.rebuild());
+          }
+        }
+
+        if (method === "POST" && url.pathname === "/index/rebuild") {
+          if (!opts.indexManager) {
+            return serverError("index_manager_unavailable");
+          }
+          return jsonResponse(await opts.indexManager.rebuild());
         }
 
         if (segments.length === 1 && segments[0] === "workers") {

@@ -59,6 +59,22 @@ Extract:
 - Comments with additional context
 - Acceptance criteria if present
 
+### 1.3. Load Repo Config
+
+Read repo config from workspace root:
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Apply @references/config.md semantics for `plan` mode:
+- Parse recognized keys
+- Merge `phases.plan.*` overrides on top of top-level values
+- Echo recognized keys/effective values
+- Missing/malformed config falls back to defaults
+
+Use config constraints to shape downstream guidance in the plan preamble (e.g., reporter approval gate, required specific-task testing, taiga evidence, merge restrictions).
+
 ### 1.2. Check for Project-Specific Skills
 
 Before diving into planning, check if the repo has skills relevant to this work:
@@ -73,6 +89,8 @@ Before diving into planning, check if the repo has skills relevant to this work:
 4. Include any relevant skill invocations in the testing plan (step 3) so downstream workers use them
 
 Also check AGENTS.md and CLAUDE.md for project-specific conventions that should inform the plan.
+
+If config sets `skills.required` (or `phases.plan.skills.required`), treat them as additive requirements and include them in downstream `requiredSkills` recommendations.
 
 **Output of this step:** A categorized skill list to carry forward to steps 5 and 5.5:
 
@@ -186,6 +204,9 @@ Do NOT ask the user questions interactively. If requirements are unclear:
 
 Metis pre-analysis:
 [analysis output from step 1.5]
+
+Repo config constraints from .legion/config.yml:
+[recognized keys and effective values]
 
 Feature description:
 [Issue title + description + comments]

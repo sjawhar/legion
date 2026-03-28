@@ -15,6 +15,25 @@ jj rebase -d main
 
 Resolve any conflicts before proceeding.
 
+### 0.5. Load Repo Config
+
+Read repo config from workspace root:
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Apply @references/config.md semantics:
+- Parse and apply recognized keys for `test` mode
+- Merge `phases.test.*` overrides on top of top-level values
+- Echo recognized keys/effective values for auditability
+- Missing/malformed config falls back to defaults
+
+Test-mode config keys:
+- `testing.require_specific_task`
+- `testing.require_taiga_evidence`
+- `skills.required` (plus `phases.test.skills.required`)
+
 ## Workflow
 
 ### 1. Fetch Context
@@ -47,6 +66,8 @@ legion handoff read --phase plan --workspace . 2>/dev/null || echo '{}'
 If the plan handoff includes a `requiredSkills.test` array, invoke each listed skill before proceeding. This replaces the repo-specific skill check above for this run.
 
 If `requiredSkills` is absent or the plan handoff is missing, rely on the repo-specific skill check above as the fallback (current behavior, no regression).
+
+If config sets `skills.required`, invoke those skills additively with plan handoff skills.
 
 Then fetch PR metadata and check out the branch:
 
@@ -169,6 +190,8 @@ done
 
 For each acceptance criterion, simulate the user story: navigate to the relevant screen, perform the action, verify the outcome. Use appropriate tools:
 
+If `testing.require_specific_task=true`, identify the exact blocked task from the issue/plan and include explicit evidence that this exact task was run (not a generic smoke scenario).
+
 - **Playwright / agent-browser** for web UIs (navigate, click, fill forms, verify results)
 - **curl / HTTP requests** for APIs (hit endpoints, verify responses)
 - **CLI commands** for command-line tools (run commands, verify output)
@@ -188,6 +211,8 @@ Do NOT accept "it looks like it works" — capture actual artifacts.
 - Do NOT downgrade a failure to a "minor issue" or "observation"
 - Do NOT write "mostly works" or "partially passes" — it either passes or it fails
 - If you cannot verify a criterion because you lack access to reference material, external services, or credentials — FAIL the test and explain what's missing. Silent degradation is not acceptable.
+
+If `testing.require_taiga_evidence=true` and you cannot include a Taiga job URL in results, mark the run as FAIL.
 
 **Domain-specific verification:** If the issue references external specifications, designs, screenshots, or reference material, verify the implementation matches. Functional correctness alone is insufficient — if the issue says "make it look like X" and you can't verify it looks like X, that's a test failure, not a pass with a note.
 
@@ -219,7 +244,11 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 - [What was missing or confusing?]
 
 ### Observations
-- [UX issues, error messages, edge cases noticed]" -R $OWNER/$REPO
+- [UX issues, error messages, edge cases noticed]
+
+### Config Compliance
+- require_specific_task: [true/false] — [evidence]
+- require_taiga_evidence: [true/false] — [Taiga URL or not required]" -R $OWNER/$REPO
 ```
 
 ### 6.5. Write Handoff Data
@@ -265,7 +294,11 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Behavioral Test Re
 - [What was missing or confusing?]
 
 ### Observations
-- [UX issues, error messages, edge cases noticed]")
+- [UX issues, error messages, edge cases noticed]
+
+### Config Compliance
+- require_specific_task: [true/false] — [evidence]
+- require_taiga_evidence: [true/false] — [Taiga URL or not required]")
 ```
 
 ### 7. Signal Completion

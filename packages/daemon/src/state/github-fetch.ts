@@ -28,6 +28,9 @@ interface GitHubProjectItemNode {
         repository?: {
           nameWithOwner: string;
         };
+        issueDependenciesSummary?: {
+          blockedBy: number;
+        } | null;
         linkedPullRequests?: {
           nodes: Array<{ url: string }>;
         } | null;
@@ -95,6 +98,7 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
               title
               url
               repository { nameWithOwner }
+              issueDependenciesSummary { blockedBy }
               linkedPullRequests: closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
                 nodes { url }
               }
@@ -145,6 +149,7 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
               title
               url
               repository { nameWithOwner }
+              issueDependenciesSummary { blockedBy }
               linkedPullRequests: closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
                 nodes { url }
               }
@@ -216,6 +221,8 @@ function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown>
     content: itemContent,
     status: node.fieldValueByName?.name ?? null,
     labels,
+    isBlocked:
+      typename === "Issue" ? (content.issueDependenciesSummary?.blockedBy ?? 0) > 0 : false,
     ...(linkedPRs.length > 0 ? { "linked pull requests": linkedPRs } : {}),
   };
 }
@@ -373,6 +380,10 @@ export async function fetchGitHubProjectItems(
 
     hasNextPage = items.pageInfo.hasNextPage;
     cursor = items.pageInfo.endCursor;
+
+    if (hasNextPage && !cursor) {
+      throw new Error("GraphQL pagination error: hasNextPage=true but endCursor is null");
+    }
   }
 
   return { items: allItems };
