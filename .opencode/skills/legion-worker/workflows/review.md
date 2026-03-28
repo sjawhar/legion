@@ -53,6 +53,13 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 
 If present, implementer's `trickyParts` and `deviations` can highlight areas to review more carefully. This is advisory.
 
+Also check for plan-phase context and apply it explicitly during review:
+- If `plan.concerns` exists, verify the implementation addresses each concern or document why a concern is not applicable.
+- If `plan.learningsUsed` references solution docs/patterns, verify the implementation follows those patterns (or justify deviations).
+- If `plan.workflowRecommendation` includes review-relevant guidance, follow it.
+
+Plan-phase fields are optional/advisory — absence must not block review execution. Continue using issue requirements and implementation evidence.
+
 **Skill loading from plan handoff:** If the plan handoff includes a `requiredSkills.review` array, invoke each listed skill before proceeding to step 2. This replaces the manual skill check above for this run.
 
 If `requiredSkills` is absent or the plan handoff is missing, rely on the manual skill check above as the fallback (current behavior, no regression).
