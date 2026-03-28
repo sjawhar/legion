@@ -14,16 +14,16 @@ import type { AgentDefinition } from "./types";
 export type { AgentDefinition } from "./types";
 
 const DEFAULT_MODELS: Record<string, string> = {
-  orchestrator: "anthropic/claude-sonnet-4-20250514",
-  executor: "anthropic/claude-sonnet-4-20250514",
+  orchestrator: "anthropic/claude-sonnet-4-6",
+  executor: "anthropic/claude-sonnet-4-6",
   oracle: "anthropic/claude-opus-4-6",
-  explorer: "anthropic/claude-sonnet-4-20250514",
-  librarian: "anthropic/claude-sonnet-4-20250514",
-  metis: "anthropic/claude-sonnet-4-20250514",
-  momus: "anthropic/claude-sonnet-4-20250514",
-  multimodal: "anthropic/claude-sonnet-4-20250514",
-  conductor: "anthropic/claude-sonnet-4-20250514",
-  "simplicity-reviewer": "anthropic/claude-sonnet-4-20250514",
+  explorer: "anthropic/claude-sonnet-4-6",
+  librarian: "anthropic/claude-sonnet-4-6",
+  metis: "anthropic/claude-sonnet-4-6",
+  momus: "anthropic/claude-sonnet-4-6",
+  multimodal: "anthropic/claude-sonnet-4-6",
+  conductor: "anthropic/claude-sonnet-4-6",
+  "simplicity-reviewer": "anthropic/claude-sonnet-4-6",
 };
 
 function getModel(config: PluginConfig | undefined, agentName: string): string {
