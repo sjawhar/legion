@@ -36,7 +36,7 @@ let mockedRegistry: Record<
 > = {};
 let mockedAllocatedPorts = { daemonPort: 13370, servePort: 13381 };
 
-import { startDaemon } from "../index";
+import { pruneStaleWorkers, STALE_WORKER_TTL_MS, startDaemon } from "../index";
 
 type TimeoutCallback = (...args: unknown[]) => Promise<void> | void;
 
@@ -154,6 +154,7 @@ function startDaemonForTest(
 ): Promise<Awaited<ReturnType<typeof startDaemon>>> {
   return startDaemon(
     {
+      staleWorkerTtlMs: Number.MAX_SAFE_INTEGER,
       paths: TEST_PATHS,
       readLegionsRegistry: async () => mockedRegistry,
       allocatePort: () => mockedAllocatedPorts,
@@ -1082,5 +1083,237 @@ describe("daemon entry", () => {
     } finally {
       console.warn = originalWarn;
     }
+  });
+
+  it("starts HTTP server before re-creating worker sessions", async () => {
+    const callOrder: string[] = [];
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: {
+            [baseEntry.id]: baseEntry,
+            [secondEntry.id]: secondEntry,
+          },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: {
+          ...makeAdapter(),
+          createSession: async (sessionId: string, _workspace: string) => {
+            callOrder.push(`createSession:${sessionId}`);
+            return sessionId;
+          },
+        },
+        startServer: (opts) => {
+          callOrder.push("startServer");
+          return {
+            server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          };
+        },
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    const serverIndex = callOrder.indexOf("startServer");
+    const workerSessionIndices = callOrder
+      .map((call, i) => ({ call, i }))
+      .filter(
+        ({ call }) =>
+          call === `createSession:${baseEntry.sessionId}` ||
+          call === `createSession:${secondEntry.sessionId}`
+      )
+      .map(({ i }) => i);
+
+    expect(serverIndex).toBeGreaterThanOrEqual(0);
+    expect(workerSessionIndices.length).toBe(2);
+    for (const idx of workerSessionIndices) {
+      expect(idx).toBeGreaterThan(serverIndex);
+    }
+  });
+
+  it("prunes stale workers from state file on startup", async () => {
+    const writeStateCalls: Array<{ path: string; state: PersistedWorkerState }> = [];
+    const NOW = Date.now();
+    const staleEntry: WorkerEntry = {
+      ...baseEntry,
+      id: "stale-worker",
+      sessionId: "ses-stale",
+      startedAt: new Date(NOW - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    const freshEntry: WorkerEntry = {
+      ...baseEntry,
+      id: "fresh-worker",
+      sessionId: "ses-fresh",
+      startedAt: new Date(NOW - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+        staleWorkerTtlMs: STALE_WORKER_TTL_MS,
+      },
+      {
+        readStateFile: async () => ({
+          workers: {
+            [staleEntry.id]: staleEntry,
+            [freshEntry.id]: freshEntry,
+          },
+          crashHistory: {},
+        }),
+        writeStateFile: async (p, state) => {
+          writeStateCalls.push({ path: p, state });
+        },
+        adapter: makeAdapter(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    // Should write pruned state (stale removed, fresh kept)
+    expect(writeStateCalls.length).toBeGreaterThanOrEqual(1);
+    const pruneWrite = writeStateCalls[0];
+    expect(pruneWrite.state.workers).toHaveProperty("fresh-worker");
+    expect(pruneWrite.state.workers).not.toHaveProperty("stale-worker");
+  });
+
+  it("does not rewrite state file when no workers are stale", async () => {
+    const writeStateCalls: Array<{ path: string; state: PersistedWorkerState }> = [];
+    const freshEntry: WorkerEntry = {
+      ...baseEntry,
+      id: "fresh-worker",
+      sessionId: "ses-fresh",
+      startedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+        staleWorkerTtlMs: STALE_WORKER_TTL_MS,
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [freshEntry.id]: freshEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async (p, state) => {
+          writeStateCalls.push({ path: p, state });
+        },
+        adapter: makeAdapter(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    // No pruning write should occur — only shutdown writes
+    expect(writeStateCalls).toHaveLength(0);
+  });
+});
+
+describe("pruneStaleWorkers", () => {
+  const NOW = new Date("2026-03-28T12:00:00.000Z").getTime();
+
+  it("keeps workers newer than 7 days", () => {
+    const workers: Record<string, WorkerEntry> = {
+      fresh: {
+        ...baseEntry,
+        id: "fresh",
+        startedAt: new Date(NOW - 3 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+    };
+    const result = pruneStaleWorkers(workers, STALE_WORKER_TTL_MS, NOW);
+    expect(Object.keys(result)).toEqual(["fresh"]);
+  });
+
+  it("prunes workers older than 7 days", () => {
+    const workers: Record<string, WorkerEntry> = {
+      stale: {
+        ...baseEntry,
+        id: "stale",
+        startedAt: new Date(NOW - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+    };
+    const result = pruneStaleWorkers(workers, STALE_WORKER_TTL_MS, NOW);
+    expect(Object.keys(result)).toEqual([]);
+  });
+
+  it("prunes workers with invalid startedAt dates", () => {
+    const workers: Record<string, WorkerEntry> = {
+      invalid: {
+        ...baseEntry,
+        id: "invalid",
+        startedAt: "not-a-date",
+      },
+    };
+    const result = pruneStaleWorkers(workers, STALE_WORKER_TTL_MS, NOW);
+    expect(Object.keys(result)).toEqual([]);
+  });
+
+  it("handles mix of fresh and stale workers", () => {
+    const workers: Record<string, WorkerEntry> = {
+      fresh: {
+        ...baseEntry,
+        id: "fresh",
+        startedAt: new Date(NOW - 1 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+      stale: {
+        ...baseEntry,
+        id: "stale",
+        startedAt: new Date(NOW - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+    };
+    const result = pruneStaleWorkers(workers, STALE_WORKER_TTL_MS, NOW);
+    expect(Object.keys(result)).toEqual(["fresh"]);
+  });
+
+  it("returns empty for empty input", () => {
+    const result = pruneStaleWorkers({}, STALE_WORKER_TTL_MS, NOW);
+    expect(result).toEqual({});
+  });
+
+  it("keeps workers exactly at the 7-day boundary", () => {
+    const workers: Record<string, WorkerEntry> = {
+      boundary: {
+        ...baseEntry,
+        id: "boundary",
+        startedAt: new Date(NOW - STALE_WORKER_TTL_MS).toISOString(),
+      },
+    };
+    const result = pruneStaleWorkers(workers, STALE_WORKER_TTL_MS, NOW);
+    expect(Object.keys(result)).toEqual(["boundary"]);
+  });
+
+  it("prunes workers 1ms past the boundary", () => {
+    const workers: Record<string, WorkerEntry> = {
+      expired: {
+        ...baseEntry,
+        id: "expired",
+        startedAt: new Date(NOW - STALE_WORKER_TTL_MS - 1).toISOString(),
+      },
+    };
+    const result = pruneStaleWorkers(workers, STALE_WORKER_TTL_MS, NOW);
+    expect(Object.keys(result)).toEqual([]);
   });
 });

@@ -27,10 +27,12 @@ export interface DaemonConfig {
   issueBackend: "linear" | "github";
   runtime: "opencode" | "claude-code";
   githubApps?: GitHubAppsConfig;
+  staleWorkerTtlMs: number;
 }
 
 const BASE_DAEMON_PORT = 13370;
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
+const DEFAULT_STALE_WORKER_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const DEFAULT_BASE_WORKER_PORT = 13381;
 
 function parseNumber(value: string | undefined, fallback: number): number {
@@ -107,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     legionDir,
     paths,
     checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
+    staleWorkerTtlMs: DEFAULT_STALE_WORKER_TTL_MS,
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
     stateFilePath,
     logDir,

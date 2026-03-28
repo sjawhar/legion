@@ -19,6 +19,7 @@ import { RoleServeManager } from "./multi-serve";
 import { isPortFree } from "./ports";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter } from "./runtime/types";
+import type { WorkerEntry } from "./serve-manager";
 import { startServer } from "./server";
 import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
 
@@ -140,6 +141,26 @@ function buildControllerEnv(config: DaemonConfig): Record<string, string> {
   };
 }
 
+export const STALE_WORKER_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+export function pruneStaleWorkers(
+  workers: Record<string, WorkerEntry>,
+  ttlMs: number = STALE_WORKER_TTL_MS,
+  nowMs: number = Date.now()
+): Record<string, WorkerEntry> {
+  const cutoff = nowMs - ttlMs;
+  const result: Record<string, WorkerEntry> = {};
+  for (const [id, entry] of Object.entries(workers)) {
+    const startedAt = new Date(entry.startedAt).getTime();
+    if (Number.isNaN(startedAt) || startedAt < cutoff) {
+      console.log(`Pruning stale worker ${id} (started ${entry.startedAt})`);
+    } else {
+      result[id] = entry;
+    }
+  }
+  return result;
+}
+
 export async function startDaemon(
   overrides: DaemonOverrides = {},
   deps?: Partial<DaemonDependencies>
@@ -239,23 +260,18 @@ export async function startDaemon(
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
   let controllerState: ControllerState | undefined = preState.controller;
 
-  for (const entry of Object.values(preState.workers)) {
-    try {
-      const actualId = await resolvedDeps.adapter.createSession(entry.sessionId, entry.workspace);
-      if (actualId !== entry.sessionId) {
-        console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
-      }
-    } catch (error) {
-      console.error(`Failed to re-create session for ${entry.id}: ${error}`);
-    }
+  // Prune stale workers (>7 days old) to prevent startup blocking
+  const prunedWorkers = pruneStaleWorkers(preState.workers, config.staleWorkerTtlMs);
+  const prunedCount = Object.keys(preState.workers).length - Object.keys(prunedWorkers).length;
+  if (prunedCount > 0) {
+    console.log(`Pruned ${prunedCount} stale worker(s) from state file`);
+    await resolvedDeps.writeStateFile(config.stateFilePath, {
+      ...preState,
+      workers: prunedWorkers,
+    });
   }
 
-  if (hasIndexRoot) {
-    const startedIndexBuildAt = Date.now();
-    await indexManager.initialize();
-    console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
-  }
-
+  // Start HTTP server BEFORE session recreation so the daemon is always reachable
   let shuttingDown = false;
   let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
   let stopServer: () => void = () => {};
@@ -347,6 +363,24 @@ export async function startDaemon(
     pid: process.pid,
     startedAt: new Date().toISOString(),
   });
+
+  // Re-create sessions for persisted workers (after HTTP server is running)
+  for (const entry of Object.values(prunedWorkers)) {
+    try {
+      const actualId = await resolvedDeps.adapter.createSession(entry.sessionId, entry.workspace);
+      if (actualId !== entry.sessionId) {
+        console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
+      }
+    } catch (error) {
+      console.error(`Failed to re-create session for ${entry.id}: ${error}`);
+    }
+  }
+
+  if (hasIndexRoot) {
+    const startedIndexBuildAt = Date.now();
+    await indexManager.initialize();
+    console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
+  }
 
   const existingController = controllerState;
 
