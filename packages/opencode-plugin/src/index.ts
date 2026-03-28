@@ -37,6 +37,7 @@ interface AgentConfigEntry {
   temperature: number;
   prompt: string;
   description: string;
+  mode?: "primary" | "subagent" | "all";
   permission?: PermissionConfig;
 }
 
@@ -100,6 +101,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     name: "opencode-legion",
     config: async (opencodeConfig: Record<string, unknown>) => {
       const agents = createAgents(pluginConfig);
+      const PRIMARY_AGENTS = new Set(["orchestrator", "conductor"]);
       const agentMap: Record<string, AgentConfigEntry> = {};
       for (const agent of agents) {
         agentMap[agent.name] = {
@@ -107,6 +109,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
           temperature: agent.config.temperature,
           prompt: agent.config.prompt,
           description: agent.description,
+          mode: PRIMARY_AGENTS.has(agent.name) ? "primary" : "subagent",
         };
       }
 
