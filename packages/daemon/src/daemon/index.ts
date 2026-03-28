@@ -1,12 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import { modeToRole, TokenManager } from "./github-apps";
 import {
   allocatePort,
   readLegionsRegistry,
   removeLegionEntry,
   writeLegionEntry,
 } from "./legions-registry";
+import { RoleServeManager } from "./multi-serve";
 import { isPortFree } from "./ports";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter } from "./runtime/types";
@@ -151,6 +153,30 @@ export async function startDaemon(
     console.log(`Shared serve started on port ${sharedServePort}`);
   }
 
+  // Initialize per-role serves for credential isolation (when GitHub Apps configured)
+  let roleServeManager: RoleServeManager | undefined;
+  let tokenManager: TokenManager | undefined;
+  if (config.githubApps) {
+    tokenManager = new TokenManager(config.githubApps);
+    roleServeManager = new RoleServeManager({
+      githubApps: config.githubApps,
+      tokenManager,
+      runtime: config.runtime,
+      basePort: sharedServePort + 1,
+      shortId: legionId.slice(0, 8),
+      fallbackAdapter: resolvedDeps.adapter,
+    });
+    try {
+      await roleServeManager.start(buildControllerEnv(config), controllerWorkspace, config.logDir);
+      const entries = roleServeManager.getEntries();
+      console.log(`Role serves started: ${entries.map((e) => `${e.role}:${e.port}`).join(", ")}`);
+    } catch (error) {
+      console.error(`Failed to start role serves: ${error}`);
+      console.error("Falling back to shared serve for all workers");
+      roleServeManager = undefined;
+    }
+  }
+
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
   let controllerState: ControllerState | undefined = preState.controller;
 
@@ -185,6 +211,9 @@ export async function startDaemon(
     } catch {}
 
     await resolvedDeps.adapter.stop();
+    if (roleServeManager) {
+      await roleServeManager.stop();
+    }
 
     controllerState = undefined;
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -221,6 +250,10 @@ export async function startDaemon(
             ? `legion-${config.legionId}`
             : undefined,
         getControllerState: () => controllerState,
+        getWorkerAdapter: roleServeManager
+          ? (mode) => roleServeManager.getAdapterForMode(mode)
+          : undefined,
+        tokenManager,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
@@ -358,6 +391,38 @@ export async function startDaemon(
             }
           } catch (error) {
             console.error(`Failed to restart shared serve: ${error}`);
+          }
+        }
+
+        // Check role serves health
+        if (roleServeManager?.hasRoleServes()) {
+          const unhealthyRoles = await roleServeManager.checkHealth();
+          for (const role of unhealthyRoles) {
+            console.error(`Role serve '${role}' is unhealthy, restarting...`);
+            try {
+              await roleServeManager.restartRole(
+                role,
+                buildControllerEnv(config),
+                controllerWorkspace,
+                config.logDir
+              );
+              console.log(`Role serve '${role}' restarted`);
+              // Re-create sessions for workers on this role
+              const roleAdapter = roleServeManager.getAdapterForRole(role);
+              const state = await resolvedDeps.readStateFile(config.stateFilePath);
+              for (const workerEntry of Object.values(state.workers)) {
+                try {
+                  const workerMode = workerEntry.id.split("-").pop();
+                  if (workerMode && modeToRole(workerMode) === role) {
+                    await roleAdapter.createSession(workerEntry.sessionId, workerEntry.workspace);
+                  }
+                } catch {
+                  // Best effort — worker may not match this role
+                }
+              }
+            } catch (restartError) {
+              console.error(`Failed to restart role serve '${role}': ${restartError}`);
+            }
           }
         }
       } finally {

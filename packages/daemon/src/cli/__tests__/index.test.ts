@@ -36,6 +36,7 @@ import {
   getDaemonPort,
   legionsCommand,
   loadLegionsCache,
+  parseEnvJson,
   promptCommand,
   resetCrashesCommand,
   startCommand,
@@ -281,6 +282,53 @@ describe("cmdDispatch", () => {
     expect(JSON.parse((promptInit as RequestInit).body as string)).toEqual({
       text: "/legion-worker implement mode for LEG-42",
     });
+  });
+
+  it("sends env in POST body when provided", async () => {
+    const fetchMock = installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-env" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    });
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13371,
+      repo: "sjawhar/legion",
+      env: { GH_TOKEN: "ghs_test", GIT_AUTHOR_NAME: "bot[bot]" },
+    });
+
+    const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
+    const body = JSON.parse((postInit as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.env).toEqual({ GH_TOKEN: "ghs_test", GIT_AUTHOR_NAME: "bot[bot]" });
+  });
+
+  it("does not include env in POST body when not provided", async () => {
+    const fetchMock = installFetchMock((input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/health")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-noenv" }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    });
+    await cmdDispatch("LEG-42", "implement", {
+      daemonPort: 13371,
+      repo: "sjawhar/legion",
+    });
+
+    const [, postInit] = fetchMock.mock.calls[1] as FetchCall;
+    const body = JSON.parse((postInit as RequestInit).body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("env");
   });
 
   it("uses workspace for backward compatibility when provided", async () => {
@@ -1261,5 +1309,26 @@ describe("CLI XDG path migration", () => {
       }
       fs.rmSync(stateHome, { recursive: true, force: true });
     }
+  });
+});
+
+describe("parseEnvJson", () => {
+  it("rejects invalid JSON", () => {
+    expect(() => parseEnvJson("not json")).toThrow("Invalid --env value: must be valid JSON");
+  });
+
+  it("rejects non-string values", () => {
+    expect(() => parseEnvJson('{"KEY": 123}')).toThrow(
+      'Invalid --env value: key "KEY" must have a string value'
+    );
+  });
+
+  it("rejects array value", () => {
+    expect(() => parseEnvJson('["a", "b"]')).toThrow("Invalid --env value: must be a JSON object");
+  });
+
+  it("parses valid JSON object", () => {
+    const result = parseEnvJson('{"KEY": "VALUE"}');
+    expect(result).toEqual({ KEY: "VALUE" });
   });
 });

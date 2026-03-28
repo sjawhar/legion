@@ -1025,4 +1025,156 @@ describe("daemon server", () => {
       expect(workerIds.length).toBe(5);
     });
   });
+
+  describe("per-worker env", () => {
+    it("POST /workers stores env and GET /workers/{id}/env returns it", async () => {
+      await startTestServer();
+      const createRes = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-500",
+          mode: "implement",
+          workspace: "/tmp/work-500",
+          env: { GH_TOKEN: "ghs_test", GIT_AUTHOR_NAME: "bot[bot]" },
+        }),
+      });
+      expect(createRes.status).toBe(200);
+      const created = (await createRes.json()) as { id: string };
+
+      const envRes = await requestJson(`/workers/${created.id}/env`);
+      expect(envRes.status).toBe(200);
+      const envBody = (await envRes.json()) as { env: Record<string, string> };
+      // Credential vars are stripped from the response
+      expect(envBody.env).toEqual({});
+    });
+
+    it("GET /workers/{id}/env returns empty when no env set", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-501",
+          mode: "review",
+          workspace: "/tmp/work-501",
+        }),
+      });
+
+      const envRes = await requestJson("/workers/eng-501-review/env");
+      expect(envRes.status).toBe(200);
+      const envBody = (await envRes.json()) as { env: Record<string, string> };
+      expect(envBody.env).toEqual({});
+    });
+
+    it("GET /workers list does not leak env", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-502",
+          mode: "implement",
+          workspace: "/tmp/work-502",
+          env: { SECRET: "should-not-leak", CUSTOM_VAR: "visible" },
+        }),
+      });
+
+      const listRes = await requestJson("/workers");
+      expect(listRes.status).toBe(200);
+      const workers = (await listRes.json()) as Array<Record<string, unknown>>;
+      for (const w of workers) {
+        expect(w).not.toHaveProperty("env");
+      }
+    });
+
+    it("GET /workers/{id} does not leak env", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-503",
+          mode: "implement",
+          workspace: "/tmp/work-503",
+          env: { SECRET: "should-not-leak" },
+        }),
+      });
+
+      const detailRes = await requestJson("/workers/eng-503-implement");
+      expect(detailRes.status).toBe(200);
+      const body = (await detailRes.json()) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("env");
+    });
+
+    it("PATCH /workers/{id} response does not leak env", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-504",
+          mode: "implement",
+          workspace: "/tmp/work-504",
+          env: { SECRET: "should-not-leak" },
+        }),
+      });
+
+      const patchRes = await requestJson("/workers/eng-504-implement", {
+        method: "PATCH",
+        body: JSON.stringify({ status: "stopped" }),
+      });
+      expect(patchRes.status).toBe(200);
+      const body = (await patchRes.json()) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("env");
+    });
+  });
+
+  it("GET /credentials/{role} endpoint is removed", async () => {
+    await startTestServer();
+    const res = await requestJson("/credentials/impl");
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /workers/{id}/env strips credential vars from response", async () => {
+    await startTestServer();
+    await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-510",
+        mode: "implement",
+        workspace: "/tmp/work-510",
+        env: {
+          GH_TOKEN: "ghs_secret",
+          GIT_AUTHOR_NAME: "bot[bot]",
+          GIT_AUTHOR_EMAIL: "bot@example.com",
+          GIT_COMMITTER_NAME: "bot[bot]",
+          GIT_COMMITTER_EMAIL: "bot@example.com",
+          LEGION_APP_ROLE: "impl",
+          CUSTOM_VAR: "visible",
+        },
+      }),
+    });
+
+    const envRes = await requestJson("/workers/eng-510-implement/env");
+    expect(envRes.status).toBe(200);
+    const envBody = (await envRes.json()) as { env: Record<string, string> };
+    // Only non-credential vars should be returned
+    expect(envBody.env).toEqual({ CUSTOM_VAR: "visible" });
+    // Credential vars must not be present
+    expect(envBody.env).not.toHaveProperty("GH_TOKEN");
+    expect(envBody.env).not.toHaveProperty("GIT_AUTHOR_NAME");
+    expect(envBody.env).not.toHaveProperty("LEGION_APP_ROLE");
+  });
+
+  it("POST /workers rejects non-string env values", async () => {
+    await startTestServer();
+    const res = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-511",
+        mode: "implement",
+        workspace: "/tmp/work-511",
+        env: { GOOD: "string", BAD: 123 },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('env values must be strings (key "BAD")');
+  });
 });
