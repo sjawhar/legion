@@ -33,6 +33,8 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
    lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
 4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
+4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST attempt it before adding `worker-done`. The `|| true` means CLI failures don't block you, but skipping the attempt is not acceptable. If the write fails, note it in your exit comment.
+4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST attempt it before adding `worker-done`. The `|| true` means CLI failures don't block you, but skipping the attempt is not acceptable. If the write fails, note it in your exit comment.
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
 ## Skill Discipline
