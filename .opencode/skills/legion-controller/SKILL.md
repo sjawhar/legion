@@ -19,6 +19,73 @@ Required:
 - `LEGION_SHORT_ID` - short ID for daemon identification
 - `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
 
+## Daemon Architecture (reference)
+
+This section survives compaction — it documents infrastructure the controller depends on.
+
+### Ports
+
+| Component | Default Port | Purpose |
+|-----------|-------------|---------|
+| Daemon HTTP API | 13370 (`LEGION_DAEMON_PORT`) | Controller interacts here: `/health`, `/workers`, `/state/collect` |
+| Shared Serve | 13381 | OpenCode serve — hosts all worker + controller sessions |
+
+Both ports are allocated sequentially. If the default is occupied (e.g., another legion is
+running), the daemon increments until it finds a free port. The daemon writes its actual
+ports to the legions registry so other instances can avoid collisions.
+
+**The shared serve on 13381 is managed by the daemon, not a standalone process.** The daemon
+spawns it, monitors its health every 60 seconds, and restarts it if it dies. All worker and
+controller sessions live on this single serve instance.
+
+### State Files
+
+```
+~/.local/state/legion/
+├── legions.json                          # Global registry of all running daemons
+└── legions/
+    └── {projectId}/
+        ├── workers.json                  # Worker entries + controller state for this legion
+        └── logs/
+            └── shared-serve.stderr.log   # Shared serve logs
+```
+
+**`legions.json`** — Maps each running daemon to its ports, PID, and start time. Used for:
+- Port allocation (avoid collisions with other legions)
+- Orphan detection (PID liveness checks on startup)
+- `legion status` output
+
+**`workers.json`** — Persists worker sessions and controller state across daemon restarts:
+- Worker entries with session IDs, workspace paths, status, crash counts
+- Controller session ID and port
+- Crash history for retry tracking
+
+State files use atomic writes (write to temp file, rename) and Zod validation on read.
+Invalid `workers.json` is moved to `{path}.corrupt.{timestamp}`; invalid `legions.json`
+is backed up to `{path}.bak.{timestamp}`. In both cases, state resets to empty.
+
+### Startup Sequence
+
+1. Load config from environment
+2. Read legions registry → allocate ports (dead PIDs recycled)
+3. **Shared serve starts FIRST** on `baseWorkerPort` (13381+)
+4. Re-create sessions for persisted workers (from `workers.json`)
+5. **HTTP API binds SECOND** on `daemonPort` (13370+)
+6. Daemon writes entry to legions registry (ports, PID, timestamp)
+7. Controller session created on shared serve
+8. Health tick loop starts (60s interval)
+
+### Common Issues
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| "Port already in use" on startup | Orphan daemon or other process on 13370/13381 | `legion stop <team>` or kill the process; port scan finds next free port |
+| Daemon starts but controller doesn't respond | Shared serve unhealthy | Health tick restarts it within 60s; check `shared-serve.stderr.log` |
+| `legions.json` shows stale entries | Daemon crashed without cleanup | Next `legion start` detects dead PIDs and recycles their ports |
+| Workers can't be dispatched | Shared serve port mismatch after restart | Daemon re-creates sessions from `workers.json` on startup |
+| Serve on 13381 but no daemon on 13370 | Orphan serve from a crashed daemon | Kill the serve process, then `legion start` |
+| Registry lock stuck (`legions.json.lock`) | Daemon crashed while writing registry | Lock auto-expires after 3s if holder PID is dead; or remove manually |
+
 ## Core Principle
 
 **Keep work moving forward.** Priority order:
