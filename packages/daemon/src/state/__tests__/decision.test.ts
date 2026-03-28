@@ -7,7 +7,14 @@
 
 import { describe, expect, it } from "bun:test";
 import { ACTION_TO_MODE, buildCollectedState, buildIssueState, suggestAction } from "../decision";
-import { CollectedState, computeSessionId, type FetchedIssueData, IssueStatus } from "../types";
+import {
+  CiStatus,
+  CollectedState,
+  computeSessionId,
+  type FetchedIssueData,
+  IssueStatus,
+  MergeableStatus,
+} from "../types";
 
 describe("suggestAction", () => {
   it("todo_no_worker_done_no_live_worker dispatches planner", () => {
@@ -226,6 +233,122 @@ describe("suggestAction", () => {
     const action = suggestAction(IssueStatus.NEEDS_REVIEW, false, false, null, true, false, null);
     expect(action).toBe("dispatch_reviewer");
   });
+
+  it("needs_review_worker_done_conflicting_pr_rebases", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.PASSING,
+      MergeableStatus.CONFLICTING
+    );
+    expect(action).toBe("rebase_pr");
+  });
+
+  it("needs_review_worker_done_conflicting_pr_with_failing_ci_still_rebases", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.FAILING,
+      MergeableStatus.CONFLICTING
+    );
+    expect(action).toBe("rebase_pr");
+  });
+
+  it("needs_review_worker_done_conflicting_pr_with_pending_ci_still_rebases", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.PENDING,
+      MergeableStatus.CONFLICTING
+    );
+    expect(action).toBe("rebase_pr");
+  });
+
+  it("needs_review_worker_done_unknown_mergeable_retries", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.PASSING,
+      MergeableStatus.UNKNOWN
+    );
+    expect(action).toBe("retry_pr_check");
+  });
+
+  it("needs_review_worker_done_mergeable_pr_with_passing_ci_transitions", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.PASSING,
+      MergeableStatus.MERGEABLE
+    );
+    expect(action).toBe("transition_to_retro");
+  });
+
+  it("needs_review_worker_done_null_mergeable_falls_through_to_ci", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      true,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.FAILING,
+      null
+    );
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("needs_review_no_worker_done_conflicting_pr_rebases", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.PASSING,
+      MergeableStatus.CONFLICTING
+    );
+    expect(action).toBe("rebase_pr");
+  });
+
+  it("needs_review_no_worker_done_mergeable_pr_dispatches_reviewer", () => {
+    const action = suggestAction(
+      IssueStatus.NEEDS_REVIEW,
+      false,
+      false,
+      false,
+      true,
+      false,
+      CiStatus.PASSING,
+      MergeableStatus.MERGEABLE
+    );
+    expect(action).toBe("dispatch_reviewer");
+  });
+
+  it("rebase_pr_maps_to_review_mode", () => {
+    expect(ACTION_TO_MODE.rebase_pr).toBe("review");
+  });
 });
 
 describe("buildIssueState", () => {
@@ -237,6 +360,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -253,6 +377,30 @@ describe("buildIssueState", () => {
     expect(state.suggestedAction).toBe("dispatch_planner");
   });
 
+  it("builds_state_with_conflicting_pr_suggests_rebase", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-21",
+      status: "Needs Review",
+      labels: ["worker-done"],
+      hasPr: true,
+      prIsDraft: false,
+      ciStatus: "passing",
+      mergeableStatus: "conflicting",
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: false,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      source: null,
+    };
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
+    expect(state.suggestedAction).toBe("rebase_pr");
+  });
+
   it("skips_when_user_input_needed", () => {
     const data: FetchedIssueData = {
       issueId: "ENG-21",
@@ -261,6 +409,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -285,6 +434,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -309,6 +459,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -334,6 +485,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -362,6 +514,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -391,6 +544,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -412,6 +566,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -435,6 +590,7 @@ describe("buildIssueState", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -461,6 +617,7 @@ describe("approval gate", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -485,6 +642,7 @@ describe("approval gate", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -509,6 +667,7 @@ describe("approval gate", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -535,6 +694,7 @@ describe("orphan detection", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -559,6 +719,7 @@ describe("orphan detection", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: true,
       workerMode: null,
       workerStatus: null,
@@ -583,6 +744,7 @@ describe("orphan detection", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -610,6 +772,7 @@ describe("orphan detection", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -635,6 +798,7 @@ describe("orphan detection", () => {
       hasPr: false,
       prIsDraft: null,
       ciStatus: null,
+      mergeableStatus: null,
       hasLiveWorker: false,
       workerMode: null,
       workerStatus: null,
@@ -666,6 +830,7 @@ describe("buildCollectedState", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -684,6 +849,7 @@ describe("buildCollectedState", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -714,6 +880,7 @@ describe("buildCollectedState", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -745,6 +912,7 @@ describe("buildCollectedState", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -763,6 +931,7 @@ describe("buildCollectedState", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,
@@ -781,6 +950,7 @@ describe("buildCollectedState", () => {
         hasPr: false,
         prIsDraft: null,
         ciStatus: null,
+        mergeableStatus: null,
         hasLiveWorker: false,
         workerMode: null,
         workerStatus: null,

@@ -14,6 +14,7 @@ import {
   getCiStatusBatch,
   getLiveWorkers,
   getPrDraftStatusBatch,
+  mapMergeableState,
 } from "../fetch";
 import type { LinearIssueRaw } from "../types";
 import { createParsedIssue } from "../types";
@@ -406,6 +407,32 @@ describe("getPrDraftStatusBatch", () => {
   });
 });
 
+describe("mapMergeableState", () => {
+  it("maps MERGEABLE to mergeable", () => {
+    expect(mapMergeableState("MERGEABLE")).toBe("mergeable");
+  });
+
+  it("maps CONFLICTING to conflicting", () => {
+    expect(mapMergeableState("CONFLICTING")).toBe("conflicting");
+  });
+
+  it("maps UNKNOWN to unknown", () => {
+    expect(mapMergeableState("UNKNOWN")).toBe("unknown");
+  });
+
+  it("maps null to null", () => {
+    expect(mapMergeableState(null)).toBeNull();
+  });
+
+  it("maps undefined to null", () => {
+    expect(mapMergeableState(undefined)).toBeNull();
+  });
+
+  it("maps unrecognized value to null", () => {
+    expect(mapMergeableState("INVALID")).toBeNull();
+  });
+});
+
 // =============================================================================
 // TestGetCiStatusBatch
 // =============================================================================
@@ -417,6 +444,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
               },
@@ -431,7 +459,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": "passing" });
+    expect(result).toEqual({ "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" } });
   });
 
   it("returns failing for FAILURE status", async () => {
@@ -440,6 +468,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }],
               },
@@ -454,7 +483,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": "failing" });
+    expect(result).toEqual({ "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable" } });
   });
 
   it("returns failing for ERROR status", async () => {
@@ -463,6 +492,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "ERROR" } } }],
               },
@@ -477,7 +507,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": "failing" });
+    expect(result).toEqual({ "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable" } });
   });
 
   it("returns pending for PENDING status", async () => {
@@ -486,6 +516,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }],
               },
@@ -500,7 +531,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": "pending" });
+    expect(result).toEqual({ "ENG-21": { ciStatus: "pending", mergeableStatus: "mergeable" } });
   });
 
   it("returns pending for EXPECTED status", async () => {
@@ -509,6 +540,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "EXPECTED" } } }],
               },
@@ -523,7 +555,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": "pending" });
+    expect(result).toEqual({ "ENG-21": { ciStatus: "pending", mergeableStatus: "mergeable" } });
   });
 
   it("returns null when statusCheckRollup is null (no checks configured)", async () => {
@@ -532,6 +564,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: null } }],
               },
@@ -546,7 +579,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": null });
+    expect(result).toEqual({ "ENG-21": { ciStatus: null, mergeableStatus: "mergeable" } });
   });
 
   it("returns null when commits nodes is empty", async () => {
@@ -555,6 +588,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: { nodes: [] },
             },
           },
@@ -567,7 +601,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": null });
+    expect(result).toEqual({ "ENG-21": { ciStatus: null, mergeableStatus: null } });
   });
 
   it("returns null for missing PR", async () => {
@@ -580,7 +614,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 999 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": null });
+    expect(result).toEqual({ "ENG-21": { ciStatus: null, mergeableStatus: null } });
   });
 
   it("handles multiple PRs across repos", async () => {
@@ -592,6 +626,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
               },
@@ -599,6 +634,7 @@ describe("getCiStatusBatch", () => {
           },
           repo1: {
             pr0: {
+              mergeable: "CONFLICTING",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }],
               },
@@ -618,7 +654,10 @@ describe("getCiStatusBatch", () => {
     );
 
     expect(queriesReceived).toHaveLength(1);
-    expect(result).toEqual({ "ENG-21": "passing", "ENG-22": "failing" });
+    expect(result).toEqual({
+      "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" },
+      "ENG-22": { ciStatus: "failing", mergeableStatus: "conflicting" },
+    });
   });
 
   it("retries on failure with exponential backoff", async () => {
@@ -632,6 +671,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "MERGEABLE",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
               },
@@ -646,7 +686,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": "passing" });
+    expect(result).toEqual({ "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" } });
     expect(callCount).toBe(3);
   });
 
@@ -683,6 +723,7 @@ describe("getCiStatusBatch", () => {
         data: {
           repo0: {
             pr0: {
+              mergeable: "UNKNOWN",
               commits: {
                 nodes: [{ commit: { statusCheckRollup: { state: "UNKNOWN_VALUE" } } }],
               },
@@ -697,7 +738,7 @@ describe("getCiStatusBatch", () => {
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
-    expect(result).toEqual({ "ENG-21": null });
+    expect(result).toEqual({ "ENG-21": { ciStatus: null, mergeableStatus: "unknown" } });
   });
 });
 
@@ -848,6 +889,7 @@ describe("enrichParsedIssues", () => {
               data: {
                 repo0: {
                   pr0: {
+                    mergeable: "MERGEABLE",
                     commits: {
                       nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
                     },
@@ -873,6 +915,7 @@ describe("enrichParsedIssues", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].ciStatus).toBe("passing");
+      expect(result[0].mergeableStatus).toBe("mergeable");
       expect(result[0].prIsDraft).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;

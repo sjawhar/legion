@@ -144,8 +144,8 @@ COLLECTED=$(echo "$ISSUES_JSON" | jq -Rs --arg backend "$LEGION_ISSUE_BACKEND" \
 The state endpoint returns JSON with both `suggestedAction` and raw signals:
 - `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
 - `hasPr`, `prIsDraft` — PR state
+- `ciStatus`, `mergeableStatus` — CI and merge conflict state
 - `hasUserFeedback` — user interaction state
-
 Use `suggestedAction` as the primary guide, but consult raw signals when the suggestion
 is `skip`. The state machine returns `skip` conservatively — the controller should reason
 about what to do:
@@ -155,6 +155,7 @@ about what to do:
 | `skip` | `hasPr: true`, status: In Progress, `hasLiveWorker: true` | Live implementer still working on PR; wait for it to finish |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
+| `rebase_pr` | `mergeableStatus: "conflicting"` | PR has conflicts; auto-rebase via GitHub update-branch API |
 
 ### Routing by Action Intent
 
@@ -169,6 +170,7 @@ The state machine returns a `suggestedAction`. Route by prefix:
 | `add_` | Add label | Add the specified label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --add-label`) |
 | `remove_` | Remove label + retry | Remove label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --remove-label`), then re-evaluate |
 | `retry_` | Wait | Do nothing this iteration, re-check next loop |
+| `rebase_` | Auto-rebase PR branch | Use GitHub update-branch API, re-check next iteration |
 | `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
 | `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
 
@@ -187,6 +189,15 @@ correctly if they follow the naming convention.
 don't dispatch a worker, don't transition status. The next loop iteration will re-run the state script
 which will retry the GitHub API call. If this persists across multiple iterations, investigate the
 GitHub API connectivity.
+
+**`rebase_pr`:** The PR has merge conflicts but CI checks may have passed (or conflicts may be causing
+CI failures). The state machine checks mergeability *before* CI status, so conflicts are resolved first.
+The controller should call GitHub's update-branch API:
+```bash
+gh api repos/$OWNER/$REPO/pulls/$PR_NUMBER/update-branch -X PUT
+```
+If the API fails (e.g., conflicts too severe for auto-rebase), fall back to
+`resume_implementer_for_changes` — the implementer will need to rebase manually.
 
 ### Implement → Testing → Review Handoff
 
