@@ -37,6 +37,25 @@ jj rebase -d main
 
 Resolve any conflicts before proceeding.
 
+### 1.2. Load Repo Config
+
+Read repo config from workspace root:
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Apply @references/config.md semantics:
+- Parse and apply recognized keys for `implement` mode only
+- Merge `phases.implement.*` overrides on top of top-level values
+- Echo recognized keys/effective values for auditability
+- If missing or malformed, continue with defaults and note fallback in implement handoff
+
+Implement-mode keys:
+- `skills.required` (plus `phases.implement.skills.required` if present): load additively
+- `notifications.ping_reporter_on_pr`: include `@<reporter>` in PR body summary
+- `notifications.slack_channel`: best-effort status update via `slack-bot` skill if available
+
 ---
 
 ## Mode 1: Fresh Implementation
@@ -75,6 +94,8 @@ If architect or plan handoffs are present, note any concerns, routing hints, or 
     # /task-workflow
 
 If `requiredSkills` is absent or the plan handoff is missing, proceed with step 1.5's independent skill discovery as the fallback (current behavior, no regression).
+
+**Config-required skills are additive:** if config provides `skills.required`, invoke those skills in addition to plan handoff `requiredSkills.implement` and independently discovered skills.
 
 ### 2. Invoke Skills (in order)
 
@@ -230,7 +251,10 @@ gh pr create --draft \
   --body "Closes #$ISSUE_NUMBER
 
 ## Summary
-[summary]" \
+[summary]
+
+[if notifications.ping_reporter_on_pr=true, add: @<issue-reporter>]
+" \
   --head "$LEGION_ISSUE_ID" \
   -R $OWNER/$REPO
 ```
@@ -241,6 +265,8 @@ gh pr view $LEGION_ISSUE_ID --json body --jq '.body' -R $OWNER/$REPO | grep -q '
 ```
 
 The issue ID in the branch/title preserves traceability for the controller.
+
+If `notifications.slack_channel` is configured and `slack-bot` skill is available, post a best-effort implementation status update (PR URL, issue ID, current CI state). If unavailable, note this in implement handoff and continue.
 
 ### 7. Wait for CI
 

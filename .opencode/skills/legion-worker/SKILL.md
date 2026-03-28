@@ -33,6 +33,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
    lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
 4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
+4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST attempt it before adding `worker-done`. The `|| true` means CLI failures don't block you, but skipping the attempt is not acceptable. If the write fails, note it in your exit comment.
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 
 ## Skill Discipline
@@ -57,6 +58,18 @@ jj git fetch
 jj rebase -d main
 jj new  # Fresh commit for this session
 ```
+
+Load repo-specific config from workspace root (if present):
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Then:
+- Recognize and apply keys documented in @references/config.md
+- Echo recognized keys + effective values before workflow-specific work
+- If file is missing or malformed, proceed with defaults (no errors)
+- Ignore unknown keys
 
 Fetch per-worker environment variables from the daemon (non-blocking):
 

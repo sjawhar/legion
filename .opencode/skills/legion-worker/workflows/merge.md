@@ -4,6 +4,25 @@ Merge the PR into main. The controller handles workspace cleanup after completio
 
 ## Workflow
 
+### 0.5. Load Repo Config
+
+Read repo config from workspace root:
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Apply @references/config.md semantics for `merge` mode:
+- Parse recognized keys
+- Merge `phases.merge.*` overrides on top of top-level values
+- Echo recognized keys/effective values
+- Missing/malformed config falls back to defaults
+
+Merge-mode keys:
+- `merge.require_smoke_test`
+- `merge.require_reporter_approval`
+- `merge.auto_merge_allowed`
+
 ### 1. Check PR State
 
 Before doing anything, verify the PR is open and mergeable:
@@ -64,6 +83,12 @@ gh pr checks "$LEGION_ISSUE_ID" --watch
 Only escalate with `user-input-needed` if something has gone fundamentally wrong (e.g., infrastructure issues, impossible conflicts, external service failures). Normal code issues like type errors should be fixed, not escalated.
 
 ### 6. Merge
+
+Before running merge command, enforce config gates:
+
+1. If `merge.auto_merge_allowed=false`: add `user-input-needed`, post a comment requesting human approval, remove `worker-active`, and exit.
+2. If `merge.require_reporter_approval=true`: verify reporter sign-off exists in issue/PR comments. If missing, add `user-input-needed`, post comment asking reporter approval, remove `worker-active`, and exit.
+3. If `merge.require_smoke_test=true`: read test handoff (`legion handoff read --phase test --workspace .`) and verify smoke/behavioral evidence exists. If missing, post blocking comment and exit without merge.
 
 ```bash
 gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch
