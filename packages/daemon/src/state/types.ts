@@ -62,7 +62,8 @@ export type ActionType =
   | "add_needs_approval"
   | "retry_pr_check"
   | "resume_implementer_for_ci_failure"
-  | "retry_ci_check";
+  | "retry_ci_check"
+  | "rebase_pr";
 
 /**
  * CI check status for a PR.
@@ -77,6 +78,21 @@ export const CiStatus = {
   PASSING: "passing" as CiStatusLiteral,
   FAILING: "failing" as CiStatusLiteral,
   PENDING: "pending" as CiStatusLiteral,
+} as const;
+
+/**
+ * PR merge conflict status.
+ * - "mergeable": no conflicts, can be merged
+ * - "conflicting": has merge conflicts, needs rebase
+ * - "unknown": GitHub hasn't computed yet (lazy evaluation)
+ * - null: no PR, couldn't check, or not applicable
+ */
+export type MergeableStatusLiteral = "mergeable" | "conflicting" | "unknown";
+
+export const MergeableStatus = {
+  MERGEABLE: "mergeable" as MergeableStatusLiteral,
+  CONFLICTING: "conflicting" as MergeableStatusLiteral,
+  UNKNOWN: "unknown" as MergeableStatusLiteral,
 } as const;
 
 /**
@@ -327,6 +343,7 @@ export interface FetchedIssueData {
   hasPr: boolean; // True if issue has a linked PR
   prIsDraft: boolean | null; // null if no PR or couldn't check status
   ciStatus: CiStatusLiteral | null; // null if no PR, no checks, or couldn't check
+  mergeableStatus: MergeableStatusLiteral | null; // null if no PR, no checks, or couldn't check
   hasLiveWorker: boolean;
   workerMode: string | null;
   workerStatus: string | null;
@@ -348,6 +365,7 @@ interface IssueStateDict {
   hasPr: boolean;
   prIsDraft: boolean | null;
   ciStatus: CiStatusLiteral | null;
+  mergeableStatus: MergeableStatusLiteral | null;
   hasLiveWorker: boolean;
   workerMode: string | null;
   workerStatus: string | null;
@@ -373,6 +391,7 @@ export interface IssueState {
   hasPr: boolean; // Whether issue has a linked PR
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
   ciStatus: CiStatusLiteral | null;
+  mergeableStatus: MergeableStatusLiteral | null;
   hasLiveWorker: boolean;
   workerMode: string | null;
   workerStatus: string | null;
@@ -393,6 +412,7 @@ export const IssueState = {
       hasPr: state.hasPr,
       prIsDraft: state.prIsDraft,
       ciStatus: state.ciStatus,
+      mergeableStatus: state.mergeableStatus,
       hasLiveWorker: state.hasLiveWorker,
       workerMode: state.workerMode,
       workerStatus: state.workerStatus,

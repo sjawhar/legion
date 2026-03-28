@@ -17,6 +17,8 @@ import {
   type FetchedIssueData,
   type GitHubPRRef as GitHubPRRefType,
   type LinearIssueRaw,
+  MergeableStatus,
+  type MergeableStatusLiteral,
   type ParsedIssue,
 } from "./types";
 
@@ -175,6 +177,31 @@ export function mapCiRollupState(state: string | null | undefined): CiStatusLite
 }
 
 /**
+ * Map GitHub GraphQL MergeableState enum to MergeableStatusLiteral.
+ *
+ * GitHub GraphQL PullRequest.mergeable values:
+ * - MERGEABLE -> "mergeable"
+ * - CONFLICTING -> "conflicting"
+ * - UNKNOWN -> "unknown" (GitHub hasn't computed yet)
+ * - null or unrecognized -> null
+ */
+export function mapMergeableState(state: string | null | undefined): MergeableStatusLiteral | null {
+  if (state === null || state === undefined) {
+    return null;
+  }
+  switch (state) {
+    case "MERGEABLE":
+      return MergeableStatus.MERGEABLE;
+    case "CONFLICTING":
+      return MergeableStatus.CONFLICTING;
+    case "UNKNOWN":
+      return MergeableStatus.UNKNOWN;
+    default:
+      return null;
+  }
+}
+
+/**
  * Fetch PR draft status for multiple issues in a single GraphQL query.
  *
  * Batches all PRs across all repositories into one API call.
@@ -317,21 +344,29 @@ export async function getPrDraftStatusBatch(
 // =============================================================================
 
 /**
- * Fetch CI status for multiple PRs in a single GraphQL query.
+ * Combined CI and mergeable status for a PR.
+ */
+interface CiAndMergeStatus {
+  ciStatus: CiStatusLiteral | null;
+  mergeableStatus: MergeableStatusLiteral | null;
+}
+
+/**
+ * Fetch CI and mergeable status for multiple PRs in a single GraphQL query.
  *
- * Uses statusCheckRollup on the latest commit of each PR.
+ * Uses statusCheckRollup on the latest commit of each PR, plus the mergeable field.
  * Batches all PRs across all repositories into one API call.
  * Retries up to 3 times with exponential backoff on failure.
  *
  * @param prRefs - Dict mapping issue_id to GitHubPRRef
  * @param runner - Command runner for testing
- * @returns Dict mapping issue_id to CI status
+ * @returns Dict mapping issue_id to CI and mergeable status
  * @throws GitHubAPIError if GraphQL query fails after retries
  */
 export async function getCiStatusBatch(
   prRefs: Record<string, GitHubPRRefType>,
   runner: CommandRunner = defaultRunner
-): Promise<Record<string, CiStatusLiteral | null>> {
+): Promise<Record<string, CiAndMergeStatus>> {
   if (Object.keys(prRefs).length === 0) {
     return {};
   }
@@ -364,7 +399,7 @@ export async function getCiStatusBatch(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }`
       );
     }
 
@@ -417,7 +452,7 @@ export async function getCiStatusBatch(
         ? (rawData as Record<string, unknown>)
         : {};
 
-    const result: Record<string, CiStatusLiteral | null> = {};
+    const result: Record<string, CiAndMergeStatus> = {};
 
     for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
       const rawRepo = dataObj[repoAlias];
@@ -438,7 +473,7 @@ export async function getCiStatusBatch(
           typeof rawPr !== "object" ||
           Array.isArray(rawPr)
         ) {
-          result[issueId] = null;
+          result[issueId] = { ciStatus: null, mergeableStatus: null };
           continue;
         }
 
@@ -446,7 +481,7 @@ export async function getCiStatusBatch(
         const commits = rawPr.commits as { nodes?: unknown[] } | null | undefined;
         const nodes = commits?.nodes;
         if (!Array.isArray(nodes) || nodes.length === 0) {
-          result[issueId] = null;
+          result[issueId] = { ciStatus: null, mergeableStatus: null };
           continue;
         }
 
@@ -454,7 +489,14 @@ export async function getCiStatusBatch(
           commit?: { statusCheckRollup?: { state?: string | null } | null };
         } | null;
         const rollupState = firstNode?.commit?.statusCheckRollup?.state ?? null;
-        result[issueId] = mapCiRollupState(rollupState);
+        result[issueId] = {
+          ciStatus: mapCiRollupState(rollupState),
+          mergeableStatus: mapMergeableState(
+            typeof rawPr === "object" && rawPr !== null && "mergeable" in rawPr
+              ? ((rawPr as { mergeable?: string | null }).mergeable ?? null)
+              : null
+          ),
+        };
       }
     }
 
@@ -493,7 +535,7 @@ export async function enrichParsedIssues(
 
   let liveWorkers: Record<string, { mode: string; status: string }> = {};
   let prDraftMap: Record<string, boolean | null> = {};
-  let ciStatusMap: Record<string, CiStatusLiteral | null> = {};
+  let ciAndMergeMap: Record<string, CiAndMergeStatus> = {};
 
   await Promise.all([
     (async () => {
@@ -516,10 +558,10 @@ export async function enrichParsedIssues(
         return;
       }
       try {
-        ciStatusMap = await getCiStatusBatch(ciRefsForStatus, runner);
+        ciAndMergeMap = await getCiStatusBatch(ciRefsForStatus, runner);
       } catch {
         for (const issueId of Object.keys(ciRefsForStatus)) {
-          ciStatusMap[issueId] = null;
+          ciAndMergeMap[issueId] = { ciStatus: null, mergeableStatus: null };
         }
       }
     })(),
@@ -533,7 +575,8 @@ export async function enrichParsedIssues(
       labels: issue.labels,
       hasPr: issue.hasPr,
       prIsDraft: prDraftMap[issue.issueId] ?? null,
-      ciStatus: ciStatusMap[issue.issueId] ?? null,
+      ciStatus: ciAndMergeMap[issue.issueId]?.ciStatus ?? null,
+      mergeableStatus: ciAndMergeMap[issue.issueId]?.mergeableStatus ?? null,
       hasLiveWorker: workerInfo !== null,
       workerMode: workerInfo?.mode ?? null,
       workerStatus: workerInfo?.status ?? null,

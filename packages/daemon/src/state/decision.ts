@@ -15,6 +15,8 @@ import {
   type IssueState,
   IssueStatus,
   type IssueStatusLiteral,
+  MergeableStatus,
+  type MergeableStatusLiteral,
   WorkerMode,
   type WorkerModeLiteral,
 } from "./types";
@@ -26,7 +28,8 @@ export function suggestAction(
   prIsDraft: boolean | null,
   hasPr: boolean,
   hasTestPassed: boolean,
-  ciStatus: CiStatusLiteral | null = null
+  ciStatus: CiStatusLiteral | null = null,
+  mergeableStatus: MergeableStatusLiteral | null = null
 ): ActionType {
   switch (status) {
     case IssueStatus.DONE:
@@ -86,6 +89,14 @@ export function suggestAction(
         if (prIsDraft) {
           return "resume_implementer_for_changes";
         }
+        // Check merge conflicts before CI status.
+        // Conflicts can cause CI failures, so resolve them first.
+        if (mergeableStatus === MergeableStatus.UNKNOWN) {
+          return "retry_pr_check";
+        }
+        if (mergeableStatus === MergeableStatus.CONFLICTING) {
+          return "rebase_pr";
+        }
         if (ciStatus === CiStatus.FAILING) {
           return "resume_implementer_for_ci_failure";
         }
@@ -96,6 +107,9 @@ export function suggestAction(
       }
       if (hasLiveWorker) {
         return "skip";
+      }
+      if (hasPr && mergeableStatus === MergeableStatus.CONFLICTING) {
+        return "rebase_pr";
       }
       if (hasPr && ciStatus === CiStatus.FAILING) {
         return "resume_implementer_for_ci_failure";
@@ -144,6 +158,7 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   dispatch_tester: WorkerMode.TEST,
   transition_to_testing: WorkerMode.TEST,
   resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
+  rebase_pr: WorkerMode.REVIEW,
 };
 
 const VALID_WORKER_MODES = new Set<string>([
@@ -183,7 +198,8 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
       data.prIsDraft,
       data.hasPr,
       data.hasTestPassed ?? false,
-      data.ciStatus
+      data.ciStatus,
+      data.mergeableStatus
     );
     if (action === "transition_to_todo") {
       action = "add_needs_approval";
@@ -210,6 +226,7 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
     hasPr: data.hasPr,
     prIsDraft: data.prIsDraft,
     ciStatus: data.ciStatus,
+    mergeableStatus: data.mergeableStatus,
     hasLiveWorker: data.hasLiveWorker,
     workerMode: data.workerMode,
     workerStatus: data.workerStatus,
