@@ -35,6 +35,49 @@ export type IssueStatusLiteral =
  */
 export type WorkerModeLiteral = "architect" | "plan" | "implement" | "test" | "review" | "merge";
 
+export interface LegionRepoConfig {
+  merge?: LegionMergeConfig;
+  testing?: LegionTestingConfig;
+  notifications?: LegionNotificationsConfig;
+  skills?: LegionSkillsConfig;
+  phaseOverrides?: Partial<Record<WorkerModeLiteral, LegionRepoConfig>>;
+}
+
+export interface LegionMergeConfig {
+  require_smoke_test?: boolean;
+  require_reporter_approval?: boolean;
+  auto_merge_allowed?: boolean;
+}
+
+export interface LegionTestingConfig {
+  require_specific_task?: boolean;
+  require_taiga_evidence?: boolean;
+}
+
+export interface LegionNotificationsConfig {
+  slack_channel?: string;
+  ping_reporter_on_pr?: boolean;
+}
+
+export interface LegionSkillsConfig {
+  required?: string[];
+}
+
+export const LEGION_REPO_CONFIG = {
+  PATH: ".legion/config.yml",
+  RECOGNIZED_KEYS: [
+    "merge.require_smoke_test",
+    "merge.require_reporter_approval",
+    "merge.auto_merge_allowed",
+    "testing.require_specific_task",
+    "testing.require_taiga_evidence",
+    "notifications.slack_channel",
+    "notifications.ping_reporter_on_pr",
+    "skills.required",
+    "phases.<mode>.*",
+  ] as const,
+} as const;
+
 /**
  * Action types for state machine transitions.
  */
@@ -251,6 +294,7 @@ export interface ParsedIssue {
   labels: string[];
   prRef: GitHubPRRef | null;
   source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
+  isBlocked: boolean;
 
   // Computed properties (implemented as getters)
   readonly hasWorkerDone: boolean;
@@ -274,7 +318,8 @@ export function createParsedIssue(
   status: IssueStatusLiteral | string,
   labels: string[],
   prRef: GitHubPRRef | null,
-  source: IssueSource | null = null
+  source: IssueSource | null = null,
+  isBlocked: boolean = false
 ): ParsedIssue {
   return {
     issueId,
@@ -282,6 +327,7 @@ export function createParsedIssue(
     labels,
     prRef,
     source,
+    isBlocked,
 
     get hasWorkerDone() {
       return this.labels.includes("worker-done");
@@ -353,6 +399,7 @@ export interface FetchedIssueData {
   hasHumanApproved: boolean;
   hasTestPassed: boolean;
   hasTestFailed: boolean;
+  isBlocked?: boolean;
   source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
@@ -372,6 +419,7 @@ interface IssueStateDict {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  isBlocked: boolean;
   source: IssueSource | null;
 }
 
@@ -398,6 +446,7 @@ export interface IssueState {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  isBlocked: boolean;
   source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
@@ -419,6 +468,7 @@ export const IssueState = {
       suggestedAction: state.suggestedAction,
       sessionId: state.sessionId,
       hasUserFeedback: state.hasUserFeedback,
+      isBlocked: state.isBlocked,
       source: state.source,
     };
     return dict;

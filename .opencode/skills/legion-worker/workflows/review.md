@@ -12,6 +12,22 @@ If Apps are not configured, fall back to PR draft status signaling (legacy).
 
 ## Workflow
 
+### 0.5. Load Repo Config
+
+Read repo config from workspace root:
+
+```bash
+cat .legion/config.yml 2>/dev/null || true
+```
+
+Apply @references/config.md semantics for `review` mode:
+- Parse recognized keys
+- Merge `phases.review.*` overrides on top of top-level values
+- Echo recognized keys/effective values
+- Missing/malformed config falls back to defaults
+
+If config sets `skills.required` (or `phases.review.skills.required`), invoke those skills additively with plan handoff `requiredSkills.review`.
+
 ### 1. Gather Context
 
 Fetch the issue:

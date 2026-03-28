@@ -1,4 +1,6 @@
 import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { CodebaseIndexManager } from "../index/manager";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
 import { modeToRole, TokenManager } from "./github-apps";
@@ -38,6 +40,14 @@ export interface DaemonHandle {
   server: ServerHandle["server"];
   stop: () => Promise<void>;
   config: DaemonConfig;
+}
+
+function resolveCodebaseIndexPath(config: DaemonConfig, legionId: string): string {
+  if (config.legionDir) {
+    return path.join(config.legionDir, ".legion", "daemon", "index.json");
+  }
+
+  return path.join(config.paths.forLegion(legionId).legionStateDir, "index.json");
 }
 
 function resolveDependencies(
@@ -140,6 +150,11 @@ export async function startDaemon(
 
   const sharedServePort = config.baseWorkerPort;
   const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
+  const indexManager = new CodebaseIndexManager(
+    config.legionDir ?? process.cwd(),
+    resolveCodebaseIndexPath(config, legionId),
+    { warn: (message) => console.warn(message) }
+  );
 
   const existingHealthy = await resolvedDeps.adapter.healthy();
   if (existingHealthy) {
@@ -190,6 +205,10 @@ export async function startDaemon(
       console.error(`Failed to re-create session for ${entry.id}: ${error}`);
     }
   }
+
+  const startedIndexBuildAt = Date.now();
+  await indexManager.initialize();
+  console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
 
   let shuttingDown = false;
   let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -254,6 +273,7 @@ export async function startDaemon(
           ? (mode) => roleServeManager.getAdapterForMode(mode)
           : undefined,
         tokenManager,
+        indexManager,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
@@ -392,6 +412,12 @@ export async function startDaemon(
           } catch (error) {
             console.error(`Failed to restart shared serve: ${error}`);
           }
+        }
+
+        try {
+          await indexManager.incrementalUpdate();
+        } catch (error) {
+          console.error(`Failed to update codebase index incrementally: ${error}`);
         }
 
         // Check role serves health

@@ -281,15 +281,42 @@ CI status and include it in the review.
 
 ### Pre-Merge Gate
 
+### PR Closing-Keyword Fallback (Controller Safety Net)
+
+Before requesting merge approval (or dispatching merger), the controller must verify the PR body
+contains the dispatched issue's closing keyword. If missing, patch the PR body automatically.
+
+```bash
+PR_BODY=$(gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $OWNER/$REPO)
+
+# Accept standard auto-close keyword variants for the dispatched issue
+if ! echo "$PR_BODY" | grep -Eiq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"; then
+  UPDATED_PR_BODY="$(cat <<EOF
+$PR_BODY
+
+Closes #$ISSUE_NUMBER
+EOF
+)"
+  gh pr edit "$LEGION_ISSUE_ID" --body "$UPDATED_PR_BODY" -R $OWNER/$REPO
+fi
+
+# Verify after edit (must pass before merge approval flow continues)
+gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $OWNER/$REPO | grep -Eq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"
+```
+
+If this check/edit fails, do not proceed to merge approval. Re-dispatch implementer to repair PR
+metadata and push a follow-up update.
+
 Before requesting merge approval, verify ALL conditions:
 
 | # | Condition | Verification |
 |---|-----------|-------------|
-| 1 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID"` — all checks must show ✓ |
-| 2 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft` returns `false` |
-| 3 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep test-passed` |
-| 4 | Issue has been through retro (or skipped via routing hints) | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
-| 5 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep -v user-input-needed` — must NOT match |
+| 1 | PR body includes a closing keyword for dispatched issue | `gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $OWNER/$REPO \| grep -Eq "(Closes\|Fixes\|Resolves) #$ISSUE_NUMBER"` |
+| 2 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID"` — all checks must show ✓ |
+| 3 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft` returns `false` |
+| 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep test-passed` |
+| 5 | Issue has been through retro (or skipped via routing hints) | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
+| 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep -v user-input-needed` — must NOT match |
 
 If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
 
@@ -382,6 +409,18 @@ The background poller handles timing. The main thread does not sleep — it proc
 If operating in fallback mode (no background tasks), end turn here. The external runtime re-invokes the controller for the next iteration.
 
 ## Dispatch vs Resume
+
+## Repo-Specific Configuration (`.legion/config.yml`)
+
+Repos can define Legion behavior in `.legion/config.yml` (committed in repo root). Worker workflows read this file at startup and apply recognized keys.
+
+Controller behavior with repo config:
+- Do not duplicate repo-specific rules in every dispatch prompt
+- Assume workers will self-configure from `.legion/config.yml`
+- If needed for diagnostics, query config from the worker workspace (via worker context) and compare against observed behavior
+
+Supported schema and key precedence are documented at:
+- @../legion-worker/references/config.md
 
 ### Backend in Prompts
 

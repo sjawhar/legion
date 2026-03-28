@@ -206,6 +206,10 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
     }
   }
 
+  if (data.isBlocked === true && action.startsWith("dispatch_")) {
+    action = "skip";
+  }
+
   // Use actual worker mode for skip actions when available
   let mode: WorkerModeLiteral;
   if (
@@ -233,6 +237,7 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
     suggestedAction: action,
     sessionId,
     hasUserFeedback: data.hasUserFeedback,
+    isBlocked: data.isBlocked ?? false,
     source: data.source,
   };
 }

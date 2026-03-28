@@ -13,6 +13,7 @@ import {
   createParsedIssue,
   GitHubPRRef,
   IssueStatus,
+  LEGION_REPO_CONFIG,
 } from "../types";
 
 describe("computeSessionId", () => {
@@ -317,5 +318,23 @@ describe("ParsedIssue properties", () => {
   it("needs_pr_status returns false when no pr_ref", () => {
     const issue = createParsedIssue("ENG-21", "Needs Review", ["worker-done"], null);
     expect(issue.needsPrStatus).toBe(false);
+  });
+});
+
+describe("LEGION_REPO_CONFIG", () => {
+  it("defines workspace config path", () => {
+    expect(LEGION_REPO_CONFIG.PATH).toBe(".legion/config.yml");
+  });
+
+  it("includes documented recognized keys", () => {
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("merge.require_smoke_test");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("merge.require_reporter_approval");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("merge.auto_merge_allowed");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("testing.require_specific_task");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("testing.require_taiga_evidence");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("notifications.slack_channel");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("notifications.ping_reporter_on_pr");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("skills.required");
+    expect(LEGION_REPO_CONFIG.RECOGNIZED_KEYS).toContain("phases.<mode>.*");
   });
 });

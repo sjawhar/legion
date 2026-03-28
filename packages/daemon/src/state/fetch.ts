@@ -586,6 +586,7 @@ export async function enrichParsedIssues(
       hasHumanApproved: issue.hasHumanApproved,
       hasTestPassed: issue.hasTestPassed,
       hasTestFailed: issue.hasTestFailed,
+      isBlocked: issue.isBlocked,
       source: issue.source,
     };
   });
