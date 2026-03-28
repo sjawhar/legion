@@ -103,6 +103,29 @@ The 9-step loop describes WHAT the controller does. Execution uses background po
 
 **Fallback:** If background tasks are unavailable, process all 9 steps without any `sleep`, then end turn. External runtime re-invokes the controller.
 
+### Polling Efficiency
+
+These rules prevent the controller from burning its context window on redundant polling. They are **critical after compaction** — compaction preserves *what* to poll but often loses *how* to poll efficiently.
+
+**1. Always use the consolidated polling script.** Poll via a single bash script that fetches ALL tracked state in one execution. Do NOT decompose polling into individual `gh pr view` / `gh issue list` calls — each call in an explore-agent prompt adds ~75 lines of overhead to the context window.
+
+**2. Minimize explore-agent prompt size.** Poller sub-agent prompts must be terse. Bad: 80-line prompt with inline `gh` commands, baselines, and reporting instructions. Good: 2-line prompt that runs the script and diffs against the last result. Target ≤ 30 lines total context per poll cycle (prompt + result + metadata).
+
+**3. Adaptive poll frequency for holding patterns.** When all tracked items are blocked on human action and the poller reports no changes:
+- First 5 no-change cycles: maintain normal frequency
+- After 5 consecutive no-change cycles: poll every 5 minutes
+- After 20 consecutive no-change cycles (weekend/off-hours): poll every 15 minutes
+- Log frequency changes: `"Reduced poll frequency — N consecutive no-change cycles"`
+- Any state change resets the counter and restores normal frequency
+
+**4. Compaction-proof critical context.** The following MUST survive compaction (include verbatim in any compaction summary):
+- Polling script path (if using a consolidated script)
+- Watched-issues and watched-PRs file paths
+- Correct org/repo names for all tracked PRs
+- Daemon port and serve port
+- Controller session ID
+- Project board identifier
+
 ### 1. Fetch Issues
 
 ```bash
