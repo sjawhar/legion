@@ -21,6 +21,12 @@ import { createAdapter } from "./runtime";
 import type { RuntimeAdapter } from "./runtime/types";
 import { startServer } from "./server";
 import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
+import {
+  registerGauges,
+  registerSignals,
+  start as startMemoryTelemetry,
+  stop as stopMemoryTelemetry,
+} from "./telemetry";
 
 type ServerHandle = ReturnType<typeof startServer>;
 
@@ -187,6 +193,27 @@ export async function startDaemon(
   const resolvedDeps = resolveDependencies(config, deps);
 
   const sharedServePort = config.baseWorkerPort;
+  let healthTicks = 0;
+  let sharedServeRestarts = 0;
+  let roleServeRestarts = 0;
+  let controllerRecreates = 0;
+  let indexInitializations = 0;
+  let indexIncrementalUpdates = 0;
+
+  registerSignals();
+  startMemoryTelemetry();
+  const releaseDaemonGauges = registerGauges("daemon-index", () => ({
+    daemon_port: config.daemonPort,
+    daemon_shared_serve_port: sharedServePort,
+    daemon_health_ticks: healthTicks,
+    daemon_shared_restarts: sharedServeRestarts,
+    daemon_role_restarts: roleServeRestarts,
+    daemon_controller_recreates: controllerRecreates,
+    daemon_index_initializations: indexInitializations,
+    daemon_index_incrementals: indexIncrementalUpdates,
+    daemon_controller_present: controllerState ? 1 : 0,
+    daemon_role_serves: roleServeManager?.getEntries().length ?? 0,
+  }));
   const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
   const hasIndexRoot = !!config.legionDir && existsSync(config.legionDir);
   if (config.legionDir && !hasIndexRoot) {
@@ -253,6 +280,7 @@ export async function startDaemon(
   if (hasIndexRoot) {
     const startedIndexBuildAt = Date.now();
     await indexManager.initialize();
+    indexInitializations += 1;
     console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
   }
 
@@ -287,6 +315,8 @@ export async function startDaemon(
       crashHistory: state.crashHistory,
       controller: undefined,
     });
+    releaseDaemonGauges();
+    stopMemoryTelemetry();
     stopServer();
     if (exitAfter) {
       process.exit(0);
@@ -398,6 +428,7 @@ export async function startDaemon(
   const scheduleHealthTick = () => {
     healthTickTimeout = resolvedDeps.setTimeout(async () => {
       try {
+        healthTicks += 1;
         const serveHealthy = await resolvedDeps.adapter.healthy();
 
         if (!serveHealthy) {
@@ -409,6 +440,7 @@ export async function startDaemon(
               workspace: controllerWorkspace,
               logDir: config.logDir,
             });
+            sharedServeRestarts += 1;
             console.log(`Shared serve restarted on port ${sharedServePort}`);
 
             const state = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -444,6 +476,7 @@ export async function startDaemon(
                   sessionId: actualControllerSessionId,
                   port: sharedServePort,
                 };
+                controllerRecreates += 1;
                 await sendPromptWithRetry(
                   resolvedDeps.adapter,
                   actualControllerSessionId,
@@ -462,6 +495,7 @@ export async function startDaemon(
 
         try {
           await indexManager.incrementalUpdate();
+          indexIncrementalUpdates += 1;
         } catch (error) {
           console.error(`Failed to update codebase index incrementally: ${error}`);
         }
@@ -478,6 +512,7 @@ export async function startDaemon(
                 controllerWorkspace,
                 config.logDir
               );
+              roleServeRestarts += 1;
               console.log(`Role serve '${role}' restarted`);
               // Re-create sessions for workers on this role
               const roleAdapter = roleServeManager.getAdapterForRole(role);

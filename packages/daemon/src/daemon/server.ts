@@ -28,6 +28,7 @@ import {
   readStateFile,
   writeStateFile,
 } from "./state-file";
+import { registerGauges } from "./telemetry";
 
 type Server = ReturnType<typeof Bun.serve>;
 
@@ -66,7 +67,10 @@ const MAX_CRASHES = 3;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
 function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), { status, headers: JSON_HEADERS });
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: JSON_HEADERS,
+  });
 }
 
 function badRequest(message: string): Response {
@@ -120,12 +124,37 @@ function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
   return null;
 }
 
-export function startServer(opts: ServerOptions): { server: Server; stop: () => void } {
+export function startServer(opts: ServerOptions): {
+  server: Server;
+  stop: () => void;
+} {
   const hostname = opts.hostname ?? "127.0.0.1";
   const port = opts.port ?? 13370;
   const startedAt = Date.now();
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
+  const releaseGauges = registerGauges("daemon-server", () => {
+    let starting = 0;
+    let running = 0;
+    let stopped = 0;
+    let dead = 0;
+    for (const entry of workers.values()) {
+      if (entry.status === "starting") starting += 1;
+      if (entry.status === "running") running += 1;
+      if (entry.status === "stopped") stopped += 1;
+      if (entry.status === "dead") dead += 1;
+    }
+    return {
+      daemon_workers: workers.size,
+      daemon_workers_starting: starting,
+      daemon_workers_running: running,
+      daemon_workers_stopped: stopped,
+      daemon_workers_dead: dead,
+      daemon_crash_entries: crashHistory.size,
+      daemon_controller_present: opts.getControllerState?.() ? 1 : 0,
+      daemon_uptime_s: Math.floor((Date.now() - startedAt) / 1000),
+    };
+  });
 
   let pendingWrite: Promise<void> = Promise.resolve();
 
@@ -703,6 +732,7 @@ export function startServer(opts: ServerOptions): { server: Server; stop: () => 
   return {
     server,
     stop: () => {
+      releaseGauges();
       server.stop(true);
     },
   };

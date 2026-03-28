@@ -1,0 +1,13 @@
+.git
+.jj
+node_modules
+dist
+build
+coverage
+*.log
+.env
+.env.*
+.vscode
+.idea
+docker-data
+tmp
