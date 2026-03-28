@@ -83,7 +83,15 @@ Examples:
 1. Get the target session ID
 2. Call `envoy_send(target_session, message)`
 
-You do NOT need to subscribe in order to send.
+You do NOT need to subscribe in order to send or publish.
+
+### Tools
+
+- `envoy_subscribe(topics)` — receive future events on those topics
+- `envoy_unsubscribe(topics?)` — stop receiving some or all topics
+- `envoy_list()` — show current subscriptions
+- `envoy_send(target_session, message)` — send directly to a specific session (point-to-point)
+- `envoy_publish(topic, message)` — broadcast to any topic (all matching subscribers receive it)
 
 ## Patterns
 

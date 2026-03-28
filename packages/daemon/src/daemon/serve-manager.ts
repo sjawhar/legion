@@ -3,10 +3,11 @@ import { join } from "node:path";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { HealthCheckResponseSchema, SessionCreateResponseSchema } from "./schemas";
 
-interface SharedServeState {
+export interface SharedServeState {
   port: number;
   pid: number;
   status: "starting" | "running" | "dead";
+  subprocess: ReturnType<typeof Bun.spawn>;
 }
 
 interface SharedServeOptions {
@@ -60,7 +61,7 @@ export async function spawnSharedServe(opts: SharedServeOptions): Promise<Shared
     throw new Error("Failed to spawn shared opencode serve process");
   }
 
-  return { port: opts.port, pid, status: "starting" };
+  return { port: opts.port, pid, status: "starting", subprocess };
 }
 
 export async function waitForHealthy(port: number, maxRetries = 30, delayMs = 500): Promise<void> {

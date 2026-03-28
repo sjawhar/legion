@@ -12,9 +12,12 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) go build -o /out/envoy-slac
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r envoy && useradd -r -g envoy envoy
 
 COPY --from=build /out/envoy-slack /usr/local/bin/envoy-slack
+
+USER envoy
 
 EXPOSE 9011
 

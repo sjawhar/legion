@@ -20,7 +20,12 @@ export default async (input: { serverUrl: URL }) => {
   const update = (patch: Record<string, unknown>) => {
     if (!file) return;
     try {
-      const data = JSON.parse(readFileSync(file, "utf-8"));
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(readFileSync(file, "utf-8"));
+      } catch {
+        data = { pid: Number(shellPid), dir: process.cwd(), started: new Date().toISOString() };
+      }
       Object.assign(data, patch);
       writeFileSync(file, `${JSON.stringify(data)}\n`);
     } catch {}
@@ -185,6 +190,28 @@ export default async (input: { serverUrl: URL }) => {
             body: JSON.stringify({
               source_session: ctx.sessionID,
               target_session: args.target_session,
+              message: args.message,
+            }),
+          });
+        },
+      }),
+      envoy_publish: tool({
+        description:
+          "Publish an Envoy message to any topic. Use for broadcast to named topics like notifications.legion.controller, team channels, or custom routing. Subscribers matching the topic will receive the message. This is for BROADCAST, not session-targeted delivery (use envoy_send for that).",
+        args: {
+          topic: tool.schema
+            .string()
+            .describe("NATS-style topic to publish to, e.g. notifications.legion.controller"),
+          message: tool.schema.string().describe("Message body to broadcast"),
+        },
+        async execute(args, ctx) {
+          ctx.metadata({ title: "Envoy publish" });
+          return call("/v1/messages/publish", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              source_session: ctx.sessionID,
+              topic: args.topic,
               message: args.message,
             }),
           });

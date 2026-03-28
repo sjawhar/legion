@@ -134,16 +134,38 @@ async function sendPromptWithRetry(
   throw lastError;
 }
 
+function subscribeControllerToEnvoy(sessionId: string) {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  fetch(`${envoyUrl}/v1/interests/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      topics: ["notifications.legion.controller", "notifications.slack.*.*.mention"],
+    }),
+  })
+    .then(() => {
+      console.log(`Controller subscribed to Envoy: session=${sessionId}`);
+    })
+    .catch((err) => {
+      console.warn(`Envoy subscribe failed (non-fatal): ${err}`);
+    });
+}
+
 function buildControllerEnv(config: DaemonConfig): Record<string, string> {
   // config.legionId is guaranteed non-empty by the startDaemon guard at line 107-109.
   // The "" fallback is unreachable dead code — kept to satisfy the type checker.
   const legionId = config.legionId ?? "";
-  return {
+  const env: Record<string, string> = {
     LEGION_ID: legionId,
     LEGION_ISSUE_BACKEND: config.issueBackend,
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
   };
+  if (config.controllerSessionId) {
+    env.LEGION_CONTROLLER_SESSION_ID = config.controllerSessionId;
+  }
+  return env;
 }
 
 export async function startDaemon(
@@ -200,6 +222,8 @@ export async function startDaemon(
   let indexInitializations = 0;
   let indexIncrementalUpdates = 0;
 
+  let controllerState: ControllerState | undefined;
+
   registerSignals();
   startMemoryTelemetry();
   const releaseDaemonGauges = registerGauges("daemon-index", () => ({
@@ -239,6 +263,16 @@ export async function startDaemon(
     console.log(`Shared serve started on port ${sharedServePort}`);
   }
 
+  // Log when shared serve exits but don't auto-restart — it idles out with 0 sessions.
+  // The serve will be restarted on-demand when workers are created.
+  const adapterAny = resolvedDeps.adapter as { onServeExit?: ((code: number | null) => void) | null };
+  if (adapterAny.onServeExit !== undefined) {
+    adapterAny.onServeExit = (code) => {
+      if (shuttingDown) return;
+      console.log(`Shared serve exited (code=${code}), will restart on next worker creation`);
+    };
+  }
+
   // Initialize per-role serves for credential isolation (when GitHub Apps configured)
   let roleServeManager: RoleServeManager | undefined;
   let tokenManager: TokenManager | undefined;
@@ -264,16 +298,45 @@ export async function startDaemon(
   }
 
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
-  let controllerState: ControllerState | undefined = preState.controller;
+  controllerState = preState.controller;
 
-  for (const entry of Object.values(preState.workers)) {
-    try {
-      const actualId = await resolvedDeps.adapter.createSession(entry.sessionId, entry.workspace);
-      if (actualId !== entry.sessionId) {
-        console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
-      }
-    } catch (error) {
-      console.error(`Failed to re-create session for ${entry.id}: ${error}`);
+  // Prune dead/stopped workers from state file on startup
+  const activeWorkers: Record<string, typeof preState.workers[string]> = {};
+  let pruned = 0;
+  for (const [id, entry] of Object.entries(preState.workers)) {
+    if (entry.status === "dead" || entry.status === "stopped") {
+      pruned++;
+      continue;
+    }
+    activeWorkers[id] = entry;
+  }
+  if (pruned > 0) {
+    console.log(`Pruned ${pruned} dead/stopped workers from state file`);
+    await resolvedDeps.writeStateFile(config.stateFilePath, {
+      ...preState,
+      workers: activeWorkers,
+    });
+  }
+
+  // Recreate sessions for active workers in parallel (batched)
+  const workerEntries = Object.values(activeWorkers);
+  if (workerEntries.length > 0) {
+    console.log(`Recreating ${workerEntries.length} active worker sessions...`);
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < workerEntries.length; i += BATCH_SIZE) {
+      const batch = workerEntries.slice(i, i + BATCH_SIZE);
+      await Promise.allSettled(
+        batch.map(async (entry) => {
+          try {
+            const actualId = await resolvedDeps.adapter.createSession(entry.sessionId, entry.workspace);
+            if (actualId !== entry.sessionId) {
+              console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
+            }
+          } catch (error) {
+            console.error(`Failed to re-create session for ${entry.id}: ${error}`);
+          }
+        })
+      );
     }
   }
 
@@ -317,6 +380,7 @@ export async function startDaemon(
     });
     releaseDaemonGauges();
     stopMemoryTelemetry();
+    clearInterval(keepalive);
     stopServer();
     if (exitAfter) {
       process.exit(0);
@@ -393,6 +457,7 @@ export async function startDaemon(
     }
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
+    subscribeControllerToEnvoy(config.controllerSessionId);
   } else {
     const requestedSessionId = computeControllerSessionId(legionId);
     let actualSessionId: string | undefined;
@@ -418,6 +483,7 @@ export async function startDaemon(
           resolvedDeps
         );
         console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
+        subscribeControllerToEnvoy(actualSessionId);
       } catch (error) {
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
@@ -444,19 +510,31 @@ export async function startDaemon(
             console.log(`Shared serve restarted on port ${sharedServePort}`);
 
             const state = await resolvedDeps.readStateFile(config.stateFilePath);
-            for (const entry of Object.values(state.workers)) {
-              try {
-                const actualId = await resolvedDeps.adapter.createSession(
-                  entry.sessionId,
-                  entry.workspace
+            const liveWorkers = Object.values(state.workers).filter(
+              (e) => e.status !== "dead" && e.status !== "stopped"
+            );
+            if (liveWorkers.length > 0) {
+              console.log(`Recreating ${liveWorkers.length} active worker sessions after serve restart...`);
+              const BATCH_SIZE = 10;
+              for (let i = 0; i < liveWorkers.length; i += BATCH_SIZE) {
+                const batch = liveWorkers.slice(i, i + BATCH_SIZE);
+                await Promise.allSettled(
+                  batch.map(async (entry) => {
+                    try {
+                      const actualId = await resolvedDeps.adapter.createSession(
+                        entry.sessionId,
+                        entry.workspace
+                      );
+                      if (actualId !== entry.sessionId) {
+                        console.warn(
+                          `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
+                        );
+                      }
+                    } catch {
+                      // Best-effort session re-creation
+                    }
+                  })
                 );
-                if (actualId !== entry.sessionId) {
-                  console.warn(
-                    `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
-                  );
-                }
-              } catch {
-                // Best-effort session re-creation
               }
             }
 
@@ -539,6 +617,10 @@ export async function startDaemon(
       }
     }, config.checkIntervalMs);
   };
+  // Keepalive: prevent Bun's event loop from draining when the shared serve child exits.
+  // Bun.spawn links child lifecycle to parent — without this, the daemon exits when the serve does.
+  const keepalive = setInterval(() => {}, 2_147_483_647); // max 32-bit int
+
   scheduleHealthTick();
 
   const handleSignal = async () => {
@@ -556,5 +638,11 @@ export async function startDaemon(
 }
 
 if (import.meta.main) {
+  process.on("uncaughtException", (error) => {
+    console.error("[daemon] uncaught exception:", error);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[daemon] unhandled rejection:", reason);
+  });
   void startDaemon();
 }

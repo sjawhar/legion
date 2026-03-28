@@ -85,6 +85,10 @@ The controller MUST NOT ask "should I continue?" for routine operations. Act on 
 2. There is genuine stakeholder disagreement
 3. The situation is not covered by existing rules
 
+## Envoy Notifications
+
+The daemon automatically subscribes the controller to `notifications.legion.controller` and `notifications.agent.<session_id>` at startup. Workers broadcast to `notifications.legion.controller` when they finish a phase, giving you instant notification instead of waiting for the next polling cycle. The `worker-done` label remains the source of truth — Envoy is a speed optimization.
+
 ## Algorithm
 
 ```dot
