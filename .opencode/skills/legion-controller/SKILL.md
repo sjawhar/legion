@@ -19,6 +19,30 @@ Required:
 - `LEGION_SHORT_ID` - short ID for daemon identification
 - `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
 
+## Daemon Launch
+
+Start the daemon from the Legion packages/daemon directory.
+
+```bash
+cd ~/legion/default/packages/daemon && \
+  PATH="$HOME/opencode/default/packages/opencode/dist/opencode-linux-x64/bin:$PATH" \
+  ENVOY_URL=http://127.0.0.1:9020 \
+  LEGION_CONTROLLER_SESSION_ID=$MY_SESSION_ID \
+  bun run src/cli/index.ts start trajectory-labs-pbc/2 -b github -r opencode
+```
+
+**Key details:**
+- **`LEGION_CONTROLLER_SESSION_ID` is required** — without it, the daemon spawns a separate controller session
+- **`ENVOY_URL`** is required so spawned opencode sessions can reach Envoy
+- **`-w` is NOT needed** — worker workspaces are auto-created by `ensureWorkspace()` (see Path Architecture below)
+- Only 2 env vars needed. Everything else is CLI args (`-b github -r opencode`).
+- Expected plugin stack: `@sjawhar/oh-my-opencode@sami` and `@sjawhar/opencode-legion-envoy@0.1.0-alpha.0`
+
+**Path architecture (all derived from XDG conventions, not `-w`):**
+- Repo clones: `~/.local/share/legion/repos/github.com/{owner}/{repo}/`
+- Worker workspaces: `~/.local/share/legion/workspaces/{projectId}/{issueId}/` (jj workspaces linked to repo clones)
+- State/logs: `~/.local/state/legion/legions/{projectId}/`
+- Controller workspace: same as state dir
 ## Core Principle
 
 **Keep work moving forward.** Priority order:

@@ -1,0 +1,105 @@
+name: Legion Envoy and Contracts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/envoy/**"
+      - "packages/contracts/**"
+      - "packages/envoy-plugin/**"
+  pull_request:
+    paths:
+      - "packages/envoy/**"
+      - "packages/contracts/**"
+      - "packages/envoy-plugin/**"
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Lint contracts
+        run: bun run lint
+        working-directory: packages/contracts
+      - name: Typecheck contracts
+        run: bun run typecheck
+        working-directory: packages/contracts
+      - name: Test contracts
+        run: bun run test
+        working-directory: packages/contracts
+      - name: Build contracts
+        run: bun run build
+        working-directory: packages/contracts
+
+  envoy-plugin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Lint envoy plugin
+        run: bun run lint
+        working-directory: packages/envoy-plugin
+      - name: Typecheck envoy plugin
+        run: bun run typecheck
+        working-directory: packages/envoy-plugin
+      - name: Build envoy plugin
+        run: bun run build
+        working-directory: packages/envoy-plugin
+      - name: Pack envoy plugin
+        run: bun pm pack --destination ../../out/pr-artifacts
+        working-directory: packages/envoy-plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-legion-envoy-plugin-pr
+          path: out/pr-artifacts/*.tgz
+
+  envoy-go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Generate Go contracts from shared schema
+        run: bun run gen:go
+        working-directory: packages/contracts
+      - name: Test envoy Go package
+        run: go test ./...
+        working-directory: packages/envoy
+      - name: Build envoy services
+        run: |
+          go build ./cmd/github
+          go build ./cmd/slack
+          go build ./cmd/listener
+        working-directory: packages/envoy
+      - name: Pack envoy binaries
+        run: |
+          mkdir -p ../../out/pr-artifacts/envoy-amd64
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-github ./cmd/github
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-slack ./cmd/slack
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-listener ./cmd/listener
+          tar czf ../../out/pr-artifacts/legion-envoy-amd64.tar.gz -C ../../out/pr-artifacts/envoy-amd64 envoy-github envoy-slack envoy-listener
+          mkdir -p ../../out/pr-artifacts/envoy-arm64
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-github ./cmd/github
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-slack ./cmd/slack
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-listener ./cmd/listener
+          tar czf ../../out/pr-artifacts/legion-envoy-arm64.tar.gz -C ../../out/pr-artifacts/envoy-arm64 envoy-github envoy-slack envoy-listener
+        working-directory: packages/envoy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legion-envoy-binaries-pr
+          path: |
+            out/pr-artifacts/legion-envoy-amd64.tar.gz
+            out/pr-artifacts/legion-envoy-arm64.tar.gz

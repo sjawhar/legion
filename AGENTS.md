@@ -49,24 +49,27 @@ legion handoff write|read|message    # Workers: write/read structured handoff da
 
 **jj (Jujutsu), not git.** Changes auto-accumulate. Push directly.
 
-| Task | Command |
-|------|---------|
+| Task                | Command                            |
+| ------------------- | ---------------------------------- |
 | Status / Log / Diff | `jj status` / `jj log` / `jj diff` |
-| Push / Fetch | `jj git push` / `jj git fetch` |
+| Push / Fetch        | `jj git push` / `jj git fetch`     |
 
 ## WHERE TO LOOK
 
-| Task | Location | Notes |
-|------|----------|-------|
-| Add CLI command | `packages/daemon/src/cli/index.ts` | citty `defineCommand` pattern |
-| Change HTTP API | `packages/daemon/src/daemon/server.ts` | See @packages/daemon/src/daemon/AGENTS.md |
-| Change state machine | `packages/daemon/src/state/decision.ts` | See @packages/daemon/src/state/AGENTS.md |
-| Add worker workflow | `.opencode/skills/legion-worker/workflows/` | See @.opencode/skills/AGENTS.md |
-| Change controller loop | `.opencode/skills/legion-controller/SKILL.md` | See @.opencode/skills/AGENTS.md |
-| Modify issue types | `packages/daemon/src/state/types.ts` | Shared by daemon + state |
-| Worker process mgmt | `packages/daemon/src/daemon/serve-manager.ts` | Spawns `opencode serve` |
-| Port allocation | `packages/daemon/src/daemon/ports.ts` | Sequential from base 13381 |
-| Handoff ledger | `.legion/` on issue branch | Per-phase JSON files written by workers |
+| Task                   | Location                                      | Notes                                     |
+| ---------------------- | --------------------------------------------- | ----------------------------------------- |
+| Add CLI command        | `packages/daemon/src/cli/index.ts`            | citty `defineCommand` pattern             |
+| Change HTTP API        | `packages/daemon/src/daemon/server.ts`        | See @packages/daemon/src/daemon/AGENTS.md |
+| Change state machine   | `packages/daemon/src/state/decision.ts`       | See @packages/daemon/src/state/AGENTS.md  |
+| Add worker workflow    | `.opencode/skills/legion-worker/workflows/`   | See @.opencode/skills/AGENTS.md           |
+| Change controller loop | `.opencode/skills/legion-controller/SKILL.md` | See @.opencode/skills/AGENTS.md           |
+| Modify issue types     | `packages/daemon/src/state/types.ts`          | Shared by daemon + state                  |
+| Worker process mgmt    | `packages/daemon/src/daemon/serve-manager.ts` | Spawns `opencode serve`                   |
+| Port allocation        | `packages/daemon/src/daemon/ports.ts`         | Sequential from base 13381                |
+| Handoff ledger         | `.legion/` on issue branch                    | Per-phase JSON files written by workers   |
+| Envoy event routing    | `packages/envoy/`                             | See @packages/envoy/AGENTS.md             |
+| Shared event contracts | `packages/contracts/`                         | See @packages/contracts/AGENTS.md         |
+| Envoy OpenCode bridge  | `packages/envoy-plugin/`                      | See @packages/envoy-plugin/AGENTS.md      |
 
 ## Conventions
 
@@ -104,3 +107,4 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 - Learnings: `docs/solutions/<category>/<slug>.md`
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references. These are marked with `[HISTORICAL]` headers.
+```
