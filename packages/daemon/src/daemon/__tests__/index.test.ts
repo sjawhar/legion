@@ -927,7 +927,7 @@ describe("daemon entry", () => {
         controllerSessionId: "ses_test",
       },
       {
-        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        readStateFile: async () => ({ workers: { "test-implement": { id: "test-implement", port: 13381, sessionId: "ses_worker", workspace: "/test", startedAt: new Date().toISOString(), status: "running" as const, crashCount: 0, lastCrashAt: null } }, crashHistory: {} }),
         writeStateFile: async () => {},
         adapter: {
           ...makeAdapter({

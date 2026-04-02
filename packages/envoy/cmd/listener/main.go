@@ -84,6 +84,8 @@ func main() {
 			_ = msg.Ack()
 			return
 		}
+		// NAK on any failure retries ALL recipients, causing duplicates for already-delivered ones.
+		// Acceptable: notifications are advisory and idempotent.
 		var failed bool
 		for _, interest := range items {
 			if err := deliver.Deliver(item, interest); err != nil {
@@ -96,7 +98,7 @@ func main() {
 		} else {
 			_ = msg.Ack()
 		}
-	}, nats.Durable(consumer), nats.DeliverNew(), nats.AckExplicit(), nats.ManualAck(), nats.AckWait(60*time.Second), nats.MaxAckPending(256))
+	}, nats.Durable(consumer), nats.DeliverNew(), nats.AckExplicit(), nats.ManualAck(), nats.AckWait(60*time.Second), nats.MaxAckPending(256), nats.MaxDeliver(20))
 	if err != nil {
 		log.Fatal(err)
 	}

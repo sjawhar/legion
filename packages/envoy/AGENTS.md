@@ -9,7 +9,7 @@ Envoy owns transport, routing, and delivery:
 - ingests Slack/GitHub/agent events
 - publishes and consumes via NATS/JetStream
 - resolves target OpenCode sessions
-- delivers by hot `prompt_async` or cold `opencode run --session`
+- delivers by hot `prompt_async` (messages stay in JetStream for retry if session is unavailable)
 
 It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves events to the right session.
 
@@ -20,7 +20,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 | Receiver behavior      | `cmd/github/main.go`, `cmd/slack/main.go` | HTTP ingress, signature verification, publish path |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
-| Session delivery       | `internal/session/session.go`             | hot vs cold delivery                               |
+| Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
@@ -38,5 +38,5 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 ## Operational notes
 
 - Health endpoints should reflect NATS health, not just process liveness.
-- If a session is not live in the registry, Envoy will cold-resume it with the configured `ENVOY_OPENCODE_BIN`.
+- If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.

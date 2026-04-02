@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -331,11 +332,20 @@ func slackKind(body map[string]any) string {
 
 func slackSummary(body map[string]any) string {
 	event, _ := body["event"].(map[string]any)
-	text := stringValue(event["text"])
-	if len(text) > 160 {
-		text = text[:160]
+	data := map[string]string{
+		"kind":    slackKind(body),
+		"user":    stringValue(event["user"]),
+		"channel": stringValue(event["channel"]),
+		"text":    stringValue(event["text"]),
 	}
-	return strings.TrimSpace(fmt.Sprintf("Slack %s from %s in %s: %s", slackKind(body), stringValue(event["user"]), stringValue(event["channel"]), text))
+	if ts := stringValue(event["ts"]); ts != "" {
+		data["ts"] = ts
+	}
+	if thread := stringValue(event["thread_ts"]); thread != "" {
+		data["thread_ts"] = thread
+	}
+	out, _ := json.Marshal(data)
+	return string(out)
 }
 
 func nested(body map[string]any, keys ...string) any {

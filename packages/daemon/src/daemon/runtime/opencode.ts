@@ -10,17 +10,23 @@ import type { RuntimeAdapter, RuntimeStartOptions } from "./types";
 
 export class OpenCodeAdapter implements RuntimeAdapter {
   private pid = 0;
-  private subprocess: ReturnType<typeof Bun.spawn> | null = null;
   private readonly workspaces = new Map<string, string>();
-  private lastStartOpts: RuntimeStartOptions | null = null;
-  onServeExit: ((code: number | null) => void) | null = null;
+  private startOpts: RuntimeStartOptions | null = null;
+  private startingPromise: Promise<void> | null = null;
 
   constructor(private readonly port: number) {}
+
   getPort(): number {
     return this.port;
   }
+
+  /** Store start opts for lazy serve startup via ensureRunning(). */
+  configure(opts: RuntimeStartOptions): void {
+    this.startOpts = opts;
+  }
+
   async start(opts: RuntimeStartOptions): Promise<void> {
-    this.lastStartOpts = opts;
+    this.startOpts = opts;
     const serve = await spawnSharedServe({
       port: this.port,
       workspace: opts.workspace,
@@ -28,32 +34,26 @@ export class OpenCodeAdapter implements RuntimeAdapter {
       env: opts.env,
     });
     this.pid = serve.pid;
-    this.subprocess = serve.subprocess;
-    serve.subprocess.exited.then((code) => {
-      console.error(`[daemon] shared serve exited unexpectedly: pid=${this.pid} code=${code}`);
-      this.pid = 0;
-      this.subprocess = null;
-      this.onServeExit?.(code);
-    });
     await waitForHealthy(this.port);
   }
 
-  private async ensureRunning(): Promise<void> {
+  /** Start the serve on demand if it's not running. Coalesces concurrent calls. */
+  async ensureRunning(): Promise<void> {
     if (await healthCheck(this.port)) return;
-    if (!this.lastStartOpts) throw new Error("Shared serve not initialized");
-    console.log("Shared serve not running, starting on demand...");
-    await this.start(this.lastStartOpts);
+    if (!this.startOpts)
+      throw new Error("Shared serve not configured \u2014 call configure() or start() first");
+    if (!this.startingPromise) {
+      this.startingPromise = this.start(this.startOpts).finally(() => {
+        this.startingPromise = null;
+      });
+    }
+    await this.startingPromise;
   }
 
   async stop(): Promise<void> {
-    if (this.subprocess) {
-      this.subprocess.kill();
-      await this.subprocess.exited;
-      this.subprocess = null;
-    } else if (this.pid > 0) {
+    if (this.pid > 0) {
       await stopServe(this.port, this.pid);
     }
-    this.pid = 0;
   }
 
   async healthy(): Promise<boolean> {

@@ -9,8 +9,8 @@ import (
 type Envelope struct {
 	EventID        string `json:"event_id"`
 	Source         string `json:"source"`
-	SourceSession  string `json:"source_session,omitempty"`
 	SourceEventID  string `json:"source_event_id"`
+	SourceSession  string `json:"source_session,omitempty"`
 	Topic          string `json:"topic"`
 	DedupeKey      string `json:"dedupe_key"`
 	IssuedAt       int64  `json:"issued_at"`
