@@ -37,6 +37,8 @@ func main() {
 		HostBridge:  os.Getenv("ENVOY_HOST_BRIDGE"),
 	}
 
+	dedupe := session.NewDedupe(5 * time.Minute)
+
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
 	_, err = client.Subscribe("notifications.>", func(msg *nats.Msg) {
@@ -52,30 +54,32 @@ func main() {
 			return
 		}
 		log.Printf("listener received machine=%s source=%s topic=%s event_id=%s", cfg.MachineID, item.Source, item.Topic, item.EventID)
+		if dedupe.Check(item.DedupeKey) {
+			log.Printf("listener dedupe skip event_id=%s dedupe_key=%s", item.EventID, item.DedupeKey)
+			_ = msg.Ack()
+			return
+		}
 		if item.Source == "agent" {
 			sessionID := strings.TrimPrefix(item.Topic, "notifications.agent.")
 			interest, err := registry.Get(sessionID)
-			if err == nil && interest.MachineID == cfg.MachineID {
-				if err := deliver.Deliver(item, interest); err != nil {
-					log.Printf("listener agent delivery failed: %v", err)
-					_ = msg.NakWithDelay(30 * time.Second)
-					return
-				}
-				_ = msg.Ack()
-				return
+			var interestPtr *store.Interest
+			if err == nil {
+				interestPtr = &interest
 			}
-			entry, err := deliver.Find(sessionID)
-			if err != nil || entry == nil {
-				_ = msg.Ack()
-				return
+			result := session.HandleAgentMessage(item, sessionID, cfg.MachineID, interestPtr, &deliver)
+			if result.Err != nil {
+				log.Printf("listener agent delivery failed session=%s: %v", sessionID, result.Err)
 			}
-			fallback := store.Interest{SessionID: sessionID, Dir: entry.Dir, MachineID: cfg.MachineID}
-			if err := deliver.Deliver(item, fallback); err != nil {
-				log.Printf("listener agent delivery failed: %v", err)
+			if result.Delivered {
+				log.Printf("listener agent delivered session=%s event_id=%s", sessionID, item.EventID)
+			} else if result.Err == nil {
+				log.Printf("listener agent session not found anywhere session=%s", sessionID)
+			}
+			if result.ShouldNAK {
 				_ = msg.NakWithDelay(30 * time.Second)
-				return
+			} else {
+				_ = msg.Ack()
 			}
-			_ = msg.Ack()
 			return
 		}
 		items := registry.Match(cfg.MachineID, item.Topic)
@@ -84,6 +88,8 @@ func main() {
 			_ = msg.Ack()
 			return
 		}
+		// NAK on any failure retries ALL recipients, causing duplicates for already-delivered ones.
+		// Acceptable: notifications are advisory and idempotent.
 		var failed bool
 		for _, interest := range items {
 			if err := deliver.Deliver(item, interest); err != nil {
@@ -96,7 +102,7 @@ func main() {
 		} else {
 			_ = msg.Ack()
 		}
-	}, nats.Durable(consumer), nats.DeliverNew(), nats.AckExplicit(), nats.ManualAck(), nats.AckWait(60*time.Second), nats.MaxAckPending(256))
+	}, nats.Durable(consumer), nats.DeliverNew(), nats.AckExplicit(), nats.ManualAck(), nats.AckWait(60*time.Second), nats.MaxAckPending(256), nats.MaxDeliver(20))
 	if err != nil {
 		log.Fatal(err)
 	}

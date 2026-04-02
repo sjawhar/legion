@@ -20,14 +20,28 @@ type Registry struct {
 	cache map[string]Interest
 }
 
-func Open(conn *nats.Conn) (*Registry, error) {
+// OpenOption configures the registry.
+type OpenOption func(*openOpts)
+
+type openOpts struct{ replicas int }
+
+// WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
+func WithReplicas(n int) OpenOption {
+	return func(o *openOpts) { o.replicas = n }
+}
+
+func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
+	opts := openOpts{replicas: 3}
+	for _, o := range options {
+		o(&opts)
+	}
 	js, err := conn.JetStream()
 	if err != nil {
 		return nil, err
 	}
 	kv, err := js.KeyValue(Bucket)
 	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: Bucket, Replicas: 3, Storage: nats.FileStorage})
+		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: Bucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	}
 	if err != nil {
 		return nil, err
@@ -106,6 +120,10 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 }
 
 func (r *Registry) Remove(sessionID string, topics []string) error {
+	// Empty topics = unsubscribe from everything (delete the entry)
+	if len(topics) == 0 {
+		return r.kv.Delete(sessionID)
+	}
 	item, err := r.Get(sessionID)
 	if err != nil {
 		return err

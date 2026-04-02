@@ -40,24 +40,22 @@ func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) err
 }
 
 func (d Deliverer) Find(sessionID string) (*RegistryEntry, error) {
-	files, err := filepath.Glob(filepath.Join(d.RegistryDir, "*.json"))
+	if d.RegistryDir == "" {
+		return nil, os.ErrNotExist
+	}
+	path := filepath.Join(d.RegistryDir, sessionID+".json")
+	buf, err := os.ReadFile(path)
 	if err != nil {
+		return nil, os.ErrNotExist
+	}
+	var entry RegistryEntry
+	if err := json.Unmarshal(buf, &entry); err != nil {
 		return nil, err
 	}
-	for _, file := range files {
-		buf, err := os.ReadFile(file)
-		if err != nil {
-			continue
-		}
-		var entry RegistryEntry
-		if err := json.Unmarshal(buf, &entry); err != nil {
-			continue
-		}
-		if entry.Session.ID == sessionID {
-			return &entry, nil
-		}
+	if entry.Port == 0 {
+		return nil, fmt.Errorf("registry entry for %s has no port", sessionID)
 	}
-	return nil, os.ErrNotExist
+	return &entry, nil
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {

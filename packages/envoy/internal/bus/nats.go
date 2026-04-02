@@ -22,6 +22,18 @@ var streamCfg = &nats.StreamConfig{
 	Replicas:  3,
 }
 
+// ConnectOption configures the bus client.
+type ConnectOption func(*connectOpts)
+
+type connectOpts struct {
+	replicas int
+}
+
+// WithReplicas overrides the stream replica count (default 3). Use 1 for single-node test NATS.
+func WithReplicas(n int) ConnectOption {
+	return func(o *connectOpts) { o.replicas = n }
+}
+
 type Client struct {
 	Conn *nats.Conn
 	js   nats.JetStreamContext
@@ -82,7 +94,11 @@ func connect(urls []string, reconnectCB func(*nats.Conn)) (*nats.Conn, error) {
 	return nil, err
 }
 
-func Connect(urls []string) (*Client, error) {
+func Connect(urls []string, options ...ConnectOption) (*Client, error) {
+	opts := connectOpts{replicas: 3}
+	for _, o := range options {
+		o(&opts)
+	}
 	c := &Client{urls: urls}
 	nc, err := connect(urls, c.onReconnect)
 	if err != nil {
@@ -93,7 +109,9 @@ func Connect(urls []string) (*Client, error) {
 		nc.Close()
 		return nil, err
 	}
-	if err := ensureStream(js); err != nil {
+	cfg := *streamCfg
+	cfg.Replicas = opts.replicas
+	if err := ensureStreamWithConfig(js, &cfg); err != nil {
 		nc.Close()
 		return nil, err
 	}
@@ -102,16 +120,16 @@ func Connect(urls []string) (*Client, error) {
 	return c, nil
 }
 
-func ensureStream(js nats.JetStreamContext) error {
+func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	_, err := js.StreamInfo(Stream)
 	if err == nil {
-		_, err = js.UpdateStream(streamCfg)
+		_, err = js.UpdateStream(cfg)
 		return err
 	}
 	if !errors.Is(err, nats.ErrStreamNotFound) {
 		return err
 	}
-	_, err = js.AddStream(streamCfg)
+	_, err = js.AddStream(cfg)
 	return err
 }
 
