@@ -19,6 +19,7 @@
       "enum": ["agent", "github", "slack", "whatsapp"]
     },
     "source_event_id": { "type": "string", "minLength": 1 },
+    "source_session": { "type": "string" },
     "topic": { "type": "string", "minLength": 1 },
     "dedupe_key": { "type": "string", "minLength": 1 },
     "issued_at": { "type": "integer" },

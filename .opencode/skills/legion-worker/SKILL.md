@@ -35,6 +35,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
 4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST attempt it before adding `worker-done`. The `|| true` means CLI failures don't block you, but skipping the attempt is not acceptable. If the write fails, note it in your exit comment.
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
+6. **Notify the controller via Envoy** — after adding `worker-done`, broadcast a completion notification so the controller doesn't have to wait for its next polling cycle. Use `envoy_publish(topic="notifications.legion.controller", message="Worker done: <issue> <mode> <outcome>")`. If `envoy_publish` fails, that's fine — the label is the source of truth.
 
 ## Skill Discipline
 
@@ -108,7 +109,7 @@ If you're resuming after user feedback, also read the issue comments for the ans
 
 1. Your workflow-specific work items (from the workflow file)
 2. A **signal completion** todo as the LAST item:
-   - `Signal completion: push changes, add worker-done label, remove worker-active label`
+   - `Signal completion: push changes, add worker-done label, remove worker-active label, notify controller via Envoy`
    - Keep this todo `pending` until you have actually run the label commands and verified they succeeded
    - **Do not mark this complete early** — it is your contract with the controller
 
@@ -179,6 +180,12 @@ jj git push
 Then update labels:
 - Add `worker-done` if your mode requires it (see routing table)
 - Remove `worker-active` (the controller added this when dispatching you)
+
+Then notify the controller via Envoy (best-effort, non-blocking):
+```
+envoy_publish(topic="notifications.legion.controller", message="Worker done: <issue-id> <mode> completed")
+```
+If `envoy_publish` fails, continue — the label is the source of truth.
 
 ## Mode Routing
 

@@ -363,6 +363,12 @@ current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
 linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done"])
 ```
 
+Then notify the controller via Envoy (best-effort):
+```
+envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER implement completed. PR ready for testing.")
+```
+If `envoy_publish` fails, continue — the label is the source of truth.
+
 ---
 
 ## Mode 2: Address Comments
@@ -491,3 +497,9 @@ issue = linear_linear(action="get", id=$LEGION_ISSUE_ID)
 current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
 linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done"])
 ```
+
+Then notify the controller via Envoy (best-effort):
+```
+envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER implement completed after changes. PR ready for re-testing.")
+```
+If `envoy_publish` fails, continue — the label is the source of truth.

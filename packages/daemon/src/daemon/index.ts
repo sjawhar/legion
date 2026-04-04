@@ -18,7 +18,7 @@ import {
 import { RoleServeManager } from "./multi-serve";
 import { isPortFree } from "./ports";
 import { createAdapter } from "./runtime";
-import type { RuntimeAdapter } from "./runtime/types";
+import type { RuntimeAdapter, RuntimeStartOptions } from "./runtime/types";
 import { startServer } from "./server";
 import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
 import {
@@ -134,16 +134,51 @@ async function sendPromptWithRetry(
   throw lastError;
 }
 
+function subscribeControllerToEnvoy(sessionId: string) {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  fetch(`${envoyUrl}/v1/interests/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      topics: ["notifications.legion.controller", "notifications.slack.*.*.mention"],
+    }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(`Envoy subscribe returned ${res.status} (non-fatal)`);
+        return;
+      }
+      console.log(`Controller subscribed to Envoy: session=${sessionId}`);
+    })
+    .catch((err) => {
+      console.warn(`Envoy subscribe failed (non-fatal): ${err}`);
+    });
+}
+
+function unsubscribeFromEnvoy(sessionId: string) {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, topics: [] }),
+  }).catch(() => {});
+}
+
 function buildControllerEnv(config: DaemonConfig): Record<string, string> {
   // config.legionId is guaranteed non-empty by the startDaemon guard at line 107-109.
   // The "" fallback is unreachable dead code — kept to satisfy the type checker.
   const legionId = config.legionId ?? "";
-  return {
+  const env: Record<string, string> = {
     LEGION_ID: legionId,
     LEGION_ISSUE_BACKEND: config.issueBackend,
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
   };
+  if (config.controllerSessionId) {
+    env.LEGION_CONTROLLER_SESSION_ID = config.controllerSessionId;
+  }
+  return env;
 }
 
 export async function startDaemon(
@@ -200,6 +235,8 @@ export async function startDaemon(
   let indexInitializations = 0;
   let indexIncrementalUpdates = 0;
 
+  let controllerState: ControllerState | undefined;
+
   registerSignals();
   startMemoryTelemetry();
   const releaseDaemonGauges = registerGauges("daemon-index", () => ({
@@ -227,17 +264,16 @@ export async function startDaemon(
         })
       : createNoopIndexManager();
 
-  const existingHealthy = await resolvedDeps.adapter.healthy();
-  if (existingHealthy) {
-    console.log(`Adopted existing shared serve on port ${sharedServePort}`);
-  } else {
-    await resolvedDeps.adapter.start({
-      env: buildControllerEnv(config),
-      workspace: controllerWorkspace,
-      logDir: config.logDir,
-    });
-    console.log(`Shared serve started on port ${sharedServePort}`);
-  }
+  // Configure the adapter with start opts for lazy serve startup.
+  const serveStartOpts: RuntimeStartOptions = {
+    env: buildControllerEnv(config),
+    workspace: controllerWorkspace,
+    logDir: config.logDir,
+  };
+  const adapterConfigure = resolvedDeps.adapter as {
+    configure?: (opts: RuntimeStartOptions) => void;
+  };
+  adapterConfigure.configure?.(serveStartOpts);
 
   // Initialize per-role serves for credential isolation (when GitHub Apps configured)
   let roleServeManager: RoleServeManager | undefined;
@@ -264,16 +300,64 @@ export async function startDaemon(
   }
 
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
-  let controllerState: ControllerState | undefined = preState.controller;
+  controllerState = preState.controller;
 
-  for (const entry of Object.values(preState.workers)) {
-    try {
-      const actualId = await resolvedDeps.adapter.createSession(entry.sessionId, entry.workspace);
-      if (actualId !== entry.sessionId) {
-        console.warn(`Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`);
-      }
-    } catch (error) {
-      console.error(`Failed to re-create session for ${entry.id}: ${error}`);
+  // Prune dead/stopped workers from state file on startup
+  const activeWorkers: Record<string, (typeof preState.workers)[string]> = {};
+  let pruned = 0;
+  for (const [id, entry] of Object.entries(preState.workers)) {
+    if (entry.status === "dead" || entry.status === "stopped") {
+      pruned++;
+      continue;
+    }
+    activeWorkers[id] = entry;
+  }
+  if (pruned > 0) {
+    console.log(`Pruned ${pruned} dead/stopped workers from state file`);
+    await resolvedDeps.writeStateFile(config.stateFilePath, {
+      ...preState,
+      workers: activeWorkers,
+    });
+  }
+
+  // Start serve eagerly if there are active workers or an internal controller that needs it.
+  // Otherwise, defer — ensureRunning() in the adapter starts it on first POST /workers.
+  const workerEntries = Object.values(activeWorkers);
+  const hasInternalController = !config.controllerSessionId;
+  const needsServeNow = workerEntries.length > 0 || hasInternalController;
+
+  if (needsServeNow) {
+    const existingHealthy = await resolvedDeps.adapter.healthy();
+    if (!existingHealthy) {
+      await resolvedDeps.adapter.start(serveStartOpts);
+    }
+    console.log(`Shared serve running on port ${sharedServePort}`);
+  } else {
+    console.log(`Shared serve deferred — will start on first worker creation`);
+  }
+
+  if (workerEntries.length > 0) {
+    console.log(`Recreating ${workerEntries.length} active worker sessions...`);
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < workerEntries.length; i += BATCH_SIZE) {
+      const batch = workerEntries.slice(i, i + BATCH_SIZE);
+      await Promise.allSettled(
+        batch.map(async (entry) => {
+          try {
+            const actualId = await resolvedDeps.adapter.createSession(
+              entry.sessionId,
+              entry.workspace
+            );
+            if (actualId !== entry.sessionId) {
+              console.warn(
+                `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
+              );
+            }
+          } catch (error) {
+            console.error(`Failed to re-create session for ${entry.id}: ${error}`);
+          }
+        })
+      );
     }
   }
 
@@ -317,6 +401,7 @@ export async function startDaemon(
     });
     releaseDaemonGauges();
     stopMemoryTelemetry();
+    clearInterval(keepalive);
     stopServer();
     if (exitAfter) {
       process.exit(0);
@@ -391,8 +476,13 @@ export async function startDaemon(
         }
       }
     }
+    // Unsubscribe old controller from Envoy if session ID changed
+    if (existingController && existingController.sessionId !== config.controllerSessionId) {
+      unsubscribeFromEnvoy(existingController.sessionId);
+    }
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
+    subscribeControllerToEnvoy(config.controllerSessionId);
   } else {
     const requestedSessionId = computeControllerSessionId(legionId);
     let actualSessionId: string | undefined;
@@ -418,6 +508,7 @@ export async function startDaemon(
           resolvedDeps
         );
         console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
+        subscribeControllerToEnvoy(actualSessionId);
       } catch (error) {
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
@@ -432,64 +523,81 @@ export async function startDaemon(
         const serveHealthy = await resolvedDeps.adapter.healthy();
 
         if (!serveHealthy) {
-          console.error("Shared serve is unhealthy, attempting restart...");
+          // Only restart the serve if something needs it (active workers or internal controller).
+          // With external controller + 0 workers, let the serve stay down — ensureRunning() starts it on demand.
+          const state = await resolvedDeps.readStateFile(config.stateFilePath);
+          const liveWorkers = Object.values(state.workers).filter(
+            (e) => e.status !== "dead" && e.status !== "stopped"
+          );
+          const needsRestart = liveWorkers.length > 0 || hasInternalController;
 
-          try {
-            await resolvedDeps.adapter.start({
-              env: buildControllerEnv(config),
-              workspace: controllerWorkspace,
-              logDir: config.logDir,
-            });
-            sharedServeRestarts += 1;
-            console.log(`Shared serve restarted on port ${sharedServePort}`);
+          if (needsRestart) {
+            console.error("Shared serve is unhealthy, attempting restart...");
+            try {
+              await resolvedDeps.adapter.start(serveStartOpts);
+              sharedServeRestarts += 1;
+              console.log(`Shared serve restarted on port ${sharedServePort}`);
 
-            const state = await resolvedDeps.readStateFile(config.stateFilePath);
-            for (const entry of Object.values(state.workers)) {
-              try {
-                const actualId = await resolvedDeps.adapter.createSession(
-                  entry.sessionId,
-                  entry.workspace
+              console.log(
+                `Recreating ${liveWorkers.length} active worker sessions after serve restart...`
+              );
+              const BATCH_SIZE = 10;
+              for (let i = 0; i < liveWorkers.length; i += BATCH_SIZE) {
+                const batch = liveWorkers.slice(i, i + BATCH_SIZE);
+                await Promise.allSettled(
+                  batch.map(async (entry) => {
+                    try {
+                      const actualId = await resolvedDeps.adapter.createSession(
+                        entry.sessionId,
+                        entry.workspace
+                      );
+                      if (actualId !== entry.sessionId) {
+                        console.warn(
+                          `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
+                        );
+                      }
+                    } catch {
+                      // Best-effort session re-creation
+                    }
+                  })
                 );
-                if (actualId !== entry.sessionId) {
-                  console.warn(
-                    `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
-                  );
-                }
-              } catch {
-                // Best-effort session re-creation
               }
-            }
 
-            if (controllerState?.port) {
-              try {
-                const actualControllerSessionId = await resolvedDeps.adapter.createSession(
-                  controllerState.sessionId,
-                  controllerWorkspace
-                );
-                if (actualControllerSessionId !== controllerState.sessionId) {
-                  console.warn(
-                    `Controller: session ID changed ${controllerState.sessionId} -> ${actualControllerSessionId}`
+              if (controllerState?.port) {
+                try {
+                  const actualControllerSessionId = await resolvedDeps.adapter.createSession(
+                    controllerState.sessionId,
+                    controllerWorkspace
                   );
+                  if (actualControllerSessionId !== controllerState.sessionId) {
+                    console.warn(
+                      `Controller: session ID changed ${controllerState.sessionId} -> ${actualControllerSessionId}`
+                    );
+                  }
+                  // Unsubscribe old session ID if it changed
+                  if (actualControllerSessionId !== controllerState.sessionId) {
+                    unsubscribeFromEnvoy(controllerState.sessionId);
+                  }
+                  controllerState = {
+                    ...controllerState,
+                    sessionId: actualControllerSessionId,
+                    port: sharedServePort,
+                  };
+                  controllerRecreates += 1;
+                  await sendPromptWithRetry(
+                    resolvedDeps.adapter,
+                    actualControllerSessionId,
+                    "/legion-controller",
+                    resolvedDeps
+                  );
+                  console.log(`Controller re-created: session=${actualControllerSessionId}`);
+                } catch (error) {
+                  console.error(`Failed to re-create controller session: ${error}`);
                 }
-                controllerState = {
-                  ...controllerState,
-                  sessionId: actualControllerSessionId,
-                  port: sharedServePort,
-                };
-                controllerRecreates += 1;
-                await sendPromptWithRetry(
-                  resolvedDeps.adapter,
-                  actualControllerSessionId,
-                  "/legion-controller",
-                  resolvedDeps
-                );
-                console.log(`Controller re-created: session=${actualControllerSessionId}`);
-              } catch (error) {
-                console.error(`Failed to re-create controller session: ${error}`);
               }
+            } catch (error) {
+              console.error(`Failed to restart shared serve: ${error}`);
             }
-          } catch (error) {
-            console.error(`Failed to restart shared serve: ${error}`);
           }
         }
 
@@ -539,6 +647,10 @@ export async function startDaemon(
       }
     }, config.checkIntervalMs);
   };
+  // Keepalive: prevent Bun's event loop from draining when the shared serve child exits.
+  // Bun.spawn links child lifecycle to parent — without this, the daemon exits when the serve does.
+  const keepalive = setInterval(() => {}, 2_147_483_647); // max 32-bit int
+
   scheduleHealthTick();
 
   const handleSignal = async () => {
@@ -556,5 +668,11 @@ export async function startDaemon(
 }
 
 if (import.meta.main) {
+  process.on("uncaughtException", (error) => {
+    console.error("[daemon] uncaught exception:", error);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[daemon] unhandled rejection:", reason);
+  });
   void startDaemon();
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tool } from "@opencode-ai/plugin/tool";
 
 const root = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
@@ -12,17 +12,26 @@ async function call(path: string, init?: RequestInit) {
 }
 
 export default async (input: { serverUrl: URL }) => {
-  const shellPid = process.env.OC_SHELL_PID;
   const registryDir = process.env.OC_REGISTRY;
-  const file = shellPid && registryDir ? `${registryDir}/${shellPid}.json` : null;
   let activeSessionID: string | null = null;
+  let _activeFile: string | null = null;
 
-  const update = (patch: Record<string, unknown>) => {
+  const registryFile = (sessionID: string) =>
+    registryDir ? `${registryDir}/${sessionID}.json` : null;
+
+  const update = (sessionID: string, patch: Record<string, unknown>) => {
+    const file = registryFile(sessionID);
     if (!file) return;
     try {
-      const data = JSON.parse(readFileSync(file, "utf-8"));
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(readFileSync(file, "utf-8"));
+      } catch {
+        data = { pid: process.pid, dir: process.cwd(), started: new Date().toISOString() };
+      }
       Object.assign(data, patch);
       writeFileSync(file, `${JSON.stringify(data)}\n`);
+      registryFiles.add(file);
     } catch {}
   };
 
@@ -46,10 +55,10 @@ export default async (input: { serverUrl: URL }) => {
     return null;
   };
 
-  const syncPort = () => {
+  const syncPort = (sessionID?: string) => {
     const value = currentPort();
     if (!value) return false;
-    update({ port: value });
+    if (sessionID) update(sessionID, { port: value });
     return true;
   };
 
@@ -64,17 +73,28 @@ export default async (input: { serverUrl: URL }) => {
     }
   };
 
-  if (file) {
+  // Track all registry files this process created, clean up on exit
+  const registryFiles = new Set<string>();
+
+  if (registryDir) {
     syncPort();
     const timer = setInterval(() => {
-      if (syncPort()) clearInterval(timer);
+      if (syncPort(activeSessionID ?? undefined)) clearInterval(timer);
     }, 1000);
+
+    process.on("exit", () => {
+      for (const f of registryFiles) {
+        try {
+          unlinkSync(f);
+        } catch {}
+      }
+    });
   }
 
   return {
-    event: file
+    event: registryDir
       ? async ({ event }: { event: { type?: string; properties?: Record<string, unknown> } }) => {
-          syncPort();
+          if (activeSessionID) syncPort(activeSessionID);
 
           if (
             event.type === "session.status" &&
@@ -83,8 +103,10 @@ export default async (input: { serverUrl: URL }) => {
             const sessionID = event.properties?.sessionID as string | undefined;
             if (sessionID && sessionID !== activeSessionID) {
               activeSessionID = sessionID;
+              _activeFile = registryFile(sessionID);
               const session = await fetchSession(sessionID);
-              if (session) update({ session });
+              if (session) update(sessionID, { session });
+              syncPort(sessionID);
               call("/v1/interests/subscribe", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -99,7 +121,7 @@ export default async (input: { serverUrl: URL }) => {
           if (event.type === "session.updated") {
             const info = event.properties?.info as { id?: string; title?: string } | undefined;
             if (info && info.id === activeSessionID) {
-              update({ session: { id: info.id, title: info.title || "" } });
+              update(info.id, { session: { id: info.id, title: info.title || "" } });
             }
           }
 
@@ -107,7 +129,7 @@ export default async (input: { serverUrl: URL }) => {
             const sessionID = event.properties?.sessionID as string | undefined;
             if (sessionID && sessionID === activeSessionID) {
               const session = await fetchSession(sessionID);
-              if (session) update({ session });
+              if (session) update(sessionID, { session });
             }
           }
         }
@@ -185,6 +207,28 @@ export default async (input: { serverUrl: URL }) => {
             body: JSON.stringify({
               source_session: ctx.sessionID,
               target_session: args.target_session,
+              message: args.message,
+            }),
+          });
+        },
+      }),
+      envoy_publish: tool({
+        description:
+          "Publish an Envoy message to any topic. Use for broadcast to named topics like notifications.legion.controller, team channels, or custom routing. Subscribers matching the topic will receive the message. This is for BROADCAST, not session-targeted delivery (use envoy_send for that).",
+        args: {
+          topic: tool.schema
+            .string()
+            .describe("NATS-style topic to publish to, e.g. notifications.legion.controller"),
+          message: tool.schema.string().describe("Message body to broadcast"),
+        },
+        async execute(args, ctx) {
+          ctx.metadata({ title: "Envoy publish" });
+          return call("/v1/messages/publish", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              source_session: ctx.sessionID,
+              topic: args.topic,
               message: args.message,
             }),
           });

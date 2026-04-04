@@ -7,9 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -29,10 +27,6 @@ type RegistryEntry struct {
 type Deliverer struct {
 	RegistryDir  string
 	HostBridge   string
-	OpencodeBin  string
-	XDGConfig    string
-	XDGData      string
-	XDGCache     string
 	RequestLimit time.Duration
 }
 
@@ -40,48 +34,44 @@ func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) err
 	entry, _ := d.Find(interest.SessionID)
 	text := d.Text(item)
 	if entry != nil && entry.Port > 0 {
-		if err := d.prompt(entry.Port, interest.SessionID, text); err == nil {
-			return nil
-		}
+		return d.prompt(entry.Port, interest.SessionID, text)
 	}
-	return d.resume(interest.SessionID, interest.Dir, text)
+	return fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
 
 func (d Deliverer) Find(sessionID string) (*RegistryEntry, error) {
-	files, err := filepath.Glob(filepath.Join(d.RegistryDir, "*.json"))
+	if d.RegistryDir == "" {
+		return nil, os.ErrNotExist
+	}
+	path := filepath.Join(d.RegistryDir, sessionID+".json")
+	buf, err := os.ReadFile(path)
 	if err != nil {
+		return nil, os.ErrNotExist
+	}
+	var entry RegistryEntry
+	if err := json.Unmarshal(buf, &entry); err != nil {
 		return nil, err
 	}
-	for _, file := range files {
-		buf, err := os.ReadFile(file)
-		if err != nil {
-			continue
-		}
-		var entry RegistryEntry
-		if err := json.Unmarshal(buf, &entry); err != nil {
-			continue
-		}
-		if entry.Session.ID == sessionID {
-			return &entry, nil
-		}
+	if entry.Port == 0 {
+		return nil, fmt.Errorf("registry entry for %s has no port", sessionID)
 	}
-	return nil, os.ErrNotExist
+	return &entry, nil
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {
-	return fmt.Sprintf("[NOTIFICATION from %s]\n%s\n\nTopic: %s\nEvent ID: %s", item.Source, item.PayloadSummary, item.Topic, item.EventID)
+	header := fmt.Sprintf("[NOTIFICATION from %s]", item.Source)
+	if item.SourceSession != "" {
+		header = fmt.Sprintf("[NOTIFICATION from %s (reply-to: %s)]", item.Source, item.SourceSession)
+	}
+	return fmt.Sprintf("%s\n%s\n\nTopic: %s\nEvent ID: %s", header, item.PayloadSummary, item.Topic, item.EventID)
 }
 
 func (d Deliverer) prompt(port int, sessionID string, text string) error {
 	type promptBody struct {
 		Parts []map[string]string `json:"parts"`
-		Agent string              `json:"agent,omitempty"`
 	}
 	bodyData := promptBody{
 		Parts: []map[string]string{{"type": "text", "text": text}},
-	}
-	if agent, err := d.lastAgent(port, sessionID); err == nil && agent != "" {
-		bodyData.Agent = agent
 	}
 	body, err := json.Marshal(bodyData)
 	if err != nil {
@@ -105,53 +95,8 @@ func (d Deliverer) prompt(port int, sessionID string, text string) error {
 	return nil
 }
 
-func (d Deliverer) lastAgent(port int, sessionID string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s:%d/session/%s/message?limit=20", d.host(), port, sessionID), nil)
-	if err != nil {
-		return "", err
-	}
-	client := http.Client{Timeout: d.timeout()}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		return "", fmt.Errorf("message list returned %d", resp.StatusCode)
-	}
-	var items []struct {
-		Info struct {
-			Role  string `json:"role"`
-			Agent string `json:"agent"`
-		} `json:"info"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		return "", err
-	}
-	var result string
-	for _, item := range items {
-		if item.Info.Role != "user" || item.Info.Agent == "" {
-			continue
-		}
-		result = item.Info.Agent
-	}
-	return result, nil
-}
-
-func (d Deliverer) resume(sessionID string, dir string, text string) error {
-	cmd := exec.Command(d.OpencodeBin, "run", "--session", sessionID, "--dir", dir, text)
-	cmd.Env = append(os.Environ(),
-		"XDG_CONFIG_HOME="+d.XDGConfig,
-		"XDG_DATA_HOME="+d.XDGData,
-		"XDG_CACHE_HOME="+d.XDGCache,
-	)
-	buf, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cold resume failed: %w: %s", err, strings.TrimSpace(string(buf)))
-	}
-	return nil
-}
+// resume was removed — cold-starting host processes from inside a container
+// runs as root and is a security risk. Messages stay in JetStream for retry.
 
 func (d Deliverer) host() string {
 	if d.HostBridge != "" {

@@ -11,13 +11,22 @@ import type { RuntimeAdapter, RuntimeStartOptions } from "./types";
 export class OpenCodeAdapter implements RuntimeAdapter {
   private pid = 0;
   private readonly workspaces = new Map<string, string>();
+  private startOpts: RuntimeStartOptions | null = null;
+  private startingPromise: Promise<void> | null = null;
 
   constructor(private readonly port: number) {}
 
   getPort(): number {
     return this.port;
   }
+
+  /** Store start opts for lazy serve startup via ensureRunning(). */
+  configure(opts: RuntimeStartOptions): void {
+    this.startOpts = opts;
+  }
+
   async start(opts: RuntimeStartOptions): Promise<void> {
+    this.startOpts = opts;
     const serve = await spawnSharedServe({
       port: this.port,
       workspace: opts.workspace,
@@ -26,6 +35,19 @@ export class OpenCodeAdapter implements RuntimeAdapter {
     });
     this.pid = serve.pid;
     await waitForHealthy(this.port);
+  }
+
+  /** Start the serve on demand if it's not running. Coalesces concurrent calls. */
+  async ensureRunning(): Promise<void> {
+    if (await healthCheck(this.port)) return;
+    if (!this.startOpts)
+      throw new Error("Shared serve not configured \u2014 call configure() or start() first");
+    if (!this.startingPromise) {
+      this.startingPromise = this.start(this.startOpts).finally(() => {
+        this.startingPromise = null;
+      });
+    }
+    await this.startingPromise;
   }
 
   async stop(): Promise<void> {
@@ -39,12 +61,14 @@ export class OpenCodeAdapter implements RuntimeAdapter {
   }
 
   async createSession(sessionId: string, workspace: string): Promise<string> {
+    await this.ensureRunning();
     const actualId = await createSession(this.port, sessionId, workspace);
     this.workspaces.set(actualId, workspace);
     return actualId;
   }
 
   async sendPrompt(sessionId: string, text: string): Promise<void> {
+    await this.ensureRunning();
     const client = createWorkerClient(this.port, this.workspaces.get(sessionId) ?? "");
     await client.session.promptAsync({
       sessionID: sessionId,

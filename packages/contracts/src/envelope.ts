@@ -4,6 +4,7 @@ export const EnvelopeSchema = z.object({
   event_id: z.string().min(1),
   source: z.enum(["agent", "github", "slack", "whatsapp"]),
   source_event_id: z.string().min(1),
+  source_session: z.string().optional(),
   topic: z.string().min(1),
   dedupe_key: z.string().min(1),
   issued_at: z.number().int(),

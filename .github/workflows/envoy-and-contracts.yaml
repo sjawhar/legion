@@ -75,8 +75,11 @@ jobs:
       - name: Generate Go contracts from shared schema
         run: bun run gen:go
         working-directory: packages/contracts
-      - name: Test envoy Go package
-        run: go test ./...
+      - name: Unit test envoy Go package
+        run: go test $(go list ./... | grep -v /integration)
+        working-directory: packages/envoy
+      - name: Integration test envoy (testcontainers + NATS)
+        run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
       - name: Build envoy services
         run: |
