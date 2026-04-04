@@ -29,11 +29,13 @@ import {
   writeStateFile,
 } from "./state-file";
 import { registerGauges } from "./telemetry";
+import type { FeedbackLogger } from "./feedback";
 
 type Server = ReturnType<typeof Bun.serve>;
 
 interface WorkerEntry extends BaseWorkerEntry {
   env?: Record<string, string>;
+  version?: number;
 }
 export interface ServerOptions {
   port?: number;
@@ -56,6 +58,7 @@ export interface ServerOptions {
     getResponse: () => CodebaseIndexResponse;
     rebuild: () => Promise<CodebaseIndexResponse>;
   };
+  feedbackLogger?: FeedbackLogger;
 }
 
 interface ErrorResponse {
@@ -422,6 +425,17 @@ export function startServer(opts: ServerOptions): {
             workers.set(entry.id, entry);
             await persistState();
 
+            opts.feedbackLogger?.log({
+              event: "worker.dispatched",
+              issueId: normalizedIssueId,
+              mode: mode as string,
+              workerId: entry.id,
+              sessionId: entry.sessionId,
+              version,
+              workspace: resolvedWorkspace,
+              crashCount: entry.crashCount,
+            });
+
             return jsonResponse({
               id: entry.id,
               port: workerAdapter.getPort(),
@@ -566,6 +580,21 @@ export function startServer(opts: ServerOptions): {
               });
             }
             await persistState();
+
+            opts.feedbackLogger?.log({
+              event: "worker.status_changed",
+              workerId: id,
+              issueId: extractIssueIdFromWorkerId(id) ?? id,
+              mode: extractModeFromWorkerId(id) ?? "unknown",
+              sessionId: updated.sessionId,
+              version: updated.version ?? 0,
+              fromStatus: entry.status,
+              toStatus: updated.status,
+              crashCount: updated.crashCount,
+              uptimeMs: updated.startedAt
+                ? Date.now() - new Date(updated.startedAt).getTime()
+                : null,
+            });
             const { env: _patchEnv, ...safeUpdated } = updated;
             return jsonResponse(safeUpdated);
           }
@@ -665,6 +694,26 @@ export function startServer(opts: ServerOptions): {
             const daemonUrl = `http://127.0.0.1:${server.port}`;
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.legionId);
+
+            if (opts.feedbackLogger) {
+              for (const [issueId, issueState] of Object.entries(state.issues)) {
+                opts.feedbackLogger.log({
+                  event: "state.collected",
+                  issueId,
+                  status: issueState.status,
+                  suggestedAction: issueState.suggestedAction,
+                  hasLiveWorker: issueState.hasLiveWorker,
+                  workerMode: issueState.workerMode,
+                  workerStatus: issueState.workerStatus,
+                  hasPr: issueState.hasPr,
+                  prIsDraft: issueState.prIsDraft,
+                  ciStatus: issueState.ciStatus,
+                  mergeableStatus: issueState.mergeableStatus,
+                  labels: issueState.labels,
+                });
+              }
+            }
+
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

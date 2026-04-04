@@ -3,6 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
+import {
+  FeedbackLogger,
+  type FeedbackEvent,
+  type FeedbackWriter,
+} from "../feedback";
 import type { LegionPaths } from "../paths";
 import type { RepoManagerDeps } from "../repo-manager";
 import type { RuntimeAdapter } from "../runtime/types";
@@ -22,6 +27,20 @@ describe("daemon server", () => {
     | null = null;
   const originalFetch = globalThis.fetch;
   const legionId = "123e4567-e89b-12d3-a456-426614174000";
+
+  class RecordingFeedbackWriter implements FeedbackWriter {
+    lines: string[] = [];
+
+    async append(line: string): Promise<void> {
+      this.lines.push(line);
+    }
+
+    async flush(): Promise<void> {}
+  }
+
+  function parseFeedbackLines(lines: string[]): FeedbackEvent[] {
+    return lines.map((line) => JSON.parse(line) as FeedbackEvent);
+  }
 
   function makeAdapter(): RuntimeAdapter {
     return {
@@ -50,6 +69,7 @@ describe("daemon server", () => {
     repoManagerDeps?: RepoManagerDeps;
     runtime?: string;
     tmuxSession?: string;
+    feedbackLogger?: FeedbackLogger;
   }) {
     createSessionCalls = [];
     let adapter = makeAdapter();
@@ -72,6 +92,7 @@ describe("daemon server", () => {
       stateFilePath,
       runtime: options?.runtime,
       tmuxSession: options?.tmuxSession,
+      feedbackLogger: options?.feedbackLogger,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -1182,5 +1203,130 @@ describe("daemon server", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain('env values must be strings (key "BAD")');
+  });
+
+  describe("feedback logging", () => {
+    it("emits worker.dispatched after POST /workers", async () => {
+      const writer = new RecordingFeedbackWriter();
+      const feedbackLogger = new FeedbackLogger(writer, legionId);
+
+      await startTestServer({ feedbackLogger });
+
+      const workspace = path.join(tempDir!, "workspace-one");
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-21",
+          mode: "implement",
+          workspace,
+          version: 3,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await feedbackLogger.flush();
+
+      const events = parseFeedbackLines(writer.lines);
+      expect(events).toHaveLength(1);
+      expect(events[0].schemaVersion).toBe(1);
+      expect(events[0].legionId).toBe(legionId);
+      expect(events[0].event).toBe("worker.dispatched");
+      expect(events[0].issueId).toBe("eng-21");
+      expect(events[0].mode).toBe("implement");
+      expect(events[0].version).toBe(3);
+      expect(events[0].workspace).toBe(workspace);
+    });
+
+    it("emits worker.status_changed after PATCH /workers/:id", async () => {
+      const writer = new RecordingFeedbackWriter();
+      const feedbackLogger = new FeedbackLogger(writer, legionId);
+
+      await startTestServer({ feedbackLogger });
+
+      const workspace = path.join(tempDir!, "workspace-two");
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-22",
+          mode: "test",
+          workspace,
+          version: 4,
+        }),
+      });
+      const created = (await createResponse.json()) as { id: string };
+
+      const patchResponse = await requestJson(`/workers/${created.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "running",
+          crashCount: 0,
+          lastCrashAt: null,
+        }),
+      });
+
+      expect(patchResponse.status).toBe(200);
+      await feedbackLogger.flush();
+
+      const events = parseFeedbackLines(writer.lines);
+      const statusEvent = events.find((event) => event.event === "worker.status_changed");
+      expect(statusEvent).toBeDefined();
+      expect(statusEvent?.schemaVersion).toBe(1);
+      expect(statusEvent?.legionId).toBe(legionId);
+      expect(statusEvent?.workerId).toBe(created.id);
+      expect(statusEvent?.fromStatus).toBe("running");
+      expect(statusEvent?.toStatus).toBe("running");
+      expect(statusEvent?.version).toBe(4);
+    });
+
+    it("emits state.collected for each collected issue", async () => {
+      const writer = new RecordingFeedbackWriter();
+      const feedbackLogger = new FeedbackLogger(writer, legionId);
+
+      await startTestServer({ feedbackLogger });
+
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "linear",
+          issues: [
+            {
+              identifier: "ENG-31",
+              state: { name: "Todo" },
+              labels: { nodes: [] },
+            },
+            {
+              identifier: "ENG-32",
+              state: { name: "In Progress" },
+              labels: { nodes: [{ name: "worker-active" }] },
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await feedbackLogger.flush();
+
+      const events = parseFeedbackLines(writer.lines).filter(
+        (event) => event.event === "state.collected",
+      );
+      expect(events).toHaveLength(2);
+      expect(events[0].schemaVersion).toBe(1);
+      expect(events[0].legionId).toBe(legionId);
+      expect(events.map((event) => event.issueId)).toEqual(["ENG-31", "ENG-32"]);
+    });
+
+    it("does nothing when no feedbackLogger is provided", async () => {
+      await startTestServer();
+
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "linear",
+          issues: [],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+    });
   });
 });
