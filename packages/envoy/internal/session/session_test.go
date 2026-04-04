@@ -272,3 +272,34 @@ func TestDeliver_KVFirstOverFile(t *testing.T) {
 		t.Fatalf("expected 0 deliveries to file port, got %d", fileDeliveries.Load())
 	}
 }
+
+func TestDeliver_NilSessionsFallsBackToFile(t *testing.T) {
+	var deliveryCount atomic.Int32
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deliveryCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, 1, port, "ses_target")
+
+	deliverer := Deliverer{
+		RegistryDir:  dir,
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+		Sessions:     nil, // KV unavailable
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
+
+	err := deliverer.Deliver(item, interest)
+	if err != nil {
+		t.Fatalf("expected file-only delivery to succeed, got: %v", err)
+	}
+	if count := deliveryCount.Load(); count != 1 {
+		t.Fatalf("expected exactly 1 delivery via file fallback, got %d", count)
+	}
+}

@@ -135,3 +135,27 @@ func TestSessionRegistry_Delete(t *testing.T) {
 		t.Fatal("expected error after delete")
 	}
 }
+
+func TestSessionRegistry_NilPutReturnsErrNoKV(t *testing.T) {
+	var reg *SessionRegistry
+	err := reg.Put("ses_test", SessionEntry{Port: 1234})
+	if err != ErrNoKV {
+		t.Fatalf("expected ErrNoKV, got: %v", err)
+	}
+}
+
+func TestSessionRegistry_NilGetReturnsErrNoKV(t *testing.T) {
+	var reg *SessionRegistry
+	_, err := reg.Get("ses_test")
+	if err != ErrNoKV {
+		t.Fatalf("expected ErrNoKV, got: %v", err)
+	}
+}
+
+func TestSessionRegistry_NilDeleteReturnsErrNoKV(t *testing.T) {
+	var reg *SessionRegistry
+	err := reg.Delete("ses_test")
+	if err != ErrNoKV {
+		t.Fatalf("expected ErrNoKV, got: %v", err)
+	}
+}
