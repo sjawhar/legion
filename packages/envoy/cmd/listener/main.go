@@ -291,7 +291,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(item)
 	})
 
-	log.Printf("envoy-listener listening on 127.0.0.1:%d", cfg.Port)
-	server := &http.Server{Addr: "127.0.0.1:" + strconv.Itoa(cfg.Port), Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	log.Printf("envoy-listener listening on :%d", cfg.Port)
+	server := &http.Server{Addr: ":" + strconv.Itoa(cfg.Port), Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Fatal(server.ListenAndServe())
 }
