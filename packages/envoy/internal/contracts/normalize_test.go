@@ -1,6 +1,10 @@
 package contracts
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestGithubEnvelope(t *testing.T) {
 	item := GithubEnvelope(GithubEnvelopeInput{
@@ -18,8 +22,11 @@ func TestGithubEnvelope(t *testing.T) {
 				},
 			},
 			"pull_request": map[string]any{
-				"number": 7,
-				"title":  "hello",
+				"number":   7,
+				"title":    "hello",
+				"body":     "PR description",
+				"html_url": "https://github.com/sjawhar/envoy/pull/7",
+				"user":     map[string]any{"login": "sjawhar"},
 			},
 		},
 	})
@@ -97,7 +104,9 @@ func TestGithubEnvelopesNoMention(t *testing.T) {
 				},
 			},
 			"comment": map[string]any{
-				"body": "hello there",
+				"body":     "hello there",
+				"html_url": "https://github.com/sjawhar/envoy/issues/1#issuecomment-1",
+				"user":     map[string]any{"login": "commenter"},
 			},
 		},
 	}, "@legion")
@@ -125,7 +134,9 @@ func TestGithubEnvelopesWithMention(t *testing.T) {
 				},
 			},
 			"comment": map[string]any{
-				"body": "@legion please help",
+				"body":     "@legion please help",
+				"html_url": "https://github.com/sjawhar/envoy/issues/1#issuecomment-2",
+				"user":     map[string]any{"login": "requester"},
 			},
 		},
 	}, "@legion")
@@ -156,7 +167,10 @@ func TestGithubEnvelopesReview(t *testing.T) {
 				},
 			},
 			"review": map[string]any{
-				"body": "Can @legion take a look?",
+				"body":     "Can @legion take a look?",
+				"html_url": "https://github.com/sjawhar/envoy/pull/1#pullrequestreview-1",
+				"state":    "commented",
+				"user":     map[string]any{"login": "reviewer"},
 			},
 		},
 	}, "@legion")
@@ -184,7 +198,10 @@ func TestGithubEnvelopesEmptyReview(t *testing.T) {
 				},
 			},
 			"review": map[string]any{
-				"body": "",
+				"body":     "",
+				"html_url": "https://github.com/sjawhar/envoy/pull/1#pullrequestreview-2",
+				"state":    "approved",
+				"user":     map[string]any{"login": "approver"},
 			},
 		},
 	}, "@legion")
@@ -221,8 +238,11 @@ func TestGithubEnvelopesPRNumber(t *testing.T) {
 				},
 			},
 			"pull_request": map[string]any{
-				"number": 42,
-				"title":  "test",
+				"number":   42,
+				"title":    "test",
+				"body":     "Test PR",
+				"html_url": "https://github.com/sjawhar/envoy/pull/42",
+				"user":     map[string]any{"login": "sjawhar"},
 			},
 		},
 	}, "@legion")
@@ -251,9 +271,12 @@ func TestGithubEnvelopesIssueCommentNumber(t *testing.T) {
 			},
 			"issue": map[string]any{
 				"number": 7,
+				"title":  "Test issue",
 			},
 			"comment": map[string]any{
-				"body": "just a comment",
+				"body":     "just a comment",
+				"html_url": "https://github.com/sjawhar/envoy/issues/7#issuecomment-3",
+				"user":     map[string]any{"login": "commenter"},
 			},
 		},
 	}, "@legion")
@@ -283,9 +306,12 @@ func TestGithubEnvelopesMentionWithNumber(t *testing.T) {
 			},
 			"issue": map[string]any{
 				"number": 99,
+				"title":  "Review request",
 			},
 			"comment": map[string]any{
-				"body": "@legion please review",
+				"body":     "@legion please review",
+				"html_url": "https://github.com/sjawhar/envoy/issues/99#issuecomment-4",
+				"user":     map[string]any{"login": "requester"},
 			},
 		},
 	}, "@legion")
@@ -356,5 +382,222 @@ func TestSlackEnvelopesNoThread(t *testing.T) {
 	}
 	if items[1].Topic != "notifications.slack.T123.C123.thread.9999999999.000000" {
 		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
+	}
+}
+
+func TestTruncateBody(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		max      int
+		expected string
+	}{
+		{name: "under limit", input: "hello", max: 500, expected: "hello"},
+		{name: "at limit", input: "abcde", max: 5, expected: "abcde"},
+		{name: "over limit", input: "abcdef", max: 5, expected: "abcde"},
+		{name: "empty", input: "", max: 500, expected: ""},
+		{name: "emoji preserved", input: "\U0001f525\U0001f525\U0001f525", max: 2, expected: "\U0001f525\U0001f525"},
+		{name: "mixed multibyte", input: "hello\U0001f30dworld", max: 6, expected: "hello\U0001f30d"},
+		{name: "zero max", input: "hello", max: 0, expected: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateBody(tt.input, tt.max)
+			if got != tt.expected {
+				t.Fatalf("truncateBody(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGithubSummaryJSON(t *testing.T) {
+	tests := []struct {
+		name         string
+		event        string
+		body         map[string]any
+		expectedKeys []string
+		checkValues  map[string]string
+	}{
+		{
+			name:  "issue_comment on issue",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"issue":      map[string]any{"number": 42, "title": "Bug report"},
+				"comment": map[string]any{
+					"body": "Looks good to me", "html_url": "https://github.com/sjawhar/legion/issues/42#issuecomment-1",
+					"user": map[string]any{"login": "reviewer"},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
+			checkValues: map[string]string{
+				"kind": "comment", "action": "created", "repo": "sjawhar/legion", "number": "42",
+				"title": "Bug report", "parent_kind": "issue", "author": "reviewer",
+				"body": "Looks good to me", "url": "https://github.com/sjawhar/legion/issues/42#issuecomment-1",
+			},
+		},
+		{
+			name:  "issue_comment on PR",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"issue":      map[string]any{"number": 99, "title": "Add feature", "pull_request": map[string]any{}},
+				"comment": map[string]any{
+					"body": "LGTM", "html_url": "https://github.com/sjawhar/legion/pull/99#issuecomment-2",
+					"user": map[string]any{"login": "dev"},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
+			checkValues:  map[string]string{"kind": "comment", "parent_kind": "pr", "number": "99", "title": "Add feature"},
+		},
+		{
+			name:  "pull_request_review_comment",
+			event: "pull_request_review_comment",
+			body: map[string]any{
+				"action":       "created",
+				"repository":   map[string]any{"full_name": "sjawhar/legion"},
+				"pull_request": map[string]any{"number": 55, "title": "Refactor auth"},
+				"comment": map[string]any{
+					"body": "Nit: rename this variable", "html_url": "https://github.com/sjawhar/legion/pull/55#discussion_r1",
+					"user": map[string]any{"login": "reviewer"},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
+			checkValues:  map[string]string{"kind": "comment", "parent_kind": "pr", "number": "55", "title": "Refactor auth"},
+		},
+		{
+			name:  "pull_request_review",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "sjawhar/legion"},
+				"pull_request": map[string]any{"number": 77, "title": "Add metrics"},
+				"review": map[string]any{
+					"body": "Approved with minor comments", "html_url": "https://github.com/sjawhar/legion/pull/77#pullrequestreview-1",
+					"state": "approved", "user": map[string]any{"login": "lead"},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url", "state"},
+			checkValues:  map[string]string{"kind": "review", "parent_kind": "pr", "state": "approved", "number": "77", "author": "lead"},
+		},
+		{
+			name:  "pull_request",
+			event: "pull_request",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"pull_request": map[string]any{
+					"number": 10, "title": "New feature", "body": "This PR adds a new feature",
+					"html_url": "https://github.com/sjawhar/legion/pull/10",
+					"user": map[string]any{"login": "author"},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "author", "body", "url"},
+			checkValues: map[string]string{
+				"kind": "pr", "action": "opened", "number": "10", "title": "New feature",
+				"author": "author", "body": "This PR adds a new feature", "url": "https://github.com/sjawhar/legion/pull/10",
+			},
+		},
+		{
+			name:  "issues",
+			event: "issues",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"issue": map[string]any{
+					"number": 5, "title": "Bug: crash on startup", "body": "Steps to reproduce...",
+					"html_url": "https://github.com/sjawhar/legion/issues/5",
+					"user": map[string]any{"login": "reporter"},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "author", "body", "url"},
+			checkValues:  map[string]string{"kind": "issue", "action": "opened", "number": "5", "title": "Bug: crash on startup", "author": "reporter"},
+		},
+		{
+			name:  "push",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"ref":        "refs/heads/main",
+			},
+			expectedKeys: []string{"kind", "repo", "ref"},
+			checkValues:  map[string]string{"kind": "push", "repo": "sjawhar/legion", "ref": "refs/heads/main"},
+		},
+		{
+			name:  "unknown event",
+			event: "deployment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+			},
+			expectedKeys: []string{"kind", "action", "repo"},
+			checkValues:  map[string]string{"kind": "unknown", "action": "created", "repo": "sjawhar/legion"},
+		},
+		{
+			name:  "missing webhook data produces empty strings",
+			event: "issue_comment",
+			body:  map[string]any{"action": "created"},
+			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
+			checkValues: map[string]string{
+				"kind": "comment", "action": "created", "repo": "", "number": "", "title": "",
+				"parent_kind": "issue", "author": "", "body": "", "url": "",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := githubSummary(tt.event, tt.body)
+			var parsed map[string]string
+			if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+				t.Fatalf("githubSummary returned invalid JSON: %v\nraw: %s", err, result)
+			}
+			if len(parsed) != len(tt.expectedKeys) {
+				t.Fatalf("expected %d keys, got %d: %v", len(tt.expectedKeys), len(parsed), parsed)
+			}
+			for _, key := range tt.expectedKeys {
+				if _, ok := parsed[key]; !ok {
+					t.Fatalf("missing expected key %q in %v", key, parsed)
+				}
+			}
+			for key, want := range tt.checkValues {
+				if got := parsed[key]; got != want {
+					t.Fatalf("key %q: got %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestGithubSummaryTruncation(t *testing.T) {
+	longBody := strings.Repeat("a", 600)
+	result := githubSummary("issue_comment", map[string]any{
+		"action":     "created",
+		"repository": map[string]any{"full_name": "sjawhar/legion"},
+		"comment":    map[string]any{"body": longBody},
+	})
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if runes := []rune(parsed["body"]); len(runes) != 500 {
+		t.Fatalf("expected body truncated to 500 chars, got %d", len(runes))
+	}
+
+	// Verify multi-byte truncation preserves valid UTF-8
+	longEmoji := strings.Repeat("\U0001f525", 600)
+	result2 := githubSummary("pull_request", map[string]any{
+		"action":       "opened",
+		"repository":   map[string]any{"full_name": "sjawhar/legion"},
+		"pull_request": map[string]any{"body": longEmoji},
+	})
+	var parsed2 map[string]string
+	if err := json.Unmarshal([]byte(result2), &parsed2); err != nil {
+		t.Fatalf("emoji truncation produced invalid JSON: %v", err)
+	}
+	if runes2 := []rune(parsed2["body"]); len(runes2) != 500 {
+		t.Fatalf("expected emoji body truncated to 500 chars, got %d", len(runes2))
 	}
 }

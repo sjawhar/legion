@@ -477,7 +477,11 @@
     "tag:envoy": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
-      "architecture-patterns/nats-kv-graceful-degradation.md"
+      "architecture-patterns/nats-kv-graceful-degradation.md",
+      "envoy/structured-json-summary-patterns.md"
+    ],
+    "packages/envoy/internal/contracts": [
+      "envoy/structured-json-summary-patterns.md"
     ],
     "tag:session-registry": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",

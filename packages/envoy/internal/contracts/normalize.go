@@ -252,18 +252,87 @@ func githubCommentBody(event string, body map[string]any) string {
 
 func githubSummary(event string, body map[string]any) string {
 	repo := nestedString(body, "repository", "full_name")
+	action := stringValue(body["action"])
+	num := githubNumber(event, body)
+
+	var data map[string]string
+
 	switch event {
+	case "issue_comment":
+		data = map[string]string{
+			"kind":        "comment",
+			"action":      action,
+			"repo":        repo,
+			"number":      num,
+			"title":       nestedString(body, "issue", "title"),
+			"parent_kind": githubParentKind(event, body),
+			"author":      nestedString(body, "comment", "user", "login"),
+			"body":        truncateBody(nestedString(body, "comment", "body"), 500),
+			"url":         nestedString(body, "comment", "html_url"),
+		}
+	case "pull_request_review_comment":
+		data = map[string]string{
+			"kind":        "comment",
+			"action":      action,
+			"repo":        repo,
+			"number":      num,
+			"title":       nestedString(body, "pull_request", "title"),
+			"parent_kind": githubParentKind(event, body),
+			"author":      nestedString(body, "comment", "user", "login"),
+			"body":        truncateBody(nestedString(body, "comment", "body"), 500),
+			"url":         nestedString(body, "comment", "html_url"),
+		}
+	case "pull_request_review":
+		data = map[string]string{
+			"kind":        "review",
+			"action":      action,
+			"repo":        repo,
+			"number":      num,
+			"title":       nestedString(body, "pull_request", "title"),
+			"parent_kind": "pr",
+			"author":      nestedString(body, "review", "user", "login"),
+			"body":        truncateBody(nestedString(body, "review", "body"), 500),
+			"url":         nestedString(body, "review", "html_url"),
+			"state":       nestedString(body, "review", "state"),
+		}
 	case "pull_request":
-		return fmt.Sprintf("PR #%v %s in %s: %s", nested(body, "pull_request", "number"), stringValue(body["action"]), repo, nestedString(body, "pull_request", "title"))
+		data = map[string]string{
+			"kind":   "pr",
+			"action": action,
+			"repo":   repo,
+			"number": num,
+			"title":  nestedString(body, "pull_request", "title"),
+			"author": nestedString(body, "pull_request", "user", "login"),
+			"body":   truncateBody(nestedString(body, "pull_request", "body"), 500),
+			"url":    nestedString(body, "pull_request", "html_url"),
+		}
 	case "issues":
-		return fmt.Sprintf("Issue #%v %s in %s: %s", nested(body, "issue", "number"), stringValue(body["action"]), repo, nestedString(body, "issue", "title"))
+		data = map[string]string{
+			"kind":   "issue",
+			"action": action,
+			"repo":   repo,
+			"number": num,
+			"title":  nestedString(body, "issue", "title"),
+			"author": nestedString(body, "issue", "user", "login"),
+			"body":   truncateBody(nestedString(body, "issue", "body"), 500),
+			"url":    nestedString(body, "issue", "html_url"),
+		}
 	case "push":
-		return fmt.Sprintf("Push to %s on %s", repo, stringValue(body["ref"]))
-	case "check_run", "check_suite":
-		return fmt.Sprintf("CI %s in %s", stringValue(body["action"]), repo)
+		data = map[string]string{
+			"kind": "push",
+			"repo": repo,
+			"ref":  stringValue(body["ref"]),
+		}
 	default:
-		return fmt.Sprintf("Comment %s in %s", stringValue(body["action"]), repo)
+		data = map[string]string{
+			"kind":   "unknown",
+			"action": action,
+			"repo":   repo,
+		}
 	}
+
+	out, _ := json.Marshal(data)
+	return string(out)
 }
 
 func githubName(body map[string]any) string {
@@ -367,4 +436,12 @@ func nestedString(body map[string]any, keys ...string) string {
 func stringValue(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func truncateBody(s string, maxChars int) string {
+	runes := []rune(s)
+	if len(runes) <= maxChars {
+		return s
+	}
+	return string(runes[:maxChars])
 }
