@@ -220,7 +220,8 @@
     ],
     "tag:fallback-pattern": [
       "task-index-patterns.md",
-      "github-api/graphql-org-user-fallback.md"
+      "github-api/graphql-org-user-fallback.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "tag:file-based-index": [
       "architecture-patterns/task-index-retro.md",
@@ -446,24 +447,28 @@
     ],
     "packages/envoy/internal/session": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-      "testing/nats-kv-testing-patterns.md"
+      "testing/nats-kv-testing-patterns.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "packages/envoy/internal/integration": [
       "testing/nats-kv-testing-patterns.md"
     ],
     "packages/envoy/cmd/listener": [
-      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "packages/envoy-plugin": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
     ],
     "tag:nats": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-      "testing/nats-kv-testing-patterns.md"
+      "testing/nats-kv-testing-patterns.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "tag:kv": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-      "testing/nats-kv-testing-patterns.md"
+      "testing/nats-kv-testing-patterns.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "tag:ttl": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
@@ -471,15 +476,30 @@
     ],
     "tag:envoy": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-      "testing/nats-kv-testing-patterns.md"
+      "testing/nats-kv-testing-patterns.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "tag:session-registry": [
-      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "tag:testcontainers": [
       "testing/nats-kv-testing-patterns.md"
     ],
     "tag:integration-testing": [
       "testing/nats-kv-testing-patterns.md"
+    ],
+    "tag:graceful-degradation": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:nil-receiver": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:go-idioms": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:operational": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
     ]
+  }
 }
