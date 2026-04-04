@@ -2,8 +2,9 @@ services:
   listener:
     build:
       context: ../..
-      dockerfile: docker/listener.Dockerfile
+      dockerfile: docker/Dockerfile
     network_mode: host
+    command: ["/usr/local/bin/envoy-listener"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"]
