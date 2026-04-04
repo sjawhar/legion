@@ -123,8 +123,7 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	_, err := js.StreamInfo(Stream)
 	if err == nil {
-		_, err = js.UpdateStream(cfg)
-		return err
+		return nil
 	}
 	if !errors.Is(err, nats.ErrStreamNotFound) {
 		return err
