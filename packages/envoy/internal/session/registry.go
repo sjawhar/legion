@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -37,7 +38,7 @@ type SessionRegistry struct {
 }
 
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
-	opts := sessionRegistryOpts{replicas: 3, ttl: 5 * time.Minute}
+	opts := sessionRegistryOpts{replicas: 1, ttl: 5 * time.Minute}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -60,7 +61,13 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	return &SessionRegistry{kv: kv}, nil
 }
 
+// ErrNoKV is returned when methods are called on a nil SessionRegistry.
+var ErrNoKV = fmt.Errorf("session registry: KV unavailable")
+
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
+	if r == nil {
+		return ErrNoKV
+	}
 	entry.UpdatedAt = time.Now().UnixMilli()
 	buf, err := json.Marshal(entry)
 	if err != nil {
@@ -71,6 +78,9 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 }
 
 func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
+	if r == nil {
+		return SessionEntry{}, ErrNoKV
+	}
 	entry, err := r.kv.Get(sessionID)
 	if err != nil {
 		return SessionEntry{}, err
@@ -83,5 +93,8 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 }
 
 func (r *SessionRegistry) Delete(sessionID string) error {
+	if r == nil {
+		return ErrNoKV
+	}
 	return r.kv.Delete(sessionID)
 }

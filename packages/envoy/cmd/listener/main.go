@@ -33,9 +33,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	sessions, err := session.OpenSessionRegistry(client.Conn)
-	if err != nil {
-		log.Fatal(err)
+	var sessions *session.SessionRegistry
+	if reg, err := session.OpenSessionRegistry(client.Conn); err != nil {
+		log.Printf("WARN: KV registry unavailable, using file-only delivery: %v", err)
+	} else {
+		sessions = reg
 	}
 	deliver := session.Deliverer{
 		RegistryDir: os.Getenv("ENVOY_REGISTRY_DIR"),
