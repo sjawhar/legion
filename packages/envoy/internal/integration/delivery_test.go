@@ -24,17 +24,30 @@ import (
 
 // testEnv holds a complete test environment: NATS, listener handler, mock sessions.
 type testEnv struct {
-	t          *testing.T
-	ctx        context.Context
-	client     *bus.Client
-	registry   *store.Registry
-	deliverer  session.Deliverer
-	dedupe     *dedupe.Cache
+	t           *testing.T
+	ctx         context.Context
+	client      *bus.Client
+	registry    *store.Registry
+	sessions    *session.SessionRegistry
+	deliverer   session.Deliverer
+	dedupe      *dedupe.Cache
 	registryDir string
 }
 
-func setupTestEnv(t *testing.T) *testEnv {
+type testEnvOption func(*testEnvOpts)
+
+type testEnvOpts struct{ sessionTTL time.Duration }
+
+func withSessionTTL(d time.Duration) testEnvOption {
+	return func(o *testEnvOpts) { o.sessionTTL = d }
+}
+
+func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	t.Helper()
+	opts := testEnvOpts{sessionTTL: 10 * time.Second}
+	for _, o := range options {
+		o(&opts)
+	}
 	ctx := context.Background()
 
 	// Start real NATS with JetStream
@@ -62,6 +75,11 @@ func setupTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(opts.sessionTTL))
+	if err != nil {
+		t.Fatalf("failed to create session registry: %v", err)
+	}
+
 	// Set up file registry
 	registryDir := t.TempDir()
 
@@ -69,6 +87,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		RegistryDir:  registryDir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
 	}
 
 	dc := dedupe.New(5 * time.Minute)
@@ -78,6 +97,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		ctx:         ctx,
 		client:      client,
 		registry:    registry,
+		sessions:    sessions,
 		deliverer:   deliverer,
 		dedupe:      dc,
 		registryDir: registryDir,
@@ -110,22 +130,44 @@ func mockSession(t *testing.T) (port int, deliveries *atomic.Int32, bodies *[]st
 	return p, &count, &capturedBodies, srv
 }
 
-// registerSession creates a registry file and interest subscription for a mock session.
-func (env *testEnv) registerSession(sessionID string, port int, topics []string) {
+// registerInterest subscribes interest in the KV store (envoy_interests bucket).
+func (env *testEnv) registerInterest(sessionID string, topics []string) {
 	env.t.Helper()
-	// Write registry file
-	raw := fmt.Sprintf(`{"pid":%d,"port":%d,"dir":"/test","session":{"id":"%s","title":"test"}}`, os.Getpid(), port, sessionID)
-	path := filepath.Join(env.registryDir, sessionID+".json")
-	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
-		env.t.Fatal(err)
-	}
-	// Subscribe interest
 	allTopics := append([]string{contracts.AgentSubject(sessionID)}, topics...)
 	env.registry.Upsert(store.Interest{
 		SessionID: sessionID,
 		MachineID: "test-machine",
 		Dir:       "/test",
 	}, allTopics)
+}
+
+// registerFileSession creates a filesystem registry file for a session.
+func (env *testEnv) registerFileSession(sessionID string, port int) {
+	env.t.Helper()
+	raw := fmt.Sprintf(`{"pid":%d,"port":%d,"dir":"/test","session":{"id":"%s","title":"test"}}`, os.Getpid(), port, sessionID)
+	path := filepath.Join(env.registryDir, sessionID+".json")
+	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+		env.t.Fatal(err)
+	}
+}
+
+// registerSession creates BOTH interest AND file registry for backward compatibility.
+func (env *testEnv) registerSession(sessionID string, port int, topics []string) {
+	env.t.Helper()
+	env.registerFileSession(sessionID, port)
+	env.registerInterest(sessionID, topics)
+}
+
+// registerKVSession writes a session-liveness entry to the envoy_sessions KV bucket.
+func (env *testEnv) registerKVSession(sessionID string, port int) {
+	env.t.Helper()
+	if err := env.sessions.Put(sessionID, session.SessionEntry{
+		Port:      port,
+		MachineID: "test-machine",
+		Dir:       "/test",
+	}); err != nil {
+		env.t.Fatal(err)
+	}
 }
 
 func publishEnvelope(env *testEnv, item contracts.Envelope) {
@@ -693,5 +735,119 @@ func TestE2E_StaleSubDedupeProtectsLiveSession(t *testing.T) {
 	// Session B must receive exactly 1 delivery — dedupe prevents the retry duplicate
 	if count := deliveriesB.Load(); count != 1 {
 		t.Fatalf("expected exactly 1 delivery to live session (dedupe protects from NAK retry), got %d", count)
+	}
+}
+
+func TestE2E_KVFirstDeliverySkipsFile(t *testing.T) {
+	env := setupTestEnv(t)
+
+	kvPort, kvDeliveries, _, _ := mockSession(t)
+	env.registerKVSession("ses_kv", kvPort)
+	env.registerInterest("ses_kv", nil)
+
+	filePort, fileDeliveries, _, _ := mockSession(t)
+	env.registerFileSession("ses_kv", filePort)
+
+	env.startConsumer("test-machine")
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_kv", "kv test", "dedupe-kv-first"))
+
+	time.Sleep(2 * time.Second)
+	if c := kvDeliveries.Load(); c != 1 {
+		t.Fatalf("expected 1 delivery to KV port, got %d", c)
+	}
+	if c := fileDeliveries.Load(); c != 0 {
+		t.Fatalf("expected 0 deliveries to file port, got %d", c)
+	}
+}
+
+func TestE2E_FileFallbackWhenNoKVEntry(t *testing.T) {
+	env := setupTestEnv(t)
+
+	port, deliveries, _, _ := mockSession(t)
+	env.registerFileSession("ses_file_only", port)
+	env.registerInterest("ses_file_only", nil)
+
+	env.startConsumer("test-machine")
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_file_only", "fallback test", "dedupe-fallback"))
+
+	time.Sleep(2 * time.Second)
+	if c := deliveries.Load(); c != 1 {
+		t.Fatalf("expected 1 delivery via file fallback, got %d", c)
+	}
+}
+
+func TestE2E_BroadcastUsesKVPort(t *testing.T) {
+	env := setupTestEnv(t)
+
+	port, deliveries, _, _ := mockSession(t)
+	env.registerKVSession("ses_bcast_kv", port)
+	env.registerInterest("ses_bcast_kv", []string{"notifications.slack.*.*.mention"})
+
+	env.startConsumer("test-machine")
+	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.mention", "broadcast kv", "dedupe-bcast-kv"))
+
+	time.Sleep(2 * time.Second)
+	if c := deliveries.Load(); c != 1 {
+		t.Fatalf("expected 1 broadcast delivery via KV, got %d", c)
+	}
+}
+
+func TestE2E_KVEntryExpiresButInterestPersists(t *testing.T) {
+	env := setupTestEnv(t, withSessionTTL(2*time.Second))
+
+	port, _, _, _ := mockSession(t)
+	env.registerKVSession("ses_expiry_check", port)
+	env.registerInterest("ses_expiry_check", nil)
+
+	if _, err := env.sessions.Get("ses_expiry_check"); err != nil {
+		t.Fatalf("expected KV entry to exist: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		if _, err := env.sessions.Get("ses_expiry_check"); err != nil {
+			interest, err := env.registry.Get("ses_expiry_check")
+			if err != nil {
+				t.Fatalf("interest should persist after session expiry, got: %v", err)
+			}
+			if interest.SessionID != "ses_expiry_check" {
+				t.Fatalf("wrong interest session ID: %s", interest.SessionID)
+			}
+			return
+		}
+	}
+	t.Fatal("KV entry did not expire within 5s (TTL was 2s)")
+}
+
+func TestE2E_ResumeDeliveryAfterReRegistration(t *testing.T) {
+	env := setupTestEnv(t, withSessionTTL(2*time.Second))
+
+	portA, deliveriesA, _, _ := mockSession(t)
+	env.registerKVSession("ses_resume", portA)
+	env.registerInterest("ses_resume", nil)
+	env.startConsumer("test-machine")
+
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_resume", "msg1", "dedupe-resume-1"))
+	time.Sleep(2 * time.Second)
+	if c := deliveriesA.Load(); c != 1 {
+		t.Fatalf("expected 1 delivery to port A, got %d", c)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		if _, err := env.sessions.Get("ses_resume"); err != nil {
+			break
+		}
+	}
+
+	portB, deliveriesB, _, _ := mockSession(t)
+	env.registerKVSession("ses_resume", portB)
+
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_resume", "msg2", "dedupe-resume-2"))
+	time.Sleep(2 * time.Second)
+	if c := deliveriesB.Load(); c != 1 {
+		t.Fatalf("expected 1 delivery to resumed port B, got %d", c)
 	}
 }

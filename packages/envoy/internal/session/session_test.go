@@ -218,3 +218,57 @@ func TestFind_NotFound(t *testing.T) {
 		t.Fatal("expected error for missing session")
 	}
 }
+
+func TestDeliver_KVFirstOverFile(t *testing.T) {
+	// Set up a mock server for the "correct" port (from KV)
+	var kvDeliveries atomic.Int32
+	kvMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		kvDeliveries.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer kvMock.Close()
+	kvPort := mockPort(kvMock.URL)
+
+	// Set up a mock server for the "stale" port (from file)
+	var fileDeliveries atomic.Int32
+	fileMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fileDeliveries.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer fileMock.Close()
+	filePort := mockPort(fileMock.URL)
+
+	// Write file registry with stale port
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, 1, filePort, "ses_target")
+
+	// Set up KV registry with correct port (setupNATS is in registry_test.go, same package)
+	client := setupNATS(t)
+	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	sessions.Put("ses_target", SessionEntry{Port: kvPort, MachineID: "test", Dir: "/test"})
+
+	deliverer := Deliverer{
+		RegistryDir:  dir,
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
+
+	err = deliverer.Deliver(item, interest)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	// Verify KV port was used, NOT file port
+	if kvDeliveries.Load() != 1 {
+		t.Fatalf("expected 1 delivery to KV port, got %d", kvDeliveries.Load())
+	}
+	if fileDeliveries.Load() != 0 {
+		t.Fatalf("expected 0 deliveries to file port, got %d", fileDeliveries.Load())
+	}
+}
