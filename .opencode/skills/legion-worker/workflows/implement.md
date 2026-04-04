@@ -286,6 +286,23 @@ for n in $REQUIRED_CLOSES; do
 done
 ```
 
+#### 6.1. Subscribe to PR Topics (Envoy)
+
+After PR creation, subscribe to PR-specific Envoy topics so the implementer receives real-time notifications for PR comments, reviews, and state changes:
+
+```bash
+# Extract PR number from the created PR
+PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $OWNER/$REPO)
+```
+
+```
+envoy_subscribe(["notifications.github.$OWNER.$REPO.pr.$PR_NUMBER.>"])
+```
+
+This catches: PR state changes (opened/closed/merged/draft→ready), comments, reviews, mentions, and CI events on the PR.
+
+**If `envoy_subscribe` fails:** Log and continue — this is a speed optimization, not a requirement. The existing controller polling cycle is the authoritative fallback for PR state changes.
+
 The issue ID in the branch/title preserves traceability for the controller.
 
 If `notifications.slack_channel` is configured and `slack-bot` skill is available, post a best-effort implementation status update (PR URL, issue ID, current CI state). If unavailable, note this in implement handoff and continue.

@@ -1332,4 +1332,192 @@ describe("daemon server", () => {
       expect(response.status).toBe(200);
     });
   });
+
+  describe("Envoy worker auto-subscribe", () => {
+    interface EnvoySubscribeCall {
+      url: string;
+      body: { session_id: string; topics: string[] };
+    }
+
+    function mockFetchForEnvoy(calls: EnvoySubscribeCall[], statusCode = 200) {
+      const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/v1/interests/subscribe")) {
+          calls.push({
+            url,
+            body: JSON.parse(init?.body as string),
+          });
+          return new Response("{}", { status: statusCode });
+        }
+        return originalFetch(input, init);
+      };
+      globalThis.fetch = Object.assign(mockFn, {
+        preconnect: originalFetch.preconnect,
+      });
+    }
+
+    const repoPaths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => false,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    it("subscribes worker to Envoy issue topic when repo and issueNumber present", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-42",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 42,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { sessionId: string };
+
+      // Flush fire-and-forget microtasks
+      await Bun.sleep(50);
+
+      expect(envoySubscribeCalls).toHaveLength(1);
+      expect(envoySubscribeCalls[0].body.session_id).toBe(body.sessionId);
+      expect(envoySubscribeCalls[0].body.topics).toEqual([
+        "notifications.github.acme.widgets.issue.42.>",
+      ]);
+    });
+
+    it("skips Envoy subscribe when issueNumber is absent", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-43",
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+      expect(envoySubscribeCalls).toHaveLength(0);
+    });
+
+    it("skips Envoy subscribe when repo is absent (workspace mode)", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer();
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-99",
+          mode: "implement",
+          workspace: "/tmp/legacy-workspace",
+          issueNumber: 99,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+      expect(envoySubscribeCalls).toHaveLength(0);
+    });
+
+    it("returns 200 even when Envoy subscribe fails with HTTP 500", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls, 500);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-44",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 44,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+      expect(envoySubscribeCalls).toHaveLength(1);
+    });
+
+    it("returns 200 even when Envoy subscribe fails with network error", async () => {
+      const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes("/v1/interests/subscribe")) {
+          throw new Error("connection refused");
+        }
+        return originalFetch(input, init);
+      };
+      globalThis.fetch = Object.assign(mockFn, {
+        preconnect: originalFetch.preconnect,
+      });
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-45",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 45,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+    });
+
+    it("accepts optional issueNumber without changing existing response shape", async () => {
+      await startTestServer();
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-55",
+          mode: "implement",
+          workspace: "/tmp/work",
+          issueNumber: 55,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { id: string; port: number; sessionId: string };
+      expect(body.id).toBe("eng-55-implement");
+      expect(body.port).toBe(sharedServePort);
+      expect(typeof body.sessionId).toBe("string");
+    });
+  });
 });

@@ -34,11 +34,14 @@
       "task-index-patterns.md",
       "deterministic-session-ids.md",
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
-      "controller/controller-session-anti-patterns.md"
+      "controller/controller-session-anti-patterns.md",
+      "daemon/envoy-auto-subscription-patterns.md",
+      "testing/bun-fetch-mocking-patterns.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
-      "deterministic-session-ids.md"
+      "deterministic-session-ids.md",
+      "daemon/envoy-auto-subscription-patterns.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -60,7 +63,8 @@
       "daemon/deferred-review-comments-pattern.md",
       "integration-patterns/controller-worker-protocol.md",
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
-      "testing/worker-smoke-testing-requirements.md"
+      "testing/worker-smoke-testing-requirements.md",
+      "daemon/envoy-auto-subscription-patterns.md"
     ],
     ".opencode/skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
@@ -478,7 +482,9 @@
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
       "architecture-patterns/nats-kv-graceful-degradation.md",
-      "envoy/structured-json-summary-patterns.md"
+      "envoy/structured-json-summary-patterns.md",
+      "daemon/envoy-auto-subscription-patterns.md",
+      "testing/bun-fetch-mocking-patterns.md"
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md"

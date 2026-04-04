@@ -142,7 +142,11 @@ function subscribeControllerToEnvoy(sessionId: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       session_id: sessionId,
-      topics: ["notifications.legion.controller", "notifications.slack.*.*.mention"],
+      topics: [
+        "notifications.legion.controller",
+        "notifications.slack.*.*.mention",
+        "notifications.github.*.*.mention",
+      ],
     }),
   })
     .then((res) => {
