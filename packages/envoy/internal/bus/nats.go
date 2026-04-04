@@ -19,7 +19,7 @@ var streamCfg = &nats.StreamConfig{
 	Retention: nats.LimitsPolicy,
 	MaxAge:    time.Hour,
 	Storage:   nats.FileStorage,
-	Replicas:  3,
+	Replicas:  1,
 }
 
 // ConnectOption configures the bus client.
@@ -29,7 +29,7 @@ type connectOpts struct {
 	replicas int
 }
 
-// WithReplicas overrides the stream replica count (default 3). Use 1 for single-node test NATS.
+// WithReplicas overrides the stream replica count (default 1).
 func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
 }
@@ -95,7 +95,7 @@ func connect(urls []string, reconnectCB func(*nats.Conn)) (*nats.Conn, error) {
 }
 
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
-	opts := connectOpts{replicas: 3}
+	opts := connectOpts{replicas: 1}
 	for _, o := range options {
 		o(&opts)
 	}
