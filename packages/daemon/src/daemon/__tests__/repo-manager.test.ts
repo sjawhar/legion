@@ -46,6 +46,7 @@ describe("ensureRepoClone", () => {
       },
       exists: async () => false,
       rmDir: async () => {},
+      symlink: async () => {},
     };
 
     const paths = resolveLegionPaths({}, "/home/test");
@@ -65,6 +66,7 @@ describe("ensureRepoClone", () => {
       },
       exists: async () => true,
       rmDir: async () => {},
+      symlink: async () => {},
     };
     const paths = resolveLegionPaths({}, "/home/test");
     await ensureRepoClone(paths, { host: "github.com", owner: "acme", repo: "widgets" }, deps);
@@ -83,6 +85,7 @@ describe("ensureRepoClone", () => {
         },
         exists: async () => true,
         rmDir: async () => {},
+        symlink: async () => {},
       };
       const paths = resolveLegionPaths({}, "/home/test");
 
@@ -107,6 +110,7 @@ describe("ensureRepoClone", () => {
         },
         exists: async () => false,
         rmDir: async () => {},
+        symlink: async () => {},
       };
       const paths = resolveLegionPaths({}, "/home/test");
 
@@ -138,6 +142,7 @@ describe("ensureRepoClone", () => {
         }),
         exists: async () => true,
         rmDir: async () => {},
+        symlink: async () => {},
       };
       const paths = resolveLegionPaths({}, "/home/test");
 
@@ -151,6 +156,7 @@ describe("ensureRepoClone", () => {
         runJj: async () => ({ exitCode: 128, stdout: "", stderr: "Permission denied (publickey)" }),
         exists: async () => true,
         rmDir: async () => {},
+        symlink: async () => {},
       };
       const paths = resolveLegionPaths({}, "/home/test");
 
@@ -171,6 +177,7 @@ describe("ensureWorkspace", () => {
       },
       exists: async (p) => p.includes("repos/"),
       rmDir: async () => {},
+      symlink: async () => {},
     };
     const paths = resolveLegionPaths({}, "/home/test");
     const repo = { host: "github.com", owner: "acme", repo: "widgets" };
@@ -180,6 +187,8 @@ describe("ensureWorkspace", () => {
     const wsCmd = commands.find((c) => c.includes("workspace"));
     expect(wsCmd).toBeDefined();
     expect(wsCmd).toContain("add");
+    expect(wsCmd).toContain("--revision");
+    expect(wsCmd).toContain("main");
   });
 
   it("skips workspace creation when it already exists", async () => {
@@ -191,6 +200,7 @@ describe("ensureWorkspace", () => {
       },
       exists: async () => true,
       rmDir: async () => {},
+      symlink: async () => {},
     };
     const paths = resolveLegionPaths({}, "/home/test");
     const repo = { host: "github.com", owner: "acme", repo: "widgets" };
@@ -198,6 +208,93 @@ describe("ensureWorkspace", () => {
 
     const wsCmd = commands.find((c) => c.includes("workspace"));
     expect(wsCmd).toBeUndefined();
+  });
+
+  it("creates .opencode symlink when .claude exists", async () => {
+    const symlinkCalls: { target: string; linkPath: string }[] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async (p) => {
+        if (p.includes("repos/")) return true;
+        if (p.endsWith(".claude")) return true;
+        if (p.endsWith(".opencode")) return false;
+        return false;
+      },
+      rmDir: async () => {},
+      symlink: async (target, linkPath) => {
+        symlinkCalls.push({ target, linkPath });
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    expect(symlinkCalls).toHaveLength(1);
+    expect(symlinkCalls[0].target).toBe(".claude");
+    expect(symlinkCalls[0].linkPath).toEndWith(".opencode");
+  });
+
+  it("skips .opencode symlink when .claude does not exist", async () => {
+    const symlinkCalls: { target: string; linkPath: string }[] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async (p) => {
+        if (p.includes("repos/")) return true;
+        return false;
+      },
+      rmDir: async () => {},
+      symlink: async (target, linkPath) => {
+        symlinkCalls.push({ target, linkPath });
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    expect(symlinkCalls).toHaveLength(0);
+  });
+
+  it("skips .opencode symlink when .opencode already exists", async () => {
+    const symlinkCalls: { target: string; linkPath: string }[] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async (p) => {
+        if (p.includes("repos/")) return true;
+        if (p.endsWith(".claude")) return true;
+        if (p.endsWith(".opencode")) return true;
+        return false;
+      },
+      rmDir: async () => {},
+      symlink: async (target, linkPath) => {
+        symlinkCalls.push({ target, linkPath });
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    expect(symlinkCalls).toHaveLength(0);
+  });
+
+  it("does not fail when symlink creation throws", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async (p) => {
+        if (p.includes("repos/")) return true;
+        if (p.endsWith(".claude")) return true;
+        if (p.endsWith(".opencode")) return false;
+        return false;
+      },
+      rmDir: async () => {},
+      symlink: async () => {
+        throw new Error("EACCES: permission denied");
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    // Should not throw despite symlink failure
+    const wsPath = await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+    expect(wsPath).toBe("/home/test/.local/share/legion/workspaces/sjawhar/42/acme-widgets-7");
   });
 });
 
@@ -214,8 +311,8 @@ describe("cleanupWorkspace", () => {
       rmDir: async (p) => {
         removedPaths.push(p);
       },
+      symlink: async () => {},
     };
-
     const paths = resolveLegionPaths({}, "/home/test");
     const repo = { host: "github.com", owner: "acme", repo: "widgets" };
     await cleanupWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);

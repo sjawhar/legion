@@ -232,6 +232,7 @@ describe("daemon server", () => {
       },
       exists: async () => false,
       rmDir: async () => {},
+      symlink: async () => {},
     };
     await startTestServer({ paths, repoManagerDeps });
 
@@ -262,6 +263,8 @@ describe("daemon server", () => {
         "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-77",
         "--name",
         "acme-widgets-77",
+        "--revision",
+        "main",
         "-R",
         "/tmp/legion-data/repos/github.com/acme/widgets",
       ],
@@ -305,6 +308,7 @@ describe("daemon server", () => {
         runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
         exists: async () => false,
         rmDir: async () => {},
+        symlink: async () => {},
       };
       await startTestServer({ paths, repoManagerDeps });
 
@@ -374,6 +378,7 @@ describe("daemon server", () => {
       runJj: async () => ({ exitCode: 128, stdout: "", stderr: "Permission denied (publickey)" }),
       exists: async () => true,
       rmDir: async () => {},
+      symlink: async () => {},
     };
     await startTestServer({ paths, repoManagerDeps });
 
@@ -605,6 +610,7 @@ describe("daemon server", () => {
       rmDir: async (workspacePath: string) => {
         rmDirCalls.push(workspacePath);
       },
+      symlink: async () => {},
     };
     await startTestServer({ paths, repoManagerDeps });
 

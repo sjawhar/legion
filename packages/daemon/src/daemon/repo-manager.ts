@@ -17,6 +17,7 @@ export interface RepoManagerDeps {
   runJj: (args: string[]) => Promise<JjResult>;
   exists: (path: string) => Promise<boolean>;
   rmDir: (path: string) => Promise<void>;
+  symlink: (target: string, linkPath: string) => Promise<void>;
 }
 
 const defaultDeps: RepoManagerDeps = {
@@ -38,6 +39,10 @@ const defaultDeps: RepoManagerDeps = {
   rmDir: async (p) => {
     const { rm } = await import("node:fs/promises");
     await rm(p, { recursive: true, force: true });
+  },
+  symlink: async (target, linkPath) => {
+    const { symlink } = await import("node:fs/promises");
+    await symlink(target, linkPath);
   },
 };
 
@@ -113,11 +118,24 @@ export async function ensureWorkspace(
       workspacePath,
       "--name",
       issueId.toLowerCase(),
+      "--revision",
+      "main",
       "-R",
       clonePath,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(`Failed to create workspace ${workspacePath}: ${result.stderr}`);
+    }
+  }
+
+  // Create .opencode symlink if .claude exists and .opencode doesn't
+  const claudeDir = path.join(workspacePath, ".claude");
+  const opencodePath = path.join(workspacePath, ".opencode");
+  if ((await deps.exists(claudeDir)) && !(await deps.exists(opencodePath))) {
+    try {
+      await deps.symlink(".claude", opencodePath);
+    } catch {
+      // Non-fatal: symlink creation failure shouldn't block workspace setup
     }
   }
 
