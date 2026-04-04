@@ -8,6 +8,7 @@ import {
 } from "../index/types";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
 import { modeToRole, TokenManager } from "./github-apps";
 import {
   allocatePort,
@@ -227,7 +228,17 @@ export async function startDaemon(
 
   const resolvedDeps = resolveDependencies(config, deps);
 
+  let feedbackLogger: FeedbackLogger | undefined;
+  if (!process.env.LEGION_FEEDBACK_DISABLED) {
+    const feedbackPath = config.paths.forLegion(legionId).feedbackFile;
+    mkdirSync(path.dirname(feedbackPath), { recursive: true });
+    const maxBytes = Number(process.env.LEGION_FEEDBACK_MAX_BYTES) || 50 * 1024 * 1024;
+    const writer = new FileFeedbackWriter(feedbackPath, maxBytes);
+    feedbackLogger = new FeedbackLogger(writer, legionId);
+  }
+
   const sharedServePort = config.baseWorkerPort;
+  const startedAt = Date.now();
   let healthTicks = 0;
   let sharedServeRestarts = 0;
   let roleServeRestarts = 0;
@@ -383,6 +394,14 @@ export async function startDaemon(
       healthTickTimeout = null;
     }
 
+    if (feedbackLogger) {
+      try {
+        await feedbackLogger.flush();
+      } catch (error) {
+        console.error(`[feedback] Flush on shutdown failed: ${error}`);
+      }
+    }
+
     try {
       await removeLegionEntryFn(config.paths.legionsFile, legionId);
     } catch {}
@@ -435,6 +454,7 @@ export async function startDaemon(
           : undefined,
         tokenManager,
         indexManager,
+        feedbackLogger,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
@@ -640,6 +660,17 @@ export async function startDaemon(
             }
           }
         }
+
+        const workerState = await resolvedDeps.readStateFile(config.stateFilePath);
+        feedbackLogger?.log({
+          event: "daemon.health_tick",
+          tick: healthTicks,
+          workerCount: Object.keys(workerState.workers).length,
+          serveHealthy: await resolvedDeps.adapter.healthy(),
+          uptimeS: Math.max(0, (Date.now() - startedAt) / 1000),
+          serveRestarted: sharedServeRestarts > 0,
+          sessionsRecreated: controllerRecreates,
+        });
       } finally {
         if (!shuttingDown) {
           scheduleHealthTick();
