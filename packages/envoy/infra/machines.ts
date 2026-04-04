@@ -15,7 +15,7 @@ export interface ReceiverConfig {
 
 export interface MachineConfig {
   name: string;
-  sshHost: string;
+  sshHost?: string;
   machineId: string;
   tailscaleIp: string;
   nats?: NatsConfig;
@@ -23,8 +23,12 @@ export interface MachineConfig {
   receivers?: ReceiverConfig;
 }
 
-export function createProvider(machine: MachineConfig): docker.Provider {
+export function createProvider(
+  machine: MachineConfig,
+  registryAuth?: docker.types.input.ProviderRegistryAuth[]
+): docker.Provider {
   return new docker.Provider(`docker-${machine.name}`, {
     host: machine.sshHost,
+    registryAuth,
   });
 }

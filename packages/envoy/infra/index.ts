@@ -1,3 +1,4 @@
+import type * as docker from "@pulumi/docker";
 import * as pulumi from "@pulumi/pulumi";
 import { pullImages } from "./images";
 import type { MachineConfig } from "./machines";
@@ -19,9 +20,14 @@ const slackSigningSecret = cfg.requireSecret("slackSigningSecret");
 
 const secrets = { githubWebhookSecret, slackSigningSecret };
 
+// Registry auth for GHCR (private packages)
+const registryAuth: docker.types.input.ProviderRegistryAuth[] = [
+  { address: registry, username: "sjawhar", password: cfg.requireSecret("ghcrToken") },
+];
+
 // Deploy to each machine
 for (const machine of machines) {
-  const provider = createProvider(machine);
+  const provider = createProvider(machine, registryAuth);
   const images = pullImages(provider, machine, registry, imageTag, natsImage);
 
   // NATS peer — only on machines with nats config
