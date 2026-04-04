@@ -62,7 +62,7 @@ func main() {
 			return
 		}
 		log.Printf("listener received machine=%s source=%s topic=%s event_id=%s", cfg.MachineID, item.Source, item.Topic, item.EventID)
-		if item.Source == "agent" {
+		if strings.HasPrefix(item.Topic, "notifications.agent.") {
 			sessionID := strings.TrimPrefix(item.Topic, "notifications.agent.")
 			if dedupeCache.Seen(item.DedupeKey, sessionID) {
 				log.Printf("listener dedupe skip session=%s dedupe_key=%s", sessionID, item.DedupeKey)
