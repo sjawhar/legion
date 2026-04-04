@@ -231,6 +231,7 @@ export async function startDaemon(
   let feedbackLogger: FeedbackLogger | undefined;
   if (!process.env.LEGION_FEEDBACK_DISABLED) {
     const feedbackPath = config.paths.forLegion(legionId).feedbackFile;
+    mkdirSync(path.dirname(feedbackPath), { recursive: true });
     const maxBytes = Number(process.env.LEGION_FEEDBACK_MAX_BYTES) || 50 * 1024 * 1024;
     const writer = new FileFeedbackWriter(feedbackPath, maxBytes);
     feedbackLogger = new FeedbackLogger(writer, legionId);
