@@ -39,6 +39,9 @@ describe("resolveLegionPaths", () => {
     const paths = resolveLegionPaths({}, "/home/testuser");
     const legion = paths.forLegion("sjawhar/42");
     expect(legion.legionStateDir).toBe("/home/testuser/.local/state/legion/legions/sjawhar/42");
+    expect(legion.feedbackFile).toBe(
+      "/home/testuser/.local/state/legion/legions/sjawhar/42/feedback.jsonl"
+    );
     expect(legion.workersFile).toBe(
       "/home/testuser/.local/state/legion/legions/sjawhar/42/workers.json"
     );
