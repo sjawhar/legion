@@ -103,6 +103,10 @@ func main() {
 				log.Printf("listener dedupe skip session=%s dedupe_key=%s", interest.SessionID, item.DedupeKey)
 				continue
 			}
+			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
+				log.Printf("listener skip echo session=%s topic=%s", interest.SessionID, item.Topic)
+				continue
+			}
 			if err := deliver.Deliver(item, interest); err != nil {
 				log.Printf("listener delivery failed session=%s: %v", interest.SessionID, err)
 				failed = true

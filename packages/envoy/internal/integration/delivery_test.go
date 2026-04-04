@@ -240,6 +240,9 @@ func (env *testEnv) startConsumer(machineID string) {
 			if env.dedupe.Seen(item.DedupeKey, interest.SessionID) {
 				continue
 			}
+			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
+				continue
+			}
 			if err := env.deliverer.Deliver(item, interest); err != nil {
 				failed = true
 			} else {
@@ -310,6 +313,54 @@ func TestE2E_BroadcastDeliveredToAllSubscribers(t *testing.T) {
 	}
 	if c2 := deliveries2.Load(); c2 != 1 {
 		t.Fatalf("session 2: expected 1 delivery, got %d", c2)
+	}
+}
+
+func TestE2E_BroadcastSkipsSender(t *testing.T) {
+	env := setupTestEnv(t)
+
+	portSender, deliveriesSender, _, _ := mockSession(t)
+	portOther, deliveriesOther, _, _ := mockSession(t)
+
+	env.registerSession("ses_sender", portSender, []string{"notifications.slack.*.*.mention"})
+	env.registerSession("ses_other", portOther, []string{"notifications.slack.*.*.mention"})
+	env.startConsumer("test-machine")
+
+	// Publish with SourceSession matching one of the subscribers
+	item := newEnvelope("slack", "notifications.slack.T123.C456.mention", "team broadcast", "dedupe-echo")
+	item.SourceSession = "ses_sender"
+	publishEnvelope(env, item)
+
+	time.Sleep(2 * time.Second)
+	if c := deliveriesSender.Load(); c != 0 {
+		t.Fatalf("sender should NOT receive its own broadcast, got %d deliveries", c)
+	}
+	if c := deliveriesOther.Load(); c != 1 {
+		t.Fatalf("other subscriber expected 1 delivery, got %d", c)
+	}
+}
+
+func TestE2E_BroadcastEmptySourceSessionDeliveredToAll(t *testing.T) {
+	env := setupTestEnv(t)
+
+	port1, deliveries1, _, _ := mockSession(t)
+	port2, deliveries2, _, _ := mockSession(t)
+
+	env.registerSession("ses_a", port1, []string{"notifications.slack.*.*.mention"})
+	env.registerSession("ses_b", port2, []string{"notifications.slack.*.*.mention"})
+	env.startConsumer("test-machine")
+
+	// Publish with empty SourceSession — no echo skip should happen
+	item := newEnvelope("slack", "notifications.slack.T123.C456.mention", "no sender", "dedupe-nosource")
+	item.SourceSession = ""
+	publishEnvelope(env, item)
+
+	time.Sleep(2 * time.Second)
+	if c := deliveries1.Load(); c != 1 {
+		t.Fatalf("session A expected 1 delivery, got %d", c)
+	}
+	if c := deliveries2.Load(); c != 1 {
+		t.Fatalf("session B expected 1 delivery, got %d", c)
 	}
 }
 
