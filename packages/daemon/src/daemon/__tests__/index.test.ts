@@ -177,6 +177,7 @@ describe("daemon entry", () => {
   const originalOn = process.on;
   const originalExit = process.exit;
   const originalFetch = globalThis.fetch;
+  const startServerCalls: ServerOptions[] = [];
 
   afterEach(() => {
     process.on = originalOn;
@@ -188,6 +189,9 @@ describe("daemon entry", () => {
     removeLegionEntryCalls.length = 0;
     mockedRegistry = {};
     mockedAllocatedPorts = { daemonPort: 13370, servePort: 13381 };
+    startServerCalls.length = 0;
+    process.env.LEGION_FEEDBACK_DISABLED = undefined;
+    process.env.LEGION_FEEDBACK_MAX_BYTES = undefined;
   });
 
   describe("port allocation", () => {
@@ -1096,5 +1100,106 @@ describe("daemon entry", () => {
     } finally {
       console.warn = originalWarn;
     }
+  });
+
+  describe("feedback logger wiring", () => {
+    it("creates and passes a feedback logger when feedback is enabled", async () => {
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: (opts) => {
+            startServerCalls.push(opts);
+            return {
+              server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+            };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(startServerCalls).toHaveLength(1);
+      expect(startServerCalls[0].feedbackLogger).toBeDefined();
+
+      await handle.stop();
+    });
+
+    it("skips feedback logger creation when LEGION_FEEDBACK_DISABLED=1", async () => {
+      process.env.LEGION_FEEDBACK_DISABLED = "1";
+
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: (opts) => {
+            startServerCalls.push(opts);
+            return {
+              server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+            };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(startServerCalls).toHaveLength(1);
+      expect(startServerCalls[0].feedbackLogger).toBeUndefined();
+
+      await handle.stop();
+    });
+
+    it("flushes the feedback logger during shutdown", async () => {
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: (opts) => {
+            startServerCalls.push(opts);
+            return {
+              server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+            };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      const feedbackLogger = startServerCalls[0].feedbackLogger;
+      if (!feedbackLogger) {
+        throw new Error("Expected feedbackLogger to be created");
+      }
+
+      const flush = mock(async () => {});
+      feedbackLogger.flush = flush;
+
+      await handle.stop();
+
+      expect(flush).toHaveBeenCalledTimes(1);
+    });
   });
 });

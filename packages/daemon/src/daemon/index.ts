@@ -9,6 +9,7 @@ import {
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
 import { modeToRole, TokenManager } from "./github-apps";
+import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
 import {
   allocatePort,
   readLegionsRegistry,
@@ -227,6 +228,14 @@ export async function startDaemon(
 
   const resolvedDeps = resolveDependencies(config, deps);
 
+  let feedbackLogger: FeedbackLogger | undefined;
+  if (!process.env.LEGION_FEEDBACK_DISABLED) {
+    const feedbackPath = config.paths.forLegion(legionId).feedbackFile;
+    const maxBytes = Number(process.env.LEGION_FEEDBACK_MAX_BYTES) || 50 * 1024 * 1024;
+    const writer = new FileFeedbackWriter(feedbackPath, maxBytes);
+    feedbackLogger = new FeedbackLogger(writer, legionId);
+  }
+
   const sharedServePort = config.baseWorkerPort;
   let healthTicks = 0;
   let sharedServeRestarts = 0;
@@ -383,6 +392,14 @@ export async function startDaemon(
       healthTickTimeout = null;
     }
 
+    if (feedbackLogger) {
+      try {
+        await feedbackLogger.flush();
+      } catch (error) {
+        console.error(`[feedback] Flush on shutdown failed: ${error}`);
+      }
+    }
+
     try {
       await removeLegionEntryFn(config.paths.legionsFile, legionId);
     } catch {}
@@ -435,6 +452,7 @@ export async function startDaemon(
           : undefined,
         tokenManager,
         indexManager,
+        feedbackLogger,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
