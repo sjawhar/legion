@@ -281,31 +281,30 @@ The controller MUST NOT:
 
 The controller dispatches workers. Workers do the work. If you are about to touch code, branches, or PRs directly — stop and dispatch the appropriate worker instead.
 
-### Quality Gate (Controller Policy)
+### CI Gates (Enforced by Decision Engine)
 
-Before dispatching a tester, the controller independently verifies code quality. This is a controller-level policy, not signaled by the state machine.
+CI status is now checked by the decision engine at all code-producing phase transitions:
+- **In Progress → Testing** (implementer done)
+- **Testing → Needs Review** (tester done)
+- **Needs Review → Retro** (reviewer done)
 
-**When to run:** Whenever about to execute a `dispatch_tester` action.
+The decision engine emits `resume_implementer_for_ci_failure`, `retry_ci_check`, or
+`investigate_no_pr` when appropriate. The controller does NOT need to independently
+verify CI before dispatching — the state machine handles it.
 
-**Before dispatching tester, verify CI is passing:**
-```bash
-gh pr checks "$LEGION_ISSUE_ID"
-```
+**Controller remediation for CI-related actions:**
 
-If any checks are failing, do NOT dispatch the tester. Instead:
-1. Move issue back to In Progress
-2. Re-dispatch an implementer with the CI failure output:
-```bash
-legion dispatch "$ISSUE_IDENTIFIER" implement \
-  --repo "$OWNER/$REPO" \
-  --prompt "Invoke the /legion-worker skill for implement mode. CI is failing: [paste failure summary]. Fix and push. ($BACKEND_SUFFIX)"
-```
+| Action | From Status | Controller Response |
+|--------|-------------|---------------------|
+| `resume_implementer_for_ci_failure` | In Progress | Remove `worker-done` label, resume implementer with CI failure output. Status stays In Progress. |
+| `resume_implementer_for_ci_failure` | Testing | Remove `worker-done` and `test-passed` labels, move issue back to In Progress, resume implementer with CI failure output. |
+| `resume_implementer_for_ci_failure` | Needs Review | Same as existing behavior — resume implementer with CI failure output. |
+| `retry_ci_check` | In Progress / Testing | Wait and re-check (same as existing Needs Review behavior). |
+| `investigate_no_pr` | In Progress / Testing | Same handling as Needs Review — investigate missing PR. |
 
 **CI is the implementer's responsibility.** The implement workflow requires passing CI before
-signaling completion. If CI is failing when the controller sees a PR, the implementer didn't
-finish — re-dispatch an implementer with the CI failure output. The tester should also check
-CI status and include it in the review.
-
+signaling completion. If CI is failing when the decision engine evaluates an issue, the
+implementer didn't finish — the engine emits the appropriate resume action.
 
 ### Pre-Merge Gate
 
