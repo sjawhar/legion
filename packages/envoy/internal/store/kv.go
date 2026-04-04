@@ -31,7 +31,7 @@ func WithReplicas(n int) OpenOption {
 }
 
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
-	opts := openOpts{replicas: 3}
+	opts := openOpts{replicas: 1}
 	for _, o := range options {
 		o(&opts)
 	}
