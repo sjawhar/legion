@@ -443,6 +443,43 @@
     ],
     "tag:quality-gates": [
       "testing/worker-smoke-testing-requirements.md"
+    ],
+    "packages/envoy/internal/session": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "packages/envoy/internal/integration": [
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "packages/envoy/cmd/listener": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+    ],
+    "packages/envoy-plugin": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+    ],
+    "tag:nats": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "tag:kv": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "tag:ttl": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "tag:envoy": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "tag:session-registry": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+    ],
+    "tag:testcontainers": [
+      "testing/nats-kv-testing-patterns.md"
+    ],
+    "tag:integration-testing": [
+      "testing/nats-kv-testing-patterns.md"
     ]
-  }
 }
