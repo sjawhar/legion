@@ -82,7 +82,28 @@ export default async (input: { serverUrl: URL }) => {
       if (syncPort(activeSessionID ?? undefined)) clearInterval(timer);
     }, 1000);
 
+    // Heartbeat: re-subscribe every 2 minutes to refresh envoy_sessions TTL (5-min)
+    const heartbeatInterval = setInterval(
+      () => {
+        if (!activeSessionID) return;
+        const port = currentPort();
+        if (!port) return;
+        call("/v1/interests/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: activeSessionID,
+            dir: process.cwd(),
+            topics: [`notifications.agent.${activeSessionID}`],
+            port,
+          }),
+        }).catch(() => {});
+      },
+      2 * 60 * 1000
+    );
+
     process.on("exit", () => {
+      clearInterval(heartbeatInterval);
       for (const f of registryFiles) {
         try {
           unlinkSync(f);
@@ -114,6 +135,7 @@ export default async (input: { serverUrl: URL }) => {
                   session_id: sessionID,
                   dir: process.cwd(),
                   topics: [`notifications.agent.${sessionID}`],
+                  port: currentPort() ?? 0,
                 }),
               }).catch(() => {});
             }
@@ -154,6 +176,7 @@ export default async (input: { serverUrl: URL }) => {
               session_id: ctx.sessionID,
               dir: ctx.directory,
               topics: args.topics,
+              port: Number.parseInt(input.serverUrl.port, 10) || 0,
             }),
           });
         },

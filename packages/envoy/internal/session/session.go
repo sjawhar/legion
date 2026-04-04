@@ -28,14 +28,25 @@ type Deliverer struct {
 	RegistryDir  string
 	HostBridge   string
 	RequestLimit time.Duration
+	Sessions     *SessionRegistry
 }
 
 func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) error {
-	entry, _ := d.Find(interest.SessionID)
 	text := d.Text(item)
+
+	// KV-first: try SessionRegistry for port
+	if d.Sessions != nil {
+		if entry, err := d.Sessions.Get(interest.SessionID); err == nil && entry.Port > 0 {
+			return d.prompt(entry.Port, interest.SessionID, text)
+		}
+	}
+
+	// Fallback: file registry
+	entry, _ := d.Find(interest.SessionID)
 	if entry != nil && entry.Port > 0 {
 		return d.prompt(entry.Port, interest.SessionID, text)
 	}
+
 	return fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
 

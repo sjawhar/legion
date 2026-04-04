@@ -33,9 +33,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	sessions, err := session.OpenSessionRegistry(client.Conn)
+	if err != nil {
+		log.Fatal(err)
+	}
 	deliver := session.Deliverer{
 		RegistryDir: os.Getenv("ENVOY_REGISTRY_DIR"),
 		HostBridge:  os.Getenv("ENVOY_HOST_BRIDGE"),
+		Sessions:    sessions,
 	}
 
 	dedupeCache := dedupe.New(10 * time.Minute)
@@ -131,6 +136,7 @@ func main() {
 			SessionID string   `json:"session_id"`
 			Dir       string   `json:"dir"`
 			Topics    []string `json:"topics"`
+			Port      int      `json:"port"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
@@ -144,6 +150,15 @@ func main() {
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if body.Port > 0 {
+			if err := sessions.Put(body.SessionID, session.SessionEntry{
+				Port:      body.Port,
+				MachineID: cfg.MachineID,
+				Dir:       body.Dir,
+			}); err != nil {
+				log.Printf("listener session registry put failed session=%s: %v", body.SessionID, err)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(item)
@@ -168,6 +183,21 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		entry, err := sessions.Get(sessionID)
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(entry)
+	})
+
 	mux.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 		item, err := registry.Get(sessionID)
