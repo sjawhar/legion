@@ -90,6 +90,7 @@ interface DispatchOptions {
   workspace?: string;
   version?: number;
   env?: Record<string, string>;
+  issueNumber?: number;
 }
 
 interface PromptOptions {
@@ -375,6 +376,9 @@ export async function cmdDispatch(
   }
   if (opts.env) {
     body.env = opts.env;
+  }
+  if (opts.issueNumber !== undefined) {
+    body.issueNumber = opts.issueNumber;
   }
 
   let response: Response;
@@ -825,6 +829,10 @@ export const dispatchCommand = defineCommand({
       type: "string",
       description: 'Worker env as JSON object (e.g. --env \'{"KEY":"VALUE"}\')',
     },
+    "issue-number": {
+      type: "string",
+      description: "GitHub issue number for Envoy subscription",
+    },
   },
   async run({ args }) {
     try {
@@ -846,6 +854,13 @@ export const dispatchCommand = defineCommand({
       if (args.env) {
         const envObj = parseEnvJson(args.env as string);
         dispatchOpts.env = envObj;
+      }
+      if (args["issue-number"] !== undefined) {
+        const parsed = Number(args["issue-number"]);
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          throw new CliError("Invalid issue-number: must be a positive integer");
+        }
+        dispatchOpts.issueNumber = parsed;
       }
       await cmdDispatch(args.issue, args.mode, dispatchOpts);
     } catch (e) {
