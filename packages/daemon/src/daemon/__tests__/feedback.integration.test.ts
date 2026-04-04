@@ -58,16 +58,14 @@ describe("feedback logging integration", () => {
     handle = await startDaemon(
       {
         legionId: "acme/widgets",
-        projectId: "acme/widgets",
         paths,
         stateFilePath,
-        port: 0,
-        hostname: "127.0.0.1",
+        daemonPort: 0,
         controllerSessionId: "ses_test",
       },
       {
         adapter: makeAdapter(),
-      },
+      }
     );
 
     const baseUrl = `http://127.0.0.1:${handle.server.port}`;
@@ -160,16 +158,14 @@ describe("feedback logging integration", () => {
     handle = await startDaemon(
       {
         legionId: "acme/widgets",
-        projectId: "acme/widgets",
         paths,
         stateFilePath,
-        port: 0,
-        hostname: "127.0.0.1",
+        daemonPort: 0,
         controllerSessionId: "ses_test",
       },
       {
         adapter: makeAdapter(),
-      },
+      }
     );
 
     const baseUrl = `http://127.0.0.1:${handle.server.port}`;
@@ -201,16 +197,14 @@ describe("feedback logging integration", () => {
     handle = await startDaemon(
       {
         legionId: "acme/widgets",
-        projectId: "acme/widgets",
         paths,
         stateFilePath,
-        port: 0,
-        hostname: "127.0.0.1",
+        daemonPort: 0,
         controllerSessionId: "ses_test",
       },
       {
         adapter: makeAdapter(),
-      },
+      }
     );
 
     const baseUrl = `http://127.0.0.1:${handle.server.port}`;

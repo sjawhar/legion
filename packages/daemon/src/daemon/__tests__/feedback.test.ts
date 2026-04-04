@@ -271,7 +271,9 @@ describe("FeedbackLogger", () => {
 
     const event = JSON.parse(writer.lines[0]) as FeedbackEvent;
     expect(event.event).toBe("daemon.health_tick");
-    expect(event.workerCount).toBe(3);
+    if (event.event === "daemon.health_tick") {
+      expect(event.workerCount).toBe(3);
+    }
   });
 });
 

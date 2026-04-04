@@ -10,6 +10,7 @@ import {
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
+import type { FeedbackLogger } from "./feedback";
 import type { TokenManager } from "./github-apps";
 import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
@@ -29,7 +30,6 @@ import {
   writeStateFile,
 } from "./state-file";
 import { registerGauges } from "./telemetry";
-import type { FeedbackLogger } from "./feedback";
 
 type Server = ReturnType<typeof Bun.serve>;
 

@@ -8,8 +8,8 @@ import {
 } from "../index/types";
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
-import { modeToRole, TokenManager } from "./github-apps";
 import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
+import { modeToRole, TokenManager } from "./github-apps";
 import {
   allocatePort,
   readLegionsRegistry,

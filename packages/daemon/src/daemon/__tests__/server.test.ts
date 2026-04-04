@@ -3,11 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
-import {
-  FeedbackLogger,
-  type FeedbackEvent,
-  type FeedbackWriter,
-} from "../feedback";
+import { type FeedbackEvent, FeedbackLogger, type FeedbackWriter } from "../feedback";
 import type { LegionPaths } from "../paths";
 import type { RepoManagerDeps } from "../repo-manager";
 import type { RuntimeAdapter } from "../runtime/types";
@@ -239,6 +235,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -319,6 +316,7 @@ describe("daemon server", () => {
         forLegion: (projectId: string) => ({
           legionStateDir: `/tmp/legion-state/legions/${projectId}`,
           workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+          feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
           logDir: `/tmp/legion-state/legions/${projectId}/logs`,
           workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
         }),
@@ -389,6 +387,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -614,6 +613,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -1228,13 +1228,16 @@ describe("daemon server", () => {
 
       const events = parseFeedbackLines(writer.lines);
       expect(events).toHaveLength(1);
-      expect(events[0].schemaVersion).toBe(1);
-      expect(events[0].legionId).toBe(legionId);
-      expect(events[0].event).toBe("worker.dispatched");
-      expect(events[0].issueId).toBe("eng-21");
-      expect(events[0].mode).toBe("implement");
-      expect(events[0].version).toBe(3);
-      expect(events[0].workspace).toBe(workspace);
+      const dispatched = events[0];
+      expect(dispatched.schemaVersion).toBe(1);
+      expect(dispatched.legionId).toBe(legionId);
+      expect(dispatched.event).toBe("worker.dispatched");
+      if (dispatched.event === "worker.dispatched") {
+        expect(dispatched.issueId).toBe("eng-21");
+        expect(dispatched.mode).toBe("implement");
+        expect(dispatched.version).toBe(3);
+        expect(dispatched.workspace).toBe(workspace);
+      }
     });
 
     it("emits worker.status_changed after PATCH /workers/:id", async () => {
@@ -1307,7 +1310,7 @@ describe("daemon server", () => {
       await feedbackLogger.flush();
 
       const events = parseFeedbackLines(writer.lines).filter(
-        (event) => event.event === "state.collected",
+        (event) => event.event === "state.collected"
       );
       expect(events).toHaveLength(2);
       expect(events[0].schemaVersion).toBe(1);
