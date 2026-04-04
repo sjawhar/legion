@@ -16,6 +16,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -28,7 +29,7 @@ type testEnv struct {
 	client     *bus.Client
 	registry   *store.Registry
 	deliverer  session.Deliverer
-	dedupe     *session.Dedupe
+	dedupe     *dedupe.Cache
 	registryDir string
 }
 
@@ -70,7 +71,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		RequestLimit: 5 * time.Second,
 	}
 
-	dedupe := session.NewDedupe(5 * time.Minute)
+	dc := dedupe.New(5 * time.Minute)
 
 	return &testEnv{
 		t:           t,
@@ -78,7 +79,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 		client:      client,
 		registry:    registry,
 		deliverer:   deliverer,
-		dedupe:      dedupe,
+		dedupe:      dc,
 		registryDir: registryDir,
 	}
 }
@@ -162,21 +163,22 @@ func (env *testEnv) startConsumer(machineID string) {
 			return
 		}
 
-		// Dedupe
-		if env.dedupe.Check(item.DedupeKey) {
-			msg.Ack()
-			return
-		}
-
 		// Agent path
 		if item.Source == "agent" {
 			sessionID := item.Topic[len("notifications.agent."):]
+			if env.dedupe.Seen(item.DedupeKey, sessionID) {
+				msg.Ack()
+				return
+			}
 			interest, err := env.registry.Get(sessionID)
 			var interestPtr *store.Interest
 			if err == nil {
 				interestPtr = &interest
 			}
 			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, &env.deliverer)
+			if result.Delivered {
+				env.dedupe.Record(item.DedupeKey, sessionID)
+			}
 			if result.ShouldNAK {
 				msg.NakWithDelay(1 * time.Second)
 			} else {
@@ -193,8 +195,13 @@ func (env *testEnv) startConsumer(machineID string) {
 		}
 		var failed bool
 		for _, interest := range items {
+			if env.dedupe.Seen(item.DedupeKey, interest.SessionID) {
+				continue
+			}
 			if err := env.deliverer.Deliver(item, interest); err != nil {
 				failed = true
+			} else {
+				env.dedupe.Record(item.DedupeKey, interest.SessionID)
 			}
 		}
 		if failed {
@@ -450,7 +457,7 @@ func TestE2E_SessionReRegistration(t *testing.T) {
 
 func TestE2E_DedupeWindowExpiry(t *testing.T) {
 	env := setupTestEnv(t)
-	env.dedupe = session.NewDedupe(500 * time.Millisecond)
+	env.dedupe = dedupe.New(500 * time.Millisecond)
 
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_expiry", port, nil)

@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -37,7 +38,7 @@ func main() {
 		HostBridge:  os.Getenv("ENVOY_HOST_BRIDGE"),
 	}
 
-	dedupe := session.NewDedupe(5 * time.Minute)
+	dedupeCache := dedupe.New(10 * time.Minute)
 
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
@@ -54,13 +55,13 @@ func main() {
 			return
 		}
 		log.Printf("listener received machine=%s source=%s topic=%s event_id=%s", cfg.MachineID, item.Source, item.Topic, item.EventID)
-		if dedupe.Check(item.DedupeKey) {
-			log.Printf("listener dedupe skip event_id=%s dedupe_key=%s", item.EventID, item.DedupeKey)
-			_ = msg.Ack()
-			return
-		}
 		if item.Source == "agent" {
 			sessionID := strings.TrimPrefix(item.Topic, "notifications.agent.")
+			if dedupeCache.Seen(item.DedupeKey, sessionID) {
+				log.Printf("listener dedupe skip session=%s dedupe_key=%s", sessionID, item.DedupeKey)
+				_ = msg.Ack()
+				return
+			}
 			interest, err := registry.Get(sessionID)
 			var interestPtr *store.Interest
 			if err == nil {
@@ -71,6 +72,7 @@ func main() {
 				log.Printf("listener agent delivery failed session=%s: %v", sessionID, result.Err)
 			}
 			if result.Delivered {
+				dedupeCache.Record(item.DedupeKey, sessionID)
 				log.Printf("listener agent delivered session=%s event_id=%s", sessionID, item.EventID)
 			} else if result.Err == nil {
 				log.Printf("listener agent session not found anywhere session=%s", sessionID)
@@ -88,13 +90,17 @@ func main() {
 			_ = msg.Ack()
 			return
 		}
-		// NAK on any failure retries ALL recipients, causing duplicates for already-delivered ones.
-		// Acceptable: notifications are advisory and idempotent.
 		var failed bool
 		for _, interest := range items {
+			if dedupeCache.Seen(item.DedupeKey, interest.SessionID) {
+				log.Printf("listener dedupe skip session=%s dedupe_key=%s", interest.SessionID, item.DedupeKey)
+				continue
+			}
 			if err := deliver.Deliver(item, interest); err != nil {
 				log.Printf("listener delivery failed session=%s: %v", interest.SessionID, err)
 				failed = true
+			} else {
+				dedupeCache.Record(item.DedupeKey, interest.SessionID)
 			}
 		}
 		if failed {
