@@ -238,6 +238,7 @@ export async function startDaemon(
   }
 
   const sharedServePort = config.baseWorkerPort;
+  const startedAt = Date.now();
   let healthTicks = 0;
   let sharedServeRestarts = 0;
   let roleServeRestarts = 0;
@@ -659,6 +660,17 @@ export async function startDaemon(
             }
           }
         }
+
+        const workerState = await resolvedDeps.readStateFile(config.stateFilePath);
+        feedbackLogger?.log({
+          event: "daemon.health_tick",
+          tick: healthTicks,
+          workerCount: Object.keys(workerState.workers).length,
+          serveHealthy: await resolvedDeps.adapter.healthy(),
+          uptimeS: Math.max(0, (Date.now() - startedAt) / 1000),
+          serveRestarted: sharedServeRestarts > 0,
+          sessionsRecreated: controllerRecreates,
+        });
       } finally {
         if (!shuttingDown) {
           scheduleHealthTick();

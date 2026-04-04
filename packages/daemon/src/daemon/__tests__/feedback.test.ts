@@ -252,6 +252,27 @@ describe("FeedbackLogger", () => {
     await expect(logger.flush()).resolves.toBeUndefined();
     expect(consoleError).toHaveBeenCalledTimes(1);
   });
+
+  it("writes daemon.health_tick events", async () => {
+    const writer = new RecordingWriter();
+    const logger = new FeedbackLogger(writer, "team/project");
+
+    logger.log({
+      event: "daemon.health_tick",
+      tick: 4,
+      workerCount: 3,
+      serveHealthy: true,
+      uptimeS: 120,
+      serveRestarted: false,
+      sessionsRecreated: 1,
+    });
+
+    await logger.flush();
+
+    const event = JSON.parse(writer.lines[0]) as FeedbackEvent;
+    expect(event.event).toBe("daemon.health_tick");
+    expect(event.workerCount).toBe(3);
+  });
 });
 
 describe("FileFeedbackWriter", () => {
