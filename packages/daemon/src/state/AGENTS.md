@@ -28,9 +28,15 @@ The core of the controller's decision-making. Key transitions:
 |--------|-------------|-------------|----------|-----------|----------|
 | Backlog | yes | — | — | — | `transition_to_todo` |
 | Todo | no | no | — | — | `dispatch_planner` |
-| In Progress | yes | — | — | — | `transition_to_testing` |
+| In Progress | yes | — | no PR | — | `investigate_no_pr` |
+| In Progress | yes | — | has PR | failing | `resume_implementer_for_ci_failure` |
+| In Progress | yes | — | has PR | pending | `retry_ci_check` |
+| In Progress | yes | — | has PR | passing/null | `transition_to_testing` |
 | Testing | no | no | — | — | `dispatch_tester` |
-| Testing | yes | — | — | test-passed | `transition_to_needs_review` |
+| Testing | yes | — | has PR | test-passed + passing/null | `transition_to_needs_review` |
+| Testing | yes | — | no PR | test-passed | `investigate_no_pr` |
+| Testing | yes | — | has PR | test-passed + failing | `resume_implementer_for_ci_failure` |
+| Testing | yes | — | has PR | test-passed + pending | `retry_ci_check` |
 | Testing | yes | — | — | !test-passed | `resume_implementer_for_test_failure` |
 | Needs Review | yes | — | ready | passing/null | `transition_to_retro` |
 | Needs Review | yes | — | ready | failing | `resume_implementer_for_ci_failure` |
@@ -51,6 +57,7 @@ The core of the controller's decision-making. Key transitions:
 - In Progress no longer returns `skip` when `hasPr && !hasLiveWorker` — this caused a deadlock when workers died after creating a PR.
 - `skip` action uses the actual `workerMode` from the daemon (when available) for sessionId computation, instead of defaulting to `implement`.
 - `transition_to_done` action exists for explicit Done transitions (mapped to `merge` mode).
+- `needsCiStatus` now returns `true` for In Progress, Testing, and Needs Review (all require PR). CI gates are enforced at all code-producing transitions.
 
 ## Anti-Patterns
 

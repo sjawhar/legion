@@ -59,6 +59,15 @@ export function suggestAction(
 
     case IssueStatus.IN_PROGRESS:
       if (hasWorkerDone) {
+        if (!hasPr) {
+          return "investigate_no_pr";
+        }
+        if (ciStatus === CiStatus.FAILING) {
+          return "resume_implementer_for_ci_failure";
+        }
+        if (ciStatus === CiStatus.PENDING) {
+          return "retry_ci_check";
+        }
         return "transition_to_testing";
       }
       if (hasLiveWorker) {
@@ -69,6 +78,15 @@ export function suggestAction(
     case IssueStatus.TESTING:
       if (hasWorkerDone) {
         if (hasTestPassed) {
+          if (!hasPr) {
+            return "investigate_no_pr";
+          }
+          if (ciStatus === CiStatus.FAILING) {
+            return "resume_implementer_for_ci_failure";
+          }
+          if (ciStatus === CiStatus.PENDING) {
+            return "retry_ci_check";
+          }
           return "transition_to_needs_review";
         }
         return "resume_implementer_for_test_failure";

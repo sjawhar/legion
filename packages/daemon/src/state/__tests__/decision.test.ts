@@ -32,14 +32,59 @@ describe("suggestAction", () => {
     expect(action).toBe("dispatch_implementer");
   });
 
-  it("in_progress_worker_done transitions to testing", () => {
-    const action = suggestAction(IssueStatus.IN_PROGRESS, true, false, null, false, false);
+  it("in_progress_worker_done_ci_null_transitions_to_testing", () => {
+    const action = suggestAction(IssueStatus.IN_PROGRESS, true, false, null, true, false);
     expect(action).toBe("transition_to_testing");
   });
 
   it("in_progress_with_live_worker skips", () => {
     const action = suggestAction(IssueStatus.IN_PROGRESS, false, true, null, false, false);
     expect(action).toBe("skip");
+  });
+
+  // In Progress + CI gate tests
+  it("in_progress_worker_done_no_pr_investigates", () => {
+    const action = suggestAction(IssueStatus.IN_PROGRESS, true, false, null, false, false);
+    expect(action).toBe("investigate_no_pr");
+  });
+
+  it("in_progress_worker_done_ci_failing_resumes_implementer", () => {
+    const action = suggestAction(
+      IssueStatus.IN_PROGRESS,
+      true,
+      false,
+      null,
+      true,
+      false,
+      "failing"
+    );
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("in_progress_worker_done_ci_pending_retries", () => {
+    const action = suggestAction(
+      IssueStatus.IN_PROGRESS,
+      true,
+      false,
+      null,
+      true,
+      false,
+      "pending"
+    );
+    expect(action).toBe("retry_ci_check");
+  });
+
+  it("in_progress_worker_done_ci_passing_transitions_to_testing", () => {
+    const action = suggestAction(
+      IssueStatus.IN_PROGRESS,
+      true,
+      false,
+      null,
+      true,
+      false,
+      "passing"
+    );
+    expect(action).toBe("transition_to_testing");
   });
 
   it("needs_review_approved transitions to retro", () => {
@@ -156,6 +201,32 @@ describe("suggestAction", () => {
   it("testing_with_live_worker_skips", () => {
     const action = suggestAction(IssueStatus.TESTING, false, true, null, false, false);
     expect(action).toBe("skip");
+  });
+
+  // Testing + CI gate tests
+  it("testing_worker_done_test_passed_no_pr_investigates", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, false, true);
+    expect(action).toBe("investigate_no_pr");
+  });
+
+  it("testing_worker_done_test_passed_ci_failing_resumes_implementer", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, true, true, "failing");
+    expect(action).toBe("resume_implementer_for_ci_failure");
+  });
+
+  it("testing_worker_done_test_passed_ci_pending_retries", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, true, true, "pending");
+    expect(action).toBe("retry_ci_check");
+  });
+
+  it("testing_worker_done_test_passed_ci_passing_transitions_to_needs_review", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, true, true, "passing");
+    expect(action).toBe("transition_to_needs_review");
+  });
+
+  it("testing_worker_done_test_passed_ci_null_transitions_to_needs_review", () => {
+    const action = suggestAction(IssueStatus.TESTING, true, false, null, true, true, null);
+    expect(action).toBe("transition_to_needs_review");
   });
 
   it("unknown_status_skips", () => {
@@ -482,7 +553,7 @@ describe("buildIssueState", () => {
       issueId: "ENG-21",
       status: "In Progress",
       labels: ["user-feedback-given", "worker-done"],
-      hasPr: false,
+      hasPr: true,
       prIsDraft: null,
       ciStatus: null,
       mergeableStatus: null,
@@ -846,7 +917,7 @@ describe("buildCollectedState", () => {
         issueId: "ENG-22",
         status: "In Progress",
         labels: ["worker-done"],
-        hasPr: false,
+        hasPr: true,
         prIsDraft: null,
         ciStatus: null,
         mergeableStatus: null,

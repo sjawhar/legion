@@ -367,14 +367,19 @@ export function createParsedIssue(
 
     get needsPrStatus() {
       return (
-        this.status === IssueStatus.NEEDS_REVIEW &&
-        this.labels.includes("worker-done") &&
+        ((this.status === IssueStatus.NEEDS_REVIEW && this.labels.includes("worker-done")) ||
+          (this.status === IssueStatus.IN_PROGRESS && this.labels.includes("worker-done"))) &&
         this.prRef !== null
       );
     },
 
     get needsCiStatus() {
-      return this.status === IssueStatus.NEEDS_REVIEW && this.prRef !== null;
+      return (
+        (this.status === IssueStatus.NEEDS_REVIEW ||
+          this.status === IssueStatus.IN_PROGRESS ||
+          this.status === IssueStatus.TESTING) &&
+        this.prRef !== null
+      );
     },
   };
 }

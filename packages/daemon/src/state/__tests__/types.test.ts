@@ -297,8 +297,8 @@ describe("ParsedIssue properties", () => {
     expect(issue.needsPrStatus).toBe(true);
   });
 
-  it("needs_pr_status returns false when status not Needs Review", () => {
-    const issue = createParsedIssue("ENG-21", "In Progress", ["worker-done"], {
+  it("needs_pr_status returns false when status not Needs Review or In Progress", () => {
+    const issue = createParsedIssue("ENG-21", "Testing", ["worker-done"], {
       owner: "owner",
       repo: "repo",
       number: 123,
@@ -318,6 +318,39 @@ describe("ParsedIssue properties", () => {
   it("needs_pr_status returns false when no pr_ref", () => {
     const issue = createParsedIssue("ENG-21", "Needs Review", ["worker-done"], null);
     expect(issue.needsPrStatus).toBe(false);
+  });
+
+  it("needs_pr_status returns true for In Progress with worker-done and PR", () => {
+    const issue = createParsedIssue("ENG-21", "In Progress", ["worker-done"], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
+    expect(issue.needsPrStatus).toBe(true);
+  });
+
+  // needsCiStatus enrichment tests
+  it("needsCiStatus returns true for In Progress with PR", () => {
+    const issue = createParsedIssue("ENG-21", "In Progress", [], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
+    expect(issue.needsCiStatus).toBe(true);
+  });
+
+  it("needsCiStatus returns true for Testing with PR", () => {
+    const issue = createParsedIssue("ENG-21", "Testing", [], {
+      owner: "owner",
+      repo: "repo",
+      number: 123,
+    });
+    expect(issue.needsCiStatus).toBe(true);
+  });
+
+  it("needsCiStatus returns false for In Progress without PR", () => {
+    const issue = createParsedIssue("ENG-21", "In Progress", [], null);
+    expect(issue.needsCiStatus).toBe(false);
   });
 });
 
