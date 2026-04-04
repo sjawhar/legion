@@ -2,8 +2,9 @@ services:
   github:
     build:
       context: ../..
-      dockerfile: docker/github.Dockerfile
+      dockerfile: docker/Dockerfile
     network_mode: host
+    command: ["/usr/local/bin/envoy-github"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9010/healthz"]

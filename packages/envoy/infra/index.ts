@@ -32,14 +32,14 @@ for (const machine of machines) {
   }
 
   // Listener — on ALL machines
-  createListener(provider, machine, machines, images.listener, natsDependency);
+  createListener(provider, machine, machines, images.envoy, natsDependency);
 
   // Receivers — only where configured
-  if (machine.receivers?.github && images.github) {
-    createGithubReceiver(provider, machine, machines, images.github, secrets, natsDependency);
+  if (machine.receivers?.github) {
+    createGithubReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
   }
 
-  if (machine.receivers?.slack && images.slack) {
-    createSlackReceiver(provider, machine, machines, images.slack, secrets, natsDependency);
+  if (machine.receivers?.slack) {
+    createSlackReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
   }
 }

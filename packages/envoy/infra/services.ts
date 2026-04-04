@@ -73,6 +73,7 @@ export function createListener(
     {
       name: "envoy-listener",
       image: image.imageId,
+      command: ["/usr/local/bin/envoy-listener"],
       restart: "unless-stopped",
       networkMode: "host",
       envs: [
@@ -123,6 +124,7 @@ export function createGithubReceiver(
     {
       name: "envoy-github",
       image: image.imageId,
+      command: ["/usr/local/bin/envoy-github"],
       restart: "unless-stopped",
       networkMode: "host",
       envs: [
@@ -165,6 +167,7 @@ export function createSlackReceiver(
     {
       name: "envoy-slack",
       image: image.imageId,
+      command: ["/usr/local/bin/envoy-slack"],
       restart: "unless-stopped",
       networkMode: "host",
       envs: [

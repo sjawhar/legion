@@ -3,16 +3,13 @@ import type { MachineConfig } from "./machines";
 
 export interface MachineImages {
   nats?: docker.RemoteImage;
-  listener: docker.RemoteImage;
-  github?: docker.RemoteImage;
-  slack?: docker.RemoteImage;
+  envoy: docker.RemoteImage;
 }
 
 /**
  * Pull only the images a machine actually needs.
- * - All machines: listener
+ * - All machines: envoy (single multi-binary image)
  * - NATS machines only: nats
- * - Receiver machines only: github, slack (as configured)
  *
  * Uses keepLocally: true to avoid deleting images on `pulumi destroy`.
  */
@@ -24,10 +21,10 @@ export function pullImages(
   natsImage: string
 ): MachineImages {
   const result: MachineImages = {
-    listener: new docker.RemoteImage(
-      `listener-image-${machine.name}`,
+    envoy: new docker.RemoteImage(
+      `envoy-image-${machine.name}`,
       {
-        name: `${registry}/envoy-listener:${imageTag}`,
+        name: `${registry}/envoy:${imageTag}`,
         keepLocally: true,
       },
       { provider }
@@ -39,28 +36,6 @@ export function pullImages(
       `nats-image-${machine.name}`,
       {
         name: natsImage,
-        keepLocally: true,
-      },
-      { provider }
-    );
-  }
-
-  if (machine.receivers?.github) {
-    result.github = new docker.RemoteImage(
-      `github-image-${machine.name}`,
-      {
-        name: `${registry}/envoy-github:${imageTag}`,
-        keepLocally: true,
-      },
-      { provider }
-    );
-  }
-
-  if (machine.receivers?.slack) {
-    result.slack = new docker.RemoteImage(
-      `slack-image-${machine.name}`,
-      {
-        name: `${registry}/envoy-slack:${imageTag}`,
         keepLocally: true,
       },
       { provider }
