@@ -1,0 +1,38 @@
+config:
+  envoy:registry: ghcr.io/sjawhar/legion
+  envoy:imageTag: PLACEHOLDER_SET_BEFORE_DEPLOY
+  envoy:natsImage: "nats:2.11-alpine"
+  envoy:machines:
+    - name: sami-agents-mx
+      sshHost: "ssh://ubuntu@sami-agents-mx"
+      machineId: sami-agents-mx
+      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      nats:
+        serverName: sami-agents-mx
+      listener:
+        registryDir: /home/ubuntu/.local/state/opencode/registry
+      receivers:
+        github: true
+        slack: true
+    - name: sami
+      sshHost: "ssh://sami@sami"
+      machineId: sami
+      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      nats:
+        serverName: sami
+      listener:
+        registryDir: /home/sami/.local/state/opencode/registry
+    - name: sami-claude
+      sshHost: "ssh://claude@sami-claude"
+      machineId: sami-claude
+      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      nats:
+        serverName: sami-claude
+      listener:
+        registryDir: /home/claude/.local/state/opencode/registry
+    - name: ghost-wispr
+      sshHost: "ssh://ghost-wispr@ghost-wispr"
+      machineId: ghost-wispr
+      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      listener:
+        registryDir: /home/ghost-wispr/.local/state/opencode/registry
