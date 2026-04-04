@@ -517,6 +517,38 @@
     ],
     "tag:routing": [
       "envoy/listener-routing-by-topic-prefix.md"
+    ],
+    "packages/envoy/infra": [
+      "envoy/docker-tailscale-networking.md",
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "packages/envoy/scripts": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "packages/envoy/deploy": [
+      "envoy/docker-tailscale-networking.md",
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:tailscale": [
+      "envoy/docker-tailscale-networking.md"
+    ],
+    "tag:bridge-networking": [
+      "envoy/docker-tailscale-networking.md"
+    ],
+    "tag:magicdns": [
+      "envoy/docker-tailscale-networking.md"
+    ],
+    "tag:pulumi": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:deleteBeforeReplace": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:infrastructure-as-code": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:deployment": [
+      "envoy/pulumi-remote-docker-patterns.md"
     ]
   }
 }
