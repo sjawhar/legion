@@ -24,17 +24,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	client, err := bus.Connect(cfg.NATSURLs)
+	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Conn.Close()
-	registry, err := store.Open(client.Conn)
+	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}
 	var sessions *session.SessionRegistry
-	if reg, err := session.OpenSessionRegistry(client.Conn); err != nil {
+	if reg, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(cfg.NATSReplicas)); err != nil {
 		log.Printf("WARN: KV registry unavailable, using file-only delivery: %v", err)
 	} else {
 		sessions = reg

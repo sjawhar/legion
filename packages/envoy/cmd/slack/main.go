@@ -23,7 +23,7 @@ func main() {
 		log.Fatal(err)
 	}
 	secret := getenv("ENVOY_SLACK_SIGNING_SECRET")
-	client, err := bus.Connect(cfg.NATSURLs)
+	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}

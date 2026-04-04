@@ -24,7 +24,7 @@ func main() {
 	}
 	secret := getenv("ENVOY_GITHUB_WEBHOOK_SECRET")
 	trigger := getenvDefault("ENVOY_GITHUB_MENTION_TRIGGER", "@legion")
-	client, err := bus.Connect(cfg.NATSURLs)
+	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}

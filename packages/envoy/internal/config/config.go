@@ -8,9 +8,10 @@ import (
 )
 
 type Service struct {
-	MachineID string
-	NATSURLs  []string
-	Port      int
+	MachineID    string
+	NATSURLs     []string
+	NATSReplicas int
+	Port         int
 }
 
 func Load(defaultPort int) (Service, error) {
@@ -34,5 +35,13 @@ func Load(defaultPort int) (Service, error) {
 		}
 		port = next
 	}
-	return Service{MachineID: machine, NATSURLs: urls, Port: port}, nil
+	replicas := 1
+	if value := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); value != "" {
+		next, err := strconv.Atoi(value)
+		if err != nil {
+			return Service{}, fmt.Errorf("invalid ENVOY_NATS_REPLICAS: %w", err)
+		}
+		replicas = next
+	}
+	return Service{MachineID: machine, NATSURLs: urls, NATSReplicas: replicas, Port: port}, nil
 }
