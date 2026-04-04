@@ -1212,7 +1212,7 @@ describe("daemon server", () => {
 
       await startTestServer({ feedbackLogger });
 
-      const workspace = path.join(tempDir!, "workspace-one");
+      const workspace = path.join(tempDir ?? os.tmpdir(), "workspace-one");
       const response = await requestJson("/workers", {
         method: "POST",
         body: JSON.stringify({
@@ -1246,7 +1246,7 @@ describe("daemon server", () => {
 
       await startTestServer({ feedbackLogger });
 
-      const workspace = path.join(tempDir!, "workspace-two");
+      const workspace = path.join(tempDir ?? os.tmpdir(), "workspace-two");
       const createResponse = await requestJson("/workers", {
         method: "POST",
         body: JSON.stringify({
