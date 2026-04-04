@@ -455,11 +455,13 @@
       "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
     "packages/envoy/internal/integration": [
-      "testing/nats-kv-testing-patterns.md"
+      "testing/nats-kv-testing-patterns.md",
+      "envoy/listener-routing-by-topic-prefix.md"
     ],
     "packages/envoy/cmd/listener": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-      "architecture-patterns/nats-kv-graceful-degradation.md"
+      "architecture-patterns/nats-kv-graceful-degradation.md",
+      "envoy/listener-routing-by-topic-prefix.md"
     ],
     "packages/envoy-plugin": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
@@ -484,7 +486,8 @@
       "architecture-patterns/nats-kv-graceful-degradation.md",
       "envoy/structured-json-summary-patterns.md",
       "daemon/envoy-auto-subscription-patterns.md",
-      "testing/bun-fetch-mocking-patterns.md"
+      "testing/bun-fetch-mocking-patterns.md",
+      "envoy/listener-routing-by-topic-prefix.md"
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md"
@@ -497,7 +500,8 @@
       "testing/nats-kv-testing-patterns.md"
     ],
     "tag:integration-testing": [
-      "testing/nats-kv-testing-patterns.md"
+      "testing/nats-kv-testing-patterns.md",
+      "envoy/listener-routing-by-topic-prefix.md"
     ],
     "tag:graceful-degradation": [
       "architecture-patterns/nats-kv-graceful-degradation.md"
@@ -510,6 +514,9 @@
     ],
     "tag:operational": [
       "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:routing": [
+      "envoy/listener-routing-by-topic-prefix.md"
     ]
   }
 }
