@@ -127,6 +127,34 @@ function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
   return null;
 }
 
+function subscribeWorkerToEnvoy(
+  sessionId: string,
+  owner: string,
+  repo: string,
+  issueNumber: number
+): void {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  const topic = `notifications.github.${owner}.${repo}.issue.${issueNumber}.>`;
+  fetch(`${envoyUrl}/v1/interests/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      topics: [topic],
+    }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(
+          `Envoy worker subscribe returned ${res.status} for session=${sessionId} (non-fatal)`
+        );
+      }
+    })
+    .catch((err) => {
+      console.warn(`Envoy worker subscribe failed for session=${sessionId} (non-fatal): ${err}`);
+    });
+}
+
 export function startServer(opts: ServerOptions): {
   server: Server;
   stop: () => void;
@@ -263,6 +291,8 @@ export function startServer(opts: ServerOptions): {
             const workspace = payload.workspace;
             const version = typeof payload.version === "number" ? payload.version : 0;
             const envPayload = payload.env;
+            const issueNumber =
+              typeof payload.issueNumber === "number" ? payload.issueNumber : undefined;
 
             if (typeof issueId !== "string" || typeof mode !== "string") {
               return badRequest("missing_fields");
@@ -425,6 +455,13 @@ export function startServer(opts: ServerOptions): {
             workers.set(entry.id, entry);
             await persistState();
 
+            // Auto-subscribe worker to Envoy issue topics (GitHub-only, fire-and-forget)
+            if (typeof repo === "string" && issueNumber !== undefined) {
+              const repoRef = parseIssueRepo(repo);
+              if (repoRef) {
+                subscribeWorkerToEnvoy(actualSessionId, repoRef.owner, repoRef.repo, issueNumber);
+              }
+            }
             opts.feedbackLogger?.log({
               event: "worker.dispatched",
               issueId: normalizedIssueId,
