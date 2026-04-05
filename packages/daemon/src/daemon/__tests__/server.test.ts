@@ -1520,4 +1520,349 @@ describe("daemon server", () => {
       expect(typeof body.sessionId).toBe("string");
     });
   });
+
+  describe("dispatch validation", () => {
+    it("rejects gated mode dispatch when cache says wrong phase", async () => {
+      await startTestServer();
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes(baseUrl)) {
+          return originalFetch(input, init);
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as typeof fetch;
+
+      // Populate cache with a Needs Review issue (suggestedAction: transition_to_retro)
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 42,
+                repository: "test/repo",
+                url: "https://github.com/test/repo/issues/42",
+                type: "Issue",
+              },
+              status: "Needs Review",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      // Try to dispatch merge — should be rejected
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-repo-42",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { error: string; suggestedAction: string };
+      expect(body.error).toBe("phase_prerequisite_unmet");
+      expect(body.suggestedAction).toBeTruthy();
+    });
+
+    it("allows gated mode dispatch when cache says correct phase", async () => {
+      await startTestServer();
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes(baseUrl)) {
+          return originalFetch(input, init);
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as typeof fetch;
+
+      // Populate cache with Retro + worker-done (suggestedAction: dispatch_merger)
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 43,
+                repository: "test/repo",
+                url: "https://github.com/test/repo/issues/43",
+                type: "Issue",
+              },
+              status: "Retro",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      // Dispatch merge — should succeed
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-repo-43",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+    });
+
+    it("allows gated mode dispatch on cache miss (no prior collect)", async () => {
+      await startTestServer();
+
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "unknown-issue-99",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+    });
+
+    it("allows non-gated modes regardless of cached state", async () => {
+      await startTestServer();
+
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-issue-1",
+          mode: "implement",
+          workspace: "/tmp/work",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+    });
+
+    it("bypasses validation when force flag is set", async () => {
+      await startTestServer();
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes(baseUrl)) {
+          return originalFetch(input, init);
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as typeof fetch;
+
+      // Populate cache with wrong phase for merge
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 44,
+                repository: "test/repo",
+                url: "https://github.com/test/repo/issues/44",
+                type: "Issue",
+              },
+              status: "Needs Review",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      // Force dispatch merge — should succeed
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-repo-44",
+          mode: "merge",
+          workspace: "/tmp/work",
+          force: true,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+    });
+
+    it("422 error includes attempted mode and suggestedAction", async () => {
+      await startTestServer();
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes(baseUrl)) {
+          return originalFetch(input, init);
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as typeof fetch;
+
+      // Populate cache
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 45,
+                repository: "test/repo",
+                url: "https://github.com/test/repo/issues/45",
+                type: "Issue",
+              },
+              status: "Needs Review",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-repo-45",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as {
+        error: string;
+        attemptedMode: string;
+        suggestedAction: string;
+        reason: string;
+      };
+      expect(body.error).toBe("phase_prerequisite_unmet");
+      expect(body.attemptedMode).toBe("merge");
+      expect(body.suggestedAction).toBeTruthy();
+      expect(body.reason).toBeTruthy();
+    });
+
+    it("updates cache on subsequent collect calls (latest wins)", async () => {
+      await startTestServer();
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes(baseUrl)) {
+          return originalFetch(input, init);
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as typeof fetch;
+
+      // First collect: Needs Review + worker-done → transition_to_retro
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 50,
+                repository: "test/repo",
+                url: "https://github.com/test/repo/issues/50",
+                type: "Issue",
+              },
+              status: "Needs Review",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      // merge should fail with stale cache
+      const res1 = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-repo-50",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+      expect(res1.status).toBe(422);
+
+      // Second collect: Retro + worker-done → dispatch_merger
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 50,
+                repository: "test/repo",
+                url: "https://github.com/test/repo/issues/50",
+                type: "Issue",
+              },
+              status: "Retro",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      // merge should now succeed with updated cache
+      const res2 = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "test-repo-50",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+      expect(res2.status).toBe(200);
+    });
+
+    it("cache lookup uses normalized issue ID (case insensitive)", async () => {
+      await startTestServer();
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.includes(baseUrl)) {
+          return originalFetch(input, init);
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as typeof fetch;
+
+      // Populate cache — issue ID from GitHub will be lowercase
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 51,
+                repository: "Test/Repo",
+                url: "https://github.com/Test/Repo/issues/51",
+                type: "Issue",
+              },
+              status: "Needs Review",
+              labels: ["worker-done"],
+            },
+          ],
+        }),
+      });
+
+      // Dispatch with mixed-case issueId — should still hit cache and reject
+      const res = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "Test-Repo-51",
+          mode: "merge",
+          workspace: "/tmp/work",
+        }),
+      });
+
+      expect(res.status).toBe(422);
+    });
+  });
 });

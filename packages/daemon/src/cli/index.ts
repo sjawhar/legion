@@ -91,6 +91,7 @@ interface DispatchOptions {
   version?: number;
   env?: Record<string, string>;
   issueNumber?: number;
+  force?: boolean;
 }
 
 interface PromptOptions {
@@ -380,6 +381,9 @@ export async function cmdDispatch(
   if (opts.issueNumber !== undefined) {
     body.issueNumber = opts.issueNumber;
   }
+  if (opts.force) {
+    body.force = true;
+  }
 
   let response: Response;
   try {
@@ -415,6 +419,20 @@ export async function cmdDispatch(
     throw new CliError(
       `Crash limit exceeded for ${responseBody.id} (${responseBody.crashCount} crashes)\n` +
         `Reset with: legion reset-crashes ${issue} ${mode}`
+    );
+  }
+
+  if (response.status === 422) {
+    const detail = responseBody as {
+      error: string;
+      attemptedMode: string;
+      suggestedAction: string;
+      reason: string;
+    };
+    throw new CliError(
+      `Phase prerequisite not met for "${detail.attemptedMode}":\n` +
+        `  ${detail.reason}\n\n` +
+        `To force dispatch: legion dispatch ${issue} ${mode} --force`
     );
   }
 
@@ -833,6 +851,11 @@ export const dispatchCommand = defineCommand({
       type: "string",
       description: "GitHub issue number for Envoy subscription",
     },
+    force: {
+      type: "boolean",
+      alias: "f",
+      description: "Bypass phase prerequisite validation (emergency use only)",
+    },
   },
   async run({ args }) {
     try {
@@ -861,6 +884,9 @@ export const dispatchCommand = defineCommand({
           throw new CliError("Invalid issue-number: must be a positive integer");
         }
         dispatchOpts.issueNumber = parsed;
+      }
+      if (args.force) {
+        dispatchOpts.force = true;
       }
       await cmdDispatch(args.issue, args.mode, dispatchOpts);
     } catch (e) {

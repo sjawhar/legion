@@ -11,7 +11,8 @@
       "deterministic-session-ids.md",
       "github-api/graphql-org-user-fallback.md",
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
-      "controller/controller-session-anti-patterns.md"
+      "controller/controller-session-anti-patterns.md",
+      "daemon/server-side-dispatch-validation.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
       "daemon/opencode-serve-lifecycle.md",
@@ -36,12 +37,15 @@
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "controller/controller-session-anti-patterns.md",
       "daemon/envoy-auto-subscription-patterns.md",
-      "testing/bun-fetch-mocking-patterns.md"
+      "testing/bun-fetch-mocking-patterns.md",
+      "daemon/server-side-dispatch-validation.md",
+      "testing/github-backend-collect-test-payloads.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
       "deterministic-session-ids.md",
-      "daemon/envoy-auto-subscription-patterns.md"
+      "daemon/envoy-auto-subscription-patterns.md",
+      "daemon/server-side-dispatch-validation.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -72,7 +76,8 @@
       "daemon/controller-observability.md",
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "controller/controller-session-anti-patterns.md",
-      "testing/worker-smoke-testing-requirements.md"
+      "testing/worker-smoke-testing-requirements.md",
+      "daemon/server-side-dispatch-validation.md"
     ],
     ".opencode/skills/linear": [
       "integration-issues/linear-mcp-label-resolution.md"
