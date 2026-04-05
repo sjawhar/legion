@@ -452,16 +452,19 @@
     "packages/envoy/internal/session": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
-      "architecture-patterns/nats-kv-graceful-degradation.md"
+      "architecture-patterns/nats-kv-graceful-degradation.md",
+      "envoy/cross-machine-delivery-filtering.md"
     ],
     "packages/envoy/internal/integration": [
       "testing/nats-kv-testing-patterns.md",
-      "envoy/listener-routing-by-topic-prefix.md"
+      "envoy/listener-routing-by-topic-prefix.md",
+      "envoy/cross-machine-delivery-filtering.md"
     ],
     "packages/envoy/cmd/listener": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "architecture-patterns/nats-kv-graceful-degradation.md",
-      "envoy/listener-routing-by-topic-prefix.md"
+      "envoy/listener-routing-by-topic-prefix.md",
+      "envoy/cross-machine-delivery-filtering.md"
     ],
     "packages/envoy-plugin": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
