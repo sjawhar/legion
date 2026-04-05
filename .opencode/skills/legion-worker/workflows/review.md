@@ -88,6 +88,31 @@ legion handoff messages --workspace . 2>/dev/null || echo '[]'
 
 Messages may contain warnings, blockers, or context from earlier workers.
 
+### 1.6. Check Automated Bot Review Comments
+
+Before running the review, check whether automated code reviewers (Claude, GitHub Copilot,
+Codex, etc.) have already posted review comments on the PR:
+
+```bash
+PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $OWNER/$REPO)
+BOT_COMMENTS=$(gh api repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments \
+  --jq '.[] | select(.user.type == "Bot") | {author: .user.login, file: .path, line: .line, body: .body}')
+echo "$BOT_COMMENTS"
+```
+
+If bot comments exist:
+
+1. **Note which bot comments have been addressed** by the implementer (check for reply threads
+   or code changes at the flagged locations) vs which remain unaddressed.
+2. **Classify unaddressed bot findings:** Unaddressed bot comments that identify real bugs,
+   security issues, or correctness problems are **P1 issues** — treat them the same as if you
+   discovered the bug yourself.
+3. **Factor bot findings into your review** rather than duplicating them. If a bot already
+   flagged an issue and it's still present, reference the bot's comment in your review finding
+   instead of writing a new description from scratch.
+4. **Dismiss bot style suggestions** that conflict with project conventions — these are not
+   review issues.
+
 ### 1.5. Protected Files — Do NOT Flag
 
 The `.legion/` directory contains **structured handoff data** committed intentionally as part of the Legion pipeline. Files include: `architect.json`, `plan.json`, `implement.json`, `test.json`, `review.json`, `retro.json`.
@@ -257,3 +282,4 @@ If `envoy_publish` fails, continue — the label is the source of truth.
 | Not checking for dropped requirements | Cross-reference every acceptance criterion. A missing criterion is a CRITICAL issue. |
 | Flagging `.legion/` handoff files for removal | `.legion/` files are intentional pipeline data committed by design. Do NOT suggest removing them or adding `.legion/` to `.gitignore`. |
 | Posting review findings without evidence | Include code snippets, CI output, or reproduction steps for every P1/P2 finding. |
+| Ignoring automated bot review comments | Check bot comments (`user.type == "Bot"`) before reviewing. Unaddressed bot comments identifying correctness issues are P1 — the implementer should have fixed them. |

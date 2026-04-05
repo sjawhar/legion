@@ -321,6 +321,32 @@ Do NOT exit with failing CI — it's your job to get CI green before the reviewe
 with no checks reported, convert the PR to ready (`gh pr ready`), wait for CI, then
 convert back to draft (`gh pr ready --undo`) if needed.
 
+### 7.1. Address Automated Review Comments
+
+After CI runs, automated code reviewers (Claude, GitHub Copilot, Codex, etc.) may post
+review comments on the PR. Check for and address these before proceeding:
+
+```bash
+PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $OWNER/$REPO)
+BOT_COMMENTS=$(gh api repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments --jq '[.[] | select(.user.type == "Bot")] | length')
+echo "Bot review comments: $BOT_COMMENTS"
+```
+
+If bot comments exist:
+
+1. **Read the comments:**
+   ```bash
+   gh api repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments \
+     --jq '.[] | select(.user.type == "Bot") | {author: .user.login, file: .path, line: .line, body: .body}'
+   ```
+2. **Evaluate each comment** — fix legitimate issues (bugs, security, correctness). Dismiss
+   style suggestions that conflict with project conventions. Bot suggestions are advisory,
+   not authoritative.
+3. **If fixes were made**, re-run Pre-Ship Verification (step 4), push, and wait for CI again.
+4. **Reply to addressed comments** acknowledging the fix or explaining why dismissed.
+
+If no bot comments exist, skip to step 7.5.
+
 ### 7.5. Write Handoff Data
 
 Write handoff data for downstream phases (non-blocking):
@@ -403,6 +429,11 @@ gh api repos/$OWNER/$REPO/issues/$PR_NUMBER/comments
 If the PR was converted to draft but has no review comments in either location, there's nothing to address. Rebase onto latest main, verify tests pass, push, and exit.
 
 Otherwise, invoke `/superpowers/receiving-code-review` to evaluate and prioritize feedback.
+
+**Include automated bot comments** in your review feedback processing. The API calls above
+return comments from all authors including bots (Claude, GitHub Copilot, Codex). Treat
+bot-identified issues the same as human review feedback — fix legitimate bugs, dismiss style
+suggestions that conflict with project conventions.
 
 ### 1.5. Read Prior Handoffs (Advisory)
 
