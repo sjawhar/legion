@@ -347,7 +347,8 @@
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md",
-      "envoy/contracts-and-handler-patterns.md"
+      "envoy/contracts-and-handler-patterns.md",
+      "envoy/adding-resource-level-subject-helpers.md"
     ],
     "tag:session-registry": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
@@ -380,11 +381,13 @@
     "tag:deleteBeforeReplace": ["envoy/pulumi-remote-docker-patterns.md"],
     "tag:infrastructure-as-code": ["envoy/pulumi-remote-docker-patterns.md"],
     "tag:deployment": ["envoy/pulumi-remote-docker-patterns.md"],
-    "packages/contracts": ["envoy/contracts-and-handler-patterns.md"],
+    "packages/contracts": ["envoy/contracts-and-handler-patterns.md", "envoy/adding-resource-level-subject-helpers.md"],
     ".github/workflows": ["envoy/ghcr-docker-multiarch-ci.md", "ci/envoy-plugin-release-versioning.md"],
     "packages/envoy/docker": ["envoy/ghcr-docker-multiarch-ci.md"],
     "tag:knowledge-injection": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:cross-cutting": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:workflows": ["skill-patterns/cross-cutting-workflow-concerns.md"]
+    "tag:topic-filtering": ["envoy/adding-resource-level-subject-helpers.md"],
+    "packages/envoy/internal/routing": ["envoy/adding-resource-level-subject-helpers.md"]
   }
 }

@@ -70,3 +70,7 @@ func GithubSubject(owner string, repo string, kind string) string {
 func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
+
+func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
+	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
+}
