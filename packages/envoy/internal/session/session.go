@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +25,12 @@ type RegistryEntry struct {
 	} `json:"session"`
 }
 
+// ErrWrongMachine is returned when a session belongs to a different machine.
+// Callers should ACK the message (another listener owns this session).
+var ErrWrongMachine = errors.New("session belongs to a different machine")
+
 type Deliverer struct {
+	MachineID    string
 	RegistryDir  string
 	HostBridge   string
 	RequestLimit time.Duration
@@ -36,8 +42,13 @@ func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) err
 
 	// KV-first: try SessionRegistry for port
 	if d.Sessions != nil {
-		if entry, err := d.Sessions.Get(interest.SessionID); err == nil && entry.Port > 0 {
-			return d.prompt(entry.Port, interest.SessionID, text)
+		if entry, err := d.Sessions.Get(interest.SessionID); err == nil {
+			if d.MachineID != "" && entry.MachineID != "" && entry.MachineID != d.MachineID {
+				return ErrWrongMachine
+			}
+			if entry.Port > 0 {
+				return d.prompt(entry.Port, interest.SessionID, text)
+			}
 		}
 	}
 

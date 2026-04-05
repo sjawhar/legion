@@ -84,6 +84,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	registryDir := t.TempDir()
 
 	deliverer := session.Deliverer{
+		MachineID:    "test-machine",
 		RegistryDir:  registryDir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
@@ -900,5 +901,104 @@ func TestE2E_ResumeDeliveryAfterReRegistration(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	if c := deliveriesB.Load(); c != 1 {
 		t.Fatalf("expected 1 delivery to resumed port B, got %d", c)
+	}
+}
+
+// TestE2E_CrossMachineAgentMessageACKsWithoutDelivery verifies that when an agent
+// message targets a session on machine-B, machine-A's listener ACKs (does not deliver
+// or NAK). This prevents wasting MaxDeliver budget on wrong-machine retries.
+func TestE2E_CrossMachineAgentMessageACKsWithoutDelivery(t *testing.T) {
+	env := setupTestEnv(t)
+	// Override deliverer machine ID to match the consumer's machine-A
+	env.deliverer.MachineID = "machine-A"
+	// Create a mock session server (simulates the target)
+	port, deliveries, _, _ := mockSession(t)
+
+	// Register the session in KV as belonging to machine-B
+	if err := env.sessions.Put("ses_on_b", session.SessionEntry{
+		Port:      port,
+		MachineID: "machine-B",
+		Dir:       "/test",
+	}); err != nil {
+		t.Fatalf("failed to put session entry: %v", err)
+	}
+
+	// Register interest (any machine can see interests)
+	env.registry.Upsert(store.Interest{
+		SessionID: "ses_on_b",
+		MachineID: "machine-B",
+		Dir:       "/test",
+	}, []string{contracts.AgentSubject("ses_on_b")})
+
+	// Also create a stale file registry entry on machine-A (simulates the problem)
+	env.registerFileSession("ses_on_b", port)
+
+	// Start consumer as machine-A (not the session's machine)
+	env.startConsumer("machine-A")
+
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_on_b", "cross-machine test", "dedupe-cross-1"))
+
+	// Wait long enough for delivery + potential retries
+	time.Sleep(3 * time.Second)
+
+	// Machine-A should NOT have delivered (session belongs to machine-B)
+	if count := deliveries.Load(); count != 0 {
+		t.Fatalf("machine-A should not deliver to machine-B's session, got %d deliveries", count)
+	}
+}
+
+// TestE2E_CrossMachineBroadcastFilteredByMatch verifies that broadcast messages
+// are only delivered to sessions on the local machine (registry.Match filters by machine_id).
+func TestE2E_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
+	env := setupTestEnv(t)
+	// Override deliverer machine ID to match the consumer's machine-A
+	env.deliverer.MachineID = "machine-A"
+	portLocal, deliveriesLocal, _, _ := mockSession(t)
+	portRemote, deliveriesRemote, _, _ := mockSession(t)
+
+	// Register local session (machine-A)
+	env.registry.Upsert(store.Interest{
+		SessionID: "ses_local",
+		MachineID: "machine-A",
+		Dir:       "/test",
+	}, []string{"notifications.slack.*.*.mention"})
+	env.registerFileSession("ses_local", portLocal)
+	if err := env.sessions.Put("ses_local", session.SessionEntry{
+		Port:      portLocal,
+		MachineID: "machine-A",
+		Dir:       "/test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register remote session (machine-B)
+	env.registry.Upsert(store.Interest{
+		SessionID: "ses_remote",
+		MachineID: "machine-B",
+		Dir:       "/test",
+	}, []string{"notifications.slack.*.*.mention"})
+	env.registerFileSession("ses_remote", portRemote)
+	if err := env.sessions.Put("ses_remote", session.SessionEntry{
+		Port:      portRemote,
+		MachineID: "machine-B",
+		Dir:       "/test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Consumer is machine-A
+	env.startConsumer("machine-A")
+
+	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.mention", "broadcast", "dedupe-cross-bcast"))
+
+	time.Sleep(3 * time.Second)
+
+	// Local session should receive the broadcast
+	if c := deliveriesLocal.Load(); c != 1 {
+		t.Fatalf("local session expected 1 delivery, got %d", c)
+	}
+	// Remote session should NOT receive (Match filters by machine_id)
+	if c := deliveriesRemote.Load(); c != 0 {
+		t.Fatalf("remote session should not receive broadcast on machine-A, got %d", c)
 	}
 }

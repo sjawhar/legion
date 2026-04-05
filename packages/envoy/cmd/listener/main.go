@@ -40,6 +40,7 @@ func main() {
 		sessions = reg
 	}
 	deliver := session.Deliverer{
+		MachineID:   cfg.MachineID,
 		RegistryDir: os.Getenv("ENVOY_REGISTRY_DIR"),
 		HostBridge:  os.Getenv("ENVOY_HOST_BRIDGE"),
 		Sessions:    sessions,

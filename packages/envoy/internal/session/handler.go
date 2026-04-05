@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -25,6 +27,9 @@ func HandleAgentMessage(
 	// Interest path: direct delivery if interest matches this machine
 	if interest != nil && interest.MachineID == machineID {
 		if err := deliverer.Deliver(item, *interest); err != nil {
+			if errors.Is(err, ErrWrongMachine) {
+				return HandleAgentResult{Delivered: false}
+			}
 			return HandleAgentResult{ShouldNAK: true, Err: err}
 		}
 		return HandleAgentResult{Delivered: true}
@@ -38,6 +43,9 @@ func HandleAgentMessage(
 
 	fallback := store.Interest{SessionID: sessionID, Dir: entry.Dir, MachineID: machineID}
 	if err := deliverer.Deliver(item, fallback); err != nil {
+		if errors.Is(err, ErrWrongMachine) {
+			return HandleAgentResult{Delivered: false}
+		}
 		return HandleAgentResult{ShouldNAK: true, Err: err}
 	}
 	return HandleAgentResult{Delivered: true}
