@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -19,26 +21,271 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
+// listenerDeps holds NATS-dependent resources published atomically after
+// initialization completes. HTTP handlers read these via atomic.Pointer to
+// avoid data races during the startup window.
+type listenerDeps struct {
+	client   *bus.Client
+	registry *store.Registry
+	sessions *session.SessionRegistry
+}
+
+// readinessGate returns 503 until ready returns true, providing a single
+// gate for all /v1/* endpoints during NATS initialization.
+func readinessGate(ready func() bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !ready() {
+			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
+	// Phase 1: Load config (synchronous, fast).
 	cfg, err := config.Load(9020)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Phase 2: Bind HTTP port deterministically in main goroutine before
+	// any NATS work begins. This guarantees /healthz is reachable as soon
+	// as Serve starts, regardless of NATS connection latency.
+	addr := ":" + strconv.Itoa(cfg.Port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Shared state: nil until NATS initialization completes.
+	var deps atomic.Pointer[listenerDeps]
+
+	// Phase 3: Build HTTP mux.
+	mux := http.NewServeMux()
+
+	// /healthz is always reachable — returns 200 "starting" before NATS init,
+	// 200 "healthy" after init with live NATS, 503 "unhealthy" if NATS drops.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		d := deps.Load()
+		if d == nil {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+			return
+		}
+		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "nats unavailable"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+	})
+
+	// /v1/* routes on a sub-mux, gated by a single readiness middleware.
+	v1 := http.NewServeMux()
+
+	v1.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SessionID string   `json:"session_id"`
+			Dir       string   `json:"dir"`
+			Topics    []string `json:"topics"`
+			Port      int      `json:"port"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		d := deps.Load()
+		item, err := d.registry.Upsert(store.Interest{
+			SessionID: body.SessionID,
+			MachineID: cfg.MachineID,
+			Dir:       body.Dir,
+		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if body.Port > 0 {
+			if err := d.sessions.Put(body.SessionID, session.SessionEntry{
+				Port:      body.Port,
+				MachineID: cfg.MachineID,
+				Dir:       body.Dir,
+			}); err != nil {
+				log.Printf("listener session registry put failed session=%s: %v", body.SessionID, err)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(item)
+	})
+	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SessionID string   `json:"session_id"`
+			Topics    []string `json:"topics"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		d := deps.Load()
+		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		d := deps.Load()
+		entry, err := d.sessions.Get(sessionID)
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(entry)
+	})
+
+	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
+		d := deps.Load()
+		item, err := d.registry.Get(sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(item)
+	})
+	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SourceSession string `json:"source_session"`
+			TargetSession string `json:"target_session"`
+			Message       string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		item := contracts.Envelope{
+			EventID:        id.New(),
+			Source:         "agent",
+			SourceSession:  body.SourceSession,
+			SourceEventID:  id.New(),
+			Topic:          contracts.AgentSubject(body.TargetSession),
+			DedupeKey:      "agent." + body.TargetSession + "." + id.New(),
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: body.Message,
+			TraceID:        id.New(),
+		}
+		if err := item.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := deps.Load()
+		if err := d.client.Publish(item); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(item)
+	})
+	v1.HandleFunc("/v1/messages/publish", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SourceSession string `json:"source_session"`
+			Topic         string `json:"topic"`
+			Message       string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if body.Topic == "" || body.Message == "" {
+			http.Error(w, "topic and message are required", http.StatusBadRequest)
+			return
+		}
+		item := contracts.Envelope{
+			EventID:        id.New(),
+			Source:         "agent",
+			SourceSession:  body.SourceSession,
+			SourceEventID:  id.New(),
+			Topic:          body.Topic,
+			DedupeKey:      "publish." + id.New(),
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: body.Message,
+			TraceID:        id.New(),
+		}
+		if err := item.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := deps.Load()
+		if err := d.client.Publish(item); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(item)
+	})
+
+	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+
+	// Phase 4: Start HTTP server (port already bound via net.Listen).
+	server := &http.Server{
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+	fatal := make(chan error, 1)
+	go func() {
+		if err := server.Serve(ln); err != http.ErrServerClosed {
+			fatal <- err
+		}
+	}()
+	log.Printf("envoy-listener listening on %s", addr)
+
+	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
 	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer client.Conn.Close()
+
 	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	var sessions *session.SessionRegistry
 	if reg, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(cfg.NATSReplicas)); err != nil {
 		log.Printf("WARN: KV registry unavailable, using file-only delivery: %v", err)
 	} else {
 		sessions = reg
 	}
+
 	deliver := session.Deliverer{
 		MachineID:   cfg.MachineID,
 		RegistryDir: os.Getenv("ENVOY_REGISTRY_DIR"),
@@ -125,174 +372,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := client.Conn.FlushTimeout(3 * time.Second); err != nil {
-			http.Error(w, "nats unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
+	deps.Store(&listenerDeps{
+		client:   client,
+		registry: registry,
+		sessions: sessions,
 	})
-	mux.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			SessionID string   `json:"session_id"`
-			Dir       string   `json:"dir"`
-			Topics    []string `json:"topics"`
-			Port      int      `json:"port"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		item, err := registry.Upsert(store.Interest{
-			SessionID: body.SessionID,
-			MachineID: cfg.MachineID,
-			Dir:       body.Dir,
-		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if body.Port > 0 {
-			if err := sessions.Put(body.SessionID, session.SessionEntry{
-				Port:      body.Port,
-				MachineID: cfg.MachineID,
-				Dir:       body.Dir,
-			}); err != nil {
-				log.Printf("listener session registry put failed session=%s: %v", body.SessionID, err)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(item)
-	})
-	mux.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			SessionID string   `json:"session_id"`
-			Topics    []string `json:"topics"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		if err := registry.Remove(body.SessionID, body.Topics); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
-		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
-		if sessionID == "" {
-			http.Error(w, "session_id required", http.StatusBadRequest)
-			return
-		}
-		entry, err := sessions.Get(sessionID)
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(entry)
-	})
+	log.Printf("envoy-listener ready (NATS connected)")
 
-	mux.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
-		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
-		item, err := registry.Get(sessionID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(item)
-	})
-	mux.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			SourceSession string `json:"source_session"`
-			TargetSession string `json:"target_session"`
-			Message       string `json:"message"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "agent",
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          contracts.AgentSubject(body.TargetSession),
-			DedupeKey:      "agent." + body.TargetSession + "." + id.New(),
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			TraceID:        id.New(),
-		}
-		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
-	})
-	mux.HandleFunc("/v1/messages/publish", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			SourceSession string `json:"source_session"`
-			Topic         string `json:"topic"`
-			Message       string `json:"message"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		if body.Topic == "" || body.Message == "" {
-			http.Error(w, "topic and message are required", http.StatusBadRequest)
-			return
-		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "agent",
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          body.Topic,
-			DedupeKey:      "publish." + id.New(),
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			TraceID:        id.New(),
-		}
-		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
-	})
-
-	log.Printf("envoy-listener listening on :%d", cfg.Port)
-	server := &http.Server{Addr: ":" + strconv.Itoa(cfg.Port), Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	log.Fatal(server.ListenAndServe())
+	// Phase 7: Block until fatal error from HTTP server.
+	log.Fatal(<-fatal)
 }

@@ -466,7 +466,8 @@
     "packages/envoy/cmd/listener": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "architecture-patterns/nats-kv-graceful-degradation.md",
-      "envoy/listener-routing-by-topic-prefix.md"
+      "envoy/listener-routing-by-topic-prefix.md",
+      "envoy/async-health-startup-pattern.md"
     ],
     "packages/envoy-plugin": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
