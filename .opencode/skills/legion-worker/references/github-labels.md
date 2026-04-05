@@ -14,6 +14,11 @@ gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO
 - `needs-approval` — Plan/architecture needs human approval
 - `human-approved` — Human approved the plan
 
+## Architect-Review Labels (Opt-In)
+- `architect-continuity` — Opt-in: architect reviews plan before implementation (persistent, stays for issue lifetime)
+- `arch-review-approved` — Architect approved the plan (transient, cleaned up by controller after acting)
+- `arch-review-changes` — Architect requests plan changes (transient, cleaned up by controller after acting)
+
 ## Key Difference from Linear
 Labels are **additive**. Use `--add-label` to add and `--remove-label` to remove.
 No need to fetch current labels first (unlike Linear's replace-all semantics).
