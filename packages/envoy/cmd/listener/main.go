@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -89,6 +90,44 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(item)
+	}
+}
+
+func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
+
+		if sessionID == "" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			items := registry.List()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			item, err := registry.Get(sessionID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(item)
+		case http.MethodDelete:
+			if err := registry.Remove(sessionID, nil); err != nil {
+				if !errors.Is(err, nats.ErrKeyNotFound) {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
 }
 
@@ -211,15 +250,8 @@ func main() {
 	})
 
 	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
-		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 		d := deps.Load()
-		item, err := d.registry.Get(sessionID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(item)
+		adminInterestsHandler(d.registry).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -1015,3 +1015,28 @@ func TestE2E_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
 		t.Fatalf("remote session should not receive broadcast on machine-A, got %d", c)
 	}
 }
+
+func TestE2E_RegistryListReturnsSortedInterests(t *testing.T) {
+	env := setupTestEnv(t)
+
+	env.registerInterest("ses_charlie", []string{"notifications.test.>"})
+	env.registerInterest("ses_alpha", []string{"notifications.test.>"})
+	env.registerInterest("ses_bravo", []string{"notifications.test.>"})
+
+	// Allow watcher to propagate Upsert events to cache
+	time.Sleep(500 * time.Millisecond)
+
+	items := env.registry.List()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 interests, got %d", len(items))
+	}
+	if items[0].SessionID != "ses_alpha" {
+		t.Fatalf("expected first item to be ses_alpha, got %s", items[0].SessionID)
+	}
+	if items[1].SessionID != "ses_bravo" {
+		t.Fatalf("expected second item to be ses_bravo, got %s", items[1].SessionID)
+	}
+	if items[2].SessionID != "ses_charlie" {
+		t.Fatalf("expected third item to be ses_charlie, got %s", items[2].SessionID)
+	}
+}

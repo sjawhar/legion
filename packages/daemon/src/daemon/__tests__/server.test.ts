@@ -1343,7 +1343,7 @@ describe("daemon server", () => {
       const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
         const url =
           typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url.includes("/v1/interests/subscribe")) {
+        if (url.includes("/v1/interests/subscribe") || url.includes("/v1/interests/unsubscribe")) {
           calls.push({
             url,
             body: JSON.parse(init?.body as string),
@@ -1518,6 +1518,65 @@ describe("daemon server", () => {
       expect(body.id).toBe("eng-55-implement");
       expect(body.port).toBe(sharedServePort);
       expect(typeof body.sessionId).toBe("string");
+    });
+
+    it("unsubscribes worker from envoy on delete", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-250",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 250,
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { id: string; sessionId: string };
+      await Bun.sleep(50);
+
+      envoySubscribeCalls.length = 0;
+
+      const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
+      expect(deleteResponse.status).toBe(200);
+
+      await Bun.sleep(50);
+
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls).toHaveLength(1);
+      expect(unsubCalls[0].body).toEqual({
+        session_id: created.sessionId,
+        topics: [],
+      });
+    });
+
+    it("delete succeeds even when envoy unsubscribe fails", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls, 500);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-251",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 251,
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { id: string };
+
+      const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
+      expect(deleteResponse.status).toBe(200);
+      expect(await deleteResponse.json()).toEqual({ status: "stopped" });
     });
   });
 

@@ -166,6 +166,25 @@ function subscribeWorkerToEnvoy(
     });
 }
 
+function unsubscribeWorkerFromEnvoy(sessionId: string): void {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, topics: [] }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(
+          `Envoy worker unsubscribe returned ${res.status} for session=${sessionId} (non-fatal)`
+        );
+      }
+    })
+    .catch((err) => {
+      console.warn(`Envoy worker unsubscribe failed for session=${sessionId} (non-fatal): ${err}`);
+    });
+}
+
 export function startServer(opts: ServerOptions): {
   server: Server;
   stop: () => void;
@@ -709,6 +728,7 @@ export function startServer(opts: ServerOptions): {
             });
             workers.delete(id);
             await persistState();
+            unsubscribeWorkerFromEnvoy(entry.sessionId);
             return jsonResponse({ status: "stopped" });
           }
         }
