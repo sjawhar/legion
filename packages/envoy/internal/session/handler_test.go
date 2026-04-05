@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -137,6 +138,111 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	}
 	if count := deliveryCount.Load(); count != 1 {
 		t.Fatalf("expected 1 delivery via fallback, got %d", count)
+	}
+}
+
+// TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session
+// registry says a session is on another machine, the handler returns no-delivery
+// (ACK) rather than NAK, even when the file registry has a stale entry.
+func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
+	var deliveryCount atomic.Int32
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deliveryCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, 1, port, "ses_target")
+
+	client := setupNATS(t)
+	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	// KV says session is on machine-B
+	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
+
+	deliverer := Deliverer{
+		MachineID:    "machine-A",
+		RegistryDir:  dir,
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
+	}
+
+	// No interest or wrong-machine interest — handler falls to fallback path
+	result := HandleAgentMessage(
+		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
+		"ses_target", "machine-A", nil, &deliverer,
+	)
+
+	// Should ACK (not NAK) — another listener owns this session
+	if result.Delivered {
+		t.Fatal("expected no delivery (session on different machine)")
+	}
+	if result.ShouldNAK {
+		t.Fatal("wrong machine should ACK, not NAK")
+	}
+	if count := deliveryCount.Load(); count != 0 {
+		t.Fatalf("expected 0 deliveries, got %d", count)
+	}
+}
+
+// TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that even when
+// the interest path matches this machine, if the KV session registry says the
+// session moved to another machine, the handler returns no-delivery (ACK).
+func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
+	var deliveryCount atomic.Int32
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deliveryCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, 1, port, "ses_target")
+
+	client := setupNATS(t)
+	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	// KV says session moved to machine-B
+	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
+
+	deliverer := Deliverer{
+		MachineID:    "machine-A",
+		RegistryDir:  dir,
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
+	}
+
+	// Interest says machine-A (stale interest), but KV says machine-B
+	interest := &store.Interest{
+		SessionID: "ses_target",
+		Dir:       "/test",
+		MachineID: "machine-A",
+	}
+
+	result := HandleAgentMessage(
+		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
+		"ses_target", "machine-A", interest, &deliverer,
+	)
+
+	if result.Delivered {
+		t.Fatal("expected no delivery (KV says session moved to machine-B)")
+	}
+	if result.ShouldNAK {
+		t.Fatal("wrong machine should ACK, not NAK")
+	}
+	if count := deliveryCount.Load(); count != 0 {
+		t.Fatalf("expected 0 deliveries, got %d", count)
 	}
 }
 

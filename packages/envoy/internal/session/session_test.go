@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -251,6 +252,7 @@ func TestDeliver_KVFirstOverFile(t *testing.T) {
 	sessions.Put("ses_target", SessionEntry{Port: kvPort, MachineID: "test", Dir: "/test"})
 
 	deliverer := Deliverer{
+		MachineID:    "test",
 		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
@@ -301,5 +303,87 @@ func TestDeliver_NilSessionsFallsBackToFile(t *testing.T) {
 	}
 	if count := deliveryCount.Load(); count != 1 {
 		t.Fatalf("expected exactly 1 delivery via file fallback, got %d", count)
+	}
+}
+
+func TestDeliver_WrongMachineReturnsError(t *testing.T) {
+	var deliveryCount atomic.Int32
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deliveryCount.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mock.Close()
+
+	port := mockPort(mock.URL)
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, 1, port, "ses_target")
+
+	client := setupNATS(t)
+	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	// Register session on machine-B
+	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
+
+	// Deliverer is on machine-A
+	deliverer := Deliverer{
+		MachineID:    "machine-A",
+		RegistryDir:  dir,
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "machine-A"}
+
+	err = deliverer.Deliver(item, interest)
+	if !errors.Is(err, ErrWrongMachine) {
+		t.Fatalf("expected ErrWrongMachine, got: %v", err)
+	}
+	if count := deliveryCount.Load(); count != 0 {
+		t.Fatalf("expected 0 deliveries (wrong machine), got %d", count)
+	}
+}
+
+func TestDeliver_WrongMachineSkipsFileFallback(t *testing.T) {
+	var fileDeliveries atomic.Int32
+
+	fileMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fileDeliveries.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer fileMock.Close()
+
+	filePort := mockPort(fileMock.URL)
+	dir := t.TempDir()
+	writeRegistryEntry(t, dir, 1, filePort, "ses_target")
+
+	client := setupNATS(t)
+	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+	// KV says session is on machine-B
+	sessions.Put("ses_target", SessionEntry{Port: 9999, MachineID: "machine-B", Dir: "/test"})
+
+	deliverer := Deliverer{
+		MachineID:    "machine-A",
+		RegistryDir:  dir,
+		HostBridge:   "127.0.0.1",
+		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "machine-A"}
+
+	err = deliverer.Deliver(item, interest)
+	if !errors.Is(err, ErrWrongMachine) {
+		t.Fatalf("expected ErrWrongMachine, got: %v", err)
+	}
+	// File fallback must NOT have been tried
+	if count := fileDeliveries.Load(); count != 0 {
+		t.Fatalf("expected 0 file deliveries (KV says wrong machine), got %d", count)
 	}
 }
