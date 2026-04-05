@@ -16,25 +16,96 @@ jobs:
   version:
     runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      should_release: ${{ steps.bump.outputs.should_release }}
     steps:
       - uses: actions/checkout@v5
-      - id: version
+        with:
+          fetch-depth: 0
+
+      - name: Determine version bump
+        id: bump
         run: |
-          VERSION=$(jq -r .version package.json)
-          TAG="legion-envoy-v${VERSION}-${GITHUB_SHA::7}"
+          # Find the latest envoy release tag
+          LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            # No tags yet — first release uses current envoy-plugin package.json version
+            VERSION=$(jq -r .version packages/envoy-plugin/package.json)
+            TAG="legion-envoy-v${VERSION}"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "First release: $TAG"
+            exit 0
+          fi
+
+          # Get commits since last tag
+          COMMITS=$(git log "${LATEST_TAG}..HEAD" --format='%s')
+
+          if [ -z "$COMMITS" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No commits since $LATEST_TAG"
+            exit 0
+          fi
+
+          # Classify conventional commits
+          MAJOR=false
+          MINOR=false
+          PATCH=false
+
+          while IFS= read -r msg; do
+            # BREAKING: feat!:, fix(scope)!:, or body contains BREAKING CHANGE
+            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
+              MAJOR=true
+            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+              MINOR=true
+            elif echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
+              PATCH=true
+            fi
+          done <<< "$COMMITS"
+
+          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No version-bumping commits since $LATEST_TAG"
+            exit 0
+          fi
+
+          # Parse version from last tag (strip "legion-envoy-v" prefix and any -<sha> suffix)
+          CURRENT="${LATEST_TAG#legion-envoy-v}"
+          CURRENT="${CURRENT%%-*}"  # strip -<sha> suffix from old-format tags
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+
+          if $MAJOR; then
+            major=$((major + 1)); minor=0; patch=0
+          elif $MINOR; then
+            minor=$((minor + 1)); patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          VERSION="${major}.${minor}.${patch}"
+          TAG="legion-envoy-v${VERSION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "Bumping $CURRENT → $VERSION"
 
   plugin:
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Set release version
+        run: |
+          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' \
+            packages/envoy-plugin/package.json > tmp.json \
+            && mv tmp.json packages/envoy-plugin/package.json
       - name: Build plugin
         run: bun run build
         working-directory: packages/envoy-plugin
@@ -48,6 +119,7 @@ jobs:
 
   envoy:
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
@@ -78,7 +150,8 @@ jobs:
           path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
 
   docker:
-    needs: [envoy]
+    needs: [version, envoy]
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -101,9 +174,29 @@ jobs:
 
   release:
     needs: [version, plugin, envoy]
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+
+      - name: Bump version in repo
+        run: |
+          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' \
+            packages/envoy-plugin/package.json > tmp.json \
+            && mv tmp.json packages/envoy-plugin/package.json
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/envoy-plugin/package.json
+          git diff --staged --quiet || git commit -m "chore: release envoy-plugin v${{ needs.version.outputs.version }} [skip ci]"
+          git tag "${{ needs.version.outputs.tag }}"
+          git push origin main --tags
+
       - uses: actions/download-artifact@v4
       - name: Generate checksums
         run: |
