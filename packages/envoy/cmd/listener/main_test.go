@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/store"
+	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 func TestReadinessGate_NotReady_Returns503(t *testing.T) {
@@ -188,5 +193,136 @@ func TestPublishHandler_MethodNotAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.Registry {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("failed to start NATS: %v", err)
+	}
+	t.Cleanup(func() { ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("failed to get NATS URI: %v", err)
+	}
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect bus: %v", err)
+	}
+	t.Cleanup(func() { client.Conn.Close() })
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create registry: %v", err)
+	}
+	for sessionID, topics := range interests {
+		allTopics := append([]string{contracts.AgentSubject(sessionID)}, topics...)
+		if _, err := registry.Upsert(store.Interest{
+			SessionID: sessionID,
+			MachineID: "test-machine",
+			Dir:       "/test",
+		}, allTopics); err != nil {
+			t.Fatalf("failed to upsert interest for %s: %v", sessionID, err)
+		}
+	}
+	// Allow watcher to propagate all Upsert events to cache
+	time.Sleep(500 * time.Millisecond)
+	return registry
+}
+
+func TestAdminInterestsHandler_ListAll(t *testing.T) {
+	registry := setupAdminTestRegistry(t, map[string][]string{
+		"ses_list_b": {"notifications.test.>"},
+		"ses_list_a": {"notifications.github.>"},
+	})
+	handler := adminInterestsHandler(registry)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/interests/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []store.Interest
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 interests, got %d", len(items))
+	}
+	if items[0].SessionID != "ses_list_a" {
+		t.Fatalf("expected first item ses_list_a, got %s", items[0].SessionID)
+	}
+}
+
+func TestAdminInterestsHandler_GetBySession(t *testing.T) {
+	registry := setupAdminTestRegistry(t, map[string][]string{
+		"ses_get_test": {"notifications.test.>"},
+	})
+	handler := adminInterestsHandler(registry)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/interests/ses_get_test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var item store.Interest
+	if err := json.NewDecoder(rec.Body).Decode(&item); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if item.SessionID != "ses_get_test" {
+		t.Fatalf("expected ses_get_test, got %s", item.SessionID)
+	}
+}
+
+func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
+	registry := setupAdminTestRegistry(t, map[string][]string{
+		"ses_delete_target": {"notifications.test.>"},
+	})
+	handler := adminInterestsHandler(registry)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_delete_target", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Allow watcher to propagate delete event to cache
+	time.Sleep(500 * time.Millisecond)
+	if _, err := registry.Get("ses_delete_target"); err == nil {
+		t.Fatal("expected interest to be deleted")
+	}
+}
+
+func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
+	registry := setupAdminTestRegistry(t, nil)
+	handler := adminInterestsHandler(registry)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_nonexistent", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for non-existent session, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
+	registry := setupAdminTestRegistry(t, nil)
+	handler := adminInterestsHandler(registry)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/interests/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
 	}
 }

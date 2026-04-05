@@ -180,6 +180,20 @@ func (r *Registry) Match(machineID string, topic string) []Interest {
 	return out
 }
 
+// List returns all cached interests sorted by SessionID for deterministic output.
+func (r *Registry) List() []Interest {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Interest, 0, len(r.cache))
+	for _, item := range r.cache {
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out
+}
+
 func first(value string, fallback string) string {
 	if value != "" {
 		return value
