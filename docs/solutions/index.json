@@ -18,6 +18,7 @@
       "daemon/shared-serve-refactor.md",
       "daemon/shared-serve-retro.md",
       "daemon/graceful-worker-shutdown.md"
+      "daemon/idempotent-creation-id-mismatch.md"
     ],
     "packages/daemon/src/daemon/state-file": [
       "architecture-patterns/shared-state-file-ownership.md",
@@ -37,6 +38,7 @@
       "controller/controller-session-anti-patterns.md",
       "daemon/envoy-auto-subscription-patterns.md",
       "testing/bun-fetch-mocking-patterns.md"
+      "daemon/idempotent-creation-id-mismatch.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
