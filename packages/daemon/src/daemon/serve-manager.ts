@@ -113,6 +113,14 @@ export async function createSession(
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 409 && body.name === "DuplicateIDError") {
+    if (typeof body.id === "string") {
+      if (body.id !== sessionId) {
+        console.warn(
+          `createSession: 409 session ID mismatch: requested=${sessionId} actual=${body.id}`
+        );
+      }
+      return body.id;
+    }
     return sessionId;
   }
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);

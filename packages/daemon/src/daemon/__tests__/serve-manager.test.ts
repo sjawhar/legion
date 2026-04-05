@@ -150,6 +150,66 @@ describe("serve-manager", () => {
       await expect(createSession(13381, "ses_existing", "/tmp")).resolves.toBe("ses_existing");
     });
 
+    it("returns body.id on 409 DuplicateIDError when id is present", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "DuplicateIDError", id: "ses_actual" }), {
+          status: 409,
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_requested", "/tmp")).resolves.toBe("ses_actual");
+    });
+
+    it("warns on 409 DuplicateIDError when body.id differs from requested", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "DuplicateIDError", id: "ses_actual" }), {
+          status: 409,
+        });
+      }) as unknown as typeof fetch;
+      const warn = mock(() => {});
+      const originalWarn = console.warn;
+      console.warn = warn;
+
+      try {
+        await createSession(13381, "ses_requested", "/tmp");
+      } finally {
+        console.warn = originalWarn;
+      }
+
+      expect(warn).toHaveBeenCalledWith(
+        "createSession: 409 session ID mismatch: requested=ses_requested actual=ses_actual"
+      );
+    });
+
+    it("does not warn on 409 DuplicateIDError when body.id matches requested", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "DuplicateIDError", id: "ses_same" }), {
+          status: 409,
+        });
+      }) as unknown as typeof fetch;
+      const warn = mock(() => {});
+      const originalWarn = console.warn;
+      console.warn = warn;
+
+      try {
+        await createSession(13381, "ses_same", "/tmp");
+      } finally {
+        console.warn = originalWarn;
+      }
+
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("returns requested ID on 409 DuplicateIDError when body.id is not a string", async () => {
+      globalThis.fetch = (async () => {
+        return new Response(JSON.stringify({ name: "DuplicateIDError", id: 12345 }), {
+          status: 409,
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(createSession(13381, "ses_requested", "/tmp")).resolves.toBe("ses_requested");
+    });
+
     it("returns session ID from response body on success", async () => {
       globalThis.fetch = (async () => {
         return new Response(JSON.stringify({ id: "ses_actual" }), {
