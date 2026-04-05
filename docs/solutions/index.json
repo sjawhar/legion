@@ -563,6 +563,12 @@
 ,
     "packages/contracts": [
       "envoy/contracts-and-handler-patterns.md"
+    ],
+    ".github/workflows": [
+      "envoy/ghcr-docker-multiarch-ci.md"
+    ],
+    "packages/envoy/docker": [
+      "envoy/ghcr-docker-multiarch-ci.md"
     ]
   }
 }
