@@ -40,12 +40,14 @@
       "testing/bun-fetch-mocking-patterns.md",
       "daemon/server-side-dispatch-validation.md",
       "testing/github-backend-collect-test-payloads.md"
+      "daemon/prompt-delivery-bootstrap-delay.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
       "deterministic-session-ids.md",
       "daemon/envoy-auto-subscription-patterns.md",
-      "daemon/server-side-dispatch-validation.md"
+      "daemon/server-side-dispatch-validation.md",
+      "daemon/prompt-delivery-bootstrap-delay.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",

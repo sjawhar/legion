@@ -384,6 +384,10 @@ export async function cmdDispatch(
   if (opts.force) {
     body.force = true;
   }
+  // Include prompt in the POST /workers body so the server handles delivery
+  // with the bootstrap delay + retry mechanism (#237)
+  const initialPrompt = opts.prompt ?? `/legion-worker ${mode} mode for ${issue}`;
+  body.prompt = initialPrompt;
 
   let response: Response;
   try {
@@ -448,15 +452,9 @@ export async function cmdDispatch(
   console.log(`  port: ${workerPort}`);
   console.log(`  session: ${sessionId}`);
 
-  const initialPrompt = opts.prompt ?? `/legion-worker ${mode} mode for ${issue}`;
-  try {
-    await fetch(`${baseUrl}/workers/${encodeURIComponent(workerId)}/prompt`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: initialPrompt }),
-    });
+  if (responseBody.promptDelivered === true) {
     console.log(`Prompt sent: ${initialPrompt}`);
-  } catch (_error) {
+  } else if (responseBody.promptDelivered === false) {
     console.warn("Worker spawned but prompt delivery failed. Send manually:");
     console.warn(`  legion prompt ${issue} "${initialPrompt}"`);
   }

@@ -1865,4 +1865,139 @@ describe("daemon server", () => {
       expect(res.status).toBe(422);
     });
   });
+
+  describe("POST /workers with prompt (#237)", () => {
+    it("delivers prompt after session creation delay", async () => {
+      const sendPromptCalls: Array<{ sessionId: string; text: string }> = [];
+      await startTestServer({
+        adapterOverrides: {
+          sendPrompt: async (sessionId, text) => {
+            sendPromptCalls.push({ sessionId, text });
+          },
+        },
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-237",
+          mode: "implement",
+          workspace: "/tmp/work-237",
+          prompt: "/legion-worker implement mode",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        id: string;
+        sessionId: string;
+        promptDelivered: boolean;
+      };
+      expect(body.id).toBe("eng-237-implement");
+      expect(body.promptDelivered).toBe(true);
+      expect(sendPromptCalls).toHaveLength(1);
+      expect(sendPromptCalls[0].sessionId).toBe(body.sessionId);
+      expect(sendPromptCalls[0].text).toBe("/legion-worker implement mode");
+    });
+
+    it("omits promptDelivered when no prompt provided", async () => {
+      await startTestServer();
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-238",
+          mode: "implement",
+          workspace: "/tmp/work-238",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("promptDelivered");
+    });
+
+    it("returns promptDelivered=false when sendPrompt fails all retries", async () => {
+      await startTestServer({
+        adapterOverrides: {
+          sendPrompt: async () => {
+            throw new Error("session not bootstrapped");
+          },
+        },
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-239",
+          mode: "implement",
+          workspace: "/tmp/work-239",
+          prompt: "/legion-worker implement mode",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        id: string;
+        promptDelivered: boolean;
+      };
+      expect(body.id).toBe("eng-239-implement");
+      expect(body.promptDelivered).toBe(false);
+    });
+
+    it("retries prompt delivery on transient failures", async () => {
+      let sendPromptAttempts = 0;
+      await startTestServer({
+        adapterOverrides: {
+          sendPrompt: async (_sessionId, _text) => {
+            sendPromptAttempts++;
+            if (sendPromptAttempts < 3) {
+              throw new Error("transient failure");
+            }
+          },
+        },
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-240",
+          mode: "implement",
+          workspace: "/tmp/work-240",
+          prompt: "start working",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { promptDelivered: boolean };
+      expect(body.promptDelivered).toBe(true);
+      expect(sendPromptAttempts).toBe(3);
+    });
+
+    it("ignores empty string prompt", async () => {
+      const sendPromptCalls: Array<{ sessionId: string; text: string }> = [];
+      await startTestServer({
+        adapterOverrides: {
+          sendPrompt: async (sessionId, text) => {
+            sendPromptCalls.push({ sessionId, text });
+          },
+        },
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-241",
+          mode: "implement",
+          workspace: "/tmp/work-241",
+          prompt: "",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("promptDelivered");
+      expect(sendPromptCalls).toHaveLength(0);
+    });
+  });
 });

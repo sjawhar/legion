@@ -232,7 +232,7 @@ describe("cmdDispatch", () => {
     console.warn = originalWarn;
   });
 
-  it("dispatches worker via daemon API with repo and sends initial prompt", async () => {
+  it("dispatches worker via daemon API with repo and sends prompt via POST body", async () => {
     const fetchMock = installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -245,14 +245,19 @@ describe("cmdDispatch", () => {
       }
       if (url.endsWith("/workers")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-1" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          })
+          new Response(
+            JSON.stringify({
+              id: "leg-42-implement",
+              port: 18000,
+              sessionId: "s-1",
+              promptDelivered: true,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
         );
-      }
-      if (url.endsWith("/workers/leg-42-implement/prompt")) {
-        return Promise.resolve(new Response("{}", { status: 200 }));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
@@ -261,7 +266,7 @@ describe("cmdDispatch", () => {
       repo: "sjawhar/legion",
     });
 
-    expect(fetchMock.mock.calls.length).toBe(3);
+    expect(fetchMock.mock.calls.length).toBe(2);
     const [postUrl, postInit] = fetchMock.mock.calls[1] as FetchCall;
     const postInitResolved = postInit as RequestInit;
     expect(postUrl.toString()).toBe("http://127.0.0.1:13371/workers");
@@ -270,17 +275,13 @@ describe("cmdDispatch", () => {
       issueId: string;
       mode: string;
       repo: string;
+      prompt: string;
     };
     expect(body).toEqual({
       issueId: "LEG-42",
       mode: "implement",
       repo: "sjawhar/legion",
-    });
-
-    const [promptUrl, promptInit] = fetchMock.mock.calls[2] as FetchCall;
-    expect(promptUrl.toString()).toBe("http://127.0.0.1:13371/workers/leg-42-implement/prompt");
-    expect(JSON.parse((promptInit as RequestInit).body as string)).toEqual({
-      text: "/legion-worker implement mode for LEG-42",
+      prompt: "/legion-worker implement mode for LEG-42",
     });
   });
 
@@ -384,14 +385,19 @@ describe("cmdDispatch", () => {
       }
       if (url.endsWith("/workers")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-v2" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          })
+          new Response(
+            JSON.stringify({
+              id: "leg-42-implement",
+              port: 18000,
+              sessionId: "s-v2",
+              promptDelivered: true,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
         );
-      }
-      if (url.endsWith("/workers/leg-42-implement/prompt")) {
-        return Promise.resolve(new Response("{}", { status: 200 }));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
@@ -404,12 +410,14 @@ describe("cmdDispatch", () => {
       mode: string;
       workspace: string;
       version: number;
+      prompt: string;
     };
     expect(body).toEqual({
       issueId: "LEG-42",
       mode: "implement",
       workspace: legionDir,
       version: 2,
+      prompt: "/legion-worker implement mode for LEG-42",
     });
   });
 
@@ -476,7 +484,7 @@ describe("cmdDispatch", () => {
     ).rejects.toThrow(CliError);
   });
 
-  it("warns but succeeds when prompt delivery fails", async () => {
+  it("warns but succeeds when server reports prompt delivery failure", async () => {
     installFetchMock((input: string | URL) => {
       const url = input.toString();
       if (url.endsWith("/health")) {
@@ -484,14 +492,19 @@ describe("cmdDispatch", () => {
       }
       if (url.endsWith("/workers")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ id: "leg-42-implement", port: 18000, sessionId: "s-6" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          })
+          new Response(
+            JSON.stringify({
+              id: "leg-42-implement",
+              port: 18000,
+              sessionId: "s-6",
+              promptDelivered: false,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
         );
-      }
-      if (url.endsWith("/workers/leg-42-implement/prompt")) {
-        return Promise.reject(new Error("Connection refused"));
       }
       return Promise.reject(new Error(`Unexpected fetch: ${url}`));
     });
