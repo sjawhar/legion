@@ -256,6 +256,93 @@ When the reviewer requests changes, the implementer's fixes **must go through te
 
 **Critical:** The controller MUST transition to In Progress before resuming the implementer. If the issue stays in Needs Review and the implementer adds `worker-done`, the state machine will see `prIsDraft + worker-done` and suggest `resume_implementer_for_changes` again (infinite loop).
 
+### Architect-Review Checkpoint (Post-Plan, Opt-In)
+
+**Trigger:** `architect-continuity` label on issue. When present, the controller intercepts
+the planner-done → In Progress transition and resumes the original architect session for plan review.
+
+**Why resume, not re-dispatch:** The architect session persists in OpenCode's SQLite with full
+context (original spec analysis, architectural decisions). Resuming preserves this context.
+`legion dispatch` handles both cases: reuses existing session (409 Duplicate → success) or
+creates fresh if the session was lost.
+
+**Flow when `transition_to_in_progress` is suggested and `architect-continuity` label is present:**
+
+1. **Check for verdict label** (arch-review-approved / arch-review-changes):
+   - If `arch-review-approved`: clean up label, proceed with normal `transition_to_in_progress`
+   - If `arch-review-changes`: route to planner feedback (see step 3 below)
+   - If neither: this is a fresh planner completion — proceed to step 2
+
+2. **Resume architect for plan review:**
+   ```bash
+   # Clean up planner signals
+   gh issue edit $ISSUE_NUMBER \
+     --remove-label "worker-done" \
+     --add-label "worker-active" \
+     -R $OWNER/$REPO
+
+   # Dispatch architect with review prompt (reuses existing session if alive)
+   legion dispatch "$ISSUE_IDENTIFIER" architect \
+     --repo "$OWNER/$REPO" \
+     --prompt "Invoke the /legion-worker skill for architect mode. You are being resumed to review the implementation plan for $ISSUE_IDENTIFIER.
+
+   Read the latest issue comments to find the planner's output. Compare it against your original architectural spec (the issue body and your architect handoff).
+
+   Assess:
+   1. Does the plan address all acceptance criteria from the spec?
+   2. Are there architectural concerns, spec misalignment, or missing components?
+   3. Are the planner's assumptions reasonable?
+
+   Post your review as an issue comment with a clear APPROVED or CHANGES NEEDED verdict.
+
+   If APPROVED — add labels: arch-review-approved, worker-done. Remove label: worker-active.
+   If CHANGES NEEDED — post specific items to address. Add labels: arch-review-changes, worker-done. Remove label: worker-active.
+
+   (github backend, repo: $OWNER/$REPO)"
+   ```
+
+3. **Handle architect verdict — changes requested:**
+   When `transition_to_in_progress` + `architect-continuity` + `arch-review-changes`:
+   ```bash
+   # Clean up verdict + signal labels
+   gh issue edit $ISSUE_NUMBER \
+     --remove-label "arch-review-changes" \
+     --remove-label "worker-done" \
+     --add-label "worker-active" \
+     -R $OWNER/$REPO
+
+   # Resume planner with architect feedback
+   legion prompt "$ISSUE_IDENTIFIER" --mode plan \
+     "Invoke the /legion-worker skill for plan mode. The architect has reviewed your plan and requested changes — read the latest issue comments for their feedback. Revise your plan accordingly. (github backend, repo: $OWNER/$REPO)"
+   ```
+   The planner revises, adds `worker-done`, removes `worker-active`. The state machine
+   suggests `transition_to_in_progress` again. The controller re-checks for `architect-continuity`
+   and resumes the architect for re-review (no verdict label present → step 2 above).
+
+4. **Handle architect verdict — approved:**
+   When `transition_to_in_progress` + `architect-continuity` + `arch-review-approved`:
+   ```bash
+   # Clean up transient verdict label
+   gh issue edit $ISSUE_NUMBER \
+     --remove-label "arch-review-approved" \
+     -R $OWNER/$REPO
+
+   # Proceed with normal transition_to_in_progress
+   ```
+   The controller then executes the standard `transition_to_in_progress` action (update issue
+   status, dispatch implementer on next cycle).
+
+**Edge cases:**
+- **No architect session exists** (architect was skipped): `legion dispatch` creates a fresh
+  session. The architect reviews based on the issue body alone — still valuable.
+- **Architect is a live worker** (still running from initial phase): State machine returns
+  `skip` (hasLiveWorker), so the controller never reaches the intercept. Correct behavior.
+- **Manual override:** Adding `arch-review-approved` manually bypasses the architect review.
+  This is intentional — it's a human escape hatch.
+
+**Linear backend equivalent:** Replace `gh issue edit` with `linear_linear(action="update", ...)`
+label operations and `legion dispatch/prompt` remains the same.
+
 
 ### Pipeline Integrity
 
@@ -268,6 +355,11 @@ Pipeline phases MUST run in order: architect → plan → implement → test →
 **MAY skip (with conditions):**
 - **Architect** — ONLY when ALL conditions are met: `bug` label present, description contains clear reproduction steps, AND the change is scoped to a single component. This exception is documented in the Route Triage table — do not contradict it.
 - **Retro** — ONLY when ALL skip conditions are met per the routing hints (see Retro section)
+
+**Optional checkpoints (opt-in):**
+- **Architect-Review (post-plan)** — when `architect-continuity` label is present, the controller
+  resumes the architect to review the plan before transitioning to In Progress. See
+  "Architect-Review Checkpoint" section above.
 
 Simple issues go through every phase — they just go through faster. Complexity is not a reason to skip phases.
 
