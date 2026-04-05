@@ -12,9 +12,8 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "outDir": "./dist",
-    "rootDir": ".",
-    "types": ["bun-types"]
+    "rootDir": "."
   },
   "include": ["./**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist", "__tests__"]
 }
