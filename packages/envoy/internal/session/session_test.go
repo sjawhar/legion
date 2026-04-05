@@ -149,6 +149,45 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 			t.Errorf("notification text missing %q: %s", want, text)
 		}
 	}
+	replyInstruction := `Use envoy_send(target_session="ses_sender_123", message="...") to reply to this message.`
+	if !strings.Contains(text, replyInstruction) {
+		t.Errorf("notification text missing reply instruction: %s", text)
+	}
+}
+
+func TestText_WithSourceSession(t *testing.T) {
+	deliverer := newDeliverer(t.TempDir())
+	item := contracts.Envelope{
+		EventID:        "evt-1",
+		Source:         "agent",
+		SourceSession:  "ses_abc",
+		Topic:          "notifications.agent.ses_target",
+		PayloadSummary: "hello world",
+	}
+	got := deliverer.Text(item)
+	want := "[NOTIFICATION from agent (reply-to: ses_abc)]\nhello world\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-1\nUse envoy_send(target_session=\"ses_abc\", message=\"...\") to reply to this message."
+	if got != want {
+		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestText_WithoutSourceSession(t *testing.T) {
+	deliverer := newDeliverer(t.TempDir())
+	item := contracts.Envelope{
+		EventID:        "evt-2",
+		Source:         "slack",
+		SourceSession:  "",
+		Topic:          "notifications.slack.T1.C1.mention",
+		PayloadSummary: "no sender",
+	}
+	got := deliverer.Text(item)
+	want := "[NOTIFICATION from slack]\nno sender\n\nTopic: notifications.slack.T1.C1.mention\nEvent ID: evt-2"
+	if got != want {
+		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "envoy_send") {
+		t.Error("Text() should NOT contain reply instruction when SourceSession is empty")
+	}
 }
 
 func TestDeliver_NoAgentField(t *testing.T) {
