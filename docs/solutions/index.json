@@ -321,7 +321,7 @@
       "envoy/async-health-startup-pattern.md",
       "envoy/contracts-and-handler-patterns.md"
     ],
-    "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md"],
+    "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md", "ci/envoy-plugin-release-versioning.md"],
     "tag:nats": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
@@ -381,7 +381,7 @@
     "tag:infrastructure-as-code": ["envoy/pulumi-remote-docker-patterns.md"],
     "tag:deployment": ["envoy/pulumi-remote-docker-patterns.md"],
     "packages/contracts": ["envoy/contracts-and-handler-patterns.md"],
-    ".github/workflows": ["envoy/ghcr-docker-multiarch-ci.md"],
+    ".github/workflows": ["envoy/ghcr-docker-multiarch-ci.md", "ci/envoy-plugin-release-versioning.md"],
     "packages/envoy/docker": ["envoy/ghcr-docker-multiarch-ci.md"],
     "tag:knowledge-injection": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:cross-cutting": ["skill-patterns/cross-cutting-workflow-concerns.md"],
