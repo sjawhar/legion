@@ -119,6 +119,22 @@ legion handoff messages --workspace . 2>/dev/null || echo '[]'
 
 Messages may contain important context, warnings, or clarifications from the architect, planner, or implementer that aren't captured in the phase handoff data.
 
+### 1.5. Inject Relevant Learnings
+
+Follow the injection algorithm in @references/knowledge-injection.md using these keyword sources:
+
+| Keyword Source | Fallback |
+|---------------|----------|
+| Issue title | — (always available) |
+| Acceptance criteria from issue body | Issue title only |
+| Implement handoff `filesChanged[]` | Issue title + acceptance criteria only |
+
+Extract keywords from all available sources above. Match against `docs/solutions/index.json` to surface patterns, testing pitfalls, and known issues relevant to the code under test.
+
+Output the injected learnings visibly in the session before proceeding to spec compliance check. If no relevant learnings are found, output "No relevant learnings found." and continue.
+
+**Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
+
 ### 2. Spec Compliance Check
 
 Before booting anything, verify the code even attempts to address the spec. Dispatch a spec compliance subagent using the template from `/superpowers/subagent-driven-development` (spec-reviewer-prompt.md):

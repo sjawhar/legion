@@ -97,6 +97,23 @@ If `requiredSkills` is absent or the plan handoff is missing, proceed with step 
 
 **Config-required skills are additive:** if config provides `skills.required`, invoke those skills in addition to plan handoff `requiredSkills.implement` and independently discovered skills.
 
+### 1.7. Inject Relevant Learnings
+
+Follow the injection algorithm in @references/knowledge-injection.md using these keyword sources:
+
+| Keyword Source | Fallback |
+|---------------|----------|
+| Issue title | — (always available) |
+| Plan handoff `concerns[]` | Issue title only |
+| Plan handoff `requiredSkills.implement[]` | Issue title only |
+| File paths mentioned in plan (from issue body or plan context) | Issue title only |
+
+Extract keywords from all available sources above. Match against `docs/solutions/index.json` to surface patterns, pitfalls, and implementation guidance relevant to this work.
+
+Output the injected learnings visibly in the session before proceeding to coding. If no relevant learnings are found, output "No relevant learnings found." and continue.
+
+**Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
+
 ### 2. Invoke Skills (in order)
 
 1. `/superpowers/executing-plans` - Load and structure the plan

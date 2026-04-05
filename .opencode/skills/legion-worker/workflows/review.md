@@ -113,6 +113,22 @@ If bot comments exist:
 4. **Dismiss bot style suggestions** that conflict with project conventions — these are not
    review issues.
 
+### 1.7. Inject Relevant Learnings
+
+Follow the injection algorithm in @references/knowledge-injection.md using these keyword sources:
+
+| Keyword Source | Fallback |
+|---------------|----------|
+| Issue title | — (always available) |
+| Implement handoff `filesChanged[]` | Issue title only |
+| Implement handoff `trickyParts[]` | Issue title only |
+
+Extract keywords from all available sources above. Match against `docs/solutions/index.json` to surface patterns, known pitfalls, and review-relevant institutional knowledge for the code under review.
+
+Output the injected learnings visibly in the session before proceeding to the review. If no relevant learnings are found, output "No relevant learnings found." and continue.
+
+**Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
+
 ### 1.5. Protected Files — Do NOT Flag
 
 The `.legion/` directory contains **structured handoff data** committed intentionally as part of the Legion pipeline. Files include: `architect.json`, `plan.json`, `implement.json`, `test.json`, `review.json`, `retro.json`.
