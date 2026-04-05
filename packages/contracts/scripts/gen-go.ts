@@ -27,20 +27,22 @@ const map = {
   integer: "int64",
 } satisfies Record<Kind, string>;
 
-const keep = `func NowMillis() int64 {
-\treturn time.Now().UnixMilli()
+const keep = `const AgentTopicPrefix = "notifications.agent."
+
+func NowMillis() int64 {
+	return time.Now().UnixMilli()
 }
 
 func AgentSubject(session string) string {
-\treturn "notifications.agent." + session
+	return AgentTopicPrefix + session
 }
 
 func GithubSubject(owner string, repo string, kind string) string {
-\treturn "notifications.github." + owner + "." + repo + "." + kind
+	return "notifications.github." + owner + "." + repo + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
-\treturn "notifications.slack." + team + "." + channel + "." + kind
+	return "notifications.slack." + team + "." + channel + "." + kind
 }`;
 
 function title(text: string) {

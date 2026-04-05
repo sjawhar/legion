@@ -53,12 +53,14 @@ func (e Envelope) Validate() error {
 	return nil
 }
 
+const AgentTopicPrefix = "notifications.agent."
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }
 
 func AgentSubject(session string) string {
-	return "notifications.agent." + session
+	return AgentTopicPrefix + session
 }
 
 func GithubSubject(owner string, repo string, kind string) string {

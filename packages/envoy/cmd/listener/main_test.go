@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 func TestReadinessGate_NotReady_Returns503(t *testing.T) {
@@ -126,4 +129,64 @@ func TestFullMux_StartingState(t *testing.T) {
 			t.Fatalf("expected 503, got %d", rr.Code)
 		}
 	})
+}
+
+func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
+	// publishHandler validation runs before deps.client is used, so a
+	// minimal non-nil deps (with nil inner fields) is enough to test the
+	// rejection path without NATS.
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{})
+	handler := publishHandler(&state)
+
+	cases := []struct {
+		name       string
+		topic      string
+		wantStatus int
+		wantSubstr string
+	}{
+		{
+			name:       "bare agent prefix",
+			topic:      contracts.AgentTopicPrefix,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "cannot publish to agent topics",
+		},
+		{
+			name:       "agent with session ID",
+			topic:      contracts.AgentSubject("ses_abc123"),
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "cannot publish to agent topics",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"source_session":"ses_test","topic":"` + tc.topic + `","message":"hello"}`
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d (body: %s)", tc.wantStatus, rr.Code, rr.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rr.Body.String(), tc.wantSubstr) {
+				t.Fatalf("expected body to contain %q, got %q", tc.wantSubstr, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestPublishHandler_MethodNotAllowed(t *testing.T) {
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{})
+	handler := publishHandler(&state)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages/publish", nil)
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
 }

@@ -42,6 +42,56 @@ func readinessGate(ready func() bool, next http.Handler) http.Handler {
 	})
 }
 
+// publishHandler rejects agent-targeted topics (must use /v1/messages/send
+// instead) and publishes the envelope to NATS.
+func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SourceSession string `json:"source_session"`
+			Topic         string `json:"topic"`
+			Message       string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if body.Topic == "" || body.Message == "" {
+			http.Error(w, "topic and message are required", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(body.Topic, contracts.AgentTopicPrefix) {
+			http.Error(w, "cannot publish to agent topics; use /v1/messages/send for direct agent messages", http.StatusBadRequest)
+			return
+		}
+		item := contracts.Envelope{
+			EventID:        id.New(),
+			Source:         "agent",
+			SourceSession:  body.SourceSession,
+			SourceEventID:  id.New(),
+			Topic:          body.Topic,
+			DedupeKey:      "publish." + id.New(),
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: body.Message,
+			TraceID:        id.New(),
+		}
+		if err := item.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := state.Load()
+		if err := d.client.Publish(item); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(item)
+	}
+}
+
 func main() {
 	// Phase 1: Load config (synchronous, fast).
 	cfg, err := config.Load(9020)
@@ -208,47 +258,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(item)
 	})
-	v1.HandleFunc("/v1/messages/publish", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			SourceSession string `json:"source_session"`
-			Topic         string `json:"topic"`
-			Message       string `json:"message"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		if body.Topic == "" || body.Message == "" {
-			http.Error(w, "topic and message are required", http.StatusBadRequest)
-			return
-		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "agent",
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          body.Topic,
-			DedupeKey:      "publish." + id.New(),
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			TraceID:        id.New(),
-		}
-		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		d := deps.Load()
-		if err := d.client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
-	})
+	v1.HandleFunc("/v1/messages/publish", publishHandler(&deps))
 
 	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 
@@ -310,8 +320,8 @@ func main() {
 			return
 		}
 		log.Printf("listener received machine=%s source=%s topic=%s event_id=%s", cfg.MachineID, item.Source, item.Topic, item.EventID)
-		if strings.HasPrefix(item.Topic, "notifications.agent.") {
-			sessionID := strings.TrimPrefix(item.Topic, "notifications.agent.")
+		if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
+			sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 			if dedupeCache.Seen(item.DedupeKey, sessionID) {
 				log.Printf("listener dedupe skip session=%s dedupe_key=%s", sessionID, item.DedupeKey)
 				_ = msg.Ack()

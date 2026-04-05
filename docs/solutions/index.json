@@ -39,7 +39,7 @@
       "daemon/envoy-auto-subscription-patterns.md",
       "testing/bun-fetch-mocking-patterns.md",
       "daemon/server-side-dispatch-validation.md",
-      "testing/github-backend-collect-test-payloads.md"
+      "testing/github-backend-collect-test-payloads.md",
       "daemon/prompt-delivery-bootstrap-delay.md"
     ],
     "packages/daemon/src/cli": [
@@ -469,7 +469,8 @@
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "architecture-patterns/nats-kv-graceful-degradation.md",
       "envoy/listener-routing-by-topic-prefix.md",
-      "envoy/async-health-startup-pattern.md"
+      "envoy/async-health-startup-pattern.md",
+      "envoy/contracts-and-handler-patterns.md"
     ],
     "packages/envoy-plugin": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
@@ -498,7 +499,8 @@
       "envoy/listener-routing-by-topic-prefix.md"
     ],
     "packages/envoy/internal/contracts": [
-      "envoy/structured-json-summary-patterns.md"
+      "envoy/structured-json-summary-patterns.md",
+      "envoy/contracts-and-handler-patterns.md"
     ],
     "tag:session-registry": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
@@ -557,6 +559,10 @@
     ],
     "tag:deployment": [
       "envoy/pulumi-remote-docker-patterns.md"
+]
+,
+    "packages/contracts": [
+      "envoy/contracts-and-handler-patterns.md"
     ]
   }
 }

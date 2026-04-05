@@ -1,5 +1,7 @@
+export const AGENT_TOPIC_PREFIX = "notifications.agent.";
+
 export function agentSubject(session: string) {
-  return `notifications.agent.${session}`;
+  return `${AGENT_TOPIC_PREFIX}${session}`;
 }
 
 export function githubSubject(owner: string, repo: string, kind: string) {
