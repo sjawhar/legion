@@ -365,7 +365,8 @@
     "tag:routing": ["envoy/listener-routing-by-topic-prefix.md"],
     "packages/envoy/infra": [
       "envoy/docker-tailscale-networking.md",
-      "envoy/pulumi-remote-docker-patterns.md"
+      "envoy/pulumi-remote-docker-patterns.md",
+      "infra/mixed-runtime-type-boundaries.md"
     ],
     "packages/envoy/scripts": ["envoy/pulumi-remote-docker-patterns.md"],
     "packages/envoy/deploy": [
