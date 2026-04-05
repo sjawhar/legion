@@ -16,6 +16,14 @@ import type { TokenManager } from "./github-apps";
 import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
+  mergePipelineFromCollectedState,
+  PipelineIssueEntrySchema,
+  PipelineStateSchema,
+  patchIssueEntry,
+  readPipelineFile,
+  writePipelineFile,
+} from "./pipeline-file";
+import {
   cleanupWorkspace,
   ensureWorkspace,
   parseIssueRepo,
@@ -176,6 +184,9 @@ export function startServer(opts: ServerOptions): {
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
   const issueStateCache = new Map<string, IssueState>();
+  const pipelineFilePath = opts.paths
+    ? opts.paths.forLegion(opts.projectId ?? opts.legionId).pipelineFile
+    : null;
   const releaseGauges = registerGauges("daemon-server", () => {
     let starting = 0;
     let running = 0;
@@ -804,6 +815,17 @@ export function startServer(opts: ServerOptions): {
               issueStateCache.set(issueId.toLowerCase(), issueState);
             }
 
+            // Auto-merge collected state into pipeline file
+            if (pipelineFilePath) {
+              try {
+                await mergePipelineFromCollectedState(pipelineFilePath, state);
+              } catch (mergeError) {
+                console.warn(
+                  `[pipeline] Auto-merge failed after /state/collect: ${(mergeError as Error).message}`
+                );
+              }
+            }
+
             if (opts.feedbackLogger) {
               for (const [issueId, issueState] of Object.entries(state.issues)) {
                 opts.feedbackLogger.log({
@@ -873,11 +895,96 @@ export function startServer(opts: ServerOptions): {
               issueStateCache.set(issueId.toLowerCase(), issueState);
             }
 
+            // Auto-merge collected state into pipeline file
+            if (pipelineFilePath) {
+              try {
+                await mergePipelineFromCollectedState(pipelineFilePath, state);
+              } catch (mergeError) {
+                console.warn(
+                  `[pipeline] Auto-merge failed after /state/fetch-and-collect: ${(mergeError as Error).message}`
+                );
+              }
+            }
+
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
             return serverError(`fetch_and_collect_failed: ${message}`);
+          }
+        }
+
+        // =====================================================================
+        // Pipeline endpoints
+        // =====================================================================
+
+        if (segments.length === 1 && segments[0] === "pipeline") {
+          if (!pipelineFilePath) {
+            return notFound("pipeline_not_configured");
+          }
+
+          if (method === "GET") {
+            const state = await readPipelineFile(pipelineFilePath);
+            return jsonResponse(state);
+          }
+
+          if (method === "PUT") {
+            let payload: Record<string, unknown>;
+            try {
+              payload = await parseJson(request);
+            } catch {
+              return badRequest("invalid_json");
+            }
+
+            const validation = PipelineStateSchema.safeParse(payload);
+            if (!validation.success) {
+              const issues = validation.error.issues.map((i) => i.message).join(", ");
+              return badRequest(`invalid_pipeline_state: ${issues}`);
+            }
+
+            await writePipelineFile(pipelineFilePath, validation.data);
+            return jsonResponse({ ok: true });
+          }
+        }
+
+        if (segments.length === 3 && segments[0] === "pipeline" && segments[1] === "issues") {
+          if (!pipelineFilePath) {
+            return notFound("pipeline_not_configured");
+          }
+
+          const issueId = decodeURIComponent(segments[2]).toLowerCase();
+
+          if (method === "PATCH") {
+            let payload: Record<string, unknown>;
+            try {
+              payload = await parseJson(request);
+            } catch {
+              return badRequest("invalid_json");
+            }
+
+            const pipeline = await readPipelineFile(pipelineFilePath);
+            const existing = pipeline.issues[issueId];
+            const merged = patchIssueEntry(existing, payload);
+
+            const validation = PipelineIssueEntrySchema.safeParse(merged);
+            if (!validation.success) {
+              const issues = validation.error.issues.map((i) => i.message).join(", ");
+              return badRequest(`invalid_patch_result: ${issues}`);
+            }
+
+            pipeline.issues[issueId] = validation.data;
+            await writePipelineFile(pipelineFilePath, pipeline);
+            return jsonResponse(validation.data);
+          }
+
+          if (method === "DELETE") {
+            const pipeline = await readPipelineFile(pipelineFilePath);
+            if (!(issueId in pipeline.issues)) {
+              return notFound("issue_not_tracked");
+            }
+            delete pipeline.issues[issueId];
+            await writePipelineFile(pipelineFilePath, pipeline);
+            return jsonResponse({ removed: true });
           }
         }
 

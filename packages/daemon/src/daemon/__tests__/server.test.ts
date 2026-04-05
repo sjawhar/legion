@@ -238,6 +238,7 @@ describe("daemon server", () => {
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+        pipelineFile: `/tmp/legion-state/legions/${projectId}/controller-pipeline.json`,
       }),
       repoClonePath: (host: string, owner: string, repo: string) =>
         `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
@@ -319,6 +320,7 @@ describe("daemon server", () => {
           feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
           logDir: `/tmp/legion-state/legions/${projectId}/logs`,
           workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+          pipelineFile: `/tmp/legion-state/legions/${projectId}/controller-pipeline.json`,
         }),
         repoClonePath: (host: string, owner: string, repo: string) =>
           `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
@@ -390,6 +392,7 @@ describe("daemon server", () => {
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+        pipelineFile: `/tmp/legion-state/legions/${projectId}/controller-pipeline.json`,
       }),
       repoClonePath: (host: string, owner: string, repo: string) =>
         `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
@@ -616,6 +619,7 @@ describe("daemon server", () => {
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+        pipelineFile: `/tmp/legion-state/legions/${projectId}/controller-pipeline.json`,
       }),
       repoClonePath: (host: string, owner: string, repo: string) =>
         `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
@@ -1369,6 +1373,7 @@ describe("daemon server", () => {
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+        pipelineFile: `/tmp/legion-state/legions/${projectId}/controller-pipeline.json`,
       }),
       repoClonePath: (host: string, owner: string, repo: string) =>
         `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
@@ -1998,6 +2003,188 @@ describe("daemon server", () => {
       const body = (await response.json()) as Record<string, unknown>;
       expect(body).not.toHaveProperty("promptDelivered");
       expect(sendPromptCalls).toHaveLength(0);
+    });
+  });
+
+  describe("pipeline endpoints", () => {
+    function makePipelinePaths(td: string): LegionPaths {
+      return {
+        dataDir: td,
+        stateDir: td,
+        reposDir: path.join(td, "repos"),
+        workspacesDir: path.join(td, "workspaces"),
+        legionsFile: path.join(td, "legions.json"),
+        forLegion: () => ({
+          legionStateDir: td,
+          workersFile: path.join(td, "workers.json"),
+          pipelineFile: path.join(td, "controller-pipeline.json"),
+          feedbackFile: path.join(td, "feedback.jsonl"),
+          logDir: path.join(td, "logs"),
+          workspacesDir: path.join(td, "workspaces"),
+        }),
+        repoClonePath: (host: string, owner: string, repo: string) =>
+          path.join(td, "repos", host, owner, repo),
+      };
+    }
+
+    let pipelineTempDir: string | null = null;
+
+    afterEach(async () => {
+      if (pipelineTempDir) {
+        await rm(pipelineTempDir, { recursive: true, force: true });
+        pipelineTempDir = null;
+      }
+    });
+
+    it("GET /pipeline returns empty state when no file exists", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+      const response = await requestJson("/pipeline");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        schemaVersion: number;
+        issues: Record<string, unknown>;
+      };
+      expect(body.schemaVersion).toBe(1);
+      expect(body.issues).toEqual({});
+    });
+
+    it("PUT /pipeline writes and GET reads it back", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+
+      const putResponse = await requestJson("/pipeline", {
+        method: "PUT",
+        body: JSON.stringify({
+          schemaVersion: 1,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          issues: {},
+        }),
+      });
+      expect(putResponse.status).toBe(200);
+
+      const getResponse = await requestJson("/pipeline");
+      const body = (await getResponse.json()) as { schemaVersion: number };
+      expect(body.schemaVersion).toBe(1);
+    });
+
+    it("PUT /pipeline rejects invalid schema", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+      const response = await requestJson("/pipeline", {
+        method: "PUT",
+        body: JSON.stringify({ bad: "data" }),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("PATCH /pipeline/issues/:id creates new entry for unknown issueId", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+      const response = await requestJson("/pipeline/issues/test-issue-1", {
+        method: "PATCH",
+        body: JSON.stringify({
+          lastAction: "dispatch_implementer",
+          lastActionAt: "2026-01-01T00:00:00.000Z",
+          lastProgressAt: "2026-01-01T00:00:00.000Z",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        lastAction: string;
+        enteredPipelineAt: string;
+      };
+      expect(body.lastAction).toBe("dispatch_implementer");
+      expect(typeof body.enteredPipelineAt).toBe("string");
+    });
+
+    it("PATCH /pipeline/issues/:id preserves unpatched fields", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+
+      await requestJson("/pipeline/issues/test-issue-1", {
+        method: "PATCH",
+        body: JSON.stringify({
+          lastAction: "dispatch_planner",
+          lastActionAt: "2026-01-01T00:00:00.000Z",
+          lastProgressAt: "2026-01-01T00:00:00.000Z",
+        }),
+      });
+
+      const response = await requestJson("/pipeline/issues/test-issue-1", {
+        method: "PATCH",
+        body: JSON.stringify({ lastAction: "dispatch_implementer" }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        lastAction: string;
+        lastActionAt: string;
+      };
+      expect(body.lastAction).toBe("dispatch_implementer");
+      expect(body.lastActionAt).toBe("2026-01-01T00:00:00.000Z");
+    });
+
+    it("PATCH normalizes issueId to lowercase", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+
+      await requestJson("/pipeline/issues/MyRepo-Issue-42", {
+        method: "PATCH",
+        body: JSON.stringify({
+          lastAction: "dispatch_implementer",
+          lastActionAt: "2026-01-01T00:00:00.000Z",
+          lastProgressAt: "2026-01-01T00:00:00.000Z",
+        }),
+      });
+
+      const getResponse = await requestJson("/pipeline");
+      const state = (await getResponse.json()) as {
+        issues: Record<string, unknown>;
+      };
+      expect(state.issues["myrepo-issue-42"]).toBeDefined();
+      expect(state.issues["MyRepo-Issue-42"]).toBeUndefined();
+    });
+
+    it("DELETE /pipeline/issues/:id removes tracked issue", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+
+      await requestJson("/pipeline/issues/test-issue-1", {
+        method: "PATCH",
+        body: JSON.stringify({
+          lastAction: "dispatch_implementer",
+          lastActionAt: "2026-01-01T00:00:00.000Z",
+          lastProgressAt: "2026-01-01T00:00:00.000Z",
+        }),
+      });
+
+      const response = await requestJson("/pipeline/issues/test-issue-1", {
+        method: "DELETE",
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { removed: boolean };
+      expect(body.removed).toBe(true);
+
+      const getResponse = await requestJson("/pipeline");
+      const state = (await getResponse.json()) as {
+        issues: Record<string, unknown>;
+      };
+      expect(state.issues["test-issue-1"]).toBeUndefined();
+    });
+
+    it("DELETE /pipeline/issues/:id returns 404 for unknown issue", async () => {
+      pipelineTempDir = await mkdtemp(path.join(os.tmpdir(), "legion-srv-pipeline-"));
+      await startTestServer({ paths: makePipelinePaths(pipelineTempDir) });
+      const response = await requestJson("/pipeline/issues/nonexistent", {
+        method: "DELETE",
+      });
+      expect(response.status).toBe(404);
+    });
+
+    it("returns 404 for pipeline when paths not configured", async () => {
+      await startTestServer();
+      const response = await requestJson("/pipeline");
+      expect(response.status).toBe(404);
     });
   });
 });

@@ -45,6 +45,9 @@ describe("resolveLegionPaths", () => {
     expect(legion.workersFile).toBe(
       "/home/testuser/.local/state/legion/legions/sjawhar/42/workers.json"
     );
+    expect(legion.pipelineFile).toBe(
+      "/home/testuser/.local/state/legion/legions/sjawhar/42/controller-pipeline.json"
+    );
     expect(legion.logDir).toBe("/home/testuser/.local/state/legion/legions/sjawhar/42/logs");
     expect(legion.workspacesDir).toBe("/home/testuser/.local/share/legion/workspaces/sjawhar/42");
   });

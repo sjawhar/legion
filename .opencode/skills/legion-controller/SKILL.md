@@ -131,6 +131,62 @@ The 9-step loop describes WHAT the controller does. Execution uses background po
 
 **Fallback:** If background tasks are unavailable, process all 9 steps without any `sleep`, then end turn. External runtime re-invokes the controller.
 
+### Pipeline State (Fast Startup)
+
+On startup/resume, read the pipeline for fast context reconstruction:
+
+```bash
+PIPELINE=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/pipeline)
+```
+
+Use the pipeline to:
+- Reconstruct in-context state (priority queue, in-progress list, blocked list)
+- Identify stale issues needing attention
+- Detect issues where `lastProgressAt` is older than `staleAfterMinutes`
+
+**Then** fetch live state via `/state/collect` to verify and update. The pipeline is a cache — live sources always win.
+
+### After Each Action
+
+After executing any `dispatch_*`, `resume_*`, `transition_to_*`, or `relay_*` action:
+
+```bash
+curl -s -X PATCH "http://127.0.0.1:$LEGION_DAEMON_PORT/pipeline/issues/$ISSUE_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "lastAction": "<action_name>",
+    "lastActionAt": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'",
+    "lastProgressAt": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
+  }'
+```
+
+Do NOT PATCH after `skip`, `retry_*`, or `rebase_*` actions — these are passive/retries, not progress.
+
+### Stale Detection
+
+Each loop iteration, check for stale issues:
+
+```bash
+STALE=$(echo "$PIPELINE" | jq '[.issues | to_entries[] | select(
+  (.value.suggestedAction != "skip") and
+  (.value.blockedSince == null) and
+  ((now - (.value.lastProgressAt | fromdateiso8601)) / 60 > .value.staleAfterMinutes)
+) | .key]')
+```
+
+On stale detection:
+1. Re-evaluate via `/state/collect` (maybe worker finished but notification missed)
+2. If worker is dead (check via `GET /workers/:id`, status `"dead"`): clean up worker, re-dispatch
+3. If worker is alive but idle >30min: re-prompt with "Status check — are you making progress?"
+4. If still stale after re-prompt on next iteration: add `user-input-needed` label, post issue comment
+
+### Cleanup on Done
+
+When transitioning an issue to Done:
+
+```bash
+curl -s -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/pipeline/issues/$ISSUE_ID"
+```
 ### 1. Fetch Issues
 
 ```bash
