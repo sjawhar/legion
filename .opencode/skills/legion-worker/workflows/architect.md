@@ -32,6 +32,21 @@ Extract title, description, comments (included in get response), current labels.
 
 Also check for project-specific skills that may be relevant to this issue's domain. Note any relevant skills in your output so downstream workers (planner, implementer, tester) know to use them.
 
+### 1.5. Inject Relevant Learnings
+
+Follow the injection algorithm in @references/knowledge-injection.md using these keyword sources:
+
+| Keyword Source | Fallback |
+|---------------|----------|
+| Issue title | — (always available) |
+| Issue description | Title only (description rarely missing) |
+
+Extract keywords from the issue title and description. Match against `docs/solutions/index.json` to surface patterns, architectural decisions, and pitfalls relevant to this issue's domain.
+
+Output the injected learnings visibly in the session before proceeding to assessment. If no relevant learnings are found, output "No relevant learnings found." and continue.
+
+**Graceful degradation:** If `docs/solutions/index.json` is missing or invalid, skip silently and proceed to step 2.
+
 ### 2. Assess
 
 **Is it clear?** Does it have testable acceptance criteria and no unresolved questions?
