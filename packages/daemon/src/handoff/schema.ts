@@ -41,6 +41,8 @@ const baseHandoffSchema = z.object({
   schemaVersion: z.literal(HANDOFF_SCHEMA_VERSION),
   phase: handoffPhase,
   completed: isoTimestamp,
+  learningsInjected: z.array(z.string()).optional(),
+  learningsHelpful: z.array(z.string()).optional(),
 });
 
 const architectSchema = baseHandoffSchema.extend({
@@ -67,6 +69,7 @@ const planSchema = baseHandoffSchema.extend({
   independentTasks: z.number().optional(),
   routingHints: routingHintsSchema,
   concerns: z.array(z.string()).optional(),
+  /** @deprecated Use learningsInjected on BaseHandoff instead */
   learningsUsed: z.array(z.string()).optional(),
   workflowRecommendation: z.string().optional(),
   requiredSkills: requiredSkillsSchema,
@@ -139,7 +142,16 @@ export function validatePhaseHandoff(value: unknown): PhaseHandoff | null {
   if (!result.success) {
     return null;
   }
-  return result.data as PhaseHandoff;
+  const data = result.data;
+  // Backward compat: migrate plan.learningsUsed → learningsInjected
+  if (data.phase === "plan" && "learningsUsed" in data) {
+    const { learningsUsed, ...rest } = data as Record<string, unknown>;
+    if (Array.isArray(learningsUsed) && !rest.learningsInjected) {
+      (rest as Record<string, unknown>).learningsInjected = learningsUsed;
+    }
+    return rest as unknown as PhaseHandoff;
+  }
+  return data as PhaseHandoff;
 }
 
 export function validateHandoffMessage(value: unknown): HandoffMessage | null {

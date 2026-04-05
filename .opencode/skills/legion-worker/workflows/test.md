@@ -271,6 +271,10 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 
 Write handoff data for the next phase (non-blocking):
 
+First, assess which injected learnings were helpful:
+
+> Review the learnings injected at the start of this phase. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
+
 ```bash
 legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
 {
@@ -278,7 +282,9 @@ legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
   "failed": <count of criteria that failed>,
   "failures": [{"criterion": "...", "evidence": "..."}],
   "documentationFeedback": "<text about doc quality>",
-  "observations": ["<edge case or UX issue>"]
+  "observations": ["<edge case or UX issue>"],
+  "learningsInjected": ["<canonical docs/solutions/ paths injected into this phase>"],
+  "learningsHelpful": ["<subset that materially helped>"]
 }
 HANDOFF
 ```

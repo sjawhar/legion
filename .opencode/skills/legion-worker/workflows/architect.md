@@ -114,6 +114,10 @@ Before signaling completion, spawn a cross-family review session to validate the
 
 Before signaling completion, write handoff data for downstream workers. This data is advisory — downstream workers can read it but are not required to act on it.
 
+First, assess which injected learnings were helpful:
+
+> Review the learnings injected at the start of this phase. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
+
 ```bash
 # Write handoff data (non-blocking — if this fails, continue)
 legion handoff write --phase architect --workspace . <<'HANDOFF' 2>/dev/null || true
@@ -126,7 +130,9 @@ legion handoff write --phase architect --workspace . <<'HANDOFF' 2>/dev/null || 
     "estimatedImplementers": 1,
     "skipRetro": false
   },
-  "concerns": ["list", "of", "concerns"]
+  "concerns": ["list", "of", "concerns"],
+  "learningsInjected": ["<canonical docs/solutions/ paths injected into this phase>"],
+  "learningsHelpful": ["<subset that materially helped>"]
 }
 HANDOFF
 ```
@@ -137,6 +143,8 @@ HANDOFF
 - `subIssues`: IDs of any sub-issues created during breakdown
 - `routingHints`: Guidance for downstream workers (complexity, estimated implementers, skip flags)
 - `concerns`: Any architectural concerns or gotchas identified
+- `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
+- `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
 The `|| true` ensures the handoff write doesn't block workflow completion if the CLI fails.
 

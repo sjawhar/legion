@@ -18,6 +18,10 @@ export interface BaseHandoff {
   schemaVersion: 1;
   phase: HandoffPhase;
   completed: string;
+  /** Canonical docs/solutions/ paths injected into this phase */
+  learningsInjected?: string[];
+  /** Subset of learningsInjected the worker found materially helpful */
+  learningsHelpful?: string[];
 }
 
 export interface ArchitectHandoff extends BaseHandoff {
@@ -35,7 +39,6 @@ export interface PlanHandoff extends BaseHandoff {
   independentTasks?: number;
   routingHints?: RoutingHints;
   concerns?: string[];
-  learningsUsed?: string[];
   workflowRecommendation?: string;
   requiredSkills?: RequiredSkills;
 }
