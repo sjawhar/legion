@@ -96,10 +96,10 @@ export function createListener(
         interval: "10s",
         timeout: "3s",
         retries: 3,
-        startPeriod: "5s",
+        startPeriod: "30s",
       },
       wait: true,
-      waitTimeout: 30,
+      waitTimeout: 90,
     },
     { provider, dependsOn, deleteBeforeReplace: true }
   );

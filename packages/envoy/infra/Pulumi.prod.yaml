@@ -1,12 +1,11 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
-  envoy:imageTag: PLACEHOLDER_SET_BEFORE_DEPLOY
+  envoy:imageTag: 78afd36b3ea3
   envoy:natsImage: "nats:2.11-alpine"
   envoy:machines:
     - name: sami-agents-mx
-      sshHost: "ssh://ubuntu@sami-agents-mx"
       machineId: sami-agents-mx
-      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      tailscaleIp: "100.117.175.119"
       nats:
         serverName: sami-agents-mx
       listener:
@@ -17,7 +16,7 @@ config:
     - name: sami
       sshHost: "ssh://sami@sami"
       machineId: sami
-      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      tailscaleIp: "100.100.92.97"
       nats:
         serverName: sami
       listener:
@@ -25,7 +24,7 @@ config:
     - name: sami-claude
       sshHost: "ssh://claude@sami-claude"
       machineId: sami-claude
-      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      tailscaleIp: "100.85.18.68"
       nats:
         serverName: sami-claude
       listener:
@@ -33,6 +32,13 @@ config:
     - name: ghost-wispr
       sshHost: "ssh://ghost-wispr@ghost-wispr"
       machineId: ghost-wispr
-      tailscaleIp: PLACEHOLDER_SET_BEFORE_DEPLOY
+      tailscaleIp: "100.103.243.89"
       listener:
         registryDir: /home/ghost-wispr/.local/state/opencode/registry
+  envoy:githubWebhookSecret:
+    secure: v1:kb4Dq9+22FdpMyKS:TddsOzBlO2icbVSvWlXr95m/7Z7pWAEg0GJ5tgmJmT79pgoIxI9HOehkzU4CXhid0MkeE7xGNzk=
+  envoy:slackSigningSecret:
+    secure: v1:UXOgMy5m0OkUPiXC:0udxatu8sR8AKagjGPBCI+hPK3GyH8VwZNUIs1HO+2YOo2F8gsbPc8P4HDGvju001w==
+  envoy:ghcrToken:
+    secure: v1:n9jTNhn4Yk/eJer7:jc7QuPq5Dx2Ta67Qaz3nHaE8kBNpZREVmkafRpeWI0E7EjujsjADx7V3SbG107ajOvCvsLwrOJU=
+encryptionsalt: v1:R5vvgmHVgJw=:v1:T7WdS5AO9zYdN0xD:83mEIYvoAB6yLBeqMlWe44tRSwIeIA==
