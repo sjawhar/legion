@@ -87,7 +87,7 @@ The controller MUST NOT ask "should I continue?" for routine operations. Act on 
 
 ## Envoy Notifications
 
-The daemon automatically subscribes the controller to `notifications.legion.controller` and `notifications.agent.<session_id>` at startup. Workers broadcast to `notifications.legion.controller` when they finish a phase, giving you instant notification instead of waiting for the next polling cycle. The `worker-done` label remains the source of truth — Envoy is a speed optimization.
+The daemon automatically subscribes the controller to `notifications.agent.<session_id>` at startup. Workers send completion notifications directly to the controller session via `envoy_send` (the controller session ID is included in the dispatch prompt's ENVOY section). This gives you instant notification instead of waiting for the next polling cycle. The `worker-done` label remains the source of truth — Envoy is a speed optimization.
 
 ## Algorithm
 

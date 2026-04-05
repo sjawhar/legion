@@ -240,11 +240,11 @@ linear_linear(action="update",
 - **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
 
-Then notify the controller via Envoy (best-effort):
+Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER architect completed. Sub-issues ready for planning.")
+envoy_send(target_session="$CONTROLLER_SESSION_ID", message="Worker done: $ISSUE_NUMBER architect completed. Sub-issues ready for planning.")
 ```
-If `envoy_publish` fails, continue — the label is the source of truth.
+If `envoy_send` fails, continue — the label is the source of truth.
 
 ## Common Mistakes
 

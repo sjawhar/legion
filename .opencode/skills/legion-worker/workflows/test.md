@@ -332,9 +332,9 @@ current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
 linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done", "test-passed"])
 ```
 
-Then notify the controller via Envoy (best-effort):
+Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER test passed.")
+envoy_send(target_session="$CONTROLLER_SESSION_ID", message="Worker done: $ISSUE_NUMBER test passed.")
 ```
 
 **If any criterion fails:**
@@ -356,12 +356,12 @@ current_labels = [l.name for l in issue.labels if l.name != "worker-active"]
 linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "worker-done", "test-failed"])
 ```
 
-Then notify the controller via Envoy (best-effort):
+Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER test failed. See PR comments for details.")
+envoy_send(target_session="$CONTROLLER_SESSION_ID", message="Worker done: $ISSUE_NUMBER test failed. See PR comments for details.")
 ```
 
-If `envoy_publish` fails, continue — the label is the source of truth.
+If `envoy_send` fails, continue — the label is the source of truth.
 
 ## Blocking on User Input
 

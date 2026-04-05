@@ -408,11 +408,11 @@ Then remove `worker-active`:
 - **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
 
-Then notify the controller via Envoy (best-effort):
+Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER plan completed. Ready for implementation.")
+envoy_send(target_session="$CONTROLLER_SESSION_ID", message="Worker done: $ISSUE_NUMBER plan completed. Ready for implementation.")
 ```
-If `envoy_publish` fails, continue — the label is the source of truth.
+If `envoy_send` fails, continue — the label is the source of truth.
 
 **CRITICAL:** Only add `worker-done` after successfully posting the plan. Never add this label if:
 - Requirements were unclear and could not be resolved (use `user-input-needed` instead)
