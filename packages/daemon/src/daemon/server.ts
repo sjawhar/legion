@@ -70,6 +70,16 @@ const JSON_HEADERS = { "content-type": "application/json" };
 const MAX_CRASHES = 3;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
+/**
+ * Delay between session creation and prompt delivery to allow the serve process
+ * to bootstrap the Instance context for the new session's directory.
+ * See: https://github.com/sjawhar/legion/issues/237
+ */
+export const SESSION_READY_DELAY_MS = 2000;
+
+const PROMPT_RETRY_ATTEMPTS = 3;
+const PROMPT_RETRY_BASE_MS = 100;
+
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
@@ -296,6 +306,7 @@ export function startServer(opts: ServerOptions): {
             const issueNumber =
               typeof payload.issueNumber === "number" ? payload.issueNumber : undefined;
 
+            const prompt = payload.prompt;
             if (typeof issueId !== "string" || typeof mode !== "string") {
               return badRequest("missing_fields");
             }
@@ -486,6 +497,37 @@ export function startServer(opts: ServerOptions): {
                 subscribeWorkerToEnvoy(actualSessionId, repoRef.owner, repoRef.repo, issueNumber);
               }
             }
+
+            // Deliver initial prompt with delay for session bootstrap (#237)
+            let promptDelivered: boolean | undefined;
+            if (typeof prompt === "string" && prompt.length > 0) {
+              try {
+                await new Promise((resolve) => setTimeout(resolve, SESSION_READY_DELAY_MS));
+                let lastError: Error = new Error("All prompt retry attempts failed");
+                for (let attempt = 0; attempt < PROMPT_RETRY_ATTEMPTS; attempt++) {
+                  try {
+                    await workerAdapter.sendPrompt(actualSessionId, prompt);
+                    promptDelivered = true;
+                    break;
+                  } catch (error) {
+                    lastError = error instanceof Error ? error : new Error(String(error));
+                    if (attempt < PROMPT_RETRY_ATTEMPTS - 1) {
+                      await new Promise((resolve) =>
+                        setTimeout(resolve, PROMPT_RETRY_BASE_MS * 2 ** attempt)
+                      );
+                    }
+                  }
+                }
+                if (promptDelivered !== true) {
+                  throw lastError;
+                }
+              } catch (error) {
+                console.error(
+                  `[dispatch] Failed to deliver prompt to ${workerId}: ${(error as Error).message}`
+                );
+                promptDelivered = false;
+              }
+            }
             opts.feedbackLogger?.log({
               event: "worker.dispatched",
               issueId: normalizedIssueId,
@@ -501,6 +543,7 @@ export function startServer(opts: ServerOptions): {
               id: entry.id,
               port: workerAdapter.getPort(),
               sessionId: entry.sessionId,
+              ...(promptDelivered !== undefined ? { promptDelivered } : {}),
             });
           }
         }
