@@ -601,3 +601,23 @@ func TestGithubSummaryTruncation(t *testing.T) {
 		t.Fatalf("expected emoji body truncated to 500 chars, got %d", len(runes2))
 	}
 }
+
+func TestGithubResourceSubject(t *testing.T) {
+	cases := []struct {
+		owner        string
+		repo         string
+		resourceType string
+		resourceNum  string
+		want         string
+	}{
+		{owner: "acme", repo: "widgets", resourceType: "pr", resourceNum: "42", want: "notifications.github.acme.widgets.pr.42"},
+		{owner: "sjawhar", repo: "legion", resourceType: "issue", resourceNum: "185", want: "notifications.github.sjawhar.legion.issue.185"},
+		{owner: "org", repo: "repo", resourceType: "pr", resourceNum: "1", want: "notifications.github.org.repo.pr.1"},
+	}
+	for _, item := range cases {
+		got := GithubResourceSubject(item.owner, item.repo, item.resourceType, item.resourceNum)
+		if got != item.want {
+			t.Fatalf("GithubResourceSubject(%s, %s, %s, %s) = %s, want %s", item.owner, item.repo, item.resourceType, item.resourceNum, got, item.want)
+		}
+	}
+}

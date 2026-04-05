@@ -15,10 +15,7 @@ type Schema = {
   additionalProperties?: boolean;
 };
 
-const out = resolve(
-  import.meta.dir,
-  "../../envoy/internal/contracts/generated.go",
-);
+const out = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
 
 const file = resolve(import.meta.dir, "../schemas/envelope.schema.json");
 
@@ -43,6 +40,10 @@ func GithubSubject(owner string, repo string, kind string) string {
 
 func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
+}
+
+func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
+	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
 }`;
 
 function title(text: string) {
@@ -61,13 +62,7 @@ function kind(prop: Prop, req: Set<string>, key: string) {
   return `*${base}`;
 }
 
-function field(
-  key: string,
-  prop: Prop,
-  req: Set<string>,
-  wide: number,
-  types: number,
-) {
+function field(key: string, prop: Prop, req: Set<string>, wide: number, types: number) {
   const n = name(key);
   const t = kind(prop, req, key);
   const tag = req.has(key) ? key : `${key},omitempty`;
@@ -88,7 +83,7 @@ function check(key: string, prop: Prop) {
 function enums(key: string, prop: Prop) {
   if (!prop.enum?.length) return "";
   const n = name(key);
-  const list = prop.enum.map((item) => `\"${item}\"`).join(", ");
+  const list = prop.enum.map((item) => `"${item}"`).join(", ");
   return [
     `\tswitch e.${n} {`,
     `\tcase ${list}:`,
@@ -99,17 +94,12 @@ function enums(key: string, prop: Prop) {
 }
 
 function render(schema: Schema) {
-  if (schema.type !== "object")
-    throw new Error("envelope schema must be an object");
+  if (schema.type !== "object") throw new Error("envelope schema must be an object");
   const keys = Object.keys(schema.properties);
   const req = new Set(schema.required ?? []);
   const wide = Math.max(...keys.map((key) => name(key).length));
-  const types = Math.max(
-    ...keys.map((key) => kind(schema.properties[key], req, key).length),
-  );
-  const body = keys
-    .map((key) => field(key, schema.properties[key], req, wide, types))
-    .join("\n");
+  const types = Math.max(...keys.map((key) => kind(schema.properties[key], req, key).length));
+  const body = keys.map((key) => field(key, schema.properties[key], req, wide, types)).join("\n");
   const checks = (schema.required ?? [])
     .map((key) => {
       const prop = schema.properties[key];

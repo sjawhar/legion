@@ -11,3 +11,12 @@ export function githubSubject(owner: string, repo: string, kind: string) {
 export function slackSubject(team: string, channel: string, kind: string) {
   return `notifications.slack.${team}.${channel}.${kind}`;
 }
+
+export function githubResourceSubject(
+  owner: string,
+  repo: string,
+  resourceType: string,
+  resourceNumber: number | string
+) {
+  return `notifications.github.${owner}.${repo}.${resourceType}.${resourceNumber}`;
+}
