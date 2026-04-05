@@ -1,12 +1,13 @@
 import { isAbsolute } from "node:path";
 import type { CodebaseIndexResponse } from "../index/types";
 import { getBackend, isBackendName } from "../state/backends/index";
-import { buildCollectedState } from "../state/decision";
+import { buildCollectedState, canDispatchMode } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
 import { fetchGitHubProjectItems } from "../state/github-fetch";
 import {
   CollectedState,
   computeSessionId,
+  type IssueState,
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
@@ -164,6 +165,7 @@ export function startServer(opts: ServerOptions): {
   const startedAt = Date.now();
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
+  const issueStateCache = new Map<string, IssueState>();
   const releaseGauges = registerGauges("daemon-server", () => {
     let starting = 0;
     let running = 0;
@@ -319,6 +321,29 @@ export function startServer(opts: ServerOptions): {
               return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
             }
 
+            // Phase prerequisite validation for gated modes
+            const normalizedIssueId = issueId.toLowerCase();
+            const forceDispatch = payload.force === true;
+            if (!forceDispatch) {
+              const cachedState = issueStateCache.get(normalizedIssueId);
+              const validation = canDispatchMode(cachedState, mode as WorkerModeLiteral);
+              if (!validation.valid) {
+                return jsonResponse(
+                  {
+                    error: "phase_prerequisite_unmet",
+                    attemptedMode: mode,
+                    suggestedAction: validation.suggestedAction,
+                    reason: validation.reason,
+                  },
+                  422
+                );
+              }
+            } else {
+              console.warn(
+                `[dispatch] force=true for ${normalizedIssueId} mode=${mode} — skipping phase validation`
+              );
+            }
+
             let resolvedWorkspace: string | null = null;
             if (typeof repo === "string") {
               if (!opts.paths) {
@@ -349,7 +374,6 @@ export function startServer(opts: ServerOptions): {
               return badRequest("missing repo or workspace");
             }
 
-            const normalizedIssueId = issueId.toLowerCase();
             const workerId = `${normalizedIssueId}-${mode}`.toLowerCase();
             const existing = workers.get(workerId);
             if (existing && existing.status !== "dead") {
@@ -732,6 +756,11 @@ export function startServer(opts: ServerOptions): {
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.legionId);
 
+            // Populate dispatch validation cache
+            for (const [issueId, issueState] of Object.entries(state.issues)) {
+              issueStateCache.set(issueId.toLowerCase(), issueState);
+            }
+
             if (opts.feedbackLogger) {
               for (const [issueId, issueState] of Object.entries(state.issues)) {
                 opts.feedbackLogger.log({
@@ -795,6 +824,12 @@ export function startServer(opts: ServerOptions): {
             const daemonUrl = `http://127.0.0.1:${server.port}`;
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.legionId);
+
+            // Populate dispatch validation cache
+            for (const [issueId, issueState] of Object.entries(state.issues)) {
+              issueStateCache.set(issueId.toLowerCase(), issueState);
+            }
+
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

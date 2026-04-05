@@ -179,6 +179,70 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   rebase_pr: WorkerMode.REVIEW,
 };
 
+/**
+ * Modes that require server-side validation before dispatch.
+ * Non-gated modes are always allowed (backward compatible).
+ */
+export const GATED_MODES: ReadonlySet<WorkerModeLiteral> = new Set<WorkerModeLiteral>([
+  WorkerMode.MERGE,
+]);
+
+/**
+ * Actions that represent actual worker dispatch (not transitions/resumes/skips).
+ */
+const DISPATCH_ACTIONS: ReadonlySet<string> = new Set([
+  "dispatch_architect",
+  "dispatch_planner",
+  "dispatch_implementer",
+  "dispatch_implementer_for_retro",
+  "dispatch_tester",
+  "dispatch_reviewer",
+  "dispatch_merger",
+]);
+
+export type DispatchValidation =
+  | { valid: true }
+  | { valid: false; suggestedAction: ActionType; reason: string };
+
+/**
+ * Validate whether a worker mode can be dispatched given cached issue state.
+ *
+ * For gated modes (initially: merge), the cached suggestedAction must be a
+ * dispatch action that maps to the requested mode. This prevents the controller
+ * from bypassing lifecycle phases (e.g., skipping retro before merge).
+ *
+ * For non-gated modes, always returns valid (backward compatible).
+ * For cache misses (undefined state), always returns valid (graceful degradation).
+ */
+export function canDispatchMode(
+  cachedState: IssueState | undefined,
+  requestedMode: WorkerModeLiteral
+): DispatchValidation {
+  if (!GATED_MODES.has(requestedMode)) {
+    return { valid: true };
+  }
+  if (cachedState === undefined) {
+    return { valid: true };
+  }
+
+  const { suggestedAction } = cachedState;
+  const suggestedMode = ACTION_TO_MODE[suggestedAction];
+
+  if (DISPATCH_ACTIONS.has(suggestedAction) && suggestedMode === requestedMode) {
+    return { valid: true };
+  }
+
+  return {
+    valid: false,
+    suggestedAction,
+    reason:
+      `Cannot dispatch "${requestedMode}" worker: ` +
+      `current suggestedAction is "${suggestedAction}" ` +
+      `(maps to "${suggestedMode}" mode). ` +
+      `The issue must reach the correct lifecycle state before "${requestedMode}" can be dispatched.`,
+  };
+}
+
 const VALID_WORKER_MODES = new Set<string>([
   WorkerMode.ARCHITECT,
   WorkerMode.PLAN,

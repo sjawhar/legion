@@ -6,12 +6,19 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { ACTION_TO_MODE, buildCollectedState, buildIssueState, suggestAction } from "../decision";
+import {
+  ACTION_TO_MODE,
+  buildCollectedState,
+  buildIssueState,
+  canDispatchMode,
+  suggestAction,
+} from "../decision";
 import {
   CiStatus,
   CollectedState,
   computeSessionId,
   type FetchedIssueData,
+  type IssueState,
   IssueStatus,
   MergeableStatus,
 } from "../types";
@@ -1041,5 +1048,126 @@ describe("buildCollectedState", () => {
     expect(state.issues["ENG-21"].suggestedAction).toBe("dispatch_planner");
     expect(state.issues["ENG-22"].suggestedAction).toBe("relay_user_feedback");
     expect(state.issues["ENG-23"].suggestedAction).toBe("skip");
+  });
+});
+
+describe("canDispatchMode", () => {
+  function makeIssueState(overrides: Partial<IssueState>): IssueState {
+    return {
+      status: IssueStatus.RETRO,
+      labels: ["worker-done"],
+      hasPr: true,
+      prIsDraft: false,
+      ciStatus: null,
+      mergeableStatus: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      suggestedAction: "dispatch_merger",
+      sessionId: "ses_test123",
+      hasUserFeedback: false,
+      isBlocked: false,
+      source: null,
+      ...overrides,
+    };
+  }
+
+  // --- Gated mode: merge ---
+
+  it("allows merge when suggestedAction is dispatch_merger", () => {
+    const state = makeIssueState({ suggestedAction: "dispatch_merger" });
+    const result = canDispatchMode(state, "merge");
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects merge when suggestedAction is transition_to_retro", () => {
+    const state = makeIssueState({
+      status: IssueStatus.NEEDS_REVIEW,
+      suggestedAction: "transition_to_retro",
+    });
+    const result = canDispatchMode(state, "merge");
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.suggestedAction).toBe("transition_to_retro");
+      expect(result.reason).toContain("merge");
+    }
+  });
+
+  it("rejects merge when suggestedAction is dispatch_implementer_for_retro", () => {
+    const state = makeIssueState({
+      status: IssueStatus.RETRO,
+      suggestedAction: "dispatch_implementer_for_retro",
+      labels: [],
+    });
+    const result = canDispatchMode(state, "merge");
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects merge when suggestedAction is skip", () => {
+    const state = makeIssueState({
+      suggestedAction: "skip",
+      hasLiveWorker: true,
+    });
+    const result = canDispatchMode(state, "merge");
+    expect(result.valid).toBe(false);
+  });
+
+  // --- Cache miss (undefined state) ---
+
+  it("allows merge when cachedState is undefined (cache miss)", () => {
+    const result = canDispatchMode(undefined, "merge");
+    expect(result.valid).toBe(true);
+  });
+
+  // --- Non-gated modes (backward compatible) ---
+
+  it("allows architect regardless of cached state", () => {
+    const state = makeIssueState({ suggestedAction: "skip" });
+    const result = canDispatchMode(state, "architect");
+    expect(result.valid).toBe(true);
+  });
+
+  it("allows plan regardless of cached state", () => {
+    const state = makeIssueState({ suggestedAction: "dispatch_merger" });
+    const result = canDispatchMode(state, "plan");
+    expect(result.valid).toBe(true);
+  });
+
+  it("allows implement regardless of cached state", () => {
+    const state = makeIssueState({ suggestedAction: "skip" });
+    const result = canDispatchMode(state, "implement");
+    expect(result.valid).toBe(true);
+  });
+
+  it("allows test regardless of cached state", () => {
+    const state = makeIssueState({ suggestedAction: "skip" });
+    const result = canDispatchMode(state, "test");
+    expect(result.valid).toBe(true);
+  });
+
+  it("allows review regardless of cached state", () => {
+    const state = makeIssueState({ suggestedAction: "skip" });
+    const result = canDispatchMode(state, "review");
+    expect(result.valid).toBe(true);
+  });
+
+  it("allows non-gated mode when cachedState is undefined", () => {
+    const result = canDispatchMode(undefined, "implement");
+    expect(result.valid).toBe(true);
+  });
+
+  // --- Error message content ---
+
+  it("includes attempted mode and suggestedAction in rejection reason", () => {
+    const state = makeIssueState({
+      status: IssueStatus.NEEDS_REVIEW,
+      suggestedAction: "transition_to_retro",
+    });
+    const result = canDispatchMode(state, "merge");
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.reason).toContain("merge");
+      expect(result.reason).toContain("transition_to_retro");
+    }
   });
 });

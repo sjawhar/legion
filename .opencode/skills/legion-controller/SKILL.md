@@ -271,6 +271,8 @@ Pipeline phases MUST run in order: architect → plan → implement → test →
 
 Simple issues go through every phase — they just go through faster. Complexity is not a reason to skip phases.
 
+**Daemon enforcement:** The daemon validates lifecycle ordering on `POST /workers`. Dispatching a gated mode (e.g., merge) when the issue hasn't reached the correct state returns 422. The controller should follow `suggestedAction` one step at a time — never construct multi-step dispatch pipelines. If the daemon rejects a dispatch, the issue needs to progress through intermediate phases first.
+
 ### Role Boundary
 
 The controller MUST NOT:
