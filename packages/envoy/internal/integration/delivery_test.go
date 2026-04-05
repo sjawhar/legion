@@ -508,9 +508,22 @@ func TestE2E_ReplyToInBody(t *testing.T) {
 	if len(*bodies) == 0 {
 		t.Fatal("no delivery received")
 	}
-	body := (*bodies)[0]
-	if !contains(body, "ses_sender_xyz") {
-		t.Fatalf("body should contain source session 'ses_sender_xyz', got: %s", body)
+	var parsed struct {
+		Parts []map[string]string `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte((*bodies)[0]), &parsed); err != nil {
+		t.Fatalf("failed to parse body: %v", err)
+	}
+	if len(parsed.Parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(parsed.Parts))
+	}
+	text := parsed.Parts[0]["text"]
+	if !contains(text, "ses_sender_xyz") {
+		t.Fatalf("text should contain source session 'ses_sender_xyz', got: %s", text)
+	}
+	replyInstruction := `Use envoy_send(target_session="ses_sender_xyz", message="...") to reply to this message.`
+	if !contains(text, replyInstruction) {
+		t.Fatalf("text should contain exact reply instruction %q, got: %s", replyInstruction, text)
 	}
 }
 

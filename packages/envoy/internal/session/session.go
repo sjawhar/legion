@@ -85,7 +85,11 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	if item.SourceSession != "" {
 		header = fmt.Sprintf("[NOTIFICATION from %s (reply-to: %s)]", item.Source, item.SourceSession)
 	}
-	return fmt.Sprintf("%s\n%s\n\nTopic: %s\nEvent ID: %s", header, item.PayloadSummary, item.Topic, item.EventID)
+	text := fmt.Sprintf("%s\n%s\n\nTopic: %s\nEvent ID: %s", header, item.PayloadSummary, item.Topic, item.EventID)
+	if item.SourceSession != "" {
+		text += fmt.Sprintf("\nUse envoy_send(target_session=\"%s\", message=\"...\") to reply to this message.", item.SourceSession)
+	}
+	return text
 }
 
 func (d Deliverer) prompt(port int, sessionID string, text string) error {
