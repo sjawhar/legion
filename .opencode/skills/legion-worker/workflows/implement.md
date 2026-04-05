@@ -368,6 +368,10 @@ If no bot comments exist, skip to step 7.5.
 
 Write handoff data for downstream phases (non-blocking):
 
+First, assess which injected learnings were helpful:
+
+> Review the learnings injected at Step 1.5. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
+
 ```bash
 legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || true
 {
@@ -375,7 +379,9 @@ legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || 
   "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
   "deviations": ["List any deviations from the plan with rationale"],
   "openQuestions": ["Unresolved questions for downstream phases"],
-  "subPlanningNeeded": false
+  "subPlanningNeeded": false,
+  "learningsInjected": ["<canonical docs/solutions/ paths injected into this phase>"],
+  "learningsHelpful": ["<subset that materially helped>"]
 }
 HANDOFF
 ```
@@ -386,6 +392,8 @@ Key fields:
 - `deviations`: List of deviations from the plan with rationale for each
 - `openQuestions`: Unresolved questions or concerns for downstream phases
 - `subPlanningNeeded`: Boolean — set to `true` if discovered complexity was greater than planned
+- `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
+- `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
 ### 8. Exit
 
@@ -508,6 +516,10 @@ Reply in PR comment threads acknowledging fixes. Reference specific changes made
 
 Write handoff data for downstream phases (non-blocking):
 
+First, assess which injected learnings were helpful:
+
+> Review the learnings injected at Step 1.5. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
+
 ```bash
 legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || true
 {
@@ -515,7 +527,9 @@ legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || 
   "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
   "deviations": ["List any deviations from the plan with rationale"],
   "openQuestions": ["Unresolved questions for downstream phases"],
-  "subPlanningNeeded": false
+  "subPlanningNeeded": false,
+  "learningsInjected": ["<canonical docs/solutions/ paths injected into this phase>"],
+  "learningsHelpful": ["<subset that materially helped>"]
 }
 HANDOFF
 ```
@@ -526,6 +540,8 @@ Key fields:
 - `deviations`: List of deviations from the plan with rationale for each
 - `openQuestions`: Unresolved questions or concerns for downstream phases
 - `subPlanningNeeded`: Boolean — set to `true` if discovered complexity was greater than planned
+- `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
+- `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
 ### 6. Exit
 

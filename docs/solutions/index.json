@@ -47,7 +47,8 @@
       "deterministic-session-ids.md",
       "daemon/envoy-auto-subscription-patterns.md",
       "daemon/server-side-dispatch-validation.md",
-      "daemon/prompt-delivery-bootstrap-delay.md"
+      "daemon/prompt-delivery-bootstrap-delay.md",
+      "daemon/handoff-schema-migration-patterns.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -65,7 +66,8 @@
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "testing/worker-smoke-testing-requirements.md",
       "daemon/envoy-auto-subscription-patterns.md",
-      "skill-patterns/cross-cutting-workflow-concerns.md"
+      "skill-patterns/cross-cutting-workflow-concerns.md",
+      "daemon/handoff-schema-migration-patterns.md"
     ],
     ".opencode/skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
@@ -285,6 +287,24 @@
     "tag:merge-ordering": ["controller/controller-session-anti-patterns.md"],
     "tag:smoke-testing": ["testing/worker-smoke-testing-requirements.md"],
     "tag:quality-gates": ["testing/worker-smoke-testing-requirements.md"],
+    "packages/daemon/src/handoff": [
+      "daemon/handoff-schema-migration-patterns.md"
+    ],
+    "tag:handoff": [
+      "daemon/handoff-schema-migration-patterns.md"
+    ],
+    "tag:zod": [
+      "daemon/handoff-schema-migration-patterns.md"
+    ],
+    "tag:schema-migration": [
+      "daemon/handoff-schema-migration-patterns.md"
+    ],
+    "tag:backward-compatibility": [
+      "daemon/handoff-schema-migration-patterns.md"
+    ],
+    "tag:discriminated-union": [
+      "daemon/handoff-schema-migration-patterns.md"
+    ],
     "packages/envoy/internal/session": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",

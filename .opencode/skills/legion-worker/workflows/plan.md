@@ -329,6 +329,10 @@ This section is informational for human readers. The structured data is in the h
 
 After posting the plan, write handoff data for downstream phases:
 
+First, assess which injected learnings were helpful:
+
+> Review the learnings injected at Step 1.7. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
+
 ```bash
 legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
   {
@@ -341,7 +345,8 @@ legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
     "skipArchitect": false
   },
   "concerns": ["Race condition in state transitions noted by Metis"],
-  "learningsUsed": ["docs/solutions/state/race-conditions.md"],
+  "learningsInjected": ["state/race-conditions.md"],
+  "learningsHelpful": ["state/race-conditions.md"],
   "workflowRecommendation": "Standard pipeline — all phases needed",
   "requiredSkills": {
     "implement": ["reskin-environment", "task-workflow"],
@@ -357,7 +362,8 @@ legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
 - `independentTasks`: Number of tasks marked as independent (can parallelize)
 - `routingHints`: Planner's assessment of complexity and pipeline needs
 - `concerns`: Combined concerns from Metis analysis and planner judgment
-- `learningsUsed`: List of `docs/solutions/` files injected in step 1.7
+- `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
+- `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 - `workflowRecommendation`: Freeform text for future adaptive routing
 - `requiredSkills`: Per-phase skill arrays from step 1.2 (optional — omit if no project-specific skills found)
   - `implement`: Skills the implementer should invoke before coding

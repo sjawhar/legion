@@ -71,7 +71,7 @@ If present, implementer's `trickyParts` and `deviations` can highlight areas to 
 
 Also check for plan-phase context and apply it explicitly during review:
 - If `plan.concerns` exists, verify the implementation addresses each concern or document why a concern is not applicable.
-- If `plan.learningsUsed` references solution docs/patterns, verify the implementation follows those patterns (or justify deviations).
+- If `plan.learningsInjected` references solution docs/patterns, verify the implementation follows those patterns (or justify deviations).
 - If `plan.workflowRecommendation` includes review-relevant guidance, follow it.
 
 Plan-phase fields are optional/advisory — absence must not block review execution. Continue using issue requirements and implementation evidence.
@@ -200,6 +200,10 @@ Group related issues when they affect the same area.
 
 Write handoff data (non-blocking) — BEFORE setting PR draft status:
 
+First, assess which injected learnings were helpful:
+
+> Review the learnings injected at the start of this phase. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
+
 ```bash
 legion handoff write --phase review --workspace . <<'HANDOFF' 2>/dev/null || true
 {
@@ -210,7 +214,9 @@ legion handoff write --phase review --workspace . <<'HANDOFF' 2>/dev/null || tru
   "keyFindings": [
     {"severity": "P2", "file": "src/auth.ts", "description": "Missing null check on line 45"},
     {"severity": "P2", "file": "src/session.ts", "description": "Session TTL should be configurable"}
-  ]
+  ],
+  "learningsInjected": ["<canonical docs/solutions/ paths injected into this phase>"],
+  "learningsHelpful": ["<subset that materially helped>"]
 }
 HANDOFF
 ```
@@ -221,6 +227,8 @@ Replace the example counts and findings with actual review results:
 - `minor`: count of MINOR/P3 suggestions found
 - `verdict`: "approved" if no CRITICAL issues, "changes_requested" if any CRITICAL issues found
 - `keyFindings`: list of `{"severity": "P1"|"P2"|"P3", "file": "path", "description": "..."}`
+- `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
+- `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
 You MUST attempt the handoff write before setting PR draft status or signaling completion. The `|| true` ensures CLI failures don't block you, but skipping this step entirely is not acceptable. If the write fails, note it in your PR comment.
 
