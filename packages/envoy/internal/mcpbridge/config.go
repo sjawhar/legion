@@ -3,38 +3,32 @@ package mcpbridge
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 )
 
-// ServerConfig describes a single MCP server to connect to.
 type ServerConfig struct {
 	Name          string            `json:"name"`
 	Transport     string            `json:"transport"`
 	Command       []string          `json:"command"`
+	URL           string            `json:"url"`
 	Env           map[string]string `json:"env"`
 	Resources     []string          `json:"resources"`
 	Source        string            `json:"source"`
 	TopicTemplate string            `json:"topic_template"`
 	URIPattern    string            `json:"uri_pattern"`
-
-	// compiled is the pre-compiled regex from URIPattern.
 	compiled *regexp.Regexp
 }
 
-// Config is the top-level configuration for the MCP bridge.
 type Config struct {
 	Servers []ServerConfig `json:"servers"`
 }
 
-// CompiledPattern returns the pre-compiled regex for URI extraction.
-func (s *ServerConfig) CompiledPattern() *regexp.Regexp {
-	return s.compiled
-}
+func (s *ServerConfig) CompiledPattern() *regexp.Regexp { return s.compiled }
 
-// LoadConfig reads and validates the MCP bridge configuration from a JSON file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -66,11 +60,30 @@ func (s *ServerConfig) validate() error {
 	if strings.TrimSpace(s.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
-	if s.Transport != "stdio" {
-		return fmt.Errorf("transport must be \"stdio\", got %q", s.Transport)
+	if s.Transport == "" {
+		s.Transport = "stdio"
 	}
-	if len(s.Command) == 0 {
-		return fmt.Errorf("command is required")
+	switch s.Transport {
+	case "stdio":
+		if s.URL != "" {
+			return fmt.Errorf("url must not be set for stdio transport")
+		}
+		if len(s.Command) == 0 {
+			return fmt.Errorf("command is required")
+		}
+	case "http":
+		if len(s.Command) > 0 {
+			return fmt.Errorf("command must not be set for http transport")
+		}
+		if s.URL == "" {
+			return fmt.Errorf("url is required for http transport")
+		}
+		u, err := url.Parse(s.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("url must be a valid http:// or https:// URL")
+		}
+	default:
+		return fmt.Errorf("transport must be \"stdio\" or \"http\", got %q", s.Transport)
 	}
 	if strings.TrimSpace(s.Source) == "" {
 		return fmt.Errorf("source is required")
@@ -81,15 +94,11 @@ func (s *ServerConfig) validate() error {
 	if strings.TrimSpace(s.URIPattern) == "" {
 		return fmt.Errorf("uri_pattern is required")
 	}
-
-	// Compile URI pattern.
 	re, err := regexp.Compile(s.URIPattern)
 	if err != nil {
 		return fmt.Errorf("uri_pattern: %w", err)
 	}
 	s.compiled = re
-
-	// Verify every {placeholder} in topic_template has a matching named capture group.
 	groups := make(map[string]bool)
 	for _, name := range re.SubexpNames() {
 		if name != "" {
@@ -105,16 +114,14 @@ func (s *ServerConfig) validate() error {
 			return fmt.Errorf("topic_template placeholder {%s} has no matching named capture group in uri_pattern", ph)
 		}
 	}
-
-	// Verify command[0] exists.
-	if _, err := exec.LookPath(s.Command[0]); err != nil {
-		return fmt.Errorf("command[0] %q not found: %w", s.Command[0], err)
+	if s.Transport == "stdio" {
+		if _, err := exec.LookPath(s.Command[0]); err != nil {
+			return fmt.Errorf("command[0] %q not found: %w", s.Command[0], err)
+		}
 	}
-
 	return nil
 }
 
-// extractPlaceholders returns all {name} placeholder names from a template string.
 func extractPlaceholders(tmpl string) []string {
 	var out []string
 	for {
@@ -135,7 +142,6 @@ func extractPlaceholders(tmpl string) []string {
 	return out
 }
 
-// RenderTopic fills topic_template placeholders with values extracted from a URI.
 func (s *ServerConfig) RenderTopic(uri string) (string, error) {
 	match := s.compiled.FindStringSubmatch(uri)
 	if match == nil {
