@@ -52,6 +52,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		var body struct {
+			Source        string `json:"source"`
 			SourceSession string `json:"source_session"`
 			Topic         string `json:"topic"`
 			Message       string `json:"message"`
@@ -68,9 +69,12 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			http.Error(w, "cannot publish to agent topics; use /v1/messages/send for direct agent messages", http.StatusBadRequest)
 			return
 		}
+		if body.Source == "" {
+			body.Source = "agent"
+		}
 		item := contracts.Envelope{
 			EventID:        id.New(),
-			Source:         "agent",
+			Source:         body.Source,
 			SourceSession:  body.SourceSession,
 			SourceEventID:  id.New(),
 			Topic:          body.Topic,

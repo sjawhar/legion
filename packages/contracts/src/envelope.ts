@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const EnvelopeSchema = z.object({
   event_id: z.string().min(1),
-  source: z.enum(["agent", "github", "slack", "whatsapp"]),
+  source: z.enum(["agent", "github", "slack", "whatsapp", "ghostwispr"]),
   source_event_id: z.string().min(1),
   source_session: z.string().optional(),
   topic: z.string().min(1),

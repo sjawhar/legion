@@ -47,3 +47,49 @@ func TestPerPRFiltering(t *testing.T) {
 		}
 	}
 }
+
+func TestGhostWisprTopicFiltering(t *testing.T) {
+	// Wildcard subscription for all Ghost Wispr events
+	pattern := "notifications.ghostwispr.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		// Should match: ghostwispr events
+		{topic: "notifications.ghostwispr.rec-abc123.transcript", ok: true},
+		{topic: "notifications.ghostwispr.rec-abc123.summary", ok: true},
+		{topic: "notifications.ghostwispr.rec-xyz789.transcript", ok: true},
+		// Should NOT match: other source topics
+		{topic: "notifications.github.sjawhar.legion.pr", ok: false},
+		{topic: "notifications.slack.T123.C456.message", ok: false},
+		{topic: "notifications.agent.ses_123", ok: false},
+	}
+	for _, item := range cases {
+		got := Match(pattern, item.topic)
+		if got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+}
+
+func TestGhostWisprPerRecordingFiltering(t *testing.T) {
+	// Subscription for a specific recording's events
+	pattern := "notifications.ghostwispr.rec-abc123.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		// Should match: target recording events
+		{topic: "notifications.ghostwispr.rec-abc123.transcript", ok: true},
+		{topic: "notifications.ghostwispr.rec-abc123.summary", ok: true},
+		// Should NOT match: different recording
+		{topic: "notifications.ghostwispr.rec-xyz789.transcript", ok: false},
+		{topic: "notifications.ghostwispr.rec-xyz789.summary", ok: false},
+	}
+	for _, item := range cases {
+		got := Match(pattern, item.topic)
+		if got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+}

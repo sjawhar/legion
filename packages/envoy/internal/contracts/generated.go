@@ -46,9 +46,9 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("trace_id is required")
 	}
 	switch e.Source {
-	case "agent", "github", "slack", "whatsapp":
+	case "agent", "github", "slack", "whatsapp", "ghostwispr":
 	default:
-		return fmt.Errorf("source must be one of: agent, github, slack, whatsapp")
+		return fmt.Errorf("source must be one of: agent, github, slack, whatsapp, ghostwispr")
 	}
 	return nil
 }
@@ -73,4 +73,10 @@ func SlackSubject(team string, channel string, kind string) string {
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
 	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
+}
+
+const GhostWisprTopicPrefix = "notifications.ghostwispr."
+
+func GhostWisprSubject(recordingId string, kind string) string {
+	return GhostWisprTopicPrefix + recordingId + "." + kind
 }
