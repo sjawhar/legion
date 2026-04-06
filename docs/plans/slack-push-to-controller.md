@@ -125,7 +125,7 @@ Direct-to-serve can exist as a fallback path if daemon endpointing is temporaril
 
 ### Filter rules (default deny, explicit allow)
 
-- **Workspace allowlist:** only `trajectorylabs` workspace/team ID.
+- **Team allowlist:** only team ID `T09FRELLTS8` (use real Slack `team_id`, not workspace slug like `trajectorylabs`).
 - **Channel allowlist:** explicit list including `#engineering` channel ID(s).
 - **User allowlist/priority:** `@sami` and optional trusted operators.
 - **Bot/self suppression:** drop events from bot users including self.

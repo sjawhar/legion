@@ -100,6 +100,8 @@ The daemon subscribes the controller to these topics:
 
 **No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events. Polling handles board-level state adequately on its ~30s cycle. Only CI events (time-sensitive for pipeline progression) get Envoy subscriptions.
 
+> **Slack topic format:** Slack topics use the real `team_id` (e.g., `T09FRELLTS8`), not the human-readable workspace slug (e.g., `trajectorylabs`). The Slack receiver publishes with the actual team ID from the Slack API. If you manually subscribe to specific Slack channels, use `notifications.slack.<team_id>.<channel_id>.mention` — see the Envoy skill for full topic format reference.
+
 ### CI Event Handling
 
 When a CI event is received (via `notifications.github.{owner}.{repo}.ci`), it indicates a `check_run` or `check_suite` status change on a PR in that repo. The controller should:
