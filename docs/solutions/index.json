@@ -320,13 +320,15 @@
       "architecture-patterns/nats-kv-graceful-degradation.md",
       "envoy/listener-routing-by-topic-prefix.md",
       "envoy/async-health-startup-pattern.md",
-      "envoy/contracts-and-handler-patterns.md"
+      "envoy/contracts-and-handler-patterns.md",
+      "envoy/nats-bus-client-self-healing.md"
     ],
     "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md", "ci/envoy-plugin-release-versioning.md"],
     "tag:nats": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
-      "architecture-patterns/nats-kv-graceful-degradation.md"
+      "architecture-patterns/nats-kv-graceful-degradation.md",
+      "envoy/nats-bus-client-self-healing.md"
     ],
     "tag:kv": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
@@ -344,7 +346,8 @@
       "envoy/structured-json-summary-patterns.md",
       "daemon/envoy-auto-subscription-patterns.md",
       "testing/bun-fetch-mocking-patterns.md",
-      "envoy/listener-routing-by-topic-prefix.md"
+      "envoy/listener-routing-by-topic-prefix.md",
+      "envoy/nats-bus-client-self-healing.md"
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md",
@@ -355,7 +358,7 @@
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
-    "tag:testcontainers": ["testing/nats-kv-testing-patterns.md"],
+    "tag:testcontainers": ["testing/nats-kv-testing-patterns.md", "envoy/nats-bus-client-self-healing.md"],
     "tag:integration-testing": [
       "testing/nats-kv-testing-patterns.md",
       "envoy/listener-routing-by-topic-prefix.md"
@@ -395,6 +398,12 @@
     "tag:codebase-index": ["daemon/codebase-index-file-placement.md"],
     "tag:xdg-state": ["daemon/codebase-index-file-placement.md"],
     "tag:legionDir": ["daemon/codebase-index-file-placement.md"],
-    "tag:scanner-exclusions": ["daemon/codebase-index-file-placement.md"]
+    "tag:scanner-exclusions": ["daemon/codebase-index-file-placement.md"],
+    "packages/envoy/internal/bus": ["envoy/nats-bus-client-self-healing.md"],
+    "tag:recovery": ["envoy/nats-bus-client-self-healing.md"],
+    "tag:jetstream": ["envoy/nats-bus-client-self-healing.md"],
+    "tag:health-check": ["envoy/nats-bus-client-self-healing.md"],
+    "tag:subscription": ["envoy/nats-bus-client-self-healing.md"],
+    "tag:goroutine-serialization": ["envoy/nats-bus-client-self-healing.md"]
   }
 }
