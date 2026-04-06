@@ -19,6 +19,7 @@ import {
 } from "./legions-registry";
 import { RoleServeManager } from "./multi-serve";
 import { isPortFree } from "./ports";
+import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter, RuntimeStartOptions } from "./runtime/types";
 import { startServer } from "./server";
@@ -278,7 +279,8 @@ export async function startDaemon(
   let controllerRecreates = 0;
   let indexInitializations = 0;
   let indexIncrementalUpdates = 0;
-
+  let rssRestarts = 0;
+  let lastRssCheckAt = 0;
   let controllerState: ControllerState | undefined;
 
   registerSignals();
@@ -293,6 +295,7 @@ export async function startDaemon(
     daemon_index_initializations: indexInitializations,
     daemon_index_incrementals: indexIncrementalUpdates,
     daemon_controller_present: controllerState ? 1 : 0,
+    daemon_rss_restarts: rssRestarts,
     daemon_role_serves: roleServeManager?.getEntries().length ?? 0,
   }));
   const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
@@ -591,82 +594,119 @@ export async function startDaemon(
         healthTicks += 1;
         const serveHealthy = await resolvedDeps.adapter.healthy();
 
+        // Determine if the shared serve needs a restart and why.
+        let restartReason: string | null = null;
+        let stopBeforeRestart = false;
+
         if (!serveHealthy) {
-          // Only restart the serve if something needs it (active workers or internal controller).
-          // With external controller + 0 workers, let the serve stay down — ensureRunning() starts it on demand.
+          // Only restart if something needs it (active workers or internal controller).
+          // With external controller + 0 workers, let the serve stay down.
           const state = await resolvedDeps.readStateFile(config.stateFilePath);
           const liveWorkers = Object.values(state.workers).filter(
             (e) => e.status !== "dead" && e.status !== "stopped"
           );
-          const needsRestart = liveWorkers.length > 0 || hasInternalController;
-
-          if (needsRestart) {
-            console.error("Shared serve is unhealthy, attempting restart...");
-            try {
-              await resolvedDeps.adapter.start(serveStartOpts);
-              sharedServeRestarts += 1;
-              console.log(`Shared serve restarted on port ${sharedServePort}`);
-
-              console.log(
-                `Recreating ${liveWorkers.length} active worker sessions after serve restart...`
-              );
-              const BATCH_SIZE = 10;
-              for (let i = 0; i < liveWorkers.length; i += BATCH_SIZE) {
-                const batch = liveWorkers.slice(i, i + BATCH_SIZE);
-                await Promise.allSettled(
-                  batch.map(async (entry) => {
-                    try {
-                      const actualId = await resolvedDeps.adapter.createSession(
-                        entry.sessionId,
-                        entry.workspace
-                      );
-                      if (actualId !== entry.sessionId) {
-                        console.warn(
-                          `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
-                        );
-                      }
-                    } catch {
-                      // Best-effort session re-creation
-                    }
-                  })
-                );
+          if (liveWorkers.length > 0 || hasInternalController) {
+            restartReason = "unhealthy";
+          }
+        } else if (config.maxRssBytes > 0) {
+          // Serve is healthy — check RSS for bmalloc leak mitigation.
+          const now = Date.now();
+          if (now - lastRssCheckAt >= config.rssCheckIntervalMs) {
+            lastRssCheckAt = now;
+            const pid = resolvedDeps.adapter.getServePid();
+            if (pid > 0) {
+              const rssBytes = readProcessRssBytes(pid);
+              if (rssBytes !== null && rssBytes > config.maxRssBytes) {
+                const rssGb = (rssBytes / 1024 / 1024 / 1024).toFixed(2);
+                const thresholdGb = (config.maxRssBytes / 1024 / 1024 / 1024).toFixed(2);
+                restartReason = `RSS ${rssGb}GB exceeds threshold ${thresholdGb}GB`;
+                stopBeforeRestart = true;
               }
-
-              if (controllerState?.port) {
-                try {
-                  const actualControllerSessionId = await resolvedDeps.adapter.createSession(
-                    controllerState.sessionId,
-                    controllerWorkspace
-                  );
-                  if (actualControllerSessionId !== controllerState.sessionId) {
-                    console.warn(
-                      `Controller: session ID changed ${controllerState.sessionId} -> ${actualControllerSessionId}`
-                    );
-                  }
-                  // Unsubscribe old session ID if it changed
-                  if (actualControllerSessionId !== controllerState.sessionId) {
-                    unsubscribeFromEnvoy(controllerState.sessionId);
-                  }
-                  controllerState = {
-                    ...controllerState,
-                    sessionId: actualControllerSessionId,
-                    port: sharedServePort,
-                  };
-                  controllerRecreates += 1;
-                  await sendPromptWithRetry(
-                    resolvedDeps.adapter,
-                    actualControllerSessionId,
-                    "/legion-controller",
-                    resolvedDeps
-                  );
-                  console.log(`Controller re-created: session=${actualControllerSessionId}`);
-                } catch (error) {
-                  console.error(`Failed to re-create controller session: ${error}`);
-                }
-              }
-            } catch (error) {
-              console.error(`Failed to restart shared serve: ${error}`);
             }
+          }
+        }
+
+        if (restartReason) {
+          console.error(`Shared serve needs restart: ${restartReason}`);
+          try {
+            if (stopBeforeRestart) {
+              try {
+                await resolvedDeps.adapter.stop();
+              } catch {
+                // Best-effort — serve may already be dead
+              }
+            }
+            await resolvedDeps.adapter.start(serveStartOpts);
+            sharedServeRestarts += 1;
+            if (stopBeforeRestart) {
+              rssRestarts += 1;
+            }
+            console.log(`Shared serve restarted on port ${sharedServePort}`);
+
+            const state = await resolvedDeps.readStateFile(config.stateFilePath);
+            const liveWorkers = Object.values(state.workers).filter(
+              (e) => e.status !== "dead" && e.status !== "stopped"
+            );
+
+            console.log(
+              `Recreating ${liveWorkers.length} active worker sessions after serve restart...`
+            );
+            const BATCH_SIZE = 10;
+            for (let i = 0; i < liveWorkers.length; i += BATCH_SIZE) {
+              const batch = liveWorkers.slice(i, i + BATCH_SIZE);
+              await Promise.allSettled(
+                batch.map(async (entry) => {
+                  try {
+                    const actualId = await resolvedDeps.adapter.createSession(
+                      entry.sessionId,
+                      entry.workspace
+                    );
+                    if (actualId !== entry.sessionId) {
+                      console.warn(
+                        `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
+                      );
+                    }
+                  } catch {
+                    // Best-effort session re-creation
+                  }
+                })
+              );
+            }
+
+            if (controllerState?.port) {
+              try {
+                const actualControllerSessionId = await resolvedDeps.adapter.createSession(
+                  controllerState.sessionId,
+                  controllerWorkspace
+                );
+                if (actualControllerSessionId !== controllerState.sessionId) {
+                  console.warn(
+                    `Controller: session ID changed ${controllerState.sessionId} -> ${actualControllerSessionId}`
+                  );
+                }
+                // Unsubscribe old session ID if it changed
+                if (actualControllerSessionId !== controllerState.sessionId) {
+                  unsubscribeFromEnvoy(controllerState.sessionId);
+                }
+                controllerState = {
+                  ...controllerState,
+                  sessionId: actualControllerSessionId,
+                  port: sharedServePort,
+                };
+                controllerRecreates += 1;
+                await sendPromptWithRetry(
+                  resolvedDeps.adapter,
+                  actualControllerSessionId,
+                  "/legion-controller",
+                  resolvedDeps
+                );
+                console.log(`Controller re-created: session=${actualControllerSessionId}`);
+              } catch (error) {
+                console.error(`Failed to re-create controller session: ${error}`);
+              }
+            }
+          } catch (error) {
+            console.error(`Failed to restart shared serve: ${error}`);
           }
         }
 
@@ -719,6 +759,7 @@ export async function startDaemon(
           uptimeS: Math.max(0, (Date.now() - startedAt) / 1000),
           serveRestarted: sharedServeRestarts > 0,
           sessionsRecreated: controllerRecreates,
+          rssRestarts,
         });
       } finally {
         if (!shuttingDown) {

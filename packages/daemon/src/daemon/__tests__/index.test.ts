@@ -101,6 +101,7 @@ function makeAdapter(overrides?: {
   healthy?: () => Promise<boolean>;
   stopServeCalls?: number[];
   createSessionCalls?: Array<{ sessionId: string; workspace: string }>;
+  getServePid?: () => number;
 }): RuntimeAdapter {
   const createSessionCalls = overrides?.createSessionCalls ?? [];
   const stopServeCalls = overrides?.stopServeCalls ?? [];
@@ -123,7 +124,7 @@ function makeAdapter(overrides?: {
       promptAsyncCalls.push({ sessionID: sessionId, parts: [{ type: "text", text }] });
     },
     getSessionStatus: async () => ({ data: undefined }),
-    getServePid: () => 0,
+    getServePid: overrides?.getServePid ?? (() => 0),
   };
 }
 
@@ -1296,6 +1297,247 @@ describe("daemon entry", () => {
       await handle.stop();
 
       expect(flush).toHaveBeenCalledTimes(1);
+    });
+  });
+  describe("RSS-based serve restart", () => {
+    it("triggers stop + start when RSS exceeds threshold (Linux only)", async () => {
+      // Skip on non-Linux where /proc doesn't exist
+      if (process.platform !== "linux") return;
+
+      let timeoutCallback: TimeoutCallback | null = null;
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallback = callback as TimeoutCallback;
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      let _healthCallCount = 0;
+      const stopCalls: number[] = [];
+      const startCalls: Array<{
+        workspace: string;
+        logDir?: string;
+        env?: Record<string, string>;
+      }> = [];
+      const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          // 1 byte threshold \u2014 any real process will exceed this
+          maxRssBytes: 1,
+          rssCheckIntervalMs: 0,
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [baseEntry.id]: baseEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: {
+            ...makeAdapter({
+              createSessionCalls,
+              stopServeCalls: stopCalls,
+              healthy: async () => {
+                _healthCallCount += 1;
+                return true;
+              },
+              // Use the real test process PID so /proc/<pid>/statm exists
+              getServePid: () => process.pid,
+            }),
+            start: async (opts) => {
+              startCalls.push(opts);
+            },
+          },
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
+      await (timeoutCallback as () => Promise<void>)();
+
+      // RSS exceeded: stop was called (graceful shutdown before restart)
+      expect(stopCalls.length).toBeGreaterThanOrEqual(1);
+      // Then start was called (restart)
+      expect(startCalls.length).toBeGreaterThanOrEqual(1);
+      // Worker session was re-created after restart
+      const reCreated = createSessionCalls.filter((c) => c.sessionId === baseEntry.sessionId);
+      expect(reCreated.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("does not check RSS when serve is unhealthy", async () => {
+      let timeoutCallback: TimeoutCallback | null = null;
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallback = callback as TimeoutCallback;
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      let healthCallCount = 0;
+      const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          maxRssBytes: 1 * 1024 * 1024 * 1024,
+          rssCheckIntervalMs: 0,
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [baseEntry.id]: baseEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({
+            createSessionCalls,
+            healthy: async () => {
+              healthCallCount += 1;
+              if (healthCallCount === 1) return true;
+              if (healthCallCount === 2) return false;
+              return true;
+            },
+            getServePid: () => 12345,
+          }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
+      await (timeoutCallback as () => Promise<void>)();
+
+      // Unhealthy restart happened (session recreated)
+      const reCreatedSessions = createSessionCalls.filter(
+        (c) => c.sessionId === baseEntry.sessionId
+      );
+      expect(reCreatedSessions.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("skips RSS check when maxRssBytes is 0 (disabled)", async () => {
+      let timeoutCallback: TimeoutCallback | null = null;
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallback = callback as TimeoutCallback;
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      let _healthCallCount = 0;
+      const stopCalls: number[] = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          maxRssBytes: 0,
+          rssCheckIntervalMs: 0,
+        },
+        {
+          readStateFile: async () => ({
+            workers: {},
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({
+            stopServeCalls: stopCalls,
+            healthy: async () => {
+              _healthCallCount += 1;
+              return true;
+            },
+            getServePid: () => 12345,
+          }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
+      await (timeoutCallback as () => Promise<void>)();
+
+      // No restart should happen — serve is healthy and RSS check is disabled
+      expect(stopCalls).toHaveLength(0);
+    });
+
+    it("skips RSS check when getServePid returns 0", async () => {
+      let timeoutCallback: TimeoutCallback | null = null;
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallback = callback as TimeoutCallback;
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      let _healthCallCount = 0;
+      const stopCalls: number[] = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          maxRssBytes: 1 * 1024 * 1024 * 1024,
+          rssCheckIntervalMs: 0,
+        },
+        {
+          readStateFile: async () => ({
+            workers: {},
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({
+            stopServeCalls: stopCalls,
+            healthy: async () => {
+              _healthCallCount += 1;
+              return true;
+            },
+            // PID 0 = not applicable (e.g., ClaudeCode adapter)
+            getServePid: () => 0,
+          }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
+      await (timeoutCallback as () => Promise<void>)();
+
+      // No restart should happen — getServePid returns 0
+      expect(stopCalls).toHaveLength(0);
     });
   });
 });

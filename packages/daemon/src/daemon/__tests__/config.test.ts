@@ -186,4 +186,41 @@ describe("daemon config", () => {
       });
     });
   });
+
+  describe("RSS monitoring config", () => {
+    it("defaults maxRssBytes to 20GB", () => {
+      const config = loadConfig({});
+      expect(config.maxRssBytes).toBe(20 * 1024 * 1024 * 1024);
+    });
+
+    it("defaults rssCheckIntervalMs to 60s", () => {
+      const config = loadConfig({});
+      expect(config.rssCheckIntervalMs).toBe(60_000);
+    });
+
+    it("parses OPENCODE_MAX_RSS_GB", () => {
+      const config = loadConfig({ OPENCODE_MAX_RSS_GB: "10" });
+      expect(config.maxRssBytes).toBe(10 * 1024 * 1024 * 1024);
+    });
+
+    it("disables RSS check when OPENCODE_MAX_RSS_GB=0", () => {
+      const config = loadConfig({ OPENCODE_MAX_RSS_GB: "0" });
+      expect(config.maxRssBytes).toBe(0);
+    });
+
+    it("parses OPENCODE_RSS_CHECK_INTERVAL", () => {
+      const config = loadConfig({ OPENCODE_RSS_CHECK_INTERVAL: "120" });
+      expect(config.rssCheckIntervalMs).toBe(120_000);
+    });
+
+    it("falls back to default for invalid OPENCODE_MAX_RSS_GB", () => {
+      const config = loadConfig({ OPENCODE_MAX_RSS_GB: "not-a-number" });
+      expect(config.maxRssBytes).toBe(20 * 1024 * 1024 * 1024);
+    });
+
+    it("falls back to default for invalid OPENCODE_RSS_CHECK_INTERVAL", () => {
+      const config = loadConfig({ OPENCODE_RSS_CHECK_INTERVAL: "abc" });
+      expect(config.rssCheckIntervalMs).toBe(60_000);
+    });
+  });
 });

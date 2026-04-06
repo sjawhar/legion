@@ -56,6 +56,7 @@ export const HealthTickEventSchema = FeedbackEventBase.extend({
   uptimeS: z.number().nonnegative(),
   serveRestarted: z.boolean(),
   sessionsRecreated: z.number().int().nonnegative(),
+  rssRestarts: z.number().int().nonnegative(),
 });
 
 export const FeedbackEventSchema = z.discriminatedUnion("event", [

@@ -27,11 +27,17 @@ export interface DaemonConfig {
   issueBackend: "linear" | "github";
   runtime: "opencode" | "claude-code";
   githubApps?: GitHubAppsConfig;
+  /** RSS threshold in bytes; serve restarts when exceeded. 0 = disabled. */
+  maxRssBytes: number;
+  /** Minimum interval between RSS checks in ms. */
+  rssCheckIntervalMs: number;
 }
 
 const BASE_DAEMON_PORT = 13370;
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const DEFAULT_BASE_WORKER_PORT = 13381;
+const DEFAULT_MAX_RSS_GB = 20;
+const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
 
 function parseNumber(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -101,6 +107,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   }
   const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
   const githubApps = loadGitHubApps(env);
+  const maxRssGb = parseNumber(env.OPENCODE_MAX_RSS_GB, DEFAULT_MAX_RSS_GB);
+  const maxRssBytes = maxRssGb > 0 ? maxRssGb * 1024 * 1024 * 1024 : 0;
+  const rssCheckIntervalS = parseNumber(
+    env.OPENCODE_RSS_CHECK_INTERVAL,
+    DEFAULT_RSS_CHECK_INTERVAL_S
+  );
+  const rssCheckIntervalMs =
+    rssCheckIntervalS > 0 ? rssCheckIntervalS * 1000 : DEFAULT_RSS_CHECK_INTERVAL_S * 1000;
+
   return {
     daemonPort: parseNumber(env.LEGION_DAEMON_PORT, BASE_DAEMON_PORT),
     legionId,
@@ -108,6 +123,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     paths,
     checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
     baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
+    maxRssBytes,
+    rssCheckIntervalMs,
     stateFilePath,
     logDir,
     controllerSessionId,

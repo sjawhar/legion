@@ -94,6 +94,7 @@ function validEvents(): FeedbackEvent[] {
       uptimeS: 60,
       serveRestarted: false,
       sessionsRecreated: 0,
+      rssRestarts: 0,
     },
   ];
 }
@@ -265,6 +266,7 @@ describe("FeedbackLogger", () => {
       uptimeS: 120,
       serveRestarted: false,
       sessionsRecreated: 1,
+      rssRestarts: 0,
     });
 
     await logger.flush();
