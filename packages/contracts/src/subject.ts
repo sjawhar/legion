@@ -12,12 +12,7 @@ export function slackSubject(team: string, channel: string, kind: string) {
   return `notifications.slack.${team}.${channel}.${kind}`;
 }
 
-export function slackThreadSubject(
-  team: string,
-  channel: string,
-  threadTs: string,
-  kind: string
-) {
+export function slackThreadSubject(team: string, channel: string, threadTs: string, kind: string) {
   return `notifications.slack.${team}.${channel}.thread.${threadTs.replaceAll(".", "_")}.${kind}`;
 }
 
