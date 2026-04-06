@@ -44,6 +44,7 @@ describe("daemon server", () => {
       stop: async () => {},
       healthy: async () => true,
       getPort: () => sharedServePort,
+      getServePid: () => 0,
       createSession: async (sessionId: string, workspace: string) => {
         createSessionCalls.push({ sessionId, workspace });
         return sessionId;

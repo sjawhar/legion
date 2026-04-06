@@ -71,6 +71,7 @@ export const LegionEntrySchema = z.object({
   port: z.number(),
   servePort: z.number(),
   pid: z.number(),
+  servePid: z.number().optional(),
   startedAt: z.string(),
 });
 

@@ -27,12 +27,12 @@ mock.module("@opencode-ai/sdk/v2", () => ({
 const writeLegionEntryCalls: Array<{
   filePath: string;
   projectId: string;
-  entry: { port: number; servePort: number; pid: number; startedAt: string };
+  entry: { port: number; servePort: number; pid: number; servePid?: number; startedAt: string };
 }> = [];
 const removeLegionEntryCalls: Array<{ filePath: string; projectId: string }> = [];
 let mockedRegistry: Record<
   string,
-  { port: number; servePort: number; pid: number; startedAt: string }
+  { port: number; servePort: number; pid: number; servePid?: number; startedAt: string }
 > = {};
 let mockedAllocatedPorts = { daemonPort: 13370, servePort: 13381 };
 
@@ -123,6 +123,7 @@ function makeAdapter(overrides?: {
       promptAsyncCalls.push({ sessionID: sessionId, parts: [{ type: "text", text }] });
     },
     getSessionStatus: async () => ({ data: undefined }),
+    getServePid: () => 0,
   };
 }
 
@@ -156,11 +157,18 @@ function startDaemonForTest(
     {
       paths: TEST_PATHS,
       readLegionsRegistry: async () => mockedRegistry,
+      cleanupStaleServes: async () => {},
       allocatePort: () => mockedAllocatedPorts,
       writeLegionEntry: async (
         filePath: string,
         projectId: string,
-        entry: { port: number; servePort: number; pid: number; startedAt: string }
+        entry: {
+          port: number;
+          servePort: number;
+          pid: number;
+          servePid?: number;
+          startedAt: string;
+        }
       ) => {
         writeLegionEntryCalls.push({ filePath, projectId, entry });
       },
@@ -312,6 +320,94 @@ describe("daemon entry", () => {
 
       expect(startServerCalls).toEqual([initialPort, initialPort + 1]);
       expect(writeLegionEntryCalls[0].entry.port).toBe(initialPort + 1);
+    });
+  });
+
+  describe("stale serve cleanup", () => {
+    it("calls cleanupStaleServes on startup before port allocation", async () => {
+      const cleanupCalls: Array<{ filePath: string; legionId: string }> = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          cleanupStaleServes: async (filePath: string, legionId: string) => {
+            cleanupCalls.push({ filePath, legionId });
+          },
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(cleanupCalls).toHaveLength(1);
+      expect(cleanupCalls[0].legionId).toBe(TEAM_ID);
+      expect(cleanupCalls[0].filePath).toBe(TEST_PATHS.legionsFile);
+    });
+
+    it("writes servePid to registry when adapter provides it", async () => {
+      const servePid = 42424;
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: {
+            ...makeAdapter(),
+            getServePid: () => servePid,
+          },
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(writeLegionEntryCalls).toHaveLength(1);
+      expect(writeLegionEntryCalls[0].entry.servePid).toBe(servePid);
+    });
+
+    it("omits servePid from registry when adapter returns 0", async () => {
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          }),
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(writeLegionEntryCalls).toHaveLength(1);
+      expect(writeLegionEntryCalls[0].entry.servePid).toBeUndefined();
     });
   });
 

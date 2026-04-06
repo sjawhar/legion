@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   allocatePort,
+  cleanupStaleServes,
   findLegionByProjectId,
   isPidAlive,
   readLegionsRegistry,
@@ -216,5 +217,89 @@ describe("isPidAlive", () => {
   it("returns false for non-existent PID", () => {
     // PID 0 signals current process group, 999999 almost certainly doesn't exist
     expect(isPidAlive(999999)).toBe(false);
+  });
+});
+
+describe("cleanupStaleServes", () => {
+  let tempDir: string | null = null;
+  const originalFetch = globalThis.fetch;
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+  });
+
+  it("does nothing when no entry exists for legionId", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-cleanup-"));
+    const filePath = path.join(tempDir, "legions.json");
+
+    // No entry in the registry
+    await cleanupStaleServes(filePath, "nonexistent");
+
+    // Registry should not exist (ENOENT is fine)
+    const registry = await readLegionsRegistry(filePath);
+    expect(registry).toEqual({});
+  });
+
+  it("skips cleanup when daemon PID is still alive", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-cleanup-"));
+    const filePath = path.join(tempDir, "legions.json");
+
+    // Write entry with current PID (alive)
+    await writeLegionEntry(filePath, "my-legion", {
+      port: 13370,
+      servePort: 13381,
+      pid: process.pid,
+      startedAt: "2026-03-12T00:00:00Z",
+    });
+
+    await cleanupStaleServes(filePath, "my-legion");
+
+    // Entry should still exist (not cleaned up)
+    const registry = await readLegionsRegistry(filePath);
+    expect(registry["my-legion"]).toBeDefined();
+  });
+
+  it("cleans up stale entry when daemon PID is dead and port is free", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-cleanup-"));
+    const filePath = path.join(tempDir, "legions.json");
+
+    // Write entry with dead PID and a port that's free (59997)
+    await writeLegionEntry(filePath, "my-legion", {
+      port: 13370,
+      servePort: 59997,
+      pid: 999999999,
+      startedAt: "2026-03-12T00:00:00Z",
+    });
+
+    await cleanupStaleServes(filePath, "my-legion");
+
+    // Entry should be removed from registry
+    const registry = await readLegionsRegistry(filePath);
+    expect(registry["my-legion"]).toBeUndefined();
+  });
+
+  it("passes servePid to killStaleServe when available", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-cleanup-"));
+    const filePath = path.join(tempDir, "legions.json");
+
+    // Write entry with dead daemon PID, servePid, and a free port
+    await writeLegionEntry(filePath, "my-legion", {
+      port: 13370,
+      servePort: 59996,
+      pid: 999999999,
+      servePid: 888888888,
+      startedAt: "2026-03-12T00:00:00Z",
+    });
+
+    // Since the port is free, killStaleServe returns true immediately
+    // and the stale entry is cleaned up
+    await cleanupStaleServes(filePath, "my-legion");
+
+    const registry = await readLegionsRegistry(filePath);
+    expect(registry["my-legion"]).toBeUndefined();
   });
 });

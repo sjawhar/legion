@@ -33,6 +33,7 @@ describe("sessionId contract (daemon vs state)", () => {
       stop: async () => {},
       healthy: async () => true,
       getPort: () => sharedServePort,
+      getServePid: () => 0,
       createSession: async (sessionId: string, workspace: string) => {
         createSessionCalls.push({ sessionId, workspace });
         return sessionId;
@@ -78,6 +79,7 @@ describe("sessionId contract (daemon vs state)", () => {
       stop: async () => {},
       healthy: async () => true,
       getPort: () => sharedServePort,
+      getServePid: () => 0,
       createSession: async (sessionId: string, workspace: string) => {
         createSessionCalls.push({ sessionId, workspace });
         return sessionId;
@@ -127,6 +129,7 @@ describe("sessionId contract (daemon vs state)", () => {
       stop: async () => {},
       healthy: async () => true,
       getPort: () => sharedServePort,
+      getServePid: () => 0,
       createSession: async (_sessionId: string, _workspace: string) => {
         // Simulate serve returning a different session ID (e.g., 409 recovery)
         return actualSessionId;

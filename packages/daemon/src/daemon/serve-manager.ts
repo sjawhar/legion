@@ -1,6 +1,7 @@
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
+import { isPortFree } from "./ports";
 import { HealthCheckResponseSchema, SessionCreateResponseSchema } from "./schemas";
 
 interface SharedServeState {
@@ -179,4 +180,62 @@ export async function healthCheck(port: number, timeoutMs = 5000): Promise<boole
   } catch {
     return false;
   }
+}
+
+/**
+ * Kill a stale serve process on a given port.
+ * Used during daemon startup to clean up orphaned serves from previous runs.
+ *
+ * Strategy:
+ *   1. If port is free, return immediately (nothing to clean up)
+ *   2. If PID is known, use stopServe() (dispose → poll PID → SIGKILL)
+ *   3. If PID is unknown, try dispose endpoint and wait for port to become free
+ */
+export async function killStaleServe(
+  port: number,
+  pid?: number,
+  waitTimeoutMs = 5000,
+  pollIntervalMs = 200,
+  disposeTimeoutMs = 3000
+): Promise<boolean> {
+  if (await isPortFree(port)) {
+    return true;
+  }
+
+  console.log(`Cleaning up stale serve on port ${port}${pid ? ` (PID ${pid})` : ""}...`);
+
+  // If we have the PID, use the existing stopServe flow
+  if (pid) {
+    try {
+      await stopServe(port, pid, waitTimeoutMs, pollIntervalMs, disposeTimeoutMs);
+      console.log(`Stale serve on port ${port} (PID ${pid}) stopped`);
+      return true;
+    } catch (error) {
+      console.warn(`stopServe failed for stale PID ${pid}: ${error}`);
+      // Fall through to dispose-only path
+    }
+  }
+
+  // No PID or PID-based cleanup failed — try dispose endpoint directly
+  try {
+    await fetch(`http://127.0.0.1:${port}/global/dispose`, {
+      method: "POST",
+      signal: AbortSignal.timeout(disposeTimeoutMs),
+    });
+  } catch {
+    // Dispose is best-effort
+  }
+
+  // Wait for port to become free
+  const deadline = Date.now() + waitTimeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortFree(port)) {
+      console.log(`Stale serve on port ${port} cleaned up via dispose`);
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  console.warn(`Failed to clean up stale serve on port ${port} — port still occupied`);
+  return false;
 }
