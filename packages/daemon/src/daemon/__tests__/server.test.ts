@@ -67,6 +67,7 @@ describe("daemon server", () => {
     runtime?: string;
     tmuxSession?: string;
     feedbackLogger?: FeedbackLogger;
+    getControllerState?: () => { sessionId: string; port?: number } | undefined;
   }) {
     createSessionCalls = [];
     let adapter = makeAdapter();
@@ -90,6 +91,7 @@ describe("daemon server", () => {
       runtime: options?.runtime,
       tmuxSession: options?.tmuxSession,
       feedbackLogger: options?.feedbackLogger,
+      getControllerState: options?.getControllerState,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -336,7 +338,7 @@ describe("daemon server", () => {
         method: "POST",
         body: JSON.stringify({
           issueId: "acme-widgets-80",
-          mode: "implement",
+          mode: "plan",
           repo: "acme/widgets",
         }),
       });
@@ -355,7 +357,7 @@ describe("daemon server", () => {
         method: "POST",
         body: JSON.stringify({
           issueId: "ENG-80",
-          mode: "implement",
+          mode: "plan",
           workspace: "/tmp/characterization-workspace",
         }),
       });
@@ -1061,7 +1063,7 @@ describe("daemon server", () => {
         method: "POST",
         body: JSON.stringify({
           issueId: "ENG-500",
-          mode: "implement",
+          mode: "plan",
           workspace: "/tmp/work-500",
           env: { GH_TOKEN: "ghs_test", GIT_AUTHOR_NAME: "bot[bot]" },
         }),
@@ -1615,10 +1617,12 @@ describe("daemon server", () => {
 
       await Bun.sleep(50);
 
-      const subscribeCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/subscribe")
+      const issueSubscribeCalls = envoySubscribeCalls.filter(
+        (c) =>
+          c.url.includes("/v1/interests/subscribe") &&
+          c.body.topics.some((topic) => topic.includes(".issue."))
       );
-      expect(subscribeCalls).toHaveLength(0);
+      expect(issueSubscribeCalls).toHaveLength(0);
     });
 
     it("unsubscribes existing plan worker when dispatching implement for same issue", async () => {
@@ -1671,10 +1675,12 @@ describe("daemon server", () => {
       expect(unsubCalls).toHaveLength(1);
       expect(unsubCalls[0].body.session_id).toBe(planWorker.sessionId);
 
-      const newSubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/subscribe")
+      const issueSubscribeCalls = envoySubscribeCalls.filter(
+        (c) =>
+          c.url.includes("/v1/interests/subscribe") &&
+          c.body.topics.some((topic) => topic.includes(".issue."))
       );
-      expect(newSubCalls).toHaveLength(0);
+      expect(issueSubscribeCalls).toHaveLength(0);
     });
 
     it("includes envoyTopics in GET /workers for plan mode dispatch", async () => {
@@ -1865,6 +1871,302 @@ describe("daemon server", () => {
         c.url.includes("/v1/interests/unsubscribe")
       );
       expect(unsubCalls).toHaveLength(0);
+    });
+
+    it("subscribes controller to CI topic on first dispatch for a repo", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+      const controllerSessionId = "ses_controller_ci_test";
+
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        getControllerState: () => ({ sessionId: controllerSessionId }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-300",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 300,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(envoySubscribeCalls).toHaveLength(1);
+      const ciCall = envoySubscribeCalls.find((c) =>
+        c.body.topics.some((t: string) => t.includes(".ci"))
+      );
+      expect(ciCall).toBeDefined();
+      expect(ciCall?.body.session_id).toBe(controllerSessionId);
+      expect(ciCall?.body.topics).toEqual(["notifications.github.acme.widgets.ci"]);
+    });
+
+    it("does not duplicate CI subscription for same repo on second dispatch", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+      const controllerSessionId = "ses_controller_ci_dedup";
+
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        getControllerState: () => ({ sessionId: controllerSessionId }),
+      });
+
+      // First dispatch for acme/widgets
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-301",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 301,
+        }),
+      });
+      await Bun.sleep(50);
+
+      const ciCallsAfterFirst = envoySubscribeCalls.filter((c) =>
+        c.body.topics.some((t: string) => t.includes(".ci"))
+      );
+      expect(ciCallsAfterFirst).toHaveLength(1);
+
+      // Second dispatch for same repo, different issue
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-302",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 302,
+        }),
+      });
+      await Bun.sleep(50);
+
+      // Still only 1 CI subscribe call
+      const ciCallsAfterSecond = envoySubscribeCalls.filter((c) =>
+        c.body.topics.some((t: string) => t.includes(".ci"))
+      );
+      expect(ciCallsAfterSecond).toHaveLength(1);
+    });
+
+    it("skips CI subscription when no controller state available", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        // No getControllerState — controller not yet ready
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-303",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 303,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Only worker issue subscribe, no CI subscribe
+      const ciCalls = envoySubscribeCalls.filter((c) =>
+        c.body.topics.some((t: string) => t.includes(".ci"))
+      );
+      expect(ciCalls).toHaveLength(0);
+    });
+
+    it("CI subscribe failure does not block dispatch", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls, 500);
+
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        getControllerState: () => ({ sessionId: "ses_ctrl_fail" }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-304",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 304,
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+
+      const ciCalls = envoySubscribeCalls.filter((c) =>
+        c.body.topics.some((t: string) => t.includes(".ci"))
+      );
+      expect(ciCalls).toHaveLength(1);
+    });
+
+    it("re-subscribes worker to issue topics on resume via prompt", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+      });
+
+      // First create a worker
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-305",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 305,
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { id: string; sessionId: string };
+      await Bun.sleep(50);
+
+      // Clear calls from dispatch
+      envoySubscribeCalls.length = 0;
+
+      // Resume worker via prompt
+      const promptResponse = await requestJson(`/workers/${created.id}/prompt`, {
+        method: "POST",
+        body: JSON.stringify({ text: "Address review comments" }),
+      });
+      expect(promptResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Should have re-subscribed to issue topics
+      const issueSubs = envoySubscribeCalls.filter(
+        (c) =>
+          c.url.includes("/subscribe") && c.body.topics.some((t: string) => t.includes("issue.305"))
+      );
+      expect(issueSubs).toHaveLength(1);
+      expect(issueSubs[0].body.session_id).toBe(created.sessionId);
+      expect(issueSubs[0].body.topics).toEqual([
+        "notifications.github.acme.widgets.issue.305.>",
+        "notifications.github.acme.widgets.pr.305.>",
+      ]);
+    });
+
+    it("skips resume re-subscription for workspace-only workers", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer();
+
+      // Create a workspace-only worker (no repo/issueNumber)
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-306",
+          mode: "implement",
+          workspace: "/tmp/work-306",
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { id: string };
+      await Bun.sleep(50);
+
+      envoySubscribeCalls.length = 0;
+
+      // Resume worker via prompt
+      const promptResponse = await requestJson(`/workers/${created.id}/prompt`, {
+        method: "POST",
+        body: JSON.stringify({ text: "Continue work" }),
+      });
+      expect(promptResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // No subscribe calls — workspace-only worker has no repo/issueNumber
+      expect(envoySubscribeCalls).toHaveLength(0);
+    });
+
+    it("persists repo and issueNumber in worker entry", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-307",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 307,
+        }),
+      });
+
+      // Read the state file to verify repo/issueNumber were persisted
+      const stateContent = await readFile(path.join(tempDir ?? "", "workers.json"), "utf-8");
+      const state = JSON.parse(stateContent) as PersistedWorkerState & {
+        workers: Record<string, { repo?: string; issueNumber?: number }>;
+      };
+      const worker = Object.values(state.workers)[0];
+      expect(worker.repo).toBe("acme/widgets");
+      expect(worker.issueNumber).toBe(307);
+    });
+
+    it("seeds CI repo tracking from persisted state on startup", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+      const controllerSessionId = "ses_controller_seed_test";
+
+      // Start server with pre-existing worker that has repo field
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        getControllerState: () => ({ sessionId: controllerSessionId }),
+        state: {
+          workers: {
+            "acme-widgets-310-implement": {
+              id: "acme-widgets-310-implement",
+              port: sharedServePort,
+              sessionId: "ses_existing_310",
+              workspace: "/tmp/work-310",
+              startedAt: new Date().toISOString(),
+              status: "running",
+              crashCount: 0,
+              lastCrashAt: null,
+              repo: "acme/widgets",
+              issueNumber: 310,
+            } satisfies WorkerEntry,
+          },
+          crashHistory: {},
+        },
+      });
+      await Bun.sleep(50);
+      envoySubscribeCalls.length = 0;
+
+      // Dispatch another worker for the SAME repo
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-311",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 311,
+        }),
+      });
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Should NOT have a CI subscribe call — repo was already seeded from state
+      const ciCalls = envoySubscribeCalls.filter((c) =>
+        c.body.topics.some((t: string) => t.includes(".ci"))
+      );
+      expect(ciCalls).toHaveLength(0);
     });
   });
 

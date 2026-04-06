@@ -89,6 +89,27 @@ The controller MUST NOT ask "should I continue?" for routine operations. Act on 
 
 The daemon automatically subscribes the controller to `notifications.agent.<session_id>` at startup. Workers send completion notifications directly to the controller session via `envoy_send` (the controller session ID is included in the dispatch prompt's ENVOY section). This gives you instant notification instead of waiting for the next polling cycle. The `worker-done` label remains the source of truth — Envoy is a speed optimization.
 
+### Subscription Policy
+
+The daemon subscribes the controller to these topics:
+
+- `notifications.legion.controller` — broadcast channel for controller-targeted messages
+- `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
+- `notifications.github.*.*.mention` — @mentions across all GitHub repos
+- `notifications.github.{owner}.{repo}.ci` — CI events for repos with active workers (subscribed on first worker dispatch per repo, reconciled on daemon restart)
+
+**No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events. Polling handles board-level state adequately on its ~30s cycle. Only CI events (time-sensitive for pipeline progression) get Envoy subscriptions.
+
+### CI Event Handling
+
+When a CI event is received (via `notifications.github.{owner}.{repo}.ci`), it indicates a `check_run` or `check_suite` status change on a PR in that repo. The controller should:
+
+1. **Identify affected issues** — match the CI event's branch/PR to an issue with an active worker in `implement` or `test` mode
+2. **Trigger an early poll** — run a focused `fetch-and-collect` for the affected repo to pick up the CI status change immediately rather than waiting for the next polling cycle
+3. **Act on results** — if CI passed and a worker is waiting, advance the pipeline (e.g., move from implement to test, or test to review)
+
+**CI events are advisory.** They trigger early polling but do not bypass the normal state machine. The authoritative state comes from the poll results, not the Envoy event payload.
+
 ## Algorithm
 
 ```dot
