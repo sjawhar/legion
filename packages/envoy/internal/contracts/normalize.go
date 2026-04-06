@@ -152,15 +152,12 @@ func SlackEnvelopes(input SlackEnvelopeInput) []Envelope {
 	out := []Envelope{item}
 	event, _ := input.Body["event"].(map[string]any)
 	thread := stringValue(event["thread_ts"])
-	if thread == "" {
-		thread = stringValue(event["ts"])
-	}
 	if thread != "" {
 		team := stringValue(input.Body["team_id"])
 		channel := stringValue(event["channel"])
 		if team != "" && channel != "" {
 			threaded := item
-			threaded.Topic = SlackSubject(team, channel, "thread."+thread)
+			threaded.Topic = SlackThreadSubject(team, channel, thread, slackKind(input.Body))
 			out = append(out, threaded)
 		}
 	}

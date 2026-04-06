@@ -5,6 +5,8 @@ import {
   ghostWisprSubject,
   githubResourceSubject,
   githubSubject,
+  slackSubject,
+  slackThreadSubject,
   whatsappSubject,
 } from "./subject";
 
@@ -126,5 +128,25 @@ describe("whatsappSubject", () => {
     });
 
     expect(item.source).toBe("whatsapp");
+  });
+});
+
+describe("slackThreadSubject", () => {
+  test("normalizes thread_ts dot to underscore", () => {
+    expect(slackThreadSubject("T123", "C456", "1234567890.123456", "message")).toBe(
+      "notifications.slack.T123.C456.thread.1234567890_123456.message"
+    );
+  });
+
+  test("returns mention kind for app_mention threads", () => {
+    expect(slackThreadSubject("T123", "C456", "1234567890.123456", "mention")).toBe(
+      "notifications.slack.T123.C456.thread.1234567890_123456.mention"
+    );
+  });
+
+  test("is consistent with slackSubject prefix", () => {
+    const thread = slackThreadSubject("T123", "C456", "1234567890.123456", "message");
+    const channel = slackSubject("T123", "C456", "thread");
+    expect(thread.startsWith(`${channel}.`)).toBe(true);
   });
 });

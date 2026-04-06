@@ -61,14 +61,20 @@ Examples:
   - `notifications.slack.<team_id>.<channel_id>.message`
 - App mention events:
   - `notifications.slack.<team_id>.<channel_id>.mention`
-- Thread events:
-  - `notifications.slack.<team_id>.<channel_id>.thread.<thread_ts>`
+- Thread message events:
+  - `notifications.slack.<team_id>.<channel_id>.thread.<normalized_ts>.message`
+- Thread mention events:
+  - `notifications.slack.<team_id>.<channel_id>.thread.<normalized_ts>.mention`
+
+Thread timestamps are normalized: `1234567890.123456` → `1234567890_123456`
+(dots replaced with underscores to make the thread ID a single NATS segment).
 
 Examples:
 
 - `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.message`
 - `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention`
-- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890.123456`
+- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.message`
+- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.mention`
 
 ## When to use what
 
@@ -100,6 +106,30 @@ You do NOT need to subscribe in order to send or publish.
 ```text
 envoy_subscribe([
   "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention"
+])
+```
+
+### Subscribe to all events in a specific Slack thread
+
+```text
+envoy_subscribe([
+  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.>"
+])
+```
+
+### Subscribe to only messages in a Slack thread (not mentions)
+
+```text
+envoy_subscribe([
+  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.message"
+])
+```
+
+### Subscribe to all threads in a Slack channel
+
+```text
+envoy_subscribe([
+  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.>"
 ])
 ```
 
