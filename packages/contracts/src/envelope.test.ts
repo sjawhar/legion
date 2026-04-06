@@ -5,6 +5,7 @@ import {
   ghostWisprSubject,
   githubResourceSubject,
   githubSubject,
+  whatsappSubject,
 } from "./subject";
 
 describe("EnvelopeSchema", () => {
@@ -96,5 +97,34 @@ describe("ghostWisprSubject", () => {
   test("starts with GHOSTWISPR_TOPIC_PREFIX", () => {
     const topic = ghostWisprSubject("rec-1", "transcript");
     expect(topic.startsWith(GHOSTWISPR_TOPIC_PREFIX)).toBe(true);
+  });
+});
+
+describe("whatsappSubject", () => {
+  test("returns message topic", () => {
+    expect(whatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message")).toBe(
+      "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message"
+    );
+  });
+
+  test("returns different kind", () => {
+    expect(whatsappSubject("15551234567", "5551234567@s.whatsapp.net", "status")).toBe(
+      "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.status"
+    );
+  });
+
+  test("accepts whatsapp source in envelope", () => {
+    const item = EnvelopeSchema.parse({
+      event_id: "evt-wa",
+      source: "whatsapp",
+      source_event_id: "whatsapp://messages/15551234567/5551234567@s.whatsapp.net",
+      topic: whatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message"),
+      dedupe_key: "whatsapp.15551234567.5551234567@s.whatsapp.net.1712345678000",
+      issued_at: Date.now(),
+      payload_summary: "WhatsApp message in chat 5551234567@s.whatsapp.net",
+      trace_id: "trace-wa",
+    });
+
+    expect(item.source).toBe("whatsapp");
   });
 });

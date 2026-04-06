@@ -93,3 +93,54 @@ func TestGhostWisprPerRecordingFiltering(t *testing.T) {
 		}
 	}
 }
+
+func TestWhatsappTopicFiltering(t *testing.T) {
+	// Wildcard subscription for all messages on a phone number
+	pattern := "notifications.whatsapp.15551234567.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		// Should match: WhatsApp messages for this phone number
+		{topic: "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message", ok: true},
+		{topic: "notifications.whatsapp.15551234567.group-abc@g.us.message", ok: true},
+		{topic: "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.status", ok: true},
+		// Should NOT match: different phone number
+		{topic: "notifications.whatsapp.15559876543.5551234567@s.whatsapp.net.message", ok: false},
+		// Should NOT match: other source topics
+		{topic: "notifications.slack.T123.C456.message", ok: false},
+		{topic: "notifications.github.sjawhar.legion.pr", ok: false},
+		{topic: "notifications.agent.ses_123", ok: false},
+	}
+	for _, item := range cases {
+		got := Match(pattern, item.topic)
+		if got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+}
+
+func TestWhatsappPerJIDFiltering(t *testing.T) {
+	// Subscription for a specific phone+JID combination using > wildcard
+	// Note: JID contains dots (e.g., s.whatsapp.net) which create extra NATS subject levels
+	// The > wildcard is required (not *) to match across these levels
+	pattern := "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		// Should match: events for this specific chat
+		{topic: "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message", ok: true},
+		{topic: "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.status", ok: true},
+		// Should NOT match: different JID on same phone
+		{topic: "notifications.whatsapp.15551234567.group-abc@g.us.message", ok: false},
+		// Should NOT match: different phone number
+		{topic: "notifications.whatsapp.15559876543.5551234567@s.whatsapp.net.message", ok: false},
+	}
+	for _, item := range cases {
+		got := Match(pattern, item.topic)
+		if got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+}
