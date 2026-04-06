@@ -28,9 +28,15 @@ describe("getLiveWorkers", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(
       async () =>
-        new Response(JSON.stringify([{ id: "ENG-21-implement" }, { id: "ENG-22-plan" }]), {
-          status: 200,
-        })
+        new Response(
+          JSON.stringify([
+            { id: "ENG-21-implement", status: "running" },
+            { id: "ENG-22-plan", status: "running" },
+          ]),
+          {
+            status: 200,
+          }
+        )
     ) as unknown as typeof fetch;
 
     try {
@@ -48,9 +54,15 @@ describe("getLiveWorkers", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(
       async () =>
-        new Response(JSON.stringify([{ id: "eng-21-implement" }, { id: "Eng-22-plan" }]), {
-          status: 200,
-        })
+        new Response(
+          JSON.stringify([
+            { id: "eng-21-implement", status: "running" },
+            { id: "Eng-22-plan", status: "running" },
+          ]),
+          {
+            status: 200,
+          }
+        )
     ) as unknown as typeof fetch;
 
     try {
@@ -110,15 +122,41 @@ describe("getLiveWorkers", () => {
     }
   });
 
-  it("handles workers without status field (backwards compat)", async () => {
+  it("excludes workers without status field (stale entries)", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(
-      async () => new Response(JSON.stringify([{ id: "eng-21-implement" }]), { status: 200 })
+      async () =>
+        new Response(
+          JSON.stringify([{ id: "eng-21-implement" }, { id: "eng-22-plan", status: "running" }]),
+          { status: 200 }
+        )
     ) as unknown as typeof fetch;
 
     try {
       const result = await getLiveWorkers("http://localhost:3000");
-      expect(result).toEqual({ "ENG-21": { mode: "implement", status: "running" } });
+      // Workers without status are stale — only running/starting count as live
+      expect(result).toEqual({ "ENG-22": { mode: "plan", status: "running" } });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("excludes workers with null status", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(
+      async () =>
+        new Response(
+          JSON.stringify([
+            { id: "eng-21-implement", status: null },
+            { id: "eng-22-plan", status: "running" },
+          ]),
+          { status: 200 }
+        )
+    ) as unknown as typeof fetch;
+
+    try {
+      const result = await getLiveWorkers("http://localhost:3000");
+      expect(result).toEqual({ "ENG-22": { mode: "plan", status: "running" } });
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -172,8 +210,8 @@ describe("getLiveWorkers", () => {
       async () =>
         new Response(
           JSON.stringify([
-            { id: "TEAM-PROJECT-123-implement" },
-            { id: "MY-COMPLEX-ISSUE-456-plan" },
+            { id: "TEAM-PROJECT-123-implement", status: "running" },
+            { id: "MY-COMPLEX-ISSUE-456-plan", status: "running" },
           ]),
           { status: 200 }
         )
@@ -750,7 +788,10 @@ describe("fetchAllIssueData", () => {
   it("fetches data for issues", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(
-      async () => new Response(JSON.stringify([{ id: "ENG-21-implement" }]), { status: 200 })
+      async () =>
+        new Response(JSON.stringify([{ id: "ENG-21-implement", status: "running" }]), {
+          status: 200,
+        })
     ) as unknown as typeof fetch;
 
     try {

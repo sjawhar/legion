@@ -624,7 +624,13 @@ export function startServer(opts: ServerOptions): {
             return serverError(`Failed to cleanup workspace: ${(error as Error).message}`);
           }
 
-          return jsonResponse({ status: "cleaned" });
+          // Also remove the worker entry — workspace deletion means the issue is done
+          workers.delete(workerId);
+          crashHistory.delete(workerId);
+          await persistState();
+          unsubscribeWorkerFromEnvoy(entry.sessionId);
+
+          return jsonResponse({ status: "cleaned", workerRemoved: true });
         }
 
         if (segments.length === 3 && segments[0] === "workers" && segments[2] === "env") {
@@ -649,6 +655,65 @@ export function startServer(opts: ServerOptions): {
             }
           }
           return jsonResponse({ env: safeEnv });
+        }
+
+        if (segments.length === 2 && segments[0] === "workers" && segments[1] === "prune") {
+          await stateLoaded;
+          if (method !== "POST") {
+            return notFound();
+          }
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const issueIds = payload.issueIds;
+          if (!Array.isArray(issueIds) || !issueIds.every((id) => typeof id === "string")) {
+            return badRequest("issueIds must be an array of strings");
+          }
+
+          const normalizedIssueIds = new Set(issueIds.map((id: string) => id.toLowerCase()));
+          const prunedWorkers: string[] = [];
+          const prunedCrashHistory: string[] = [];
+          const prunedSessionIds: string[] = [];
+
+          for (const [workerId, entry] of workers.entries()) {
+            const workerIssueId = extractIssueIdFromWorkerId(workerId);
+            if (workerIssueId && normalizedIssueIds.has(workerIssueId.toLowerCase())) {
+              prunedWorkers.push(workerId);
+              prunedSessionIds.push(entry.sessionId);
+            }
+          }
+          for (const id of prunedWorkers) {
+            workers.delete(id);
+          }
+
+          for (const crashId of [...crashHistory.keys()]) {
+            const crashIssueId = extractIssueIdFromWorkerId(crashId);
+            if (crashIssueId && normalizedIssueIds.has(crashIssueId.toLowerCase())) {
+              prunedCrashHistory.push(crashId);
+              crashHistory.delete(crashId);
+            }
+          }
+
+          for (const issueId of normalizedIssueIds) {
+            issueStateCache.delete(issueId);
+          }
+
+          if (prunedWorkers.length > 0 || prunedCrashHistory.length > 0) {
+            await persistState();
+          }
+
+          for (const sessionId of prunedSessionIds) {
+            unsubscribeWorkerFromEnvoy(sessionId);
+          }
+
+          return jsonResponse({
+            pruned: prunedWorkers,
+            crashHistoryPruned: prunedCrashHistory,
+          });
         }
 
         if (segments.length === 2 && segments[0] === "workers") {

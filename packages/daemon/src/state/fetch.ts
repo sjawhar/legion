@@ -113,7 +113,7 @@ export async function getLiveWorkers(
     const result: Record<string, { mode: string; status: string }> = {};
 
     for (const worker of workers) {
-      if (worker.status && worker.status !== "running" && worker.status !== "starting") {
+      if (worker.status !== "running" && worker.status !== "starting") {
         continue;
       }
 

@@ -651,7 +651,7 @@ describe("daemon server", () => {
     });
 
     expect(cleanupResponse.status).toBe(200);
-    expect(await cleanupResponse.json()).toEqual({ status: "cleaned" });
+    expect(await cleanupResponse.json()).toEqual({ status: "cleaned", workerRemoved: true });
     expect(runJjCalls).toEqual([
       ["workspace", "forget", "eng-79", "-R", "/tmp/legion-data/repos/github.com/acme/widgets"],
     ]);
@@ -2057,6 +2057,262 @@ describe("daemon server", () => {
       const body = (await response.json()) as Record<string, unknown>;
       expect(body).not.toHaveProperty("promptDelivered");
       expect(sendPromptCalls).toHaveLength(0);
+    });
+  });
+
+  describe("POST /workers/prune", () => {
+    it("prunes all workers for given issue IDs", async () => {
+      await startTestServer();
+      // Create workers for two issues with multiple modes
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-100", mode: "implement", workspace: "/tmp/w1" }),
+      });
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-100", mode: "review", workspace: "/tmp/w2" }),
+      });
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-200", mode: "implement", workspace: "/tmp/w3" }),
+      });
+
+      const pruneResponse = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["ENG-100"] }),
+      });
+      expect(pruneResponse.status).toBe(200);
+      const pruneBody = (await pruneResponse.json()) as {
+        pruned: string[];
+        crashHistoryPruned: string[];
+      };
+      expect(pruneBody.pruned.sort()).toEqual(["eng-100-implement", "eng-100-review"]);
+
+      // ENG-200 worker should still exist
+      const listResponse = await requestJson("/workers");
+      const workers = (await listResponse.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(1);
+      expect(workers[0].id).toBe("eng-200-implement");
+    });
+
+    it("prunes crash history for matching workers", async () => {
+      await startTestServer();
+      // Create worker, mark dead with max crashes (creates crash history entry)
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-300", mode: "implement", workspace: "/tmp/w" }),
+      });
+      const created = (await createResponse.json()) as { id: string };
+
+      await requestJson(`/workers/${created.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "dead",
+          crashCount: 3,
+          lastCrashAt: new Date().toISOString(),
+        }),
+      });
+
+      // Prune the issue (worker is dead in map + has crash history)
+      const pruneResponse = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["ENG-300"] }),
+      });
+      expect(pruneResponse.status).toBe(200);
+      const pruneBody = (await pruneResponse.json()) as {
+        pruned: string[];
+        crashHistoryPruned: string[];
+      };
+      expect(pruneBody.pruned).toEqual(["eng-300-implement"]);
+      expect(pruneBody.crashHistoryPruned).toEqual(["eng-300-implement"]);
+
+      // Verify crash history is gone — respawn succeeds despite previous 3 crashes
+      const respawn = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-300", mode: "implement", workspace: "/tmp/w" }),
+      });
+      expect(respawn.status).toBe(200);
+    });
+    it("returns empty lists when no workers match", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-400", mode: "implement", workspace: "/tmp/w" }),
+      });
+
+      const pruneResponse = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["ENG-999"] }),
+      });
+      expect(pruneResponse.status).toBe(200);
+      const body = (await pruneResponse.json()) as {
+        pruned: string[];
+        crashHistoryPruned: string[];
+      };
+      expect(body.pruned).toEqual([]);
+      expect(body.crashHistoryPruned).toEqual([]);
+
+      // Original worker still exists
+      const listResponse = await requestJson("/workers");
+      const workers = (await listResponse.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(1);
+    });
+
+    it("rejects missing issueIds field", async () => {
+      await startTestServer();
+      const response = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("rejects non-array issueIds", async () => {
+      await startTestServer();
+      const response = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: "not-an-array" }),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("handles case-insensitive issue ID matching", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-500", mode: "implement", workspace: "/tmp/w" }),
+      });
+
+      // Prune with different casing
+      const pruneResponse = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["eng-500"] }),
+      });
+      expect(pruneResponse.status).toBe(200);
+      const body = (await pruneResponse.json()) as { pruned: string[] };
+      expect(body.pruned).toEqual(["eng-500-implement"]);
+    });
+
+    it("persists state after pruning", async () => {
+      await startTestServer();
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "ENG-600", mode: "implement", workspace: "/tmp/w" }),
+      });
+
+      await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["ENG-600"] }),
+      });
+
+      // Read state file directly to verify persistence
+      const raw = await readFile(path.join(tempDir ?? os.tmpdir(), "workers.json"), "utf-8");
+      const parsed = JSON.parse(raw) as PersistedWorkerState;
+      expect(Object.keys(parsed.workers)).toHaveLength(0);
+    });
+
+    it("prunes workers loaded from pre-existing state file", async () => {
+      const existing: WorkerEntry = {
+        id: "eng-700-implement",
+        port: sharedServePort,
+        sessionId: computeSessionId(legionId, "eng-700", "implement"),
+        workspace: "/tmp",
+        startedAt: "2026-02-01T00:00:00.000Z",
+        status: "running",
+        crashCount: 0,
+        lastCrashAt: null,
+      };
+      await startTestServer({
+        state: {
+          workers: { [existing.id]: existing },
+          crashHistory: {
+            "eng-700-implement": { crashCount: 1, lastCrashAt: "2026-01-01T00:00:00.000Z" },
+          },
+        },
+      });
+
+      const pruneResponse = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["eng-700"] }),
+      });
+      expect(pruneResponse.status).toBe(200);
+      const body = (await pruneResponse.json()) as {
+        pruned: string[];
+        crashHistoryPruned: string[];
+      };
+      expect(body.pruned).toEqual(["eng-700-implement"]);
+      expect(body.crashHistoryPruned).toEqual(["eng-700-implement"]);
+
+      // Verify workers list is empty
+      const listResponse = await requestJson("/workers");
+      const workers = (await listResponse.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(0);
+    });
+
+    it("returns 404 for non-POST methods", async () => {
+      await startTestServer();
+      const response = await requestJson("/workers/prune");
+      expect(response.status).toBe(404);
+    });
+  });
+
+  describe("DELETE /workers/:id/workspace prunes worker", () => {
+    it("removes worker entry after workspace cleanup", async () => {
+      const paths: LegionPaths = {
+        dataDir: "/tmp/legion-data",
+        stateDir: "/tmp/legion-state",
+        reposDir: "/tmp/legion-data/repos",
+        workspacesDir: "/tmp/legion-data/workspaces",
+        legionsFile: "/tmp/legion-state/legions.json",
+        forLegion: (projectId: string) => ({
+          legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+          workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+          feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+          logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+          workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+        }),
+        repoClonePath: (host: string, owner: string, repo: string) =>
+          `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+      };
+      const repoManagerDeps: RepoManagerDeps = {
+        runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        exists: async () => true,
+        rmDir: async () => {},
+        symlink: async () => {},
+      };
+      await startTestServer({ paths, repoManagerDeps });
+
+      // Create a worker with repo context
+      const createRes = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-800",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 800,
+        }),
+      });
+      expect(createRes.status).toBe(200);
+      const created = (await createRes.json()) as { id: string };
+
+      // Verify worker exists
+      const before = await requestJson("/workers");
+      const workersBefore = (await before.json()) as WorkerEntry[];
+      expect(workersBefore).toHaveLength(1);
+
+      // Delete workspace — should also remove the worker
+      const deleteRes = await requestJson(`/workers/${created.id}/workspace`, {
+        method: "DELETE",
+        body: JSON.stringify({ repo: "acme/widgets" }),
+      });
+      expect(deleteRes.status).toBe(200);
+      const deleteBody = (await deleteRes.json()) as { status: string; workerRemoved: boolean };
+      expect(deleteBody.workerRemoved).toBe(true);
+
+      // Verify worker is gone
+      const after = await requestJson("/workers");
+      const workersAfter = (await after.json()) as WorkerEntry[];
+      expect(workersAfter).toHaveLength(0);
     });
   });
 });
