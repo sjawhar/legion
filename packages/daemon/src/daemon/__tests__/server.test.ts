@@ -1823,6 +1823,44 @@ describe("daemon server", () => {
       planWorker = workers.find((w) => w.id === "acme-widgets-90-plan");
       expect(planWorker?.envoyTopics).toBeUndefined();
     });
+
+    it("does not unsubscribe workers for a different issue on cross-mode dispatch", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker for issue 50
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-50",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 50,
+        }),
+      });
+      await Bun.sleep(50);
+      envoySubscribeCalls.length = 0;
+
+      // Dispatch implement worker for issue 51 (different issue)
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-51",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 51,
+        }),
+      });
+      await Bun.sleep(50);
+
+      // No unsubscribe calls — issue 50's plan worker untouched
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls).toHaveLength(0);
+    });
   });
 
   describe("dispatch validation", () => {

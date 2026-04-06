@@ -661,16 +661,6 @@ export async function startDaemon(
           }
         }
 
-        // Clean up Envoy subscriptions for dead workers (fire-and-forget fallback)
-        // Catches workers that die without going through DELETE /workers/:id
-        for (const entry of Object.values(
-          (await resolvedDeps.readStateFile(config.stateFilePath)).workers
-        )) {
-          if (entry.status === "dead" && entry.envoyTopics && entry.envoyTopics.length > 0) {
-            unsubscribeFromEnvoy(entry.sessionId);
-          }
-        }
-
         const workerState = await resolvedDeps.readStateFile(config.stateFilePath);
         feedbackLogger?.log({
           event: "daemon.health_tick",

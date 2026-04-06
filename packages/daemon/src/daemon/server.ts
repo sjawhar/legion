@@ -540,15 +540,11 @@ export function startServer(opts: ServerOptions): {
             // Mode-based Envoy subscription (GitHub-only, fire-and-forget)
             // Only plan mode subscribes to issue topics at dispatch.
             // Implement self-subscribes to PR topics after PR creation via envoy_subscribe.
-            if (
-              mode === WorkerMode.PLAN &&
-              typeof repo === "string" &&
-              issueNumber !== undefined
-            ) {
+            if (mode === WorkerMode.PLAN && typeof repo === "string" && issueNumber !== undefined) {
               const repoRef = parseIssueRepo(repo);
               if (repoRef) {
                 const topics = [
-                  `notifications.github.${repoRef.owner}.${repoRef.repo}.issue.${issueNumber}.>`
+                  `notifications.github.${repoRef.owner}.${repoRef.repo}.issue.${issueNumber}.>`,
                 ];
                 subscribeWorkerToEnvoy(actualSessionId, topics);
                 entry.envoyTopics = topics;
@@ -739,10 +735,9 @@ export function startServer(opts: ServerOptions): {
                 crashCount: updated.crashCount,
                 lastCrashAt: updated.lastCrashAt,
               });
-              // Clean up Envoy subscriptions for dead workers (fire-and-forget)
-              if (updated.envoyTopics && updated.envoyTopics.length > 0) {
-                unsubscribeWorkerFromEnvoy(updated.sessionId);
-                updated.envoyTopics = undefined;
+              // Clean up Envoy subscriptions on transition to dead (fire-and-forget)
+              if (entry.status !== "dead") {
+                detachWorkerFromEnvoy(updated, "worker-dead");
               }
             }
             await persistState();
@@ -769,9 +764,10 @@ export function startServer(opts: ServerOptions): {
               crashCount: entry.crashCount,
               lastCrashAt: entry.lastCrashAt,
             });
+            entry.envoyTopics = undefined;
             workers.delete(id);
             await persistState();
-            unsubscribeWorkerFromEnvoy(entry.sessionId);
+            unsubscribeAllWorkerTopics(entry.sessionId);
             return jsonResponse({ status: "stopped" });
           }
         }
