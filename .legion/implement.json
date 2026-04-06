@@ -1,35 +1,44 @@
 {
   "filesChanged": [
-    "packages/daemon/src/handoff/ledger.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/cli/__tests__/handoff.test.ts",
-    ".opencode/skills/legion-worker/SKILL.md",
-    ".opencode/skills/legion-worker/workflows/architect.md",
-    ".opencode/skills/legion-worker/workflows/plan.md",
-    ".opencode/skills/legion-worker/workflows/implement.md",
-    ".opencode/skills/legion-worker/workflows/test.md",
-    ".opencode/skills/legion-worker/workflows/review.md",
-    ".opencode/skills/legion-retro/SKILL.md"
+    "packages/envoy/.gitignore",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/ghostwispr/main.go",
+    "packages/envoy/internal/verify/ghostwispr.go",
+    "packages/envoy/internal/verify/ghostwispr_test.go",
+    "packages/envoy/internal/contracts/normalize.go",
+    "packages/envoy/internal/contracts/normalize_test.go",
+    "packages/envoy/internal/contracts/generated.go",
+    "packages/envoy/deploy/compose/ghostwispr.compose.yml",
+    "packages/envoy/docker/Dockerfile",
+    "packages/envoy/infra/machines.ts",
+    "packages/envoy/infra/services.ts",
+    "packages/envoy/infra/index.ts",
+    "packages/envoy/infra/Pulumi.prod.yaml",
+    "packages/contracts/src/subject.ts",
+    "packages/contracts/scripts/gen-go.ts",
+    "packages/contracts/src/envelope.test.ts",
+    ".opencode/skills/envoy/SKILL.md",
+    "docs/plans/2026-04-06-ghost-wispr-webhook-receiver.md"
   ],
   "trickyParts": [
-    "Two layers of error suppression: TypeScript try-catch AND bash || true both needed fixing",
-    "Read functions intentionally keep try-catch for graceful degradation - only writes should fail loudly",
-    "implement.md has TWO handoff write sections (fresh + address-comments) - easy to miss one",
-    "legion-retro/SKILL.md also had || true on handoff writes - found during cross-family review"
+    "Compiled Go binary (9.6MB) was left in workspace from prior implementer, blocking jj snapshot — added /ghostwispr to .gitignore and deleted the binary",
+    "Most implementation was already complete from prior workers (architect+plan phases ran implementation). This implement phase focused on cleanup, verification, and shipping"
   ],
   "deviations": [
-    "Also fixed legion-retro/SKILL.md which wasn't mentioned in the issue but had the same problem"
+    "No deviations — the plan was accurate. Both remaining tasks (AGENTS.md update + binary cleanup) were already done by prior phases, so this phase only verified, tested, and shipped"
   ],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [
-    "docs/solutions/daemon/handoff-schema-migration-patterns.md",
-    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md"
+    "docs/solutions/envoy/contracts-and-handler-patterns.md",
+    "docs/solutions/envoy/adding-resource-level-subject-helpers.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/daemon/handoff-schema-migration-patterns.md"
+    "docs/solutions/envoy/contracts-and-handler-patterns.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-06T17:34:37.243Z"
+  "completed": "2026-04-06T23:41:52.274Z"
 }

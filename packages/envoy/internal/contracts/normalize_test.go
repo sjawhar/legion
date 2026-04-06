@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func decodeSummary(t *testing.T, raw string) map[string]string {
+	t.Helper()
+	var summary map[string]string
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		t.Fatalf("invalid summary JSON: %v", err)
+	}
+	return summary
+}
+
 func TestGithubEnvelope(t *testing.T) {
 	item := GithubEnvelope(GithubEnvelopeInput{
 		Event:    "pull_request",
@@ -69,22 +78,29 @@ func TestSlackEnvelope(t *testing.T) {
 
 func TestContainsMention(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		want bool
+		name    string
+		body    string
+		trigger string
+		want    bool
 	}{
-		{name: "prefix", body: "@legion please help", want: true},
-		{name: "middle", body: "hello @legion", want: true},
-		{name: "punctuation", body: "(@legion)", want: true},
-		{name: "case", body: "@LEGION", want: true},
-		{name: "suffix word", body: "@legionnaire", want: false},
-		{name: "email", body: "user@legion.dev", want: false},
-		{name: "empty", body: "", want: false},
+		{name: "matches mention at start", body: "@legion please help", trigger: "@legion", want: true},
+		{name: "matches mention in middle", body: "hello @legion", trigger: "@legion", want: true},
+		{name: "matches mention wrapped in punctuation", body: "(@legion)", trigger: "@legion", want: true},
+		{name: "matches case-insensitively", body: "@LEGION", trigger: "@legion", want: true},
+		{name: "finds a later valid mention after an invalid suffix match", body: "@legionnaire then @legion", trigger: "@legion", want: true},
+		{name: "finds a later valid mention after email-like text", body: "user@legion.dev then ping @legion", trigger: "@legion", want: true},
+		{name: "rejects suffix word", body: "@legionnaire", trigger: "@legion", want: false},
+		{name: "rejects email", body: "user@legion.dev", trigger: "@legion", want: false},
+		{name: "rejects dotted suffix", body: "@legion.dev", trigger: "@legion", want: false},
+		{name: "rejects empty body", body: "", trigger: "@legion", want: false},
+		{name: "rejects empty trigger", body: "@legion please help", trigger: "", want: false},
 	}
 	for _, item := range tests {
-		if got := ContainsMention(item.body, "@legion"); got != item.want {
-			t.Fatalf("%s: expected %v, got %v", item.name, item.want, got)
-		}
+		t.Run(item.name, func(t *testing.T) {
+			if got := ContainsMention(item.body, item.trigger); got != item.want {
+				t.Fatalf("ContainsMention(%q, %q) = %v, want %v", item.body, item.trigger, got, item.want)
+			}
+		})
 	}
 }
 
@@ -207,6 +223,75 @@ func TestGithubEnvelopesEmptyReview(t *testing.T) {
 	}, "@legion")
 	if len(items) != 1 {
 		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+}
+
+func TestGithubEnvelopesIssueCommentEditedDoesNotCreateMentionEnvelope(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "issue_comment",
+		Delivery: "d1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "edited",
+			"repository": map[string]any{
+				"full_name": "sjawhar/envoy",
+				"name":      "envoy",
+				"owner": map[string]any{
+					"login": "sjawhar",
+				},
+			},
+			"issue": map[string]any{
+				"number": 7,
+				"title":  "Test issue",
+			},
+			"comment": map[string]any{
+				"body":     "@legion please review",
+				"html_url": "https://github.com/sjawhar/envoy/issues/7#issuecomment-5",
+				"user":     map[string]any{"login": "editor"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope when action is edited, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.envoy.issue.7.comment" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+}
+
+func TestGithubEnvelopesReviewRequiresSubmittedActionForMentionFanout(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "pull_request_review",
+		Delivery: "d1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "edited",
+			"repository": map[string]any{
+				"full_name": "sjawhar/envoy",
+				"name":      "envoy",
+				"owner": map[string]any{
+					"login": "sjawhar",
+				},
+			},
+			"pull_request": map[string]any{
+				"number": 1,
+				"title":  "hello",
+			},
+			"review": map[string]any{
+				"body":     "@legion can you take a look?",
+				"html_url": "https://github.com/sjawhar/envoy/pull/1#pullrequestreview-3",
+				"state":    "commented",
+				"user":     map[string]any{"login": "reviewer"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope when review action is not submitted, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.envoy.pr.1.review" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
 	}
 }
 
@@ -415,6 +500,26 @@ func TestSlackEnvelopesNoThread(t *testing.T) {
 	}
 }
 
+func TestSlackEnvelopeDefaultsUnknownTeamAndChannel(t *testing.T) {
+	item := SlackEnvelope(SlackEnvelopeInput{
+		EventID: "e1",
+		TraceID: "t1",
+		Body: map[string]any{
+			"event_id": "Ev123",
+			"event": map[string]any{
+				"type": "message",
+				"text": "hello envoy",
+			},
+		},
+	})
+	if item.Topic != "notifications.slack.unknown.unknown.message" {
+		t.Fatalf("unexpected topic: %s", item.Topic)
+	}
+	if item.DedupeKey != "slack.Ev123" {
+		t.Fatalf("unexpected dedupe key: %s", item.DedupeKey)
+	}
+}
+
 func TestTruncateBody(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -611,10 +716,7 @@ func TestGithubSummaryJSON(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := githubSummary(tt.event, tt.body)
-			var parsed map[string]string
-			if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-				t.Fatalf("githubSummary returned invalid JSON: %v\nraw: %s", err, result)
-			}
+			parsed := decodeSummary(t, result)
 			if len(parsed) != len(tt.expectedKeys) {
 				t.Fatalf("expected %d keys, got %d: %v", len(tt.expectedKeys), len(parsed), parsed)
 			}
@@ -804,6 +906,49 @@ func TestGithubEnvelopesCICheckRunMultiplePRs(t *testing.T) {
 	}
 }
 
+func TestGithubEnvelopesCICheckRunSkipsMalformedPullRequests(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "check_run",
+		Delivery: "d3",
+		EventID:  "e3",
+		TraceID:  "t3",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_run": map[string]any{
+				"name":       "test",
+				"status":     "completed",
+				"conclusion": "success",
+				"pull_requests": []any{
+					"not-a-map",
+					map[string]any{},
+					map[string]any{"number": 42},
+					map[string]any{"number": float64(43)},
+				},
+			},
+		},
+	}, "@legion")
+	if len(items) != 2 {
+		t.Fatalf("expected 2 envelopes from valid PR entries, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.pr.42.ci" {
+		t.Fatalf("unexpected topic[0]: %s", items[0].Topic)
+	}
+	if items[0].DedupeKey != "github.d3.pr.42" {
+		t.Fatalf("unexpected dedupe key[0]: %s", items[0].DedupeKey)
+	}
+	if items[1].Topic != "notifications.github.sjawhar.legion.pr.43.ci" {
+		t.Fatalf("unexpected topic[1]: %s", items[1].Topic)
+	}
+	if items[1].DedupeKey != "github.d3.pr.43" {
+		t.Fatalf("unexpected dedupe key[1]: %s", items[1].DedupeKey)
+	}
+}
+
 func TestGithubEnvelopesCICheckSuiteOnePR(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "check_suite",
@@ -839,18 +984,18 @@ func TestGithubEnvelopesCICheckSuiteOnePR(t *testing.T) {
 
 func TestGhostWisprSubject(t *testing.T) {
 	cases := []struct {
-		recordingId string
-		kind        string
-		want        string
+		sessionId string
+		kind      string
+		want      string
 	}{
-		{recordingId: "rec-abc123", kind: "transcript", want: "notifications.ghostwispr.rec-abc123.transcript"},
-		{recordingId: "rec-abc123", kind: "summary", want: "notifications.ghostwispr.rec-abc123.summary"},
-		{recordingId: "rec-xyz789", kind: "transcript", want: "notifications.ghostwispr.rec-xyz789.transcript"},
+		{sessionId: "20260326041405", kind: "session.started", want: "notifications.ghostwispr.20260326041405.session.started"},
+		{sessionId: "20260326041405", kind: "session.ended", want: "notifications.ghostwispr.20260326041405.session.ended"},
+		{sessionId: "20260326041629", kind: "summary.ready", want: "notifications.ghostwispr.20260326041629.summary.ready"},
 	}
 	for _, item := range cases {
-		got := GhostWisprSubject(item.recordingId, item.kind)
+		got := GhostWisprSubject(item.sessionId, item.kind)
 		if got != item.want {
-			t.Fatalf("GhostWisprSubject(%s, %s) = %s, want %s", item.recordingId, item.kind, got, item.want)
+			t.Fatalf("GhostWisprSubject(%s, %s) = %s, want %s", item.sessionId, item.kind, got, item.want)
 		}
 	}
 }
@@ -859,7 +1004,7 @@ func TestGhostWisprTopicPrefix(t *testing.T) {
 	if GhostWisprTopicPrefix != "notifications.ghostwispr." {
 		t.Fatalf("unexpected prefix: %s", GhostWisprTopicPrefix)
 	}
-	subject := GhostWisprSubject("rec-1", "transcript")
+	subject := GhostWisprSubject("20260326041405", "session.ended")
 	if !strings.HasPrefix(subject, GhostWisprTopicPrefix) {
 		t.Fatalf("subject %s does not start with prefix %s", subject, GhostWisprTopicPrefix)
 	}
@@ -869,11 +1014,11 @@ func TestGhostWisprSourceValidation(t *testing.T) {
 	env := Envelope{
 		EventID:        "evt-1",
 		Source:         "ghostwispr",
-		SourceEventID:  "src-1",
-		Topic:          "notifications.ghostwispr.rec-1.transcript",
-		DedupeKey:      "ghostwispr.src-1",
+		SourceEventID:  "gw-delivery-1",
+		Topic:          "notifications.ghostwispr.20260326041405.session.ended",
+		DedupeKey:      "ghostwispr.gw-delivery-1",
 		IssuedAt:       NowMillis(),
-		PayloadSummary: "{}",
+		PayloadSummary: `{"event_type":"session_ended","session_id":"20260326041405"}`,
 		TraceID:        "trace-1",
 	}
 	if err := env.Validate(); err != nil {
@@ -913,5 +1058,271 @@ func TestWhatsappSourceValidation(t *testing.T) {
 	}
 	if err := env.Validate(); err != nil {
 		t.Fatalf("expected whatsapp source to be valid: %v", err)
+	}
+}
+
+func TestSlackEnvelopeHandlesNonObjectEvent(t *testing.T) {
+	item := SlackEnvelope(SlackEnvelopeInput{
+		EventID: "e-malformed",
+		TraceID: "t-malformed",
+		Body: map[string]any{
+			"team_id":  "T123",
+			"event_id": "Ev123",
+			"event":    "not-an-object",
+		},
+	})
+	if item.Topic != "notifications.slack.T123.unknown.message" {
+		t.Fatalf("unexpected topic: %s", item.Topic)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("expected valid envelope: %v", err)
+	}
+}
+
+func TestGithubEnvelopesHandlesMalformedCheckRunPullRequests(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "check_run",
+		Delivery: "d-ci",
+		EventID:  "e-ci",
+		TraceID:  "t-ci",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"name":  "envoy",
+				"owner": map[string]any{"login": "sjawhar"},
+			},
+			"check_run": map[string]any{
+				"name":          "ci",
+				"status":        "completed",
+				"conclusion":    "success",
+				"pull_requests": []any{"bad-entry", 42},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected only base envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.envoy.ci" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+}
+
+func TestGhostWisprEnvelopeSessionEnded(t *testing.T) {
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: "session_ended",
+		Delivery:  "gw-delivery-1",
+		EventID:   "e1",
+		TraceID:   "t1",
+		Body: map[string]any{
+			"id":         float64(11),
+			"event_type": "session_ended",
+			"payload": map[string]any{
+				"session_id": "20260326041405",
+				"timestamp":  "2026-03-26T04:14:58.198253094Z",
+				"duration":   51.05,
+				"type":       "session_ended",
+				"version":    float64(1),
+			},
+			"created_at": "2026-03-26T04:14:58Z",
+		},
+	})
+	if item.Topic != "notifications.ghostwispr.20260326041405.session.ended" {
+		t.Fatalf("unexpected topic: %s", item.Topic)
+	}
+	if item.DedupeKey != "ghostwispr.gw-delivery-1" {
+		t.Fatalf("unexpected dedupe key: %s", item.DedupeKey)
+	}
+	if item.Source != "ghostwispr" {
+		t.Fatalf("unexpected source: %s", item.Source)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("expected valid envelope: %v", err)
+	}
+	// Verify summary has duration
+	summary := decodeSummary(t, item.PayloadSummary)
+	if summary["duration"] == "" {
+		t.Fatal("expected duration in summary")
+	}
+	if summary["session_id"] != "20260326041405" {
+		t.Fatalf("unexpected session_id in summary: %s", summary["session_id"])
+	}
+}
+
+func TestGhostWisprEnvelopeSummaryReady(t *testing.T) {
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: "summary_ready",
+		Delivery:  "gw-delivery-2",
+		EventID:   "e2",
+		TraceID:   "t2",
+		Body: map[string]any{
+			"id":         float64(19),
+			"event_type": "summary_ready",
+			"payload": map[string]any{
+				"session_id":     "20260326041629",
+				"status":         "completed",
+				"summary":        "",
+				"summary_preset": "default",
+				"timestamp":      "2026-03-26T04:17:03.04177255Z",
+				"title":          "How are we gonna do the",
+				"type":           "summary_ready",
+				"version":        float64(1),
+			},
+			"created_at": "2026-03-26T04:17:03Z",
+		},
+	})
+	if item.Topic != "notifications.ghostwispr.20260326041629.summary.ready" {
+		t.Fatalf("unexpected topic: %s", item.Topic)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("expected valid envelope: %v", err)
+	}
+	// Verify summary has title
+	summary := decodeSummary(t, item.PayloadSummary)
+	if summary["title"] != "How are we gonna do the" {
+		t.Fatalf("unexpected title in summary: %s", summary["title"])
+	}
+}
+
+func TestGhostWisprEnvelopeSessionStarted(t *testing.T) {
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: "session_started",
+		Delivery:  "gw-delivery-3",
+		EventID:   "e3",
+		TraceID:   "t3",
+		Body: map[string]any{
+			"id":         float64(5),
+			"event_type": "session_started",
+			"payload": map[string]any{
+				"session_id": "20260326041405",
+				"timestamp":  "2026-03-26T04:14:05.79928117Z",
+				"type":       "session_started",
+				"version":    float64(1),
+			},
+			"created_at": "2026-03-26T04:14:05Z",
+		},
+	})
+	if item.Topic != "notifications.ghostwispr.20260326041405.session.started" {
+		t.Fatalf("unexpected topic: %s", item.Topic)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("expected valid envelope: %v", err)
+	}
+}
+
+func TestGhostWisprEnvelopeMissingSessionIdUsesUnknownTopic(t *testing.T) {
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: "session_ended",
+		Delivery:  "gw-delivery-4",
+		EventID:   "e4",
+		TraceID:   "t4",
+		Body:      map[string]any{"event_type": "session_ended"},
+	})
+	if item.Topic != "notifications.ghostwispr.unknown.session.ended" {
+		t.Fatalf("unexpected topic for missing session_id: %s", item.Topic)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("expected valid envelope even without session_id: %v", err)
+	}
+	summary := decodeSummary(t, item.PayloadSummary)
+	if summary["session_id"] != "" {
+		t.Fatalf("expected empty session_id in summary, got %q", summary["session_id"])
+	}
+}
+
+func TestGhostWisprKindMapping(t *testing.T) {
+	cases := []struct {
+		eventType string
+		wantKind  string
+	}{
+		{eventType: "session_started", wantKind: "session.started"},
+		{eventType: "session_ended", wantKind: "session.ended"},
+		{eventType: "summary_ready", wantKind: "summary.ready"},
+		{eventType: "unknown_type", wantKind: "unknown_type"},
+	}
+	for _, item := range cases {
+		env := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+			EventType: item.eventType,
+			Delivery:  "d1",
+			EventID:   "e1",
+			TraceID:   "t1",
+			Body: map[string]any{
+				"payload": map[string]any{"session_id": "20260326041405"},
+			},
+		})
+		want := GhostWisprSubject("20260326041405", item.wantKind)
+		if env.Topic != want {
+			t.Fatalf("eventType=%s: got topic %s, want %s", item.eventType, env.Topic, want)
+		}
+	}
+}
+
+func TestGhostWisprEnvelopeSanitizesSessionID(t *testing.T) {
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: "session_ended",
+		Delivery:  "gw-delivery-sanitize",
+		EventID:   "e-sanitize",
+		TraceID:   "t-sanitize",
+		Body: map[string]any{
+			"event_type": "session_ended",
+			"payload": map[string]any{
+				"session_id": " 2026.03/26 041405 ",
+				"type":       "session_ended",
+			},
+		},
+	})
+	if item.Topic != "notifications.ghostwispr.2026_03_26_041405.session.ended" {
+		t.Fatalf("unexpected sanitized topic: %s", item.Topic)
+	}
+	var summary map[string]string
+	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
+		t.Fatalf("invalid summary JSON: %v", err)
+	}
+	if summary["session_id"] != "2026.03/26 041405" {
+		t.Fatalf("unexpected session_id in summary: %q", summary["session_id"])
+	}
+}
+
+func TestGhostWisprEnvelopeNormalizesEventType(t *testing.T) {
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: " SUMMARY.READY ",
+		Delivery:  "gw-delivery-normalized",
+		EventID:   "e-normalized",
+		TraceID:   "t-normalized",
+		Body: map[string]any{
+			"payload": map[string]any{"session_id": "20260326041629"},
+		},
+	})
+	if item.Topic != "notifications.ghostwispr.20260326041629.summary.ready" {
+		t.Fatalf("unexpected topic: %s", item.Topic)
+	}
+	var summary map[string]string
+	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
+		t.Fatalf("invalid summary JSON: %v", err)
+	}
+	if summary["event_type"] != "summary_ready" {
+		t.Fatalf("unexpected normalized event_type in summary: %q", summary["event_type"])
+	}
+}
+
+func TestGhostWisprSummaryTruncatesTitle(t *testing.T) {
+	longTitle := strings.Repeat("a", 600)
+	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+		EventType: "summary_ready",
+		Delivery:  "gw-delivery-title",
+		EventID:   "e-title",
+		TraceID:   "t-title",
+		Body: map[string]any{
+			"payload": map[string]any{
+				"session_id": "20260326041629",
+				"title":      longTitle,
+			},
+		},
+	})
+	var summary map[string]string
+	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
+		t.Fatalf("invalid summary JSON: %v", err)
+	}
+	if got := len(summary["title"]); got != 500 {
+		t.Fatalf("unexpected truncated title length: %d", got)
 	}
 }

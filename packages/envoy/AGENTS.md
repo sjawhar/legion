@@ -6,7 +6,7 @@ Go-based cross-machine event transport and delivery subsystem.
 
 Envoy owns transport, routing, and delivery:
 
-- ingests Slack/GitHub/agent events
+- ingests Slack/GitHub/Ghost Wispr/agent events
 - publishes and consumes via NATS/JetStream
 - resolves target OpenCode sessions
 - delivers by hot `prompt_async` (messages stay in JetStream for retry if session is unavailable)
@@ -17,7 +17,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 
 | Task                   | Location                                  | Notes                                              |
 | ---------------------- | ----------------------------------------- | -------------------------------------------------- |
-| Receiver behavior      | `cmd/github/main.go`, `cmd/slack/main.go` | HTTP ingress, signature verification, publish path |
+| Receiver behavior      | `cmd/github/main.go`, `cmd/slack/main.go`, `cmd/ghostwispr/main.go` | HTTP ingress, signature verification, publish path |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
@@ -30,7 +30,9 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 
 - `packages/contracts` is the source of truth for event contract shape; regenerate Go output from there.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
-- `github` / `slack` receivers must fail loudly and return 503 when publish cannot be confirmed.
+- `github` / `slack` / `ghostwispr` receivers must fail loudly and return 503 when publish cannot be confirmed.
+- Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
+- `ENVOY_GHOSTWISPR_SIGNING_SECRET` is optional for trusted Ghost Wispr deployments; when unset, skip signature verification explicitly rather than half-verifying missing headers.
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.

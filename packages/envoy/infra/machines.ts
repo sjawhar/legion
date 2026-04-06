@@ -11,6 +11,7 @@ export interface ListenerConfig {
 export interface ReceiverConfig {
   github?: boolean;
   slack?: boolean;
+  ghostwispr?: boolean;
 }
 
 export interface MachineConfig {

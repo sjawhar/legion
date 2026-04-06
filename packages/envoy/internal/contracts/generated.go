@@ -81,8 +81,8 @@ func GithubResourceSubject(owner string, repo string, resourceType string, resou
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."
 
-func GhostWisprSubject(recordingId string, kind string) string {
-	return GhostWisprTopicPrefix + recordingId + "." + kind
+func GhostWisprSubject(sessionId string, kind string) string {
+	return GhostWisprTopicPrefix + sessionId + "." + kind
 }
 
 func WhatsappSubject(phone, jid, kind string) string {

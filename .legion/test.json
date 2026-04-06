@@ -1,0 +1,23 @@
+{
+  "passed": 10,
+  "failed": 0,
+  "failures": [],
+  "documentationFeedback": "Envoy skill SKILL.md updated with Ghost Wispr section — clear topic format, parameters, and examples. AGENTS.md updated with ghostwispr receiver. No separate README or setup guide, appropriate for internal service.",
+  "observations": [
+    "P2: Handler tests check wantPublished bool but don't verify envelope content (topic/source/dedupe key) — covered separately in normalization tests but no end-to-end integration",
+    "Event type normalization handles dots-to-underscores flexibly (e.g., session.ended header → session_ended)",
+    "Optional signing well-documented as deliberate design choice (Tailscale perimeter)",
+    "Pre-existing moduleResolution=node10 deprecation warning in infra tsconfig — unrelated to PR"
+  ],
+  "learningsInjected": [
+    "envoy/contracts-and-handler-patterns.md",
+    "envoy/adding-resource-level-subject-helpers.md",
+    "envoy/pulumi-remote-docker-patterns.md"
+  ],
+  "learningsHelpful": [
+    "envoy/contracts-and-handler-patterns.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-07T00:16:18.546Z"
+}

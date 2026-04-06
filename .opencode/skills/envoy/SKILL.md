@@ -76,6 +76,23 @@ Examples:
 - `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.message`
 - `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.mention`
 
+### Ghost Wispr
+
+- Session started events:
+  - `notifications.ghostwispr.<session_id>.session.started`
+- Session ended events:
+  - `notifications.ghostwispr.<session_id>.session.ended`
+- Summary ready events:
+  - `notifications.ghostwispr.<session_id>.summary.ready`
+
+**Parameters:**
+- `<session_id>`: Ghost Wispr session timestamp string (e.g., `20260326041405`). Alphanumeric only, safe for NATS topic segments.
+- Supported kinds: `session.started`, `session.ended`, `summary.ready`
+
+Examples:
+
+- `notifications.ghostwispr.20260326041405.session.ended` (session ended)
+- `notifications.ghostwispr.20260326041629.summary.ready` (summary ready)
 
 ### WhatsApp
 
