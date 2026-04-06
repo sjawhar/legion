@@ -15,6 +15,7 @@ function makeAdapter(): RuntimeAdapter {
     stop: async () => {},
     healthy: async () => true,
     getPort: () => 15500,
+    getServePid: () => 0,
     createSession: async (sessionId) => sessionId,
     sendPrompt: async () => {},
     getSessionStatus: async () => ({ data: undefined }),

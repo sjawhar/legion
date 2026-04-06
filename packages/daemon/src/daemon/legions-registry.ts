@@ -2,11 +2,13 @@ import { closeSync, constants, openSync, readFileSync, writeSync } from "node:fs
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { LegionsRegistrySchema } from "./schemas";
+import { killStaleServe } from "./serve-manager";
 
 interface LegionEntry {
   port: number;
   servePort: number;
   pid: number;
+  servePid?: number;
   startedAt: string;
 }
 
@@ -113,6 +115,44 @@ export async function findLegionByProjectId(
 ): Promise<LegionEntry | undefined> {
   const registry = await readLegionsRegistry(filePath);
   return registry[projectId];
+}
+
+/**
+ * Clean up stale serve processes from dead daemon entries in the registry.
+ * Called on daemon startup before port allocation.
+ *
+ * For our legionId: if the previous daemon is dead, kill its orphaned serve process.
+ * This prevents SQLite lock contention and port conflicts after unclean daemon exits.
+ */
+export async function cleanupStaleServes(filePath: string, legionId: string): Promise<void> {
+  const registry = await readLegionsRegistry(filePath);
+  const entry = registry[legionId];
+  if (!entry) {
+    return;
+  }
+
+  // If the previous daemon is still alive, don't touch its serve
+  if (isPidAlive(entry.pid)) {
+    return;
+  }
+
+  // Previous daemon is dead — its serve may still be running
+  console.log(
+    `Previous daemon for ${legionId} (PID ${entry.pid}) is dead, checking for stale serve on port ${entry.servePort}...`
+  );
+
+  const cleaned = await killStaleServe(entry.servePort, entry.servePid);
+  if (cleaned) {
+    // Remove the stale entry from the registry
+    await withRegistryLock(filePath, async () => {
+      const current = await readLegionsRegistry(filePath);
+      if (current[legionId]?.pid === entry.pid) {
+        delete current[legionId];
+        await writeRegistry(filePath, current);
+        console.log(`Removed stale registry entry for ${legionId}`);
+      }
+    });
+  }
 }
 
 async function writeRegistry(filePath: string, registry: LegionsRegistry): Promise<void> {

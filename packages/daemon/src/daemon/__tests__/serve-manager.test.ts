@@ -3,6 +3,7 @@ import {
   createSession,
   createWorkerClient,
   healthCheck,
+  killStaleServe,
   spawnSharedServe,
   stopServe,
   waitForHealthy,
@@ -386,5 +387,99 @@ describe("serve-manager", () => {
       expect(client).toBeDefined();
       expect(client.session).toBeDefined();
     });
+  });
+});
+
+describe("killStaleServe", () => {
+  const originalFetch = globalThis.fetch;
+  const originalKill = process.kill;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.kill = originalKill;
+  });
+
+  it("returns true immediately when port is already free", async () => {
+    // Use a port that's almost certainly free
+    const result = await killStaleServe(59999, undefined, 50, 10);
+    expect(result).toBe(true);
+  });
+
+  it("stops stale serve using PID when available", async () => {
+    // Mock: port is occupied (isPortFree returns false)
+    // Mock: fetch (dispose) succeeds
+    // Mock: process.kill(pid, 0) throws ESRCH (process already dead after dispose)
+    const disposeCalled = { value: false };
+    globalThis.fetch = (async (input: string) => {
+      if (typeof input === "string" && input.includes("/global/dispose")) {
+        disposeCalled.value = true;
+      }
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    process.kill = ((_: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0) {
+        const err = new Error("ESRCH") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      }
+      return true;
+    }) as typeof process.kill;
+
+    // Bind a port to simulate an occupied port
+    const { createServer } = await import("node:net");
+    const server = createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+
+    try {
+      const result = await killStaleServe(port, 99999, 100, 10, 100);
+      expect(result).toBe(true);
+      expect(disposeCalled.value).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("falls back to dispose-only when PID not provided", async () => {
+    let disposeUrl = "";
+    globalThis.fetch = (async (input: string) => {
+      if (typeof input === "string" && input.includes("/global/dispose")) {
+        disposeUrl = input;
+      }
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    // Use a port that's free (so killStaleServe returns true on first check)
+    const result = await killStaleServe(59998, undefined, 50, 10);
+    expect(result).toBe(true);
+    // Dispose should NOT be called because port was already free
+    expect(disposeUrl).toBe("");
+  });
+
+  it("returns false when port stays occupied and no PID available", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("connection refused");
+    }) as unknown as typeof fetch;
+
+    const { createServer } = await import("node:net");
+    const server = createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+
+    try {
+      const result = await killStaleServe(port, undefined, 100, 10, 50);
+      expect(result).toBe(false);
+    } finally {
+      server.close();
+    }
   });
 });

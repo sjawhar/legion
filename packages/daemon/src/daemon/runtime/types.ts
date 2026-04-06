@@ -27,4 +27,7 @@ export interface RuntimeAdapter {
   getPort(): number;
   /** Get the status of a session (returns opaque data forwarded to the client) */
   getSessionStatus(sessionId: string): Promise<{ data?: unknown; error?: unknown }>;
+
+  /** Get the PID of the serve process (0 if not applicable or not started). */
+  getServePid(): number;
 }

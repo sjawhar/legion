@@ -32,6 +32,9 @@ function createMockAdapter(port: number): RuntimeAdapter & {
     getPort() {
       return port;
     },
+    getServePid() {
+      return 0;
+    },
     async getSessionStatus() {
       return { data: { type: "idle" } };
     },

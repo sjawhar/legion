@@ -36,6 +36,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return 0;
   }
 
+  getServePid(): number {
+    return 0;
+  }
+
   async start(opts: RuntimeStartOptions): Promise<void> {
     const result = this.spawn(["tmux", "new-session", "-d", "-s", this.sessionName]);
     if (result.exitCode !== 0) {

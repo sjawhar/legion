@@ -20,6 +20,10 @@ export class OpenCodeAdapter implements RuntimeAdapter {
     return this.port;
   }
 
+  getServePid(): number {
+    return this.pid;
+  }
+
   /** Store start opts for lazy serve startup via ensureRunning(). */
   configure(opts: RuntimeStartOptions): void {
     this.startOpts = opts;

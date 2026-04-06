@@ -12,6 +12,7 @@ import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
 import { modeToRole, TokenManager } from "./github-apps";
 import {
   allocatePort,
+  cleanupStaleServes,
   readLegionsRegistry,
   removeLegionEntry,
   writeLegionEntry,
@@ -43,6 +44,7 @@ interface DaemonDependencies {
 
 interface DaemonOverrides extends Partial<DaemonConfig> {
   readLegionsRegistry?: typeof readLegionsRegistry;
+  cleanupStaleServes?: typeof cleanupStaleServes;
   allocatePort?: typeof allocatePort;
   writeLegionEntry?: typeof writeLegionEntry;
   removeLegionEntry?: typeof removeLegionEntry;
@@ -188,6 +190,7 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   const {
     readLegionsRegistry: readLegionsRegistryOverride,
+    cleanupStaleServes: cleanupStaleServesOverride,
     allocatePort: allocatePortOverride,
     writeLegionEntry: writeLegionEntryOverride,
     removeLegionEntry: removeLegionEntryOverride,
@@ -195,6 +198,7 @@ export async function startDaemon(
   } = overrides;
 
   const readLegionsRegistryFn = readLegionsRegistryOverride ?? readLegionsRegistry;
+  const cleanupStaleServesFn = cleanupStaleServesOverride ?? cleanupStaleServes;
   const allocatePortFn = allocatePortOverride ?? allocatePort;
   const writeLegionEntryFn = writeLegionEntryOverride ?? writeLegionEntry;
   const removeLegionEntryFn = removeLegionEntryOverride ?? removeLegionEntry;
@@ -208,6 +212,11 @@ export async function startDaemon(
   mkdirSync(config.logDir, { recursive: true });
 
   const registry = await readLegionsRegistryFn(config.paths.legionsFile);
+
+  // Clean up stale serve processes from previous daemon runs before allocating ports.
+  // This prevents orphaned serves from holding SQLite locks and occupying ports.
+  await cleanupStaleServesFn(config.paths.legionsFile, legionId);
+
   const { daemonPort, servePort } = allocatePortFn(registry);
 
   let actualDaemonPort = daemonPort;
@@ -476,10 +485,12 @@ export async function startDaemon(
 
   stopServer = stop;
 
+  const servePid = resolvedDeps.adapter.getServePid();
   await writeLegionEntryFn(config.paths.legionsFile, legionId, {
     port: config.daemonPort,
     servePort: sharedServePort,
     pid: process.pid,
+    ...(servePid > 0 ? { servePid } : {}),
     startedAt: new Date().toISOString(),
   });
 

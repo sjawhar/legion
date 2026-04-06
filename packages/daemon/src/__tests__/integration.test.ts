@@ -28,6 +28,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     stop: async (): Promise<void> => {},
     healthy: async (): Promise<boolean> => true,
     getPort: (): number => sharedServePort,
+    getServePid: (): number => 0,
     createSession: async (sessionId: string, workspace: string): Promise<string> => {
       createSessionCalls.push({ sessionId, workspace });
       return sessionId;
