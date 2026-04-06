@@ -987,12 +987,17 @@ export const handoffCommand = defineCommand({
           }
           const data = parseHandoffData(rawData);
           writePhaseHandoff(workspaceDir, phase, data);
+          const filePath = path.join(workspaceDir, ".legion", `${phase}.json`);
+          console.log(`[handoff] Wrote ${phase} handoff to ${filePath}`);
         } catch (e) {
           if (e instanceof CliError) {
             console.error(e.message);
             process.exit(e.code);
           }
-          throw e;
+          console.error(
+            `[handoff] Failed to write handoff: ${e instanceof Error ? e.message : String(e)}`
+          );
+          process.exit(1);
         }
       },
     }),
@@ -1058,12 +1063,16 @@ export const handoffCommand = defineCommand({
             to,
             body: args.body,
           });
+          console.log(`[handoff] Wrote message from ${from} to ${to}`);
         } catch (e) {
           if (e instanceof CliError) {
             console.error(e.message);
             process.exit(e.code);
           }
-          throw e;
+          console.error(
+            `[handoff] Failed to write message: ${e instanceof Error ? e.message : String(e)}`
+          );
+          process.exit(1);
         }
       },
     }),

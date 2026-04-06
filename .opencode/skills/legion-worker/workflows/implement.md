@@ -366,14 +366,14 @@ If no bot comments exist, skip to step 7.5.
 
 ### 7.5. Write Handoff Data
 
-Write handoff data for downstream phases (non-blocking):
+Write handoff data for downstream phases:
 
 First, assess which injected learnings were helpful:
 
 > Review the learnings injected at Step 1.5. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
 
 ```bash
-legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || true
+legion handoff write --phase implement --workspace . <<'HANDOFF'
 {
   "filesChanged": ["src/file1.ts", "src/file2.ts"],
   "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
@@ -386,6 +386,13 @@ legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || 
 HANDOFF
 ```
 
+Verify the handoff was written:
+
+```bash
+if [ ! -f .legion/implement.json ]; then
+  echo "ERROR: Handoff write failed — .legion/implement.json not created"
+fi
+```
 Key fields:
 - `filesChanged`: List of files created or modified during implementation
 - `trickyParts`: Notes about what was difficult or required special handling
@@ -532,14 +539,14 @@ Reply in PR comment threads acknowledging fixes. Reference specific changes made
 
 ### 5.5. Write Handoff Data
 
-Write handoff data for downstream phases (non-blocking):
+Write handoff data for downstream phases:
 
 First, assess which injected learnings were helpful:
 
 > Review the learnings injected at Step 1.5. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
 
 ```bash
-legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || true
+legion handoff write --phase implement --workspace . <<'HANDOFF'
 {
   "filesChanged": ["src/file1.ts", "src/file2.ts"],
   "trickyParts": ["Describe any difficult implementation decisions or gotchas"],
@@ -550,6 +557,14 @@ legion handoff write --phase implement --workspace . <<'HANDOFF' 2>/dev/null || 
   "learningsHelpful": ["<subset that materially helped>"]
 }
 HANDOFF
+```
+
+Verify the handoff was written:
+
+```bash
+if [ ! -f .legion/implement.json ]; then
+  echo "ERROR: Handoff write failed — .legion/implement.json not created"
+fi
 ```
 
 Key fields:

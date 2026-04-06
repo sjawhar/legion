@@ -53,11 +53,16 @@ No significant learnings — mechanical change (find-and-replace / formatting / 
 ```
 For Linear, use `linear_linear(action="comment", ...)` with the same body.
 
-# Write minimal handoff to signal retro skipped (non-blocking)
+# Write minimal handoff to signal retro skipped
 legion handoff write --phase retro --data '{
   "skipped": true,
   "reason": "no significant learnings"
-}' 2>/dev/null || true
+}'
+
+# Verify handoff was written
+if [ ! -f .legion/retro.json ]; then
+  echo "ERROR: Handoff write failed — .legion/retro.json not created"
+fi
 
 ### 2. Get PR URL and Launch Background Subagent
 
@@ -211,14 +216,19 @@ jj bookmark set "$BOOKMARK_NAME" -r @
 jj git push
 ```
 
-After pushing, write the retro handoff to signal completion (non-blocking):
+After pushing, write the retro handoff to signal completion:
 
 ```bash
-# Write retro handoff with doc paths (non-blocking)
+# Write retro handoff with doc paths
 legion handoff write --phase retro --data '{
   "skipped": false,
   "docsCreated": ["docs/solutions/path/to/file.md"]
-}' 2>/dev/null || true
+}'
+
+# Verify handoff was written
+if [ ! -f .legion/retro.json ]; then
+  echo "ERROR: Handoff write failed — .legion/retro.json not created"
+fi
 ```
 
 **If jj says there's no tracked branch:** The implementer should have created this branch.

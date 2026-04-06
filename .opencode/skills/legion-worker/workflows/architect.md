@@ -119,8 +119,8 @@ First, assess which injected learnings were helpful:
 > Review the learnings injected at the start of this phase. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
 
 ```bash
-# Write handoff data (non-blocking — if this fails, continue)
-legion handoff write --phase architect --workspace . <<'HANDOFF' 2>/dev/null || true
+# Write handoff data — fail loudly if this fails
+legion handoff write --phase architect --workspace . <<'HANDOFF'
 {
   "scope": "<small|medium|large>",
   "components": ["list", "of", "affected", "components"],
@@ -137,6 +137,14 @@ legion handoff write --phase architect --workspace . <<'HANDOFF' 2>/dev/null || 
 HANDOFF
 ```
 
+Verify the handoff was written:
+
+```bash
+if [ ! -f .legion/architect.json ]; then
+  echo "ERROR: Handoff write failed — .legion/architect.json not created"
+fi
+```
+
 **Fields:**
 - `scope`: Overall scope assessment (small/medium/large)
 - `components`: List of affected components or modules
@@ -146,7 +154,7 @@ HANDOFF
 - `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
 - `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
-The `|| true` ensures the handoff write doesn't block workflow completion if the CLI fails.
+The handoff write will fail loudly if the CLI encounters an error. If the write fails, diagnose and fix the issue before continuing — handoff data is required for downstream phases to function.
 
 ## What Makes Good Acceptance Criteria
 

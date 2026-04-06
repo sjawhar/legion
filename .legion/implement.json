@@ -1,0 +1,35 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/handoff/ledger.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/cli/__tests__/handoff.test.ts",
+    ".opencode/skills/legion-worker/SKILL.md",
+    ".opencode/skills/legion-worker/workflows/architect.md",
+    ".opencode/skills/legion-worker/workflows/plan.md",
+    ".opencode/skills/legion-worker/workflows/implement.md",
+    ".opencode/skills/legion-worker/workflows/test.md",
+    ".opencode/skills/legion-worker/workflows/review.md",
+    ".opencode/skills/legion-retro/SKILL.md"
+  ],
+  "trickyParts": [
+    "Two layers of error suppression: TypeScript try-catch AND bash || true both needed fixing",
+    "Read functions intentionally keep try-catch for graceful degradation - only writes should fail loudly",
+    "implement.md has TWO handoff write sections (fresh + address-comments) - easy to miss one",
+    "legion-retro/SKILL.md also had || true on handoff writes - found during cross-family review"
+  ],
+  "deviations": [
+    "Also fixed legion-retro/SKILL.md which wasn't mentioned in the issue but had the same problem"
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "learningsInjected": [
+    "docs/solutions/daemon/handoff-schema-migration-patterns.md",
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/daemon/handoff-schema-migration-patterns.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-06T17:34:37.243Z"
+}
