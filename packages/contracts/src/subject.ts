@@ -20,3 +20,9 @@ export function githubResourceSubject(
 ) {
   return `notifications.github.${owner}.${repo}.${resourceType}.${resourceNumber}`;
 }
+
+export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
+
+export function ghostWisprSubject(recordingId: string, kind: string) {
+  return `${GHOSTWISPR_TOPIC_PREFIX}${recordingId}.${kind}`;
+}

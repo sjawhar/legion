@@ -44,6 +44,12 @@ func SlackSubject(team string, channel string, kind string) string {
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
 	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
+}
+
+const GhostWisprTopicPrefix = "notifications.ghostwispr."
+
+func GhostWisprSubject(recordingId string, kind string) string {
+	return GhostWisprTopicPrefix + recordingId + "." + kind
 }`;
 
 function title(text: string) {

@@ -491,7 +491,7 @@ func TestGithubSummaryJSON(t *testing.T) {
 				"pull_request": map[string]any{
 					"number": 10, "title": "New feature", "body": "This PR adds a new feature",
 					"html_url": "https://github.com/sjawhar/legion/pull/10",
-					"user": map[string]any{"login": "author"},
+					"user":     map[string]any{"login": "author"},
 				},
 			},
 			expectedKeys: []string{"kind", "action", "repo", "number", "title", "author", "body", "url"},
@@ -509,7 +509,7 @@ func TestGithubSummaryJSON(t *testing.T) {
 				"issue": map[string]any{
 					"number": 5, "title": "Bug: crash on startup", "body": "Steps to reproduce...",
 					"html_url": "https://github.com/sjawhar/legion/issues/5",
-					"user": map[string]any{"login": "reporter"},
+					"user":     map[string]any{"login": "reporter"},
 				},
 			},
 			expectedKeys: []string{"kind", "action", "repo", "number", "title", "author", "body", "url"},
@@ -536,9 +536,9 @@ func TestGithubSummaryJSON(t *testing.T) {
 			checkValues:  map[string]string{"kind": "unknown", "action": "created", "repo": "sjawhar/legion"},
 		},
 		{
-			name:  "missing webhook data produces empty strings",
-			event: "issue_comment",
-			body:  map[string]any{"action": "created"},
+			name:         "missing webhook data produces empty strings",
+			event:        "issue_comment",
+			body:         map[string]any{"action": "created"},
 			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
 			checkValues: map[string]string{
 				"kind": "comment", "action": "created", "repo": "", "number": "", "title": "",
@@ -619,5 +619,49 @@ func TestGithubResourceSubject(t *testing.T) {
 		if got != item.want {
 			t.Fatalf("GithubResourceSubject(%s, %s, %s, %s) = %s, want %s", item.owner, item.repo, item.resourceType, item.resourceNum, got, item.want)
 		}
+	}
+}
+
+func TestGhostWisprSubject(t *testing.T) {
+	cases := []struct {
+		recordingId string
+		kind        string
+		want        string
+	}{
+		{recordingId: "rec-abc123", kind: "transcript", want: "notifications.ghostwispr.rec-abc123.transcript"},
+		{recordingId: "rec-abc123", kind: "summary", want: "notifications.ghostwispr.rec-abc123.summary"},
+		{recordingId: "rec-xyz789", kind: "transcript", want: "notifications.ghostwispr.rec-xyz789.transcript"},
+	}
+	for _, item := range cases {
+		got := GhostWisprSubject(item.recordingId, item.kind)
+		if got != item.want {
+			t.Fatalf("GhostWisprSubject(%s, %s) = %s, want %s", item.recordingId, item.kind, got, item.want)
+		}
+	}
+}
+
+func TestGhostWisprTopicPrefix(t *testing.T) {
+	if GhostWisprTopicPrefix != "notifications.ghostwispr." {
+		t.Fatalf("unexpected prefix: %s", GhostWisprTopicPrefix)
+	}
+	subject := GhostWisprSubject("rec-1", "transcript")
+	if !strings.HasPrefix(subject, GhostWisprTopicPrefix) {
+		t.Fatalf("subject %s does not start with prefix %s", subject, GhostWisprTopicPrefix)
+	}
+}
+
+func TestGhostWisprSourceValidation(t *testing.T) {
+	env := Envelope{
+		EventID:        "evt-1",
+		Source:         "ghostwispr",
+		SourceEventID:  "src-1",
+		Topic:          "notifications.ghostwispr.rec-1.transcript",
+		DedupeKey:      "ghostwispr.src-1",
+		IssuedAt:       NowMillis(),
+		PayloadSummary: "{}",
+		TraceID:        "trace-1",
+	}
+	if err := env.Validate(); err != nil {
+		t.Fatalf("expected ghostwispr source to be valid: %v", err)
 	}
 }

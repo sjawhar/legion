@@ -196,6 +196,121 @@ func TestPublishHandler_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
+	// Validation runs before deps.client is used, so nil inner fields
+	// are enough for rejection-path tests.
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{})
+	handler := publishHandler(&state)
+
+	cases := []struct {
+		name       string
+		body       string
+		wantSubstr string
+	}{
+		{
+			name:       "rejects invalid source",
+			body:       `{"source":"invalid","topic":"notifications.test.foo","message":"hello"}`,
+			wantSubstr: "source must be one of",
+		},
+		{
+			name:       "rejects empty-ish source after trim",
+			body:       `{"source":" ","topic":"notifications.test.foo","message":"hello"}`,
+			wantSubstr: "source is required",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tc.wantSubstr) {
+				t.Fatalf("expected body to contain %q, got %q", tc.wantSubstr, rr.Body.String())
+			}
+		})
+	}
+}
+
+func setupPublishTestClient(t *testing.T) *bus.Client {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("failed to start NATS: %v", err)
+	}
+	t.Cleanup(func() { ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("failed to get NATS URI: %v", err)
+	}
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect bus: %v", err)
+	}
+	t.Cleanup(func() { client.Conn.Close() })
+	return client
+}
+
+func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	handler := publishHandler(&state)
+
+	cases := []struct {
+		name       string
+		body       string
+		wantSource string
+	}{
+		{
+			name:       "defaults to agent when source omitted",
+			body:       `{"topic":"notifications.test.foo","message":"hello"}`,
+			wantSource: "agent",
+		},
+		{
+			name:       "defaults to agent when source empty",
+			body:       `{"source":"","topic":"notifications.test.foo","message":"hello"}`,
+			wantSource: "agent",
+		},
+		{
+			name:       "accepts ghostwispr source",
+			body:       `{"source":"ghostwispr","topic":"notifications.ghostwispr.rec-1.transcript","message":"{}"}`,
+			wantSource: "ghostwispr",
+		},
+		{
+			name:       "accepts github source",
+			body:       `{"source":"github","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
+			wantSource: "github",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+			}
+			var env contracts.Envelope
+			if err := json.NewDecoder(rr.Body).Decode(&env); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if env.Source != tc.wantSource {
+				t.Fatalf("expected source %q, got %q", tc.wantSource, env.Source)
+			}
+		})
+	}
+}
+
 func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.Registry {
 	t.Helper()
 	ctx := context.Background()
