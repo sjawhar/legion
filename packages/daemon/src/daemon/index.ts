@@ -168,6 +168,30 @@ function unsubscribeFromEnvoy(sessionId: string) {
   }).catch(() => {});
 }
 
+function subscribeControllerToCiEnvoy(sessionId: string, repos: string[]): void {
+  if (repos.length === 0) return;
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  const topics = repos.map((r) => {
+    const [owner, repo] = r.split("/");
+    return `notifications.github.${owner}.${repo}.ci`;
+  });
+  fetch(`${envoyUrl}/v1/interests/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, topics }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(`Envoy CI subscribe returned ${res.status} for controller (non-fatal)`);
+        return;
+      }
+      console.log(`Controller subscribed to CI for ${repos.length} repo(s): ${repos.join(", ")}`);
+    })
+    .catch((err) => {
+      console.warn(`Envoy CI subscribe failed for controller (non-fatal): ${err}`);
+    });
+}
+
 function buildControllerEnv(config: DaemonConfig): Record<string, string> {
   // config.legionId is guaranteed non-empty by the startDaemon guard at line 107-109.
   // The "" fallback is unreachable dead code — kept to satisfy the type checker.
@@ -544,6 +568,20 @@ export async function startDaemon(
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
       }
+    }
+  }
+
+  // Startup reconciliation: subscribe controller to CI for repos with active workers
+  if (controllerState) {
+    const ciRepos = new Set<string>();
+    for (const entry of Object.values(activeWorkers)) {
+      const workerEntry = entry as { repo?: string };
+      if (workerEntry.repo) {
+        ciRepos.add(workerEntry.repo);
+      }
+    }
+    if (ciRepos.size > 0) {
+      subscribeControllerToCiEnvoy(controllerState.sessionId, Array.from(ciRepos));
     }
   }
 

@@ -138,7 +138,14 @@ function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
   return null;
 }
 
-function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): void {
+function buildIssueEnvoyTopics(owner: string, repo: string, issueNumber: number): string[] {
+  return [
+    `notifications.github.${owner}.${repo}.issue.${issueNumber}.>`,
+    `notifications.github.${owner}.${repo}.pr.${issueNumber}.>`,
+  ];
+}
+
+export function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): void {
   if (topics.length === 0) return;
   const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
   fetch(`${envoyUrl}/v1/interests/subscribe`, {
@@ -204,6 +211,31 @@ function unsubscribeAllWorkerTopics(sessionId: string): void {
     });
 }
 
+export function subscribeControllerToCiEnvoy(sessionId: string, owner: string, repo: string): void {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  const topic = `notifications.github.${owner}.${repo}.ci`;
+  fetch(`${envoyUrl}/v1/interests/subscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      topics: [topic],
+    }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(
+          `Envoy CI subscribe returned ${res.status} for session=${sessionId} repo=${owner}/${repo} (non-fatal)`
+        );
+      }
+    })
+    .catch((err) => {
+      console.warn(
+        `Envoy CI subscribe failed for session=${sessionId} repo=${owner}/${repo} (non-fatal): ${err}`
+      );
+    });
+}
+
 export function startServer(opts: ServerOptions): {
   server: Server;
   stop: () => void;
@@ -214,6 +246,7 @@ export function startServer(opts: ServerOptions): {
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
   const issueStateCache = new Map<string, IssueState>();
+  const subscribedCiRepos = new Set<string>();
   const releaseGauges = registerGauges("daemon-server", () => {
     let starting = 0;
     let running = 0;
@@ -263,7 +296,34 @@ export function startServer(opts: ServerOptions): {
     }
     for (const [id, entry] of Object.entries(state.workers)) {
       const normalizedId = id.toLowerCase();
-      workers.set(normalizedId, { ...entry, id: normalizedId });
+      const loadedEntry: WorkerEntry = { ...entry, id: normalizedId };
+      workers.set(normalizedId, loadedEntry);
+      // Seed CI repo tracking from persisted workers
+      if (entry.repo) {
+        subscribedCiRepos.add(entry.repo);
+      }
+
+      if (loadedEntry.status === "dead") {
+        continue;
+      }
+
+      const recoveredTopics = (() => {
+        if (loadedEntry.envoyTopics?.length) {
+          return loadedEntry.envoyTopics;
+        }
+        if (loadedEntry.repo && loadedEntry.issueNumber !== undefined) {
+          const repoRef = parseIssueRepo(loadedEntry.repo);
+          if (repoRef) {
+            return buildIssueEnvoyTopics(repoRef.owner, repoRef.repo, loadedEntry.issueNumber);
+          }
+        }
+        return undefined;
+      })();
+
+      if (recoveredTopics?.length) {
+        loadedEntry.envoyTopics = recoveredTopics;
+        subscribeWorkerToEnvoy(loadedEntry.sessionId, recoveredTopics);
+      }
     }
   };
 
@@ -394,11 +454,11 @@ export function startServer(opts: ServerOptions): {
             }
 
             let resolvedWorkspace: string | null = null;
+            const repoRef = typeof repo === "string" ? parseIssueRepo(repo) : null;
             if (typeof repo === "string") {
               if (!opts.paths) {
                 return badRequest("repo_resolution_unavailable");
               }
-              const repoRef = parseIssueRepo(repo);
               if (!repoRef) {
                 return badRequest("invalid_repo: expected owner/repo");
               }
@@ -522,6 +582,8 @@ export function startServer(opts: ServerOptions): {
               crashCount: crashHistoryEntry?.crashCount ?? 0,
               lastCrashAt: crashHistoryEntry?.lastCrashAt ?? null,
               version,
+              ...(typeof repo === "string" ? { repo } : {}),
+              ...(issueNumber !== undefined ? { issueNumber } : {}),
               ...(workerEnv ? { env: workerEnv } : {}),
             };
 
@@ -529,10 +591,14 @@ export function startServer(opts: ServerOptions): {
             await persistState();
 
             // Cross-mode cleanup: unsubscribe same-issue workers from Envoy
+            let workerEntriesChanged = false;
             for (const [existingId, existingEntry] of workers) {
               if (existingId === workerId) continue;
               const existingIssueId = extractIssueIdFromWorkerId(existingId);
               if (existingIssueId === normalizedIssueId) {
+                if (existingEntry.envoyTopics?.length) {
+                  workerEntriesChanged = true;
+                }
                 detachWorkerFromEnvoy(existingEntry, "cross-mode-cleanup");
               }
             }
@@ -540,16 +606,26 @@ export function startServer(opts: ServerOptions): {
             // Mode-based Envoy subscription (GitHub-only, fire-and-forget)
             // Only plan mode subscribes to issue topics at dispatch.
             // Implement self-subscribes to PR topics after PR creation via envoy_subscribe.
-            if (mode === WorkerMode.PLAN && typeof repo === "string" && issueNumber !== undefined) {
-              const repoRef = parseIssueRepo(repo);
-              if (repoRef) {
-                const topics = [
-                  `notifications.github.${repoRef.owner}.${repoRef.repo}.issue.${issueNumber}.>`,
-                  `notifications.github.${repoRef.owner}.${repoRef.repo}.pr.${issueNumber}.>`,
-                ];
-                subscribeWorkerToEnvoy(actualSessionId, topics);
-                entry.envoyTopics = topics;
+            if (mode === WorkerMode.PLAN && repoRef && issueNumber !== undefined) {
+              const topics = buildIssueEnvoyTopics(repoRef.owner, repoRef.repo, issueNumber);
+              subscribeWorkerToEnvoy(actualSessionId, topics);
+              entry.envoyTopics = topics;
+              workerEntriesChanged = true;
+            }
+
+            if (repoRef) {
+              const repoKey = `${repoRef.owner}/${repoRef.repo}`;
+              if (!subscribedCiRepos.has(repoKey)) {
+                subscribedCiRepos.add(repoKey);
+                const controllerSessionId = opts.getControllerState?.()?.sessionId;
+                if (controllerSessionId) {
+                  subscribeControllerToCiEnvoy(controllerSessionId, repoRef.owner, repoRef.repo);
+                }
               }
+            }
+
+            if (workerEntriesChanged) {
+              await persistState();
             }
 
             // Deliver initial prompt with delay for session bootstrap (#237)
@@ -826,6 +902,11 @@ export function startServer(opts: ServerOptions): {
               ? (opts.getWorkerAdapter?.(promptMode) ?? opts.adapter)
               : opts.adapter;
             await promptAdapter.sendPrompt(entry.sessionId, text);
+
+            if (entry.envoyTopics?.length) {
+              subscribeWorkerToEnvoy(entry.sessionId, entry.envoyTopics);
+            }
+
             return jsonResponse({ ok: true });
           } catch (error) {
             return serverError(`Failed to send prompt: ${(error as Error).message}`);

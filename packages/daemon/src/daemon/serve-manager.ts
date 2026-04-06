@@ -29,6 +29,8 @@ export interface WorkerEntry {
   lastCrashAt: string | null;
   version?: number;
   envoyTopics?: string[];
+  repo?: string;
+  issueNumber?: number;
 }
 
 export function createWorkerClient(port: number, workspace: string): OpencodeClient {

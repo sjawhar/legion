@@ -32,7 +32,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    branches or bookmarks in review, retro, or merge workflows.
    **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
    lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
-4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
+4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, unsubscribe from explicit Envoy topics (see Exiting), add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
 4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST attempt it before adding `worker-done`. The `|| true` means CLI failures don't block you, but skipping the attempt is not acceptable. If the write fails, note it in your exit comment.
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 6. **Notify the controller via Envoy** — after adding `worker-done`, send exactly one completion notification so the controller doesn't have to wait for its next polling cycle. Use `envoy_send(target_session="$CONTROLLER_SESSION_ID", message="Worker done: <issue> <mode> <outcome>")`. The controller session ID (`$CONTROLLER_SESSION_ID`) is provided in your dispatch prompt's ENVOY section. If `envoy_send` fails, that's fine — the label is the source of truth. **Do not also call `envoy_publish` — one notification only.**
@@ -102,6 +102,7 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 Prior phase data (from architect, plan, implement, etc.) is available in `.legion/` on this branch. Reading it is optional — individual workflow files handle phase-specific handoff reads. This note is a reminder that this data exists. Never block on missing handoff data.
 
 If you're resuming after user feedback, also read the issue comments for the answer.
+If you previously created a PR, re-subscribe to PR topics: `envoy_subscribe(["notifications.github.$OWNER.$REPO.pr.$PR_NUMBER.>"])` (the daemon re-subscribes you to issue topics automatically on resume).
 
 ### Required Startup Todos
 
@@ -109,7 +110,7 @@ If you're resuming after user feedback, also read the issue comments for the ans
 
 1. Your workflow-specific work items (from the workflow file)
 2. A **signal completion** todo as the LAST item:
-   - `Signal completion: push changes, add worker-done label, remove worker-active label, notify controller via Envoy`
+   - `Signal completion: push changes, unsubscribe from Envoy topics, add worker-done label, remove worker-active label, notify controller via Envoy`
    - Keep this todo `pending` until you have actually run the label commands and verified they succeeded
    - **Do not mark this complete early** — it is your contract with the controller
 
@@ -176,6 +177,19 @@ Always push before exiting:
 ```bash
 jj git push
 ```
+
+Then unsubscribe from explicit issue and PR topics (best-effort, non-blocking).
+**IMPORTANT:** Use explicit topic list, NOT empty-array unsubscribe — empty array would
+also remove `notifications.agent.{sessionId}` and create a delivery gap before daemon cleanup.
+
+```
+# Unsubscribe from issue and PR topics (substitute your actual values)
+envoy_unsubscribe([
+  "notifications.github.$OWNER.$REPO.issue.$ISSUE_NUMBER.>",
+  "notifications.github.$OWNER.$REPO.pr.$PR_NUMBER.>"    # only if a PR was created
+])
+```
+If `envoy_unsubscribe` fails, continue — the daemon's `DELETE /workers` is the authoritative cleanup.
 
 Then update labels:
 - Add `worker-done` if your mode requires it (see routing table)
