@@ -1,0 +1,25 @@
+{
+  "passed": 6,
+  "failed": 0,
+  "failures": [],
+  "documentationFeedback": "Envoy auto-subscription docs exist and are accurate. Gap: issue spec's curl example uses {\"message\": \"...\"} for prompt_async but actual serve API requires {\"parts\": [{\"type\": \"text\", \"text\": \"...\"}]} format. Also: gh pr review --comment events are NOT routed through Envoy (only issue_comment events are), and @mention comments route exclusively to mention topics (not duplicated on issue comment topics).",
+  "observations": [
+    "Consistent 10-15s delivery latency across all tests",
+    "gh pr review --comment (pull_request_review events) NOT delivered via Envoy — only gh pr comment (issue_comment events) work",
+    "@mention comments route exclusively to mention topic, not duplicated on issue.N.> topic",
+    "Cross-mode cleanup removes entire Envoy interest entry (including agent topic), not selective",
+    "No automated CI-runnable E2E test for full delivery chain — regression risk"
+  ],
+  "learningsInjected": [
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
+    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md",
+    "docs/solutions/testing/worker-smoke-testing-requirements.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
+    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-06T22:25:22.979Z"
+}
