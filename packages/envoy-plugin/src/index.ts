@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tool } from "@opencode-ai/plugin/tool";
+import { resolvePort } from "./port";
 
 const root = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
 
@@ -35,24 +35,17 @@ export default async (input: { serverUrl: URL }) => {
     } catch {}
   };
 
+  let portWarningLogged = false;
   const currentPort = () => {
-    const value = Number.parseInt(input.serverUrl.port, 10);
-    if (Number.isFinite(value) && value > 0) return value;
-
-    try {
-      const output = execFileSync("ss", ["-tlnp"], { encoding: "utf-8" });
-      for (const line of output.split("\n")) {
-        if (!line.includes(`pid=${process.pid}`)) continue;
-        const parts = line.trim().split(/\s+/);
-        const local = parts[3];
-        const match = local?.match(/:(\d+)$/);
-        if (!match) continue;
-        const port = Number.parseInt(match[1], 10);
-        if (Number.isFinite(port) && port > 0) return port;
-      }
-    } catch {}
-
-    return null;
+    const port = resolvePort(input.serverUrl);
+    if (!port && !portWarningLogged) {
+      portWarningLogged = true;
+      console.error(
+        `[envoy-plugin] Could not resolve serve port: serverUrl=${input.serverUrl.href}, pid=${process.pid}`
+      );
+    }
+    if (port) portWarningLogged = false;
+    return port;
   };
 
   const syncPort = (sessionID?: string) => {
@@ -128,16 +121,19 @@ export default async (input: { serverUrl: URL }) => {
               const session = await fetchSession(sessionID);
               if (session) update(sessionID, { session });
               syncPort(sessionID);
-              call("/v1/interests/subscribe", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  session_id: sessionID,
-                  dir: process.cwd(),
-                  topics: [`notifications.agent.${sessionID}`],
-                  port: currentPort() ?? 0,
-                }),
-              }).catch(() => {});
+              const port = currentPort();
+              if (port) {
+                call("/v1/interests/subscribe", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    session_id: sessionID,
+                    dir: process.cwd(),
+                    topics: [`notifications.agent.${sessionID}`],
+                    port,
+                  }),
+                }).catch(() => {});
+              }
             }
           }
           if (event.type === "session.updated") {
@@ -176,7 +172,7 @@ export default async (input: { serverUrl: URL }) => {
               session_id: ctx.sessionID,
               dir: ctx.directory,
               topics: args.topics,
-              port: Number.parseInt(input.serverUrl.port, 10) || 0,
+              port: currentPort() ?? 0,
             }),
           });
         },
