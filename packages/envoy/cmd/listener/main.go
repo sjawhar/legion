@@ -168,6 +168,11 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "nats unavailable"})
 			return
 		}
+		if !d.client.SubOK() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "subscription inactive"})
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 	})
