@@ -269,14 +269,14 @@ gh pr comment $PR_NUMBER --body "## Behavioral Test Results
 
 ### 6.5. Write Handoff Data
 
-Write handoff data for the next phase (non-blocking):
+Write handoff data for the next phase:
 
 First, assess which injected learnings were helpful:
 
 > Review the learnings injected at the start of this phase. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
 
 ```bash
-legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
+legion handoff write --phase test --workspace . <<'HANDOFF'
 {
   "passed": <count of criteria that passed>,
   "failed": <count of criteria that failed>,
@@ -289,7 +289,15 @@ legion handoff write --phase test --workspace . <<'HANDOFF' 2>/dev/null || true
 HANDOFF
 ```
 
-You **MUST** attempt the handoff write before signaling completion. The `|| true` ensures CLI failures don't block you, but skipping this step entirely is not acceptable. If the write fails, note it in your PR comment. Note: handoff plumbing between phases may not be fully operational yet (#124) — the attempt is what matters, establishing the habit so that when the plumbing is fixed, data flows automatically.
+Verify the handoff was written:
+
+```bash
+if [ ! -f .legion/test.json ]; then
+  echo "ERROR: Handoff write failed — .legion/test.json not created"
+fi
+```
+
+You **MUST** attempt the handoff write before signaling completion. The CLI will fail loudly if the write encounters an error. If the write fails, diagnose the issue and note it in your PR comment before continuing.
 
 **Linear:**
 

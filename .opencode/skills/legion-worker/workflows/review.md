@@ -198,14 +198,14 @@ Group related issues when they affect the same area.
 
 ### 4.5. Write Handoff Data
 
-Write handoff data (non-blocking) — BEFORE setting PR draft status:
+Write handoff data — BEFORE setting PR draft status:
 
 First, assess which injected learnings were helpful:
 
 > Review the learnings injected at the start of this phase. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
 
 ```bash
-legion handoff write --phase review --workspace . <<'HANDOFF' 2>/dev/null || true
+legion handoff write --phase review --workspace . <<'HANDOFF'
 {
   "critical": 0,
   "important": 2,
@@ -221,6 +221,14 @@ legion handoff write --phase review --workspace . <<'HANDOFF' 2>/dev/null || tru
 HANDOFF
 ```
 
+Verify the handoff was written:
+
+```bash
+if [ ! -f .legion/review.json ]; then
+  echo "ERROR: Handoff write failed — .legion/review.json not created"
+fi
+```
+
 Replace the example counts and findings with actual review results:
 - `critical`: count of CRITICAL/P1 issues found
 - `important`: count of IMPORTANT/P2 issues found
@@ -230,7 +238,7 @@ Replace the example counts and findings with actual review results:
 - `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
 - `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
-You MUST attempt the handoff write before setting PR draft status or signaling completion. The `|| true` ensures CLI failures don't block you, but skipping this step entirely is not acceptable. If the write fails, note it in your PR comment.
+You MUST attempt the handoff write before setting PR draft status or signaling completion. The CLI will fail loudly if the write encounters an error. If the write fails, diagnose the issue and note it in your PR comment before continuing.
 
 
 ### 5. Submit Review
