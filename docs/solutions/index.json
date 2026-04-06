@@ -40,7 +40,8 @@
       "testing/bun-fetch-mocking-patterns.md",
       "daemon/server-side-dispatch-validation.md",
       "testing/github-backend-collect-test-payloads.md",
-      "daemon/prompt-delivery-bootstrap-delay.md"
+      "daemon/prompt-delivery-bootstrap-delay.md",
+      "daemon/codebase-index-file-placement.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -386,8 +387,14 @@
     "packages/envoy/docker": ["envoy/ghcr-docker-multiarch-ci.md"],
     "tag:knowledge-injection": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:cross-cutting": ["skill-patterns/cross-cutting-workflow-concerns.md"],
-    "tag:workflows": ["skill-patterns/cross-cutting-workflow-concerns.md"]
+    "tag:workflows": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:topic-filtering": ["envoy/adding-resource-level-subject-helpers.md"],
-    "packages/envoy/internal/routing": ["envoy/adding-resource-level-subject-helpers.md"]
+    "packages/envoy/internal/routing": ["envoy/adding-resource-level-subject-helpers.md"],
+    "packages/daemon/src/index": ["daemon/codebase-index-file-placement.md"],
+    "tag:file-placement": ["daemon/codebase-index-file-placement.md"],
+    "tag:codebase-index": ["daemon/codebase-index-file-placement.md"],
+    "tag:xdg-state": ["daemon/codebase-index-file-placement.md"],
+    "tag:legionDir": ["daemon/codebase-index-file-placement.md"],
+    "tag:scanner-exclusions": ["daemon/codebase-index-file-placement.md"]
   }
 }

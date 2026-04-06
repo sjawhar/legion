@@ -6,7 +6,17 @@ import { CODEBASE_INDEX_VERSION } from "./types";
 
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"];
 const RESOLUTION_SUFFIXES = [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"];
-const SKIP_DIRS = new Set(["node_modules", ".git", ".jj", "dist", "build"]);
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".jj",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".legion",
+  "dist",
+  "build",
+]);
 
 function isSourceFile(filePath: string): boolean {
   return SOURCE_EXTENSIONS.includes(path.extname(filePath));
