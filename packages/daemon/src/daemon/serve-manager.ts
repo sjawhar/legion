@@ -28,6 +28,7 @@ export interface WorkerEntry {
   crashCount: number;
   lastCrashAt: string | null;
   version?: number;
+  envoyTopics?: string[];
 }
 
 export function createWorkerClient(port: number, workspace: string): OpencodeClient {

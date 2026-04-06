@@ -470,6 +470,24 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 
 If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
 
+### 1.6. Subscribe to Existing PR Events (Envoy)
+
+When resuming with an existing PR, subscribe to PR-specific Envoy topics so you receive
+real-time notifications for comments, reviews, and state changes:
+
+```bash
+PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $OWNER/$REPO 2>/dev/null)
+```
+
+If a PR exists:
+
+```
+envoy_subscribe(["notifications.github.$OWNER.$REPO.pr.$PR_NUMBER.>"])
+```
+
+**If no PR exists or `envoy_subscribe` fails:** Log and continue — this is a speed
+optimization, not a requirement. The controller polling cycle is the authoritative fallback.
+
 Key behaviors:
 - Verify suggestions against codebase before implementing
 - Push back with technical reasoning if wrong

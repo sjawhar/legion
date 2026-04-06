@@ -1381,7 +1381,7 @@ describe("daemon server", () => {
       symlink: async () => {},
     };
 
-    it("subscribes worker to Envoy issue topic when repo and issueNumber present", async () => {
+    it("subscribes plan worker to Envoy issue topic when repo and issueNumber present", async () => {
       const envoySubscribeCalls: EnvoySubscribeCall[] = [];
       mockFetchForEnvoy(envoySubscribeCalls);
 
@@ -1391,7 +1391,7 @@ describe("daemon server", () => {
         method: "POST",
         body: JSON.stringify({
           issueId: "acme-widgets-42",
-          mode: "implement",
+          mode: "plan",
           repo: "acme/widgets",
           issueNumber: 42,
         }),
@@ -1461,7 +1461,7 @@ describe("daemon server", () => {
         method: "POST",
         body: JSON.stringify({
           issueId: "acme-widgets-44",
-          mode: "implement",
+          mode: "plan",
           repo: "acme/widgets",
           issueNumber: 44,
         }),
@@ -1491,7 +1491,7 @@ describe("daemon server", () => {
         method: "POST",
         body: JSON.stringify({
           issueId: "acme-widgets-45",
-          mode: "implement",
+          mode: "plan",
           repo: "acme/widgets",
           issueNumber: 45,
         }),
@@ -1578,6 +1578,289 @@ describe("daemon server", () => {
       const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
       expect(deleteResponse.status).toBe(200);
       expect(await deleteResponse.json()).toEqual({ status: "stopped" });
+    });
+
+    it("does not subscribe non-plan modes to Envoy even with repo and issueNumber", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      for (const mode of ["implement", "test", "review", "architect"]) {
+        const response = await requestJson("/workers", {
+          method: "POST",
+          body: JSON.stringify({
+            issueId: `acme-widgets-mode-${mode}`,
+            mode,
+            repo: "acme/widgets",
+            issueNumber: 100,
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      // Also test merge (gated mode, requires force)
+      const mergeResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-mode-merge",
+          mode: "merge",
+          repo: "acme/widgets",
+          issueNumber: 100,
+          force: true,
+        }),
+      });
+      expect(mergeResponse.status).toBe(200);
+
+      await Bun.sleep(50);
+
+      const subscribeCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/subscribe")
+      );
+      expect(subscribeCalls).toHaveLength(0);
+    });
+
+    it("unsubscribes existing plan worker when dispatching implement for same issue", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker
+      const planResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-60",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 60,
+        }),
+      });
+      expect(planResponse.status).toBe(200);
+      const planWorker = (await planResponse.json()) as { sessionId: string };
+      await Bun.sleep(50);
+
+      // Verify plan was subscribed
+      const subscribeCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/subscribe")
+      );
+      expect(subscribeCalls).toHaveLength(1);
+      expect(subscribeCalls[0].body.session_id).toBe(planWorker.sessionId);
+
+      // Reset tracking
+      envoySubscribeCalls.length = 0;
+
+      // Dispatch implement worker for same issue
+      const implResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-60",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 60,
+        }),
+      });
+      expect(implResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Plan worker should be unsubscribed, implement should NOT be subscribed
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls).toHaveLength(1);
+      expect(unsubCalls[0].body.session_id).toBe(planWorker.sessionId);
+
+      const newSubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/subscribe")
+      );
+      expect(newSubCalls).toHaveLength(0);
+    });
+
+    it("includes envoyTopics in GET /workers for plan mode dispatch", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-70",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 70,
+        }),
+      });
+
+      const listResponse = await requestJson("/workers");
+      expect(listResponse.status).toBe(200);
+      const workers = (await listResponse.json()) as Array<{
+        id: string;
+        envoyTopics?: string[];
+      }>;
+      const planWorker = workers.find((w) => w.id === "acme-widgets-70-plan");
+      expect(planWorker).toBeDefined();
+      expect(planWorker?.envoyTopics).toEqual(["notifications.github.acme.widgets.issue.70.>"]);
+    });
+
+    it("omits envoyTopics for non-plan mode dispatch", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-71",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 71,
+        }),
+      });
+
+      const listResponse = await requestJson("/workers");
+      const workers = (await listResponse.json()) as Array<{
+        id: string;
+        envoyTopics?: string[];
+      }>;
+      const implWorker = workers.find((w) => w.id === "acme-widgets-71-implement");
+      expect(implWorker).toBeDefined();
+      expect(implWorker?.envoyTopics).toBeUndefined();
+    });
+
+    it("unsubscribes and clears envoyTopics when worker status changes to dead", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker (gets envoyTopics)
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-80",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 80,
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { id: string; sessionId: string };
+      await Bun.sleep(50);
+
+      // Reset tracking
+      envoySubscribeCalls.length = 0;
+
+      // PATCH status to dead
+      const patchResponse = await requestJson(`/workers/${created.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "dead",
+          crashCount: 1,
+          lastCrashAt: new Date().toISOString(),
+        }),
+      });
+      expect(patchResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Should trigger unsubscribe
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls).toHaveLength(1);
+      expect(unsubCalls[0].body.session_id).toBe(created.sessionId);
+
+      // envoyTopics should be cleared
+      const getResponse = await requestJson(`/workers/${created.id}`);
+      expect(getResponse.status).toBe(200);
+      const worker = (await getResponse.json()) as { envoyTopics?: string[] };
+      expect(worker.envoyTopics).toBeUndefined();
+    });
+
+    it("cross-mode cleanup clears envoyTopics on old worker", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-90",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 90,
+        }),
+      });
+
+      // Verify plan has envoyTopics
+      let listResponse = await requestJson("/workers");
+      let workers = (await listResponse.json()) as Array<{
+        id: string;
+        envoyTopics?: string[];
+      }>;
+      let planWorker = workers.find((w) => w.id === "acme-widgets-90-plan");
+      expect(planWorker?.envoyTopics).toBeDefined();
+
+      // Dispatch implement for same issue
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-90",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 90,
+        }),
+      });
+
+      // Plan worker's envoyTopics should be cleared
+      listResponse = await requestJson("/workers");
+      workers = (await listResponse.json()) as Array<{
+        id: string;
+        envoyTopics?: string[];
+      }>;
+      planWorker = workers.find((w) => w.id === "acme-widgets-90-plan");
+      expect(planWorker?.envoyTopics).toBeUndefined();
+    });
+
+    it("does not unsubscribe workers for a different issue on cross-mode dispatch", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker for issue 50
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-50",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 50,
+        }),
+      });
+      await Bun.sleep(50);
+      envoySubscribeCalls.length = 0;
+
+      // Dispatch implement worker for issue 51 (different issue)
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-51",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 51,
+        }),
+      });
+      await Bun.sleep(50);
+
+      // No unsubscribe calls — issue 50's plan worker untouched
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls).toHaveLength(0);
     });
   });
 

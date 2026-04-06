@@ -138,20 +138,15 @@ function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
   return null;
 }
 
-function subscribeWorkerToEnvoy(
-  sessionId: string,
-  owner: string,
-  repo: string,
-  issueNumber: number
-): void {
+function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): void {
+  if (topics.length === 0) return;
   const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
-  const topic = `notifications.github.${owner}.${repo}.issue.${issueNumber}.>`;
   fetch(`${envoyUrl}/v1/interests/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       session_id: sessionId,
-      topics: [topic],
+      topics,
     }),
   })
     .then((res) => {
@@ -166,7 +161,31 @@ function subscribeWorkerToEnvoy(
     });
 }
 
-function unsubscribeWorkerFromEnvoy(sessionId: string): void {
+function detachWorkerFromEnvoy(entry: BaseWorkerEntry, reason: string): void {
+  const hadTopics = entry.envoyTopics;
+  entry.envoyTopics = undefined;
+  if (!hadTopics?.length) return;
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: entry.sessionId, topics: [] }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(
+          `Envoy worker unsubscribe (${reason}) returned ${res.status} for session=${entry.sessionId} (non-fatal)`
+        );
+      }
+    })
+    .catch((err) => {
+      console.warn(
+        `Envoy worker unsubscribe (${reason}) failed for session=${entry.sessionId} (non-fatal): ${err}`
+      );
+    });
+}
+
+function unsubscribeAllWorkerTopics(sessionId: string): void {
   const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
@@ -509,11 +528,26 @@ export function startServer(opts: ServerOptions): {
             workers.set(entry.id, entry);
             await persistState();
 
-            // Auto-subscribe worker to Envoy issue topics (GitHub-only, fire-and-forget)
-            if (typeof repo === "string" && issueNumber !== undefined) {
+            // Cross-mode cleanup: unsubscribe same-issue workers from Envoy
+            for (const [existingId, existingEntry] of workers) {
+              if (existingId === workerId) continue;
+              const existingIssueId = extractIssueIdFromWorkerId(existingId);
+              if (existingIssueId === normalizedIssueId) {
+                detachWorkerFromEnvoy(existingEntry, "cross-mode-cleanup");
+              }
+            }
+
+            // Mode-based Envoy subscription (GitHub-only, fire-and-forget)
+            // Only plan mode subscribes to issue topics at dispatch.
+            // Implement self-subscribes to PR topics after PR creation via envoy_subscribe.
+            if (mode === WorkerMode.PLAN && typeof repo === "string" && issueNumber !== undefined) {
               const repoRef = parseIssueRepo(repo);
               if (repoRef) {
-                subscribeWorkerToEnvoy(actualSessionId, repoRef.owner, repoRef.repo, issueNumber);
+                const topics = [
+                  `notifications.github.${repoRef.owner}.${repoRef.repo}.issue.${issueNumber}.>`,
+                ];
+                subscribeWorkerToEnvoy(actualSessionId, topics);
+                entry.envoyTopics = topics;
               }
             }
 
@@ -701,6 +735,10 @@ export function startServer(opts: ServerOptions): {
                 crashCount: updated.crashCount,
                 lastCrashAt: updated.lastCrashAt,
               });
+              // Clean up Envoy subscriptions on transition to dead (fire-and-forget)
+              if (entry.status !== "dead") {
+                detachWorkerFromEnvoy(updated, "worker-dead");
+              }
             }
             await persistState();
 
@@ -726,9 +764,10 @@ export function startServer(opts: ServerOptions): {
               crashCount: entry.crashCount,
               lastCrashAt: entry.lastCrashAt,
             });
+            entry.envoyTopics = undefined;
             workers.delete(id);
             await persistState();
-            unsubscribeWorkerFromEnvoy(entry.sessionId);
+            unsubscribeAllWorkerTopics(entry.sessionId);
             return jsonResponse({ status: "stopped" });
           }
         }

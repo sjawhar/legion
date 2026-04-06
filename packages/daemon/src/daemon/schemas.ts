@@ -15,6 +15,7 @@ export const WorkerEntrySchema = z
     status: z.enum(["starting", "running", "stopped", "dead"]),
     crashCount: z.number(),
     lastCrashAt: z.string().nullable(),
+    envoyTopics: z.array(z.string()).optional(),
   })
   .passthrough();
 
