@@ -352,7 +352,40 @@ func TestSlackEnvelopesThread(t *testing.T) {
 	if items[0].Topic != "notifications.slack.T123.C123.message" {
 		t.Fatalf("unexpected channel topic: %s", items[0].Topic)
 	}
-	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890.123456" {
+	// Thread topic must use normalized ts (dot→underscore) and kind suffix
+	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.message" {
+		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
+	}
+	// Both envelopes share the same dedupe_key (critical for single-delivery guarantee)
+	if items[0].DedupeKey != items[1].DedupeKey {
+		t.Fatalf("dedupe keys differ: channel=%s thread=%s", items[0].DedupeKey, items[1].DedupeKey)
+	}
+}
+
+func TestSlackEnvelopesThreadMention(t *testing.T) {
+	items := SlackEnvelopes(SlackEnvelopeInput{
+		EventID: "e1",
+		TraceID: "t1",
+		Body: map[string]any{
+			"team_id":  "T123",
+			"event_id": "Ev123",
+			"event": map[string]any{
+				"type":      "app_mention",
+				"user":      "U123",
+				"channel":   "C123",
+				"text":      "@bot help in thread",
+				"thread_ts": "1234567890.123456",
+			},
+		},
+	})
+	if len(items) != 2 {
+		t.Fatalf("expected 2 envelopes, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.slack.T123.C123.mention" {
+		t.Fatalf("unexpected channel topic: %s", items[0].Topic)
+	}
+	// Thread mention must use .mention kind suffix
+	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.mention" {
 		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
 	}
 }
@@ -373,15 +406,12 @@ func TestSlackEnvelopesNoThread(t *testing.T) {
 			},
 		},
 	})
-	// channel mention + thread (using ts as fallback)
-	if len(items) != 2 {
-		t.Fatalf("expected 2 envelopes, got %d", len(items))
+	// No thread_ts present — only channel-level envelope, NO ts fallback
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope (no thread fallback), got %d", len(items))
 	}
 	if items[0].Topic != "notifications.slack.T123.C123.mention" {
 		t.Fatalf("unexpected channel topic: %s", items[0].Topic)
-	}
-	if items[1].Topic != "notifications.slack.T123.C123.thread.9999999999.000000" {
-		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
 	}
 }
 

@@ -48,6 +48,44 @@ func TestPerPRFiltering(t *testing.T) {
 	}
 }
 
+func TestPerSlackThreadFiltering(t *testing.T) {
+	pattern := "notifications.slack.T123.C456.thread.1234567890_123456.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		// Should match: target thread and its subtopics
+		{topic: "notifications.slack.T123.C456.thread.1234567890_123456.message", ok: true},
+		{topic: "notifications.slack.T123.C456.thread.1234567890_123456.mention", ok: true},
+		// Should NOT match: different thread
+		{topic: "notifications.slack.T123.C456.thread.9999999999_000000.message", ok: false},
+		{topic: "notifications.slack.T123.C456.thread.9999999999_000000.mention", ok: false},
+		// Should NOT match: channel-level topic (no thread segment)
+		{topic: "notifications.slack.T123.C456.message", ok: false},
+		{topic: "notifications.slack.T123.C456.mention", ok: false},
+		// Should NOT match: different channel
+		{topic: "notifications.slack.T123.C789.thread.1234567890_123456.message", ok: false},
+	}
+	for _, item := range cases {
+		got := Match(pattern, item.topic)
+		if got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+
+	// Prove normalized thread_ts (underscore) is a single NATS segment
+	// while raw thread_ts (dot) would be two segments
+	starPattern := "notifications.slack.T.C.thread.*.message"
+	// Normalized ts = single segment: matches *
+	if !Match(starPattern, "notifications.slack.T.C.thread.1234567890_123456.message") {
+		t.Fatal("normalized thread_ts should match single-segment wildcard")
+	}
+	// Raw ts (dot) = two segments: does NOT match *
+	if Match(starPattern, "notifications.slack.T.C.thread.1234567890.123456.message") {
+		t.Fatal("raw dotted thread_ts should NOT match single-segment wildcard")
+	}
+}
+
 func TestGhostWisprTopicFiltering(t *testing.T) {
 	// Wildcard subscription for all Ghost Wispr events
 	pattern := "notifications.ghostwispr.>"
