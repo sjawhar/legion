@@ -55,10 +55,6 @@ export interface DaemonHandle {
 }
 
 function resolveCodebaseIndexPath(config: DaemonConfig, legionId: string): string {
-  if (config.legionDir) {
-    return path.join(config.legionDir, ".legion", "daemon", "index.json");
-  }
-
   return path.join(config.paths.forLegion(legionId).legionStateDir, "index.json");
 }
 
