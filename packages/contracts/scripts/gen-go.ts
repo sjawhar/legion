@@ -50,6 +50,10 @@ const GhostWisprTopicPrefix = "notifications.ghostwispr."
 
 func GhostWisprSubject(recordingId string, kind string) string {
 	return GhostWisprTopicPrefix + recordingId + "." + kind
+}
+
+func WhatsappSubject(phone, jid, kind string) string {
+	return "notifications.whatsapp." + phone + "." + jid + "." + kind
 }`;
 
 function title(text: string) {

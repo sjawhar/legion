@@ -665,3 +665,38 @@ func TestGhostWisprSourceValidation(t *testing.T) {
 		t.Fatalf("expected ghostwispr source to be valid: %v", err)
 	}
 }
+
+func TestWhatsappSubject(t *testing.T) {
+	cases := []struct {
+		phone string
+		jid   string
+		kind  string
+		want  string
+	}{
+		{phone: "15551234567", jid: "5551234567@s.whatsapp.net", kind: "message", want: "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.message"},
+		{phone: "15559876543", jid: "group-abc@g.us", kind: "message", want: "notifications.whatsapp.15559876543.group-abc@g.us.message"},
+		{phone: "15551234567", jid: "5551234567@s.whatsapp.net", kind: "status", want: "notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.status"},
+	}
+	for _, item := range cases {
+		got := WhatsappSubject(item.phone, item.jid, item.kind)
+		if got != item.want {
+			t.Fatalf("WhatsappSubject(%s, %s, %s) = %s, want %s", item.phone, item.jid, item.kind, got, item.want)
+		}
+	}
+}
+
+func TestWhatsappSourceValidation(t *testing.T) {
+	env := Envelope{
+		EventID:        "evt-wa",
+		Source:         "whatsapp",
+		SourceEventID:  "whatsapp://messages/15551234567/5551234567@s.whatsapp.net",
+		Topic:          WhatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message"),
+		DedupeKey:      "whatsapp.15551234567.5551234567@s.whatsapp.net.1712345678000",
+		IssuedAt:       NowMillis(),
+		PayloadSummary: "WhatsApp message in chat 5551234567@s.whatsapp.net",
+		TraceID:        "trace-wa",
+	}
+	if err := env.Validate(); err != nil {
+		t.Fatalf("expected whatsapp source to be valid: %v", err)
+	}
+}

@@ -26,3 +26,7 @@ export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 export function ghostWisprSubject(recordingId: string, kind: string) {
   return `${GHOSTWISPR_TOPIC_PREFIX}${recordingId}.${kind}`;
 }
+
+export function whatsappSubject(phone: string, jid: string, kind: string) {
+  return `notifications.whatsapp.${phone}.${jid}.${kind}`;
+}

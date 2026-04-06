@@ -1040,3 +1040,78 @@ func TestE2E_RegistryListReturnsSortedInterests(t *testing.T) {
 		t.Fatalf("expected third item to be ses_charlie, got %s", items[2].SessionID)
 	}
 }
+
+// --- WHATSAPP MCP BRIDGE INTEGRATION ---
+
+func TestE2E_WhatsappTopicRouting(t *testing.T) {
+	env := setupTestEnv(t)
+	port, deliveries, bodies, _ := mockSession(t)
+
+	// Subscribe to all WhatsApp messages for phone 15551234567
+	whatsappPattern := "notifications.whatsapp.15551234567.>"
+	env.registerSession("ses_whatsapp", port, []string{whatsappPattern})
+	env.startConsumer("test-machine")
+
+	// Publish a WhatsApp envelope (simulating what the MCP bridge would publish)
+	waTopic := contracts.WhatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message")
+	waEnv := newEnvelope("whatsapp", waTopic, "Hello from WhatsApp", "dedupe-wa-1")
+	waEnv.SourceSession = "" // Bridge has no session
+	waEnv.PayloadRef = "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
+	publishEnvelope(env, waEnv)
+
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 1 {
+		t.Fatalf("expected 1 delivery for WhatsApp message, got %d", count)
+	}
+
+	// Verify the body contains the WhatsApp message content
+	if len(*bodies) == 0 {
+		t.Fatal("no body captured")
+	}
+	if !contains((*bodies)[0], "Hello from WhatsApp") {
+		t.Fatalf("body should contain WhatsApp message, got: %s", (*bodies)[0])
+	}
+}
+
+func TestE2E_WhatsappDifferentPhoneNotDelivered(t *testing.T) {
+	env := setupTestEnv(t)
+	port, deliveries, _, _ := mockSession(t)
+
+	// Subscribe to messages for phone 15551234567 only
+	env.registerSession("ses_wa_filtered", port, []string{"notifications.whatsapp.15551234567.>"})
+	env.startConsumer("test-machine")
+
+	// Publish message for a DIFFERENT phone number
+	waTopicOther := contracts.WhatsappSubject("15559876543", "5551234567@s.whatsapp.net", "message")
+	publishEnvelope(env, newEnvelope("whatsapp", waTopicOther, "Wrong phone", "dedupe-wa-wrong"))
+
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 0 {
+		t.Fatalf("expected 0 deliveries for wrong phone, got %d", count)
+	}
+}
+
+func TestE2E_WhatsappMultipleSubscribers(t *testing.T) {
+	env := setupTestEnv(t)
+
+	port1, deliveries1, _, _ := mockSession(t)
+	port2, deliveries2, _, _ := mockSession(t)
+
+	// Both sessions subscribe to WhatsApp messages
+	env.registerSession("ses_wa_a", port1, []string{"notifications.whatsapp.15551234567.>"})
+	env.registerSession("ses_wa_b", port2, []string{"notifications.whatsapp.15551234567.>"})
+	env.startConsumer("test-machine")
+
+	waTopic := contracts.WhatsappSubject("15551234567", "5551234567@s.whatsapp.net", "message")
+	item := newEnvelope("whatsapp", waTopic, "Broadcast WhatsApp", "dedupe-wa-broadcast")
+	item.SourceSession = ""
+	publishEnvelope(env, item)
+
+	time.Sleep(2 * time.Second)
+	if c1 := deliveries1.Load(); c1 != 1 {
+		t.Fatalf("session A expected 1 delivery, got %d", c1)
+	}
+	if c2 := deliveries2.Load(); c2 != 1 {
+		t.Fatalf("session B expected 1 delivery, got %d", c2)
+	}
+}
