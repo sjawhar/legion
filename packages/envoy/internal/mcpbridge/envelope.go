@@ -16,11 +16,12 @@ func BuildEnvelope(cfg *ServerConfig, notifyURI string, contents []resourceConte
 	}
 
 	now := contracts.NowMillis()
+	eventID := id.New()
 	summary := buildSummary(cfg, notifyURI, contents)
-	dedupeKey := buildDedupeKey(cfg.Source, notifyURI)
+	dedupeKey := buildDedupeKey(cfg.Source, eventID)
 
 	return contracts.Envelope{
-		EventID:        id.New(),
+		EventID:        eventID,
 		Source:         cfg.Source,
 		SourceEventID:  notifyURI,
 		Topic:          topic,
@@ -43,8 +44,8 @@ func buildSummary(cfg *ServerConfig, uri string, contents []resourceContent) str
 	return fmt.Sprintf("%s event from %s", cfg.Source, uri)
 }
 
-func buildDedupeKey(source string, uri string) string {
-	return source + "." + uri
+func buildDedupeKey(source string, eventID string) string {
+	return source + "." + eventID
 }
 
 func truncateSummary(s string, maxChars int) string {

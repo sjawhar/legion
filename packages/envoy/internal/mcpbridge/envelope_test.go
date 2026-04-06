@@ -125,4 +125,7 @@ func TestBuildEnvelope_UniqueIDs(t *testing.T) {
 	if env1.TraceID == env2.TraceID {
 		t.Fatal("trace_id should be unique")
 	}
+	if env1.DedupeKey == env2.DedupeKey {
+		t.Fatal("dedupe_key should be unique across calls with the same URI")
+	}
 }
