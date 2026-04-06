@@ -1,0 +1,39 @@
+{
+  "scope": "large",
+  "components": [
+    "packages/envoy/cmd/listener",
+    "packages/envoy/internal/tsnet",
+    "packages/envoy/infra",
+    "packages/envoy/deploy",
+    "packages/envoy/docs/constraints.md"
+  ],
+  "subIssues": [
+    "sjawhar-legion-308",
+    "sjawhar-legion-309",
+    "sjawhar-legion-310"
+  ],
+  "routingHints": {
+    "complexity": "large",
+    "estimatedImplementers": 2,
+    "skipRetro": false
+  },
+  "concerns": [
+    "Listener binds :9020 on all host interfaces with host networking — not localhost-only. tsnet must constrain /v1/* to tsnet-only when enabled.",
+    "GitHub/Slack receivers already have webhook signature auth — tsnet adds no value for them. Removed from scope.",
+    "MCP bridge exists in code but is not deployed in Pulumi infra — tsnet for MCP is conditional on deployment.",
+    "NATS containers use bridge networking and cannot resolve MagicDNS. Switching to host networking resolves this but requires host port availability checks.",
+    "packages/envoy/docs/constraints.md says 'Use Tailscale IPs' — must be updated as part of #310.",
+    "tsnet state directories must be unique per service to avoid Tailscale identity collisions.",
+    "Tailscale auth key only needed for initial registration; state persistence across restarts avoids re-auth."
+  ],
+  "learningsInjected": [
+    "docs/solutions/envoy/docker-tailscale-networking.md",
+    "docs/solutions/envoy/listener-routing-by-topic-prefix.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "architect",
+  "completed": "2026-04-06T23:25:38.353Z"
+}
