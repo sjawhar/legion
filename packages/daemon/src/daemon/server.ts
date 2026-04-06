@@ -545,6 +545,7 @@ export function startServer(opts: ServerOptions): {
               if (repoRef) {
                 const topics = [
                   `notifications.github.${repoRef.owner}.${repoRef.repo}.issue.${issueNumber}.>`,
+                  `notifications.github.${repoRef.owner}.${repoRef.repo}.pr.${issueNumber}.>`,
                 ];
                 subscribeWorkerToEnvoy(actualSessionId, topics);
                 entry.envoyTopics = topics;

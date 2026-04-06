@@ -526,6 +526,37 @@ func TestGithubSummaryJSON(t *testing.T) {
 			checkValues:  map[string]string{"kind": "push", "repo": "sjawhar/legion", "ref": "refs/heads/main"},
 		},
 		{
+			name:  "check_run",
+			event: "check_run",
+			body: map[string]any{
+				"action":     "completed",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"check_run": map[string]any{
+					"name":          "test",
+					"status":        "completed",
+					"conclusion":    "success",
+					"pull_requests": []any{},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "name", "status", "conclusion"},
+			checkValues:  map[string]string{"kind": "ci", "action": "completed", "repo": "sjawhar/legion", "number": "", "name": "test", "status": "completed", "conclusion": "success"},
+		},
+		{
+			name:  "check_suite",
+			event: "check_suite",
+			body: map[string]any{
+				"action":     "completed",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"check_suite": map[string]any{
+					"status":        "completed",
+					"conclusion":    "failure",
+					"pull_requests": []any{},
+				},
+			},
+			expectedKeys: []string{"kind", "action", "repo", "number", "status", "conclusion"},
+			checkValues:  map[string]string{"kind": "ci", "action": "completed", "repo": "sjawhar/legion", "number": "", "status": "completed", "conclusion": "failure"},
+		},
+		{
 			name:  "unknown event",
 			event: "deployment",
 			body: map[string]any{
@@ -619,6 +650,160 @@ func TestGithubResourceSubject(t *testing.T) {
 		if got != item.want {
 			t.Fatalf("GithubResourceSubject(%s, %s, %s, %s) = %s, want %s", item.owner, item.repo, item.resourceType, item.resourceNum, got, item.want)
 		}
+	}
+}
+
+func TestGithubEnvelopesCICheckRunNoPRs(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "check_run",
+		Delivery: "d1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_run": map[string]any{
+				"name":          "test",
+				"status":        "completed",
+				"conclusion":    "success",
+				"pull_requests": []any{},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.ci" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+	if items[0].DedupeKey != "github.d1" {
+		t.Fatalf("unexpected dedupe key: %s", items[0].DedupeKey)
+	}
+}
+
+func TestGithubEnvelopesCICheckRunOnePR(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "check_run",
+		Delivery: "d1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_run": map[string]any{
+				"name":       "test",
+				"status":     "completed",
+				"conclusion": "success",
+				"pull_requests": []any{
+					map[string]any{"number": 42},
+				},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.pr.42.ci" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+	if items[0].DedupeKey != "github.d1.pr.42" {
+		t.Fatalf("unexpected dedupe key: %s", items[0].DedupeKey)
+	}
+}
+
+func TestGithubEnvelopesCICheckRunMultiplePRs(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "check_run",
+		Delivery: "d1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_run": map[string]any{
+				"name":       "test",
+				"status":     "completed",
+				"conclusion": "success",
+				"pull_requests": []any{
+					map[string]any{"number": 42},
+					map[string]any{"number": 43},
+					map[string]any{"number": 44},
+				},
+			},
+		},
+	}, "@legion")
+	if len(items) != 3 {
+		t.Fatalf("expected 3 envelopes, got %d", len(items))
+	}
+	expectedTopics := []string{
+		"notifications.github.sjawhar.legion.pr.42.ci",
+		"notifications.github.sjawhar.legion.pr.43.ci",
+		"notifications.github.sjawhar.legion.pr.44.ci",
+	}
+	expectedDedupeKeys := []string{
+		"github.d1.pr.42",
+		"github.d1.pr.43",
+		"github.d1.pr.44",
+	}
+	for i, item := range items {
+		if item.Topic != expectedTopics[i] {
+			t.Fatalf("envelope[%d] unexpected topic: %s, want %s", i, item.Topic, expectedTopics[i])
+		}
+		if item.DedupeKey != expectedDedupeKeys[i] {
+			t.Fatalf("envelope[%d] unexpected dedupe key: %s, want %s", i, item.DedupeKey, expectedDedupeKeys[i])
+		}
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		if seen[item.DedupeKey] {
+			t.Fatalf("duplicate dedupe key: %s", item.DedupeKey)
+		}
+		seen[item.DedupeKey] = true
+	}
+}
+
+func TestGithubEnvelopesCICheckSuiteOnePR(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "check_suite",
+		Delivery: "d2",
+		EventID:  "e2",
+		TraceID:  "t2",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"check_suite": map[string]any{
+				"status":     "completed",
+				"conclusion": "success",
+				"pull_requests": []any{
+					map[string]any{"number": 99},
+				},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.pr.99.ci" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+	if items[0].DedupeKey != "github.d2.pr.99" {
+		t.Fatalf("unexpected dedupe key: %s", items[0].DedupeKey)
 	}
 }
 

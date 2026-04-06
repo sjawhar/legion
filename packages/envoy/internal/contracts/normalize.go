@@ -39,6 +39,27 @@ func GithubEnvelope(input GithubEnvelopeInput) Envelope {
 func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	item := GithubEnvelope(input)
 	out := []Envelope{item}
+	if githubCIEvent(input.Event) {
+		prs := githubCIPullRequests(input.Event, input.Body)
+		if len(prs) > 0 {
+			owner := nestedString(input.Body, "repository", "owner", "login")
+			if owner == "" {
+				owner = "unknown"
+			}
+			repo := nestedString(input.Body, "repository", "name")
+			if repo == "" {
+				repo = "unknown"
+			}
+			out = make([]Envelope, 0, len(prs))
+			for _, pr := range prs {
+				ci := item
+				ci.Topic = GithubSubject(owner, repo, "pr."+pr+".ci")
+				ci.DedupeKey = "github." + input.Delivery + ".pr." + pr
+				out = append(out, ci)
+			}
+		}
+		return out
+	}
 	if !githubCommentEvent(input.Event) {
 		return out
 	}
@@ -85,7 +106,7 @@ func ContainsMention(body string, trigger string) bool {
 		if mentionEdge(body, idx, idx+len(trigger)) {
 			return true
 		}
-	next := idx + len(trigger)
+		next := idx + len(trigger)
 		if next >= len(body) {
 			return false
 		}
@@ -224,6 +245,10 @@ func githubNumber(event string, body map[string]any) string {
 		if n != nil {
 			return fmt.Sprintf("%v", n)
 		}
+	case "check_run", "check_suite":
+		if nums := githubCIPullRequests(event, body); len(nums) > 0 {
+			return nums[0]
+		}
 	}
 	return ""
 }
@@ -234,6 +259,43 @@ func githubCommentEvent(event string) bool {
 		return true
 	}
 	return false
+}
+
+func githubCIEvent(event string) bool {
+	switch event {
+	case "check_run", "check_suite":
+		return true
+	}
+	return false
+}
+
+func githubCIPullRequests(event string, body map[string]any) []string {
+	var key string
+	switch event {
+	case "check_run":
+		key = "check_run"
+	case "check_suite":
+		key = "check_suite"
+	default:
+		return nil
+	}
+	obj, _ := body[key].(map[string]any)
+	if obj == nil {
+		return nil
+	}
+	prs, _ := obj["pull_requests"].([]any)
+	var nums []string
+	for _, pr := range prs {
+		prMap, _ := pr.(map[string]any)
+		if prMap == nil {
+			continue
+		}
+		n := prMap["number"]
+		if n != nil {
+			nums = append(nums, fmt.Sprintf("%v", n))
+		}
+	}
+	return nums
 }
 
 func githubCommentBody(event string, body map[string]any) string {
@@ -323,6 +385,25 @@ func githubSummary(event string, body map[string]any) string {
 			"repo": repo,
 			"ref":  stringValue(body["ref"]),
 		}
+	case "check_run":
+		data = map[string]string{
+			"kind":       "ci",
+			"action":     action,
+			"repo":       repo,
+			"number":     num,
+			"name":       nestedString(body, "check_run", "name"),
+			"status":     nestedString(body, "check_run", "status"),
+			"conclusion": nestedString(body, "check_run", "conclusion"),
+		}
+	case "check_suite":
+		data = map[string]string{
+			"kind":       "ci",
+			"action":     action,
+			"repo":       repo,
+			"number":     num,
+			"status":     nestedString(body, "check_suite", "status"),
+			"conclusion": nestedString(body, "check_suite", "conclusion"),
+		}
 	default:
 		data = map[string]string{
 			"kind":   "unknown",
@@ -333,22 +414,6 @@ func githubSummary(event string, body map[string]any) string {
 
 	out, _ := json.Marshal(data)
 	return string(out)
-}
-
-func githubName(body map[string]any) string {
-	repo := nestedString(body, "repository", "name")
-	if repo != "" {
-		return repo
-	}
-	return "unknown"
-}
-
-func githubRepo(body map[string]any) string {
-	owner := nestedString(body, "repository", "owner", "login")
-	if owner != "" {
-		return owner
-	}
-	return "unknown"
 }
 
 func mentionEdge(body string, start int, end int) bool {

@@ -134,10 +134,6 @@ func githubEvent(event string) bool {
 	return false
 }
 
-func githubSkip(event string) bool {
-	switch event {
-	case "check_run", "check_suite":
-		return true
-	}
+func githubSkip(_ string) bool {
 	return false
 }

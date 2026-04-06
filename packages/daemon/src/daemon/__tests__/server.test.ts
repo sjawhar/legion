@@ -1407,6 +1407,7 @@ describe("daemon server", () => {
       expect(envoySubscribeCalls[0].body.session_id).toBe(body.sessionId);
       expect(envoySubscribeCalls[0].body.topics).toEqual([
         "notifications.github.acme.widgets.issue.42.>",
+        "notifications.github.acme.widgets.pr.42.>",
       ]);
     });
 
@@ -1700,7 +1701,10 @@ describe("daemon server", () => {
       }>;
       const planWorker = workers.find((w) => w.id === "acme-widgets-70-plan");
       expect(planWorker).toBeDefined();
-      expect(planWorker?.envoyTopics).toEqual(["notifications.github.acme.widgets.issue.70.>"]);
+      expect(planWorker?.envoyTopics).toEqual([
+        "notifications.github.acme.widgets.issue.70.>",
+        "notifications.github.acme.widgets.pr.70.>",
+      ]);
     });
 
     it("omits envoyTopics for non-plan mode dispatch", async () => {

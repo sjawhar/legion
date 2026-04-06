@@ -144,3 +144,23 @@ func TestWhatsappPerJIDFiltering(t *testing.T) {
 		}
 	}
 }
+
+func TestCITopicFiltering(t *testing.T) {
+	pattern := "notifications.github.acme.widgets.pr.42.>"
+	cases := []struct {
+		topic string
+		ok    bool
+	}{
+		{topic: "notifications.github.acme.widgets.pr.42.ci", ok: true},
+		{topic: "notifications.github.acme.widgets.pr.42.comment", ok: true},
+		{topic: "notifications.github.acme.widgets.pr.42.review", ok: true},
+		{topic: "notifications.github.acme.widgets.pr.43.ci", ok: false},
+		{topic: "notifications.github.acme.widgets.ci", ok: false},
+	}
+	for _, item := range cases {
+		got := Match(pattern, item.topic)
+		if got != item.ok {
+			t.Fatalf("pattern=%s topic=%s expected=%v got=%v", pattern, item.topic, item.ok, got)
+		}
+	}
+}
