@@ -1,0 +1,41 @@
+{
+  "taskCount": 6,
+  "independentTasks": 3,
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1,
+    "skipRetro": true,
+    "skipArchitect": true
+  },
+  "concerns": [
+    "AC2 may need to use manual subscription fallback if no implement worker with PR exists — evidence should note which path was taken",
+    "Step 0 agent preservation gate is a hard blocker — if it fails, all ACs are skipped",
+    "Fire-and-forget subscription may not have landed by the time events are triggered — always poll Envoy API to confirm",
+    "Session bootstrap delay after dispatch — wait ≥5s before querying session state",
+    "Cross-machine routing — machine_id alignment between Envoy listener and shared serve must be verified"
+  ],
+  "learningsInjected": [
+    "daemon/envoy-auto-subscription-patterns.md",
+    "daemon/prompt-delivery-bootstrap-delay.md",
+    "testing/worker-smoke-testing-requirements.md"
+  ],
+  "learningsHelpful": [
+    "daemon/envoy-auto-subscription-patterns.md",
+    "daemon/prompt-delivery-bootstrap-delay.md",
+    "testing/worker-smoke-testing-requirements.md"
+  ],
+  "workflowRecommendation": "Verification-only task — no code changes. Skip retro. Single implementer runs smoke tests against live infrastructure and posts evidence report.",
+  "requiredSkills": {
+    "implement": [
+      "envoy",
+      "systematic-debugging"
+    ],
+    "test": [
+      "envoy"
+    ],
+    "review": []
+  },
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-04-06T21:16:30.062Z"
+}
