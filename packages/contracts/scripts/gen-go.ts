@@ -42,6 +42,10 @@ func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
 
+func SlackThreadSubject(team, channel, threadTs, kind string) string {
+	return "notifications.slack." + team + "." + channel + ".thread." + strings.ReplaceAll(threadTs, ".", "_") + "." + kind
+}
+
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
 	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
 }
