@@ -1,30 +1,45 @@
 {
   "critical": 0,
-  "important": 0,
-  "minor": 2,
+  "important": 2,
+  "minor": 3,
   "verdict": "approved",
   "keyFindings": [
     {
-      "severity": "P3",
-      "file": "packages/daemon/src/cli/index.ts",
-      "description": "CLI success message constructs confirmation path manually instead of using PHASE_FILE_NAMES constant from schema — cosmetic divergence point"
+      "severity": "P2",
+      "file": "Envoy receiver",
+      "description": "gh pr review --comment (pull_request_review) events NOT routed through Envoy — only issue_comment events delivered. Workers expecting PR review notifications will miss them."
+    },
+    {
+      "severity": "P2",
+      "file": "Envoy routing",
+      "description": "@mention comments route exclusively to mention topic, NOT duplicated on issue comment topic. Workers subscribed to issue.N.> will miss @mention comments."
     },
     {
       "severity": "P3",
-      "file": "PR description",
-      "description": "PR body says '9 handoff write commands' but actual count is 8 across 6 files"
+      "file": "CI",
+      "description": "No automated CI-runnable E2E test for full delivery chain — regression risk"
+    },
+    {
+      "severity": "P3",
+      "file": "Issue spec",
+      "description": "Issue spec curl example uses incorrect prompt_async format (message vs parts array)"
+    },
+    {
+      "severity": "P3",
+      "file": "AC2",
+      "description": "Self-subscription code path not directly exercised — only delivery path tested via manual subscription"
     }
   ],
   "learningsInjected": [
-    "daemon/handoff-schema-migration-patterns.md",
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "skill-patterns/worker-skill-failure-modes.md"
+    "daemon/envoy-auto-subscription-patterns.md",
+    "testing/worker-smoke-testing-requirements.md",
+    "daemon/prompt-delivery-bootstrap-delay.md"
   ],
   "learningsHelpful": [
-    "daemon/handoff-schema-migration-patterns.md",
-    "skill-patterns/cross-cutting-workflow-concerns.md"
+    "daemon/envoy-auto-subscription-patterns.md",
+    "daemon/prompt-delivery-bootstrap-delay.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-06T18:25:31.412Z"
+  "completed": "2026-04-06T22:35:23.773Z"
 }
