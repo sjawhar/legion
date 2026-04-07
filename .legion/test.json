@@ -1,19 +1,23 @@
 {
-  "passed": 12,
-  "failed": 0,
-  "failures": [],
-  "documentationFeedback": "README Machine Configuration table is clear — name→MagicDNS contract explicit on line 104. constraints.md updates both required lines. docker-tailscale-networking.md preserves bridge networking rule while noting NATS exception. No gaps or confusion found.",
+  "passed": 9,
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "Error handling: print message + non-zero exit on failure",
+      "evidence": "statusCommand.run() at index.ts:849-851 has NO try/catch. cmdStatus correctly throws CliError on HTTP 500 and connection failure, but the error is never caught at the command level. Compare attachCommand at index.ts:866-874 which has the correct pattern. Errors propagate as unhandled rejections with stack traces instead of clean error messages."
+    }
+  ],
+  "documentationFeedback": "No project docs updated. No README.md exists. AGENTS.md mentions 'legion status' but doesn't describe pipeline output or --json flag. PR body is the only feature reference.",
   "observations": [
-    "P2: Tests are happy-path-only — no edge cases for empty machines, all nats:false, or special characters in names",
-    "P2: No integration test for createNatsPeer() full pipeline (MachineConfig→PeerInfo→routes→conf→container)",
-    "Deviation: receivers.ghostwispr row added to README (harmless, documents existing field)",
-    "Pre-existing TS5107 moduleResolution=node10 deprecation in infra tsconfig — unrelated to PR",
-    "deleteBeforeReplace: true correctly set on NATS container per pulumi-remote-docker-patterns learning",
-    "Criteria 13 (JetStream persistence) and 14 (cluster formation) are manual rollout verification — code supports both via named volumes and hostname-based routes"
+    "P2: No CLI-level integration tests for statusCommand pipeline path",
+    "P2: No error path tests (HTTP 500, timeout, connection refused)",
+    "P3: Done/skip issues render without bracketed status indicator",
+    "P3: /state/fetch-and-collect is GitHub-only but CLI advertises linear+github for --backend",
+    "P3: Pipeline includes Icebox in PHASE_ORDER which wasn't in AC#1 status list"
   ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-07T02:09:46.782Z"
+  "completed": "2026-04-07T04:22:04.282Z"
 }

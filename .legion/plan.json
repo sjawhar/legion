@@ -1,28 +1,27 @@
 {
-  "taskCount": 6,
-  "independentTasks": 4,
+  "taskCount": 3,
+  "independentTasks": 1,
   "routingHints": {
     "complexity": "small",
     "estimatedImplementers": 1,
-    "skipRetro": false,
+    "skipRetro": true,
     "skipArchitect": true
   },
   "concerns": [
-    "MachineConfig.name must match MagicDNS hostname - assumption verified by existing sshHost usage but should be documented",
-    "Host networking exposes NATS ports directly - verify no port collisions during rollout",
-    "Live cluster verification (routez, JetStream persistence) requires Tailscale-connected host, not CI-testable"
+    "statusCommand.run() missing try/catch for proper non-zero exit code on CliError",
+    "No CLI-level integration tests exercising the full cmdStatus → fetch → format → output path",
+    "Error test must mock process.exit since Task 1 adds try/catch that catches CliError internally"
   ],
   "learningsInjected": [
-    "envoy/docker-tailscale-networking.md",
-    "envoy/pulumi-remote-docker-patterns.md",
-    "infra/mixed-runtime-type-boundaries.md"
+    "daemon/controller-observability.md",
+    "testing/bun-fetch-mocking-patterns.md",
+    "testing/github-backend-collect-test-payloads.md"
   ],
   "learningsHelpful": [
-    "envoy/docker-tailscale-networking.md",
-    "envoy/pulumi-remote-docker-patterns.md"
+    "testing/bun-fetch-mocking-patterns.md"
   ],
-  "workflowRecommendation": "Standard pipeline — all phases needed. Tasks 1/2/4/5 are independent and can be parallelized by the implementer.",
+  "workflowRecommendation": "Simple hardening — single implementer, skip retro. Core pipeline implementation already exists and passes 17 unit tests. Only error handling and CLI integration tests remain.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-07T01:52:38.524Z"
+  "completed": "2026-04-07T04:10:30.071Z"
 }

@@ -290,6 +290,7 @@ export interface IssueSource {
  */
 export interface ParsedIssue {
   issueId: string;
+  title: string;
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   prRef: GitHubPRRef | null;
@@ -319,10 +320,12 @@ export function createParsedIssue(
   labels: string[],
   prRef: GitHubPRRef | null,
   source: IssueSource | null = null,
-  isBlocked: boolean = false
+  isBlocked: boolean = false,
+  title: string = ""
 ): ParsedIssue {
   return {
     issueId,
+    title,
     status,
     labels,
     prRef,
@@ -389,6 +392,7 @@ export function createParsedIssue(
  */
 export interface FetchedIssueData {
   issueId: string;
+  title?: string;
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   hasPr: boolean; // True if issue has a linked PR
@@ -413,6 +417,7 @@ export interface FetchedIssueData {
  */
 interface IssueStateDict {
   status: IssueStatusLiteral | string;
+  title?: string;
   labels: string[];
   hasPr: boolean;
   prIsDraft: boolean | null;
@@ -440,6 +445,7 @@ interface CollectedStateDict {
  */
 export interface IssueState {
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
+  title?: string;
   labels: string[];
   hasPr: boolean; // Whether issue has a linked PR
   prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
@@ -461,6 +467,7 @@ export const IssueState = {
    */
   toDict(state: IssueState): IssueStateDict {
     const dict: IssueStateDict = {
+      title: state.title,
       status: state.status,
       labels: state.labels,
       hasPr: state.hasPr,

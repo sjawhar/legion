@@ -35,6 +35,7 @@ export interface LinearIssueRaw {
   state?: LinearStateDict;
   labels?: string[] | LinearLabelsContainer;
   attachments?: LinearAttachment[] | { nodes: LinearAttachment[] };
+  title?: string;
 }
 
 export class LinearTracker implements IssueTracker {
@@ -109,7 +110,8 @@ export class LinearTracker implements IssueTracker {
         }
       }
 
-      parsed.push(createParsedIssue(issueId, status, labels, prRef));
+      const title = typeof issue.title === "string" ? issue.title : "";
+      parsed.push(createParsedIssue(issueId, status, labels, prRef, null, false, title));
     }
 
     return parsed;

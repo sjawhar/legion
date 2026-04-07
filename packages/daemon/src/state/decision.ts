@@ -307,6 +307,7 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
   const sessionId = computeSessionId(legionId, data.issueId, mode);
 
   return {
+    title: data.title,
     status: data.status,
     labels: data.labels,
     hasPr: data.hasPr,

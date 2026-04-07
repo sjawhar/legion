@@ -1325,6 +1325,213 @@ describe("CLI XDG path migration", () => {
   });
 });
 
+describe("statusCommand pipeline integration", () => {
+  const legionId = "12345678-1234-1234-1234-123456789012";
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const originalError = console.error;
+  let stateHome: string;
+  let originalStateHome: string | undefined;
+
+  beforeEach(() => {
+    stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "legion-pipeline-"));
+    originalStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = stateHome;
+
+    const legionStateDir = path.join(stateHome, "legion", "legions", legionId);
+    fs.mkdirSync(legionStateDir, { recursive: true });
+    fs.writeFileSync(path.join(legionStateDir, "workers.json"), "[]");
+
+    console.log = mock(() => {}) as typeof console.log;
+    console.error = mock(() => {}) as typeof console.error;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    console.error = originalError;
+    if (originalStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = originalStateHome;
+    }
+    fs.rmSync(stateHome, { recursive: true, force: true });
+  });
+
+  test("displays pipeline view with grouped issues", async () => {
+    installFetchMock(async (input) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url.includes("/workers")) {
+        return new Response(JSON.stringify([{ id: "test-repo-1-implement", port: 13382 }]), {
+          status: 200,
+        });
+      }
+      if (url.includes("/state/fetch-and-collect")) {
+        return new Response(
+          JSON.stringify({
+            issues: {
+              "test-repo-1": {
+                status: "In Progress",
+                title: "Active feature work",
+                labels: ["worker-active"],
+                hasPr: true,
+                prIsDraft: false,
+                ciStatus: "passing",
+                mergeableStatus: "mergeable",
+                hasLiveWorker: true,
+                workerMode: "implement",
+                workerStatus: "running",
+                suggestedAction: "skip",
+                sessionId: "ses_000000000000xxxxxxxxxxxx",
+                hasUserFeedback: false,
+                isBlocked: false,
+                source: null,
+              },
+              "test-repo-2": {
+                status: "Todo",
+                title: "Planned work item",
+                labels: [],
+                hasPr: false,
+                prIsDraft: null,
+                ciStatus: null,
+                mergeableStatus: null,
+                hasLiveWorker: false,
+                workerMode: null,
+                workerStatus: null,
+                suggestedAction: "dispatch_planner",
+                sessionId: "ses_000000000000yyyyyyyyyyyy",
+                hasUserFeedback: false,
+                isBlocked: false,
+                source: null,
+              },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+
+    await runCommand(statusCommand, { team: legionId });
+
+    const output = (console.log as ReturnType<typeof mock>).mock.calls.flat().join("\n");
+    expect(output).toContain("Pipeline");
+    expect(output).toContain("Todo (1)");
+    expect(output).toContain("In Progress (1)");
+    expect(output).toContain("[implement:running]");
+    expect(output).toContain("[IDLE]");
+    expect(output).toContain("Total: 2 issues");
+    expect(output).toContain("Active: 1 workers");
+    expect(output).toContain("Idle: 1");
+  });
+
+  test("outputs JSON when --json flag is set", async () => {
+    installFetchMock(async (input) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url.includes("/workers")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url.includes("/state/fetch-and-collect")) {
+        return new Response(
+          JSON.stringify({
+            issues: {
+              "test-repo-1": {
+                status: "Todo",
+                title: "Some task",
+                labels: [],
+                hasPr: false,
+                prIsDraft: null,
+                ciStatus: null,
+                mergeableStatus: null,
+                hasLiveWorker: false,
+                workerMode: null,
+                workerStatus: null,
+                suggestedAction: "dispatch_planner",
+                sessionId: "ses_000000000000xxxxxxxxxxxx",
+                hasUserFeedback: false,
+                isBlocked: false,
+                source: null,
+              },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+
+    await runCommand(statusCommand, { team: legionId, json: true });
+
+    const output = (console.log as ReturnType<typeof mock>).mock.calls.flat().join("");
+    const parsed = JSON.parse(output);
+    expect(parsed).toHaveProperty("phases");
+    expect(parsed).toHaveProperty("summary");
+    expect(parsed.summary.total).toBe(1);
+    expect(parsed.phases[0].name).toBe("Todo");
+  });
+
+  test("exits with non-zero code when pipeline fetch fails", async () => {
+    const originalExit = process.exit;
+    const exitMock = mock(() => {}) as unknown as typeof process.exit;
+    process.exit = exitMock;
+
+    try {
+      installFetchMock(async (input) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url.includes("/workers")) {
+          return new Response(JSON.stringify([{ id: "test-1", port: 13382 }]), {
+            status: 200,
+          });
+        }
+        if (url.includes("/state/fetch-and-collect")) {
+          return new Response("collect_failed", { status: 500 });
+        }
+        return new Response("", { status: 404 });
+      });
+
+      // CliError is caught, process.exit called, then re-thrown (since mock doesn't actually exit)
+      try {
+        await runCommand(statusCommand, { team: legionId });
+      } catch (e) {
+        expect(e).toBeInstanceOf(CliError);
+      }
+
+      const errOutput = (console.error as ReturnType<typeof mock>).mock.calls.flat().join("");
+      expect(errOutput).toContain("Pipeline data unavailable");
+      expect(exitMock).toHaveBeenCalledWith(1);
+    } finally {
+      process.exit = originalExit;
+    }
+  });
+
+  test("handles daemon not running gracefully in JSON mode", async () => {
+    installFetchMock(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+
+    await runCommand(statusCommand, { team: legionId, json: true });
+
+    const output = (console.log as ReturnType<typeof mock>).mock.calls.flat().join("");
+    const parsed = JSON.parse(output);
+    expect(parsed.summary.total).toBe(0);
+  });
+});
+
 describe("parseEnvJson", () => {
   it("rejects invalid JSON", () => {
     expect(() => parseEnvJson("not json")).toThrow("Invalid --env value: must be valid JSON");

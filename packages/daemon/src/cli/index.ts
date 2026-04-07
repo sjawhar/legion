@@ -18,6 +18,7 @@ import {
 import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
 import type { HandoffPhase } from "../handoff/types";
 import { resolveLegionId } from "./legion-resolver";
+import { buildPipelineJson, formatPipelineView, type PipelineState } from "./pipeline";
 
 export class CliError extends Error {
   constructor(
@@ -225,38 +226,102 @@ async function cmdStop(team: string, _stateDir?: string, backend?: string): Prom
   }
 }
 
-async function cmdStatus(team: string, _stateDir?: string, backend?: string): Promise<void> {
+async function cmdStatus(
+  team: string,
+  _stateDir?: string,
+  backend?: string,
+  json?: boolean
+): Promise<void> {
   const legionId = await resolveLegionId(team, { backend });
   const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
 
-  console.log(`Legion Status: ${legionId}`);
-  console.log("=".repeat(40));
+  if (!json) {
+    console.log(`Legion Status: ${legionId}`);
+    console.log("=".repeat(40));
+  }
 
   const daemonPort = await getDaemonPort(legionId);
+  let daemonRunning = false;
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (response.ok) {
       const workers = (await response.json()) as WorkerInfo[];
-      console.log(`Daemon: RUNNING (port ${daemonPort})`);
-      console.log(`Workers: ${workers.length}`);
-      for (const worker of workers) {
-        console.log(`  - ${worker.id} (port ${worker.port})`);
+      daemonRunning = true;
+      if (!json) {
+        console.log(`Daemon: RUNNING (port ${daemonPort})`);
+        console.log(`Workers: ${workers.length}`);
+        for (const worker of workers) {
+          console.log(`  - ${worker.id} (port ${worker.port})`);
+        }
       }
-    } else {
+    } else if (!json) {
       console.log("Daemon: NOT RUNNING");
     }
   } catch (_error) {
-    console.log("Daemon: NOT RUNNING");
+    if (!json) {
+      console.log("Daemon: NOT RUNNING");
+    }
   }
 
-  const stateFilePath = instancePaths.workersFile;
-  if (fs.existsSync(stateFilePath)) {
-    const stat = fs.statSync(stateFilePath);
-    const age = Math.floor((Date.now() - stat.mtimeMs) / 1000);
-    console.log(`\nState file: ${stateFilePath}`);
-    console.log(`Last updated: ${age}s ago`);
-  } else {
-    console.log(`\nState file: NOT FOUND`);
+  if (!json) {
+    const stateFilePath = instancePaths.workersFile;
+    if (fs.existsSync(stateFilePath)) {
+      const stat = fs.statSync(stateFilePath);
+      const age = Math.floor((Date.now() - stat.mtimeMs) / 1000);
+      console.log(`\nState file: ${stateFilePath}`);
+      console.log(`Last updated: ${age}s ago`);
+    } else {
+      console.log(`\nState file: NOT FOUND`);
+    }
+  }
+
+  // Pipeline view: fetch collected state from daemon
+  if (daemonRunning) {
+    try {
+      const collectResponse = await fetch(
+        `http://127.0.0.1:${daemonPort}/state/fetch-and-collect`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ backend: backend ?? "github" }),
+          signal: AbortSignal.timeout(30_000),
+        }
+      );
+
+      if (!collectResponse.ok) {
+        const body = await collectResponse.text();
+        throw new CliError(`Pipeline data unavailable: ${collectResponse.status} ${body}`);
+      }
+
+      const collected = (await collectResponse.json()) as {
+        issues: Record<string, PipelineState["issues"][string]>;
+      };
+      const pipelineState: PipelineState = { issues: collected.issues };
+
+      if (json) {
+        console.log(JSON.stringify(buildPipelineJson(pipelineState), null, 2));
+      } else {
+        console.log(formatPipelineView(pipelineState));
+      }
+    } catch (error) {
+      if (error instanceof CliError) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new CliError(`Failed to fetch pipeline data: ${message}`);
+    }
+  } else if (json) {
+    // Daemon not running — emit empty JSON structure
+    console.log(
+      JSON.stringify(
+        {
+          phases: [],
+          summary: { total: 0, active: 0, blocked: 0, needsInput: 0, idle: 0 },
+        },
+        null,
+        2
+      )
+    );
   }
 }
 
@@ -775,9 +840,22 @@ export const statusCommand = defineCommand({
       alias: "b",
       description: "Issue tracker backend (linear or github)",
     },
+    json: {
+      type: "boolean",
+      description: "Output pipeline data as machine-readable JSON",
+      default: false,
+    },
   },
   async run({ args }) {
-    await cmdStatus(args.team, args["state-dir"], args.backend);
+    try {
+      await cmdStatus(args.team, args["state-dir"], args.backend, args.json);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
   },
 });
 

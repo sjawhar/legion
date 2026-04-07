@@ -12,6 +12,7 @@ interface GitHubProjectItem {
   id?: string;
   content?: {
     number?: number;
+    title?: string;
     repository?: string;
     url?: string;
     type?: string;
@@ -118,7 +119,8 @@ export class GitHubTracker implements IssueTracker {
       };
       const isBlocked = typedItem.isBlocked === true;
 
-      parsed.push(createParsedIssue(issueId, status, labels, prRef, source, isBlocked));
+      const title = typeof content.title === "string" ? content.title : "";
+      parsed.push(createParsedIssue(issueId, status, labels, prRef, source, isBlocked, title));
     }
 
     return parsed;

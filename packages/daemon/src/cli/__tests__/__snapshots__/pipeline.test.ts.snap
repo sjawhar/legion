@@ -1,0 +1,125 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`formatPipelineView formats 10 issues across 5 phases correctly 1`] = `
+"
+Pipeline
+----------------------------------------
+
+Backlog (2)
+  sjawhar-legion-101 Set up authentication service with JWT tokens [IDLE]
+  sjawhar-legion-102 Add rate limiting to API endpoints [BLOCKED]
+
+Todo (1)
+  sjawhar-legion-103 Design database schema for user profiles [IDLE]
+
+In Progress (2)
+  sjawhar-legion-104 Implement webhook delivery system with retry logic [implement:running]
+  sjawhar-legion-105 Fix memory leak in event processor causing OOM cr… [NEEDS INPUT]
+
+Testing (2)
+  sjawhar-legion-106 Add OpenTelemetry tracing to all HTTP handlers [test:running]
+  sjawhar-legion-107 Refactor config loading to support environment-sp… [IDLE]
+
+Needs Review (2)
+  sjawhar-legion-108 Implement graceful shutdown for all background wo… [IDLE]
+  sjawhar-legion-109 Add comprehensive error handling to CLI commands [review:running]
+
+Done (1)
+  sjawhar-legion-110 Update deployment scripts for multi-region suppor…
+
+Total: 10 issues | Active: 3 workers | Blocked: 1 | Needs Input: 1 | Idle: 4"
+`;
+
+exports[`buildPipelineJson builds JSON for 10-issue fixture 1`] = `
+{
+  "phases": [
+    {
+      "issues": [
+        {
+          "id": "sjawhar-legion-101",
+          "status": "IDLE",
+          "title": "Set up authentication service with JWT tokens",
+        },
+        {
+          "id": "sjawhar-legion-102",
+          "status": "BLOCKED",
+          "title": "Add rate limiting to API endpoints",
+        },
+      ],
+      "name": "Backlog",
+    },
+    {
+      "issues": [
+        {
+          "id": "sjawhar-legion-103",
+          "status": "IDLE",
+          "title": "Design database schema for user profiles",
+        },
+      ],
+      "name": "Todo",
+    },
+    {
+      "issues": [
+        {
+          "id": "sjawhar-legion-104",
+          "status": "implement:running",
+          "title": "Implement webhook delivery system with retry logic",
+        },
+        {
+          "id": "sjawhar-legion-105",
+          "status": "NEEDS INPUT",
+          "title": "Fix memory leak in event processor causing OOM crashes",
+        },
+      ],
+      "name": "In Progress",
+    },
+    {
+      "issues": [
+        {
+          "id": "sjawhar-legion-106",
+          "status": "test:running",
+          "title": "Add OpenTelemetry tracing to all HTTP handlers",
+        },
+        {
+          "id": "sjawhar-legion-107",
+          "status": "IDLE",
+          "title": "Refactor config loading to support environment-specific overrides",
+        },
+      ],
+      "name": "Testing",
+    },
+    {
+      "issues": [
+        {
+          "id": "sjawhar-legion-108",
+          "status": "IDLE",
+          "title": "Implement graceful shutdown for all background workers",
+        },
+        {
+          "id": "sjawhar-legion-109",
+          "status": "review:running",
+          "title": "Add comprehensive error handling to CLI commands",
+        },
+      ],
+      "name": "Needs Review",
+    },
+    {
+      "issues": [
+        {
+          "id": "sjawhar-legion-110",
+          "status": "",
+          "title": "Update deployment scripts for multi-region support with automatic failover",
+        },
+      ],
+      "name": "Done",
+    },
+  ],
+  "summary": {
+    "active": 3,
+    "blocked": 1,
+    "idle": 4,
+    "needsInput": 1,
+    "total": 10,
+  },
+}
+`;

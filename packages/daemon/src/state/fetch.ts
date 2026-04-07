@@ -571,6 +571,7 @@ export async function enrichParsedIssues(
     const workerInfo = liveWorkers[issue.issueId.toUpperCase()] ?? null;
     return {
       issueId: issue.issueId,
+      title: issue.title,
       status: issue.status,
       labels: issue.labels,
       hasPr: issue.hasPr,
