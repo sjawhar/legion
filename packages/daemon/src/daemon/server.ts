@@ -1,5 +1,11 @@
 import { isAbsolute } from "node:path";
 import type { CodebaseIndexResponse } from "../index/types";
+import {
+  extractRelationshipsFromBody,
+  mergeRelationships,
+  readRelationships,
+  writeRelationships,
+} from "../relationships";
 import { getBackend, isBackendName } from "../state/backends/index";
 import { buildCollectedState, canDispatchMode } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
@@ -8,6 +14,7 @@ import {
   CollectedState,
   computeSessionId,
   type IssueState,
+  type ParsedIssue,
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
@@ -48,6 +55,7 @@ export interface ServerOptions {
   adapter: RuntimeAdapter;
   repoManagerDeps?: RepoManagerDeps;
   stateFilePath: string;
+  relationshipsFilePath?: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
   getControllerState?: () => ControllerState | undefined;
@@ -143,6 +151,35 @@ function buildIssueEnvoyTopics(owner: string, repo: string, issueNumber: number)
     `notifications.github.${owner}.${repo}.issue.${issueNumber}.>`,
     `notifications.github.${owner}.${repo}.pr.${issueNumber}.>`,
   ];
+}
+
+/**
+ * Extract relationships from parsed issues and persist them.
+ * Non-blocking — failures are logged but don't affect state collection.
+ */
+async function extractAndPersistRelationships(
+  parsed: ParsedIssue[],
+  relationshipsFilePath: string | undefined
+): Promise<void> {
+  if (!relationshipsFilePath) return;
+
+  const incoming = parsed.flatMap((issue) => {
+    if (!issue.body || !issue.source) return [];
+    const repoPrefix = `${issue.source.owner}-${issue.source.repo}`.toLowerCase();
+    return extractRelationshipsFromBody(issue.issueId, issue.body, repoPrefix);
+  });
+
+  if (incoming.length === 0) return;
+
+  try {
+    const existing = await readRelationships(relationshipsFilePath);
+    const merged = mergeRelationships(existing.relationships, incoming);
+    await writeRelationships(relationshipsFilePath, { relationships: merged });
+  } catch (error) {
+    console.warn(
+      `[relationships] Failed to persist: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 export function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): void {
@@ -346,6 +383,14 @@ export function startServer(opts: ServerOptions): {
             runtime: opts.runtime ?? "opencode",
             ...(opts.tmuxSession ? { tmuxSession: opts.tmuxSession } : {}),
           });
+        }
+
+        if (method === "GET" && url.pathname === "/pipeline/relationships") {
+          if (!opts.relationshipsFilePath) {
+            return jsonResponse({ relationships: [] });
+          }
+          const graph = await readRelationships(opts.relationshipsFilePath);
+          return jsonResponse(graph);
         }
 
         if (url.pathname === "/index") {
@@ -1005,6 +1050,9 @@ export function startServer(opts: ServerOptions): {
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.legionId);
 
+            // Extract and persist relationships (non-blocking)
+            extractAndPersistRelationships(parsed, opts.relationshipsFilePath);
+
             // Populate dispatch validation cache
             for (const [issueId, issueState] of Object.entries(state.issues)) {
               issueStateCache.set(issueId.toLowerCase(), issueState);
@@ -1073,6 +1121,9 @@ export function startServer(opts: ServerOptions): {
             const daemonUrl = `http://127.0.0.1:${server.port}`;
             const issuesData = await enrichParsedIssues(parsed, daemonUrl);
             const state = buildCollectedState(issuesData, opts.legionId);
+
+            // Extract and persist relationships (non-blocking)
+            extractAndPersistRelationships(parsed, opts.relationshipsFilePath);
 
             // Populate dispatch validation cache
             for (const [issueId, issueState] of Object.entries(state.issues)) {

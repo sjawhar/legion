@@ -478,6 +478,7 @@ export async function startDaemon(
         paths: config.paths,
         adapter: resolvedDeps.adapter,
         stateFilePath: config.stateFilePath,
+        relationshipsFilePath: config.relationshipsFilePath,
         logDir: config.logDir,
         runtime: config.runtime,
         tmuxSession:

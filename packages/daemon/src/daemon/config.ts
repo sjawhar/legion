@@ -21,6 +21,7 @@ export interface DaemonConfig {
   checkIntervalMs: number;
   baseWorkerPort: number;
   stateFilePath: string;
+  relationshipsFilePath?: string;
   logDir: string;
   controllerSessionId?: string;
   controllerPrompt?: string;
@@ -84,6 +85,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const logDir = legionId
     ? paths.forLegion(legionId).logDir
     : path.join(paths.stateDir, "daemon", "logs");
+  const relationshipsFilePath = legionId
+    ? paths.forLegion(legionId).relationshipsFile
+    : path.join(paths.stateDir, "daemon", "relationships.json");
   const controllerSessionId = env.LEGION_CONTROLLER_SESSION_ID || undefined;
   const controllerPrompt = env.LEGION_CONTROLLER_PROMPT || undefined;
 
@@ -126,6 +130,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     maxRssBytes,
     rssCheckIntervalMs,
     stateFilePath,
+    relationshipsFilePath,
     logDir,
     controllerSessionId,
     controllerPrompt,

@@ -15,6 +15,7 @@ interface GitHubProjectItem {
     repository?: string;
     url?: string;
     type?: string;
+    body?: string;
   };
   status?: string | null;
   labels?: string[] | null;
@@ -117,8 +118,9 @@ export class GitHubTracker implements IssueTracker {
         url: typeof content.url === "string" ? content.url : "",
       };
       const isBlocked = typedItem.isBlocked === true;
+      const body = typeof content.body === "string" ? content.body : null;
 
-      parsed.push(createParsedIssue(issueId, status, labels, prRef, source, isBlocked));
+      parsed.push(createParsedIssue(issueId, status, labels, prRef, source, isBlocked, body));
     }
 
     return parsed;

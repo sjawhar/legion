@@ -24,6 +24,7 @@ interface GitHubProjectItemNode {
         __typename: "Issue" | "PullRequest" | "DraftIssue";
         number?: number;
         title?: string;
+        body?: string;
         url?: string;
         repository?: {
           nameWithOwner: string;
@@ -96,6 +97,7 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
             ... on Issue {
               number
               title
+              body
               url
               repository { nameWithOwner }
               issueDependenciesSummary { blockedBy }
@@ -147,6 +149,7 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
             ... on Issue {
               number
               title
+              body
               url
               repository { nameWithOwner }
               issueDependenciesSummary { blockedBy }
@@ -189,6 +192,9 @@ function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown>
     itemContent.title = content.title;
     itemContent.url = content.url;
     itemContent.repository = content.repository?.nameWithOwner;
+    if (typename === "Issue" && content.body) {
+      itemContent.body = content.body;
+    }
   } else if (typename === "DraftIssue") {
     itemContent.type = "DraftIssue";
     itemContent.title = content.title;

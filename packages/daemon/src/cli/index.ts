@@ -17,6 +17,7 @@ import {
 } from "../handoff/ledger";
 import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
 import type { HandoffPhase } from "../handoff/types";
+import { getRelativesForIssue, type RelationshipGraph } from "../relationships";
 import { resolveLegionId } from "./legion-resolver";
 
 export class CliError extends Error {
@@ -225,6 +226,81 @@ async function cmdStop(team: string, _stateDir?: string, backend?: string): Prom
   }
 }
 
+const WORKER_MODE_SUFFIXES = ["-architect", "-plan", "-implement", "-test", "-review", "-merge"];
+
+function extractIssueIdFromWorkerId(workerId: string): string | null {
+  for (const suffix of WORKER_MODE_SUFFIXES) {
+    if (workerId.endsWith(suffix)) {
+      return workerId.slice(0, -suffix.length);
+    }
+  }
+  return null;
+}
+
+function formatRelationshipIndicator(
+  issueId: string,
+  graph: RelationshipGraph,
+  collectedIssues: Record<string, { status: string }>
+): string {
+  const { parents, children } = getRelativesForIssue(issueId, graph);
+
+  const parts: string[] = [];
+  if (parents.length > 0) {
+    parts.push(`CHILD OF ${parents.map((p) => `#${p.split("-").pop()}`).join(", ")}`);
+  }
+  if (children.length > 0) {
+    const doneCount = children.filter((c) => collectedIssues[c]?.status === "Done").length;
+    parts.push(`PARENT: ${doneCount}/${children.length} children done`);
+  }
+
+  return parts.length > 0 ? ` [${parts.join(" | ")}]` : "";
+}
+
+async function cmdGraph(team: string, issue: string, backend?: string): Promise<void> {
+  const legionId = await resolveLegionId(team, { backend });
+  const daemonPort = await getDaemonPort(legionId);
+
+  let graph: RelationshipGraph = { relationships: [] };
+  try {
+    const relsRes = await fetch(`http://127.0.0.1:${daemonPort}/pipeline/relationships`);
+    if (relsRes.ok) {
+      graph = (await relsRes.json()) as RelationshipGraph;
+    }
+  } catch {
+    throw new CliError("Could not connect to daemon. Is it running?");
+  }
+
+  if (graph.relationships.length === 0) {
+    console.log("No relationships found.");
+    return;
+  }
+
+  const { parents, children } = getRelativesForIssue(issue, graph);
+
+  // Print parents above
+  if (parents.length > 0) {
+    for (const parent of parents) {
+      const parentChildren = graph.relationships.filter(
+        (r) => r.parent.toLowerCase() === parent.toLowerCase()
+      );
+      console.log(`  ${parent} (${parentChildren.length} children)`);
+    }
+    console.log("    │");
+    console.log(`    └─► ${issue} (this issue)`);
+  } else {
+    console.log(`  ${issue} (this issue)`);
+  }
+
+  // Print children below
+  if (children.length > 0) {
+    for (let i = 0; i < children.length; i++) {
+      const isLast = i === children.length - 1;
+      const prefix = isLast ? "└─" : "├─";
+      console.log(`    ${prefix} ${children[i]}`);
+    }
+  }
+}
+
 async function cmdStatus(team: string, _stateDir?: string, backend?: string): Promise<void> {
   const legionId = await resolveLegionId(team, { backend });
   const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
@@ -233,20 +309,63 @@ async function cmdStatus(team: string, _stateDir?: string, backend?: string): Pr
   console.log("=".repeat(40));
 
   const daemonPort = await getDaemonPort(legionId);
+
+  // Fetch relationships and collected state in parallel with worker info
+  let graph: RelationshipGraph = { relationships: [] };
+  let collectedIssues: Record<string, { status: string }> = {};
+
   try {
-    const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
-    if (response.ok) {
-      const workers = (await response.json()) as WorkerInfo[];
+    const [workersRes, relsRes, stateRes] = await Promise.all([
+      fetch(`http://127.0.0.1:${daemonPort}/workers`).catch(() => null),
+      fetch(`http://127.0.0.1:${daemonPort}/pipeline/relationships`).catch(() => null),
+      fetch(`http://127.0.0.1:${daemonPort}/state/collect`, { method: "POST" }).catch(() => null),
+    ]);
+
+    if (relsRes?.ok) {
+      graph = (await relsRes.json()) as RelationshipGraph;
+    }
+
+    if (stateRes?.ok) {
+      const stateData = (await stateRes.json()) as { issues?: Record<string, { status: string }> };
+      collectedIssues = stateData.issues ?? {};
+    }
+
+    if (workersRes?.ok) {
+      const workers = (await workersRes.json()) as WorkerInfo[];
       console.log(`Daemon: RUNNING (port ${daemonPort})`);
       console.log(`Workers: ${workers.length}`);
       for (const worker of workers) {
-        console.log(`  - ${worker.id} (port ${worker.port})`);
+        const issueId = extractIssueIdFromWorkerId(worker.id);
+        const relIndicator = issueId
+          ? formatRelationshipIndicator(issueId, graph, collectedIssues)
+          : "";
+        console.log(`  - ${worker.id} (port ${worker.port})${relIndicator}`);
       }
     } else {
       console.log("Daemon: NOT RUNNING");
     }
   } catch (_error) {
     console.log("Daemon: NOT RUNNING");
+  }
+
+  // Show relationship summary if any exist
+  if (graph.relationships.length > 0) {
+    console.log(`\nRelationships: ${graph.relationships.length}`);
+    // Show unique parent issues
+    const parents = [...new Set(graph.relationships.map((r) => r.parent))];
+    for (const parent of parents) {
+      const children = graph.relationships.filter((r) => r.parent === parent);
+      const doneCount = children.filter((c) => {
+        const state = collectedIssues[c.child];
+        return state?.status === "Done";
+      }).length;
+      console.log(`  ${parent} [PARENT: ${doneCount}/${children.length} children done]`);
+      for (const child of children) {
+        const state = collectedIssues[child.child];
+        const statusTag = state ? ` (${state.status})` : "";
+        console.log(`    └─ ${child.child}${statusTag}`);
+      }
+    }
   }
 
   const stateFilePath = instancePaths.workersFile;
@@ -781,6 +900,30 @@ export const statusCommand = defineCommand({
   },
 });
 
+export const graphCommand = defineCommand({
+  meta: { name: "graph", description: "Show issue relationship graph" },
+  args: {
+    team: { type: "positional", description: "Legion key or UUID", required: true },
+    issue: { type: "positional", description: "Issue identifier", required: true },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
+  },
+  async run({ args }) {
+    try {
+      await cmdGraph(args.team, args.issue, args.backend);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
 export const attachCommand = defineCommand({
   meta: { name: "attach", description: "Attach to a worker session" },
   args: {
@@ -1085,6 +1228,7 @@ export const mainCommand = defineCommand({
     start: startCommand,
     stop: stopCommand,
     status: statusCommand,
+    graph: graphCommand,
     attach: attachCommand,
     dispatch: dispatchCommand,
     prompt: promptCommand,

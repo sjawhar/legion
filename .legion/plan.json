@@ -1,6 +1,6 @@
 {
-  "taskCount": 6,
-  "independentTasks": 4,
+  "taskCount": 3,
+  "independentTasks": 3,
   "routingHints": {
     "complexity": "small",
     "estimatedImplementers": 1,
@@ -8,21 +8,18 @@
     "skipArchitect": true
   },
   "concerns": [
-    "MachineConfig.name must match MagicDNS hostname - assumption verified by existing sshHost usage but should be documented",
-    "Host networking exposes NATS ports directly - verify no port collisions during rollout",
-    "Live cluster verification (routez, JetStream persistence) requires Tailscale-connected host, not CI-testable"
+    "Tasks 2 and 3 both need GET /pipeline/status-summary endpoint - coordinate if parallelizing",
+    "Handoff CLI derives parent issue ID from workspace basename (path.basename(workspaceDir)) - fragile if workspace naming changes"
   ],
   "learningsInjected": [
-    "envoy/docker-tailscale-networking.md",
-    "envoy/pulumi-remote-docker-patterns.md",
-    "infra/mixed-runtime-type-boundaries.md"
+    "architecture-patterns/shared-state-file-ownership.md",
+    "task-index-patterns.md"
   ],
   "learningsHelpful": [
-    "envoy/docker-tailscale-networking.md",
-    "envoy/pulumi-remote-docker-patterns.md"
+    "architecture-patterns/shared-state-file-ownership.md"
   ],
-  "workflowRecommendation": "Standard pipeline — all phases needed. Tasks 1/2/4/5 are independent and can be parallelized by the implementer.",
+  "workflowRecommendation": "Standard pipeline — all phases needed. Core relationship module already exists; only CLI surface and POST endpoint remain. All 3 tasks are independent and can be parallelized.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-07T01:52:38.524Z"
+  "completed": "2026-04-07T04:05:48.166Z"
 }

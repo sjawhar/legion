@@ -295,6 +295,7 @@ export interface ParsedIssue {
   prRef: GitHubPRRef | null;
   source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
   isBlocked: boolean;
+  body: string | null; // Issue body text (for relationship extraction)
 
   // Computed properties (implemented as getters)
   readonly hasWorkerDone: boolean;
@@ -319,7 +320,8 @@ export function createParsedIssue(
   labels: string[],
   prRef: GitHubPRRef | null,
   source: IssueSource | null = null,
-  isBlocked: boolean = false
+  isBlocked: boolean = false,
+  body: string | null = null
 ): ParsedIssue {
   return {
     issueId,
@@ -328,7 +330,7 @@ export function createParsedIssue(
     prRef,
     source,
     isBlocked,
-
+    body,
     get hasWorkerDone() {
       return this.labels.includes("worker-done");
     },
