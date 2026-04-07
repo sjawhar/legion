@@ -7,6 +7,7 @@ import {
   parseIssueRepo,
   type RepoManagerDeps,
   resolveWorkspacePath,
+  startBackgroundFetch,
 } from "../repo-manager";
 
 describe("parseIssueRepo", () => {
@@ -57,7 +58,7 @@ describe("ensureRepoClone", () => {
     expect(commands[0]).toContain("https://github.com/acme/widgets");
   });
 
-  it("fetches when directory already exists", async () => {
+  it("skips fetch when directory already exists", async () => {
     const commands: string[][] = [];
     const deps: RepoManagerDeps = {
       runJj: async (args) => {
@@ -69,14 +70,18 @@ describe("ensureRepoClone", () => {
       symlink: async () => {},
     };
     const paths = resolveLegionPaths({}, "/home/test");
-    await ensureRepoClone(paths, { host: "github.com", owner: "acme", repo: "widgets" }, deps);
+    const clonePath = await ensureRepoClone(
+      paths,
+      { host: "github.com", owner: "acme", repo: "widgets" },
+      deps
+    );
 
-    expect(commands[0]).toContain("git");
-    expect(commands[0]).toContain("fetch");
+    expect(clonePath).toBe("/home/test/.local/share/legion/repos/github.com/acme/widgets");
+    expect(commands).toEqual([]);
   });
 
   describe("characterization: ensureRepoClone", () => {
-    it("returns clone path when directory exists and fetch succeeds", async () => {
+    it("returns clone path without fetching when directory exists", async () => {
       const commands: string[][] = [];
       const deps: RepoManagerDeps = {
         runJj: async (args) => {
@@ -96,9 +101,7 @@ describe("ensureRepoClone", () => {
       );
 
       expect(clonePath).toBe("/home/test/.local/share/legion/repos/github.com/acme/widgets");
-      expect(commands).toEqual([
-        ["git", "fetch", "-R", "/home/test/.local/share/legion/repos/github.com/acme/widgets"],
-      ]);
+      expect(commands).toEqual([]);
     });
 
     it("clones and returns clone path when directory does not exist", async () => {
@@ -132,15 +135,15 @@ describe("ensureRepoClone", () => {
     });
   });
 
-  describe("fetch failure propagation", () => {
-    it("throws when jj git fetch fails", async () => {
+  describe("clone failure propagation", () => {
+    it("throws when jj git clone fails", async () => {
       const deps: RepoManagerDeps = {
         runJj: async () => ({
           exitCode: 1,
           stdout: "",
           stderr: "fatal: could not read from remote",
         }),
-        exists: async () => true,
+        exists: async () => false,
         rmDir: async () => {},
         symlink: async () => {},
       };
@@ -148,13 +151,17 @@ describe("ensureRepoClone", () => {
 
       await expect(
         ensureRepoClone(paths, { host: "github.com", owner: "acme", repo: "widgets" }, deps)
-      ).rejects.toThrow("jj git fetch failed");
+      ).rejects.toThrow("Failed to clone");
     });
 
     it("includes stderr in error message", async () => {
       const deps: RepoManagerDeps = {
-        runJj: async () => ({ exitCode: 128, stdout: "", stderr: "Permission denied (publickey)" }),
-        exists: async () => true,
+        runJj: async () => ({
+          exitCode: 128,
+          stdout: "",
+          stderr: "Permission denied (publickey)",
+        }),
+        exists: async () => false,
         rmDir: async () => {},
         symlink: async () => {},
       };
@@ -323,5 +330,50 @@ describe("cleanupWorkspace", () => {
     expect(removedPaths).toContain(
       "/home/test/.local/share/legion/workspaces/sjawhar/42/acme-widgets-7"
     );
+  });
+});
+
+describe("startBackgroundFetch", () => {
+  it("fires jj git fetch with the correct clone path", async () => {
+    const commands: string[][] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        commands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    const result = await startBackgroundFetch(
+      paths,
+      { host: "github.com", owner: "acme", repo: "widgets" },
+      deps
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(commands).toEqual([
+      ["git", "fetch", "-R", "/home/test/.local/share/legion/repos/github.com/acme/widgets"],
+    ]);
+  });
+
+  it("rejects on non-zero exit code so .catch() fires", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({
+        exitCode: 128,
+        stdout: "",
+        stderr: "Permission denied (publickey)",
+      }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    await expect(
+      startBackgroundFetch(paths, { host: "github.com", owner: "acme", repo: "widgets" }, deps)
+    ).rejects.toThrow("Permission denied");
   });
 });
