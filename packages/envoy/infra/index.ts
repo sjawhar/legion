@@ -23,8 +23,14 @@ const machines = cfg.requireObject<MachineConfig[]>("machines");
 const githubWebhookSecret = cfg.requireSecret("githubWebhookSecret");
 const slackSigningSecret = cfg.requireSecret("slackSigningSecret");
 const ghostWisprSigningSecret = cfg.getSecret("ghostWisprSigningSecret");
+const tsnetAuthKey = cfg.getSecret("tsnetAuthKey");
 
-const secrets = { githubWebhookSecret, slackSigningSecret, ghostWisprSigningSecret };
+const secrets = {
+  githubWebhookSecret,
+  slackSigningSecret,
+  ghostWisprSigningSecret,
+  tsnetAuthKey,
+};
 
 // Registry auth for GHCR (private packages)
 const registryAuth: docker.types.input.ProviderRegistryAuth[] = [
@@ -44,7 +50,7 @@ for (const machine of machines) {
   }
 
   // Listener — on ALL machines
-  createListener(provider, machine, machines, images.envoy, natsDependency);
+  createListener(provider, machine, machines, images.envoy, secrets, natsDependency);
 
   // Receivers — only where configured
   if (machine.receivers?.github) {

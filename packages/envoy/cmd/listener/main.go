@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	envoytsnet "github.com/sjawhar/envoy/internal/tsnet"
 )
 
 // listenerDeps holds NATS-dependent resources published atomically after
@@ -138,6 +139,12 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 func main() {
 	// Phase 1: Load config (synchronous, fast).
 	cfg, err := config.Load(9020)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Load tsnet config (fast — env var reads only).
+	tsCfg, err := envoytsnet.LoadConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -301,7 +308,12 @@ func main() {
 	})
 	v1.HandleFunc("/v1/messages/publish", publishHandler(&deps))
 
-	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+	// When tsnet is disabled, serve /v1/* on the legacy port (existing behavior).
+	// When tsnet is enabled, /v1/* is served exclusively on the tsnet TLS listener
+	// and the legacy port only has /healthz (security boundary).
+	if !tsCfg.Enabled {
+		mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+	}
 
 	// Phase 4: Start HTTP server (port already bound via net.Listen).
 	server := &http.Server{
@@ -310,7 +322,8 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	fatal := make(chan error, 1)
+	// Buffer 2: one for legacy HTTP, one for tsnet HTTP (if enabled).
+	fatal := make(chan error, 2)
 	go func() {
 		if err := server.Serve(ln); err != http.ErrServerClosed {
 			fatal <- err
@@ -318,6 +331,21 @@ func main() {
 	}()
 	log.Printf("envoy-listener listening on %s", addr)
 
+	// Phase 4.5: Start tsnet server (if enabled). The tsnet node connects
+	// to the Tailscale network, which is a slow operation like NATS connect.
+	// /v1/* routes on the tsnet listener are gated by readiness (deps nil
+	// until NATS init completes).
+	var tsServer *envoytsnet.Server
+	if tsCfg.Enabled {
+		tsServer = envoytsnet.New(tsCfg)
+		defer tsServer.Close()
+		tsMux := http.NewServeMux()
+		tsMux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+		if _, err := tsServer.Serve(tsMux, fatal); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("envoy-listener tsnet serving /v1/* on %s:443", tsServer.Hostname())
+	}
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
 	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {

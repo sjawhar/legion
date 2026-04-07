@@ -83,7 +83,7 @@ The passphrase itself has no external recovery path — if lost, you must choose
 | `envoy:githubWebhookSecret` | `ENVOY_GITHUB_WEBHOOK_SECRET` | Validates incoming GitHub webhook payloads |
 | `envoy:slackSigningSecret` | `ENVOY_SLACK_SIGNING_SECRET` | Validates incoming Slack event payloads |
 | `envoy:ghcrToken` | `GHCR_TOKEN` | Pulls container images from GHCR |
-
+| `envoy:tsnetAuthKey` | `TS_AUTHKEY` | Tailscale auth key for tsnet node registration (optional — only for initial setup) |
 ## Stack Configuration
 
 Non-secret config in `Pulumi.prod.yaml`:
@@ -106,10 +106,22 @@ Each machine in the `envoy:machines` array:
 | `sshHost` | No | SSH URI for Docker provider (e.g. `ssh://user@host`). **Omit for the local machine** — Docker uses the local socket instead. |
 | `nats.serverName` | No | NATS server name. Omit to skip NATS peer on this machine. |
 | `listener.registryDir` | Yes | Path to the OpenCode session registry directory on the machine |
+| `listener.tsnet.hostname` | No | Tailscale hostname for the listener's tsnet node (e.g., `envoy-listener-sami-agents-mx`). When set, enables tsnet: `/v1/*` served over TLS on the tsnet interface, legacy port restricted to `/healthz`. |
+| `listener.tsnet.stateDir` | No | Persistent state directory for the tsnet node (must be unique per service per machine, e.g., `/var/lib/envoy-tsnet/listener-sami-agents-mx/`) |
 | `receivers.github` | No | Deploy GitHub webhook receiver on this machine |
 | `receivers.slack` | No | Deploy Slack webhook receiver on this machine |
 | `receivers.ghostwispr` | No | Deploy Ghost Wispr webhook receiver on this machine |
 
+### tsnet (Tailscale) Integration
+
+When `listener.tsnet` is configured on a machine, the listener creates an embedded Tailscale node via [tsnet](https://pkg.go.dev/tailscale.com/tsnet):
+
+- **Security boundary**: `/v1/*` API routes are served exclusively on the tsnet HTTPS interface (port 443). The legacy HTTP port (`:9020`) only serves `/healthz`.
+- **Hostname convention**: `envoy-{service}-{machineName}` (e.g., `envoy-listener-sami-agents-mx`)
+- **State directory convention**: `/var/lib/envoy-tsnet/{service}-{machineName}/`
+- **Docker capabilities**: None required — tsnet uses userspace networking (gVisor netstack)
+- **Auth key lifecycle**: Only needed for initial node registration. Once state is persisted (named Docker volume), the node reconnects without it.
+- **MagicDNS**: tsnet sidesteps the Docker bridge DNS limitation (see `docs/solutions/envoy/docker-tailscale-networking.md`) because the Tailscale node is embedded in the Go process itself.
 ### Local Machine (no sshHost)
 
 When `sshHost` is omitted, the Docker provider connects via the local Docker socket. Use this for the machine where `pulumi up` runs (e.g. `sami-agents-mx`).
