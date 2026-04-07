@@ -75,6 +75,52 @@ func TestMatch_WildcardPatterns(t *testing.T) {
 	}
 }
 
+func TestMatch_SlackThreadIsolation(t *testing.T) {
+	r := &Registry{cache: map[string]Interest{
+		"ses_thread_a": {SessionID: "ses_thread_a", MachineID: "m1", Topics: []string{
+			"notifications.slack.T123.C456.thread.1111111111_111111.>",
+		}},
+		"ses_thread_b": {SessionID: "ses_thread_b", MachineID: "m1", Topics: []string{
+			"notifications.slack.T123.C456.thread.2222222222_222222.>",
+		}},
+		"ses_channel": {SessionID: "ses_channel", MachineID: "m1", Topics: []string{
+			"notifications.slack.T123.C456.>",
+		}},
+	}}
+
+	// Thread A message: only ses_thread_a and ses_channel
+	gotA := r.Match("m1", "notifications.slack.T123.C456.thread.1111111111_111111.message")
+	idsA := make([]string, len(gotA))
+	for i, item := range gotA {
+		idsA[i] = item.SessionID
+	}
+	sort.Strings(idsA)
+	if len(idsA) != 2 || idsA[0] != "ses_channel" || idsA[1] != "ses_thread_a" {
+		t.Fatalf("thread A message: expected [ses_channel, ses_thread_a], got %v", idsA)
+	}
+
+	// Thread B mention: only ses_thread_b and ses_channel
+	gotB := r.Match("m1", "notifications.slack.T123.C456.thread.2222222222_222222.mention")
+	idsB := make([]string, len(gotB))
+	for i, item := range gotB {
+		idsB[i] = item.SessionID
+	}
+	sort.Strings(idsB)
+	if len(idsB) != 2 || idsB[0] != "ses_channel" || idsB[1] != "ses_thread_b" {
+		t.Fatalf("thread B mention: expected [ses_channel, ses_thread_b], got %v", idsB)
+	}
+
+	// Channel-level message (no thread): only ses_channel
+	gotC := r.Match("m1", "notifications.slack.T123.C456.message")
+	idsC := make([]string, len(gotC))
+	for i, item := range gotC {
+		idsC[i] = item.SessionID
+	}
+	if len(idsC) != 1 || idsC[0] != "ses_channel" {
+		t.Fatalf("channel message: expected [ses_channel], got %v", idsC)
+	}
+}
+
 func TestMatch_EmptyCache(t *testing.T) {
 	r := &Registry{cache: map[string]Interest{}}
 	got := r.Match("m1", "notifications.test")

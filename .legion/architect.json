@@ -1,0 +1,36 @@
+{
+  "scope": "small",
+  "components": [
+    "packages/envoy/infra/nats.ts",
+    "packages/envoy/infra/services.ts",
+    "packages/envoy/infra/machines.ts",
+    "packages/envoy/infra/Pulumi.prod.yaml",
+    "packages/envoy/infra/README.md",
+    "packages/envoy/infra/__tests__/nats.test.ts",
+    "packages/envoy/infra/__tests__/services.test.ts",
+    "packages/envoy/deploy/compose/nats/peer.compose.yml",
+    "packages/envoy/deploy/compose/nats/compose.yml",
+    "packages/envoy/docs/constraints.md",
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
+  "subIssues": [],
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1,
+    "skipRetro": false
+  },
+  "concerns": [
+    "machine.name must match MagicDNS hostname — if not, add a dedicated hostname field instead of overloading name",
+    "Host networking removes container network namespace isolation — ports protected by Tailscale boundary and firewall only",
+    "constraints.md has TWO lines needing update: Tailscale IP rule AND port/ingress rule",
+    "Compose files should stay updated as active recovery/manual deployment path"
+  ],
+  "learningsInjected": [
+    "docs/solutions/envoy/docker-tailscale-networking.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+  ],
+  "learningsHelpful": ["docs/solutions/envoy/docker-tailscale-networking.md"],
+  "schemaVersion": 1,
+  "phase": "architect",
+  "completed": "2026-04-07T01:38:13.954Z"
+}

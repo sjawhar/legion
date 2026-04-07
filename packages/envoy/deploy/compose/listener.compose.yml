@@ -18,5 +18,15 @@ services:
       NATS_URLS: ${NATS_URLS}
       ENVOY_REGISTRY_DIR: ${ENVOY_REGISTRY_DIR}
       ENVOY_HOST_BRIDGE: 127.0.0.1
+      # tsnet config (disabled by default for local dev)
+      ENVOY_TSNET_ENABLED: ${ENVOY_TSNET_ENABLED:-false}
+      ENVOY_TSNET_HOSTNAME: ${ENVOY_TSNET_HOSTNAME:-}
+      ENVOY_TSNET_STATE_DIR: ${ENVOY_TSNET_STATE_DIR:-/var/lib/envoy-tsnet/listener}
+      ENVOY_TSNET_AUTH_KEY: ${ENVOY_TSNET_AUTH_KEY:-}
     volumes:
       - ${ENVOY_REGISTRY_DIR}:${ENVOY_REGISTRY_DIR}:ro
+      # tsnet state persistence (only needed when ENVOY_TSNET_ENABLED=true)
+      - envoy-listener-tsnet-state:${ENVOY_TSNET_STATE_DIR:-/var/lib/envoy-tsnet/listener}
+
+volumes:
+  envoy-listener-tsnet-state:

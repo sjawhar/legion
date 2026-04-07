@@ -247,4 +247,55 @@ describe("handoff command", () => {
     const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
     expect(errors.join("\n")).toContain("not allowed");
   });
+
+  it("prints confirmation message on successful write", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+
+    const calls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
+    const output = calls.join("\n");
+    expect(output).toContain("[handoff] Wrote plan handoff to");
+    expect(output).toContain(".legion");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("exits non-zero when write fails due to unwritable path", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    // Create a file where .legion directory would need to go
+    const blocker = path.join(tempDir, ".legion");
+    fs.writeFileSync(blocker, "not a directory");
+
+    try {
+      await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
+    expect(errors.join("\n")).toContain("[handoff] Failed to write handoff:");
+  });
+
+  it("prints confirmation message on successful message write", async () => {
+    const message = getSubCommand(handoffCommand, "message");
+    await runCommand(message, { from: "plan", to: "implement", body: "test" });
+
+    const calls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
+    const output = calls.join("\n");
+    expect(output).toContain("[handoff] Wrote message from plan to implement");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("exits non-zero when message write fails", async () => {
+    const message = getSubCommand(handoffCommand, "message");
+    // Create a file where .legion directory would need to go
+    const blocker = path.join(tempDir, ".legion");
+    fs.writeFileSync(blocker, "not a directory");
+
+    try {
+      await runCommand(message, { from: "plan", to: "implement", body: "test" });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
+    expect(errors.join("\n")).toContain("[handoff] Failed to write message:");
+  });
 });

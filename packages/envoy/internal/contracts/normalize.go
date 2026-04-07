@@ -15,14 +15,7 @@ type GithubEnvelopeInput struct {
 }
 
 func GithubEnvelope(input GithubEnvelopeInput) Envelope {
-	owner := nestedString(input.Body, "repository", "owner", "login")
-	if owner == "" {
-		owner = "unknown"
-	}
-	repo := nestedString(input.Body, "repository", "name")
-	if repo == "" {
-		repo = "unknown"
-	}
+	owner, repo := githubRepo(input.Body)
 	topic := githubTopic(owner, repo, input.Event, input.Body)
 	return Envelope{
 		EventID:        input.EventID,
@@ -39,24 +32,18 @@ func GithubEnvelope(input GithubEnvelopeInput) Envelope {
 func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	item := GithubEnvelope(input)
 	out := []Envelope{item}
+	owner, repo := githubRepo(input.Body)
 	if githubCIEvent(input.Event) {
 		prs := githubCIPullRequests(input.Event, input.Body)
-		if len(prs) > 0 {
-			owner := nestedString(input.Body, "repository", "owner", "login")
-			if owner == "" {
-				owner = "unknown"
-			}
-			repo := nestedString(input.Body, "repository", "name")
-			if repo == "" {
-				repo = "unknown"
-			}
-			out = make([]Envelope, 0, len(prs))
-			for _, pr := range prs {
-				ci := item
-				ci.Topic = GithubSubject(owner, repo, "pr."+pr+".ci")
-				ci.DedupeKey = "github." + input.Delivery + ".pr." + pr
-				out = append(out, ci)
-			}
+		if len(prs) == 0 {
+			return out
+		}
+		out = make([]Envelope, 0, len(prs))
+		for _, pr := range prs {
+			ci := item
+			ci.Topic = GithubSubject(owner, repo, "pr."+pr+".ci")
+			ci.DedupeKey = "github." + input.Delivery + ".pr." + pr
+			out = append(out, ci)
 		}
 		return out
 	}
@@ -68,14 +55,6 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 		return out
 	}
 	// Publish mention topic with same structure: type.number.mention
-	owner := nestedString(input.Body, "repository", "owner", "login")
-	if owner == "" {
-		owner = "unknown"
-	}
-	repo := nestedString(input.Body, "repository", "name")
-	if repo == "" {
-		repo = "unknown"
-	}
 	num := githubNumber(input.Event, input.Body)
 	base := githubParentKind(input.Event, input.Body)
 	if num != "" {
@@ -93,6 +72,18 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 
 func GithubIsBotSender(body map[string]any) bool {
 	return strings.EqualFold(nestedString(body, "sender", "type"), "Bot")
+}
+
+func githubRepo(body map[string]any) (string, string) {
+	owner := nestedString(body, "repository", "owner", "login")
+	if owner == "" {
+		owner = "unknown"
+	}
+	repo := nestedString(body, "repository", "name")
+	if repo == "" {
+		repo = "unknown"
+	}
+	return owner, repo
 }
 
 func ContainsMention(body string, trigger string) bool {
@@ -130,7 +121,7 @@ func SlackEnvelope(input SlackEnvelopeInput) Envelope {
 	if team == "" {
 		team = "unknown"
 	}
-	event, _ := input.Body["event"].(map[string]any)
+	event := mapValue(input.Body["event"])
 	channel := stringValue(event["channel"])
 	if channel == "" {
 		channel = "unknown"
@@ -150,17 +141,14 @@ func SlackEnvelope(input SlackEnvelopeInput) Envelope {
 func SlackEnvelopes(input SlackEnvelopeInput) []Envelope {
 	item := SlackEnvelope(input)
 	out := []Envelope{item}
-	event, _ := input.Body["event"].(map[string]any)
+	event := mapValue(input.Body["event"])
 	thread := stringValue(event["thread_ts"])
-	if thread == "" {
-		thread = stringValue(event["ts"])
-	}
 	if thread != "" {
 		team := stringValue(input.Body["team_id"])
 		channel := stringValue(event["channel"])
 		if team != "" && channel != "" {
 			threaded := item
-			threaded.Topic = SlackSubject(team, channel, "thread."+thread)
+			threaded.Topic = SlackThreadSubject(team, channel, thread, slackKind(input.Body))
 			out = append(out, threaded)
 		}
 	}
@@ -279,14 +267,14 @@ func githubCIPullRequests(event string, body map[string]any) []string {
 	default:
 		return nil
 	}
-	obj, _ := body[key].(map[string]any)
+	obj := mapValue(body[key])
 	if obj == nil {
 		return nil
 	}
-	prs, _ := obj["pull_requests"].([]any)
+	prs := sliceValue(obj["pull_requests"])
 	var nums []string
 	for _, pr := range prs {
-		prMap, _ := pr.(map[string]any)
+		prMap := mapValue(pr)
 		if prMap == nil {
 			continue
 		}
@@ -412,8 +400,7 @@ func githubSummary(event string, body map[string]any) string {
 		}
 	}
 
-	out, _ := json.Marshal(data)
-	return string(out)
+	return summaryJSON(data)
 }
 
 func mentionEdge(body string, start int, end int) bool {
@@ -457,7 +444,7 @@ func mentionWord(ch rune) bool {
 }
 
 func slackKind(body map[string]any) string {
-	event, _ := body["event"].(map[string]any)
+	event := mapValue(body["event"])
 	if stringValue(event["type"]) == "app_mention" {
 		return "mention"
 	}
@@ -465,7 +452,7 @@ func slackKind(body map[string]any) string {
 }
 
 func slackSummary(body map[string]any) string {
-	event, _ := body["event"].(map[string]any)
+	event := mapValue(body["event"])
 	data := map[string]string{
 		"kind":    slackKind(body),
 		"user":    stringValue(event["user"]),
@@ -478,6 +465,10 @@ func slackSummary(body map[string]any) string {
 	if thread := stringValue(event["thread_ts"]); thread != "" {
 		data["thread_ts"] = thread
 	}
+	return summaryJSON(data)
+}
+
+func summaryJSON(data map[string]string) string {
 	out, _ := json.Marshal(data)
 	return string(out)
 }
@@ -485,8 +476,8 @@ func slackSummary(body map[string]any) string {
 func nested(body map[string]any, keys ...string) any {
 	var cur any = body
 	for _, key := range keys {
-		item, ok := cur.(map[string]any)
-		if !ok {
+		item := mapValue(cur)
+		if item == nil {
 			return nil
 		}
 		cur = item[key]
@@ -498,9 +489,23 @@ func nestedString(body map[string]any, keys ...string) string {
 	return stringValue(nested(body, keys...))
 }
 
+func mapValue(value any) map[string]any {
+	item, _ := value.(map[string]any)
+	return item
+}
+
+func sliceValue(value any) []any {
+	items, _ := value.([]any)
+	return items
+}
+
 func stringValue(value any) string {
-	text, _ := value.(string)
-	return text
+	switch text := value.(type) {
+	case string:
+		return text
+	default:
+		return ""
+	}
 }
 
 func truncateBody(s string, maxChars int) string {
@@ -509,4 +514,93 @@ func truncateBody(s string, maxChars int) string {
 		return s
 	}
 	return string(runes[:maxChars])
+}
+
+type GhostWisprEnvelopeInput struct {
+	EventType string
+	Delivery  string
+	Body      map[string]any
+	EventID   string
+	TraceID   string
+}
+
+var ghostWisprTopicSegmentSanitizer = strings.NewReplacer(
+	".", "_",
+	" ", "_",
+	"\n", "_",
+	"\r", "_",
+	"\t", "_",
+	">", "_",
+	"*", "_",
+	"/", "_",
+)
+
+// GhostWisprEnvelope normalizes a Ghost Wispr webhook event into an Envoy envelope.
+// Returns a single envelope (no fan-out — Ghost Wispr events are 1:1).
+func GhostWisprEnvelope(input GhostWisprEnvelopeInput) Envelope {
+	eventType := normalizeGhostWisprEventType(input.EventType)
+	sessionID := ghostWisprTopicSessionID(input.Body)
+	kind := ghostWisprKind(eventType)
+	topic := GhostWisprSubject(sessionID, kind)
+	return Envelope{
+		EventID:        input.EventID,
+		Source:         "ghostwispr",
+		SourceEventID:  input.Delivery,
+		Topic:          topic,
+		DedupeKey:      "ghostwispr." + input.Delivery,
+		IssuedAt:       NowMillis(),
+		PayloadSummary: ghostWisprSummary(eventType, input.Body),
+		TraceID:        input.TraceID,
+	}
+}
+
+// ghostWisprKind maps Ghost Wispr event types to NATS topic kinds.
+func ghostWisprKind(eventType string) string {
+	switch normalizeGhostWisprEventType(eventType) {
+	case "session_started":
+		return "session.started"
+	case "session_ended":
+		return "session.ended"
+	case "summary_ready":
+		return "summary.ready"
+	default:
+		return normalizeGhostWisprEventType(eventType)
+	}
+}
+
+// ghostWisprSummary builds a JSON summary of the Ghost Wispr event.
+func ghostWisprSummary(eventType string, body map[string]any) string {
+	data := map[string]string{
+		"event_type": normalizeGhostWisprEventType(eventType),
+		"session_id": ghostWisprSummarySessionID(body),
+	}
+	if title := truncateBody(strings.TrimSpace(nestedString(body, "payload", "title")), 500); title != "" {
+		data["title"] = title
+	}
+	if duration := nested(body, "payload", "duration"); duration != nil {
+		data["duration"] = fmt.Sprintf("%v", duration)
+	}
+	return summaryJSON(data)
+}
+
+func ghostWisprSummarySessionID(body map[string]any) string {
+	return strings.TrimSpace(nestedString(body, "payload", "session_id"))
+}
+
+func ghostWisprTopicSessionID(body map[string]any) string {
+	sessionID := ghostWisprSummarySessionID(body)
+	if sessionID == "" {
+		return "unknown"
+	}
+	sessionID = ghostWisprTopicSegmentSanitizer.Replace(sessionID)
+	sessionID = strings.Trim(sessionID, "_")
+	if sessionID == "" {
+		return "unknown"
+	}
+	return sessionID
+}
+
+func normalizeGhostWisprEventType(eventType string) string {
+	eventType = strings.TrimSpace(strings.ToLower(eventType))
+	return strings.ReplaceAll(eventType, ".", "_")
 }

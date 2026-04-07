@@ -5,7 +5,6 @@ import type { MachineConfig } from "./machines";
 
 interface PeerInfo {
   name: string;
-  tailscaleIp: string;
   nats: boolean;
 }
 
@@ -16,7 +15,7 @@ interface PeerInfo {
 export function computeNatsRoutes(machineName: string, machines: PeerInfo[]): string[] {
   return machines
     .filter((m) => m.nats && m.name !== machineName)
-    .map((m) => `nats://${m.tailscaleIp}:6222`);
+    .map((m) => `nats://${m.name}:6222`);
 }
 
 /**
@@ -65,7 +64,6 @@ export function createNatsPeer(
 
   const peerInfo = allMachines.map((m) => ({
     name: m.name,
-    tailscaleIp: m.tailscaleIp,
     nats: !!m.nats,
   }));
 
@@ -88,11 +86,7 @@ export function createNatsPeer(
       name: "envoy-nats",
       image: natsImage.imageId,
       restart: "unless-stopped",
-      ports: [
-        { internal: 4222, external: 4222 },
-        { internal: 6222, external: 6222 },
-        { internal: 8222, external: 8222 },
-      ],
+      networkMode: "host",
       uploads: [
         {
           content: conf,

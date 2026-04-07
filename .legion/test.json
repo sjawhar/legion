@@ -1,0 +1,19 @@
+{
+  "passed": 12,
+  "failed": 0,
+  "failures": [],
+  "documentationFeedback": "README Machine Configuration table is clear — name→MagicDNS contract explicit on line 104. constraints.md updates both required lines. docker-tailscale-networking.md preserves bridge networking rule while noting NATS exception. No gaps or confusion found.",
+  "observations": [
+    "P2: Tests are happy-path-only — no edge cases for empty machines, all nats:false, or special characters in names",
+    "P2: No integration test for createNatsPeer() full pipeline (MachineConfig→PeerInfo→routes→conf→container)",
+    "Deviation: receivers.ghostwispr row added to README (harmless, documents existing field)",
+    "Pre-existing TS5107 moduleResolution=node10 deprecation in infra tsconfig — unrelated to PR",
+    "deleteBeforeReplace: true correctly set on NATS container per pulumi-remote-docker-patterns learning",
+    "Criteria 13 (JetStream persistence) and 14 (cluster formation) are manual rollout verification — code supports both via named volumes and hostname-based routes"
+  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-07T02:09:46.782Z"
+}

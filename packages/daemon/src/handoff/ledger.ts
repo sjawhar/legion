@@ -58,12 +58,8 @@ export function getLegionDir(workspaceDir: string): string {
 }
 
 export function ensureLegionDir(workspaceDir: string): void {
-  try {
-    ensureDir(getLegionDir(workspaceDir));
-    ensureDir(getMessagesDir(workspaceDir));
-  } catch (e) {
-    console.error("[handoff] Failed to create .legion/ directory:", e);
-  }
+  ensureDir(getLegionDir(workspaceDir));
+  ensureDir(getMessagesDir(workspaceDir));
 }
 
 export function writePhaseHandoff<T extends object>(
@@ -71,18 +67,14 @@ export function writePhaseHandoff<T extends object>(
   phase: HandoffPhase,
   data: T
 ): void {
-  try {
-    ensureLegionDir(workspaceDir);
-    const payload = {
-      ...data,
-      schemaVersion: HANDOFF_SCHEMA_VERSION,
-      phase,
-      completed: new Date().toISOString(),
-    };
-    atomicWriteJson(getPhaseFilePath(workspaceDir, phase), payload);
-  } catch (e) {
-    console.error(`[handoff] Failed to write ${phase} handoff:`, e);
-  }
+  ensureLegionDir(workspaceDir);
+  const payload = {
+    ...data,
+    schemaVersion: HANDOFF_SCHEMA_VERSION,
+    phase,
+    completed: new Date().toISOString(),
+  };
+  atomicWriteJson(getPhaseFilePath(workspaceDir, phase), payload);
 }
 
 export function readPhaseHandoff(workspaceDir: string, phase: HandoffPhase): PhaseHandoff | null {
@@ -118,19 +110,15 @@ export function readAllHandoffs(workspaceDir: string): Partial<Record<HandoffPha
 }
 
 export function writeMessage(workspaceDir: string, msg: Omit<HandoffMessage, "timestamp">): void {
-  try {
-    ensureLegionDir(workspaceDir);
-    const messagesDir = getMessagesDir(workspaceDir);
-    const msgId = generateMessageId();
-    const fileName = `${msgId}-${msg.from}-to-${msg.to}.json`;
-    const payload: HandoffMessage = {
-      ...msg,
-      timestamp: new Date().toISOString(),
-    };
-    atomicWriteJson(path.join(messagesDir, fileName), payload);
-  } catch (e) {
-    console.error(`[handoff] Failed to write message ${msg.from}->${msg.to}:`, e);
-  }
+  ensureLegionDir(workspaceDir);
+  const messagesDir = getMessagesDir(workspaceDir);
+  const msgId = generateMessageId();
+  const fileName = `${msgId}-${msg.from}-to-${msg.to}.json`;
+  const payload: HandoffMessage = {
+    ...msg,
+    timestamp: new Date().toISOString(),
+  };
+  atomicWriteJson(path.join(messagesDir, fileName), payload);
 }
 
 export function readMessages(workspaceDir: string): HandoffMessage[] {

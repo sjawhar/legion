@@ -71,14 +71,18 @@ func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
 
+func SlackThreadSubject(team, channel, threadTs, kind string) string {
+	return "notifications.slack." + team + "." + channel + ".thread." + strings.ReplaceAll(threadTs, ".", "_") + "." + kind
+}
+
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
 	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."
 
-func GhostWisprSubject(recordingId string, kind string) string {
-	return GhostWisprTopicPrefix + recordingId + "." + kind
+func GhostWisprSubject(sessionId string, kind string) string {
+	return GhostWisprTopicPrefix + sessionId + "." + kind
 }
 
 func WhatsappSubject(phone, jid, kind string) string {

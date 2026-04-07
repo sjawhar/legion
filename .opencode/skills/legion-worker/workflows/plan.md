@@ -334,7 +334,7 @@ First, assess which injected learnings were helpful:
 > Review the learnings injected at Step 1.7. For each, assess: did this learning materially influence your work, prevent a mistake, or provide useful context for this phase? List only those canonical paths in `learningsHelpful`. If none were helpful, use an empty array. If no learnings were injected, omit both fields from handoff.
 
 ```bash
-legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
+legion handoff write --phase plan --workspace . <<'HANDOFF'
   {
   "taskCount": 5,
   "independentTasks": 3,
@@ -357,6 +357,14 @@ legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
   HANDOFF
 ```
 
+Verify the handoff was written:
+
+```bash
+if [ ! -f .legion/plan.json ]; then
+  echo "ERROR: Handoff write failed — .legion/plan.json not created"
+fi
+```
+
 **Fields:**
 - `taskCount`: Number of tasks in the executable plan
 - `independentTasks`: Number of tasks marked as independent (can parallelize)
@@ -370,7 +378,7 @@ legion handoff write --phase plan --workspace . <<'HANDOFF' 2>/dev/null || true
   - `test`: Skills the tester should invoke before verification
   - `review`: Skills the reviewer should invoke before review
 
-**This step is non-blocking.** If the handoff write fails, it must not prevent completion. The `|| true` ensures the workflow continues.
+The handoff write will fail loudly if the CLI encounters an error. If the write fails, diagnose and fix the issue before continuing — handoff data is required for downstream phases to function.
 
 **workflowRecommendation examples:**
 - "Standard pipeline — all phases needed"

@@ -1,0 +1,34 @@
+{
+  "filesChanged": [
+    "packages/envoy/infra/machines.ts",
+    "packages/envoy/infra/nats.ts",
+    "packages/envoy/infra/services.ts",
+    "packages/envoy/infra/Pulumi.prod.yaml",
+    "packages/envoy/infra/README.md",
+    "packages/envoy/infra/__tests__/nats.test.ts",
+    "packages/envoy/infra/__tests__/services.test.ts",
+    "packages/envoy/deploy/compose/nats/peer.compose.yml",
+    "packages/envoy/deploy/compose/nats/compose.yml",
+    "packages/envoy/docs/constraints.md",
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
+  "trickyParts": [
+    "Conflict resolution on .legion/architect.json after rebase — main had ghost-wispr architect data, our branch had #310 architect data",
+    "Empty intermediate commit from jj new needed to be rebased past to avoid push rejection"
+  ],
+  "deviations": [
+    "Added receivers.ghostwispr row to README.md Machine Configuration table — was missing, noticed while removing tailscaleIp row"
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "learningsInjected": [
+    "docs/solutions/envoy/docker-tailscale-networking.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-07T02:00:23.064Z"
+}

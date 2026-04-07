@@ -255,4 +255,5 @@ $RECYCLE.BIN/
 
 .sisyphus/*
 !.sisyphus/rules/
-.legion/
+# .legion/ handoff data must be committed — do not ignore the directory
+# (see implement.md step 6 note)

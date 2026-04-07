@@ -18,10 +18,10 @@
 
 ## Deployment posture
 
-- Use Tailscale IPs for inter-machine traffic
+- Use MagicDNS hostnames for inter-machine traffic (hostnames are stable; IPs can change)
 - Use Docker on all four machines
 - Prefer Compose-managed services and explicit mounted config
-- Keep ports and public ingress limited to the already-open webhook receiver ports
+- Keep ports and public ingress limited to the already-open webhook receiver ports. NATS uses host networking (ports 4222, 6222, 8222 exposed on host interfaces, protected by Tailscale ACLs / firewall rules).
 
 ## Source integration model
 
