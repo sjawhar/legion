@@ -739,7 +739,7 @@ export function startServer(opts: ServerOptions): {
           workers.delete(workerId);
           crashHistory.delete(workerId);
           await persistState();
-          unsubscribeWorkerFromEnvoy(entry.sessionId);
+          unsubscribeAllWorkerTopics(entry.sessionId);
 
           return jsonResponse({ status: "cleaned", workerRemoved: true });
         }
@@ -818,7 +818,7 @@ export function startServer(opts: ServerOptions): {
           }
 
           for (const sessionId of prunedSessionIds) {
-            unsubscribeWorkerFromEnvoy(sessionId);
+            unsubscribeAllWorkerTopics(sessionId);
           }
 
           return jsonResponse({
