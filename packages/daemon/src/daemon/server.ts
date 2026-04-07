@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import type { CodebaseIndexResponse } from "../index/types";
+import { loadRoutingConfig, matchRouting } from "../routing";
 import { getBackend, isBackendName } from "../state/backends/index";
 import { buildCollectedState, canDispatchMode } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
@@ -739,7 +740,7 @@ export function startServer(opts: ServerOptions): {
           workers.delete(workerId);
           crashHistory.delete(workerId);
           await persistState();
-          unsubscribeWorkerFromEnvoy(entry.sessionId);
+          unsubscribeAllWorkerTopics(entry.sessionId);
 
           return jsonResponse({ status: "cleaned", workerRemoved: true });
         }
@@ -818,7 +819,7 @@ export function startServer(opts: ServerOptions): {
           }
 
           for (const sessionId of prunedSessionIds) {
-            unsubscribeWorkerFromEnvoy(sessionId);
+            unsubscribeAllWorkerTopics(sessionId);
           }
 
           return jsonResponse({
@@ -1085,6 +1086,71 @@ export function startServer(opts: ServerOptions): {
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
             return serverError(`fetch_and_collect_failed: ${message}`);
           }
+        }
+
+        if (method === "POST" && url.pathname === "/routing/match") {
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const workspace = payload.workspace;
+          const files = payload.files;
+          const issueId = typeof payload.issueId === "string" ? payload.issueId : undefined;
+          if (typeof workspace !== "string" || !isAbsolute(workspace)) {
+            return badRequest("workspace must be an absolute path");
+          }
+          if (!Array.isArray(files) || !files.every((f) => typeof f === "string")) {
+            return badRequest("files must be an array of strings");
+          }
+
+          const { config, warning } = loadRoutingConfig(workspace);
+          if (!config) {
+            const result = {
+              reviewers: [] as string[],
+              matchedDomains: [] as { name: string; reviewers: string[] }[],
+              configWarning: warning,
+            };
+
+            if (opts.feedbackLogger && issueId) {
+              opts.feedbackLogger.log({
+                event: "routing.matched",
+                issueId,
+                workspace,
+                fileCount: files.length,
+                matchedDomains: [],
+                reviewersAdded: [],
+                configWarning: warning,
+              });
+            }
+
+            return jsonResponse(result);
+          }
+
+          if (warning) {
+            console.warn(`[routing] ${warning}`);
+          }
+
+          const matchResult = matchRouting(config, files as string[]);
+
+          if (opts.feedbackLogger && issueId) {
+            opts.feedbackLogger.log({
+              event: "routing.matched",
+              issueId,
+              workspace,
+              fileCount: files.length,
+              matchedDomains: matchResult.matchedDomains,
+              reviewersAdded: matchResult.reviewers,
+              configWarning: warning,
+            });
+          }
+
+          return jsonResponse({
+            ...matchResult,
+            configWarning: warning,
+          });
         }
 
         if (method === "POST" && url.pathname === "/shutdown") {

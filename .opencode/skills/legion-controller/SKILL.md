@@ -287,6 +287,51 @@ After the tester runs:
 - **Test passed** (`test-passed` label): Controller removes `worker-done` and `test-passed` labels, transitions to Needs Review, dispatches reviewer (no additional quality gate needed)
 - **Test failed** (`test-failed` label): Controller removes `test-failed` and `worker-done` labels, transitions back to In Progress, resumes implementer session with test failure report from the PR comment
 
+### Domain-Based Reviewer Auto-Assignment
+
+When the controller processes `dispatch_reviewer` (i.e., about to dispatch a review worker),
+it MUST first run domain-based reviewer routing. This auto-assigns PR reviewers based on
+which files were changed, using configuration from `.legion/routing.yml` in the workspace.
+
+**Steps (before dispatching the review worker):**
+
+1. Get the PR's changed files and the worker workspace:
+   ```bash
+   PR_FILES=$(gh pr view "$ISSUE_IDENTIFIER" --json files --jq '[.files[].path]' -R $OWNER/$REPO)
+   WORKSPACE=$(curl -fsS "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/${ISSUE_IDENTIFIER}-implement" 2>/dev/null | jq -r '.workspace // empty')
+   ```
+
+2. Call the daemon's routing endpoint:
+   ```bash
+   ROUTING_RESULT=$(curl -fsS -X POST "http://127.0.0.1:$LEGION_DAEMON_PORT/routing/match" \
+     -H 'Content-Type: application/json' \
+     -d "{\"workspace\": \"$WORKSPACE\", \"files\": $PR_FILES, \"issueId\": \"$ISSUE_IDENTIFIER\"}")
+   ```
+
+3. If reviewers are returned, add them to the PR:
+   ```bash
+   REVIEWERS=$(echo "$ROUTING_RESULT" | jq -r '.reviewers[]')
+   if [ -n "$REVIEWERS" ]; then
+     for reviewer in $REVIEWERS; do
+       gh pr edit "$ISSUE_IDENTIFIER" --add-reviewer "$reviewer" -R $OWNER/$REPO 2>/dev/null || true
+     done
+   fi
+   ```
+
+4. Log the result (for debugging):
+   ```bash
+   MATCHED=$(echo "$ROUTING_RESULT" | jq -r '.matchedDomains | length')
+   echo "[routing] Matched $MATCHED domains, added reviewers: $(echo "$ROUTING_RESULT" | jq -r '.reviewers | join(", ")')"
+   ```
+
+5. Proceed with normal review worker dispatch.
+
+**Graceful degradation:**
+- If `.legion/routing.yml` is missing: no reviewers added (silent, no error)
+- If the routing endpoint fails: log warning and proceed with dispatch (routing is advisory)
+- If `gh pr edit --add-reviewer` fails for a reviewer: skip that reviewer, continue with others
+- If the implement worker's workspace is unavailable: skip routing, proceed with dispatch
+
 ### Review → Re-implementation → Testing Loop
 
 When the reviewer requests changes, the implementer's fixes **must go through testing again**:

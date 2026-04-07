@@ -1,34 +1,40 @@
 {
   "filesChanged": [
-    "packages/envoy/infra/machines.ts",
-    "packages/envoy/infra/nats.ts",
-    "packages/envoy/infra/services.ts",
-    "packages/envoy/infra/Pulumi.prod.yaml",
-    "packages/envoy/infra/README.md",
-    "packages/envoy/infra/__tests__/nats.test.ts",
-    "packages/envoy/infra/__tests__/services.test.ts",
-    "packages/envoy/deploy/compose/nats/peer.compose.yml",
-    "packages/envoy/deploy/compose/nats/compose.yml",
-    "packages/envoy/docs/constraints.md",
-    "docs/solutions/envoy/docker-tailscale-networking.md"
+    "packages/daemon/src/routing/schema.ts",
+    "packages/daemon/src/routing/config.ts",
+    "packages/daemon/src/routing/match.ts",
+    "packages/daemon/src/routing/index.ts",
+    "packages/daemon/src/routing/__tests__/schema.test.ts",
+    "packages/daemon/src/routing/__tests__/config.test.ts",
+    "packages/daemon/src/routing/__tests__/match.test.ts",
+    "packages/daemon/src/routing/__tests__/server-endpoint.test.ts",
+    "packages/daemon/src/daemon/feedback.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    ".opencode/skills/legion-controller/SKILL.md",
+    "packages/daemon/package.json",
+    "bun.lock"
   ],
   "trickyParts": [
-    "Conflict resolution on .legion/architect.json after rebase — main had ghost-wispr architect data, our branch had #310 architect data",
-    "Empty intermediate commit from jj new needed to be rebased past to avoid push rejection"
+    "Rebase onto main brought in unsubscribeWorkerFromEnvoy references from the prune endpoint PR that needed fixing to unsubscribeAllWorkerTopics",
+    "Auto-generated plan file from planner phase used different architecture than implementation — removed from PR"
   ],
   "deviations": [
-    "Added receivers.ghostwispr row to README.md Machine Configuration table — was missing, noticed while removing tailscaleIp row"
+    "Used .legion/routing.yml instead of repo root legion.routing.yml — consistent with existing .legion/config.yml pattern",
+    "Used separate routing/ module directory instead of single routing.ts file in daemon/ — cleaner separation of concerns",
+    "Added yaml npm dependency for YAML parsing instead of using plan's suggestion of Bun built-in"
   ],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [
-    "docs/solutions/envoy/docker-tailscale-networking.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "daemon/handoff-schema-migration-patterns.md",
+    "delegation/hardening-patterns.md",
+    "testing/bun-fetch-mocking-patterns.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/envoy/docker-tailscale-networking.md"
+    "daemon/handoff-schema-migration-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-07T02:00:23.064Z"
+  "completed": "2026-04-07T04:09:02.514Z"
 }

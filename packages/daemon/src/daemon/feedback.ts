@@ -59,11 +59,27 @@ export const HealthTickEventSchema = FeedbackEventBase.extend({
   rssRestarts: z.number().int().nonnegative(),
 });
 
+export const RoutingMatchedEventSchema = FeedbackEventBase.extend({
+  event: z.literal("routing.matched"),
+  issueId: z.string(),
+  workspace: z.string(),
+  fileCount: z.number().int().nonnegative(),
+  matchedDomains: z.array(
+    z.object({
+      name: z.string(),
+      reviewers: z.array(z.string()),
+    })
+  ),
+  reviewersAdded: z.array(z.string()),
+  configWarning: z.string().nullable(),
+});
+
 export const FeedbackEventSchema = z.discriminatedUnion("event", [
   WorkerDispatchedEventSchema,
   WorkerStatusChangedEventSchema,
   StateCollectedEventSchema,
   HealthTickEventSchema,
+  RoutingMatchedEventSchema,
 ]);
 
 type WorkerDispatchedEvent = z.infer<typeof WorkerDispatchedEventSchema>;
@@ -72,12 +88,14 @@ type StateCollectedEvent = z.infer<typeof StateCollectedEventSchema>;
 type HealthTickEvent = z.infer<typeof HealthTickEventSchema> & {
   issueId?: undefined;
 };
+type RoutingMatchedEvent = z.infer<typeof RoutingMatchedEventSchema>;
 
 export type FeedbackEvent =
   | WorkerDispatchedEvent
   | WorkerStatusChangedEvent
   | StateCollectedEvent
-  | HealthTickEvent;
+  | HealthTickEvent
+  | RoutingMatchedEvent;
 
 type OmitFeedbackBase<TEvent> = TEvent extends unknown
   ? Omit<TEvent, "schemaVersion" | "timestamp" | "legionId">
