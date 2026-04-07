@@ -101,14 +101,14 @@ Each machine in the `envoy:machines` array:
 
 | Field | Required | Description |
 |---|---|---|
-| `name` | Yes | Human-readable machine identifier |
+| `name` | Yes | Machine identifier — must match the machine's Tailscale MagicDNS hostname (used for NATS cluster routing) |
 | `machineId` | Yes | Machine ID passed to Envoy services as `ENVOY_MACHINE_ID` |
-| `tailscaleIp` | Yes | Tailscale IP for NATS cluster routing |
 | `sshHost` | No | SSH URI for Docker provider (e.g. `ssh://user@host`). **Omit for the local machine** — Docker uses the local socket instead. |
 | `nats.serverName` | No | NATS server name. Omit to skip NATS peer on this machine. |
 | `listener.registryDir` | Yes | Path to the OpenCode session registry directory on the machine |
 | `receivers.github` | No | Deploy GitHub webhook receiver on this machine |
 | `receivers.slack` | No | Deploy Slack webhook receiver on this machine |
+| `receivers.ghostwispr` | No | Deploy Ghost Wispr webhook receiver on this machine |
 
 ### Local Machine (no sshHost)
 
