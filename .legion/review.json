@@ -1,29 +1,33 @@
 {
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 2,
   "verdict": "approved",
   "keyFindings": [
     {
-      "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main.go",
-      "description": "Duplicate normalizeGhostWisprEventType function also exists in internal/contracts/normalize.go:603. Could be exported and shared."
+      "severity": "P2",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "Dead code: console.warn block at lines 1132-1134 can never execute — loadRoutingConfig() returns warning=null when config is non-null. Warning is correctly surfaced via API response and feedback events."
     },
     {
       "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main_test.go",
-      "description": "Handler tests only check wantPublished bool, don't verify envelope content (topic/source/dedupe_key). Partially mitigated by normalization tests."
+      "file": "packages/daemon/src/routing/__tests__/match.test.ts",
+      "description": "Missing partial path prefix edge case test (packages/envoy-plugin/ vs packages/envoy/**). Bun.Glob handles correctly but no test covers this glob gotcha."
+    },
+    {
+      "severity": "P3",
+      "file": "docs/",
+      "description": "No standalone user-facing documentation for .legion/routing.yml config format. Documented in issue, PR, and controller skill but not in docs/."
     }
   ],
   "learningsInjected": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md",
-    "docs/solutions/envoy/adding-resource-level-subject-helpers.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "daemon/server-side-dispatch-validation.md",
+    "integration-patterns/controller-worker-protocol.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md"
+    "integration-patterns/controller-worker-protocol.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-07T01:28:49.487Z"
+  "completed": "2026-04-07T04:31:40.387Z"
 }
