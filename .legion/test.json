@@ -1,19 +1,24 @@
 {
-  "passed": 12,
+  "passed": 9,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "README Machine Configuration table is clear — name→MagicDNS contract explicit on line 104. constraints.md updates both required lines. docker-tailscale-networking.md preserves bridge networking rule while noting NATS exception. No gaps or confusion found.",
+  "documentationFeedback": "AGENTS.md includes /routing/match endpoint. PR description documents design decisions clearly. Controller skill has detailed integration steps with graceful degradation. Missing: no standalone user-facing doc for .legion/routing.yml config format.",
   "observations": [
-    "P2: Tests are happy-path-only — no edge cases for empty machines, all nats:false, or special characters in names",
-    "P2: No integration test for createNatsPeer() full pipeline (MachineConfig→PeerInfo→routes→conf→container)",
-    "Deviation: receivers.ghostwispr row added to README (harmless, documents existing field)",
-    "Pre-existing TS5107 moduleResolution=node10 deprecation in infra tsconfig — unrelated to PR",
-    "deleteBeforeReplace: true correctly set on NATS container per pulumi-remote-docker-patterns learning",
-    "Criteria 13 (JetStream persistence) and 14 (cluster formation) are manual rollout verification — code supports both via named volumes and hostname-based routes"
+    "P2: console.warn at server.ts:1132-1134 is dead code — placed after early return for !config. Warning is surfaced via API response and feedback events but not to console/stderr.",
+    "P2: Missing edge case test for partial path prefix (packages/envoy-plugin/ vs packages/envoy/**) — Bun.Glob handles correctly but no unit test covers it.",
+    "P2: No concurrent request tests for /routing/match endpoint.",
+    "P2: No test for file permission errors on config read.",
+    "Pre-existing: 1 test failure in daemon/index.test.ts (passes controller env vars to adapter.start) — unrelated to routing."
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "testing/bun-fetch-mocking-patterns.md",
+    "integration-patterns/controller-worker-protocol.md",
+    "daemon/server-side-dispatch-validation.md"
+  ],
+  "learningsHelpful": [
+    "integration-patterns/controller-worker-protocol.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-07T02:09:46.782Z"
+  "completed": "2026-04-07T04:22:32.640Z"
 }
