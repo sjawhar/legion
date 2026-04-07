@@ -4,7 +4,12 @@ import { pullImages } from "./images";
 import type { MachineConfig } from "./machines";
 import { createProvider } from "./machines";
 import { createNatsPeer } from "./nats";
-import { createGithubReceiver, createListener, createSlackReceiver } from "./services";
+import {
+  createGhostWisprReceiver,
+  createGithubReceiver,
+  createListener,
+  createSlackReceiver,
+} from "./services";
 
 const cfg = new pulumi.Config("envoy");
 
@@ -17,8 +22,9 @@ const machines = cfg.requireObject<MachineConfig[]>("machines");
 // Secrets
 const githubWebhookSecret = cfg.requireSecret("githubWebhookSecret");
 const slackSigningSecret = cfg.requireSecret("slackSigningSecret");
+const ghostWisprSigningSecret = cfg.getSecret("ghostWisprSigningSecret");
 
-const secrets = { githubWebhookSecret, slackSigningSecret };
+const secrets = { githubWebhookSecret, slackSigningSecret, ghostWisprSigningSecret };
 
 // Registry auth for GHCR (private packages)
 const registryAuth: docker.types.input.ProviderRegistryAuth[] = [
@@ -47,5 +53,9 @@ for (const machine of machines) {
 
   if (machine.receivers?.slack) {
     createSlackReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
+  }
+
+  if (machine.receivers?.ghostwispr) {
+    createGhostWisprReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
   }
 }

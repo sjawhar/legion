@@ -35,6 +35,7 @@ export function computeNatsUrls(
 interface ServiceSecrets {
   githubWebhookSecret: pulumi.Output<string>;
   slackSigningSecret: pulumi.Output<string>;
+  ghostWisprSigningSecret?: pulumi.Output<string>;
 }
 
 function getNatsUrls(machine: MachineConfig, allMachines: MachineConfig[]): string {
@@ -178,6 +179,52 @@ export function createSlackReceiver(
       ],
       healthcheck: {
         tests: ["CMD", "curl", "-f", "http://127.0.0.1:9011/healthz"],
+        interval: "10s",
+        timeout: "3s",
+        retries: 3,
+        startPeriod: "5s",
+      },
+      wait: true,
+      waitTimeout: 30,
+    },
+    { provider, dependsOn, deleteBeforeReplace: true }
+  );
+}
+
+/**
+ * Create the Ghost Wispr webhook receiver container.
+ * Only on machines with receivers.ghostwispr = true.
+ */
+export function createGhostWisprReceiver(
+  provider: docker.Provider,
+  machine: MachineConfig,
+  allMachines: MachineConfig[],
+  image: docker.RemoteImage,
+  secrets: ServiceSecrets,
+  dependsOn: pulumi.Resource[]
+): docker.Container {
+  const port = 9012;
+  const natsUrls = getNatsUrls(machine, allMachines);
+  const envs: pulumi.Input<string>[] = [
+    `PORT=${port}`,
+    `ENVOY_MACHINE_ID=${machine.machineId}`,
+    `NATS_URLS=${natsUrls}`,
+    ...(secrets.ghostWisprSigningSecret
+      ? [pulumi.interpolate`ENVOY_GHOSTWISPR_SIGNING_SECRET=${secrets.ghostWisprSigningSecret}`]
+      : []),
+  ];
+
+  return new docker.Container(
+    `ghostwispr-${machine.name}`,
+    {
+      name: "envoy-ghostwispr",
+      image: image.imageId,
+      command: ["/usr/local/bin/envoy-ghostwispr"],
+      restart: "unless-stopped",
+      networkMode: "host",
+      envs,
+      healthcheck: {
+        tests: ["CMD", "curl", "-f", `http://127.0.0.1:${port}/healthz`],
         interval: "10s",
         timeout: "3s",
         retries: 3,

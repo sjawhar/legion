@@ -1,0 +1,41 @@
+{
+  "scope": "medium",
+  "components": [
+    "packages/envoy/cmd/ghostwispr",
+    "packages/envoy/internal/verify",
+    "packages/envoy/internal/contracts",
+    "packages/envoy/deploy/compose",
+    "packages/envoy/docker",
+    "packages/envoy/infra",
+    "packages/contracts/src/subject.ts",
+    "packages/contracts/scripts/gen-go.ts",
+    ".opencode/skills/envoy/SKILL.md"
+  ],
+  "subIssues": [
+    "sjawhar-legion-268",
+    "sjawhar-legion-269"
+  ],
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1,
+    "skipRetro": false
+  },
+  "concerns": [
+    "Contracts layer (#267) used placeholder recordingId/transcript/summary - #268 includes fix to rename to sessionId and correct kinds",
+    "Signing secret is deliberately optional (diverges from GitHub/Slack pattern) - documented in #268 spec",
+    "Ghost Wispr webhook push capability is an external dependency - must be implemented separately on the Raspberry Pi",
+    "Session IDs are timestamp strings (20260326041405) - safe for NATS segments but not validated by the contracts helper"
+  ],
+  "learningsInjected": [
+    "envoy/contracts-and-handler-patterns.md",
+    "envoy/adding-resource-level-subject-helpers.md",
+    "envoy/pulumi-remote-docker-patterns.md"
+  ],
+  "learningsHelpful": [
+    "envoy/contracts-and-handler-patterns.md",
+    "envoy/pulumi-remote-docker-patterns.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "architect",
+  "completed": "2026-04-06T20:56:22.901Z"
+}

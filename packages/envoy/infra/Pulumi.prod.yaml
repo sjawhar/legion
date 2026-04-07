@@ -35,6 +35,8 @@ config:
       tailscaleIp: "100.103.243.89"
       listener:
         registryDir: /home/ghost-wispr/.local/state/opencode/registry
+      receivers:
+        ghostwispr: true
   envoy:githubWebhookSecret:
     secure: v1:ou5S7z5dQpftDzAT:rKMa1g6CsSv/1iGl+vP92mZKUPBPaE5sis0LqHwG4akHkqAW0wNd8C3Lg9ilfHV4lQYYloI1cGM=
   envoy:slackSigningSecret:
