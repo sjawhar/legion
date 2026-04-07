@@ -1,29 +1,32 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 2,
+  "minor": 3,
   "verdict": "approved",
   "keyFindings": [
     {
       "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main.go",
-      "description": "Duplicate normalizeGhostWisprEventType function also exists in internal/contracts/normalize.go:603. Could be exported and shared."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "Tangential cleanup: two stale unsubscribeWorkerFromEnvoy references fixed to unsubscribeAllWorkerTopics. Harmless, just tangential to pipeline feature."
     },
     {
       "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main_test.go",
-      "description": "Handler tests only check wantPublished bool, don't verify envelope content (topic/source/dedupe_key). Partially mitigated by normalization tests."
+      "file": "packages/daemon/src/cli/index.ts",
+      "description": "Linear backend limitation: backend defaults to 'github' for /state/fetch-and-collect, running with -b linear gives generic error instead of user-friendly message."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/pipeline.ts",
+      "description": "Done/skip issues render without bracketed status indicator. Reasonable design choice for settled issues, but an implicit 5th badge state not covered by AC."
     }
   ],
   "learningsInjected": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md",
-    "docs/solutions/envoy/adding-resource-level-subject-helpers.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "daemon/controller-observability.md",
+    "testing/bun-fetch-mocking-patterns.md",
+    "testing/github-backend-collect-test-payloads.md"
   ],
-  "learningsHelpful": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md"
-  ],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-07T01:28:49.487Z"
+  "completed": "2026-04-07T04:44:44.524Z"
 }
