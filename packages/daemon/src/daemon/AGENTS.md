@@ -13,6 +13,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `PATCH` | `/workers/:id` | Update status (`running`, `dead`) |
 | `DELETE` | `/workers/:id` | Remove tracking (session goes idle naturally) |
 | `GET` | `/workers/:id/status` | Proxy to worker's OpenCode `/session/status` |
+| `POST` | `/workers/prune` | Bulk-remove workers + crash history by issue ID — `{issueIds: string[]}` → `{pruned, crashHistoryPruned}` |
 | `POST` | `/shutdown` | Graceful shutdown — stop shared serve, persist state |
 
 **Worker ID format:** `{issueId}-{mode}` lowercase (e.g., `eng-21-implement`)

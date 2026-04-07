@@ -543,11 +543,22 @@ component. When in doubt, route to Backlog.
 ### 6. Cleanup Done
 
 For Done issues without live workers:
+
+1. Remove workspace:
 ```bash
 curl -s -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/workspace" \
   -H 'Content-Type: application/json' \
   -d '{"repo": "'"'$OWNER/$REPO'"'"}'
 ```
+
+2. Prune all worker entries and crash history for the issue:
+```bash
+curl -s -X POST "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/prune" \
+  -H 'Content-Type: application/json' \
+  -d '{"issueIds": ["'$ISSUE_ID'"]}'
+```
+
+Both calls are idempotent. The prune call removes all worker modes for the issue, their crash history, and the dispatch validation cache.
 
 ### 7. Write Heartbeat
 
