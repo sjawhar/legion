@@ -5,7 +5,6 @@ config:
   envoy:machines:
     - name: sami-agents-mx
       machineId: sami-agents-mx
-      tailscaleIp: "100.117.175.119"
       nats:
         serverName: sami-agents-mx
       listener:
@@ -16,7 +15,6 @@ config:
     - name: sami
       sshHost: "ssh://sami@sami"
       machineId: sami
-      tailscaleIp: "100.100.92.97"
       nats:
         serverName: sami
       listener:
@@ -24,7 +22,6 @@ config:
     - name: sami-claude
       sshHost: "ssh://claude@sami-claude"
       machineId: sami-claude
-      tailscaleIp: "100.85.18.68"
       nats:
         serverName: sami-claude
       listener:
@@ -32,7 +29,6 @@ config:
     - name: ghost-wispr
       sshHost: "ssh://ghost-wispr@ghost-wispr"
       machineId: ghost-wispr
-      tailscaleIp: "100.103.243.89"
       listener:
         registryDir: /home/ghost-wispr/.local/state/opencode/registry
       receivers:

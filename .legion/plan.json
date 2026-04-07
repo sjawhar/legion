@@ -1,28 +1,28 @@
 {
-  "taskCount": 2,
-  "independentTasks": 2,
+  "taskCount": 6,
+  "independentTasks": 4,
   "routingHints": {
     "complexity": "small",
     "estimatedImplementers": 1,
-    "skipRetro": true,
+    "skipRetro": false,
     "skipArchitect": true
   },
   "concerns": [
-    "Compiled Go binary (9.6MB) in workspace blocking jj snapshot — must be cleaned up before commit",
-    "Implementation is ~95% complete from prior workers — only AGENTS.md update and binary cleanup remain"
+    "MachineConfig.name must match MagicDNS hostname - assumption verified by existing sshHost usage but should be documented",
+    "Host networking exposes NATS ports directly - verify no port collisions during rollout",
+    "Live cluster verification (routez, JetStream persistence) requires Tailscale-connected host, not CI-testable"
   ],
   "learningsInjected": [
-    "envoy/contracts-and-handler-patterns.md",
-    "envoy/adding-resource-level-subject-helpers.md",
+    "envoy/docker-tailscale-networking.md",
     "envoy/pulumi-remote-docker-patterns.md",
-    "envoy/docker-tailscale-networking.md"
+    "infra/mixed-runtime-type-boundaries.md"
   ],
   "learningsHelpful": [
-    "envoy/contracts-and-handler-patterns.md",
+    "envoy/docker-tailscale-networking.md",
     "envoy/pulumi-remote-docker-patterns.md"
   ],
-  "workflowRecommendation": "Simple cleanup — 2 trivial tasks remain (AGENTS.md update + binary cleanup). Skip retro, single implementer.",
+  "workflowRecommendation": "Standard pipeline — all phases needed. Tasks 1/2/4/5 are independent and can be parallelized by the implementer.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-06T22:26:27.332Z"
+  "completed": "2026-04-07T01:52:38.524Z"
 }

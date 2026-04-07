@@ -6,7 +6,6 @@ import type { MachineConfig } from "./machines";
 
 interface PeerInfo {
   name: string;
-  tailscaleIp: string;
   nats: boolean;
 }
 
@@ -22,7 +21,7 @@ export function computeNatsUrls(
 ): string {
   const remotePeers = machines
     .filter((m) => m.nats && m.name !== machineName)
-    .map((m) => `nats://${m.tailscaleIp}:4222`);
+    .map((m) => `nats://${m.name}:4222`);
 
   if (hasLocalNats) {
     return ["nats://127.0.0.1:4222", ...remotePeers].join(",");
@@ -41,7 +40,6 @@ interface ServiceSecrets {
 function getNatsUrls(machine: MachineConfig, allMachines: MachineConfig[]): string {
   const peerInfo = allMachines.map((m) => ({
     name: m.name,
-    tailscaleIp: m.tailscaleIp,
     nats: !!m.nats,
   }));
   return computeNatsUrls(machine.name, !!machine.nats, peerInfo);

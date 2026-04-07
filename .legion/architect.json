@@ -1,41 +1,36 @@
 {
-  "scope": "medium",
+  "scope": "small",
   "components": [
-    "packages/envoy/cmd/ghostwispr",
-    "packages/envoy/internal/verify",
-    "packages/envoy/internal/contracts",
-    "packages/envoy/deploy/compose",
-    "packages/envoy/docker",
-    "packages/envoy/infra",
-    "packages/contracts/src/subject.ts",
-    "packages/contracts/scripts/gen-go.ts",
-    ".opencode/skills/envoy/SKILL.md"
+    "packages/envoy/infra/nats.ts",
+    "packages/envoy/infra/services.ts",
+    "packages/envoy/infra/machines.ts",
+    "packages/envoy/infra/Pulumi.prod.yaml",
+    "packages/envoy/infra/README.md",
+    "packages/envoy/infra/__tests__/nats.test.ts",
+    "packages/envoy/infra/__tests__/services.test.ts",
+    "packages/envoy/deploy/compose/nats/peer.compose.yml",
+    "packages/envoy/deploy/compose/nats/compose.yml",
+    "packages/envoy/docs/constraints.md",
+    "docs/solutions/envoy/docker-tailscale-networking.md"
   ],
-  "subIssues": [
-    "sjawhar-legion-268",
-    "sjawhar-legion-269"
-  ],
+  "subIssues": [],
   "routingHints": {
-    "complexity": "medium",
+    "complexity": "small",
     "estimatedImplementers": 1,
     "skipRetro": false
   },
   "concerns": [
-    "Contracts layer (#267) used placeholder recordingId/transcript/summary - #268 includes fix to rename to sessionId and correct kinds",
-    "Signing secret is deliberately optional (diverges from GitHub/Slack pattern) - documented in #268 spec",
-    "Ghost Wispr webhook push capability is an external dependency - must be implemented separately on the Raspberry Pi",
-    "Session IDs are timestamp strings (20260326041405) - safe for NATS segments but not validated by the contracts helper"
+    "machine.name must match MagicDNS hostname — if not, add a dedicated hostname field instead of overloading name",
+    "Host networking removes container network namespace isolation — ports protected by Tailscale boundary and firewall only",
+    "constraints.md has TWO lines needing update: Tailscale IP rule AND port/ingress rule",
+    "Compose files should stay updated as active recovery/manual deployment path"
   ],
   "learningsInjected": [
-    "envoy/contracts-and-handler-patterns.md",
-    "envoy/adding-resource-level-subject-helpers.md",
-    "envoy/pulumi-remote-docker-patterns.md"
+    "docs/solutions/envoy/docker-tailscale-networking.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
   ],
-  "learningsHelpful": [
-    "envoy/contracts-and-handler-patterns.md",
-    "envoy/pulumi-remote-docker-patterns.md"
-  ],
+  "learningsHelpful": ["docs/solutions/envoy/docker-tailscale-networking.md"],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-06T20:56:22.901Z"
+  "completed": "2026-04-07T01:38:13.954Z"
 }

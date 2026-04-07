@@ -18,7 +18,6 @@ export interface MachineConfig {
   name: string;
   sshHost?: string;
   machineId: string;
-  tailscaleIp: string;
   nats?: NatsConfig;
   listener: ListenerConfig;
   receivers?: ReceiverConfig;
