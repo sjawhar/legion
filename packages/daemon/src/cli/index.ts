@@ -8,6 +8,7 @@ import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { findLegionByProjectId } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
+import { readPipelineCache } from "../daemon/pipeline-cache";
 import {
   readAllHandoffs,
   readMessages,
@@ -233,9 +234,11 @@ async function cmdStatus(team: string, _stateDir?: string, backend?: string): Pr
   console.log("=".repeat(40));
 
   const daemonPort = await getDaemonPort(legionId);
+  let daemonRunning = false;
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/workers`);
     if (response.ok) {
+      daemonRunning = true;
       const workers = (await response.json()) as WorkerInfo[];
       console.log(`Daemon: RUNNING (port ${daemonPort})`);
       console.log(`Workers: ${workers.length}`);
@@ -247,6 +250,24 @@ async function cmdStatus(team: string, _stateDir?: string, backend?: string): Pr
     }
   } catch (_error) {
     console.log("Daemon: NOT RUNNING");
+  }
+
+  // Show cached pipeline state when daemon is not running
+  if (!daemonRunning) {
+    const cached = await readPipelineCache(instancePaths.pipelineCacheFile);
+    if (cached) {
+      const ageMs = Date.now() - new Date(cached.collectedAt).getTime();
+      const ageMin = Math.floor(ageMs / 60_000);
+      console.log(`\nPipeline [CACHED ${ageMin}m ago]:`);
+      const issueIds = Object.keys(cached.issues);
+      console.log(`  Issues: ${issueIds.length}`);
+      for (const [id, issue] of Object.entries(cached.issues)) {
+        const state = issue as Record<string, unknown>;
+        const status = state.status ?? "unknown";
+        const action = state.suggestedAction ?? "-";
+        console.log(`  - ${id}: ${status} → ${action}`);
+      }
+    }
   }
 
   const stateFilePath = instancePaths.workersFile;

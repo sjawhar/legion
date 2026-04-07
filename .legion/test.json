@@ -1,19 +1,24 @@
 {
-  "passed": 12,
+  "passed": 9,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "README Machine Configuration table is clear — name→MagicDNS contract explicit on line 104. constraints.md updates both required lines. docker-tailscale-networking.md preserves bridge networking rule while noting NATS exception. No gaps or confusion found.",
+  "documentationFeedback": "AGENTS.md updated with pipeline-cache.ts in Files table and GET /pipeline/cached in HTTP API table. PR description clearly explains read-through cache design, separate file rationale, and design decisions. No gaps or confusion.",
   "observations": [
-    "P2: Tests are happy-path-only — no edge cases for empty machines, all nats:false, or special characters in names",
-    "P2: No integration test for createNatsPeer() full pipeline (MachineConfig→PeerInfo→routes→conf→container)",
-    "Deviation: receivers.ghostwispr row added to README (harmless, documents existing field)",
-    "Pre-existing TS5107 moduleResolution=node10 deprecation in infra tsconfig — unrelated to PR",
-    "deleteBeforeReplace: true correctly set on NATS container per pulumi-remote-docker-patterns learning",
-    "Criteria 13 (JetStream persistence) and 14 (cluster formation) are manual rollout verification — code supports both via named volumes and hostname-based routes"
+    "P2: No integration test for cache write after /state/collect — server tests only test read path with pre-populated cache",
+    "P2: No CLI cached fallback test for cli/index.ts:254-270 (plan identified this as the one missing test)",
+    "P2: No boundary test for staleness threshold at exactly 5 minutes",
+    "Conflict resolution needed after rebase onto main (#279 prune endpoint) — server.test.ts had merge conflict in test blocks",
+    "7 pre-existing/unrelated test failures (1 index.test.ts + 6 from #279 prune/workspace tests merged into main)"
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/architecture-patterns/shared-state-file-ownership.md",
+    "docs/solutions/task-index-patterns.md",
+    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/architecture-patterns/shared-state-file-ownership.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-07T02:09:46.782Z"
+  "completed": "2026-04-07T04:26:33.712Z"
 }

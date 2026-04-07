@@ -1,29 +1,37 @@
 {
-  "critical": 0,
-  "important": 0,
+  "critical": 1,
+  "important": 1,
   "minor": 2,
-  "verdict": "approved",
+  "verdict": "changes_requested",
   "keyFindings": [
     {
-      "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main.go",
-      "description": "Duplicate normalizeGhostWisprEventType function also exists in internal/contracts/normalize.go:603. Could be exported and shared."
+      "severity": "P1",
+      "file": "packages/daemon/src/daemon/__tests__/server.test.ts",
+      "description": "DELETE /workers/:id/workspace test mock missing pipelineCacheFile in forLegion return — this PR added the field to LegionInstancePaths but missed updating this mock. Causes typecheck failure."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "Pre-existing from #279 merge: unsubscribeWorkerFromEnvoy (lines 744, 823) doesn't exist — should be unsubscribeAllWorkerTopics. Not caused by this PR but blocks CI."
     },
     {
       "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main_test.go",
-      "description": "Handler tests only check wantPublished bool, don't verify envelope content (topic/source/dedupe_key). Partially mitigated by normalization tests."
+      "file": "packages/daemon/src/daemon/index.ts",
+      "description": "Line 481 derives pipelineCachePath via path.join(path.dirname(...)) instead of using config.paths.forLegion(legionId).pipelineCacheFile"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/index.ts",
+      "description": "readPipelineCache at line 257 not wrapped in try/catch — non-ENOENT errors would crash cmdStatus"
     }
   ],
   "learningsInjected": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md",
-    "docs/solutions/envoy/adding-resource-level-subject-helpers.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "docs/solutions/architecture-patterns/shared-state-file-ownership.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md"
+    "docs/solutions/architecture-patterns/shared-state-file-ownership.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-07T01:28:49.487Z"
+  "completed": "2026-04-07T04:34:00.398Z"
 }

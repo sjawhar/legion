@@ -15,6 +15,7 @@ import type { FeedbackLogger } from "./feedback";
 import type { TokenManager } from "./github-apps";
 import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
+import { readPipelineCache, writePipelineCache } from "./pipeline-cache";
 import {
   cleanupWorkspace,
   ensureWorkspace,
@@ -60,6 +61,7 @@ export interface ServerOptions {
     rebuild: () => Promise<CodebaseIndexResponse>;
   };
   feedbackLogger?: FeedbackLogger;
+  pipelineCachePath?: string;
 }
 
 interface ErrorResponse {
@@ -1029,7 +1031,18 @@ export function startServer(opts: ServerOptions): {
               }
             }
 
-            return jsonResponse(CollectedState.toDict(state));
+            const stateDict = CollectedState.toDict(state);
+
+            // Persist pipeline cache (best-effort, awaited for durability)
+            if (opts.pipelineCachePath) {
+              try {
+                await writePipelineCache(opts.pipelineCachePath, stateDict);
+              } catch (err) {
+                console.warn(`[pipeline-cache] Failed to write cache: ${err}`);
+              }
+            }
+
+            return jsonResponse(stateDict);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[collect] backend=${backend} error=${message}`);
@@ -1079,11 +1092,39 @@ export function startServer(opts: ServerOptions): {
               issueStateCache.set(issueId.toLowerCase(), issueState);
             }
 
-            return jsonResponse(CollectedState.toDict(state));
+            const stateDict = CollectedState.toDict(state);
+
+            // Persist pipeline cache (best-effort, awaited for durability)
+            if (opts.pipelineCachePath) {
+              try {
+                await writePipelineCache(opts.pipelineCachePath, stateDict);
+              } catch (err) {
+                console.warn(`[pipeline-cache] Failed to write cache: ${err}`);
+              }
+            }
+
+            return jsonResponse(stateDict);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
             return serverError(`fetch_and_collect_failed: ${message}`);
+          }
+        }
+
+        if (method === "GET" && url.pathname === "/pipeline/cached") {
+          if (!opts.pipelineCachePath) {
+            return notFound("pipeline_cache_not_configured");
+          }
+          try {
+            const cached = await readPipelineCache(opts.pipelineCachePath);
+            if (!cached) {
+              return notFound("no_cached_state");
+            }
+            return jsonResponse(cached);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[pipeline-cache] Read error: ${message}`);
+            return serverError("pipeline_cache_read_failed");
           }
         }
 

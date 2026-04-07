@@ -478,6 +478,7 @@ export async function startDaemon(
         paths: config.paths,
         adapter: resolvedDeps.adapter,
         stateFilePath: config.stateFilePath,
+        pipelineCachePath: path.join(path.dirname(config.stateFilePath), "pipeline-cache.json"),
         logDir: config.logDir,
         runtime: config.runtime,
         tmuxSession:

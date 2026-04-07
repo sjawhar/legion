@@ -15,6 +15,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `GET` | `/workers/:id/status` | Proxy to worker's OpenCode `/session/status` |
 | `POST` | `/workers/prune` | Bulk-remove workers + crash history by issue ID — `{issueIds: string[]}` → `{pruned, crashHistoryPruned}` |
 | `POST` | `/shutdown` | Graceful shutdown — stop shared serve, persist state |
+| `GET` | `/pipeline/cached` | Cached pipeline state from last `/state/collect` — `{collectedAt, issues, stale}` or 404 |
 
 **Worker ID format:** `{issueId}-{mode}` lowercase (e.g., `eng-21-implement`)
 
@@ -30,6 +31,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `config.ts` | `DaemonConfig` interface, `loadConfig()` reads env vars. Defaults: daemon port 13370, shared serve port 13381 (`baseWorkerPort`), check interval 60s. **Controller mode:** `LEGION_CONTROLLER_SESSION_ID` env var (optional, must start with `ses_` if set, hard fails on invalid format). |
 | `state-file.ts` | `readStateFile()` / `writeStateFile()` — atomic JSON persistence to `~/.legion/{legionId}/workers.json`. Includes `controller?: ControllerState` field for controller lifecycle. Legacy `controller-controller` worker entries are stripped on read. |
 | `ports.ts` | `isPortFree()` utility only. `PortAllocator` removed — all workers share one port. |
+| `pipeline-cache.ts` | `readPipelineCache()` / `writePipelineCache()` — atomic JSON persistence to `~/.legion/{legionId}/pipeline-cache.json`. Read-through cache of last collected pipeline state with staleness computation and corrupt-file recovery. |
 
 ## Key Patterns
 

@@ -77,3 +77,15 @@ export const LegionEntrySchema = z.object({
 });
 
 export const LegionsRegistrySchema = z.record(z.string(), LegionEntrySchema);
+
+/**
+ * Schema for the persisted pipeline cache.
+ * The `issues` record uses passthrough() to allow CollectedState fields
+ * to evolve without breaking cache reads.
+ */
+export const PipelineCacheSchema = z
+  .object({
+    collectedAt: z.string().datetime(),
+    issues: z.record(z.string(), z.object({}).passthrough()),
+  })
+  .passthrough();

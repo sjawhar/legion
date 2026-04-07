@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
@@ -68,6 +68,7 @@ describe("daemon server", () => {
     tmuxSession?: string;
     feedbackLogger?: FeedbackLogger;
     getControllerState?: () => { sessionId: string; port?: number } | undefined;
+    pipelineCachePath?: string;
   }) {
     createSessionCalls = [];
     let adapter = makeAdapter();
@@ -92,6 +93,7 @@ describe("daemon server", () => {
       tmuxSession: options?.tmuxSession,
       feedbackLogger: options?.feedbackLogger,
       getControllerState: options?.getControllerState,
+      pipelineCachePath: options?.pipelineCachePath,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -239,6 +241,7 @@ describe("daemon server", () => {
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        pipelineCacheFile: `/tmp/legion-state/legions/${projectId}/pipeline-cache.json`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -320,6 +323,7 @@ describe("daemon server", () => {
           legionStateDir: `/tmp/legion-state/legions/${projectId}`,
           workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
           feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+          pipelineCacheFile: `/tmp/legion-state/legions/${projectId}/pipeline-cache.json`,
           logDir: `/tmp/legion-state/legions/${projectId}/logs`,
           workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
         }),
@@ -391,6 +395,7 @@ describe("daemon server", () => {
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        pipelineCacheFile: `/tmp/legion-state/legions/${projectId}/pipeline-cache.json`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -617,6 +622,7 @@ describe("daemon server", () => {
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        pipelineCacheFile: `/tmp/legion-state/legions/${projectId}/pipeline-cache.json`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -1370,6 +1376,7 @@ describe("daemon server", () => {
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        pipelineCacheFile: `/tmp/legion-state/legions/${projectId}/pipeline-cache.json`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
       }),
@@ -2649,7 +2656,6 @@ describe("daemon server", () => {
       expect(sendPromptCalls).toHaveLength(0);
     });
   });
-
   describe("POST /workers/prune", () => {
     it("prunes all workers for given issue IDs", async () => {
       await startTestServer();
@@ -2858,6 +2864,7 @@ describe("daemon server", () => {
           legionStateDir: `/tmp/legion-state/legions/${projectId}`,
           workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
           feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+          pipelineCacheFile: `/tmp/legion-state/legions/${projectId}/pipeline-cache.json`,
           logDir: `/tmp/legion-state/legions/${projectId}/logs`,
           workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
         }),
@@ -2903,6 +2910,94 @@ describe("daemon server", () => {
       const after = await requestJson("/workers");
       const workersAfter = (await after.json()) as WorkerEntry[];
       expect(workersAfter).toHaveLength(0);
+    });
+  });
+
+  describe("GET /pipeline/cached", () => {
+    it("returns 404 when pipelineCachePath not configured", async () => {
+      await startTestServer();
+      const response = await requestJson("/pipeline/cached");
+      expect(response.status).toBe(404);
+    });
+
+    it("returns 404 when cache file does not exist", async () => {
+      await startTestServer();
+      // Set pipelineCachePath on the server after tempDir is created — just test via the endpoint
+      // We test by reading the endpoint with a non-existent file path
+      // The server was started without pipelineCachePath, so we get 404 from not-configured
+      // Instead, start a dedicated server with a new temp dir
+      stopServer?.();
+      const cacheDir = await mkdtemp(path.join(os.tmpdir(), "legion-cache-"));
+      const cachePath = path.join(cacheDir, "pipeline-cache.json");
+      await startTestServer({ pipelineCachePath: cachePath });
+      const response = await requestJson("/pipeline/cached");
+      expect(response.status).toBe(404);
+      await rm(cacheDir, { recursive: true, force: true });
+    });
+
+    it("returns cached state with stale=false when fresh", async () => {
+      const cachePath = path.join(
+        await mkdtemp(path.join(os.tmpdir(), "legion-cache-")),
+        "pipeline-cache.json"
+      );
+      const now = new Date().toISOString();
+      await writeFile(
+        cachePath,
+        JSON.stringify({
+          collectedAt: now,
+          issues: {
+            "eng-42": { status: "In Progress", labels: [] },
+          },
+        })
+      );
+
+      await startTestServer({ pipelineCachePath: cachePath });
+      const response = await requestJson("/pipeline/cached");
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        collectedAt: string;
+        stale: boolean;
+        issues: Record<string, unknown>;
+      };
+      expect(body.collectedAt).toBe(now);
+      expect(body.stale).toBe(false);
+      expect(body.issues["eng-42"]).toBeDefined();
+    });
+
+    it("returns stale=true when cache is older than 5 minutes", async () => {
+      const cachePath = path.join(
+        await mkdtemp(path.join(os.tmpdir(), "legion-cache-")),
+        "pipeline-cache.json"
+      );
+      const oldTime = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+      await writeFile(
+        cachePath,
+        JSON.stringify({
+          collectedAt: oldTime,
+          issues: { "eng-42": { status: "Todo", labels: [] } },
+        })
+      );
+
+      await startTestServer({ pipelineCachePath: cachePath });
+      const response = await requestJson("/pipeline/cached");
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { stale: boolean };
+      expect(body.stale).toBe(true);
+    });
+
+    it("returns 404 when cache is corrupt JSON", async () => {
+      const cachePath = path.join(
+        await mkdtemp(path.join(os.tmpdir(), "legion-cache-")),
+        "pipeline-cache.json"
+      );
+      await writeFile(cachePath, "NOT VALID JSON{{{");
+
+      await startTestServer({ pipelineCachePath: cachePath });
+      const response = await requestJson("/pipeline/cached");
+
+      expect(response.status).toBe(404);
     });
   });
 });
