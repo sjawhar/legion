@@ -20,6 +20,7 @@ import {
   ensureWorkspace,
   parseIssueRepo,
   type RepoManagerDeps,
+  startBackgroundFetch,
 } from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
 import type { WorkerEntry as BaseWorkerEntry } from "./serve-manager";
@@ -473,6 +474,13 @@ export function startServer(opts: ServerOptions): {
               } catch (error) {
                 return serverError(`Failed to resolve workspace: ${(error as Error).message}`);
               }
+              // Fire background fetch (non-blocking) — pre-warms the clone for the
+              // worker's own `jj git fetch` during startup.
+              startBackgroundFetch(opts.paths, repoRef, opts.repoManagerDeps).catch((err) => {
+                console.error(
+                  `[dispatch] Background fetch failed for ${repoRef.owner}/${repoRef.repo}: ${err instanceof Error ? err.message : String(err)}`
+                );
+              });
             } else if (typeof workspace === "string") {
               if (!isAbsolute(workspace)) {
                 return badRequest("workspace must be an absolute path");

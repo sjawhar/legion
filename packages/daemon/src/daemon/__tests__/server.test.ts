@@ -271,7 +271,8 @@ describe("daemon server", () => {
     expect(createSessionCalls[0].workspace).toBe(
       "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-77"
     );
-    expect(runJjCalls).toEqual([
+    // Blocking calls: clone + workspace add. Background fetch follows.
+    expect(runJjCalls.slice(0, 2)).toEqual([
       [
         "git",
         "clone",
@@ -289,6 +290,13 @@ describe("daemon server", () => {
         "-R",
         "/tmp/legion-data/repos/github.com/acme/widgets",
       ],
+    ]);
+    // Background fetch fires after workspace creation (non-blocking)
+    expect(runJjCalls[2]).toEqual([
+      "git",
+      "fetch",
+      "-R",
+      "/tmp/legion-data/repos/github.com/acme/widgets",
     ]);
   });
 
@@ -380,7 +388,49 @@ describe("daemon server", () => {
     });
   });
 
-  it("returns 500 when repo fetch fails", async () => {
+  it("succeeds when clone exists even if background fetch would fail", async () => {
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const repoManagerDeps: RepoManagerDeps = {
+      // runJj would fail if called — but ensureRepoClone skips fetch for existing clones
+      runJj: async () => ({ exitCode: 128, stdout: "", stderr: "Permission denied (publickey)" }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+    await startTestServer({ paths, repoManagerDeps });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "acme-widgets-99",
+        mode: "implement",
+        repo: "acme/widgets",
+      }),
+    });
+
+    // Worker created successfully — background fetch failure is non-blocking
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toHaveProperty("id", "acme-widgets-99-implement");
+    expect(body).toHaveProperty("sessionId");
+  });
+
+  it("returns 500 when repo clone fails", async () => {
     const paths: LegionPaths = {
       dataDir: "/tmp/legion-data",
       stateDir: "/tmp/legion-state",
@@ -399,7 +449,7 @@ describe("daemon server", () => {
     };
     const repoManagerDeps: RepoManagerDeps = {
       runJj: async () => ({ exitCode: 128, stdout: "", stderr: "Permission denied (publickey)" }),
-      exists: async () => true,
+      exists: async () => false, // clone does not exist — clone will fail
       rmDir: async () => {},
       symlink: async () => {},
     };

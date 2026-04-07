@@ -15,6 +15,8 @@ export interface JjResult {
 
 export interface RepoManagerDeps {
   runJj: (args: string[]) => Promise<JjResult>;
+  /** Truly async subprocess runner for non-blocking operations. Falls back to runJj if absent. */
+  spawnJjAsync?: (args: string[]) => Promise<JjResult>;
   exists: (path: string) => Promise<boolean>;
   rmDir: (path: string) => Promise<void>;
   symlink: (target: string, linkPath: string) => Promise<void>;
@@ -31,6 +33,15 @@ const defaultDeps: RepoManagerDeps = {
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
     };
+  },
+  spawnJjAsync: async (args) => {
+    const proc = Bun.spawn(["jj", ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const exitCode = await proc.exited;
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    return { exitCode, stdout, stderr };
   },
   exists: async (p) => {
     const { existsSync } = await import("node:fs");
@@ -86,16 +97,15 @@ export async function ensureRepoClone(
   const clonePath = paths.repoClonePath(repo.host, repo.owner, repo.repo);
 
   if (await deps.exists(clonePath)) {
-    const result = await deps.runJj(["git", "fetch", "-R", clonePath]);
-    if (result.exitCode !== 0) {
-      throw new Error(`jj git fetch failed for ${clonePath}: ${result.stderr}`);
-    }
-  } else {
-    const url = `https://${repo.host}/${repo.owner}/${repo.repo}`;
-    const result = await deps.runJj(["git", "clone", url, clonePath]);
-    if (result.exitCode !== 0) {
-      throw new Error(`Failed to clone ${url}: ${result.stderr}`);
-    }
+    // Clone exists — skip fetch here, caller fires background fetch separately.
+    // Workers fetch again on startup, so a slightly stale clone is fine.
+    return clonePath;
+  }
+
+  const url = `https://${repo.host}/${repo.owner}/${repo.repo}`;
+  const result = await deps.runJj(["git", "clone", url, clonePath]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to clone ${url}: ${result.stderr}`);
   }
 
   return clonePath;
@@ -140,6 +150,27 @@ export async function ensureWorkspace(
   }
 
   return workspacePath;
+}
+
+/**
+ * Fire a non-blocking `jj git fetch` on an existing clone.
+ *
+ * Uses `spawnJjAsync` (truly non-blocking) when available, falling back to
+ * `runJj` for tests. Rejects on non-zero exit codes so callers can log
+ * failures via `.catch()`.
+ */
+export async function startBackgroundFetch(
+  paths: LegionPaths,
+  repo: RepoRef,
+  deps: RepoManagerDeps = defaultDeps
+): Promise<JjResult> {
+  const clonePath = paths.repoClonePath(repo.host, repo.owner, repo.repo);
+  const runner = deps.spawnJjAsync ?? deps.runJj;
+  const result = await runner(["git", "fetch", "-R", clonePath]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Background fetch failed for ${clonePath}: ${result.stderr}`);
+  }
+  return result;
 }
 
 export async function cleanupWorkspace(
