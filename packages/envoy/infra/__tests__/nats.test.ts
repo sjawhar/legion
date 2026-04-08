@@ -31,22 +31,30 @@ describe("computeNatsRoutes", () => {
 });
 
 describe("renderNatsConf", () => {
-  test("renders valid nats.conf matching deploy/scripts/render-nats-peer.sh output", () => {
-    const conf = renderNatsConf("sami-agents-mx", ["nats://sami:6222", "nats://sami-claude:6222"]);
+  test("renders valid nats.conf with client_advertise and cluster advertise", () => {
+    const conf = renderNatsConf(
+      "sami-agents-mx",
+      ["nats://sami:6222", "nats://sami-claude:6222"],
+      "sami-agents-mx"
+    );
 
     expect(conf).toContain("server_name=sami-agents-mx");
     expect(conf).toContain("listen=0.0.0.0:4222");
+    expect(conf).toContain("client_advertise=sami-agents-mx:4222");
     expect(conf).toContain("store_dir=/data");
     expect(conf).toContain("name: envoy");
     expect(conf).toContain("listen: 0.0.0.0:6222");
+    expect(conf).toContain("advertise: sami-agents-mx:6222");
     expect(conf).toContain("nats://sami:6222");
     expect(conf).toContain("nats://sami-claude:6222");
-    expect(conf).not.toContain("sami-agents-mx:6222");
+    expect(conf).not.toContain("sami-agents-mx:6222\n    nats://");
   });
 
   test("handles single-route cluster", () => {
-    const conf = renderNatsConf("node-a", ["nats://node-b:6222"]);
+    const conf = renderNatsConf("node-a", ["nats://node-b:6222"], "node-a");
     expect(conf).toContain("server_name=node-a");
+    expect(conf).toContain("client_advertise=node-a:4222");
+    expect(conf).toContain("advertise: node-a:6222");
     expect(conf).toContain("nats://node-b:6222");
   });
 });

@@ -1,25 +1,30 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/repo-manager.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/repo-manager.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/envoy/infra/nats.ts",
+    "packages/envoy/infra/__tests__/nats.test.ts",
+    "packages/envoy/deploy/scripts/render-nats-peer.sh",
+    "docs/solutions/envoy/docker-tailscale-networking.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
   ],
   "trickyParts": [
-    "Cross-family review identified that default runJj uses Bun.spawnSync which blocks the event loop even in async wrapper — added spawnJjAsync field to RepoManagerDeps with truly async Bun.spawn default",
-    "startBackgroundFetch needed to reject on non-zero exit codes for .catch() logging to work — resolved promises with exitCode!=0 were silently swallowed"
+    "Cross-family review caught that cluster.advertise was also needed for the same docker0 interface issue on cluster gossip — added both client_advertise and cluster advertise",
+    "Refactored renderNatsConf to accept machineName instead of clientAdvertise string — cleaner since function derives both :4222 and :6222 ports internally"
   ],
   "deviations": [
-    "Added spawnJjAsync optional field to RepoManagerDeps interface (not in original issue spec but required for correctness)",
-    "Background fetch fires even after fresh clone (slightly redundant but harmless — fetch is a no-op immediately after clone)"
+    "Added cluster.advertise in addition to client_advertise — not in original issue but same root cause (docker0 IPs leaking into gossip)",
+    "Changed render-nats-peer.sh to use NATS_HOSTNAME env var instead of NATS_ADVERTISE — derives both advertise addresses from hostname"
   ],
   "openQuestions": [
-    "Pre-existing CI failures on main: unsubscribeWorkerFromEnvoy typecheck errors at server.ts lines 750/829, and 6 prune/workspace cleanup test failures — all unrelated to this PR"
+    "Live cluster verification (routez, JetStream persistence) requires Tailscale-connected host — needs manual verification after deploy"
   ],
   "subPlanningNeeded": false,
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-07T17:26:28.444Z"
+  "completed": "2026-04-08T12:07:55.280Z"
 }

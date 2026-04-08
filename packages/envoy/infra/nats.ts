@@ -22,10 +22,11 @@ export function computeNatsRoutes(machineName: string, machines: PeerInfo[]): st
  * Render nats.conf content matching the format produced by
  * deploy/scripts/render-nats-peer.sh.
  */
-export function renderNatsConf(serverName: string, routes: string[]): string {
+export function renderNatsConf(serverName: string, routes: string[], machineName: string): string {
   const routeLines = routes.map((r) => `    ${r}`).join("\n");
   return `server_name=${serverName}
 listen=0.0.0.0:4222
+client_advertise=${machineName}:4222
 
 jetstream {
   store_dir=/data
@@ -34,6 +35,7 @@ jetstream {
 cluster {
   name: envoy
   listen: 0.0.0.0:6222
+  advertise: ${machineName}:6222
   routes: [
 ${routeLines}
   ]
@@ -68,7 +70,7 @@ export function createNatsPeer(
   }));
 
   const routes = computeNatsRoutes(machine.name, peerInfo);
-  const conf = renderNatsConf(machine.nats.serverName, routes);
+  const conf = renderNatsConf(machine.nats.serverName, routes, machine.name);
 
   // Named volume — matches existing compose-generated "nats_nats_data"
   // for zero-copy migration. docker compose down (without -v) preserves it.
