@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock } from "bun:test";
 import {
   createSession,
   createWorkerClient,
+  deleteSession,
   healthCheck,
   killStaleServe,
   spawnSharedServe,
@@ -387,6 +388,36 @@ describe("serve-manager", () => {
       expect(client).toBeDefined();
       expect(client.session).toBeDefined();
     });
+  });
+});
+
+describe("deleteSession", () => {
+  it("sends DELETE to /session/{sessionID}", async () => {
+    let deletedUrl = "";
+    globalThis.fetch = (async (input: string, init?: RequestInit) => {
+      deletedUrl = input;
+      expect(init?.method).toBe("DELETE");
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await deleteSession(13381, "ses_abc123");
+    expect(deletedUrl).toBe("http://127.0.0.1:13381/session/ses_abc123");
+  });
+
+  it("does not throw on fetch failure", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("connection refused");
+    }) as unknown as typeof fetch;
+
+    await expect(deleteSession(13381, "ses_abc123")).resolves.toBeUndefined();
+  });
+
+  it("does not throw on non-2xx response", async () => {
+    globalThis.fetch = (async () => {
+      return new Response(null, { status: 500 });
+    }) as unknown as typeof fetch;
+
+    await expect(deleteSession(13381, "ses_abc123")).resolves.toBeUndefined();
   });
 });
 

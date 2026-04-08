@@ -37,6 +37,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     getSessionStatus: async (): Promise<{ data?: unknown; error?: unknown }> => ({
       data: undefined,
     }),
+    deleteSession: async () => {},
   };
   const { server, stop } = startServer({
     port: randomPort(),

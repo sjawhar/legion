@@ -1,26 +1,41 @@
 {
   "filesChanged": [
-    "packages/envoy/go.mod",
-    "packages/envoy/go.sum",
-    "packages/envoy/internal/bus/nats.go",
-    "packages/envoy/internal/store/kv.go",
-    "packages/envoy/internal/store/kv_test.go",
-    "packages/envoy/internal/session/registry.go"
+    "packages/daemon/src/daemon/serve-manager.ts",
+    "packages/daemon/src/daemon/runtime/types.ts",
+    "packages/daemon/src/daemon/runtime/opencode.ts",
+    "packages/daemon/src/daemon/runtime/claude-code.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/__tests__/serve-manager.test.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts",
+    "packages/daemon/src/daemon/__tests__/multi-serve.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/feedback.integration.test.ts",
+    "packages/daemon/src/daemon/__tests__/session-id-contract.test.ts",
+    "packages/daemon/src/__tests__/integration.test.ts"
   ],
   "trickyParts": [
-    "Removing load() introduces a theoretical startup race window where Match() returns empty until watch() populates the cache. Analysis shows this is safe: Get() has a KV fallback for agent-targeted messages, the consumer uses DeliverNew() so no historical messages are at risk, and WatchAll() initial delivery is faster than the old N sequential Gets approach."
+    "Cross-family review caught that POST /workers/prune had a leak window: persistState() before deleteSession() meant a crash between them could orphan sessions. Fixed by moving deleteSession before persistState.",
+    "Cross-family review caught that POST /workers replacing dead workers never deleted the old session. Added deleteSession call before replacing dead worker entries."
   ],
   "deviations": [
-    "Removed the entire load() function rather than just skipping the call — it was dead code after removing the call site, so clean removal is better than leaving it"
+    "No formal plan existed in issue comments — implemented directly from the bug report description",
+    "Added deleteSession to POST /workers dead-worker-replacement path (not in original scope but identified by cross-family review as necessary)"
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "Pre-existing test failure: 'passes controller env vars to adapter.start on startup' in index.test.ts — fails on main, unrelated to this PR",
+    "ClaudeCodeAdapter.deleteSession is a no-op — tmux windows persist by design, but could accumulate if not cleaned up"
+  ],
   "subPlanningNeeded": false,
   "learningsInjected": [
-    "docs/solutions/architecture-patterns/nats-kv-graceful-degradation.md",
-    "docs/solutions/envoy/async-health-startup-pattern.md"
+    "docs/solutions/daemon/opencode-serve-lifecycle.md",
+    "docs/solutions/daemon/graceful-worker-shutdown.md",
+    "docs/solutions/daemon/shared-serve-retro.md"
   ],
-  "learningsHelpful": ["docs/solutions/envoy/async-health-startup-pattern.md"],
+  "learningsHelpful": [
+    "docs/solutions/daemon/opencode-serve-lifecycle.md",
+    "docs/solutions/daemon/graceful-worker-shutdown.md"
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T12:08:54.859Z"
+  "completed": "2026-04-08T12:15:16.102Z"
 }

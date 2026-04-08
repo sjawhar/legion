@@ -2,16 +2,25 @@
   "passed": 4,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "README does not mention internal behavior changes — appropriate for a bugfix. Code comments at kv.go:50-52 clearly explain the rationale for removing load() and switching to async watch(). No user-facing documentation updates needed.",
+  "documentationFeedback": "PR body is clear and well-structured. JSDoc on deleteSession is accurate. Minor gap: AGENTS.md doesn't mention deleteSession in serve-manager description — not blocking.",
   "observations": [
-    "P2: Happy-path-only test coverage for error paths — no test for watch() goroutine failure (kv.WatchAll() error) or Get() cache-miss fallback blocking on remote KV leader",
-    "P2: No negative test verifying Open() with MaxWait properly returns error if JetStream unreachable within 10s",
-    "Get() fallback to direct kv.Get() on cache miss (kv.go:120-139) is a latent risk — single-key Get could block on remote leader before watch() delivers initial values, though window is very short and blast radius is 1 key not 1492",
-    "All 12 Go test packages pass including internal/integration (115s) — comprehensive end-to-end coverage"
+    "P2: No test assertion for deleteSessionCalls in workspace deletion path (cleans worker workspace by repo)",
+    "P2: No test assertion for deleteSessionCalls in dead worker replacement path (allows respawn for dead workers)",
+    "P2: No ordering test for prune path deleteSession-before-persistState constraint",
+    "P2: Happy-path-only integration tests — no slow/blocked deleteSession coverage",
+    "ClaudeCodeAdapter.deleteSession is a no-op — tmux windows can accumulate",
+    "Pre-existing test failure: passes controller env vars to adapter.start on startup — fails on main, unrelated"
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/daemon/opencode-serve-lifecycle.md",
+    "docs/solutions/daemon/graceful-worker-shutdown.md",
+    "docs/solutions/daemon/shared-serve-retro.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/daemon/opencode-serve-lifecycle.md",
+    "docs/solutions/daemon/graceful-worker-shutdown.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-08T12:11:22.239Z"
+  "completed": "2026-04-08T12:25:24.762Z"
 }
