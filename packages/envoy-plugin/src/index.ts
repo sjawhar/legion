@@ -178,12 +178,12 @@ export default async (input: { serverUrl: URL }) => {
     tool: {
       envoy_subscribe: tool({
         description:
-          "Subscribe this session to Envoy notification topics. Use exact NATS-style topic strings such as notifications.agent.<session_id>, notifications.github.<owner>.<repo>.pr, notifications.github.<owner>.<repo>.issue, notifications.github.<owner>.<repo>.comment, notifications.github.<owner>.<repo>.ci, notifications.slack.<team_id>.<channel_id>.message, or notifications.slack.<team_id>.<channel_id>.mention. Use this when a session should RECEIVE future events.",
+          "Subscribe this session to Envoy notification topics. GitHub topics are resource-scoped: notifications.github.<owner>.<repo>.pr.<number>, notifications.github.<owner>.<repo>.issue.<number>.comment, etc. Use NATS wildcards for broad subscriptions: notifications.github.<owner>.<repo>.pr.> (all PR events). Other topics: notifications.agent.<session_id>, notifications.slack.<team_id>.<channel_id>.message, notifications.slack.<team_id>.<channel_id>.mention. Use this when a session should RECEIVE future events.",
         args: {
           topics: tool.schema
             .array(tool.schema.string())
             .describe(
-              "NATS-style topic patterns to subscribe to. Examples: notifications.agent.ses_123, notifications.github.trajectory-labs-pbc.agent-c.pr, notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention"
+              "NATS-style topic patterns to subscribe to. GitHub topics include resource number: notifications.github.owner.repo.pr.123 (PR state), notifications.github.owner.repo.pr.123.comment (PR comments), notifications.github.owner.repo.issue.456.> (all events on issue). Use > wildcard for broad matching. Other examples: notifications.agent.ses_123, notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention"
             ),
         },
         async execute(args, ctx) {
