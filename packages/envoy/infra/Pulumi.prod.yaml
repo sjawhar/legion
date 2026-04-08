@@ -1,6 +1,6 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
-  envoy:imageTag: 9b3224965ee7
+  envoy:imageTag: 7f2012976dba
   envoy:natsImage: "nats:2.11-alpine"
   envoy:machines:
     - name: sami-agents-mx
@@ -34,9 +34,9 @@ config:
       receivers:
         ghostwispr: true
   envoy:githubWebhookSecret:
-    secure: v1:ou5S7z5dQpftDzAT:rKMa1g6CsSv/1iGl+vP92mZKUPBPaE5sis0LqHwG4akHkqAW0wNd8C3Lg9ilfHV4lQYYloI1cGM=
+    secure: v1:DHpfNE2vubEaxKtd:sDJqUeZA3l2UW4w4NGRLEHKUvLraLygVoWB9MaqagpRBL8lAN5U1tjmZSBNj1COepP3AKYV+OwY=
   envoy:slackSigningSecret:
-    secure: v1:hNaZMeJ90PxT0yhp:5B9aQdgyj2OgnGVW8hhtS5Zvkvhyg5svIjzXeiDtXpjtSFm/cIaV30JX0KnU3e31ew==
+    secure: v1:jgP6XET6JwLTT8bn:ketvBJemrITJfFxEd42KajyVg9xXGwSUcdBnxM8VluQs+BleTU2Hss0BzjyKuG1R
   envoy:ghcrToken:
-    secure: v1:D4KYv31vCGwPTeKR:ZbyxyiCIs3gJ0A2IUMsG1FIEJ+JlRTkca0P8i6Zvd0bZ8td1M9iUtHGmB5qgBidZKmVHvFx8t/Y=
-encryptionsalt: v1:R5vvgmHVgJw=:v1:T7WdS5AO9zYdN0xD:83mEIYvoAB6yLBeqMlWe44tRSwIeIA==
+    secure: v1:Jx0lqnviYu9cA7rr:3GdTR57rbuNwSFwMJ0MikYKVFXPhoL5gc59iGWy2T0d9iLPCQhixLiW+/vQrHrw9buYpV4rRWko=
+encryptionsalt: v1:H2lyi7rkmK8=:v1:Zia1Tn6jUgV/DGFh:NZBFxTMbVeWRm/di9FWg0OUVX3cXNA==
