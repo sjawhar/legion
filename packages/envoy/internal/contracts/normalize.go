@@ -25,6 +25,7 @@ func GithubEnvelope(input GithubEnvelopeInput) Envelope {
 		DedupeKey:      "github." + input.Delivery,
 		IssuedAt:       NowMillis(),
 		PayloadSummary: githubSummary(input.Event, input.Body),
+		Payload:        githubPayload(input.Event, input.Body),
 		TraceID:        input.TraceID,
 	}
 }
@@ -398,6 +399,80 @@ func githubSummary(event string, body map[string]any) string {
 			"action": action,
 			"repo":   repo,
 		}
+	}
+
+	return summaryJSON(data)
+}
+
+func githubPayload(event string, body map[string]any) string {
+	repo := nestedString(body, "repository", "full_name")
+	action := stringValue(body["action"])
+	num := githubNumber(event, body)
+
+	var data map[string]string
+
+	switch event {
+	case "issue_comment":
+		data = map[string]string{
+			"kind":        "comment",
+			"action":      action,
+			"repo":        repo,
+			"number":      num,
+			"title":       nestedString(body, "issue", "title"),
+			"parent_kind": githubParentKind(event, body),
+			"author":      nestedString(body, "comment", "user", "login"),
+			"body":        nestedString(body, "comment", "body"),
+			"url":         nestedString(body, "comment", "html_url"),
+		}
+	case "pull_request_review_comment":
+		data = map[string]string{
+			"kind":        "comment",
+			"action":      action,
+			"repo":        repo,
+			"number":      num,
+			"title":       nestedString(body, "pull_request", "title"),
+			"parent_kind": githubParentKind(event, body),
+			"author":      nestedString(body, "comment", "user", "login"),
+			"body":        nestedString(body, "comment", "body"),
+			"url":         nestedString(body, "comment", "html_url"),
+		}
+	case "pull_request_review":
+		data = map[string]string{
+			"kind":        "review",
+			"action":      action,
+			"repo":        repo,
+			"number":      num,
+			"title":       nestedString(body, "pull_request", "title"),
+			"parent_kind": "pr",
+			"author":      nestedString(body, "review", "user", "login"),
+			"body":        nestedString(body, "review", "body"),
+			"url":         nestedString(body, "review", "html_url"),
+			"state":       nestedString(body, "review", "state"),
+		}
+	case "pull_request":
+		data = map[string]string{
+			"kind":   "pr",
+			"action": action,
+			"repo":   repo,
+			"number": num,
+			"title":  nestedString(body, "pull_request", "title"),
+			"author": nestedString(body, "pull_request", "user", "login"),
+			"body":   nestedString(body, "pull_request", "body"),
+			"url":    nestedString(body, "pull_request", "html_url"),
+		}
+	case "issues":
+		data = map[string]string{
+			"kind":   "issue",
+			"action": action,
+			"repo":   repo,
+			"number": num,
+			"title":  nestedString(body, "issue", "title"),
+			"author": nestedString(body, "issue", "user", "login"),
+			"body":   nestedString(body, "issue", "body"),
+			"url":    nestedString(body, "issue", "html_url"),
+		}
+	default:
+		return ""
 	}
 
 	return summaryJSON(data)

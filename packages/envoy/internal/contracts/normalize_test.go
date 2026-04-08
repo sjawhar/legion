@@ -1326,3 +1326,134 @@ func TestGhostWisprSummaryTruncatesTitle(t *testing.T) {
 		t.Fatalf("unexpected truncated title length: %d", got)
 	}
 }
+
+func TestGithubPayloadNotTruncated(t *testing.T) {
+	longBody := strings.Repeat("a", 600)
+	input := GithubEnvelopeInput{
+		Event:    "issue_comment",
+		Delivery: "d1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action":     "created",
+			"repository": map[string]any{"full_name": "sjawhar/legion", "name": "legion", "owner": map[string]any{"login": "sjawhar"}},
+			"issue":      map[string]any{"number": 42, "title": "Test issue"},
+			"comment": map[string]any{
+				"body":     longBody,
+				"html_url": "https://github.com/sjawhar/legion/issues/42#issuecomment-1",
+				"user":     map[string]any{"login": "commenter"},
+			},
+		},
+	}
+	env := GithubEnvelope(input)
+
+	// PayloadSummary should still be truncated to 500
+	summary := decodeSummary(t, env.PayloadSummary)
+	if runes := []rune(summary["body"]); len(runes) != 500 {
+		t.Fatalf("expected summary body truncated to 500 chars, got %d", len(runes))
+	}
+
+	// Payload should contain the full body (600 chars), not truncated
+	if env.Payload == "" {
+		t.Fatal("expected Payload to be populated")
+	}
+	payload := decodeSummary(t, env.Payload)
+	if runes := []rune(payload["body"]); len(runes) != 600 {
+		t.Fatalf("expected payload body to be full 600 chars, got %d", len(runes))
+	}
+	if payload["body"] != longBody {
+		t.Fatal("payload body does not match original")
+	}
+}
+
+func TestGithubPayloadAllEventTypes(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     string
+		body      map[string]any
+		hasPayload bool
+	}{
+		{
+			name:  "issue_comment has payload",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"issue":      map[string]any{"number": 1, "title": "test"},
+				"comment":    map[string]any{"body": "hello", "user": map[string]any{"login": "u"}},
+			},
+			hasPayload: true,
+		},
+		{
+			name:  "pull_request has payload",
+			event: "pull_request",
+			body: map[string]any{
+				"action":       "opened",
+				"repository":   map[string]any{"full_name": "sjawhar/legion"},
+				"pull_request": map[string]any{"number": 1, "title": "test", "body": "pr body", "user": map[string]any{"login": "u"}},
+			},
+			hasPayload: true,
+		},
+		{
+			name:  "pull_request_review has payload",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "sjawhar/legion"},
+				"pull_request": map[string]any{"number": 1, "title": "test"},
+				"review":       map[string]any{"body": "review body", "state": "approved", "user": map[string]any{"login": "u"}},
+			},
+			hasPayload: true,
+		},
+		{
+			name:  "pull_request_review_comment has payload",
+			event: "pull_request_review_comment",
+			body: map[string]any{
+				"action":       "created",
+				"repository":   map[string]any{"full_name": "sjawhar/legion"},
+				"pull_request": map[string]any{"number": 1, "title": "test"},
+				"comment":      map[string]any{"body": "comment body", "user": map[string]any{"login": "u"}},
+			},
+			hasPayload: true,
+		},
+		{
+			name:  "issues has payload",
+			event: "issues",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"full_name": "sjawhar/legion"},
+				"issue":      map[string]any{"number": 1, "title": "test", "body": "issue body", "user": map[string]any{"login": "u"}},
+			},
+			hasPayload: true,
+		},
+		{
+			name:       "push has no payload",
+			event:      "push",
+			body:       map[string]any{"repository": map[string]any{"full_name": "sjawhar/legion"}, "ref": "refs/heads/main"},
+			hasPayload: false,
+		},
+		{
+			name:       "check_run has no payload",
+			event:      "check_run",
+			body:       map[string]any{"action": "completed", "repository": map[string]any{"full_name": "sjawhar/legion"}, "check_run": map[string]any{"name": "test", "status": "completed", "conclusion": "success", "pull_requests": []any{}}},
+			hasPayload: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := GithubEnvelope(GithubEnvelopeInput{
+				Event:    tt.event,
+				Delivery: "d1",
+				EventID:  "e1",
+				TraceID:  "t1",
+				Body:     tt.body,
+			})
+			if tt.hasPayload && env.Payload == "" {
+				t.Fatal("expected Payload to be populated")
+			}
+			if !tt.hasPayload && env.Payload != "" {
+				t.Fatalf("expected empty Payload for %s, got %s", tt.event, env.Payload)
+			}
+		})
+	}
+}

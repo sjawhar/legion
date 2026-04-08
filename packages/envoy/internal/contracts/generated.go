@@ -17,6 +17,7 @@ type Envelope struct {
 	ExpiresAt      *int64 `json:"expires_at,omitempty"`
 	PayloadSummary string `json:"payload_summary"`
 	PayloadRef     string `json:"payload_ref,omitempty"`
+	Payload        string `json:"payload,omitempty"`
 	TraceID        string `json:"trace_id"`
 }
 

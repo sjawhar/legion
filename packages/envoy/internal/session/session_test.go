@@ -190,6 +190,41 @@ func TestText_WithoutSourceSession(t *testing.T) {
 	}
 }
 
+func TestText_PrefersPayloadOverSummary(t *testing.T) {
+	deliverer := newDeliverer(t.TempDir())
+	item := contracts.Envelope{
+		EventID:        "evt-3",
+		Source:         "github",
+		SourceSession:  "",
+		Topic:          "notifications.github.sjawhar.legion.issue.42.comment",
+		PayloadSummary: "truncated summary",
+		Payload:        "full payload content that is much longer",
+	}
+	got := deliverer.Text(item)
+	if !strings.Contains(got, "full payload content that is much longer") {
+		t.Errorf("Text() should use Payload when set, got: %s", got)
+	}
+	if strings.Contains(got, "truncated summary") {
+		t.Errorf("Text() should NOT use PayloadSummary when Payload is set, got: %s", got)
+	}
+}
+
+func TestText_FallsBackToSummaryWhenPayloadEmpty(t *testing.T) {
+	deliverer := newDeliverer(t.TempDir())
+	item := contracts.Envelope{
+		EventID:        "evt-4",
+		Source:         "github",
+		SourceSession:  "",
+		Topic:          "notifications.github.sjawhar.legion.push",
+		PayloadSummary: "summary only",
+		Payload:        "",
+	}
+	got := deliverer.Text(item)
+	if !strings.Contains(got, "summary only") {
+		t.Errorf("Text() should fall back to PayloadSummary when Payload is empty, got: %s", got)
+	}
+}
+
 func TestDeliver_NoAgentField(t *testing.T) {
 	var receivedBody []byte
 

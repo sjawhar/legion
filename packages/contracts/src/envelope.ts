@@ -13,6 +13,7 @@ export const EnvelopeSchema = z.object({
   issued_at: z.number().int(),
   expires_at: z.number().int().optional(),
   payload_summary: z.string().min(1),
+  payload: z.string().optional(),
   payload_ref: z.string().optional(),
   trace_id: z.string().min(1),
 });
