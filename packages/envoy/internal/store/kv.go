@@ -35,7 +35,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	for _, o := range options {
 		o(&opts)
 	}
-	js, err := conn.JetStream()
+	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		return nil, err
 	}
@@ -47,35 +47,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		return nil, err
 	}
 	r := &Registry{kv: kv, cache: map[string]Interest{}}
-	if err := r.load(); err != nil {
-		return nil, err
-	}
+	// Skip eager load — watch() populates cache asynchronously via KV watcher.
+	// The synchronous load() did N individual kv.Get() calls that block indefinitely
+	// when the KV stream leader is on a remote node.
 	go r.watch()
 	return r, nil
-}
-
-func (r *Registry) load() error {
-	keys, err := r.kv.Keys()
-	if errors.Is(err, nats.ErrNoKeysFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, key := range keys {
-		entry, err := r.kv.Get(key)
-		if err != nil {
-			continue
-		}
-		var item Interest
-		if err := json.Unmarshal(entry.Value(), &item); err != nil {
-			continue
-		}
-		r.cache[key] = item
-	}
-	return nil
 }
 
 func (r *Registry) watch() {

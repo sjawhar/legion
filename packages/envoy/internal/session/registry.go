@@ -42,7 +42,7 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	for _, o := range options {
 		o(&opts)
 	}
-	js, err := conn.JetStream()
+	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		return nil, err
 	}

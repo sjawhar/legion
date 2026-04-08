@@ -58,6 +58,8 @@ func options(urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.
 	return nats.Options{
 		Servers:       urls,
 		Name:          "envoy",
+		NoRandomize:   true,
+		Timeout:       5 * time.Second,
 		MaxReconnect:  -1,
 		ReconnectWait: 2 * nats.DefaultReconnectWait,
 		DisconnectedErrCB: func(_ *nats.Conn, err error) {
@@ -113,7 +115,7 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	js, err := nc.JetStream()
+	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -154,7 +156,7 @@ func (c *Client) onClosed() {
 func (c *Client) onReconnect(nc *nats.Conn) {
 	c.mu.Lock()
 	c.Conn = nc
-	js, err := nc.JetStream()
+	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		c.mu.Unlock()
 		log.Printf("envoy nats resubscribe failed (jetstream): %v", err)
@@ -312,7 +314,7 @@ func (c *Client) ensureConn() error {
 	if err != nil {
 		return err
 	}
-	js, err := nc.JetStream()
+	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		nc.Close()
 		return err

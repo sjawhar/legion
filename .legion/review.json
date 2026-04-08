@@ -6,24 +6,22 @@
   "keyFindings": [
     {
       "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main.go",
-      "description": "Duplicate normalizeGhostWisprEventType function also exists in internal/contracts/normalize.go:603. Could be exported and shared."
+      "file": "packages/envoy/internal/store/kv.go",
+      "description": "watch() goroutine has no retry if WatchAll() fails — logs and exits, leaving registry in Get()-only mode with MaxWait timeout. Adequate for bugfix, consider retry loop in follow-up."
     },
     {
       "severity": "P3",
-      "file": "packages/envoy/cmd/ghostwispr/main_test.go",
-      "description": "Handler tests only check wantPublished bool, don't verify envelope content (topic/source/dedupe_key). Partially mitigated by normalization tests."
+      "file": "packages/envoy/internal/store/kv.go",
+      "description": "Pre-existing: Registry has no Close() method for watch() goroutine lifecycle. Watcher channel ends when NATS connection closes, but explicit close mechanism would be cleaner."
     }
   ],
   "learningsInjected": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md",
-    "docs/solutions/envoy/adding-resource-level-subject-helpers.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "docs/solutions/architecture-patterns/nats-kv-graceful-degradation.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/envoy/contracts-and-handler-patterns.md"
+    "docs/solutions/architecture-patterns/nats-kv-graceful-degradation.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-07T01:28:49.487Z"
+  "completed": "2026-04-08T12:16:39.318Z"
 }

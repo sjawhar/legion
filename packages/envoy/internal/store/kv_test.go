@@ -212,7 +212,7 @@ func pollMatch(t *testing.T, r *Registry, machineID, topic string, wantCount int
 	}
 }
 
-func TestOpen_LoadsExistingKeys(t *testing.T) {
+func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -227,17 +227,14 @@ func TestOpen_LoadsExistingKeys(t *testing.T) {
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_preload", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	// Open registry — load() runs synchronously
+	// Open registry — watch() populates cache asynchronously
 	reg, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Match should return the pre-loaded entry immediately (no polling needed)
-	got := reg.Match("m1", "notifications.test")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 pre-loaded result, got %d", len(got))
-	}
+	// Cache is populated asynchronously by watch(); poll until ready
+	got := pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 	if got[0].SessionID != "ses_preload" {
 		t.Fatalf("expected ses_preload, got %s", got[0].SessionID)
 	}
@@ -290,11 +287,8 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Verify pre-loaded
-	got := reg.Match("m1", "notifications.test")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 pre-loaded result, got %d", len(got))
-	}
+	// Verify pre-loaded (async via watch)
+	pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 
 	// Delete via KV Delete operation (empty topics = delete all)
 	if err := reg.Remove("ses_del", nil); err != nil {
@@ -325,11 +319,8 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Verify pre-loaded
-	got := reg.Match("m1", "notifications.test")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 pre-loaded result, got %d", len(got))
-	}
+	// Verify pre-loaded (async via watch)
+	pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 
 	// Purge via NATS KV API (different from Delete — removes all revisions)
 	if err := kv.Purge("ses_purge"); err != nil {
@@ -378,11 +369,8 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	// Verify cache works before NATS shutdown
-	got := reg.Match("m1", "notifications.test")
-	if len(got) != 1 || got[0].SessionID != "ses_survive" {
-		t.Fatalf("expected ses_survive before shutdown, got %v", got)
-	}
+	// Verify cache is populated via watch() before NATS shutdown
+	pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 
 	// Kill NATS — KV is now unreachable
 	conn.Close()
@@ -391,7 +379,7 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	}
 
 	// Match should still return correct results from cache
-	got = reg.Match("m1", "notifications.test")
+	got := reg.Match("m1", "notifications.test")
 	if len(got) != 1 {
 		t.Fatalf("expected 1 result from cache after NATS shutdown, got %d", len(got))
 	}
