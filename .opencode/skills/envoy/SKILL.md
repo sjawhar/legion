@@ -27,33 +27,44 @@ Example:
 
 ### GitHub
 
-- PR events (all PRs):
-  - `notifications.github.<owner>.<repo>.pr`
-- PR events (specific PR):
+GitHub topics are **resource-scoped** — every event includes the resource type and number. There are no repo-wide event-type topics (except mentions and push).
+
+**Topic structure:** `notifications.github.<owner>.<repo>.<resource_type>.<number>.<event_kind>`
+
+- PR opened/closed/merged/ready:
   - `notifications.github.<owner>.<repo>.pr.<number>`
-- Issue events (all issues):
-  - `notifications.github.<owner>.<repo>.issue`
-- Issue events (specific issue):
+- Issue opened/closed/labeled:
   - `notifications.github.<owner>.<repo>.issue.<number>`
-- Comment events (all):
-  - `notifications.github.<owner>.<repo>.comment`
-- Comment events (specific PR/issue):
-  - `notifications.github.<owner>.<repo>.comment.<number>`
-- Mention events (all):
+- Comment on a PR:
+  - `notifications.github.<owner>.<repo>.pr.<number>.comment`
+- Comment on an issue:
+  - `notifications.github.<owner>.<repo>.issue.<number>.comment`
+- PR review submitted:
+  - `notifications.github.<owner>.<repo>.pr.<number>.review`
+- CI/check events (per-PR):
+  - `notifications.github.<owner>.<repo>.pr.<number>.ci`
+- Mention events (per-resource):
+  - `notifications.github.<owner>.<repo>.pr.<number>.mention`
+  - `notifications.github.<owner>.<repo>.issue.<number>.mention`
+- Mention events (repo-wide — catches all mentions):
   - `notifications.github.<owner>.<repo>.mention`
-- Mention events (specific PR/issue):
-  - `notifications.github.<owner>.<repo>.mention.<number>`
-- CI/check events:
-  - `notifications.github.<owner>.<repo>.ci`
 - Push events:
   - `notifications.github.<owner>.<repo>.push`
 
+**Using wildcards to subscribe broadly:**
+- All events in a repo: `notifications.github.<owner>.<repo>.>`
+- All PR events in a repo: `notifications.github.<owner>.<repo>.pr.>`
+- All events for a specific PR: `notifications.github.<owner>.<repo>.pr.<number>.>`
+- All issue events in a repo: `notifications.github.<owner>.<repo>.issue.>`
+- All events for a specific issue: `notifications.github.<owner>.<repo>.issue.<number>.>`
+
 Examples:
 
-- `notifications.github.trajectory-labs-pbc.agent-c.pr` (all PRs)
-- `notifications.github.trajectory-labs-pbc.agent-c.pr.7706` (PR #7706 only)
-- `notifications.github.sjawhar.legion.mention` (all mentions)
-- `notifications.github.sjawhar.legion.mention.171` (mentions on PR #171 only)
+- `notifications.github.trajectory-labs-pbc.agent-c.pr.9880` (PR #9880 state changes)
+- `notifications.github.trajectory-labs-pbc.agent-c.pr.9880.comment` (comments on PR #9880)
+- `notifications.github.trajectory-labs-pbc.agent-c.issue.9909.>` (all events on issue #9909)
+- `notifications.github.sjawhar.legion.pr.>` (all PR events across all PRs)
+- `notifications.github.sjawhar.legion.mention` (all @mentions repo-wide)
 
 ### Slack
 
@@ -170,11 +181,11 @@ envoy_subscribe([
 ])
 ```
 
-### Subscribe controller to all PR events for agent-c
+### Subscribe to all PR events for agent-c
 
 ```text
 envoy_subscribe([
-  "notifications.github.trajectory-labs-pbc.agent-c.pr"
+  "notifications.github.trajectory-labs-pbc.agent-c.pr.>"
 ])
 ```
 
