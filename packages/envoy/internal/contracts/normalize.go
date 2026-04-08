@@ -588,7 +588,7 @@ func truncateBody(s string, maxChars int) string {
 	if len(runes) <= maxChars {
 		return s
 	}
-	return string(runes[:maxChars])
+	return string(runes[:maxChars]) + "... [truncated]"
 }
 
 type GhostWisprEnvelopeInput struct {
