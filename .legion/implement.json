@@ -1,25 +1,17 @@
 {
-  "filesChanged": [
-    "packages/daemon/src/daemon/repo-manager.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/repo-manager.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
-  ],
+  "filesChanged": [],
   "trickyParts": [
-    "Cross-family review identified that default runJj uses Bun.spawnSync which blocks the event loop even in async wrapper — added spawnJjAsync field to RepoManagerDeps with truly async Bun.spawn default",
-    "startBackgroundFetch needed to reject on non-zero exit codes for .catch() logging to work — resolved promises with exitCode!=0 were silently swallowed"
+    "Issue #329 describes a problem already fully resolved by PR #297 (merged 2026-04-06). The RSS threshold check is implemented in config.ts, rss-monitor.ts, and index.ts health tick loop with 4 passing tests."
   ],
   "deviations": [
-    "Added spawnJjAsync optional field to RepoManagerDeps interface (not in original issue spec but required for correctness)",
-    "Background fetch fires even after fresh clone (slightly redundant but harmless — fetch is a no-op immediately after clone)"
+    "No code changes made — implementation already exists on main via PR #297"
   ],
   "openQuestions": [
-    "Pre-existing CI failures on main: unsubscribeWorkerFromEnvoy typecheck errors at server.ts lines 750/829, and 6 prune/workspace cleanup test failures — all unrelated to this PR"
+    "The 98.8GB production incident likely occurred on a daemon running pre-#297 code. Verify production is deployed from latest main.",
+    "Pre-existing test failure in index.test.ts ('passes controller env vars to adapter.start on startup') — unrelated to RSS"
   ],
   "subPlanningNeeded": false,
-  "learningsInjected": [],
-  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-07T17:26:28.444Z"
+  "completed": "2026-04-08T11:56:40.103Z"
 }
