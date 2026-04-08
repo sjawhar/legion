@@ -1353,10 +1353,12 @@ func TestGithubPayloadNotTruncated(t *testing.T) {
 	}
 	env := GithubEnvelope(input)
 
-	// PayloadSummary should still be truncated to 500
+	// PayloadSummary should still be truncated to 500 + suffix
 	summary := decodeSummary(t, env.PayloadSummary)
-	if runes := []rune(summary["body"]); len(runes) != 500 {
-		t.Fatalf("expected summary body truncated to 500 chars, got %d", len(runes))
+	truncSuffix := "... [truncated]"
+	expectedLen := 500 + len([]rune(truncSuffix))
+	if runes := []rune(summary["body"]); len(runes) != expectedLen {
+		t.Fatalf("expected summary body truncated to %d chars (500 + suffix), got %d", expectedLen, len(runes))
 	}
 
 	// Payload should contain the full body (600 chars), not truncated
