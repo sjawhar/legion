@@ -1,6 +1,8 @@
 package mcpbridge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"unicode/utf8"
 
@@ -18,7 +20,7 @@ func BuildEnvelope(cfg *ServerConfig, notifyURI string, contents []resourceConte
 	now := contracts.NowMillis()
 	eventID := id.New()
 	summary := buildSummary(cfg, notifyURI, contents)
-	dedupeKey := buildDedupeKey(cfg.Source, eventID)
+	dedupeKey := buildDedupeKey(cfg.Source, notifyURI, summary)
 
 	return contracts.Envelope{
 		EventID:        eventID,
@@ -44,8 +46,9 @@ func buildSummary(cfg *ServerConfig, uri string, contents []resourceContent) str
 	return fmt.Sprintf("%s event from %s", cfg.Source, uri)
 }
 
-func buildDedupeKey(source string, eventID string) string {
-	return source + "." + eventID
+func buildDedupeKey(source, uri, summary string) string {
+	h := sha256.Sum256([]byte(uri + "\x00" + summary))
+	return source + "." + hex.EncodeToString(h[:])
 }
 
 func truncateSummary(s string, maxChars int) string {

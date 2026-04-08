@@ -112,7 +112,7 @@ func TestBuildEnvelope_SummaryTruncation(t *testing.T) {
 	}
 }
 
-func TestBuildEnvelope_UniqueIDs(t *testing.T) {
+func TestBuildEnvelope_DedupeKeySameContent(t *testing.T) {
 	cfg := loadTestConfig(t)
 	uri := "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
 
@@ -125,7 +125,49 @@ func TestBuildEnvelope_UniqueIDs(t *testing.T) {
 	if env1.TraceID == env2.TraceID {
 		t.Fatal("trace_id should be unique")
 	}
+	if env1.DedupeKey != env2.DedupeKey {
+		t.Fatalf("dedupe_key should be identical for same URI and content: %s != %s", env1.DedupeKey, env2.DedupeKey)
+	}
+}
+
+func TestBuildEnvelope_DedupeKeyDifferentContent(t *testing.T) {
+	cfg := loadTestConfig(t)
+	uri := "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
+
+	env1, _ := BuildEnvelope(cfg, uri, []resourceContent{{URI: uri, Text: "Hello"}})
+	env2, _ := BuildEnvelope(cfg, uri, []resourceContent{{URI: uri, Text: "Goodbye"}})
+
 	if env1.DedupeKey == env2.DedupeKey {
-		t.Fatal("dedupe_key should be unique across calls with the same URI")
+		t.Fatal("dedupe_key should differ for different content")
+	}
+}
+
+func TestBuildEnvelope_DedupeKeyDifferentURI(t *testing.T) {
+	cfg := loadTestConfig(t)
+	uri1 := "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
+	uri2 := "whatsapp://messages/15559999999/9999999999@s.whatsapp.net"
+
+	env1, _ := BuildEnvelope(cfg, uri1, []resourceContent{{URI: uri1, Text: "Hello"}})
+	env2, _ := BuildEnvelope(cfg, uri2, []resourceContent{{URI: uri2, Text: "Hello"}})
+
+	if env1.DedupeKey == env2.DedupeKey {
+		t.Fatal("dedupe_key should differ for different URIs even with same content")
+	}
+}
+
+func TestBuildEnvelope_DedupeKeyIsContentHash(t *testing.T) {
+	cfg := loadTestConfig(t)
+	uri := "whatsapp://messages/15551234567/5551234567@s.whatsapp.net"
+	contents := []resourceContent{{URI: uri, Text: "Hello from WhatsApp"}}
+
+	env, _ := BuildEnvelope(cfg, uri, contents)
+
+	// Dedupe key should start with source prefix
+	if !strings.HasPrefix(env.DedupeKey, "whatsapp.") {
+		t.Fatalf("dedupe_key should start with source prefix, got: %s", env.DedupeKey)
+	}
+	// Dedupe key should NOT contain the event ID (which is a UUID)
+	if strings.Contains(env.DedupeKey, env.EventID) {
+		t.Fatal("dedupe_key should not contain event_id — it should be content-based")
 	}
 }
