@@ -21,9 +21,5 @@
     "@biomejs/biome": "^2.3.14",
     "@types/bun": "latest",
     "typescript": "^5.3.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/sjawhar/legion"
   }
 }
