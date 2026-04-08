@@ -1,23 +1,33 @@
 {
   "critical": 0,
-  "important": 0,
+  "important": 2,
   "minor": 1,
   "verdict": "approved",
   "keyFindings": [
     {
+      "severity": "P2",
+      "file": "packages/envoy-plugin/src/__tests__/index.test.ts",
+      "description": "Init test sets OC_REGISTRY=undefined, skipping the registryDir code path where all non-blocking changes live (timer, syncPort, unref). Test proves init is fast when feature is disabled, not when active."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/envoy-plugin/src/__tests__/index.test.ts",
+      "description": "Timeout test targets ECONNREFUSED (instant error), not actual timeout. Doesn't exercise AbortSignal.timeout path. Behavioral tester confirmed real timeout works (5003ms against black-hole server)."
+    },
+    {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/serve-manager.ts",
-      "description": "No test asserts the default maxRetries value (90). All waitForHealthy tests pass explicit values. A revert to 30 would not be caught by tests."
+      "file": "packages/envoy-plugin/src/index.ts",
+      "description": "_activeFile variable assigned but never read — pre-existing dead code, good cleanup opportunity since surrounding code was modified."
     }
   ],
   "learningsInjected": [
-    "docs/solutions/daemon/opencode-serve-lifecycle.md",
-    "docs/solutions/daemon/shared-serve-retro.md"
+    "docs/solutions/envoy/async-health-startup-pattern.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/daemon/opencode-serve-lifecycle.md"
+    "docs/solutions/envoy/async-health-startup-pattern.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-08T12:53:08.371Z"
+  "completed": "2026-04-08T15:19:09.415Z"
 }

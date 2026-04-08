@@ -4,8 +4,14 @@ import { resolvePort } from "./port";
 
 const root = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
 
+/** HTTP timeout for Envoy calls — prevent hanging when NATS/Envoy is unavailable. */
+const CALL_TIMEOUT_MS = 5_000;
+
 async function call(path: string, init?: RequestInit) {
-  const res = await fetch(`${root}${path}`, init);
+  const res = await fetch(`${root}${path}`, {
+    ...init,
+    signal: init?.signal ?? AbortSignal.timeout(CALL_TIMEOUT_MS),
+  });
   const text = await res.text();
   if (!res.ok) throw new Error(text || `${res.status}`);
   return text;
@@ -15,6 +21,8 @@ export default async (input: { serverUrl: URL }) => {
   const registryDir = process.env.OC_REGISTRY;
   let activeSessionID: string | null = null;
   let _activeFile: string | null = null;
+  /** Cached port — resolved asynchronously, null until first successful resolution. */
+  let resolvedPort: number | null = null;
 
   const registryFile = (sessionID: string) =>
     registryDir ? `${registryDir}/${sessionID}.json` : null;
@@ -36,20 +44,26 @@ export default async (input: { serverUrl: URL }) => {
   };
 
   let portWarningLogged = false;
-  const currentPort = () => {
-    const port = resolvePort(input.serverUrl);
+  const refreshPort = async (): Promise<number | null> => {
+    const port = await resolvePort(input.serverUrl);
     if (!port && !portWarningLogged) {
       portWarningLogged = true;
       console.error(
         `[envoy-plugin] Could not resolve serve port: serverUrl=${input.serverUrl.href}, pid=${process.pid}`
       );
     }
-    if (port) portWarningLogged = false;
+    if (port) {
+      portWarningLogged = false;
+      resolvedPort = port;
+    }
     return port;
   };
 
-  const syncPort = (sessionID?: string) => {
-    const value = currentPort();
+  /** Return cached port synchronously — tools need a port value inline. */
+  const currentPort = () => resolvedPort;
+
+  const syncPort = async (sessionID?: string): Promise<boolean> => {
+    const value = await refreshPort();
     if (!value) return false;
     if (sessionID) update(sessionID, { port: value });
     return true;
@@ -57,7 +71,9 @@ export default async (input: { serverUrl: URL }) => {
 
   const fetchSession = async (sessionID: string) => {
     try {
-      const res = await fetch(`${input.serverUrl}/session/${sessionID}`);
+      const res = await fetch(`${input.serverUrl}/session/${sessionID}`, {
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
       if (!res.ok) return null;
       const session = await res.json();
       return { id: session.id, title: session.title || "" };
@@ -70,10 +86,16 @@ export default async (input: { serverUrl: URL }) => {
   const registryFiles = new Set<string>();
 
   if (registryDir) {
-    syncPort();
+    // Defer port resolution to background — never block plugin init.
+    // The port sync loop retries every second until resolved.
     const timer = setInterval(() => {
-      if (syncPort(activeSessionID ?? undefined)) clearInterval(timer);
+      syncPort(activeSessionID ?? undefined).then((resolved) => {
+        if (resolved) clearInterval(timer);
+      });
     }, 1000);
+    timer.unref(); // Don't prevent graceful shutdown if port never resolves
+    // Fire an immediate async attempt (non-blocking)
+    syncPort().catch(() => {});
 
     // Heartbeat: re-subscribe every 2 minutes to refresh envoy_sessions TTL (5-min)
     const heartbeatInterval = setInterval(
@@ -96,6 +118,7 @@ export default async (input: { serverUrl: URL }) => {
     );
 
     process.on("exit", () => {
+      clearInterval(timer);
       clearInterval(heartbeatInterval);
       for (const f of registryFiles) {
         try {
@@ -108,7 +131,7 @@ export default async (input: { serverUrl: URL }) => {
   return {
     event: registryDir
       ? async ({ event }: { event: { type?: string; properties?: Record<string, unknown> } }) => {
-          if (activeSessionID) syncPort(activeSessionID);
+          if (activeSessionID) syncPort(activeSessionID).catch(() => {});
 
           if (
             event.type === "session.status" &&
@@ -120,7 +143,7 @@ export default async (input: { serverUrl: URL }) => {
               _activeFile = registryFile(sessionID);
               const session = await fetchSession(sessionID);
               if (session) update(sessionID, { session });
-              syncPort(sessionID);
+              await syncPort(sessionID);
               const port = currentPort();
               if (port) {
                 call("/v1/interests/subscribe", {

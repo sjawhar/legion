@@ -1,21 +1,20 @@
 {
-  "passed": 1,
+  "passed": 2,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body is clear and accurate. AGENTS.md mentions waitForHealthy() appropriately. docs/solutions/daemon/opencode-serve-lifecycle.md discusses startup timing but doesn't reference the waitForHealthy timeout — minor gap, not blocking.",
+  "documentationFeedback": "PR body is clear and accurate. README doesn't list envoy_publish tool (pre-existing gap). No docs updated about non-blocking behavior (reasonable — internal change).",
   "observations": [
-    "P2: No test asserts the default maxRetries value (90). All waitForHealthy tests pass explicit values. Someone could revert the default and tests would still pass.",
-    "45s timeout provides 17s headroom over 28s startup — adequate but not generous for future plugin growth."
+    "P2: index.test.ts init test sets OC_REGISTRY=undefined, skipping the registryDir code path where all non-blocking changes live. Test proves init is fast when feature path is disabled.",
+    "P2: index.test.ts timeout test targets ECONNREFUSED (fast error), not an actual timeout. Doesn't prove AbortSignal.timeout works.",
+    "_activeFile variable is declared but never read — pre-existing dead code.",
+    "currentPort() returns null before async resolution — tools send port:0 during startup window. Pre-existing behavior, heartbeat re-subscribes with correct port."
   ],
   "learningsInjected": [
-    "docs/solutions/daemon/opencode-serve-lifecycle.md",
-    "docs/solutions/daemon/shared-serve-retro.md",
-    "docs/solutions/daemon/graceful-worker-shutdown.md"
-  ],
-  "learningsHelpful": [
+    "docs/solutions/envoy/async-health-startup-pattern.md",
     "docs/solutions/daemon/opencode-serve-lifecycle.md"
   ],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-08T12:48:01.380Z"
+  "completed": "2026-04-08T13:10:32.786Z"
 }
