@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -65,11 +66,17 @@ func main() {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if githubEvent(event) && contracts.GithubIsBotSender(payload) {
-			log.Printf("github skipped bot sender delivery=%s event=%s", delivery, event)
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-			return
+		if githubEvent(event) {
+			log.Printf("github sender login=%s type=%s delivery=%s event=%s",
+				githubSenderField(payload, "login"),
+				githubSenderField(payload, "type"),
+				delivery, event)
+			if contracts.GithubIsBotSender(payload) {
+				log.Printf("github skipped bot sender delivery=%s event=%s", delivery, event)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+				return
+			}
 		}
 		if githubSkip(event) {
 			w.WriteHeader(http.StatusOK)
@@ -136,4 +143,20 @@ func githubEvent(event string) bool {
 
 func githubSkip(_ string) bool {
 	return false
+}
+
+func githubSenderField(payload map[string]any, field string) string {
+	sender, ok := payload["sender"].(map[string]any)
+	if !ok {
+		return fmt.Sprintf("<no sender map: %T>", payload["sender"])
+	}
+	v, ok := sender[field]
+	if !ok {
+		return fmt.Sprintf("<missing %s>", field)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return fmt.Sprintf("<non-string %s: %T=%v>", field, v, v)
+	}
+	return s
 }
