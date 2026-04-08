@@ -139,11 +139,12 @@ function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
   return null;
 }
 
-function buildIssueEnvoyTopics(owner: string, repo: string, issueNumber: number): string[] {
-  return [
-    `notifications.github.${owner}.${repo}.issue.${issueNumber}.>`,
-    `notifications.github.${owner}.${repo}.pr.${issueNumber}.>`,
-  ];
+function buildIssueTopics(owner: string, repo: string, issueNumber: number): string[] {
+  return [`notifications.github.${owner}.${repo}.issue.${issueNumber}.>`];
+}
+
+export function buildPrTopics(owner: string, repo: string, prNumber: number): string[] {
+  return [`notifications.github.${owner}.${repo}.pr.${prNumber}.>`];
 }
 
 export function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): void {
@@ -315,7 +316,7 @@ export function startServer(opts: ServerOptions): {
         if (loadedEntry.repo && loadedEntry.issueNumber !== undefined) {
           const repoRef = parseIssueRepo(loadedEntry.repo);
           if (repoRef) {
-            return buildIssueEnvoyTopics(repoRef.owner, repoRef.repo, loadedEntry.issueNumber);
+            return buildIssueTopics(repoRef.owner, repoRef.repo, loadedEntry.issueNumber);
           }
         }
         return undefined;
@@ -617,7 +618,7 @@ export function startServer(opts: ServerOptions): {
             // Only plan mode subscribes to issue topics at dispatch.
             // Implement self-subscribes to PR topics after PR creation via envoy_subscribe.
             if (mode === WorkerMode.PLAN && repoRef && issueNumber !== undefined) {
-              const topics = buildIssueEnvoyTopics(repoRef.owner, repoRef.repo, issueNumber);
+              const topics = buildIssueTopics(repoRef.owner, repoRef.repo, issueNumber);
               subscribeWorkerToEnvoy(actualSessionId, topics);
               entry.envoyTopics = topics;
               workerEntriesChanged = true;
@@ -808,6 +809,8 @@ export function startServer(opts: ServerOptions): {
             if (workerIssueId && normalizedIssueIds.has(workerIssueId.toLowerCase())) {
               prunedWorkers.push(workerId);
               prunedSessionIds.push(entry.sessionId);
+              // Clear daemon-managed topic tracking before deletion
+              detachWorkerFromEnvoy(entry, "prune-done");
             }
           }
           for (const id of prunedWorkers) {
@@ -836,6 +839,10 @@ export function startServer(opts: ServerOptions): {
             await persistState();
           }
 
+          // Blanket-unsubscribe all pruned sessions from Envoy.
+          // detachWorkerFromEnvoy above handles daemon-managed topics, but workers
+          // may also have self-managed subscriptions (e.g. implementer PR topics)
+          // that aren't tracked in entry.envoyTopics.
           for (const sessionId of prunedSessionIds) {
             unsubscribeAllWorkerTopics(sessionId);
           }
