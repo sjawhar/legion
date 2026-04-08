@@ -67,7 +67,7 @@ export async function spawnSharedServe(opts: SharedServeOptions): Promise<Shared
   return { port: opts.port, pid, status: "starting" };
 }
 
-export async function waitForHealthy(port: number, maxRetries = 30, delayMs = 500): Promise<void> {
+export async function waitForHealthy(port: number, maxRetries = 90, delayMs = 500): Promise<void> {
   for (let i = 0; i < maxRetries; i++) {
     const healthy = await healthCheck(port);
     if (healthy) {
