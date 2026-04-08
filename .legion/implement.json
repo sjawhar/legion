@@ -1,41 +1,21 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/serve-manager.ts",
-    "packages/daemon/src/daemon/runtime/types.ts",
-    "packages/daemon/src/daemon/runtime/opencode.ts",
-    "packages/daemon/src/daemon/runtime/claude-code.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/serve-manager.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "packages/daemon/src/daemon/__tests__/multi-serve.test.ts",
-    "packages/daemon/src/daemon/__tests__/index.test.ts",
-    "packages/daemon/src/daemon/__tests__/feedback.integration.test.ts",
-    "packages/daemon/src/daemon/__tests__/session-id-contract.test.ts",
-    "packages/daemon/src/__tests__/integration.test.ts"
+    ".github/workflows/publish-envoy-plugin.yml"
   ],
   "trickyParts": [
-    "Cross-family review caught that POST /workers/prune had a leak window: persistState() before deleteSession() meant a crash between them could orphan sessions. Fixed by moving deleteSession before persistState.",
-    "Cross-family review caught that POST /workers replacing dead workers never deleted the old session. Added deleteSession call before replacing dead worker entries."
+    "Cross-family review caught 3 issues: missing [skip ci] on release commit, brittle git push HEAD, and release job running when version already published. All addressed.",
+    "Branch was contaminated with unrelated changes from other workers — cleaned up to isolate only the workflow file."
   ],
   "deviations": [
-    "No formal plan existed in issue comments — implemented directly from the bug report description",
-    "Added deleteSession to POST /workers dead-worker-replacement path (not in original scope but identified by cross-family review as necessary)"
+    "Did not add declaration generation (bunx tsc --emitDeclarationOnly) — the package.json types field pointing to dist/index.d.ts is a pre-existing gap in the build script.",
+    "Did not add files field to package.json to control npm publish contents — matching existing OMO pattern."
   ],
   "openQuestions": [
-    "Pre-existing test failure: 'passes controller env vars to adapter.start on startup' in index.test.ts — fails on main, unrelated to this PR",
-    "ClaudeCodeAdapter.deleteSession is a no-op — tmux windows persist by design, but could accumulate if not cleaned up"
+    "NODE_AUTH_TOKEN secret must be added to the Legion repo before the workflow can run.",
+    "Pre-existing: packages/envoy-plugin/package.json declares types: dist/index.d.ts but the build script does not generate declarations."
   ],
   "subPlanningNeeded": false,
-  "learningsInjected": [
-    "docs/solutions/daemon/opencode-serve-lifecycle.md",
-    "docs/solutions/daemon/graceful-worker-shutdown.md",
-    "docs/solutions/daemon/shared-serve-retro.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/opencode-serve-lifecycle.md",
-    "docs/solutions/daemon/graceful-worker-shutdown.md"
-  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T12:15:16.102Z"
+  "completed": "2026-04-08T12:12:25.878Z"
 }
