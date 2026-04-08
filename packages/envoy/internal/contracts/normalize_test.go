@@ -529,11 +529,11 @@ func TestTruncateBody(t *testing.T) {
 	}{
 		{name: "under limit", input: "hello", max: 500, expected: "hello"},
 		{name: "at limit", input: "abcde", max: 5, expected: "abcde"},
-		{name: "over limit", input: "abcdef", max: 5, expected: "abcde"},
+		{name: "over limit", input: "abcdef", max: 5, expected: "abcde... [truncated]"},
 		{name: "empty", input: "", max: 500, expected: ""},
-		{name: "emoji preserved", input: "\U0001f525\U0001f525\U0001f525", max: 2, expected: "\U0001f525\U0001f525"},
-		{name: "mixed multibyte", input: "hello\U0001f30dworld", max: 6, expected: "hello\U0001f30d"},
-		{name: "zero max", input: "hello", max: 0, expected: ""},
+		{name: "emoji preserved", input: "\U0001f525\U0001f525\U0001f525", max: 2, expected: "\U0001f525\U0001f525... [truncated]"},
+		{name: "mixed multibyte", input: "hello\U0001f30dworld", max: 6, expected: "hello\U0001f30d... [truncated]"},
+		{name: "zero max", input: "hello", max: 0, expected: "... [truncated]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -745,8 +745,13 @@ func TestGithubSummaryTruncation(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if runes := []rune(parsed["body"]); len(runes) != 500 {
-		t.Fatalf("expected body truncated to 500 chars, got %d", len(runes))
+	truncSuffix := "... [truncated]"
+	body := parsed["body"]
+	if !strings.HasSuffix(body, truncSuffix) {
+		t.Fatalf("expected truncated body to end with %q", truncSuffix)
+	}
+	if runes := []rune(body); len(runes) != 500+len([]rune(truncSuffix)) {
+		t.Fatalf("expected body truncated to 500 chars + suffix, got %d", len(runes))
 	}
 
 	// Verify multi-byte truncation preserves valid UTF-8
@@ -760,8 +765,8 @@ func TestGithubSummaryTruncation(t *testing.T) {
 	if err := json.Unmarshal([]byte(result2), &parsed2); err != nil {
 		t.Fatalf("emoji truncation produced invalid JSON: %v", err)
 	}
-	if runes2 := []rune(parsed2["body"]); len(runes2) != 500 {
-		t.Fatalf("expected emoji body truncated to 500 chars, got %d", len(runes2))
+	if runes2 := []rune(parsed2["body"]); len(runes2) != 500+len([]rune(truncSuffix)) {
+		t.Fatalf("expected emoji body truncated to 500 chars + suffix, got %d", len(runes2))
 	}
 }
 
@@ -1322,7 +1327,8 @@ func TestGhostWisprSummaryTruncatesTitle(t *testing.T) {
 	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
 		t.Fatalf("invalid summary JSON: %v", err)
 	}
-	if got := len(summary["title"]); got != 500 {
-		t.Fatalf("unexpected truncated title length: %d", got)
+	expectedLen := 500 + len([]rune("... [truncated]"))
+	if got := len([]rune(summary["title"])); got != expectedLen {
+		t.Fatalf("unexpected truncated title length: %d, want %d", got, expectedLen)
 	}
 }
