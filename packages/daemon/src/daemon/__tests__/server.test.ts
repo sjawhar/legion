@@ -1468,7 +1468,6 @@ describe("daemon server", () => {
       expect(envoySubscribeCalls[0].body.session_id).toBe(body.sessionId);
       expect(envoySubscribeCalls[0].body.topics).toEqual([
         "notifications.github.acme.widgets.issue.42.>",
-        "notifications.github.acme.widgets.pr.42.>",
       ]);
     });
 
@@ -1766,10 +1765,34 @@ describe("daemon server", () => {
       }>;
       const planWorker = workers.find((w) => w.id === "acme-widgets-70-plan");
       expect(planWorker).toBeDefined();
-      expect(planWorker?.envoyTopics).toEqual([
-        "notifications.github.acme.widgets.issue.70.>",
-        "notifications.github.acme.widgets.pr.70.>",
-      ]);
+      expect(planWorker?.envoyTopics).toEqual(["notifications.github.acme.widgets.issue.70.>"]);
+    });
+
+    it("does not subscribe planner to PR topics", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-72",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 72,
+        }),
+      });
+      await Bun.sleep(50);
+
+      const subscribeCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/subscribe")
+      );
+      expect(subscribeCalls).toHaveLength(1);
+      const topics = subscribeCalls[0].body.topics;
+      expect(topics).toEqual(["notifications.github.acme.widgets.issue.72.>"]);
+      // Explicitly verify no PR topic
+      expect(topics.some((t) => t.includes(".pr."))).toBe(false);
     });
 
     it("omits envoyTopics for non-plan mode dispatch", async () => {
@@ -2112,10 +2135,7 @@ describe("daemon server", () => {
       );
       expect(issueSubs).toHaveLength(1);
       expect(issueSubs[0].body.session_id).toBe(created.sessionId);
-      expect(issueSubs[0].body.topics).toEqual([
-        "notifications.github.acme.widgets.issue.305.>",
-        "notifications.github.acme.widgets.pr.305.>",
-      ]);
+      expect(issueSubs[0].body.topics).toEqual(["notifications.github.acme.widgets.issue.305.>"]);
     });
 
     it("skips resume re-subscription for workspace-only workers", async () => {
@@ -2226,6 +2246,84 @@ describe("daemon server", () => {
         c.body.topics.some((t: string) => t.includes(".ci"))
       );
       expect(ciCalls).toHaveLength(0);
+    });
+
+    it("prune unsubscribes workers from Envoy on Done cleanup", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker (gets daemon-managed envoyTopics)
+      const planRes = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-400",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 400,
+        }),
+      });
+      const planWorker = (await planRes.json()) as { sessionId: string };
+      await Bun.sleep(50);
+
+      // Reset tracking
+      envoySubscribeCalls.length = 0;
+
+      // Prune the issue (simulates Done cleanup)
+      const pruneRes = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["acme-widgets-400"] }),
+      });
+      expect(pruneRes.status).toBe(200);
+      await Bun.sleep(50);
+
+      // detachWorkerFromEnvoy fires targeted unsubscribe for daemon-managed topics,
+      // unsubscribeAllWorkerTopics fires blanket unsubscribe for self-managed topics.
+      // Plan worker has envoyTopics, so both fire (2 calls).
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls.length).toBeGreaterThanOrEqual(1);
+      expect(unsubCalls.every((c) => c.body.session_id === planWorker.sessionId)).toBe(true);
+    });
+
+    it("prune blanket-unsubscribes workers without daemon-managed topics", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch implement worker (no daemon-managed envoyTopics)
+      const implRes = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-401",
+          mode: "implement",
+          repo: "acme/widgets",
+          issueNumber: 401,
+        }),
+      });
+      const implWorker = (await implRes.json()) as { sessionId: string };
+      await Bun.sleep(50);
+
+      // Reset tracking
+      envoySubscribeCalls.length = 0;
+
+      // Prune the issue
+      const pruneRes = await requestJson("/workers/prune", {
+        method: "POST",
+        body: JSON.stringify({ issueIds: ["acme-widgets-401"] }),
+      });
+      expect(pruneRes.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Blanket unsubscribe catches self-managed subscriptions (e.g. PR topics)
+      const unsubCalls = envoySubscribeCalls.filter((c) =>
+        c.url.includes("/v1/interests/unsubscribe")
+      );
+      expect(unsubCalls).toHaveLength(1);
+      expect(unsubCalls[0].body.session_id).toBe(implWorker.sessionId);
     });
   });
 
