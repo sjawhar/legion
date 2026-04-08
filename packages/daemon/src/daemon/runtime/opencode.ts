@@ -1,6 +1,7 @@
 import {
   createSession,
   createWorkerClient,
+  deleteSession,
   healthCheck,
   spawnSharedServe,
   stopServe,
@@ -69,6 +70,11 @@ export class OpenCodeAdapter implements RuntimeAdapter {
     const actualId = await createSession(this.port, sessionId, workspace);
     this.workspaces.set(actualId, workspace);
     return actualId;
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await deleteSession(this.port, sessionId);
+    this.workspaces.delete(sessionId);
   }
 
   async sendPrompt(sessionId: string, text: string): Promise<void> {

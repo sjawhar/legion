@@ -112,6 +112,7 @@ function makeAdapter(overrides?: {
     },
     healthy: overrides?.healthy ?? (async () => true),
     getPort: () => 13381,
+    getServePid: overrides?.getServePid ?? (() => 0),
     createSession: async (sessionId: string, workspace: string) => {
       createSessionCalls.push({ sessionId, workspace });
       return sessionId;
@@ -124,7 +125,7 @@ function makeAdapter(overrides?: {
       promptAsyncCalls.push({ sessionID: sessionId, parts: [{ type: "text", text }] });
     },
     getSessionStatus: async () => ({ data: undefined }),
-    getServePid: overrides?.getServePid ?? (() => 0),
+    deleteSession: async () => {},
   };
 }
 

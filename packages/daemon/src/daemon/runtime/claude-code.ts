@@ -125,6 +125,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { data: { status: alive === "running" ? "running" : "idle" } };
   }
 
+  async deleteSession(): Promise<void> {}
+
   private isProcessAlive(sessionId: string): "running" | "exited" | "none" {
     const windowTarget = `${this.sessionName}:${sessionId}`;
     const result = this.spawn([

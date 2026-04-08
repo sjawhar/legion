@@ -18,6 +18,7 @@ describe("daemon server", () => {
   let stopServer: (() => void) | null = null;
   let baseUrl = "";
   let createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+  let deleteSessionCalls: string[] = [];
   let sessionStatusHandler:
     | ((sessionId: string) => Promise<{ data?: unknown; error?: unknown }>)
     | null = null;
@@ -56,6 +57,9 @@ describe("daemon server", () => {
         }
         return { data: undefined };
       },
+      deleteSession: async (sessionId: string) => {
+        deleteSessionCalls.push(sessionId);
+      },
     };
   }
 
@@ -70,6 +74,7 @@ describe("daemon server", () => {
     getControllerState?: () => { sessionId: string; port?: number } | undefined;
   }) {
     createSessionCalls = [];
+    deleteSessionCalls = [];
     let adapter = makeAdapter();
     if (options?.adapterOverrides) {
       adapter = { ...adapter, ...options.adapterOverrides };
@@ -647,9 +652,13 @@ describe("daemon server", () => {
     });
     const created = (await createResponse.json()) as { id: string; port: number };
 
+    const sessionId = createSessionCalls[0].sessionId;
     const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
     expect(deleteResponse.status).toBe(200);
     expect(await deleteResponse.json()).toEqual({ status: "stopped" });
+
+    // Session should be deleted from serve to release SQLite FDs
+    expect(deleteSessionCalls).toEqual([sessionId]);
 
     const listResponse = await requestJson("/workers");
     const listBody = (await listResponse.json()) as WorkerEntry[];
@@ -2733,6 +2742,10 @@ describe("daemon server", () => {
       const workers = (await listResponse.json()) as WorkerEntry[];
       expect(workers).toHaveLength(1);
       expect(workers[0].id).toBe("eng-200-implement");
+
+      // Sessions should be deleted from serve to release SQLite FDs
+      // ENG-100 had 2 workers (implement + review), ENG-200 was not pruned
+      expect(deleteSessionCalls).toHaveLength(2);
     });
 
     it("prunes crash history for matching workers", async () => {

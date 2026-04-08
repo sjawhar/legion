@@ -505,6 +505,8 @@ export function startServer(opts: ServerOptions): {
               );
             }
             if (existing) {
+              // Delete old session from serve to release SQLite FDs before replacing
+              await opts.adapter.deleteSession(existing.sessionId);
               workers.delete(workerId);
             }
 
@@ -743,6 +745,9 @@ export function startServer(opts: ServerOptions): {
             return serverError(`Failed to cleanup workspace: ${(error as Error).message}`);
           }
 
+          // Delete session from serve to release SQLite FDs and memory
+          await opts.adapter.deleteSession(entry.sessionId);
+
           // Also remove the worker entry — workspace deletion means the issue is done
           workers.delete(workerId);
           crashHistory.delete(workerId);
@@ -819,6 +824,12 @@ export function startServer(opts: ServerOptions): {
 
           for (const issueId of normalizedIssueIds) {
             issueStateCache.delete(issueId);
+          }
+
+          // Delete sessions from serve BEFORE persisting state removal,
+          // so a crash between persist and delete can't orphan sessions.
+          for (const sessionId of prunedSessionIds) {
+            await opts.adapter.deleteSession(sessionId);
           }
 
           if (prunedWorkers.length > 0 || prunedCrashHistory.length > 0) {
@@ -910,6 +921,8 @@ export function startServer(opts: ServerOptions): {
             return jsonResponse(safeUpdated);
           }
           if (method === "DELETE") {
+            // Delete session from serve to release SQLite FDs and memory
+            await opts.adapter.deleteSession(entry.sessionId);
             crashHistory.set(id, {
               crashCount: entry.crashCount,
               lastCrashAt: entry.lastCrashAt,

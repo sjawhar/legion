@@ -17,6 +17,9 @@ export interface RuntimeAdapter {
   /** Create a session for a worker or controller */
   createSession(sessionId: string, workspace: string): Promise<string>;
 
+  /** Delete a session from the runtime, releasing its resources. Best-effort. */
+  deleteSession(sessionId: string): Promise<void>;
+
   /** Send a prompt to an existing session */
   sendPrompt(sessionId: string, text: string): Promise<void>;
 

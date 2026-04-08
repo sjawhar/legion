@@ -19,6 +19,7 @@ function makeAdapter(): RuntimeAdapter {
     createSession: async (sessionId) => sessionId,
     sendPrompt: async () => {},
     getSessionStatus: async () => ({ data: undefined }),
+    deleteSession: async () => {},
   };
 }
 

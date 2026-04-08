@@ -130,6 +130,24 @@ export async function createSession(
   throw new Error(`Failed to create session ${sessionId}: ${JSON.stringify(body)}`);
 }
 
+/**
+ * Delete a session from the shared serve, releasing its resources (SQLite FDs, memory).
+ * Best-effort: failures are logged but never propagated to callers.
+ */
+export async function deleteSession(port: number, sessionId: string): Promise<void> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/session/${sessionId}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      console.warn(`deleteSession: non-OK response for ${sessionId}: ${res.status}`);
+    }
+  } catch (error) {
+    console.warn(`deleteSession: failed for ${sessionId}:`, error);
+  }
+}
+
 export async function stopServe(
   port: number,
   pid: number,
