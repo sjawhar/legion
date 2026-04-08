@@ -77,7 +77,7 @@ rendered file:
 
 ```typescript
 uploads: [{
-  content: renderNatsConf(serverName, routes),
+  content: renderNatsConf(serverName, routes, machineName),
   file: "/etc/nats/nats.conf",
 }]
 ```

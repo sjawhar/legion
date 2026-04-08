@@ -92,3 +92,22 @@ NATS containers were switched from Docker bridge networking to host networking
 - The bridge networking rule above still applies to any future bridge-networked containers
 - Host networking removes container network namespace isolation; NATS ports (4222, 6222, 8222)
   are exposed directly on host interfaces, protected by Tailscale's network boundary
+
+### client_advertise (April 2026)
+
+Even with host networking, NATS may advertise Docker bridge IPs (172.17.0.x) in
+`connect_urls` because the `docker0` bridge interface is still present on the host.
+Clients that receive these unreachable IPs in the gossip-based `connect_urls` will
+hang trying to connect to them.
+
+**Fix:** Set `client_advertise=<hostname>:4222` and `cluster.advertise=<hostname>:6222`
+in nats.conf. This tells NATS exactly which addresses to advertise to clients and
+cluster peers, overriding the automatic interface detection. The hostname must be the
+machine's MagicDNS name (= `machine.name` in Pulumi config).
+
+- **Pulumi path:** `renderNatsConf()` in `packages/envoy/infra/nats.ts` includes
+  both `client_advertise` and `cluster.advertise` automatically using `machine.name`.
+- **Compose path:** `render-nats-peer.sh` requires `NATS_HOSTNAME` env var
+  (e.g., `NATS_HOSTNAME=sami-agents-mx`).
+
+See issue #332 for the original bug report.

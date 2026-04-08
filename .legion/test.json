@@ -1,19 +1,24 @@
 {
-  "passed": 12,
+  "passed": 7,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "README Machine Configuration table is clear — name→MagicDNS contract explicit on line 104. constraints.md updates both required lines. docker-tailscale-networking.md preserves bridge networking rule while noting NATS exception. No gaps or confusion found.",
+  "documentationFeedback": "Documentation is clear and accurate. The 'client_advertise (April 2026)' section explains the problem well and covers both deployment paths. Minor gap: no 'how to verify in production' section (e.g., checking NATS monitoring endpoint). Not blocking.",
   "observations": [
-    "P2: Tests are happy-path-only — no edge cases for empty machines, all nats:false, or special characters in names",
-    "P2: No integration test for createNatsPeer() full pipeline (MachineConfig→PeerInfo→routes→conf→container)",
-    "Deviation: receivers.ghostwispr row added to README (harmless, documents existing field)",
+    "P2: Tests are happy-path only — no edge cases for empty routes, empty machineName, or special characters",
+    "P2: No negative assertion for 172.17.x bridge IPs in test suite",
+    "P2: No automated test for render-nats-peer.sh (Compose path)",
     "Pre-existing TS5107 moduleResolution=node10 deprecation in infra tsconfig — unrelated to PR",
-    "deleteBeforeReplace: true correctly set on NATS container per pulumi-remote-docker-patterns learning",
-    "Criteria 13 (JetStream persistence) and 14 (cluster formation) are manual rollout verification — code supports both via named volumes and hostname-based routes"
+    "Trailing newline difference between Pulumi and Compose output (cosmetic, NATS ignores)",
+    "Live cluster verification (routez, JetStream persistence) requires Tailscale-connected host — not CI-testable"
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/envoy/docker-tailscale-networking.md",
+    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/envoy/docker-tailscale-networking.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-07T02:09:46.782Z"
+  "completed": "2026-04-08T12:08:53.174Z"
 }
