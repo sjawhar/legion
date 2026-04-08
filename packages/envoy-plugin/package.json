@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sjawhar/legion"
+  },
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --format esm",
