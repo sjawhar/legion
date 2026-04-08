@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -103,6 +104,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Set release version
@@ -112,6 +117,23 @@ jobs:
             && mv tmp.json packages/envoy-plugin/package.json
       - name: Build plugin
         run: bun run build
+        working-directory: packages/envoy-plugin
+      - name: Check if already published
+        id: check
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/${VERSION}")
+          if [ "$STATUS" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "✓ @sjawhar/opencode-legion-envoy@${VERSION} already published"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.skip != 'true'
+        run: npm publish --access public --provenance
         working-directory: packages/envoy-plugin
       - name: Pack plugin
         run: bun pm pack
