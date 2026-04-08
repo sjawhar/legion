@@ -1,29 +1,21 @@
 {
   "filesChanged": [
-    "packages/envoy-plugin/src/port.ts",
-    "packages/envoy-plugin/src/index.ts",
-    "packages/envoy-plugin/src/__tests__/port.test.ts",
-    "packages/envoy-plugin/src/__tests__/index.test.ts"
+    "packages/envoy/internal/mcpbridge/envelope.go",
+    "packages/envoy/internal/mcpbridge/envelope_test.go"
   ],
   "trickyParts": [
-    "resolvePort was sync (execFileSync) — changed to async with callback-based execFile wrapped in Promise. DI pattern preserved: ExecFn type accepts string | Promise<string> so test mocks work with both sync and async returns.",
-    "Port resolution split into refreshPort (async, does I/O + caching) and currentPort (sync, returns cached value) — tools need synchronous port access but resolution must be async.",
-    "Port retry timer needs unref() to avoid preventing graceful shutdown, and must be cleared in the exit handler alongside the heartbeat interval."
+    "Included URI in the SHA-256 hash alongside payloadSummary to prevent false deduplication when different resources produce identical text (e.g., two contacts both send 'Hello'). The null byte separator prevents ambiguous concatenation."
   ],
   "deviations": [
-    "No formal plan existed (issue had no comments with plan). Implemented directly from issue description and non-blocking infrastructure principle documented in docs/solutions/."
+    "Issue specified sha256(payloadSummary) only, but implementation uses sha256(uri + payloadSummary) to prevent cross-resource collisions. This is stricter than requested but prevents false positives."
   ],
   "openQuestions": [
-    "currentPort() returns null before async resolution completes — tools send port:0 to Envoy during this window. This is pre-existing behavior (old sync resolvePort could also return null). The heartbeat re-subscribes with correct port when available.",
-    "_activeFile variable is declared but never read — pre-existing dead code, not introduced by this PR."
+    "Summary truncation to 200 chars means two messages differing only after char 200 from the same URI would collide within the 10-minute dedupe window. Unlikely in practice but worth noting."
   ],
   "subPlanningNeeded": false,
-  "learningsInjected": [
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/envoy/async-health-startup-pattern.md"
-  ],
-  "learningsHelpful": ["docs/solutions/daemon/envoy-auto-subscription-patterns.md"],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T12:58:29.210Z"
+  "completed": "2026-04-08T15:37:22.725Z"
 }
