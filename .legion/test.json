@@ -1,26 +1,21 @@
 {
-  "passed": 4,
+  "passed": 1,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body is clear and well-structured. JSDoc on deleteSession is accurate. Minor gap: AGENTS.md doesn't mention deleteSession in serve-manager description — not blocking.",
+  "documentationFeedback": "PR body is clear and accurate. AGENTS.md mentions waitForHealthy() appropriately. docs/solutions/daemon/opencode-serve-lifecycle.md discusses startup timing but doesn't reference the waitForHealthy timeout — minor gap, not blocking.",
   "observations": [
-    "P2: No test assertion for deleteSessionCalls in workspace deletion path (cleans worker workspace by repo)",
-    "P2: No test assertion for deleteSessionCalls in dead worker replacement path (allows respawn for dead workers)",
-    "P2: No ordering test for prune path deleteSession-before-persistState constraint",
-    "P2: Happy-path-only integration tests — no slow/blocked deleteSession coverage",
-    "ClaudeCodeAdapter.deleteSession is a no-op — tmux windows can accumulate",
-    "Pre-existing test failure: passes controller env vars to adapter.start on startup — fails on main, unrelated"
+    "P2: No test asserts the default maxRetries value (90). All waitForHealthy tests pass explicit values. Someone could revert the default and tests would still pass.",
+    "45s timeout provides 17s headroom over 28s startup — adequate but not generous for future plugin growth."
   ],
   "learningsInjected": [
     "docs/solutions/daemon/opencode-serve-lifecycle.md",
-    "docs/solutions/daemon/graceful-worker-shutdown.md",
-    "docs/solutions/daemon/shared-serve-retro.md"
+    "docs/solutions/daemon/shared-serve-retro.md",
+    "docs/solutions/daemon/graceful-worker-shutdown.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/daemon/opencode-serve-lifecycle.md",
-    "docs/solutions/daemon/graceful-worker-shutdown.md"
+    "docs/solutions/daemon/opencode-serve-lifecycle.md"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-08T12:25:24.762Z"
+  "completed": "2026-04-08T12:48:01.380Z"
 }
