@@ -1,14 +1,9 @@
 {
-  "filesChanged": [
-    ".github/workflows/release-envoy-and-plugin.yaml"
-  ],
-  "trickyParts": [
-    "The release job still bumps package.json with the Go tag version for the repo commit — this is intentional and separate from the npm publish version"
-  ],
-  "deviations": [],
-  "openQuestions": [],
-  "subPlanningNeeded": false,
+  "pr": 360,
+  "branch": "sjawhar-legion-358",
+  "status": "ready_for_review",
+  "summary": "Added Payload field to Envelope struct alongside PayloadSummary. githubPayload() in normalize.go builds full untruncated JSON for comment/review/PR/issue events. session.go Text() prefers Payload over PayloadSummary. Tests verify 600-char comment bodies delivered in full.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T22:05:55.312Z"
+  "completed": "2026-04-08T22:44:40.346Z"
 }
