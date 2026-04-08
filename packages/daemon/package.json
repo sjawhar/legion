@@ -1,6 +1,6 @@
 {
   "name": "legion",
-  "version": "0.13.7",
+  "version": "0.13.8",
   "type": "module",
   "description": "Autonomous development swarm using OpenCode agents",
   "bin": {
