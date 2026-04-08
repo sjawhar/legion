@@ -1,21 +1,14 @@
 {
   "filesChanged": [
-    ".github/workflows/release-envoy-and-plugin.yaml",
-    ".github/workflows/publish-envoy-plugin.yml"
+    ".github/workflows/release-envoy-and-plugin.yaml"
   ],
   "trickyParts": [
-    "npm OIDC trusted publishing must be configured on npmjs.com for @sjawhar/opencode-legion-envoy — without it the first real publish will fail with auth error. This is a one-time npm.js config, not a workflow issue."
+    "The release job still bumps package.json with the Go tag version for the repo commit — this is intentional and separate from the npm publish version"
   ],
-  "deviations": [
-    "Removed redundant NPM_CONFIG_PROVENANCE env var since --provenance flag already enables it"
-  ],
-  "openQuestions": [
-    "npm trusted publishing config needed on npmjs.com before first real publish via unified workflow"
-  ],
+  "deviations": [],
+  "openQuestions": [],
   "subPlanningNeeded": false,
-  "learningsInjected": [],
-  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T19:59:07.158Z"
+  "completed": "2026-04-08T22:05:55.312Z"
 }
