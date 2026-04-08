@@ -1,21 +1,19 @@
 {
   "filesChanged": [
-    ".github/workflows/publish-envoy-plugin.yml"
+    "packages/daemon/src/daemon/serve-manager.ts"
   ],
-  "trickyParts": [
-    "Cross-family review caught 3 issues: missing [skip ci] on release commit, brittle git push HEAD, and release job running when version already published. All addressed.",
-    "Branch was contaminated with unrelated changes from other workers — cleaned up to isolate only the workflow file."
-  ],
-  "deviations": [
-    "Did not add declaration generation (bunx tsc --emitDeclarationOnly) — the package.json types field pointing to dist/index.d.ts is a pre-existing gap in the build script.",
-    "Did not add files field to package.json to control npm publish contents — matching existing OMO pattern."
-  ],
-  "openQuestions": [
-    "NODE_AUTH_TOKEN secret must be added to the Legion repo before the workflow can run.",
-    "Pre-existing: packages/envoy-plugin/package.json declares types: dist/index.d.ts but the build script does not generate declarations."
-  ],
+  "trickyParts": [],
+  "deviations": [],
+  "openQuestions": [],
   "subPlanningNeeded": false,
+  "learningsInjected": [
+    "docs/solutions/daemon/opencode-serve-lifecycle.md",
+    "docs/solutions/daemon/shared-serve-retro.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/daemon/opencode-serve-lifecycle.md"
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T12:12:25.878Z"
+  "completed": "2026-04-08T12:42:23.839Z"
 }
