@@ -1,6 +1,6 @@
 config:
   envoy:registry: ghcr.io/sjawhar/legion
-  envoy:imageTag: 7f2012976dba
+  envoy:imageTag: 94fdf0276743ea20a021873f81b8fddf27169311
   envoy:natsImage: "nats:2.11-alpine"
   envoy:machines:
     - name: sami-agents-mx
