@@ -1,30 +1,26 @@
 {
   "filesChanged": [
-    "packages/envoy/infra/nats.ts",
-    "packages/envoy/infra/__tests__/nats.test.ts",
-    "packages/envoy/deploy/scripts/render-nats-peer.sh",
-    "docs/solutions/envoy/docker-tailscale-networking.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "packages/envoy/go.mod",
+    "packages/envoy/go.sum",
+    "packages/envoy/internal/bus/nats.go",
+    "packages/envoy/internal/store/kv.go",
+    "packages/envoy/internal/store/kv_test.go",
+    "packages/envoy/internal/session/registry.go"
   ],
   "trickyParts": [
-    "Cross-family review caught that cluster.advertise was also needed for the same docker0 interface issue on cluster gossip — added both client_advertise and cluster advertise",
-    "Refactored renderNatsConf to accept machineName instead of clientAdvertise string — cleaner since function derives both :4222 and :6222 ports internally"
+    "Removing load() introduces a theoretical startup race window where Match() returns empty until watch() populates the cache. Analysis shows this is safe: Get() has a KV fallback for agent-targeted messages, the consumer uses DeliverNew() so no historical messages are at risk, and WatchAll() initial delivery is faster than the old N sequential Gets approach."
   ],
   "deviations": [
-    "Added cluster.advertise in addition to client_advertise — not in original issue but same root cause (docker0 IPs leaking into gossip)",
-    "Changed render-nats-peer.sh to use NATS_HOSTNAME env var instead of NATS_ADVERTISE — derives both advertise addresses from hostname"
+    "Removed the entire load() function rather than just skipping the call — it was dead code after removing the call site, so clean removal is better than leaving it"
   ],
-  "openQuestions": [
-    "Live cluster verification (routez, JetStream persistence) requires Tailscale-connected host — needs manual verification after deploy"
-  ],
+  "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [
-    "docs/solutions/envoy/docker-tailscale-networking.md"
+    "docs/solutions/architecture-patterns/nats-kv-graceful-degradation.md",
+    "docs/solutions/envoy/async-health-startup-pattern.md"
   ],
-  "learningsHelpful": [
-    "docs/solutions/envoy/docker-tailscale-networking.md"
-  ],
+  "learningsHelpful": ["docs/solutions/envoy/async-health-startup-pattern.md"],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-08T12:07:55.280Z"
+  "completed": "2026-04-08T12:08:54.859Z"
 }
