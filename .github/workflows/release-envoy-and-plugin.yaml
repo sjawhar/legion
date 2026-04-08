@@ -111,8 +111,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Set release version
+        id: plugin_version
         run: |
-          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' \
+          PREV=$(curl -s https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/latest | jq -r '.version // "0.0.0"')
+          BASE="${PREV%%-*}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+          PLUGIN_VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
+          echo "version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Bumping npm $PREV → $PLUGIN_VERSION"
+          jq --arg v "$PLUGIN_VERSION" '.version = $v' \
             packages/envoy-plugin/package.json > tmp.json \
             && mv tmp.json packages/envoy-plugin/package.json
       - name: Build plugin
@@ -121,7 +128,7 @@ jobs:
       - name: Check if already published
         id: check
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          VERSION: ${{ steps.plugin_version.outputs.version }}
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/${VERSION}")
           if [ "$STATUS" = "200" ]; then
