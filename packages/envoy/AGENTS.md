@@ -36,6 +36,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
+- **Source-specific vs generic ingestion**: Envoy has two ingestion paths: dedicated webhook receivers (`cmd/github/`, `cmd/slack/`, `cmd/ghostwispr/`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building a dedicated receiver adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 ## Operational notes
 
