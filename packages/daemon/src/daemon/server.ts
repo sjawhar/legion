@@ -523,7 +523,7 @@ export function startServer(opts: ServerOptions): {
             const workspace = payload.workspace;
             const version = typeof payload.version === "number" ? payload.version : 0;
             const envPayload = payload.env;
-            const issueNumber =
+            let issueNumber =
               typeof payload.issueNumber === "number" ? payload.issueNumber : undefined;
 
             const prompt = payload.prompt;
@@ -577,6 +577,18 @@ export function startServer(opts: ServerOptions): {
 
             let resolvedWorkspace: string | null = null;
             const repoRef = typeof repo === "string" ? parseIssueRepo(repo) : null;
+            // Auto-extract issueNumber from issueId when not explicitly provided.
+            // GitHub issue IDs follow the format {owner}-{repo}-{number}.
+            if (issueNumber === undefined && repoRef) {
+              const prefix = `${repoRef.owner}-${repoRef.repo}-`.toLowerCase();
+              if (normalizedIssueId.startsWith(prefix)) {
+                const numStr = normalizedIssueId.slice(prefix.length);
+                const parsed = Number(numStr);
+                if (Number.isInteger(parsed) && parsed > 0) {
+                  issueNumber = parsed;
+                }
+              }
+            }
             if (typeof repo === "string") {
               if (!opts.paths) {
                 return badRequest("repo_resolution_unavailable");

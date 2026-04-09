@@ -1471,6 +1471,46 @@ describe("daemon server", () => {
       ]);
     });
 
+    it("auto-extracts issueNumber from issueId and subscribes plan worker to Envoy", async () => {
+      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
+      mockFetchForEnvoy(envoySubscribeCalls);
+
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      // Dispatch plan worker WITHOUT explicit issueNumber — matches real controller behavior
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-44",
+          mode: "plan",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { sessionId: string };
+
+      await Bun.sleep(50);
+
+      // Should still subscribe — issueNumber auto-extracted from issueId
+      expect(envoySubscribeCalls).toHaveLength(1);
+      expect(envoySubscribeCalls[0].body.session_id).toBe(body.sessionId);
+      expect(envoySubscribeCalls[0].body.topics).toEqual([
+        "notifications.github.acme.widgets.issue.44.>",
+      ]);
+
+      // Verify envoyTopics stored on worker entry
+      const workerRes = await requestJson("/workers");
+      const workers = (await workerRes.json()) as Array<{
+        id: string;
+        envoyTopics?: string[];
+        issueNumber?: number;
+      }>;
+      const planWorker = workers.find((w) => w.id === "acme-widgets-44-plan");
+      expect(planWorker?.envoyTopics).toEqual(["notifications.github.acme.widgets.issue.44.>"]);
+      expect(planWorker?.issueNumber).toBe(44);
+    });
+
     it("skips Envoy subscribe when issueNumber is absent", async () => {
       const envoySubscribeCalls: EnvoySubscribeCall[] = [];
       mockFetchForEnvoy(envoySubscribeCalls);
