@@ -98,6 +98,50 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	}
 }
 
+// sessionInfo is the joined view of an Interest (topics, dir, machine) and a
+// SessionEntry (port). Returned by GET /v1/sessions.
+type sessionInfo struct {
+	SessionID string   `json:"session_id"`
+	MachineID string   `json:"machine_id"`
+	Dir       string   `json:"dir"`
+	Port      int      `json:"port"`
+	Topics    []string `json:"topics"`
+	UpdatedAt int64    `json:"updated_at"`
+}
+
+// sessionsHandler returns all known sessions by joining the interests registry
+// (which tracks subscribed topics) with the session registry (which tracks ports).
+func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		interests := registry.List()
+		result := make([]sessionInfo, 0, len(interests))
+		for _, interest := range interests {
+			info := sessionInfo{
+				SessionID: interest.SessionID,
+				MachineID: interest.MachineID,
+				Dir:       interest.Dir,
+				Topics:    interest.Topics,
+				UpdatedAt: interest.UpdatedAt,
+			}
+			if sessions != nil {
+				if entry, err := sessions.Get(interest.SessionID); err == nil {
+					info.Port = entry.Port
+					if entry.UpdatedAt > info.UpdatedAt {
+						info.UpdatedAt = entry.UpdatedAt
+					}
+				}
+			}
+			result = append(result, info)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
+	}
+}
+
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
@@ -268,6 +312,10 @@ func main() {
 	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
 		adminInterestsHandler(d.registry).ServeHTTP(w, r)
+	})
+	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		d := deps.Load()
+		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -38,3 +38,20 @@ Agent messages  --/                         |
 - NATS JetStream cluster across all machines via Tailscale mesh
 - JetStream stream `ENVOY_NOTIFICATIONS` with 1h retention for replay on listener restart
 - JetStream KV bucket `envoy_interests` with 3 replicas for session subscriptions
+- JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data
+
+## Listener API
+
+All `/v1/*` endpoints return 503 until NATS initialization completes.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/sessions` | GET | Lists all sessions across all machines — joins `envoy_interests` (topics, dir) with `envoy_sessions` (port) |
+| `/v1/interests/subscribe` | POST | Subscribe a session to topics |
+| `/v1/interests/unsubscribe` | POST | Unsubscribe a session from topics |
+| `/v1/interests/` | GET | List all interests |
+| `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's interests |
+| `/v1/registry/{session_id}` | GET | Get a session's registry entry (port, machine) |
+| `/v1/messages/send` | POST | Send a direct agent-to-agent message |
+| `/v1/messages/publish` | POST | Publish an event to a topic |
+| `/healthz` | GET | Health check (always available, even during startup) |
