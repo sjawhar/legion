@@ -22,6 +22,13 @@ linear_linear(action="update",
 )
 ```
 
+## Routing Labels
+
+| Label | Meaning | Added by | Removed by |
+|-------|---------|----------|------------|
+| `sentry` | Issue from Sentry error tracking, triggers sentry-specific fix workflow | Sentry integration / Human | N/A (persistent) |
+| `bug` | General bug report | Human | N/A (persistent) |
+
 ## GitHub PR Draft Status (Not Linear)
 
 Review outcomes signaled via **PR draft status**, not labels:

@@ -1,3 +1,4 @@
+import { v5 as uuidv5 } from "uuid";
 import type { RuntimeAdapter, RuntimeStartOptions } from "./types";
 
 type SpawnResult = {
@@ -9,6 +10,21 @@ export type SpawnFn = (cmd: string[]) => SpawnResult;
 
 function shellEscape(s: string): string {
   return s.replace(/'/g, "'\\''");
+}
+
+/**
+ * Convert any session ID to a UUID suitable for `claude --session-id`.
+ * If it's already a UUID, return as-is. Otherwise, generate a deterministic
+ * UUID from the string (handles OpenCode's `ses_` format).
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLAUDE_SESSION_NS = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+
+function toClaudeSessionId(sessionId: string): string {
+  if (UUID_RE.test(sessionId)) {
+    return sessionId;
+  }
+  return uuidv5(sessionId, CLAUDE_SESSION_NS);
 }
 
 // TECH DEBT: Using spawnSync blocks the event loop (~2ms per call).
@@ -103,16 +119,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   async sendPrompt(sessionId: string, text: string): Promise<void> {
     const windowTarget = `${this.sessionName}:${sessionId}`;
+    const claudeId = toClaudeSessionId(sessionId);
     const alive = this.isProcessAlive(sessionId);
 
     let result: SpawnResult;
     if (alive === "running") {
       result = this.spawn(["tmux", "send-keys", "-t", windowTarget, text, "Enter"]);
     } else if (alive === "exited") {
-      const cmd = `claude --resume '${shellEscape(sessionId)}' -p '${shellEscape(text)}' --dangerously-skip-permissions`;
+      const cmd = `claude --resume '${shellEscape(claudeId)}' -p '${shellEscape(text)}' --dangerously-skip-permissions`;
       result = this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
     } else {
-      const cmd = `claude -p '${shellEscape(text)}' --session-id '${shellEscape(sessionId)}' --dangerously-skip-permissions`;
+      const cmd = `claude -p '${shellEscape(text)}' --session-id '${shellEscape(claudeId)}' --dangerously-skip-permissions`;
       result = this.spawn(["tmux", "send-keys", "-t", windowTarget, cmd, "Enter"]);
     }
     if (result.exitCode !== 0) {

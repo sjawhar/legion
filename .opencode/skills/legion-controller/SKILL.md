@@ -523,6 +523,7 @@ Controller routes Triage issues directly (no worker needed):
 
 | Assessment | Route To |
 |------------|----------|
+| `sentry` label present | Todo (Sentry integration creates these directly in Todo — see below) |
 | Urgent AND clear requirements | Todo (dispatch planner) |
 | Bug label + clear reproduction steps + no architectural uncertainty | Todo (skip architect — dispatch planner directly) |
 | Clear requirements, any size | Backlog (architect breaks down if large) |
@@ -531,6 +532,32 @@ Controller routes Triage issues directly (no worker needed):
 The skip-architect rule only applies when ALL conditions are met: `bug` label present,
 description contains clear reproduction steps, and the change is scoped to a single
 component. When in doubt, route to Backlog.
+
+#### Sentry Issues
+
+Issues with the `sentry` label come from Sentry error tracking. The Sentry-Linear integration
+creates these directly in Todo, so they skip architect and triage automatically.
+
+**Dispatch:** When dispatching any worker for an issue with the `sentry` label, include
+`This issue has the sentry label.` in the dispatch prompt. The worker workflows have
+sentry-specific conditional sections that activate when they see this label on the issue.
+
+**Post-merge cleanup:** After a sentry issue reaches Done, resolve the Sentry issue via API:
+
+```bash
+# Extract Sentry issue URL from issue body
+SENTRY_URL=$(linear_linear(action="get", id=$LEGION_ISSUE_ID) | grep -oE 'https://[^/]+\.sentry\.io/issues/[0-9]+')
+SENTRY_ID=$(echo "$SENTRY_URL" | grep -oE '[0-9]+$')
+
+if [ -n "$SENTRY_ID" ]; then
+  curl -s -X PUT "https://us.sentry.io/api/0/organizations/metr-sh/issues/$SENTRY_ID/" \
+    -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"status": "resolved"}'
+fi
+```
+
+Add this to the Cleanup Done step (step 6) for issues with the `sentry` label.
 
 ### 5. Pull from Icebox
 

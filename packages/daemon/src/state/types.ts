@@ -305,6 +305,7 @@ export interface ParsedIssue {
   readonly hasHumanApproved: boolean;
   readonly hasTestPassed: boolean;
   readonly hasTestFailed: boolean;
+  readonly hasSentry: boolean;
   readonly hasPr: boolean;
   readonly needsPrStatus: boolean;
   readonly needsCiStatus: boolean;
@@ -359,6 +360,10 @@ export function createParsedIssue(
 
     get hasTestFailed() {
       return this.labels.includes("test-failed");
+    },
+
+    get hasSentry() {
+      return this.labels.includes("sentry");
     },
 
     get hasPr() {

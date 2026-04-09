@@ -14,6 +14,10 @@ gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO
 - `needs-approval` — Plan/architecture needs human approval
 - `human-approved` — Human approved the plan
 
+## Routing Labels
+- `sentry` — Issue originated from Sentry error tracking. Triggers sentry-specific fix workflow: skip architect, use targeted fix prompt with stack trace focus, production-only scope.
+- `bug` — General bug report. May skip architect if reproduction steps are clear.
+
 ## Architect-Review Labels (Opt-In)
 - `architect-continuity` — Opt-in: architect reviews plan before implementation (persistent, stays for issue lifetime)
 - `arch-review-approved` — Architect approved the plan (transient, cleaned up by controller after acting)

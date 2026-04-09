@@ -67,6 +67,27 @@ Fetch issue and comments. The plan is in comments:
 - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
 
+#### If this issue has the `sentry` label
+
+This is a production error fix. Adjust your approach:
+
+1. **Write a failing test FIRST** that reproduces the error from the stack trace before implementing any fix
+2. **Keep the diff minimal** — fix the bug, nothing else. No refactoring, no cleanup, no unrelated improvements.
+3. **Run the full test suite** for the affected module after the fix — no regressions allowed
+
+After creating the PR (step 6), comment the PR URL on the Sentry issue:
+
+```bash
+SENTRY_ID=<numeric ID from Sentry URL in issue body>
+PR_URL=$(gh pr view "$LEGION_ISSUE_ID" --json url --jq '.url' -R $OWNER/$REPO 2>/dev/null)
+if [ -n "$SENTRY_ID" ] && [ -n "$PR_URL" ]; then
+  curl -s -X POST "https://us.sentry.io/api/0/organizations/metr-sh/issues/$SENTRY_ID/comments/" \
+    -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"text\": \"Fix PR: $PR_URL\"}"
+fi
+```
+
 ### 1.5. Check for Project-Specific Skills
 
 Before implementing, check if the repo has skills relevant to this work:

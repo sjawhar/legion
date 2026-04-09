@@ -298,7 +298,11 @@ export async function startDaemon(
     daemon_rss_restarts: rssRestarts,
     daemon_role_serves: roleServeManager?.getEntries().length ?? 0,
   }));
-  const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
+  // Both runtimes need the project directory:
+  // - claude-code: skills are discovered from the project root
+  // - opencode: MCP servers configured in opencode.json at the project root
+  const controllerWorkspace =
+    config.legionDir ?? config.paths.forLegion(legionId).legionStateDir;
   const hasIndexRoot = !!config.legionDir && existsSync(config.legionDir);
   if (config.legionDir && !hasIndexRoot) {
     console.warn(`Codebase index skipped: LEGION_DIR does not exist (${config.legionDir})`);

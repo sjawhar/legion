@@ -59,6 +59,39 @@ Extract:
 - Comments with additional context
 - Acceptance criteria if present
 
+#### If this issue has the `sentry` label
+
+This is a production error from Sentry. Before standard planning, gather Sentry-specific context:
+
+1. **Fetch Sentry details** using the Sentry MCP tools:
+   - `get_sentry_resource(url=<sentry_issue_url>)` — full issue details, stack trace, tags
+   - `search_issue_events(issueUrl=..., naturalLanguageQuery=...)` — filter events by env/release/user
+   - `get_issue_tag_values(issueUrl=..., tagKey='url'|'environment'|'release'|...)` — distribution data
+   - `analyze_issue_with_seer(issueUrl=...)` — AI root cause analysis
+
+   The Sentry issue URL should be in the issue body. The org is `metr-sh`, region URL is `https://us.sentry.io`.
+
+2. **Assign the Sentry issue** to signal work has started:
+   ```bash
+   SENTRY_ID=<numeric ID from Sentry URL>
+   curl -s -X PUT "https://us.sentry.io/api/0/organizations/metr-sh/issues/$SENTRY_ID/" \
+     -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"assignedTo":"me"}'
+   curl -s -X POST "https://us.sentry.io/api/0/organizations/metr-sh/issues/$SENTRY_ID/comments/" \
+     -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "Investigating — Legion worker assigned."}'
+   ```
+
+3. **Scope the plan tightly.** This is a targeted bug fix, not a feature:
+   - Identify root cause from the stack trace
+   - Keep changes minimal — fix the bug, nothing else
+   - Plan a regression test that reproduces the error condition
+   - Skip architectural analysis
+
+Include the Sentry MCP findings in the `/ce:plan` context (step 2) alongside Metis analysis.
+
 ### 1.3. Load Repo Config
 
 Read repo config from workspace root:
