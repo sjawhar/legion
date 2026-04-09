@@ -1,20 +1,16 @@
 {
-  "passed": 2,
+  "passed": 4,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body is clear and accurate. README doesn't list envoy_publish tool (pre-existing gap). No docs updated about non-blocking behavior (reasonable — internal change).",
+  "documentationFeedback": "PR description and issue body clearly explain the problem and solution. All 7 changed files listed accurately.",
   "observations": [
-    "P2: index.test.ts init test sets OC_REGISTRY=undefined, skipping the registryDir code path where all non-blocking changes live. Test proves init is fast when feature path is disabled.",
-    "P2: index.test.ts timeout test targets ECONNREFUSED (fast error), not an actual timeout. Doesn't prove AbortSignal.timeout works.",
-    "_activeFile variable is declared but never read — pre-existing dead code.",
-    "currentPort() returns null before async resolution — tools send port:0 during startup window. Pre-existing behavior, heartbeat re-subscribes with correct port."
+    "implement.md correctly has two notification points (fresh + address-comments)",
+    "test.md correctly has two notification points (pass + fail)",
+    "All notifications include fallback note about envoy_publish failures"
   ],
-  "learningsInjected": [
-    "docs/solutions/envoy/async-health-startup-pattern.md",
-    "docs/solutions/daemon/opencode-serve-lifecycle.md"
-  ],
+  "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-08T13:10:32.786Z"
+  "completed": "2026-04-09T22:45:40.257Z"
 }
