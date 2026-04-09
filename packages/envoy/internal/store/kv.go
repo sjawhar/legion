@@ -117,6 +117,9 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	return err
 }
 
+// Get returns the Interest for a session. Cache first, direct KV read on miss.
+// The KV fallback also repopulates the cache, bridging the warm-up window after
+// Open() before watch() has fully populated the cache.
 func (r *Registry) Get(sessionID string) (Interest, error) {
 	r.mu.RLock()
 	item, ok := r.cache[sessionID]
