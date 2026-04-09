@@ -29,7 +29,7 @@ import (
 type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
-	sessions *session.SessionRegistry
+	sessions session.SessionLookup
 }
 
 // readinessGate returns 503 until ready returns true, providing a single
@@ -321,7 +321,8 @@ func main() {
 	})
 	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
-		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
+		reg, _ := d.sessions.(*session.SessionRegistry)
+		sessionsHandler(d.registry, reg).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -412,18 +413,23 @@ func main() {
 		log.Fatal(err)
 	}
 
-	var sessions *session.SessionRegistry
-	if reg, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(cfg.NATSReplicas)); err != nil {
-		log.Printf("WARN: KV registry unavailable, using file-only delivery: %v", err)
-	} else {
-		sessions = reg
+	registryMode := session.ParseRegistryMode()
+	sessions, err := session.NewSessionLookup(
+		registryMode,
+		client.Conn,
+		os.Getenv("ENVOY_REGISTRY_DIR"),
+		cfg.MachineID,
+		session.WithSessionReplicas(cfg.NATSReplicas),
+	)
+	if err != nil {
+		log.Fatal(err)
 	}
+	log.Printf("session registry mode=%s", registryMode)
 
 	deliver := session.Deliverer{
-		MachineID:   cfg.MachineID,
-		RegistryDir: os.Getenv("ENVOY_REGISTRY_DIR"),
-		HostBridge:  os.Getenv("ENVOY_HOST_BRIDGE"),
-		Sessions:    sessions,
+		MachineID:  cfg.MachineID,
+		HostBridge: os.Getenv("ENVOY_HOST_BRIDGE"),
+		Sessions:   sessions,
 	}
 
 	dedupeCache := dedupe.New(10 * time.Minute)

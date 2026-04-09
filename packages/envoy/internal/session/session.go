@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -31,53 +29,28 @@ var ErrWrongMachine = errors.New("session belongs to a different machine")
 
 type Deliverer struct {
 	MachineID    string
-	RegistryDir  string
 	HostBridge   string
 	RequestLimit time.Duration
-	Sessions     *SessionRegistry
+	Sessions     SessionLookup
 }
 
 func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) error {
 	text := d.Text(item)
 
-	// KV-first: try SessionRegistry for port
-	if d.Sessions != nil {
-		if entry, err := d.Sessions.Get(interest.SessionID); err == nil {
-			if d.MachineID != "" && entry.MachineID != "" && entry.MachineID != d.MachineID {
-				return ErrWrongMachine
-			}
-			if entry.Port > 0 {
-				return d.prompt(entry.Port, interest.SessionID, text)
-			}
-		}
+	if d.Sessions == nil {
+		return fmt.Errorf("no session registry configured")
 	}
-
-	// Fallback: file registry
-	entry, _ := d.Find(interest.SessionID)
-	if entry != nil && entry.Port > 0 {
-		return d.prompt(entry.Port, interest.SessionID, text)
-	}
-
-	return fmt.Errorf("no live serve port for session %s", interest.SessionID)
-}
-
-func (d Deliverer) Find(sessionID string) (*RegistryEntry, error) {
-	if d.RegistryDir == "" {
-		return nil, os.ErrNotExist
-	}
-	path := filepath.Join(d.RegistryDir, sessionID+".json")
-	buf, err := os.ReadFile(path)
+	entryVal, err := d.Sessions.Get(interest.SessionID)
 	if err != nil {
-		return nil, os.ErrNotExist
+		return fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
-	var entry RegistryEntry
-	if err := json.Unmarshal(buf, &entry); err != nil {
-		return nil, err
+	if d.MachineID != "" && entryVal.MachineID != "" && entryVal.MachineID != d.MachineID {
+		return ErrWrongMachine
 	}
-	if entry.Port == 0 {
-		return nil, fmt.Errorf("registry entry for %s has no port", sessionID)
+	if entryVal.Port > 0 {
+		return d.prompt(entryVal.Port, interest.SessionID, text)
 	}
-	return &entry, nil
+	return fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {

@@ -48,11 +48,12 @@ func writeRegistryEntry(t *testing.T, dir string, pid, port int, sessionID strin
 	}
 }
 
-func newDeliverer(dir string) Deliverer {
+// newFileDeliverer creates a Deliverer backed by a FileRegistry.
+func newFileDeliverer(dir string) Deliverer {
 	return Deliverer{
-		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
+		Sessions:     &FileRegistry{Dir: dir},
 	}
 }
 
@@ -73,7 +74,7 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 12345, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 
@@ -89,7 +90,7 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 
 func TestDeliver_NoRegistryEntry(t *testing.T) {
 	dir := t.TempDir()
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 	interest := store.Interest{SessionID: "ses_ghost", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_ghost", "test message")
 
@@ -120,7 +121,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 	item := newTestEnvelope("slack", "notifications.slack.T123.C456.mention", "test payload")
 	item.SourceSession = "ses_sender_123"
 
@@ -156,7 +157,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 }
 
 func TestText_WithSourceSession(t *testing.T) {
-	deliverer := newDeliverer(t.TempDir())
+	deliverer := newFileDeliverer(t.TempDir())
 	item := contracts.Envelope{
 		EventID:        "evt-1",
 		Source:         "agent",
@@ -172,7 +173,7 @@ func TestText_WithSourceSession(t *testing.T) {
 }
 
 func TestText_WithoutSourceSession(t *testing.T) {
-	deliverer := newDeliverer(t.TempDir())
+	deliverer := newFileDeliverer(t.TempDir())
 	item := contracts.Envelope{
 		EventID:        "evt-2",
 		Source:         "slack",
@@ -191,7 +192,7 @@ func TestText_WithoutSourceSession(t *testing.T) {
 }
 
 func TestText_PrefersPayloadOverSummary(t *testing.T) {
-	deliverer := newDeliverer(t.TempDir())
+	deliverer := newFileDeliverer(t.TempDir())
 	item := contracts.Envelope{
 		EventID:        "evt-3",
 		Source:         "github",
@@ -210,7 +211,7 @@ func TestText_PrefersPayloadOverSummary(t *testing.T) {
 }
 
 func TestText_FallsBackToSummaryWhenPayloadEmpty(t *testing.T) {
-	deliverer := newDeliverer(t.TempDir())
+	deliverer := newFileDeliverer(t.TempDir())
 	item := contracts.Envelope{
 		EventID:        "evt-4",
 		Source:         "github",
@@ -240,7 +241,7 @@ func TestDeliver_NoAgentField(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
 	deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
@@ -261,7 +262,7 @@ func TestDeliver_PromptAsyncFailure(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
 	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
@@ -270,32 +271,7 @@ func TestDeliver_PromptAsyncFailure(t *testing.T) {
 	}
 }
 
-// TestFind_SessionIDKeyedFile verifies direct O(1) lookup by session ID.
-func TestFind_SessionIDKeyedFile(t *testing.T) {
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 999, 12345, "ses_direct")
-
-	deliverer := newDeliverer(dir)
-	entry, err := deliverer.Find("ses_direct")
-	if err != nil {
-		t.Fatalf("expected to find session, got: %v", err)
-	}
-	if entry.Port != 12345 {
-		t.Fatalf("expected port 12345, got %d", entry.Port)
-	}
-}
-
-func TestFind_NotFound(t *testing.T) {
-	dir := t.TempDir()
-	deliverer := newDeliverer(dir)
-	_, err := deliverer.Find("ses_nonexistent")
-	if err == nil {
-		t.Fatal("expected error for missing session")
-	}
-}
-
-func TestDeliver_KVFirstOverFile(t *testing.T) {
-	// Set up a mock server for the "correct" port (from KV)
+func TestDeliver_KVRegistryUsed(t *testing.T) {
 	var kvDeliveries atomic.Int32
 	kvMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		kvDeliveries.Add(1)
@@ -304,20 +280,6 @@ func TestDeliver_KVFirstOverFile(t *testing.T) {
 	defer kvMock.Close()
 	kvPort := mockPort(kvMock.URL)
 
-	// Set up a mock server for the "stale" port (from file)
-	var fileDeliveries atomic.Int32
-	fileMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fileDeliveries.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer fileMock.Close()
-	filePort := mockPort(fileMock.URL)
-
-	// Write file registry with stale port
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, filePort, "ses_target")
-
-	// Set up KV registry with correct port (setupNATS is in registry_test.go, same package)
 	client := setupNATS(t)
 	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
@@ -327,7 +289,6 @@ func TestDeliver_KVFirstOverFile(t *testing.T) {
 
 	deliverer := Deliverer{
 		MachineID:    "test",
-		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
 		Sessions:     sessions,
@@ -339,44 +300,26 @@ func TestDeliver_KVFirstOverFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-
-	// Verify KV port was used, NOT file port
 	if kvDeliveries.Load() != 1 {
 		t.Fatalf("expected 1 delivery to KV port, got %d", kvDeliveries.Load())
 	}
-	if fileDeliveries.Load() != 0 {
-		t.Fatalf("expected 0 deliveries to file port, got %d", fileDeliveries.Load())
-	}
 }
 
-func TestDeliver_NilSessionsFallsBackToFile(t *testing.T) {
-	var deliveryCount atomic.Int32
-
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		deliveryCount.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer mock.Close()
-
-	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
-
+func TestDeliver_NilSessionsReturnsError(t *testing.T) {
 	deliverer := Deliverer{
-		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     nil, // KV unavailable
+		Sessions:     nil, // no registry configured
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
 
 	err := deliverer.Deliver(item, interest)
-	if err != nil {
-		t.Fatalf("expected file-only delivery to succeed, got: %v", err)
+	if err == nil {
+		t.Fatal("expected error when Sessions is nil, got nil")
 	}
-	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery via file fallback, got %d", count)
+	if !strings.Contains(err.Error(), "no session registry configured") {
+		t.Fatalf("expected 'no session registry configured' error, got: %v", err)
 	}
 }
 
@@ -390,8 +333,6 @@ func TestDeliver_WrongMachineReturnsError(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
 	client := setupNATS(t)
 	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -404,7 +345,6 @@ func TestDeliver_WrongMachineReturnsError(t *testing.T) {
 	// Deliverer is on machine-A
 	deliverer := Deliverer{
 		MachineID:    "machine-A",
-		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
 		Sessions:     sessions,
@@ -418,46 +358,5 @@ func TestDeliver_WrongMachineReturnsError(t *testing.T) {
 	}
 	if count := deliveryCount.Load(); count != 0 {
 		t.Fatalf("expected 0 deliveries (wrong machine), got %d", count)
-	}
-}
-
-func TestDeliver_WrongMachineSkipsFileFallback(t *testing.T) {
-	var fileDeliveries atomic.Int32
-
-	fileMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fileDeliveries.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer fileMock.Close()
-
-	filePort := mockPort(fileMock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, filePort, "ses_target")
-
-	client := setupNATS(t)
-	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
-	if err != nil {
-		t.Fatalf("failed to open session registry: %v", err)
-	}
-	// KV says session is on machine-B
-	sessions.Put("ses_target", SessionEntry{Port: 9999, MachineID: "machine-B", Dir: "/test"})
-
-	deliverer := Deliverer{
-		MachineID:    "machine-A",
-		RegistryDir:  dir,
-		HostBridge:   "127.0.0.1",
-		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
-	}
-	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
-	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "machine-A"}
-
-	err = deliverer.Deliver(item, interest)
-	if !errors.Is(err, ErrWrongMachine) {
-		t.Fatalf("expected ErrWrongMachine, got: %v", err)
-	}
-	// File fallback must NOT have been tried
-	if count := fileDeliveries.Load(); count != 0 {
-		t.Fatalf("expected 0 file deliveries (KV says wrong machine), got %d", count)
 	}
 }
