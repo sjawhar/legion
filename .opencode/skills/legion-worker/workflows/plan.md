@@ -274,6 +274,25 @@ For each acceptance criterion:
 - Verification steps should be specific enough that a fresh agent with no implementation context can follow them
 - If infrastructure doesn't exist yet (architect flagged gaps), note what the implementer needs to create
 
+**Skill Discovery for Testers (MANDATORY):**
+
+The tester is a fresh agent with no knowledge of repo conventions. You MUST explicitly list all repo-specific skills the tester should invoke in the Testing Plan. Check `.opencode/skills/`, `.claude/skills/`, and equivalent directories for:
+
+- **Testing skills** (e.g., `smoke-testing`, `testing`) — define how to verify changes in this specific project
+- **Evidence skills** (e.g., `pr-screenshots`) — define how to capture and upload test evidence
+- **Domain skills** (e.g., environment-specific, framework-specific) — define domain-specific verification steps
+
+Add a `### Skills to Invoke` section to every Testing Plan:
+
+```
+### Skills to Invoke
+- `/smoke-testing` — [why this skill is needed for this PR]
+- `/pr-screenshots` — [why visual evidence is needed]
+- `/testing` — [why repo-specific test conventions apply]
+```
+
+Do not assume the tester will discover these on their own. Without explicit skill references, testers default to generic local testing that misses repo-specific evidence requirements (e.g., Taiga URLs, uploaded screenshots).
+
 ### 4. Review with /plan-review
 
 After creating the executable plan, invoke `/plan-review` with the plan file path.
