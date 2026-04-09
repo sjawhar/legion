@@ -1,17 +1,20 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+    ".opencode/skills/legion-worker/SKILL.md",
+    ".opencode/skills/legion-worker/workflows/architect.md",
+    ".opencode/skills/legion-worker/workflows/plan.md",
+    ".opencode/skills/legion-worker/workflows/implement.md",
+    ".opencode/skills/legion-worker/workflows/test.md",
+    ".opencode/skills/legion-worker/workflows/review.md",
+    ".opencode/skills/legion-worker/workflows/merge.md"
   ],
   "trickyParts": [
-    "index.ts had its own local subscribeControllerToCiEnvoy function (not imported from server.ts), so both files needed independent removal"
+    "merge.md had no notification at all — added new block after step 7's worker-active removal, before the Note"
   ],
   "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-09T21:58:30.760Z"
+  "completed": "2026-04-09T22:42:47.106Z"
 }
