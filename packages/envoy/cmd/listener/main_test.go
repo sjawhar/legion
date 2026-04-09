@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/session"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -130,6 +131,14 @@ func TestFullMux_StartingState(t *testing.T) {
 	t.Run("v1 registry returns 503", func(t *testing.T) {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/registry/some-id", nil))
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d", rr.Code)
+		}
+	})
+
+	t.Run("v1 sessions returns 503", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/sessions", nil))
 		if rr.Code != http.StatusServiceUnavailable {
 			t.Fatalf("expected 503, got %d", rr.Code)
 		}
@@ -439,5 +448,210 @@ func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[string]int) (*store.Registry, *session.SessionRegistry) {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("failed to start NATS: %v", err)
+	}
+	t.Cleanup(func() { ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("failed to get NATS URI: %v", err)
+	}
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect bus: %v", err)
+	}
+	t.Cleanup(func() { client.Conn.Close() })
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create session registry: %v", err)
+	}
+	for sessionID, topics := range interests {
+		allTopics := append([]string{contracts.AgentSubject(sessionID)}, topics...)
+		if _, err := registry.Upsert(store.Interest{
+			SessionID: sessionID,
+			MachineID: "test-machine",
+			Dir:       "/test/" + sessionID,
+		}, allTopics); err != nil {
+			t.Fatalf("failed to upsert interest for %s: %v", sessionID, err)
+		}
+	}
+	for sessionID, port := range ports {
+		if err := sessions.Put(sessionID, session.SessionEntry{
+			Port:      port,
+			MachineID: "test-machine",
+			Dir:       "/test/" + sessionID,
+		}); err != nil {
+			t.Fatalf("failed to put session entry for %s: %v", sessionID, err)
+		}
+	}
+	// Allow watcher to propagate interest events to cache
+	time.Sleep(500 * time.Millisecond)
+	return registry, sessions
+}
+
+func TestSessionsHandler_JoinsRegistries(t *testing.T) {
+	registry, sessions := setupSessionsTest(t,
+		map[string][]string{
+			"ses_b": {"notifications.test.>"},
+			"ses_a": {"notifications.github.>"},
+		},
+		map[string]int{
+			"ses_a": 13382,
+			"ses_b": 13383,
+		},
+	)
+	handler := sessionsHandler(registry, sessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []sessionInfo
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(items))
+	}
+	// List is sorted by SessionID
+	if items[0].SessionID != "ses_a" {
+		t.Fatalf("expected first item ses_a, got %s", items[0].SessionID)
+	}
+	if items[0].Port != 13382 {
+		t.Fatalf("expected ses_a port 13382, got %d", items[0].Port)
+	}
+	if items[0].MachineID != "test-machine" {
+		t.Fatalf("expected machine_id test-machine, got %s", items[0].MachineID)
+	}
+	if items[0].Dir != "/test/ses_a" {
+		t.Fatalf("expected dir /test/ses_a, got %s", items[0].Dir)
+	}
+	if len(items[0].Topics) == 0 {
+		t.Fatal("expected ses_a to have topics")
+	}
+	if items[1].Port != 13383 {
+		t.Fatalf("expected ses_b port 13383, got %d", items[1].Port)
+	}
+}
+
+func TestSessionsHandler_NilSessionRegistry(t *testing.T) {
+	registry, _ := setupSessionsTest(t,
+		map[string][]string{
+			"ses_no_port": {"notifications.test.>"},
+		},
+		nil,
+	)
+	// Pass nil sessions to simulate KV unavailability
+	handler := sessionsHandler(registry, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []sessionInfo
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(items))
+	}
+	if items[0].Port != 0 {
+		t.Fatalf("expected port 0 when sessions is nil, got %d", items[0].Port)
+	}
+}
+
+func TestSessionsHandler_MethodNotAllowed(t *testing.T) {
+	handler := sessionsHandler(nil, nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestSessionsHandler_EmptyList(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := sessionsHandler(registry, sessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []sessionInfo
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected 0 sessions, got %d", len(items))
+	}
+}
+
+func TestSessionsHandler_PartialPortData(t *testing.T) {
+	registry, sessions := setupSessionsTest(t,
+		map[string][]string{
+			"ses_with_port":    {"notifications.test.>"},
+			"ses_without_port": {"notifications.github.>"},
+		},
+		map[string]int{
+			"ses_with_port": 13382,
+			// ses_without_port intentionally not in sessions registry
+		},
+	)
+	handler := sessionsHandler(registry, sessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []sessionInfo
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(items))
+	}
+	// Find the session with port
+	var withPort, withoutPort *sessionInfo
+	for i := range items {
+		if items[i].SessionID == "ses_with_port" {
+			withPort = &items[i]
+		} else {
+			withoutPort = &items[i]
+		}
+	}
+	if withPort == nil || withoutPort == nil {
+		t.Fatal("expected both sessions in response")
+	}
+	if withPort.Port != 13382 {
+		t.Fatalf("expected port 13382, got %d", withPort.Port)
+	}
+	if withoutPort.Port != 0 {
+		t.Fatalf("expected port 0 for session without port data, got %d", withoutPort.Port)
 	}
 }

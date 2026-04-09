@@ -1,22 +1,22 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "packages/daemon/src/daemon/AGENTS.md"
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/main_test.go",
+    "packages/envoy/docs/architecture.md"
   ],
   "trickyParts": [
-    "Workers without repo field (legacy workspace-only dispatches) go to _unknown group with issue number 0. The issueNumber field is optional on WorkerEntry so many workers share key '0' under their repo. Title cache only populates after POST /state/collect or /state/fetch-and-collect runs with GitHub backend data."
+    "SessionRegistry has no List() method and no cache (unlike interests registry), so we iterate interests as the base set and enrich each with sessions.Get() — this means sessions without interests (stale, expired) won't appear, which is the correct behavior since they're inactive."
   ],
   "deviations": [
-    "Issue title fetch uses cached titles from state collection rather than live GitHub API calls per dashboard request - this ensures <2s response time for 84 workers. Titles are null until first state collection runs."
+    "Issue mentioned updating oc ps — this command doesn't exist in this repo (external tooling). The endpoint is the deliverable; oc ps update is out of scope for this PR."
   ],
   "openQuestions": [
-    "Activity data from getSessionStatus makes N HTTP calls to the shared serve per dashboard request. With 84 workers this completed in 36ms with mock adapter. Real serve performance depends on concurrent session query handling."
+    "envoy_sessions has 5m TTL — sessions that haven't refreshed will show port:0 in the listing. Consumers should treat port:0 as 'session alive but port unknown'."
   ],
   "subPlanningNeeded": false,
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-09T02:55:10.533Z"
+  "completed": "2026-04-09T18:25:02.661Z"
 }
