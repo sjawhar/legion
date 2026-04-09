@@ -3066,4 +3066,337 @@ describe("daemon server", () => {
       expect(workersAfter).toHaveLength(0);
     });
   });
+
+  describe("GET /dashboard", () => {
+    it("returns empty dashboard when no workers exist", async () => {
+      await startTestServer();
+      const response = await requestJson("/dashboard");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        generatedAt: string;
+        summary: {
+          totalWorkers: number;
+          byStatus: Record<string, number>;
+          byPhase: Record<string, number>;
+        };
+        groups: Record<string, unknown>;
+        recentEvents: unknown[];
+      };
+      expect(body.generatedAt).toBeTruthy();
+      expect(body.summary.totalWorkers).toBe(0);
+      expect(body.summary.byStatus).toEqual({});
+      expect(body.summary.byPhase).toEqual({});
+      expect(body.groups).toEqual({});
+      expect(body.recentEvents).toEqual([]);
+    });
+
+    it("groups workers by repo and issue number with summary stats", async () => {
+      sessionStatusHandler = async () => ({
+        data: {
+          type: "busy",
+          lastActivityAt: "2026-04-09T10:00:00Z",
+          messageCount: 20,
+          turnCount: 15,
+          phase: "busy",
+          tokensUsed: 50000,
+        },
+      });
+      const state: PersistedWorkerState = {
+        workers: {
+          "acme-widgets-10-implement": {
+            id: "acme-widgets-10-implement",
+            port: sharedServePort,
+            sessionId: "ses_w1",
+            workspace: "/tmp/w1",
+            startedAt: "2026-04-09T00:00:00Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+            issueNumber: 10,
+          },
+          "acme-widgets-10-test": {
+            id: "acme-widgets-10-test",
+            port: sharedServePort,
+            sessionId: "ses_w2",
+            workspace: "/tmp/w2",
+            startedAt: "2026-04-09T00:01:00Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+            issueNumber: 10,
+          },
+          "acme-api-5-review": {
+            id: "acme-api-5-review",
+            port: sharedServePort,
+            sessionId: "ses_w3",
+            workspace: "/tmp/w3",
+            startedAt: "2026-04-09T00:02:00Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/api",
+            issueNumber: 5,
+          },
+        },
+        crashHistory: {},
+      };
+      await startTestServer({ state });
+
+      const response = await requestJson("/dashboard");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        generatedAt: string;
+        summary: {
+          totalWorkers: number;
+          byStatus: Record<string, number>;
+          byPhase: Record<string, number>;
+        };
+        groups: Record<
+          string,
+          Record<
+            string,
+            {
+              issueTitle: string | null;
+              issueStatus: string | null;
+              workers: Array<{ id: string; phase: string; status: string; activity: unknown }>;
+            }
+          >
+        >;
+        recentEvents: Array<{ event: string; workerId: string }>;
+      };
+
+      // Summary stats
+      expect(body.summary.totalWorkers).toBe(3);
+      expect(body.summary.byStatus).toEqual({ running: 3 });
+      expect(body.summary.byPhase).toEqual({ implement: 1, test: 1, review: 1 });
+
+      // Grouping by repo
+      expect(Object.keys(body.groups)).toEqual(
+        expect.arrayContaining(["acme/widgets", "acme/api"])
+      );
+
+      // acme/widgets has issue 10 with 2 workers
+      const widgetsIssue10 = body.groups["acme/widgets"]["10"];
+      expect(widgetsIssue10).toBeDefined();
+      expect(widgetsIssue10.workers).toHaveLength(2);
+      const phases = widgetsIssue10.workers.map((w: { phase: string }) => w.phase).sort();
+      expect(phases).toEqual(["implement", "test"]);
+
+      // acme/api has issue 5 with 1 worker
+      const apiIssue5 = body.groups["acme/api"]["5"];
+      expect(apiIssue5).toBeDefined();
+      expect(apiIssue5.workers).toHaveLength(1);
+      expect(apiIssue5.workers[0].phase).toBe("review");
+
+      // Activity is populated
+      expect(widgetsIssue10.workers[0].activity).toEqual({
+        type: "busy",
+        messageCount: 20,
+        turnCount: 15,
+        tokensUsed: 50000,
+        lastActivityAt: "2026-04-09T10:00:00Z",
+      });
+    });
+
+    it("handles activity fetch failures gracefully", async () => {
+      sessionStatusHandler = async () => {
+        throw new Error("connection refused");
+      };
+      await startTestServer();
+
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-99",
+          mode: "implement",
+          workspace: "/tmp/w-fail",
+        }),
+      });
+
+      const response = await requestJson("/dashboard");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        groups: Record<string, Record<string, { workers: Array<{ activity: unknown }> }>>;
+      };
+
+      // Worker should still appear but with null activity
+      const unknownGroup = body.groups._unknown;
+      expect(unknownGroup).toBeDefined();
+      const workers = Object.values(unknownGroup)[0].workers;
+      expect(workers).toHaveLength(1);
+      expect(workers[0].activity).toBeNull();
+    });
+
+    it("records status change events in recentEvents", async () => {
+      await startTestServer();
+
+      // Create a worker
+      const createRes = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-55",
+          mode: "plan",
+          workspace: "/tmp/w-event",
+        }),
+      });
+      const created = (await createRes.json()) as { id: string };
+
+      // Change its status to dead
+      await requestJson(`/workers/${created.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "dead",
+          crashCount: 1,
+          lastCrashAt: "2026-04-09T00:00:00Z",
+        }),
+      });
+
+      const response = await requestJson("/dashboard");
+      const body = (await response.json()) as {
+        recentEvents: Array<{
+          event: string;
+          workerId: string;
+          mode: string;
+          details?: Record<string, unknown>;
+        }>;
+      };
+
+      // Should have 2 events: dispatch + status_changed (newest first)
+      expect(body.recentEvents).toHaveLength(2);
+      expect(body.recentEvents[0].event).toBe("worker.status_changed");
+      expect(body.recentEvents[0].workerId).toBe(created.id);
+      expect(body.recentEvents[0].details?.toStatus).toBe("dead");
+      expect(body.recentEvents[1].event).toBe("worker.dispatched");
+    });
+
+    it("populates issue title cache from state collection", async () => {
+      sessionStatusHandler = async () => ({ data: { type: "idle" } });
+      const state: PersistedWorkerState = {
+        workers: {
+          "acme-widgets-42-implement": {
+            id: "acme-widgets-42-implement",
+            port: sharedServePort,
+            sessionId: "ses_title",
+            workspace: "/tmp/w-title",
+            startedAt: "2026-04-09T00:00:00Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+            issueNumber: 42,
+          },
+        },
+        crashHistory: {},
+      };
+      await startTestServer({ state });
+
+      // Mock fetch for enrichParsedIssues (needs GET /workers + GraphQL)
+      const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
+        const urlStr =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (
+          urlStr.includes("/workers") &&
+          (!init || init.method === undefined || init.method === "GET")
+        ) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: "acme-widgets-42-implement",
+                port: sharedServePort,
+                sessionId: "ses_title",
+                workspace: "/tmp/w-title",
+                startedAt: new Date().toISOString(),
+                status: "running",
+                crashCount: 0,
+                lastCrashAt: null,
+                repo: "acme/widgets",
+                issueNumber: 42,
+              },
+            ]),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (urlStr.includes("graphql")) {
+          return new Response(JSON.stringify({ data: {} }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch(input as string | URL | Request, init);
+      };
+      globalThis.fetch = Object.assign(mockFn, {
+        preconnect: originalFetch.preconnect,
+      });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: {
+            items: [
+              {
+                content: {
+                  type: "Issue",
+                  number: 42,
+                  repository: "acme/widgets",
+                  url: "https://github.com/acme/widgets/issues/42",
+                  title: "Fix the widget alignment",
+                },
+                status: "In Progress",
+                labels: [],
+              },
+            ],
+          },
+        }),
+      });
+
+      // Dashboard should now have the cached title
+      const response = await requestJson("/dashboard");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        groups: Record<
+          string,
+          Record<string, { issueTitle: string | null; issueStatus: string | null }>
+        >;
+      };
+
+      const widgets = body.groups["acme/widgets"];
+      expect(widgets).toBeDefined();
+      expect(widgets["42"].issueTitle).toBe("Fix the widget alignment");
+      expect(widgets["42"].issueStatus).toBe("In Progress");
+    });
+
+    it("loads workers from persisted state", async () => {
+      sessionStatusHandler = async () => ({ data: { type: "idle" } });
+      const state: PersistedWorkerState = {
+        workers: {
+          "acme-widgets-20-implement": {
+            id: "acme-widgets-20-implement",
+            port: sharedServePort,
+            sessionId: "ses_persisted1",
+            workspace: "/tmp/persisted",
+            startedAt: "2026-04-09T00:00:00Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+            issueNumber: 20,
+          },
+        },
+        crashHistory: {},
+      };
+      await startTestServer({ state });
+
+      const response = await requestJson("/dashboard");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        summary: { totalWorkers: number };
+        groups: Record<string, Record<string, { workers: Array<{ id: string }> }>>;
+      };
+      expect(body.summary.totalWorkers).toBe(1);
+      expect(body.groups["acme/widgets"]["20"].workers[0].id).toBe("acme-widgets-20-implement");
+    });
+  });
 });
