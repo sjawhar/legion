@@ -70,6 +70,8 @@ interface ErrorResponse {
 const JSON_HEADERS = { "content-type": "application/json" };
 const MAX_CRASHES = 3;
 const ONE_HOUR_MS = 60 * 60 * 1000;
+const MAX_RECENT_EVENTS = 50;
+const ACTIVITY_FETCH_TIMEOUT_MS = 5000;
 
 /**
  * Delay between session creation and prompt delivery to allow the serve process
@@ -137,6 +139,42 @@ function extractModeFromWorkerId(workerId: string): WorkerModeLiteral | null {
     }
   }
   return null;
+}
+
+interface DashboardRecentEvent {
+  timestamp: string;
+  event: string;
+  workerId: string;
+  issueId: string;
+  mode: string;
+  details?: Record<string, unknown>;
+}
+
+function extractGitHubIssueTitles(raw: unknown): Map<string, string> {
+  const titles = new Map<string, string>();
+  const items: unknown[] = Array.isArray(raw)
+    ? raw
+    : isRecord(raw) && Array.isArray((raw as Record<string, unknown>).items)
+      ? ((raw as Record<string, unknown>).items as unknown[])
+      : [];
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    const content = (item as Record<string, unknown>).content;
+    if (!isRecord(content)) continue;
+    const c = content as Record<string, unknown>;
+    if (
+      typeof c.title === "string" &&
+      typeof c.number === "number" &&
+      typeof c.repository === "string"
+    ) {
+      const parts = (c.repository as string).split("/");
+      if (parts.length === 2 && parts[0] && parts[1]) {
+        const id = `${parts[0]}-${parts[1]}-${c.number}`.toLowerCase();
+        titles.set(id, c.title as string);
+      }
+    }
+  }
+  return titles;
 }
 
 function buildIssueTopics(owner: string, repo: string, issueNumber: number): string[] {
@@ -249,6 +287,15 @@ export function startServer(opts: ServerOptions): {
   const crashHistory = new Map<string, CrashHistoryEntry>();
   const issueStateCache = new Map<string, IssueState>();
   const subscribedCiRepos = new Set<string>();
+  const issueTitleCache = new Map<string, string>();
+  const recentEvents: DashboardRecentEvent[] = [];
+
+  function recordRecentEvent(evt: DashboardRecentEvent): void {
+    recentEvents.push(evt);
+    if (recentEvents.length > MAX_RECENT_EVENTS) {
+      recentEvents.shift();
+    }
+  }
   const releaseGauges = registerGauges("daemon-server", () => {
     let starting = 0;
     let running = 0;
@@ -347,6 +394,109 @@ export function startServer(opts: ServerOptions): {
             workerCount: workers.size,
             runtime: opts.runtime ?? "opencode",
             ...(opts.tmuxSession ? { tmuxSession: opts.tmuxSession } : {}),
+          });
+        }
+
+        if (method === "GET" && url.pathname === "/dashboard") {
+          await stateLoaded;
+          const allWorkers = Array.from(workers.values());
+
+          // Summary stats
+          const byStatus: Record<string, number> = {};
+          const byPhase: Record<string, number> = {};
+          for (const w of allWorkers) {
+            byStatus[w.status] = (byStatus[w.status] ?? 0) + 1;
+            const phase = extractModeFromWorkerId(w.id);
+            if (phase) {
+              byPhase[phase] = (byPhase[phase] ?? 0) + 1;
+            }
+          }
+
+          // Fetch activity for all workers in parallel (with timeout)
+          const activityResults = await Promise.allSettled(
+            allWorkers.map(async (w) => {
+              const mode = extractModeFromWorkerId(w.id);
+              const adapter = mode ? (opts.getWorkerAdapter?.(mode) ?? opts.adapter) : opts.adapter;
+              const result = await Promise.race([
+                adapter.getSessionStatus(w.sessionId),
+                new Promise<{ data?: unknown; error: string }>((resolve) =>
+                  setTimeout(() => resolve({ error: "timeout" }), ACTIVITY_FETCH_TIMEOUT_MS)
+                ),
+              ]);
+              return { workerId: w.id, result };
+            })
+          );
+
+          const activityMap = new Map<string, Record<string, unknown>>();
+          for (const settled of activityResults) {
+            if (settled.status === "fulfilled") {
+              const { workerId, result } = settled.value;
+              if (result.data && isRecord(result.data)) {
+                activityMap.set(workerId, result.data as Record<string, unknown>);
+              }
+            }
+          }
+
+          // Group workers by repo + issueNumber
+          const groups: Record<
+            string,
+            Record<
+              string,
+              {
+                issueTitle: string | null;
+                issueStatus: string | null;
+                workers: Array<Record<string, unknown>>;
+              }
+            >
+          > = {};
+
+          for (const w of allWorkers) {
+            const repo = w.repo ?? "_unknown";
+            const issueNum = String(w.issueNumber ?? 0);
+            const issueId = extractIssueIdFromWorkerId(w.id);
+
+            if (!groups[repo]) {
+              groups[repo] = {};
+            }
+            if (!groups[repo][issueNum]) {
+              const cachedState = issueId ? issueStateCache.get(issueId.toLowerCase()) : undefined;
+              groups[repo][issueNum] = {
+                issueTitle:
+                  (issueId ? issueTitleCache.get(issueId.toLowerCase()) : undefined) ?? null,
+                issueStatus: cachedState?.status ?? null,
+                workers: [],
+              };
+            }
+
+            const activity = activityMap.get(w.id);
+            groups[repo][issueNum].workers.push({
+              id: w.id,
+              phase: extractModeFromWorkerId(w.id),
+              status: w.status,
+              sessionId: w.sessionId,
+              startedAt: w.startedAt,
+              crashCount: w.crashCount,
+              activity: activity
+                ? {
+                    type: (activity.type as string) ?? (activity.phase as string) ?? "unknown",
+                    messageCount: (activity.messageCount as number) ?? 0,
+                    turnCount: (activity.turnCount as number) ?? 0,
+                    tokensUsed: (activity.tokensUsed as number) ?? 0,
+                    lastActivityAt: (activity.lastActivityAt as string) ?? null,
+                  }
+                : null,
+            });
+          }
+
+          return jsonResponse({
+            generatedAt: new Date().toISOString(),
+            summary: {
+              totalWorkers: allWorkers.length,
+              byStatus,
+              byPhase,
+            },
+            groups,
+            recentEvents: recentEvents.slice().reverse(),
           });
         }
 
@@ -679,6 +829,14 @@ export function startServer(opts: ServerOptions): {
               workspace: resolvedWorkspace,
               crashCount: entry.crashCount,
             });
+            recordRecentEvent({
+              timestamp: new Date().toISOString(),
+              event: "worker.dispatched",
+              workerId: entry.id,
+              issueId: normalizedIssueId,
+              mode: mode as string,
+              details: { version, crashCount: entry.crashCount },
+            });
 
             return jsonResponse({
               id: entry.id,
@@ -924,6 +1082,18 @@ export function startServer(opts: ServerOptions): {
                 ? Date.now() - new Date(updated.startedAt).getTime()
                 : null,
             });
+            recordRecentEvent({
+              timestamp: new Date().toISOString(),
+              event: "worker.status_changed",
+              workerId: id,
+              issueId: extractIssueIdFromWorkerId(id) ?? id,
+              mode: extractModeFromWorkerId(id) ?? "unknown",
+              details: {
+                fromStatus: entry.status,
+                toStatus: updated.status,
+                crashCount: updated.crashCount,
+              },
+            });
             const { env: _patchEnv, ...safeUpdated } = updated;
             return jsonResponse(safeUpdated);
           }
@@ -1038,6 +1208,13 @@ export function startServer(opts: ServerOptions): {
               issueStateCache.set(issueId.toLowerCase(), issueState);
             }
 
+            // Populate issue title cache from raw GitHub project items
+            if (backend === "github") {
+              for (const [id, title] of extractGitHubIssueTitles(issues)) {
+                issueTitleCache.set(id, title);
+              }
+            }
+
             if (opts.feedbackLogger) {
               for (const [issueId, issueState] of Object.entries(state.issues)) {
                 opts.feedbackLogger.log({
@@ -1105,6 +1282,13 @@ export function startServer(opts: ServerOptions): {
             // Populate dispatch validation cache
             for (const [issueId, issueState] of Object.entries(state.issues)) {
               issueStateCache.set(issueId.toLowerCase(), issueState);
+            }
+
+            // Populate issue title cache from raw GitHub project items
+            if (backend === "github" && rawIssues) {
+              for (const [id, title] of extractGitHubIssueTitles(rawIssues)) {
+                issueTitleCache.set(id, title);
+              }
             }
 
             return jsonResponse(CollectedState.toDict(state));
