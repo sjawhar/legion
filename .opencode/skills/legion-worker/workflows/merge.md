@@ -96,4 +96,10 @@ Then remove `worker-active` if present:
 - **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
 
+Then notify the controller via Envoy (best-effort, exactly one notification):
+```
+envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER merge completed. Issue closed.")
+```
+If `envoy_publish` fails, continue — the label is the source of truth.
+
 > **Note:** GitHub auto-close may also fire when the PR merges, which is fine — closing an already-closed issue is a no-op. This explicit close is a safety net for cases where auto-close doesn't trigger (e.g., issue not linked to PR, Linear backend).
