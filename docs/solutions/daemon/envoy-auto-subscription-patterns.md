@@ -106,14 +106,12 @@ Use `parseIssueRepo()` to decompose `owner/repo` strings — never hand-parse th
 | Worker State Transition | Subscription Action | Owner | Authority |
 |------------------------|---------------------|-------|-----------|
 | Dispatched | Subscribe worker to `issue.{n}.>` | Daemon (`POST /workers`) | Authoritative |
-| First dispatch for repo | Subscribe controller to `{owner}.{repo}.ci` | Daemon (`POST /workers`) | Authoritative |
 | PR created (implement) | Subscribe worker to `pr.{n}.>` | Worker (`envoy_subscribe`) | Best-effort |
 | Worker resumed | Re-subscribe worker to issue topics | Daemon (prompt path) | Authoritative |
 | Worker resumed with PR | Worker re-subscribes to PR topics | Worker (`envoy_subscribe`) | Best-effort |
 | Worker exits (`worker-done`) | Unsubscribe from explicit issue+PR topics | Worker (`envoy_unsubscribe`) | Best-effort |
 | Worker deleted | Unsubscribe from all topics | Daemon (`DELETE /workers`) | Authoritative |
 | Worker crashes before exit | No self-unsubscribe | — | Daemon DELETE is safety net |
-| Daemon restart (active workers) | Re-subscribe controller to CI for repos | Daemon startup | Authoritative |
 
 ### Worker Self-Unsubscribe
 
@@ -130,13 +128,9 @@ envoy_unsubscribe([
 envoy_unsubscribe([])
 ```
 
-### Controller CI Subscriptions
+### Controller CI Subscriptions [REMOVED]
 
-The daemon subscribes the controller to `notifications.github.{owner}.{repo}.ci` on first worker dispatch for each GitHub repo. Tracked via in-memory `subscribedCiRepos` Set in server.ts, seeded from persisted worker entries on startup.
-
-- **Deduplication:** The Set prevents duplicate subscriptions for the same repo
-- **Startup reconciliation:** On daemon restart with persisted active workers, controller is re-subscribed to CI for their repos (index.ts)
-- **No cleanup on individual worker deletion:** CI subscriptions persist per daemon lifetime (low-volume, acceptable)
+**Removed in #377.** The daemon previously subscribed the controller to `notifications.github.{owner}.{repo}.ci` on first worker dispatch per repo, tracked via `subscribedCiRepos` Set. This was removed because CI events from unrelated branches (Vercel previews, skipped jobs) flooded the controller with noise. The controller can subscribe manually via `envoy_subscribe` when it specifically needs to watch a CI run.
 
 ### Resume Re-Subscription
 

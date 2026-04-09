@@ -251,31 +251,6 @@ function unsubscribeAllWorkerTopics(sessionId: string): void {
     });
 }
 
-export function subscribeControllerToCiEnvoy(sessionId: string, owner: string, repo: string): void {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
-  const topic = `notifications.github.${owner}.${repo}.ci`;
-  fetch(`${envoyUrl}/v1/interests/subscribe`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: sessionId,
-      topics: [topic],
-    }),
-  })
-    .then((res) => {
-      if (!res.ok) {
-        console.warn(
-          `Envoy CI subscribe returned ${res.status} for session=${sessionId} repo=${owner}/${repo} (non-fatal)`
-        );
-      }
-    })
-    .catch((err) => {
-      console.warn(
-        `Envoy CI subscribe failed for session=${sessionId} repo=${owner}/${repo} (non-fatal): ${err}`
-      );
-    });
-}
-
 export function startServer(opts: ServerOptions): {
   server: Server;
   stop: () => void;
@@ -286,7 +261,6 @@ export function startServer(opts: ServerOptions): {
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
   const issueStateCache = new Map<string, IssueState>();
-  const subscribedCiRepos = new Set<string>();
   const issueTitleCache = new Map<string, string>();
   const recentEvents: DashboardRecentEvent[] = [];
 
@@ -347,10 +321,6 @@ export function startServer(opts: ServerOptions): {
       const normalizedId = id.toLowerCase();
       const loadedEntry: WorkerEntry = { ...entry, id: normalizedId };
       workers.set(normalizedId, loadedEntry);
-      // Seed CI repo tracking from persisted workers
-      if (entry.repo) {
-        subscribedCiRepos.add(entry.repo);
-      }
 
       if (loadedEntry.status === "dead") {
         continue;
@@ -772,17 +742,6 @@ export function startServer(opts: ServerOptions): {
               subscribeWorkerToEnvoy(actualSessionId, topics);
               entry.envoyTopics = topics;
               workerEntriesChanged = true;
-            }
-
-            if (repoRef) {
-              const repoKey = `${repoRef.owner}/${repoRef.repo}`;
-              if (!subscribedCiRepos.has(repoKey)) {
-                subscribedCiRepos.add(repoKey);
-                const controllerSessionId = opts.getControllerState?.()?.sessionId;
-                if (controllerSessionId) {
-                  subscribeControllerToCiEnvoy(controllerSessionId, repoRef.owner, repoRef.repo);
-                }
-              }
             }
 
             if (workerEntriesChanged) {
