@@ -11,8 +11,7 @@ import (
 )
 
 // TestHandleAgentMessage_DeliveredExactlyOnce tests that the agent message handler
-// delivers via interest OR fallback, never both. This catches the missing-return bug
-// where both paths executed for the same message.
+// delivers via interest OR registry lookup, never both.
 func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -26,10 +25,10 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 
-	// Session exists in BOTH interest registry AND file registry — handler should use
-	// interest path and NOT fall through to fallback
+	// Session exists in interest registry AND file registry — handler should use
+	// interest path and NOT fall through to registry lookup
 	interest := &store.Interest{
 		SessionID: "ses_target",
 		Dir:       "/test",
@@ -47,12 +46,12 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 		t.Fatal("expected message to be delivered")
 	}
 	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery, got %d — handler delivered via both interest and fallback paths", count)
+		t.Fatalf("expected exactly 1 delivery, got %d — handler delivered via both paths", count)
 	}
 }
 
 // TestHandleAgentMessage_FallbackWhenNoInterest tests that when there's no interest
-// entry but a file registry entry exists, the handler delivers via fallback.
+// entry but a registry entry exists, the handler delivers via the registry lookup.
 func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -66,30 +65,30 @@ func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 
-	// No interest entry — handler should fall through to file registry
+	// No interest entry — handler should fall through to registry lookup
 	result := HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "test-machine", nil, &deliverer,
 	)
 
 	if result.Err != nil {
-		t.Fatalf("expected success via fallback, got error: %v", result.Err)
+		t.Fatalf("expected success via registry lookup, got error: %v", result.Err)
 	}
 	if !result.Delivered {
-		t.Fatal("expected delivery via fallback")
+		t.Fatal("expected delivery via registry lookup")
 	}
 	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery via fallback, got %d", count)
+		t.Fatalf("expected exactly 1 delivery via registry lookup, got %d", count)
 	}
 }
 
-// TestHandleAgentMessage_UnknownSession tests that when neither interest nor
-// file registry has the session, the handler signals no delivery (ACK, don't NAK).
+// TestHandleAgentMessage_UnknownSession tests that when no registry has the session,
+// the handler signals no delivery (ACK, don't NAK).
 func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 	dir := t.TempDir() // empty
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 
 	result := HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_unknown", "test"),
@@ -105,7 +104,7 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 }
 
 // TestHandleAgentMessage_WrongMachine tests that when the interest exists but
-// for a different machine, the handler falls through to file registry.
+// for a different machine, the handler falls through to registry lookup.
 func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -119,7 +118,7 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	dir := t.TempDir()
 	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
-	deliverer := newDeliverer(dir)
+	deliverer := newFileDeliverer(dir)
 
 	// Interest exists but for a different machine
 	interest := &store.Interest{
@@ -134,16 +133,16 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	)
 
 	if result.Err != nil {
-		t.Fatalf("expected success via fallback, got: %v", result.Err)
+		t.Fatalf("expected success via registry lookup, got: %v", result.Err)
 	}
 	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery via fallback, got %d", count)
+		t.Fatalf("expected 1 delivery via registry lookup, got %d", count)
 	}
 }
 
 // TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session
 // registry says a session is on another machine, the handler returns no-delivery
-// (ACK) rather than NAK, even when the file registry has a stale entry.
+// (ACK) rather than NAK.
 func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -154,8 +153,6 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
 	client := setupNATS(t)
 	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -167,13 +164,12 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 
 	deliverer := Deliverer{
 		MachineID:    "machine-A",
-		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
 		Sessions:     sessions,
 	}
 
-	// No interest or wrong-machine interest — handler falls to fallback path
+	// No interest or wrong-machine interest — handler falls to registry lookup path
 	result := HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "machine-A", nil, &deliverer,
@@ -204,8 +200,6 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
 
 	client := setupNATS(t)
 	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -217,7 +211,6 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 
 	deliverer := Deliverer{
 		MachineID:    "machine-A",
-		RegistryDir:  dir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
 		Sessions:     sessions,
@@ -245,4 +238,3 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		t.Fatalf("expected 0 deliveries, got %d", count)
 	}
 }
-

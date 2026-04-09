@@ -1,22 +1,31 @@
 {
   "filesChanged": [
+    "packages/envoy/internal/session/lookup.go",
+    "packages/envoy/internal/session/file_registry.go",
+    "packages/envoy/internal/session/session.go",
+    "packages/envoy/internal/session/handler.go",
     "packages/envoy/cmd/listener/main.go",
-    "packages/envoy/cmd/listener/main_test.go",
-    "packages/envoy/docs/architecture.md"
+    "packages/envoy/internal/session/lookup_test.go",
+    "packages/envoy/internal/session/file_registry_test.go",
+    "packages/envoy/internal/session/session_test.go",
+    "packages/envoy/internal/session/handler_test.go",
+    "packages/envoy/internal/integration/delivery_test.go"
   ],
   "trickyParts": [
-    "SessionRegistry has no List() method and no cache (unlike interests registry), so we iterate interests as the base set and enrich each with sessions.Get() — this means sessions without interests (stale, expired) won't appear, which is the correct behavior since they're inactive."
+    "FileRegistry.Get reads both legacy RegistryEntry JSON format and new SessionEntry format — the port and dir JSON keys overlap so a single unmarshal handles both",
+    "HandleAgentMessage no-interest path changed from file-lookup-then-deliver to direct-deliver — behavior preserved because Deliverer.Deliver now does the single registry lookup internally",
+    "Integration tests needed significant rewrite: all registerFileSession calls removed, registerSession now uses KV+interest instead of file+interest, tests for file fallback removed"
   ],
   "deviations": [
-    "Issue mentioned updating oc ps — this command doesn't exist in this repo (external tooling). The endpoint is the deliverable; oc ps update is out of scope for this PR."
+    "RegistryEntry type kept in session.go (not moved to file_registry.go) since it is in the same package and still used by test helpers"
   ],
   "openQuestions": [
-    "envoy_sessions has 5m TTL — sessions that haven't refreshed will show port:0 in the listing. Consumers should treat port:0 as 'session alive but port unknown'."
+    "The envoy-plugin still writes file registry entries — a follow-up cleanup (#373 sub-item 6) should make the plugin respect ENVOY_SESSION_REGISTRY mode"
   ],
   "subPlanningNeeded": false,
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-09T18:25:02.661Z"
+  "completed": "2026-04-09T18:32:51.454Z"
 }

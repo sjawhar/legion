@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,14 +22,13 @@ import (
 
 // testEnv holds a complete test environment: NATS, listener handler, mock sessions.
 type testEnv struct {
-	t           *testing.T
-	ctx         context.Context
-	client      *bus.Client
-	registry    *store.Registry
-	sessions    *session.SessionRegistry
-	deliverer   session.Deliverer
-	dedupe      *dedupe.Cache
-	registryDir string
+	t         *testing.T
+	ctx       context.Context
+	client    *bus.Client
+	registry  *store.Registry
+	sessions  session.SessionLookup
+	deliverer session.Deliverer
+	dedupe    *dedupe.Cache
 }
 
 type testEnvOption func(*testEnvOpts)
@@ -80,12 +77,8 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 		t.Fatalf("failed to create session registry: %v", err)
 	}
 
-	// Set up file registry
-	registryDir := t.TempDir()
-
 	deliverer := session.Deliverer{
 		MachineID:    "test-machine",
-		RegistryDir:  registryDir,
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
 		Sessions:     sessions,
@@ -94,14 +87,13 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	dc := dedupe.New(5 * time.Minute)
 
 	return &testEnv{
-		t:           t,
-		ctx:         ctx,
-		client:      client,
-		registry:    registry,
-		sessions:    sessions,
-		deliverer:   deliverer,
-		dedupe:      dc,
-		registryDir: registryDir,
+		t:         t,
+		ctx:       ctx,
+		client:    client,
+		registry:  registry,
+		sessions:  sessions,
+		deliverer: deliverer,
+		dedupe:    dc,
 	}
 }
 
@@ -142,20 +134,9 @@ func (env *testEnv) registerInterest(sessionID string, topics []string) {
 	}, allTopics)
 }
 
-// registerFileSession creates a filesystem registry file for a session.
-func (env *testEnv) registerFileSession(sessionID string, port int) {
-	env.t.Helper()
-	raw := fmt.Sprintf(`{"pid":%d,"port":%d,"dir":"/test","session":{"id":"%s","title":"test"}}`, os.Getpid(), port, sessionID)
-	path := filepath.Join(env.registryDir, sessionID+".json")
-	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
-		env.t.Fatal(err)
-	}
-}
-
-// registerSession creates BOTH interest AND file registry for backward compatibility.
 func (env *testEnv) registerSession(sessionID string, port int, topics []string) {
 	env.t.Helper()
-	env.registerFileSession(sessionID, port)
+	env.registerKVSession(sessionID, port)
 	env.registerInterest(sessionID, topics)
 }
 
@@ -390,7 +371,6 @@ func TestE2E_DeliveryFailureRetries(t *testing.T) {
 func TestE2E_NoRegistryEntryNoDelivery(t *testing.T) {
 	env := setupTestEnv(t)
 
-	// Subscribe interest but don't create registry file
 	env.registry.Upsert(store.Interest{
 		SessionID: "ses_ghost",
 		MachineID: "test-machine",
@@ -541,17 +521,15 @@ func TestE2E_SessionReRegistration(t *testing.T) {
 		t.Fatalf("expected 1 delivery to port A, got %d", count)
 	}
 
-	// Replace registry file with port B
-	regPath := filepath.Join(env.registryDir, "ses_rereg.json")
-	os.Remove(regPath)
-
 	portB, deliveriesB, _, _ := mockSession(t)
-	raw := fmt.Sprintf(`{"pid":%d,"port":%d,"dir":"/test","session":{"id":"ses_rereg","title":"test"}}`, os.Getpid(), portB)
-	if err := os.WriteFile(regPath, []byte(raw), 0644); err != nil {
-		t.Fatal(err)
+	if err := env.sessions.Put("ses_rereg", session.SessionEntry{
+		Port:      portB,
+		MachineID: "test-machine",
+		Dir:       "/test",
+	}); err != nil {
+		t.Fatalf("failed to re-register session entry: %v", err)
 	}
 
-	// Second publish — delivered to port B
 	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_rereg", "to B", "dedupe-rereg-2"))
 	time.Sleep(2 * time.Second)
 	if count := deliveriesB.Load(); count != 1 {
@@ -637,7 +615,6 @@ func TestE2E_ConcurrentPublish(t *testing.T) {
 func TestE2E_MaxDeliverExhaustion(t *testing.T) {
 	env := setupTestEnv(t)
 
-	// Register interest but NO registry file — delivery will always fail
 	env.registry.Upsert(store.Interest{
 		SessionID: "ses_exhaust",
 		MachineID: "test-machine",
@@ -724,14 +701,10 @@ func TestE2E_NoAgentFieldInPromptAsync(t *testing.T) {
 	}
 }
 
-func TestE2E_SessionInBothKVAndFileDeliveredOnce(t *testing.T) {
+func TestE2E_SessionWithKVAndInterestDeliveredOnce(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 
-	// registerSession creates BOTH the file registry entry AND the KV interest.
-	// This is the normal case — the bug was that HandleAgentMessage delivered via
-	// the interest path, then fell through to the file-registry fallback path
-	// because of a missing return statement.
 	env.registerSession("ses_both", port, nil)
 	env.startConsumer("test-machine")
 
@@ -740,7 +713,7 @@ func TestE2E_SessionInBothKVAndFileDeliveredOnce(t *testing.T) {
 	// Wait long enough that a second (buggy) delivery would have arrived
 	time.Sleep(3 * time.Second)
 	if count := deliveries.Load(); count != 1 {
-		t.Fatalf("expected exactly 1 delivery (not 2 from interest+fallback), got %d", count)
+		t.Fatalf("expected exactly 1 delivery, got %d", count)
 	}
 }
 
@@ -806,38 +779,16 @@ func TestE2E_StaleSubDedupeProtectsLiveSession(t *testing.T) {
 func TestE2E_KVFirstDeliverySkipsFile(t *testing.T) {
 	env := setupTestEnv(t)
 
-	kvPort, kvDeliveries, _, _ := mockSession(t)
-	env.registerKVSession("ses_kv", kvPort)
+	port, deliveries, _, _ := mockSession(t)
+	env.registerKVSession("ses_kv", port)
 	env.registerInterest("ses_kv", nil)
-
-	filePort, fileDeliveries, _, _ := mockSession(t)
-	env.registerFileSession("ses_kv", filePort)
 
 	env.startConsumer("test-machine")
 	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_kv", "kv test", "dedupe-kv-first"))
 
 	time.Sleep(2 * time.Second)
-	if c := kvDeliveries.Load(); c != 1 {
-		t.Fatalf("expected 1 delivery to KV port, got %d", c)
-	}
-	if c := fileDeliveries.Load(); c != 0 {
-		t.Fatalf("expected 0 deliveries to file port, got %d", c)
-	}
-}
-
-func TestE2E_FileFallbackWhenNoKVEntry(t *testing.T) {
-	env := setupTestEnv(t)
-
-	port, deliveries, _, _ := mockSession(t)
-	env.registerFileSession("ses_file_only", port)
-	env.registerInterest("ses_file_only", nil)
-
-	env.startConsumer("test-machine")
-	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_file_only", "fallback test", "dedupe-fallback"))
-
-	time.Sleep(2 * time.Second)
 	if c := deliveries.Load(); c != 1 {
-		t.Fatalf("expected 1 delivery via file fallback, got %d", c)
+		t.Fatalf("expected 1 delivery via KV, got %d", c)
 	}
 }
 
@@ -943,9 +894,6 @@ func TestE2E_CrossMachineAgentMessageACKsWithoutDelivery(t *testing.T) {
 		Dir:       "/test",
 	}, []string{contracts.AgentSubject("ses_on_b")})
 
-	// Also create a stale file registry entry on machine-A (simulates the problem)
-	env.registerFileSession("ses_on_b", port)
-
 	// Start consumer as machine-A (not the session's machine)
 	env.startConsumer("machine-A")
 
@@ -975,7 +923,6 @@ func TestE2E_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
 		MachineID: "machine-A",
 		Dir:       "/test",
 	}, []string{"notifications.slack.*.*.mention"})
-	env.registerFileSession("ses_local", portLocal)
 	if err := env.sessions.Put("ses_local", session.SessionEntry{
 		Port:      portLocal,
 		MachineID: "machine-A",
@@ -990,7 +937,6 @@ func TestE2E_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
 		MachineID: "machine-B",
 		Dir:       "/test",
 	}, []string{"notifications.slack.*.*.mention"})
-	env.registerFileSession("ses_remote", portRemote)
 	if err := env.sessions.Put("ses_remote", session.SessionEntry{
 		Port:      portRemote,
 		MachineID: "machine-B",

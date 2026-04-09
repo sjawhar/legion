@@ -16,7 +16,8 @@ type HandleAgentResult struct {
 
 // HandleAgentMessage handles delivery of an agent-to-agent message.
 // It tries the interest path first (KV subscription match), then falls back
-// to the file registry. Returns the result so the caller can decide ACK vs NAK.
+// to a direct session registry lookup. Returns the result so the caller can
+// decide ACK vs NAK.
 func HandleAgentMessage(
 	item contracts.Envelope,
 	sessionID string,
@@ -35,18 +36,16 @@ func HandleAgentMessage(
 		return HandleAgentResult{Delivered: true}
 	}
 
-	// Fallback: file registry lookup
-	entry, err := deliverer.Find(sessionID)
-	if err != nil || entry == nil {
-		return HandleAgentResult{Delivered: false}
-	}
-
-	fallback := store.Interest{SessionID: sessionID, Dir: entry.Dir, MachineID: machineID}
-	if err := deliverer.Deliver(item, fallback); err != nil {
+	// No interest on this machine — try delivery via session registry directly.
+	// The session registry (KV or file) resolves the port/machine.
+	synth := store.Interest{SessionID: sessionID, MachineID: machineID}
+	if err := deliverer.Deliver(item, synth); err != nil {
 		if errors.Is(err, ErrWrongMachine) {
 			return HandleAgentResult{Delivered: false}
 		}
-		return HandleAgentResult{ShouldNAK: true, Err: err}
+		// Session not found or delivery failed without interest — don't NAK,
+		// another listener may own this session.
+		return HandleAgentResult{Delivered: false}
 	}
 	return HandleAgentResult{Delivered: true}
 }
