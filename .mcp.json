@@ -1,7 +1,3 @@
 {
-  "mcpServers": {
-    "sentry": {
-      "url": "https://mcp.sentry.dev/mcp"
-    }
-  }
+  "mcpServers": {}
 }
