@@ -556,6 +556,203 @@ describe("daemon entry", () => {
     expect(reCreatedSessions.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("re-subscribes workers to envoy topics after serve restart", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+    const envoySubscribeCalls: Array<{
+      url: string;
+      body: { session_id: string; topics: string[] };
+    }> = [];
+
+    const workerWithTopics: WorkerEntry = {
+      ...baseEntry,
+      envoyTopics: ["notifications.github.acme.widgets.issue.42.>"],
+    };
+    const workerWithoutTopics: WorkerEntry = {
+      ...secondEntry,
+      envoyTopics: undefined,
+    };
+
+    const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe")) {
+        envoySubscribeCalls.push({
+          url,
+          body: JSON.parse(init?.body as string),
+        });
+        return new Response("{}", { status: 200 });
+      }
+      return originalFetch(input, init);
+    };
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: {
+            [workerWithTopics.id]: workerWithTopics,
+            [workerWithoutTopics.id]: workerWithoutTopics,
+          },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter({
+          createSessionCalls,
+          healthy: async () => {
+            healthCallCount += 1;
+            if (healthCallCount === 1) {
+              return true;
+            }
+            return healthCallCount > 2;
+          },
+        }),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: Object.assign(mockFetch, {
+          preconnect: originalFetch.preconnect,
+        }),
+      }
+    );
+
+    envoySubscribeCalls.length = 0;
+
+    // subscribeWorkerToEnvoy uses globalThis.fetch directly (not DI'd)
+    globalThis.fetch = Object.assign(mockFetch, {
+      preconnect: originalFetch.preconnect,
+    });
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    // Worker with topics should be re-subscribed
+    const workerSubscriptions = envoySubscribeCalls.filter(
+      (c) => c.body.session_id === workerWithTopics.sessionId
+    );
+    expect(workerSubscriptions).toHaveLength(1);
+    expect(workerSubscriptions[0].body.topics).toEqual([
+      "notifications.github.acme.widgets.issue.42.>",
+    ]);
+
+    // Worker without topics should NOT be subscribed
+    const noTopicSubscriptions = envoySubscribeCalls.filter(
+      (c) => c.body.session_id === workerWithoutTopics.sessionId
+    );
+    expect(noTopicSubscriptions).toHaveLength(0);
+  });
+
+  it("does not re-subscribe workers to envoy when session recreation fails", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    const envoySubscribeCalls: Array<{
+      url: string;
+      body: { session_id: string; topics: string[] };
+    }> = [];
+
+    const workerWithTopics: WorkerEntry = {
+      ...baseEntry,
+      envoyTopics: ["notifications.github.acme.widgets.issue.42.>"],
+    };
+
+    const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe")) {
+        envoySubscribeCalls.push({
+          url,
+          body: JSON.parse(init?.body as string),
+        });
+        return new Response("{}", { status: 200 });
+      }
+      return originalFetch(input, init);
+    };
+
+    // Adapter whose createSession always throws
+    const failingAdapter: RuntimeAdapter = {
+      ...makeAdapter({
+        healthy: async () => {
+          healthCallCount += 1;
+          if (healthCallCount === 1) {
+            return true;
+          }
+          return healthCallCount > 2;
+        },
+      }),
+      createSession: async () => {
+        throw new Error("session creation failed");
+      },
+    };
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [workerWithTopics.id]: workerWithTopics },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: failingAdapter,
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: Object.assign(mockFetch, {
+          preconnect: originalFetch.preconnect,
+        }),
+      }
+    );
+
+    envoySubscribeCalls.length = 0;
+
+    globalThis.fetch = Object.assign(mockFetch, {
+      preconnect: originalFetch.preconnect,
+    });
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    // No envoy subscribes should have happened since all sessions failed to recreate
+    const workerSubscriptions = envoySubscribeCalls.filter(
+      (c) => c.body.session_id === workerWithTopics.sessionId
+    );
+    expect(workerSubscriptions).toHaveLength(0);
+  });
+
   it("re-creates internal controller session after serve crash+restart", async () => {
     let timeoutCallback: TimeoutCallback | null = null;
     const mockSetTimeout: typeof setTimeout = Object.assign(
