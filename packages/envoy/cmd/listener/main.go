@@ -109,30 +109,36 @@ type sessionInfo struct {
 	UpdatedAt int64    `json:"updated_at"`
 }
 
-// sessionsHandler returns all known sessions by joining the interests registry
-// (which tracks subscribed topics) with the session registry (which tracks ports).
+// sessionsHandler returns all live sessions by iterating the session registry
+// (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
+// topic data from the interests registry (envoy_interests).
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		interests := registry.List()
-		result := make([]sessionInfo, 0, len(interests))
-		for _, interest := range interests {
+		if sessions == nil {
+			http.Error(w, "session registry unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		entries, err := sessions.List()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		result := make([]sessionInfo, 0, len(entries))
+		for _, entry := range entries {
 			info := sessionInfo{
-				SessionID: interest.SessionID,
-				MachineID: interest.MachineID,
-				Dir:       interest.Dir,
-				Topics:    interest.Topics,
-				UpdatedAt: interest.UpdatedAt,
+				SessionID: entry.SessionID,
+				MachineID: entry.MachineID,
+				Dir:       entry.Dir,
+				Port:      entry.Port,
+				UpdatedAt: entry.UpdatedAt,
 			}
-			if sessions != nil {
-				if entry, err := sessions.Get(interest.SessionID); err == nil {
-					info.Port = entry.Port
-					if entry.UpdatedAt > info.UpdatedAt {
-						info.UpdatedAt = entry.UpdatedAt
-					}
+			if registry != nil {
+				if interest, err := registry.Get(entry.SessionID); err == nil {
+					info.Topics = interest.Topics
 				}
 			}
 			result = append(result, info)

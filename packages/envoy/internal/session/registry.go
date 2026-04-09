@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -97,4 +98,41 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 		return ErrNoKV
 	}
 	return r.kv.Delete(sessionID)
+}
+
+// ListEntry is a single entry from List(), keyed by session ID.
+type ListEntry struct {
+	SessionID string `json:"session_id"`
+	SessionEntry
+}
+
+// List returns all live sessions in the KV bucket. Because envoy_sessions
+// has a TTL, only sessions that have been refreshed recently appear.
+func (r *SessionRegistry) List() ([]ListEntry, error) {
+	if r == nil {
+		return nil, ErrNoKV
+	}
+	keys, err := r.kv.Keys()
+	if errors.Is(err, nats.ErrNoKeysFound) {
+		return []ListEntry{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]ListEntry, 0, len(keys))
+	for _, key := range keys {
+		kve, err := r.kv.Get(key)
+		if err != nil {
+			continue // expired between Keys() and Get()
+		}
+		var item SessionEntry
+		if err := json.Unmarshal(kve.Value(), &item); err != nil {
+			continue
+		}
+		entries = append(entries, ListEntry{SessionID: key, SessionEntry: item})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].SessionID < entries[j].SessionID
+	})
+	return entries, nil
 }

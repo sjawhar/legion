@@ -549,31 +549,15 @@ func TestSessionsHandler_JoinsRegistries(t *testing.T) {
 }
 
 func TestSessionsHandler_NilSessionRegistry(t *testing.T) {
-	registry, _ := setupSessionsTest(t,
-		map[string][]string{
-			"ses_no_port": {"notifications.test.>"},
-		},
-		nil,
-	)
-	// Pass nil sessions to simulate KV unavailability
-	handler := sessionsHandler(registry, nil)
+	// When session registry is nil, endpoint returns 503
+	handler := sessionsHandler(nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var items []sessionInfo
-	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(items))
-	}
-	if items[0].Port != 0 {
-		t.Fatalf("expected port 0 when sessions is nil, got %d", items[0].Port)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -609,15 +593,16 @@ func TestSessionsHandler_EmptyList(t *testing.T) {
 	}
 }
 
-func TestSessionsHandler_PartialPortData(t *testing.T) {
+func TestSessionsHandler_OnlyLiveSessions(t *testing.T) {
+	// Sessions in interests but NOT in envoy_sessions should be excluded
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{
-			"ses_with_port":    {"notifications.test.>"},
-			"ses_without_port": {"notifications.github.>"},
+			"ses_live":    {"notifications.test.>"},
+			"ses_dead":    {"notifications.github.>"},
 		},
 		map[string]int{
-			"ses_with_port": 13382,
-			// ses_without_port intentionally not in sessions registry
+			"ses_live": 13382,
+			// ses_dead intentionally not in sessions registry — it's dead
 		},
 	)
 	handler := sessionsHandler(registry, sessions)
@@ -633,25 +618,48 @@ func TestSessionsHandler_PartialPortData(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 sessions, got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 live session, got %d", len(items))
 	}
-	// Find the session with port
-	var withPort, withoutPort *sessionInfo
-	for i := range items {
-		if items[i].SessionID == "ses_with_port" {
-			withPort = &items[i]
-		} else {
-			withoutPort = &items[i]
-		}
+	if items[0].SessionID != "ses_live" {
+		t.Fatalf("expected ses_live, got %s", items[0].SessionID)
 	}
-	if withPort == nil || withoutPort == nil {
-		t.Fatal("expected both sessions in response")
+	if items[0].Port != 13382 {
+		t.Fatalf("expected port 13382, got %d", items[0].Port)
 	}
-	if withPort.Port != 13382 {
-		t.Fatalf("expected port 13382, got %d", withPort.Port)
+	if len(items[0].Topics) == 0 {
+		t.Fatal("expected ses_live to have topics from interests")
 	}
-	if withoutPort.Port != 0 {
-		t.Fatalf("expected port 0 for session without port data, got %d", withoutPort.Port)
+}
+
+func TestSessionsHandler_NoInterestsData(t *testing.T) {
+	// Session in envoy_sessions but NOT in interests — still appears, just no topics
+	registry, sessions := setupSessionsTest(t,
+		nil, // no interests
+		map[string]int{
+			"ses_orphan": 13382,
+		},
+	)
+	handler := sessionsHandler(registry, sessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []sessionInfo
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(items))
+	}
+	if items[0].Port != 13382 {
+		t.Fatalf("expected port 13382, got %d", items[0].Port)
+	}
+	if len(items[0].Topics) != 0 {
+		t.Fatalf("expected no topics for orphan session, got %v", items[0].Topics)
 	}
 }
