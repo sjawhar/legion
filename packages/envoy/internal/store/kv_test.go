@@ -402,3 +402,184 @@ func TestOpen_EmptyBucketSucceeds(t *testing.T) {
 		t.Fatalf("expected 0 results from empty registry, got %d", len(got))
 	}
 }
+
+// --- Cold Cache Tests (KV fallback on cache miss — regression for #367) ---
+// These tests construct a Registry with an empty cache but a populated KV bucket,
+// guaranteeing the cache is cold. This simulates the warm-up window after serve
+// restart when watch() hasn't populated the cache yet.
+
+// coldRegistry creates a Registry with an empty cache backed by the given KV bucket.
+// No watch() goroutine is started, so the cache stays cold for the test's lifetime.
+func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) {
+	t.Helper()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("failed to get JetStream: %v", err)
+	}
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("failed to create KV bucket: %v", err)
+	}
+	return &Registry{kv: kv, cache: map[string]Interest{}}, kv
+}
+
+func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_cold", MachineID: "m1", Topics: []string{"topic.a", "topic.b"}})
+
+	item, err := reg.Get("ses_cold")
+	if err != nil {
+		t.Fatalf("Get failed on cold cache: %v", err)
+	}
+	if item.SessionID != "ses_cold" {
+		t.Fatalf("expected ses_cold, got %s", item.SessionID)
+	}
+	sort.Strings(item.Topics)
+	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.b" {
+		t.Fatalf("expected [topic.a topic.b], got %v", item.Topics)
+	}
+}
+
+func TestGet_ColdCachePopulatesCacheOnHit(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_pop", MachineID: "m1", Topics: []string{"topic.x"}})
+
+	// First Get falls back to KV and caches the result
+	if _, err := reg.Get("ses_pop"); err != nil {
+		t.Fatalf("first Get failed: %v", err)
+	}
+
+	// Verify the cache was populated (Match only reads cache)
+	got := reg.Match("m1", "topic.x")
+	if len(got) != 1 || got[0].SessionID != "ses_pop" {
+		t.Fatalf("expected Match to find cached entry, got %v", got)
+	}
+}
+
+func TestGet_ColdCacheMissReturnsError(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+
+	_, err := reg.Get("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent session, got nil")
+	}
+	if err != natsgo.ErrKeyNotFound {
+		t.Fatalf("expected ErrKeyNotFound, got %v", err)
+	}
+}
+
+func TestUpsert_ColdCacheMergesWithExistingKVEntry(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+
+	// Pre-populate KV with existing session that has topics A and B
+	putInterest(t, kv, Interest{
+		SessionID: "ses_merge",
+		MachineID: "m1",
+		Dir:       "/workspace",
+		Topics:    []string{"topic.a", "topic.b"},
+	})
+
+	// Upsert with topic C — cache is cold, must read from KV to merge
+	result, err := reg.Upsert(Interest{SessionID: "ses_merge", MachineID: "m1"}, []string{"topic.c"})
+	if err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
+
+	// Must have all three topics merged (not just the new one)
+	expected := []string{"topic.a", "topic.b", "topic.c"}
+	if len(result.Topics) != 3 {
+		t.Fatalf("expected 3 topics after merge, got %d: %v", len(result.Topics), result.Topics)
+	}
+	for i, want := range expected {
+		if result.Topics[i] != want {
+			t.Fatalf("topic[%d]: expected %s, got %s (full: %v)", i, want, result.Topics[i], result.Topics)
+		}
+	}
+
+	// Also verify MachineID and Dir were preserved from the KV entry
+	if result.MachineID != "m1" {
+		t.Fatalf("expected MachineID m1, got %s", result.MachineID)
+	}
+	if result.Dir != "/workspace" {
+		t.Fatalf("expected Dir /workspace, got %s", result.Dir)
+	}
+
+	// Also verify the persisted KV entry matches the returned struct
+	entry, err := kv.Get("ses_merge")
+	if err != nil {
+		t.Fatalf("KV Get failed after Upsert: %v", err)
+	}
+	var persisted Interest
+	if err := json.Unmarshal(entry.Value(), &persisted); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(persisted.Topics) != 3 {
+		t.Fatalf("expected 3 persisted topics, got %d: %v", len(persisted.Topics), persisted.Topics)
+	}
+	for i, want := range expected {
+		if persisted.Topics[i] != want {
+			t.Fatalf("persisted topic[%d]: expected %s, got %s", i, want, persisted.Topics[i])
+		}
+	}
+}
+func TestUpsert_ColdCacheDuplicateTopicDeduped(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_dedup", MachineID: "m1", Topics: []string{"topic.a", "topic.b"}})
+
+	// Upsert with topic A (already exists) — should deduplicate
+	result, err := reg.Upsert(Interest{SessionID: "ses_dedup", MachineID: "m1"}, []string{"topic.a"})
+	if err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
+
+	expected := []string{"topic.a", "topic.b"}
+	if len(result.Topics) != len(expected) {
+		t.Fatalf("expected topics %v, got %v", expected, result.Topics)
+	}
+	for i, want := range expected {
+		if result.Topics[i] != want {
+			t.Fatalf("topic[%d]: expected %s, got %s (full: %v)", i, want, result.Topics[i], result.Topics)
+		}
+	}
+}
+
+func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_rm", MachineID: "m1", Topics: []string{"topic.a", "topic.b", "topic.c"}})
+
+	// Remove topic B — cache is cold, must read from KV
+	if err := reg.Remove("ses_rm", []string{"topic.b"}); err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+
+	// Verify KV now has [topic.a, topic.c]
+	entry, err := kv.Get("ses_rm")
+	if err != nil {
+		t.Fatalf("KV Get failed after Remove: %v", err)
+	}
+	var item Interest
+	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.c" {
+		t.Fatalf("expected [topic.a topic.c], got %v", item.Topics)
+	}
+}
