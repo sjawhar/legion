@@ -22,7 +22,7 @@ import { isPortFree } from "./ports";
 import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter, RuntimeStartOptions } from "./runtime/types";
-import { startServer } from "./server";
+import { startServer, subscribeWorkerToEnvoy } from "./server";
 import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
 import {
   registerGauges,
@@ -652,6 +652,7 @@ export async function startDaemon(
               `Recreating ${liveWorkers.length} active worker sessions after serve restart...`
             );
             const BATCH_SIZE = 10;
+            const recreatedSessions = new Map<string, string>();
             for (let i = 0; i < liveWorkers.length; i += BATCH_SIZE) {
               const batch = liveWorkers.slice(i, i + BATCH_SIZE);
               await Promise.allSettled(
@@ -661,6 +662,7 @@ export async function startDaemon(
                       entry.sessionId,
                       entry.workspace
                     );
+                    recreatedSessions.set(entry.id, actualId);
                     if (actualId !== entry.sessionId) {
                       console.warn(
                         `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
@@ -671,6 +673,18 @@ export async function startDaemon(
                   }
                 })
               );
+            }
+
+            // Re-subscribe workers to their envoy topics after serve restart.
+            // The envoy plugin re-initializes with only the agent topic on restart,
+            // so daemon-managed issue/PR subscriptions must be re-applied.
+            // Only re-subscribe workers whose sessions were successfully recreated,
+            // using the actual session ID returned by createSession.
+            for (const entry of liveWorkers) {
+              const actualSessionId = recreatedSessions.get(entry.id);
+              if (actualSessionId && entry.envoyTopics?.length) {
+                subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics);
+              }
             }
 
             if (controllerState?.port) {
