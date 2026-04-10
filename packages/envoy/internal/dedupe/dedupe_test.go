@@ -196,3 +196,44 @@ func TestCache_Len(t *testing.T) {
 		t.Fatalf("expected 3, got %d", c.Len())
 	}
 }
+
+// TestCache_PreDeliveryAttemptDedupe validates the pattern used by the listener:
+// record BEFORE delivery so redeliveries of the same (dedupe_key, session_id)
+// are skipped even when the first attempt timed out (slow-204 case).
+func TestCache_PreDeliveryAttemptDedupe(t *testing.T) {
+	clock := newTestClock()
+	attempts := NewWithClock(5*time.Minute, clock.Now)
+	defer attempts.Stop()
+
+	dedupeKey := "publish.abc123"
+	sessionID := "ses-target"
+
+	// First delivery attempt: not yet seen
+	if attempts.Seen(dedupeKey, sessionID) {
+		t.Fatal("first attempt should not be seen")
+	}
+
+	// Record attempt BEFORE calling prompt_async
+	attempts.Record(dedupeKey, sessionID)
+
+	// Simulate JetStream redelivery (same dedupe_key) — should be skipped
+	if !attempts.Seen(dedupeKey, sessionID) {
+		t.Fatal("redelivery should be seen after attempt was recorded")
+	}
+
+	// Different dedupe_key to same session is still allowed
+	if attempts.Seen("publish.different", sessionID) {
+		t.Fatal("different dedupe_key should not be blocked")
+	}
+
+	// Same dedupe_key to different session is still allowed
+	if attempts.Seen(dedupeKey, "ses-other") {
+		t.Fatal("same dedupe_key to different session should not be blocked")
+	}
+
+	// After 5-min TTL, redelivery is allowed again
+	clock.Advance(5*time.Minute + 1)
+	if attempts.Seen(dedupeKey, sessionID) {
+		t.Fatal("attempt should expire after TTL")
+	}
+}

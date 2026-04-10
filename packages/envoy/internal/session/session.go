@@ -112,5 +112,5 @@ func (d Deliverer) timeout() time.Duration {
 	if d.RequestLimit > 0 {
 		return d.RequestLimit
 	}
-	return 10 * time.Second
+	return 30 * time.Second
 }
