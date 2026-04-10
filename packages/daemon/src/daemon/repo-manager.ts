@@ -15,8 +15,6 @@ export interface JjResult {
 
 export interface RepoManagerDeps {
   runJj: (args: string[]) => Promise<JjResult>;
-  /** Truly async subprocess runner for non-blocking operations. Falls back to runJj if absent. */
-  spawnJjAsync?: (args: string[]) => Promise<JjResult>;
   exists: (path: string) => Promise<boolean>;
   rmDir: (path: string) => Promise<void>;
   symlink: (target: string, linkPath: string) => Promise<void>;
@@ -24,24 +22,20 @@ export interface RepoManagerDeps {
 
 const defaultDeps: RepoManagerDeps = {
   runJj: async (args) => {
-    const result = Bun.spawnSync(["jj", ...args], {
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120_000,
-    });
-    return {
-      exitCode: result.exitCode,
-      stdout: result.stdout.toString(),
-      stderr: result.stderr.toString(),
-    };
-  },
-  spawnJjAsync: async (args) => {
     const proc = Bun.spawn(["jj", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const exitCode = await proc.exited;
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    return { exitCode, stdout, stderr };
+    const timeout = setTimeout(() => proc.kill(), 120_000);
+    try {
+      const [exitCode, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { exitCode, stdout, stderr };
+    } finally {
+      clearTimeout(timeout);
+    }
   },
   exists: async (p) => {
     const { existsSync } = await import("node:fs");
@@ -155,9 +149,7 @@ export async function ensureWorkspace(
 /**
  * Fire a non-blocking `jj git fetch` on an existing clone.
  *
- * Uses `spawnJjAsync` (truly non-blocking) when available, falling back to
- * `runJj` for tests. Rejects on non-zero exit codes so callers can log
- * failures via `.catch()`.
+ * Rejects on non-zero exit codes so callers can log failures via `.catch()`.
  */
 export async function startBackgroundFetch(
   paths: LegionPaths,
@@ -165,8 +157,7 @@ export async function startBackgroundFetch(
   deps: RepoManagerDeps = defaultDeps
 ): Promise<JjResult> {
   const clonePath = paths.repoClonePath(repo.host, repo.owner, repo.repo);
-  const runner = deps.spawnJjAsync ?? deps.runJj;
-  const result = await runner(["git", "fetch", "-R", clonePath]);
+  const result = await deps.runJj(["git", "fetch", "-R", clonePath]);
   if (result.exitCode !== 0) {
     throw new Error(`Background fetch failed for ${clonePath}: ${result.stderr}`);
   }
