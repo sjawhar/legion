@@ -1,15 +1,20 @@
 {
   "filesChanged": [
     "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/daemon/src/daemon/__tests__/server.test.ts",
+    ".opencode/skills/legion-worker/workflows/merge.md",
+    ".opencode/skills/legion-controller/SKILL.md"
   ],
   "trickyParts": [
-    "The issueNumber was never sent by the controller — the CLI flag exists but the controller skill never uses it. The fix auto-extracts from the issueId+repoRef prefix match instead of requiring it in the payload."
+    "Workspace cleanup failure must preserve worker state for retry — two-pass approach in cleanupDoneIssueWorkers separates workspace cleanup from state removal",
+    "Fire-and-forget cleanup runs after response is built but before return — idempotent by design since workers.delete() is synchronous"
   ],
   "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-09T23:11:38.365Z"
+  "completed": "2026-04-10T00:26:34.938Z"
 }

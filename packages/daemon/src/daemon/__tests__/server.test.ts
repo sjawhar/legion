@@ -22,6 +22,7 @@ describe("daemon server", () => {
   let sessionStatusHandler:
     | ((sessionId: string) => Promise<{ data?: unknown; error?: unknown }>)
     | null = null;
+  const originalSpawn = Bun.spawn;
   const originalFetch = globalThis.fetch;
   const legionId = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -114,6 +115,7 @@ describe("daemon server", () => {
   }
 
   afterEach(async () => {
+    Bun.spawn = originalSpawn;
     globalThis.fetch = originalFetch;
     sessionStatusHandler = null;
     if (stopServer) {
@@ -881,6 +883,292 @@ describe("daemon server", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { issues: Record<string, unknown> };
       expect(body.issues).toEqual({});
+    });
+  });
+
+  describe("auto-cleanup on state collect", () => {
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+
+    function makeRepoManagerDeps(overrides?: Partial<RepoManagerDeps>): RepoManagerDeps {
+      return {
+        runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        exists: async () => true,
+        rmDir: async () => {},
+        symlink: async () => {},
+        ...overrides,
+      };
+    }
+
+    async function createRepoWorker(issueId: string) {
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId,
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as { id: string; sessionId: string };
+    }
+
+    it("auto-cleans workers for Done issues on state collect", async () => {
+      const rmDirCalls: string[] = [];
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      const created = await createRepoWorker("acme-widgets-42");
+
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_abc",
+              content: {
+                number: 42,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/42",
+                type: "Issue",
+              },
+              status: "Done",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workersResponse = await requestJson("/workers");
+      expect((await workersResponse.json()) as WorkerEntry[]).toEqual([]);
+      expect(deleteSessionCalls).toEqual([created.sessionId]);
+      expect(rmDirCalls).toEqual([
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-42",
+      ]);
+    });
+
+    it("does not clean workers for non-Done issues", async () => {
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps(),
+      });
+
+      await createRepoWorker("acme-widgets-43");
+
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_def",
+              content: {
+                number: 43,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/43",
+                type: "Issue",
+              },
+              status: "In Progress",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workersResponse = await requestJson("/workers");
+      const workers = (await workersResponse.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(1);
+      expect(workers[0]?.id).toBe("acme-widgets-43-implement");
+      expect(deleteSessionCalls).toEqual([]);
+    });
+
+    it("auto-cleanup is idempotent", async () => {
+      const rmDirCalls: string[] = [];
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      const created = await createRepoWorker("acme-widgets-44");
+
+      const donePayload = JSON.stringify({
+        backend: "github",
+        issues: [
+          {
+            id: "PVTI_xyz",
+            content: {
+              number: 44,
+              repository: "acme/widgets",
+              url: "https://github.com/acme/widgets/issues/44",
+              type: "Issue",
+            },
+            status: "Done",
+            labels: [],
+          },
+        ],
+      });
+
+      const first = await requestJson("/state/collect", {
+        method: "POST",
+        body: donePayload,
+      });
+      expect(first.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const second = await requestJson("/state/collect", {
+        method: "POST",
+        body: donePayload,
+      });
+      expect(second.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workersResponse = await requestJson("/workers");
+      expect((await workersResponse.json()) as WorkerEntry[]).toEqual([]);
+      expect(deleteSessionCalls).toEqual([created.sessionId]);
+      expect(rmDirCalls).toEqual([
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-44",
+      ]);
+    });
+
+    it("auto-cleans workers on fetch-and-collect", async () => {
+      const rmDirCalls: string[] = [];
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      const created = await createRepoWorker("acme-widgets-45");
+      Bun.spawn = ((cmd: string[]) => {
+        expect(cmd.slice(0, 3)).toEqual(["gh", "api", "graphql"]);
+        return {
+          stdout: new Blob([
+            JSON.stringify({
+              data: {
+                organization: {
+                  projectV2: {
+                    items: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          id: "PVTI_fetch",
+                          fieldValueByName: { name: "Done" },
+                          labels: { nodes: [] },
+                          content: {
+                            __typename: "Issue",
+                            number: 45,
+                            title: "Done issue",
+                            url: "https://github.com/acme/widgets/issues/45",
+                            repository: { nameWithOwner: "acme/widgets" },
+                            issueDependenciesSummary: { blockedBy: 0 },
+                            linkedPullRequests: { nodes: [] },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            }),
+          ]).stream(),
+          stderr: new Blob([""]).stream(),
+          exited: Promise.resolve(0),
+          kill: () => {},
+        } as unknown as ReturnType<typeof Bun.spawn>;
+      }) as typeof Bun.spawn;
+
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github", legionId: "acme/123" }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workersResponse = await requestJson("/workers");
+      expect((await workersResponse.json()) as WorkerEntry[]).toEqual([]);
+      expect(deleteSessionCalls).toEqual([created.sessionId]);
+      expect(rmDirCalls).toEqual([
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-45",
+      ]);
+    });
+
+    it("preserves worker state when workspace cleanup fails", async () => {
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async () => {
+            throw new Error("disk I/O error");
+          },
+        }),
+      });
+
+      await createRepoWorker("acme-widgets-46");
+
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_fail",
+              content: {
+                number: 46,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/46",
+                type: "Issue",
+              },
+              status: "Done",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Worker should still exist because workspace cleanup failed
+      const workersResponse = await requestJson("/workers");
+      const workers = (await workersResponse.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(1);
+      expect(workers[0]?.id).toBe("acme-widgets-46-implement");
+      // Session should NOT have been deleted
+      expect(deleteSessionCalls).toEqual([]);
     });
   });
 

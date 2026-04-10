@@ -8,6 +8,7 @@ import {
   CollectedState,
   computeSessionId,
   type IssueState,
+  IssueStatus,
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
@@ -347,6 +348,92 @@ export function startServer(opts: ServerOptions): {
   };
 
   const stateLoaded = loadState();
+
+  const cleanupDoneIssueWorkers = async (collectedState: CollectedState): Promise<void> => {
+    await stateLoaded;
+
+    const doneIssueIds = Object.entries(collectedState.issues)
+      .filter(([, issueState]) => issueState.status === IssueStatus.DONE)
+      .map(([issueId]) => issueId.toLowerCase());
+    if (doneIssueIds.length === 0) {
+      return;
+    }
+
+    const doneIssueIdSet = new Set(doneIssueIds);
+    const cleanedIssueIds = new Set<string>();
+    const failedWorkspaceIssueIds = new Set<string>();
+    const cleanedWorkspaceIssueIds = new Set<string>();
+    let cleanedWorkers = 0;
+
+    // First pass: attempt workspace cleanup (once per issue)
+    for (const [workerId, entry] of workers.entries()) {
+      const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
+      if (!issueId || !doneIssueIdSet.has(issueId)) {
+        continue;
+      }
+      if (cleanedWorkspaceIssueIds.has(issueId) || failedWorkspaceIssueIds.has(issueId)) {
+        continue;
+      }
+      if (opts.paths && typeof entry.repo === "string") {
+        const repoRef = parseIssueRepo(entry.repo);
+        if (repoRef) {
+          try {
+            await cleanupWorkspace(
+              opts.paths,
+              opts.legionId,
+              issueId,
+              repoRef,
+              opts.repoManagerDeps
+            );
+            cleanedWorkspaceIssueIds.add(issueId);
+          } catch (error) {
+            console.warn(
+              `[auto-cleanup] workspace cleanup failed for ${issueId}: ${error instanceof Error ? error.message : String(error)}`
+            );
+            failedWorkspaceIssueIds.add(issueId);
+          }
+        }
+      }
+    }
+
+    // Second pass: remove worker state only for issues where workspace was cleaned (or no workspace)
+    for (const [workerId, entry] of workers.entries()) {
+      const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
+      if (!issueId || !doneIssueIdSet.has(issueId)) {
+        continue;
+      }
+      // Skip issues where workspace cleanup failed — preserve state for retry
+      if (failedWorkspaceIssueIds.has(issueId)) {
+        continue;
+      }
+
+      try {
+        await opts.adapter.deleteSession(entry.sessionId);
+      } catch (error) {
+        console.warn(
+          `[auto-cleanup] session delete failed for ${entry.id}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+
+      detachWorkerFromEnvoy(entry, "auto-cleanup-done");
+      unsubscribeAllWorkerTopics(entry.sessionId);
+      workers.delete(entry.id);
+      crashHistory.delete(entry.id);
+      cleanedIssueIds.add(issueId);
+      cleanedWorkers += 1;
+    }
+
+    for (const issueId of cleanedIssueIds) {
+      issueStateCache.delete(issueId);
+    }
+
+    if (cleanedWorkers > 0) {
+      await persistState();
+      console.log(
+        `[auto-cleanup] Cleaned ${cleanedWorkers} workers for ${cleanedIssueIds.size} Done issues`
+      );
+    }
+  };
 
   const server = Bun.serve({
     hostname,
@@ -1205,6 +1292,13 @@ export function startServer(opts: ServerOptions): {
               }
             }
 
+            cleanupDoneIssueWorkers(state).catch((err) =>
+              console.error(
+                "[auto-cleanup] failed:",
+                err instanceof Error ? err.message : String(err)
+              )
+            );
+
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -1261,6 +1355,13 @@ export function startServer(opts: ServerOptions): {
                 issueTitleCache.set(id, title);
               }
             }
+
+            cleanupDoneIssueWorkers(state).catch((err) =>
+              console.error(
+                "[auto-cleanup] failed:",
+                err instanceof Error ? err.message : String(err)
+              )
+            );
 
             return jsonResponse(CollectedState.toDict(state));
           } catch (error) {
