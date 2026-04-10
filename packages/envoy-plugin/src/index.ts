@@ -1,4 +1,3 @@
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tool } from "@opencode-ai/plugin/tool";
 import { resolvePort } from "./port";
 
@@ -18,30 +17,9 @@ async function call(path: string, init?: RequestInit) {
 }
 
 export default async (input: { serverUrl: URL }) => {
-  const registryDir = process.env.OC_REGISTRY;
   let activeSessionID: string | null = null;
-  let _activeFile: string | null = null;
   /** Cached port — resolved asynchronously, null until first successful resolution. */
   let resolvedPort: number | null = null;
-
-  const registryFile = (sessionID: string) =>
-    registryDir ? `${registryDir}/${sessionID}.json` : null;
-
-  const update = (sessionID: string, patch: Record<string, unknown>) => {
-    const file = registryFile(sessionID);
-    if (!file) return;
-    try {
-      let data: Record<string, unknown> = {};
-      try {
-        data = JSON.parse(readFileSync(file, "utf-8"));
-      } catch {
-        data = { pid: process.pid, dir: process.cwd(), started: new Date().toISOString() };
-      }
-      Object.assign(data, patch);
-      writeFileSync(file, `${JSON.stringify(data)}\n`);
-      registryFiles.add(file);
-    } catch {}
-  };
 
   let portWarningLogged = false;
   const refreshPort = async (): Promise<number | null> => {
@@ -62,119 +40,79 @@ export default async (input: { serverUrl: URL }) => {
   /** Return cached port synchronously — tools need a port value inline. */
   const currentPort = () => resolvedPort;
 
-  const syncPort = async (sessionID?: string): Promise<boolean> => {
+  const syncPort = async (): Promise<boolean> => {
     const value = await refreshPort();
-    if (!value) return false;
-    if (sessionID) update(sessionID, { port: value });
-    return true;
+    return value !== null;
   };
 
-  const fetchSession = async (sessionID: string) => {
-    try {
-      const res = await fetch(`${input.serverUrl}/session/${sessionID}`, {
-        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-      });
-      if (!res.ok) return null;
-      const session = await res.json();
-      return { id: session.id, title: session.title || "" };
-    } catch {
-      return null;
-    }
-  };
-
-  // Track all registry files this process created, clean up on exit
-  const registryFiles = new Set<string>();
-
-  if (registryDir) {
-    // Defer port resolution to background — never block plugin init.
-    // The port sync loop retries every second until resolved.
-    const timer = setInterval(() => {
-      syncPort(activeSessionID ?? undefined).then((resolved) => {
-        if (resolved) clearInterval(timer);
-      });
-    }, 1000);
-    timer.unref(); // Don't prevent graceful shutdown if port never resolves
-    // Fire an immediate async attempt (non-blocking)
-    syncPort().catch(() => {});
-
-    // Heartbeat: re-subscribe every 2 minutes to refresh envoy_sessions TTL (5-min)
-    const heartbeatInterval = setInterval(
-      () => {
-        if (!activeSessionID) return;
-        const port = currentPort();
-        if (!port) return;
-        call("/v1/interests/subscribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: activeSessionID,
-            dir: process.cwd(),
-            topics: [`notifications.agent.${activeSessionID}`],
-            port,
-          }),
-        }).catch(() => {});
-      },
-      2 * 60 * 1000
-    );
-
-    process.on("exit", () => {
-      clearInterval(timer);
-      clearInterval(heartbeatInterval);
-      for (const f of registryFiles) {
-        try {
-          unlinkSync(f);
-        } catch {}
-      }
+  // Defer port resolution to background — never block plugin init.
+  // The port sync loop retries every second until resolved.
+  const timer = setInterval(() => {
+    syncPort().then((resolved) => {
+      if (resolved) clearInterval(timer);
     });
-  }
+  }, 1000);
+  timer.unref(); // Don't prevent graceful shutdown if port never resolves
+  // Fire an immediate async attempt (non-blocking)
+  syncPort().catch(() => {});
+
+  // Heartbeat: re-subscribe every 2 minutes to refresh envoy_sessions TTL (5-min)
+  const heartbeatInterval = setInterval(
+    () => {
+      if (!activeSessionID) return;
+      const port = currentPort();
+      if (!port) return;
+      call("/v1/interests/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: activeSessionID,
+          dir: process.cwd(),
+          topics: [`notifications.agent.${activeSessionID}`],
+          port,
+        }),
+      }).catch(() => {});
+    },
+    2 * 60 * 1000
+  );
+
+  process.on("exit", () => {
+    clearInterval(timer);
+    clearInterval(heartbeatInterval);
+  });
 
   return {
-    event: registryDir
-      ? async ({ event }: { event: { type?: string; properties?: Record<string, unknown> } }) => {
-          if (activeSessionID) syncPort(activeSessionID).catch(() => {});
+    event: async ({
+      event,
+    }: {
+      event: { type?: string; properties?: Record<string, unknown> };
+    }) => {
+      if (activeSessionID) syncPort().catch(() => {});
 
-          if (
-            event.type === "session.status" &&
-            (event.properties?.status as { type?: string } | undefined)?.type === "busy"
-          ) {
-            const sessionID = event.properties?.sessionID as string | undefined;
-            if (sessionID && sessionID !== activeSessionID) {
-              activeSessionID = sessionID;
-              _activeFile = registryFile(sessionID);
-              const session = await fetchSession(sessionID);
-              if (session) update(sessionID, { session });
-              await syncPort(sessionID);
-              const port = currentPort();
-              if (port) {
-                call("/v1/interests/subscribe", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    session_id: sessionID,
-                    dir: process.cwd(),
-                    topics: [`notifications.agent.${sessionID}`],
-                    port,
-                  }),
-                }).catch(() => {});
-              }
-            }
-          }
-          if (event.type === "session.updated") {
-            const info = event.properties?.info as { id?: string; title?: string } | undefined;
-            if (info && info.id === activeSessionID) {
-              update(info.id, { session: { id: info.id, title: info.title || "" } });
-            }
-          }
-
-          if (event.type === "session.idle") {
-            const sessionID = event.properties?.sessionID as string | undefined;
-            if (sessionID && sessionID === activeSessionID) {
-              const session = await fetchSession(sessionID);
-              if (session) update(sessionID, { session });
-            }
+      if (
+        event.type === "session.status" &&
+        (event.properties?.status as { type?: string } | undefined)?.type === "busy"
+      ) {
+        const sessionID = event.properties?.sessionID as string | undefined;
+        if (sessionID && sessionID !== activeSessionID) {
+          activeSessionID = sessionID;
+          await syncPort();
+          const port = currentPort();
+          if (port) {
+            call("/v1/interests/subscribe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                session_id: sessionID,
+                dir: process.cwd(),
+                topics: [`notifications.agent.${sessionID}`],
+                port,
+              }),
+            }).catch(() => {});
           }
         }
-      : undefined,
+      }
+    },
     tool: {
       envoy_subscribe: tool({
         description:

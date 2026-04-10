@@ -44,14 +44,18 @@ func newMockHTTPMCPServer(opts ...func(*mockHTTPMCPServer)) *mockHTTPMCPServer {
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 
-		messageURL := "http://" + r.Host + "/message"
-		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", messageURL)
-		flusher.Flush()
-
+		// Set SSE fields BEFORE writing the endpoint event so they're
+		// available when the client reads the event and sends requests.
+		// Otherwise there's a race: the client reads the endpoint event,
+		// immediately POSTs to /message, and sendSSE() finds nil fields.
 		m.mu.Lock()
 		m.sseWriter = flusher
 		m.sseConn = w
 		m.mu.Unlock()
+
+		messageURL := "http://" + r.Host + "/message"
+		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", messageURL)
+		flusher.Flush()
 
 		select {
 		case <-r.Context().Done():

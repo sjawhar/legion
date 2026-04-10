@@ -3,19 +3,78 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
+
+var (
+	sharedListenerNATSOnce sync.Once
+	sharedListenerNATSURI  string
+	sharedListenerNATSErr  error
+)
+
+func sharedListenerTestNATSURI(t *testing.T) string {
+	t.Helper()
+	sharedListenerNATSOnce.Do(func() {
+		ctx := context.Background()
+		ctr, err := tcnats.Run(ctx, "nats:2.10")
+		if err != nil {
+			sharedListenerNATSErr = err
+			return
+		}
+		sharedListenerNATSURI, sharedListenerNATSErr = ctr.ConnectionString(ctx)
+	})
+	if sharedListenerNATSErr != nil {
+		t.Fatalf("failed to start shared NATS: %v", sharedListenerNATSErr)
+	}
+	return sharedListenerNATSURI
+}
+
+func clearKVBucket(t *testing.T, conn *natsgo.Conn, bucket string) {
+	t.Helper()
+	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
+	if err != nil {
+		t.Fatalf("failed to open JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(bucket)
+	if errors.Is(err, natsgo.ErrBucketNotFound) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("failed to open bucket %s: %v", bucket, err)
+	}
+	keys, err := kv.Keys()
+	if errors.Is(err, natsgo.ErrNoKeysFound) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("failed to list bucket %s keys: %v", bucket, err)
+	}
+	for _, key := range keys {
+		if err := kv.Delete(key); err != nil && !errors.Is(err, natsgo.ErrKeyNotFound) {
+			t.Fatalf("failed to delete key %s from bucket %s: %v", key, bucket, err)
+		}
+	}
+}
+
+func resetListenerTestState(t *testing.T, conn *natsgo.Conn) {
+	t.Helper()
+	clearKVBucket(t, conn, store.Bucket)
+	clearKVBucket(t, conn, session.SessionBucket)
+}
 
 func TestReadinessGate_NotReady_Returns503(t *testing.T) {
 	handler := readinessGate(func() bool { return false }, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,21 +307,12 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 
 func setupPublishTestClient(t *testing.T) *bus.Client {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(func() { client.Conn.Close() })
+	resetListenerTestState(t, client.Conn)
 	return client
 }
 
@@ -322,21 +372,12 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 
 func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.Registry {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(func() { client.Conn.Close() })
+	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -453,21 +494,12 @@ func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 
 func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[string]int) (*store.Registry, *session.SessionRegistry) {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(func() { client.Conn.Close() })
+	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -597,8 +629,8 @@ func TestSessionsHandler_OnlyLiveSessions(t *testing.T) {
 	// Sessions in interests but NOT in envoy_sessions should be excluded
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{
-			"ses_live":    {"notifications.test.>"},
-			"ses_dead":    {"notifications.github.>"},
+			"ses_live": {"notifications.test.>"},
+			"ses_dead": {"notifications.github.>"},
 		},
 		map[string]int{
 			"ses_live": 13382,

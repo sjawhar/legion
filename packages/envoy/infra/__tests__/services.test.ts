@@ -25,13 +25,12 @@ describe("computeTsnetEnvs", () => {
   const baseMachine: MachineConfig = {
     name: "test-machine",
     machineId: "test-machine",
-    listener: { registryDir: "/tmp/registry" },
+    listener: {},
   };
 
   const tsnetMachine: MachineConfig = {
     ...baseMachine,
     listener: {
-      registryDir: "/tmp/registry",
       tsnet: {
         hostname: "envoy-listener-test",
         stateDir: "/var/lib/envoy-tsnet/listener-test",

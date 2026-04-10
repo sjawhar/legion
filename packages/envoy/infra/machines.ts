@@ -12,9 +12,8 @@ export interface TsnetConfig {
 }
 
 export interface ListenerConfig {
-  registryDir: string;
-  /** When set, the listener serves /v1/* exclusively on the tsnet TLS interface. */
-  tsnet?: TsnetConfig;
+	/** When set, the listener serves /v1/* exclusively on the tsnet TLS interface. */
+	tsnet?: TsnetConfig;
 }
 
 export interface ReceiverConfig {

@@ -2,30 +2,61 @@ package session
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
+var (
+	sharedNATSOnce sync.Once
+	sharedNATSURI  string
+	sharedNATSErr  error
+)
+
+func sharedTestNATSURI(t *testing.T) string {
+	t.Helper()
+	sharedNATSOnce.Do(func() {
+		ctx := context.Background()
+		ctr, err := tcnats.Run(ctx, "nats:2.10")
+		if err != nil {
+			sharedNATSErr = err
+			return
+		}
+		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(ctx)
+	})
+	if sharedNATSErr != nil {
+		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
+	}
+	return sharedNATSURI
+}
+
+func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
+	t.Helper()
+	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
+	if err != nil {
+		t.Fatalf("failed to open JetStream: %v", err)
+	}
+	// Delete the entire bucket so OpenSessionRegistry can recreate it with the
+	// correct TTL. Merely clearing keys preserves the original bucket config,
+	// which causes TTL-sensitive tests to inherit the wrong TTL.
+	if err := js.DeleteKeyValue(SessionBucket); err != nil && !errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
+		t.Fatalf("failed to delete session bucket: %v", err)
+	}
+}
+
 func setupNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(func() { client.Conn.Close() })
+	clearSessionBucket(t, client.Conn)
 	return client
 }
 

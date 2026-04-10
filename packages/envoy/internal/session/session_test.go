@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -40,20 +38,17 @@ func mockPort(url string) int {
 	return port
 }
 
-func writeRegistryEntry(t *testing.T, dir string, pid, port int, sessionID string) {
+func newKVDeliverer(t *testing.T) (*SessionRegistry, Deliverer) {
 	t.Helper()
-	raw := fmt.Sprintf(`{"pid":%d,"port":%d,"dir":"/test","session":{"id":"%s","title":"test"}}`, pid, port, sessionID)
-	if err := os.WriteFile(filepath.Join(dir, sessionID+".json"), []byte(raw), 0644); err != nil {
-		t.Fatal(err)
+	client := setupNATS(t)
+	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
 	}
-}
-
-// newFileDeliverer creates a Deliverer backed by a FileRegistry.
-func newFileDeliverer(dir string) Deliverer {
-	return Deliverer{
+	return sessions, Deliverer{
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     &FileRegistry{Dir: dir},
+		Sessions:     sessions,
 	}
 }
 
@@ -71,10 +66,10 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 		t.Fatalf("could not parse mock port from %s", mock.URL)
 	}
 
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 12345, port, "ses_target")
-
-	deliverer := newFileDeliverer(dir)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 
@@ -89,8 +84,7 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 }
 
 func TestDeliver_NoRegistryEntry(t *testing.T) {
-	dir := t.TempDir()
-	deliverer := newFileDeliverer(dir)
+	_, deliverer := newKVDeliverer(t)
 	interest := store.Interest{SessionID: "ses_ghost", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_ghost", "test message")
 
@@ -118,10 +112,10 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
-
-	deliverer := newFileDeliverer(dir)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 	item := newTestEnvelope("slack", "notifications.slack.T123.C456.mention", "test payload")
 	item.SourceSession = "ses_sender_123"
 
@@ -157,7 +151,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 }
 
 func TestText_WithSourceSession(t *testing.T) {
-	deliverer := newFileDeliverer(t.TempDir())
+	deliverer := Deliverer{}
 	item := contracts.Envelope{
 		EventID:        "evt-1",
 		Source:         "agent",
@@ -173,7 +167,7 @@ func TestText_WithSourceSession(t *testing.T) {
 }
 
 func TestText_WithoutSourceSession(t *testing.T) {
-	deliverer := newFileDeliverer(t.TempDir())
+	deliverer := Deliverer{}
 	item := contracts.Envelope{
 		EventID:        "evt-2",
 		Source:         "slack",
@@ -192,7 +186,7 @@ func TestText_WithoutSourceSession(t *testing.T) {
 }
 
 func TestText_PrefersPayloadOverSummary(t *testing.T) {
-	deliverer := newFileDeliverer(t.TempDir())
+	deliverer := Deliverer{}
 	item := contracts.Envelope{
 		EventID:        "evt-3",
 		Source:         "github",
@@ -211,7 +205,7 @@ func TestText_PrefersPayloadOverSummary(t *testing.T) {
 }
 
 func TestText_FallsBackToSummaryWhenPayloadEmpty(t *testing.T) {
-	deliverer := newFileDeliverer(t.TempDir())
+	deliverer := Deliverer{}
 	item := contracts.Envelope{
 		EventID:        "evt-4",
 		Source:         "github",
@@ -238,10 +232,10 @@ func TestDeliver_NoAgentField(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
-
-	deliverer := newFileDeliverer(dir)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
 	deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
@@ -259,10 +253,10 @@ func TestDeliver_PromptAsyncFailure(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
-
-	deliverer := newFileDeliverer(dir)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
 	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
