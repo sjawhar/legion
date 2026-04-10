@@ -6,28 +6,23 @@
   "keyFindings": [
     {
       "severity": "P2",
-      "file": "packages/envoy-plugin/src/__tests__/index.test.ts",
-      "description": "Init test sets OC_REGISTRY=undefined, skipping the registryDir code path where all non-blocking changes live (timer, syncPort, unref). Test proves init is fast when feature is disabled, not when active."
+      "file": "packages/daemon/src/daemon/__tests__/server.test.ts",
+      "description": "No test for multi-worker-per-issue cleanup. When both implement and test workers exist for a Done issue, workspace cleanup deduplicates via cleanedWorkspaceIssueIds but this path is untested."
     },
     {
       "severity": "P2",
-      "file": "packages/envoy-plugin/src/__tests__/index.test.ts",
-      "description": "Timeout test targets ECONNREFUSED (instant error), not actual timeout. Doesn't exercise AbortSignal.timeout path. Behavioral tester confirmed real timeout works (5003ms against black-hole server)."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "detachWorkerFromEnvoy() and unsubscribeAllWorkerTopics() called during auto-cleanup (line 418-419) have no test coverage. Stale Envoy subscriptions could accumulate."
     },
     {
       "severity": "P3",
-      "file": "packages/envoy-plugin/src/index.ts",
-      "description": "_activeFile variable assigned but never read — pre-existing dead code, good cleanup opportunity since surrounding code was modified."
+      "file": "packages/daemon/src/daemon/repo-manager.ts",
+      "description": "cleanupWorkspace() does not check jj workspace forget exit code (pre-existing). Benign for cleanup but worth documenting."
     }
   ],
-  "learningsInjected": [
-    "docs/solutions/envoy/async-health-startup-pattern.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/envoy/async-health-startup-pattern.md"
-  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-08T15:19:09.415Z"
+  "completed": "2026-04-10T00:47:13.801Z"
 }

@@ -1,6 +1,7 @@
 # Merge Workflow
 
-Merge the PR into main. The controller handles workspace cleanup after completion.
+Merge the PR into main, then clean up the workspace. Three-layer cleanup: merge worker (immediate),
+daemon auto-cleanup (on next state collect), controller backup sweep (Step 6).
 
 ## Workflow
 
@@ -95,6 +96,37 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, state="Done")
 Then remove `worker-active` if present:
 - **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
+
+### 7.5. Cleanup Workspace
+
+After the issue is closed and Done, clean up the workspace and worker entries to prevent disk exhaustion.
+Best-effort — do not fail the merge workflow if cleanup errors occur, but only prune worker state
+after workspace deletion succeeds (preserves retry handle for the daemon/controller backup layers).
+
+**1. Remove the filesystem workspace:**
+```bash
+CLEANUP_OK=false
+if curl -sf -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$LEGION_ISSUE_ID-merge/workspace" \
+  -H 'Content-Type: application/json' \
+  -d '{"repo": "'"$OWNER/$REPO"'"}'; then
+  CLEANUP_OK=true
+else
+  echo 'Workspace cleanup failed (non-fatal) — daemon/controller will retry'
+fi
+```
+
+**2. Prune worker entries only if workspace was removed:**
+```bash
+if [ "$CLEANUP_OK" = "true" ]; then
+  curl -sf -X POST "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/prune" \
+    -H 'Content-Type: application/json' \
+    -d '{"issueIds": ["'"$LEGION_ISSUE_ID"'"]}' || echo 'Worker prune failed (non-fatal)'
+fi
+```
+
+**Why here?** The daemon also auto-cleans Done issues on its next state collection cycle (Layer 1 safety net),
+and the controller has a backup sweep (Step 6). This merge-time cleanup is the fastest path — it reclaims
+disk space immediately when the issue completes, without waiting for the next poll cycle.
 
 Then notify the controller via Envoy (best-effort, exactly one notification):
 ```

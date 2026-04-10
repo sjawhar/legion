@@ -1,16 +1,18 @@
 {
-  "passed": 4,
+  "passed": 3,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description and issue body clearly explain the problem and solution. All 7 changed files listed accurately.",
+  "documentationFeedback": "PR description clearly explains the 3-layer defense-in-depth approach. merge.md Step 7.5 includes 'Why here?' rationale. Controller SKILL.md Step 6 has clear 'MUST run' and 'Do NOT skip' guidance. Shell quoting in curl examples is now correct.",
   "observations": [
-    "implement.md correctly has two notification points (fresh + address-comments)",
-    "test.md correctly has two notification points (pass + fail)",
-    "All notifications include fallback note about envoy_publish failures"
+    "P2: No test for multiple workers per issue (e.g., both implement and test workers for same Done issue)",
+    "P2: No test verifying detachWorkerFromEnvoy() and unsubscribeAllWorkerTopics() are called during cleanup",
+    "P2: No test for concurrent /state/collect calls racing through cleanup",
+    "Two-pass cleanup approach (workspace first, state second) correctly preserves retry handle on failure",
+    "Map iteration with workers.delete() during second pass is safe in JS"
   ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-09T22:45:40.257Z"
+  "completed": "2026-04-10T00:37:07.003Z"
 }

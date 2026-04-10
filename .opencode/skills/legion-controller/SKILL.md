@@ -540,25 +540,37 @@ component. When in doubt, route to Backlog.
 3. Move the oldest clarified item to Backlog
 4. Dispatch architect
 
-### 6. Cleanup Done
+### 6. Cleanup Done (MUST run every iteration)
 
-For Done issues without live workers:
+**This step MUST execute on every loop iteration.** Iterate over ALL Done issues from the collected
+state that still have worker entries in the daemon. The daemon also auto-cleans Done issues during
+state collection (Layer 1), and the merge worker cleans up at merge time (Layer 2). This controller
+sweep is the **backup safety net** that catches stragglers — issues where the merge worker or daemon
+auto-cleanup didn't fire (e.g., issue was closed manually, daemon restarted between collect cycles).
+
+For each Done issue that has worker entries (check the `/workers` response):
 
 1. Remove workspace:
 ```bash
+# Use ANY worker ID for the issue — all modes share the same workspace
 curl -s -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/workspace" \
   -H 'Content-Type: application/json' \
-  -d '{"repo": "'"'$OWNER/$REPO'"'"}'
+  -d '{"repo": "'"$OWNER/$REPO"'"}'
 ```
 
 2. Prune all worker entries and crash history for the issue:
 ```bash
 curl -s -X POST "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/prune" \
   -H 'Content-Type: application/json' \
-  -d '{"issueIds": ["'$ISSUE_ID'"]}'
+  -d '{"issueIds": ["'"$ISSUE_ID"'"]}'
 ```
 
-Both calls are idempotent. The prune call removes all worker modes for the issue, their crash history, and the dispatch validation cache.
+Both calls are idempotent. The prune call removes all worker modes for the issue, their crash
+history, and the dispatch validation cache. If the daemon auto-cleanup already handled this issue,
+both calls are no-ops.
+
+**Do NOT skip this step** even if the daemon auto-cleanup is active — the three layers are
+defense-in-depth against disk exhaustion.
 
 ### 7. Write Heartbeat
 
