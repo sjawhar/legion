@@ -29,6 +29,7 @@ type testEnv struct {
 	sessions  session.SessionLookup
 	deliverer session.Deliverer
 	dedupe    *dedupe.Cache
+	attempt  *dedupe.Cache
 }
 
 type testEnvOption func(*testEnvOpts)
@@ -85,6 +86,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	}
 
 	dc := dedupe.New(5 * time.Minute)
+	ac := dedupe.New(5 * time.Minute)
 
 	return &testEnv{
 		t:         t,
@@ -94,6 +96,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 		sessions:  sessions,
 		deliverer: deliverer,
 		dedupe:    dc,
+		attempt:   ac,
 	}
 }
 
@@ -194,11 +197,22 @@ func (env *testEnv) startConsumer(machineID string) {
 				msg.Ack()
 				return
 			}
+			if env.attempt.Seen(item.DedupeKey, sessionID) {
+				msg.Ack()
+				return
+			}
+			contentKey := "content." + sessionID + "." + item.PayloadSummary
+			if env.attempt.Seen(contentKey, sessionID) {
+				msg.Ack()
+				return
+			}
 			interest, err := env.registry.Get(sessionID)
 			var interestPtr *store.Interest
 			if err == nil {
 				interestPtr = &interest
 			}
+			env.attempt.Record(item.DedupeKey, sessionID)
+			env.attempt.Record(contentKey, sessionID)
 			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, &env.deliverer)
 			if result.Delivered {
 				env.dedupe.Record(item.DedupeKey, sessionID)
@@ -222,9 +236,18 @@ func (env *testEnv) startConsumer(machineID string) {
 			if env.dedupe.Seen(item.DedupeKey, interest.SessionID) {
 				continue
 			}
+			if env.attempt.Seen(item.DedupeKey, interest.SessionID) {
+				continue
+			}
+			contentKey := "content." + interest.SessionID + "." + item.PayloadSummary
+			if env.attempt.Seen(contentKey, interest.SessionID) {
+				continue
+			}
 			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
 				continue
 			}
+			env.attempt.Record(item.DedupeKey, interest.SessionID)
+			env.attempt.Record(contentKey, interest.SessionID)
 			if err := env.deliverer.Deliver(item, interest); err != nil {
 				failed = true
 			} else {
@@ -543,6 +566,7 @@ func TestE2E_SessionReRegistration(t *testing.T) {
 func TestE2E_DedupeWindowExpiry(t *testing.T) {
 	env := setupTestEnv(t)
 	env.dedupe = dedupe.New(500 * time.Millisecond)
+	env.attempt = dedupe.New(500 * time.Millisecond)
 
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_expiry", port, nil)
@@ -1059,5 +1083,70 @@ func TestE2E_WhatsappMultipleSubscribers(t *testing.T) {
 	}
 	if c2 := deliveries2.Load(); c2 != 1 {
 		t.Fatalf("session B expected 1 delivery, got %d", c2)
+	}
+}
+
+// --- CONTENT-HASH DEDUPE TESTS ---
+
+func TestE2E_ContentHashDedupe_AgentPath(t *testing.T) {
+	env := setupTestEnv(t)
+	port, deliveries, _, _ := mockSession(t)
+	env.registerSession("ses_content", port, nil)
+	env.startConsumer("test-machine")
+
+	// First message delivered normally
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_content", "same content", "dedupe-content-1"))
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 1 {
+		t.Fatalf("expected 1 delivery, got %d", count)
+	}
+
+	// Second message: different DedupeKey but same PayloadSummary — should be content-deduped
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_content", "same content", "dedupe-content-2"))
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 1 {
+		t.Fatalf("expected still 1 delivery (content-deduped), got %d", count)
+	}
+}
+
+func TestE2E_ContentHashDedupe_BroadcastPath(t *testing.T) {
+	env := setupTestEnv(t)
+	port, deliveries, _, _ := mockSession(t)
+	env.registerSession("ses_bcast_content", port, []string{"notifications.slack.*.*.mention"})
+	env.startConsumer("test-machine")
+
+	// First message delivered normally
+	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.mention", "same broadcast", "dedupe-bcast-content-1"))
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 1 {
+		t.Fatalf("expected 1 delivery, got %d", count)
+	}
+
+	// Second message: different DedupeKey but same PayloadSummary — should be content-deduped
+	publishEnvelope(env, newEnvelope("slack", "notifications.slack.T1.C1.mention", "same broadcast", "dedupe-bcast-content-2"))
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 1 {
+		t.Fatalf("expected still 1 delivery (content-deduped), got %d", count)
+	}
+}
+
+func TestE2E_ContentHashDedupe_DifferentContentDelivered(t *testing.T) {
+	env := setupTestEnv(t)
+	port, deliveries, _, _ := mockSession(t)
+	env.registerSession("ses_diff_content", port, nil)
+	env.startConsumer("test-machine")
+
+	// First message
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_diff_content", "content A", "dedupe-diff-1"))
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 1 {
+		t.Fatalf("expected 1 delivery, got %d", count)
+	}
+
+	// Second message: different DedupeKey AND different PayloadSummary — should be delivered
+	publishEnvelope(env, newEnvelope("agent", "notifications.agent.ses_diff_content", "content B", "dedupe-diff-2"))
+	time.Sleep(2 * time.Second)
+	if count := deliveries.Load(); count != 2 {
+		t.Fatalf("expected 2 deliveries (different content), got %d", count)
 	}
 }

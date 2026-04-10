@@ -435,13 +435,12 @@ func main() {
 
 	dedupeCache := dedupe.New(10 * time.Minute)
 
-	// attemptCache tracks (dedupe_key, session_id) pairs BEFORE delivery to
-	// prevent phantom duplicates when slow serves accept prompt_async but
-	// the HTTP client times out before receiving 204. Keyed by DedupeKey
-	// (not EventID) because fan-out normalization can produce multiple
-	// envelopes with the same EventID but distinct DedupeKeys. The existing
-	// dedupeCache records only successful deliveries (post-delivery) and
-	// cannot catch this slow-204 case. See #389.
+	// attemptCache tracks delivery attempts BEFORE delivery to prevent
+	// phantom duplicates. Keyed by both DedupeKey and a content hash
+	// ("content."+sessionID+"."+PayloadSummary) to catch source-side retries
+	// where each envoy_send generates a unique DedupeKey for identical content.
+	// The existing dedupeCache records only successful deliveries (post-delivery)
+	// and cannot catch these pre-delivery cases. See #389, #391.
 	attemptCache := dedupe.New(5 * time.Minute)
 
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
@@ -471,12 +470,19 @@ func main() {
 				_ = msg.Ack()
 				return
 			}
+			contentKey := "content." + sessionID + "." + item.PayloadSummary
+			if attemptCache.Seen(contentKey, sessionID) {
+				log.Printf("listener content-dedupe skip session=%s event_id=%s", sessionID, item.EventID)
+				_ = msg.Ack()
+				return
+			}
 			interest, err := registry.Get(sessionID)
 			var interestPtr *store.Interest
 			if err == nil {
 				interestPtr = &interest
 			}
 			attemptCache.Record(item.DedupeKey, sessionID)
+			attemptCache.Record(contentKey, sessionID)
 			result := session.HandleAgentMessage(item, sessionID, cfg.MachineID, interestPtr, &deliver)
 			if result.Err != nil {
 				log.Printf("listener agent delivery failed session=%s: %v", sessionID, result.Err)
@@ -510,11 +516,17 @@ func main() {
 				log.Printf("listener attempt-dedupe skip session=%s dedupe_key=%s", interest.SessionID, item.DedupeKey)
 				continue
 			}
+			contentKey := "content." + interest.SessionID + "." + item.PayloadSummary
+			if attemptCache.Seen(contentKey, interest.SessionID) {
+				log.Printf("listener content-dedupe skip session=%s event_id=%s", interest.SessionID, item.EventID)
+				continue
+			}
 			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
 				log.Printf("listener skip echo session=%s topic=%s", interest.SessionID, item.Topic)
 				continue
 			}
 			attemptCache.Record(item.DedupeKey, interest.SessionID)
+			attemptCache.Record(contentKey, interest.SessionID)
 			if err := deliver.Deliver(item, interest); err != nil {
 				log.Printf("listener delivery failed session=%s: %v", interest.SessionID, err)
 				failed = true
