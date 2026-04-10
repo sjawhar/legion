@@ -1,36 +1,40 @@
 {
-  "scope": "small",
+  "scope": "medium",
   "components": [
-    "packages/envoy/infra/nats.ts",
-    "packages/envoy/infra/services.ts",
-    "packages/envoy/infra/machines.ts",
-    "packages/envoy/infra/Pulumi.prod.yaml",
-    "packages/envoy/infra/README.md",
-    "packages/envoy/infra/__tests__/nats.test.ts",
-    "packages/envoy/infra/__tests__/services.test.ts",
-    "packages/envoy/deploy/compose/nats/peer.compose.yml",
-    "packages/envoy/deploy/compose/nats/compose.yml",
-    "packages/envoy/docs/constraints.md",
-    "docs/solutions/envoy/docker-tailscale-networking.md"
+    "packages/envoy/internal/store/kv.go",
+    "packages/envoy/internal/store/interest.go",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy-plugin/src/index.ts",
+    "packages/daemon/src/daemon/index.ts",
+    ".opencode/skills/envoy/SKILL.md",
+    ".opencode/skills/legion-controller/SKILL.md",
+    ".opencode/skills/legion-worker/SKILL.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
+    "docs/plans/2026-04-06-envoy-subscription-lifecycle.md"
   ],
   "subIssues": [],
   "routingHints": {
-    "complexity": "small",
+    "complexity": "medium",
     "estimatedImplementers": 1,
     "skipRetro": false
   },
   "concerns": [
-    "machine.name must match MagicDNS hostname — if not, add a dedicated hostname field instead of overloading name",
-    "Host networking removes container network namespace isolation — ports protected by Tailscale boundary and firewall only",
-    "constraints.md has TWO lines needing update: Tailscale IP rule AND port/ingress rule",
-    "Compose files should stay updated as active recovery/manual deployment path"
+    "Registry.List() is cache-only (async-warmed via watcher) — SetRole MUST use a dedicated per-role KV key, not cache enumeration, for old-holder lookup",
+    "Role names become NATS topic segments — validate format (^[a-z0-9][a-z0-9_-]*$) at the handler level",
+    "Controller migration must be ordered: claim role first, then subscribe mention topics — not parallel fire-and-forget",
+    "New KV bucket envoy_roles (or role: prefix) needed for authoritative role→session mapping",
+    "Cross-family review confirmed: concurrent SetRole calls with cache enumeration could result in both sessions holding the role"
   ],
   "learningsInjected": [
-    "docs/solutions/envoy/docker-tailscale-networking.md",
-    "docs/solutions/envoy/pulumi-remote-docker-patterns.md"
+    "docs/solutions/envoy/listener-routing-by-topic-prefix.md",
+    "docs/solutions/architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
   ],
-  "learningsHelpful": ["docs/solutions/envoy/docker-tailscale-networking.md"],
+  "learningsHelpful": [
+    "docs/solutions/architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-07T01:38:13.954Z"
+  "completed": "2026-04-10T23:52:19.487Z"
 }
