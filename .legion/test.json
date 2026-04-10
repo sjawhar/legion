@@ -1,20 +1,22 @@
 {
-  "schemaVersion": 1,
-  "phase": "test",
-  "completed": "2026-04-11T04:44:17.929Z",
-  "learningsInjected": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
-  "learningsHelpful": ["docs/solutions/daemon/controller-lifecycle-separation.md"],
-  "passed": 18,
+  "passed": 5,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description is clear and comprehensive. Code comments in server.ts explain extraction and delta detection logic. No user-facing docs needed (internal daemon plumbing).",
+  "documentationFeedback": "PR description is excellent with clear sub-item separation. Two README files have stale references: deploy/README.md still lists ENVOY_REGISTRY_DIR as a required env var, infra/README.md still documents listener.registryDir as required. These should be cleaned up to avoid confusing deployers.",
   "observations": [
-    "P2: Missing explicit health tick integration tests for AC10-12 (fetchAndProcessState called/not-called/error-resilient based on serve health). Code is correct but not regression-tested.",
-    "P3: Pre-existing tsc --noEmit exit code 2 due to baseUrl deprecation in TypeScript 6 — unrelated to PR, same on main.",
-    "P3: Pre-existing index.test.ts failure 'passes controller env vars to adapter.start on startup' — deferred serve startup pattern, fails identically on main."
-  ]
+    "P2: packages/envoy/deploy/README.md (lines 74, 83) still references ENVOY_REGISTRY_DIR",
+    "P2: packages/envoy/infra/README.md (line 108) still documents listener.registryDir as required",
+    "P2: No explicit negative test for file registry removal (implicitly tested by absence of file-based infrastructure)",
+    "Minor: listenerDeps.sessions uses concrete *SessionRegistry instead of SessionLookup interface (pragmatic — needed for List() on /v1/sessions)",
+    "Sub-item (3) oc ps changes are external to this repo (in ~/.dotfiles/scripts/oc) — marked N/A, not failed"
+  ],
+  "learningsInjected": [
+    "testing/nats-kv-testing-patterns.md",
+    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "architecture-patterns/nats-kv-graceful-degradation.md"
+  ],
+  "learningsHelpful": ["testing/nats-kv-testing-patterns.md"],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-10T23:56:46.858Z"
 }
