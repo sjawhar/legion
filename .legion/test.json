@@ -1,18 +1,24 @@
 {
-  "passed": 3,
+  "passed": 5,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description clearly explains the 3-layer defense-in-depth approach. merge.md Step 7.5 includes 'Why here?' rationale. Controller SKILL.md Step 6 has clear 'MUST run' and 'Do NOT skip' guidance. Shell quoting in curl examples is now correct.",
+  "documentationFeedback": "PR description is excellent with clear sub-item separation. Two README files have stale references: deploy/README.md still lists ENVOY_REGISTRY_DIR as a required env var, infra/README.md still documents listener.registryDir as required. These should be cleaned up to avoid confusing deployers.",
   "observations": [
-    "P2: No test for multiple workers per issue (e.g., both implement and test workers for same Done issue)",
-    "P2: No test verifying detachWorkerFromEnvoy() and unsubscribeAllWorkerTopics() are called during cleanup",
-    "P2: No test for concurrent /state/collect calls racing through cleanup",
-    "Two-pass cleanup approach (workspace first, state second) correctly preserves retry handle on failure",
-    "Map iteration with workers.delete() during second pass is safe in JS"
+    "P2: packages/envoy/deploy/README.md (lines 74, 83) still references ENVOY_REGISTRY_DIR",
+    "P2: packages/envoy/infra/README.md (line 108) still documents listener.registryDir as required",
+    "P2: No explicit negative test for file registry removal (implicitly tested by absence of file-based infrastructure)",
+    "Minor: listenerDeps.sessions uses concrete *SessionRegistry instead of SessionLookup interface (pragmatic — needed for List() on /v1/sessions)",
+    "Sub-item (3) oc ps changes are external to this repo (in ~/.dotfiles/scripts/oc) — marked N/A, not failed"
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "testing/nats-kv-testing-patterns.md",
+    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "architecture-patterns/nats-kv-graceful-degradation.md"
+  ],
+  "learningsHelpful": [
+    "testing/nats-kv-testing-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-10T00:37:07.003Z"
+  "completed": "2026-04-10T23:56:46.858Z"
 }
