@@ -13,9 +13,7 @@ describe("envoy plugin init", () => {
   it("returns immediately without blocking on port resolution or Envoy calls", async () => {
     // Simulate NATS/Envoy being unavailable — plugin init must still complete fast
     const originalEnvoyUrl = process.env.ENVOY_URL;
-    const originalRegistry = process.env.OC_REGISTRY;
     process.env.ENVOY_URL = "http://127.0.0.1:59999"; // Non-existent
-    process.env.OC_REGISTRY = undefined;
 
     try {
       const pluginModule = await import("../index");
@@ -35,7 +33,6 @@ describe("envoy plugin init", () => {
       expect(hooks.tool.envoy_publish).toBeDefined();
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
-      process.env.OC_REGISTRY = originalRegistry;
     }
   });
 
@@ -43,9 +40,7 @@ describe("envoy plugin init", () => {
     // The call function has AbortSignal.timeout — verify it doesn't hang
     // We test this indirectly: a tool call to non-existent Envoy should reject within timeout
     const originalEnvoyUrl = process.env.ENVOY_URL;
-    const originalRegistry = process.env.OC_REGISTRY;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
-    process.env.OC_REGISTRY = undefined;
 
     try {
       const pluginModule = await import("../index");
@@ -68,7 +63,6 @@ describe("envoy plugin init", () => {
       expect(elapsed).toBeLessThan(6000);
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
-      process.env.OC_REGISTRY = originalRegistry;
     }
   });
 });

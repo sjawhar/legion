@@ -37,7 +37,7 @@ func HandleAgentMessage(
 	}
 
 	// No interest on this machine — try delivery via session registry directly.
-	// The session registry (KV or file) resolves the port/machine.
+	// The session registry (KV) resolves the port/machine.
 	synth := store.Interest{SessionID: sessionID, MachineID: machineID}
 	if err := deliverer.Deliver(item, synth); err != nil {
 		if errors.Is(err, ErrWrongMachine) {

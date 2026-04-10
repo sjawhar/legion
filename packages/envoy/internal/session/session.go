@@ -13,16 +13,6 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-type RegistryEntry struct {
-	PID     int    `json:"pid"`
-	Port    int    `json:"port"`
-	Dir     string `json:"dir"`
-	Session struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-	} `json:"session"`
-}
-
 // ErrWrongMachine is returned when a session belongs to a different machine.
 // Callers should ACK the message (another listener owns this session).
 var ErrWrongMachine = errors.New("session belongs to a different machine")

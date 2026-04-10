@@ -1,33 +1,9 @@
 {
+  "pr": 393,
+  "pr_url": "https://github.com/sjawhar/legion/pull/393",
+  "ci": "all_green",
+  "summary": "Implemented sub-items 3 and 5. 18 files, -343 lines net.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T04:36:05.254Z",
-  "learningsInjected": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
-  "filesChanged": [
-    "packages/daemon/src/daemon/state-delta.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/__tests__/state-delta.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "packages/daemon/src/daemon/__tests__/index.test.ts"
-  ],
-  "trickyParts": [
-    "CI merges PR branch with main before running typecheck - needed to add blockedByIds to test helpers since main has the field but earlier branch commits removed it",
-    "server.ts changed from const server = Bun.serve to let server: Server | null = null to allow fetchAndCollectState closure to reference server.port",
-    "DaemonDependencies.startServer type widened to accept mock returns without fetchAndProcessState via Partial<Pick<>>"
-  ],
-  "deviations": [
-    "No separate health tick integration tests added - health tick already exercises fetchAndProcessState via the mock, and the 5 integration tests cover the delta detection path thoroughly"
-  ],
-  "openQuestions": [],
-  "subPlanningNeeded": false
+  "completed": "2026-04-10T15:35:42.706Z"
 }

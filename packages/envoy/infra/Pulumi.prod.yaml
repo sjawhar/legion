@@ -7,8 +7,7 @@ config:
       machineId: sami-agents-mx
       nats:
         serverName: sami-agents-mx
-      listener:
-        registryDir: /home/ubuntu/.local/state/opencode/registry
+      listener: {}
       receivers:
         github: true
         slack: true
@@ -17,20 +16,17 @@ config:
       machineId: sami
       nats:
         serverName: sami
-      listener:
-        registryDir: /home/sami/.local/state/opencode/registry
+      listener: {}
     - name: sami-claude
       sshHost: "ssh://claude@sami-claude"
       machineId: sami-claude
       nats:
         serverName: sami-claude
-      listener:
-        registryDir: /home/claude/.local/state/opencode/registry
+      listener: {}
     - name: ghost-wispr
       sshHost: "ssh://ghost-wispr@ghost-wispr"
       machineId: ghost-wispr
-      listener:
-        registryDir: /home/ghost-wispr/.local/state/opencode/registry
+      listener: {}
       receivers:
         ghostwispr: true
   envoy:githubWebhookSecret:
