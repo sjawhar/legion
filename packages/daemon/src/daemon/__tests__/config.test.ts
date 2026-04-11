@@ -187,6 +187,78 @@ describe("daemon config", () => {
     });
   });
 
+  describe("LEGION_EXTRA_PROJECTS parsing", () => {
+    it("returns undefined when env var not set", () => {
+      const config = loadConfig({});
+
+      expect(config.extraProjects).toBeUndefined();
+    });
+
+    it("returns undefined when env var is empty string", () => {
+      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "" });
+
+      expect(config.extraProjects).toBeUndefined();
+    });
+
+    it("parses single valid entry", () => {
+      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12" });
+
+      expect(config.extraProjects).toEqual(["acme/12"]);
+    });
+
+    it("parses multiple comma-separated entries", () => {
+      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12,globex/34,initech/56" });
+
+      expect(config.extraProjects).toEqual(["acme/12", "globex/34", "initech/56"]);
+    });
+
+    it("trims whitespace from entries", () => {
+      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "  acme/12 ,\tglobex/34\n" });
+
+      expect(config.extraProjects).toEqual(["acme/12", "globex/34"]);
+    });
+
+    it("ignores empty segments from trailing and double commas", () => {
+      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12,,globex/34," });
+
+      expect(config.extraProjects).toEqual(["acme/12", "globex/34"]);
+    });
+
+    it("deduplicates entries preserving order", () => {
+      const config = loadConfig({
+        LEGION_EXTRA_PROJECTS: "acme/12,globex/34,acme/12,initech/56,globex/34",
+      });
+
+      expect(config.extraProjects).toEqual(["acme/12", "globex/34", "initech/56"]);
+    });
+
+    it("throws on malformed entry with too many slashes", () => {
+      expect(() => loadConfig({ LEGION_EXTRA_PROJECTS: "acme/team/12" })).toThrow(
+        "LEGION_EXTRA_PROJECTS"
+      );
+    });
+
+    it("throws on malformed entry with non-numeric project number", () => {
+      expect(() => loadConfig({ LEGION_EXTRA_PROJECTS: "acme/not-a-number" })).toThrow(
+        "LEGION_EXTRA_PROJECTS"
+      );
+    });
+
+    it("throws on malformed entry with missing owner", () => {
+      expect(() => loadConfig({ LEGION_EXTRA_PROJECTS: "/12" })).toThrow("LEGION_EXTRA_PROJECTS");
+    });
+
+    it("throws on malformed entry with missing number", () => {
+      expect(() => loadConfig({ LEGION_EXTRA_PROJECTS: "acme/" })).toThrow("LEGION_EXTRA_PROJECTS");
+    });
+
+    it("throws on first invalid entry even when others are valid", () => {
+      expect(() => loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12,bad,globex/34" })).toThrow(
+        "LEGION_EXTRA_PROJECTS"
+      );
+    });
+  });
+
   describe("RSS monitoring config", () => {
     it("defaults maxRssBytes to 20GB", () => {
       const config = loadConfig({});

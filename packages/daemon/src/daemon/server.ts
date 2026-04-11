@@ -45,6 +45,7 @@ export interface ServerOptions {
   hostname?: string;
   legionId: string;
   projectId?: string;
+  extraProjects?: string[];
   legionDir?: string;
   paths?: LegionPaths;
   adapter: RuntimeAdapter;

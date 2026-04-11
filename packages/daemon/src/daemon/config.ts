@@ -25,6 +25,7 @@ export interface DaemonConfig {
   controllerSessionId?: string;
   controllerPrompt?: string;
   issueBackend: "linear" | "github";
+  extraProjects?: string[];
   runtime: "opencode" | "claude-code";
   githubApps?: GitHubAppsConfig;
   /** RSS threshold in bytes; serve restarts when exceeded. 0 = disabled. */
@@ -38,6 +39,7 @@ const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const DEFAULT_BASE_WORKER_PORT = 13381;
 const DEFAULT_MAX_RSS_GB = 20;
 const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
+const EXTRA_PROJECT_PATTERN = /^[^/]+\/\d+$/;
 
 function parseNumber(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -74,6 +76,31 @@ export function validateControllerPrompt(prompt: string | undefined): void {
   }
 }
 
+function parseExtraProjects(value: string | undefined): string[] | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+
+  const extraProjects: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawEntry of value.split(",")) {
+    const entry = rawEntry.trim();
+    if (!entry) {
+      continue;
+    }
+    if (!EXTRA_PROJECT_PATTERN.test(entry)) {
+      throw new Error(`LEGION_EXTRA_PROJECTS entries must match owner/number (got: ${entry})`);
+    }
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      extraProjects.push(entry);
+    }
+  }
+
+  return extraProjects.length > 0 ? extraProjects : undefined;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const legionDir = env.LEGION_DIR;
   const legionId = env.LEGION_ID;
@@ -107,6 +134,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   }
   const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
   const githubApps = loadGitHubApps(env);
+  const extraProjects = parseExtraProjects(env.LEGION_EXTRA_PROJECTS);
   const maxRssGb = parseNumber(env.OPENCODE_MAX_RSS_GB, DEFAULT_MAX_RSS_GB);
   const maxRssBytes = maxRssGb > 0 ? maxRssGb * 1024 * 1024 * 1024 : 0;
   const rssCheckIntervalS = parseNumber(
@@ -130,6 +158,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     controllerSessionId,
     controllerPrompt,
     issueBackend,
+    extraProjects,
     runtime,
     githubApps,
   };
