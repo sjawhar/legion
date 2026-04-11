@@ -27,29 +27,16 @@
       "task-index-patterns.md"
     ],
     "packages/daemon/src/daemon": [
-      "daemon/worker-directory-fix.md",
-      "daemon/worker-directory-resolution.md",
-      "daemon/workspace-validation-retro.md",
-      "daemon/controller-observability.md",
-      "delegation/hardening-patterns.md",
-      "integration-patterns/controller-worker-protocol.md",
-      "architecture-patterns/task-index-retro.md",
-      "task-index-patterns.md",
-      "deterministic-session-ids.md",
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "controller/controller-session-anti-patterns.md",
-      "daemon/envoy-auto-subscription-patterns.md",
       "testing/bun-fetch-mocking-patterns.md",
       "daemon/server-side-dispatch-validation.md",
       "testing/github-backend-collect-test-payloads.md",
       "daemon/prompt-delivery-bootstrap-delay.md",
       "daemon/codebase-index-file-placement.md",
-      "testing/bun-mock-module-global-leak.md",
+      "daemon/envoy-auto-subscription-patterns.md",
       "daemon/post-collection-processing-pattern.md",
-      "testing/ci-merge-type-compatibility.md",
-      "daemon/session-adoption-api-pattern.md",
-      "daemon/health-tick-baseline-isolation.md"
-      "daemon/config-resolution-patterns.md"
+      "daemon/workspace-scanning-patterns.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -60,8 +47,10 @@
       "daemon/handoff-schema-migration-patterns.md",
       "daemon/state-machine-action-display-mismatch.md",
       "daemon/session-adoption-api-pattern.md",
-      "skill-patterns/agent-workflow-enforcement-patterns.md"
-      "daemon/config-resolution-patterns.md"
+      "daemon/health-tick-baseline-isolation.md",
+      "skill-patterns/agent-workflow-enforcement-patterns.md",
+      "daemon/config-resolution-patterns.md",
+      "daemon/workspace-scanning-patterns.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -69,9 +58,15 @@
       "integration-patterns/tmux-askuserquestion-navigation.md",
       "best-practices/typescript-dead-code-audit.md"
     ],
-    "packages/opencode-plugin": ["best-practices/typescript-dead-code-audit.md"],
-    "packages/opencode-plugin/src/delegation": ["best-practices/typescript-dead-code-audit.md"],
-    "packages/opencode-plugin/src/tools/task": ["best-practices/typescript-dead-code-audit.md"],
+    "packages/opencode-plugin": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin/src/delegation": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "packages/opencode-plugin/src/tools/task": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
     ".opencode/skills/legion-worker": [
       "skill-patterns/worker-skill-failure-modes.md",
       "daemon/deferred-review-comments-pattern.md",
@@ -94,7 +89,9 @@
       "testing/worker-smoke-testing-requirements.md",
       "daemon/server-side-dispatch-validation.md"
     ],
-    ".opencode/skills/linear": ["integration-issues/linear-mcp-label-resolution.md"],
+    ".opencode/skills/linear": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
     ".opencode/skills": [
       "skill-patterns/parallel-subagent-background-execution.md",
       "delegation/delegation-hardening-retro.md",
@@ -104,83 +101,168 @@
       "skill-patterns/merge-retry-race-condition-pattern.md",
       "skill-patterns/agent-workflow-enforcement-patterns.md"
     ],
-    "tests": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
-    "tag:SIGTERM": ["daemon/opencode-serve-lifecycle.md"],
-    "tag:active-index": ["task-index-patterns.md"],
-    "tag:agent-restrictions": ["delegation/hardening-patterns.md"],
-    "tag:aiofiles": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
-    "tag:alru-cache": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
-    "tag:anyio": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
+    "tests": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:SIGTERM": [
+      "daemon/opencode-serve-lifecycle.md"
+    ],
+    "tag:active-index": [
+      "task-index-patterns.md"
+    ],
+    "tag:agent-restrictions": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:aiofiles": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:alru-cache": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:anyio": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
     "tag:architecture": [
       "daemon/controller-lifecycle-separation.md",
       "daemon/shared-serve-refactor.md",
       "skill-patterns/cross-cutting-workflow-concerns.md"
     ],
-    "tag:askuserquestion": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:async": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
-    "tag:asyncmock": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
-    "tag:atomic-writes": ["delegation/hardening-patterns.md"],
-    "tag:auto-transition": ["integration-issues/external-repo-pr-auto-transition-gap.md"],
-    "tag:automation": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:autospec": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
-    "tag:background-tasks": ["skill-patterns/parallel-subagent-background-execution.md"],
-    "tag:batch-queries": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
-    "tag:batching": ["integration-issues/github-graphql-pr-draft-status.md"],
-    "tag:bootstrap-bug": ["architecture-patterns/task-index-retro.md"],
+    "tag:askuserquestion": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:async": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:asyncmock": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:atomic-writes": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:auto-transition": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:automation": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:autospec": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:background-tasks": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:batch-queries": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:batching": [
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:bootstrap-bug": [
+      "architecture-patterns/task-index-retro.md"
+    ],
     "tag:caching": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "architecture-patterns/task-index-retro.md",
       "integration-issues/linear-mcp-label-resolution.md",
       "task-index-patterns.md"
     ],
-    "tag:callback-pattern": ["architecture-patterns/shared-state-file-ownership.md"],
-    "tag:claude-code": ["integration-patterns/tmux-askuserquestion-navigation.md"],
+    "tag:callback-pattern": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:claude-code": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
     "tag:cleanup": [
       "daemon/deferred-review-comments-pattern.md",
       "daemon/graceful-worker-shutdown.md",
       "best-practices/typescript-dead-code-audit.md"
     ],
-    "tag:cli-interaction": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:code-review": ["daemon/deferred-review-comments-pattern.md"],
-    "tag:concurrency": ["delegation/delegation-hardening-retro.md"],
-    "tag:config-schema": ["delegation/hardening-patterns.md"],
-    "tag:deprecation": ["daemon/config-resolution-patterns.md"],
+    "tag:cli-interaction": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:code-review": [
+      "daemon/deferred-review-comments-pattern.md"
+    ],
+    "tag:concurrency": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:config-schema": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:deprecation": [
+      "daemon/config-resolution-patterns.md"
+    ],
     "tag:controller": [
       "daemon/controller-observability.md",
       "integration-patterns/controller-worker-protocol.md",
       "controller/controller-session-anti-patterns.md"
     ],
-    "tag:controller-dispatch": ["integration-issues/external-repo-pr-auto-transition-gap.md"],
-    "tag:crash-recovery": ["daemon/shared-serve-retro.md"],
-    "tag:daemon": ["architecture-patterns/shared-state-file-ownership.md"],
-    "tag:debugging": ["daemon/controller-observability.md"],
-    "tag:defense-in-depth": ["daemon/graceful-worker-shutdown.md"],
-    "tag:deferred-review-comments": ["daemon/workspace-validation-retro.md"],
+    "tag:controller-dispatch": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:crash-recovery": [
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:daemon": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:debugging": [
+      "daemon/controller-observability.md"
+    ],
+    "tag:defense-in-depth": [
+      "daemon/graceful-worker-shutdown.md"
+    ],
+    "tag:deferred-review-comments": [
+      "daemon/workspace-validation-retro.md"
+    ],
     "tag:delegation": [
       "delegation/delegation-hardening-retro.md",
-      "delegation/hardening-patterns.md"
+      "delegation/hardening-patterns.md",
+      "delegation/subagent-plan-compliance.md"
     ],
     "tag:dependency-injection": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "daemon/shared-serve-refactor.md",
-      "daemon/shared-serve-retro.md"
+      "daemon/shared-serve-retro.md",
       "daemon/config-resolution-patterns.md"
     ],
-    "tag:directory-resolution": ["daemon/worker-directory-fix.md"],
-    "tag:dispatch": ["integration-patterns/controller-worker-protocol.md"],
-    "tag:dispose": ["daemon/opencode-serve-lifecycle.md"],
-    "tag:draft-status": ["integration-issues/github-graphql-pr-draft-status.md"],
-    "tag:error-handling": ["integration-issues/linear-mcp-label-resolution.md"],
-    "tag:external-repos": ["integration-issues/external-repo-pr-auto-transition-gap.md"],
-    "tag:failure-modes": ["skill-patterns/worker-skill-failure-modes.md", "skill-patterns/agent-workflow-enforcement-patterns.md"],
+    "tag:directory-resolution": [
+      "daemon/worker-directory-fix.md"
+    ],
+    "tag:dispatch": [
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:dispose": [
+      "daemon/opencode-serve-lifecycle.md"
+    ],
+    "tag:draft-status": [
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:error-handling": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:external-repos": [
+      "integration-issues/external-repo-pr-auto-transition-gap.md"
+    ],
+    "tag:failure-modes": [
+      "skill-patterns/worker-skill-failure-modes.md",
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
+    ],
     "tag:fallback-pattern": [
       "task-index-patterns.md",
       "github-api/graphql-org-user-fallback.md",
       "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
-    "tag:file-based-index": ["architecture-patterns/task-index-retro.md", "task-index-patterns.md"],
-    "tag:file-based-storage": ["delegation/hardening-patterns.md"],
-    "tag:finalize-pattern": ["delegation/delegation-hardening-retro.md"],
+    "tag:file-based-index": [
+      "architecture-patterns/task-index-retro.md",
+      "task-index-patterns.md"
+    ],
+    "tag:file-based-storage": [
+      "delegation/hardening-patterns.md"
+    ],
+    "tag:finalize-pattern": [
+      "delegation/delegation-hardening-retro.md"
+    ],
     "tag:github": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "integration-issues/github-graphql-pr-draft-status.md",
@@ -192,45 +274,94 @@
       "integration-issues/linear-mcp-label-resolution.md",
       "github-api/graphql-org-user-fallback.md"
     ],
-    "tag:implement": ["skill-patterns/worker-skill-failure-modes.md"],
+    "tag:implement": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
     "tag:jj-workspaces": [
       "daemon/worker-directory-fix.md",
       "daemon/worker-directory-resolution.md"
     ],
-    "tag:keyboard-navigation": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:labels": ["integration-issues/linear-mcp-label-resolution.md"],
-    "tag:lifecycle": ["daemon/controller-lifecycle-separation.md"],
-    "tag:lifecycle-separation": ["architecture-patterns/shared-state-file-ownership.md"],
+    "tag:keyboard-navigation": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:labels": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:lifecycle": [
+      "daemon/controller-lifecycle-separation.md"
+    ],
+    "tag:lifecycle-separation": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
     "tag:linear": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "integration-issues/linear-mcp-label-resolution.md"
     ],
-    "tag:mcp": ["integration-issues/linear-mcp-label-resolution.md"],
+    "tag:mcp": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
     "tag:merge": [
       "skill-patterns/worker-skill-failure-modes.md",
       "skill-patterns/merge-retry-race-condition-pattern.md"
     ],
-    "tag:migration": ["architecture-patterns/plugin-migration-assessment.md"],
-    "tag:mocking": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
-    "tag:modular-architecture": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
-    "tag:n-plus-one": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
-    "tag:name-resolution": ["integration-issues/linear-mcp-label-resolution.md"],
-    "tag:observability": ["daemon/controller-observability.md"],
-    "tag:oh-my-opencode": ["architecture-patterns/plugin-migration-assessment.md"],
+    "tag:migration": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:mocking": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:modular-architecture": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:n-plus-one": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
+    "tag:name-resolution": [
+      "integration-issues/linear-mcp-label-resolution.md"
+    ],
+    "tag:observability": [
+      "daemon/controller-observability.md"
+    ],
+    "tag:oh-my-opencode": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
     "tag:opencode": [
       "daemon/opencode-serve-lifecycle.md",
       "skill-patterns/parallel-subagent-background-execution.md"
     ],
-    "tag:opencode-legion": ["architecture-patterns/plugin-migration-assessment.md"],
-    "tag:opencode-sdk": ["daemon/worker-directory-fix.md", "daemon/worker-directory-resolution.md"],
-    "tag:opencode-serve": ["daemon/shared-serve-refactor.md", "daemon/shared-serve-retro.md"],
-    "tag:parallel-execution": ["skill-patterns/parallel-subagent-background-execution.md"],
-    "tag:parallel-subagents": ["architecture-patterns/task-index-retro.md"],
-    "tag:performance": ["architecture-patterns/task-index-retro.md", "task-index-patterns.md"],
-    "tag:persistence": ["architecture-patterns/shared-state-file-ownership.md"],
-    "tag:plugin": ["architecture-patterns/plugin-migration-assessment.md"],
-    "tag:pr-review": ["integration-issues/github-graphql-pr-draft-status.md"],
-    "tag:pr-workflow": ["daemon/workspace-validation-retro.md"],
+    "tag:opencode-legion": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:opencode-sdk": [
+      "daemon/worker-directory-fix.md",
+      "daemon/worker-directory-resolution.md"
+    ],
+    "tag:opencode-serve": [
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:parallel-execution": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:parallel-subagents": [
+      "architecture-patterns/task-index-retro.md"
+    ],
+    "tag:performance": [
+      "architecture-patterns/task-index-retro.md",
+      "task-index-patterns.md"
+    ],
+    "tag:persistence": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
+    "tag:plugin": [
+      "architecture-patterns/plugin-migration-assessment.md"
+    ],
+    "tag:pr-review": [
+      "integration-issues/github-graphql-pr-draft-status.md"
+    ],
+    "tag:pr-workflow": [
+      "daemon/workspace-validation-retro.md"
+    ],
     "tag:process-management": [
       "daemon/graceful-worker-shutdown.md",
       "daemon/opencode-serve-lifecycle.md",
@@ -244,70 +375,122 @@
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "integration-issues/github-graphql-pr-draft-status.md"
     ],
-    "tag:pytest-mock": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
-    "tag:python": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
+    "tag:pytest-mock": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
+    "tag:python": [
+      "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"
+    ],
     "tag:race-condition": [
       "architecture-patterns/shared-state-file-ownership.md",
       "skill-patterns/merge-retry-race-condition-pattern.md"
     ],
-    "tag:dead-code": ["best-practices/typescript-dead-code-audit.md"],
-    "tag:noUnusedLocals": ["best-practices/typescript-dead-code-audit.md"],
-    "tag:barrel-exports": ["best-practices/typescript-dead-code-audit.md"],
+    "tag:dead-code": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "tag:noUnusedLocals": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
+    "tag:barrel-exports": [
+      "best-practices/typescript-dead-code-audit.md"
+    ],
     "tag:refactoring": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "best-practices/typescript-dead-code-audit.md"
     ],
-    "tag:remote-control": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:resource-accounting": ["delegation/delegation-hardening-retro.md"],
-    "tag:resume": ["integration-patterns/controller-worker-protocol.md"],
-    "tag:retro": ["skill-patterns/worker-skill-failure-modes.md"],
-    "tag:review": ["skill-patterns/worker-skill-failure-modes.md"],
-    "tag:serve": ["daemon/opencode-serve-lifecycle.md"],
+    "tag:remote-control": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:resource-accounting": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:resume": [
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:retro": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:review": [
+      "skill-patterns/worker-skill-failure-modes.md"
+    ],
+    "tag:serve": [
+      "daemon/opencode-serve-lifecycle.md"
+    ],
     "tag:session-management": [
       "daemon/worker-directory-resolution.md",
       "controller/controller-session-anti-patterns.md"
     ],
-    "tag:sessions": ["daemon/shared-serve-refactor.md", "daemon/shared-serve-retro.md"],
-    "tag:shared-serve": ["daemon/shared-serve-refactor.md", "daemon/shared-serve-retro.md"],
-    "tag:skill-authoring": ["skill-patterns/parallel-subagent-background-execution.md"],
+    "tag:sessions": [
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:shared-serve": [
+      "daemon/shared-serve-refactor.md",
+      "daemon/shared-serve-retro.md"
+    ],
+    "tag:skill-authoring": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
     "tag:skills": [
       "skill-patterns/worker-skill-failure-modes.md",
       "skill-patterns/cross-cutting-workflow-concerns.md",
       "skill-patterns/worker-notification-conventions.md"
     ],
-    "tag:stale-detection": ["delegation/delegation-hardening-retro.md"],
-    "tag:state-file": ["architecture-patterns/shared-state-file-ownership.md"],
+    "tag:stale-detection": [
+      "delegation/delegation-hardening-retro.md"
+    ],
+    "tag:state-file": [
+      "architecture-patterns/shared-state-file-ownership.md"
+    ],
     "tag:state-machine": [
       "daemon/controller-observability.md",
       "integration-issues/github-graphql-pr-draft-status.md",
       "daemon/state-machine-action-display-mismatch.md"
     ],
-    "tag:state-management": ["daemon/controller-lifecycle-separation.md"],
-    "tag:subagents": ["skill-patterns/parallel-subagent-background-execution.md"],
-    "tag:task-index": ["architecture-patterns/task-index-retro.md"],
+    "tag:state-management": [
+      "daemon/controller-lifecycle-separation.md"
+    ],
+    "tag:subagents": [
+      "skill-patterns/parallel-subagent-background-execution.md"
+    ],
+    "tag:task-index": [
+      "architecture-patterns/task-index-retro.md"
+    ],
     "tag:task-persistence": [
       "delegation/delegation-hardening-retro.md",
       "delegation/hardening-patterns.md",
       "task-index-patterns.md"
     ],
-    "tag:testability": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
+    "tag:testability": [
+      "architecture-patterns/sync-to-async-modular-refactoring.md"
+    ],
     "tag:testing": [
       "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md",
       "github-api/graphql-org-user-fallback.md",
       "testing/worker-smoke-testing-requirements.md",
       "daemon/state-machine-action-display-mismatch.md"
     ],
-    "tag:tmux": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:validation": ["daemon/workspace-validation-retro.md"],
+    "tag:tmux": [
+      "integration-patterns/tmux-askuserquestion-navigation.md"
+    ],
+    "tag:validation": [
+      "daemon/workspace-validation-retro.md",
       "daemon/config-resolution-patterns.md"
-    "tag:worker": ["integration-patterns/controller-worker-protocol.md"],
-    "tag:worker-isolation": ["daemon/worker-directory-resolution.md"],
+    ],
+    "tag:worker": [
+      "integration-patterns/controller-worker-protocol.md"
+    ],
+    "tag:worker-isolation": [
+      "daemon/worker-directory-resolution.md"
+    ],
     "tag:worker-lifecycle": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
       "testing/worker-smoke-testing-requirements.md",
       "skill-patterns/worker-notification-conventions.md"
     ],
-    "tag:worker-spawning": ["daemon/worker-directory-fix.md"],
+    "tag:worker-spawning": [
+      "daemon/worker-directory-fix.md"
+    ],
     "tag:workers": [
       "skill-patterns/worker-skill-failure-modes.md",
       "skill-patterns/worker-notification-conventions.md"
@@ -316,12 +499,24 @@
       "skill-patterns/parallel-subagent-background-execution.md",
       "skill-patterns/cross-cutting-workflow-concerns.md"
     ],
-    "tag:workflow-pattern": ["daemon/deferred-review-comments-pattern.md"],
-    "tag:workspace-validation": ["daemon/workspace-validation-retro.md"],
-    "tag:polling": ["controller/controller-session-anti-patterns.md"],
-    "tag:merge-ordering": ["controller/controller-session-anti-patterns.md"],
-    "tag:smoke-testing": ["testing/worker-smoke-testing-requirements.md"],
-    "tag:quality-gates": ["testing/worker-smoke-testing-requirements.md"],
+    "tag:workflow-pattern": [
+      "daemon/deferred-review-comments-pattern.md"
+    ],
+    "tag:workspace-validation": [
+      "daemon/workspace-validation-retro.md"
+    ],
+    "tag:polling": [
+      "controller/controller-session-anti-patterns.md"
+    ],
+    "tag:merge-ordering": [
+      "controller/controller-session-anti-patterns.md"
+    ],
+    "tag:smoke-testing": [
+      "testing/worker-smoke-testing-requirements.md"
+    ],
+    "tag:quality-gates": [
+      "testing/worker-smoke-testing-requirements.md"
+    ],
     "packages/daemon/src/handoff": [
       "daemon/handoff-schema-migration-patterns.md"
     ],
@@ -364,7 +559,11 @@
       "envoy/webhook-handler-extraction-and-testing.md",
       "envoy/multi-layer-service-consolidation.md"
     ],
-    "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md", "ci/envoy-plugin-release-versioning.md", "envoy/publish-payload-source-validation.md"],
+    "packages/envoy-plugin": [
+      "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+      "ci/envoy-plugin-release-versioning.md",
+      "envoy/publish-payload-source-validation.md"
+    ],
     "tag:nats": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
@@ -401,59 +600,140 @@
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "architecture-patterns/nats-kv-graceful-degradation.md"
     ],
-    "tag:testcontainers": ["testing/nats-kv-testing-patterns.md", "envoy/nats-bus-client-self-healing.md"],
+    "tag:testcontainers": [
+      "testing/nats-kv-testing-patterns.md",
+      "envoy/nats-bus-client-self-healing.md"
+    ],
     "tag:integration-testing": [
       "testing/nats-kv-testing-patterns.md",
       "envoy/listener-routing-by-topic-prefix.md"
     ],
-    "tag:graceful-degradation": ["architecture-patterns/nats-kv-graceful-degradation.md"],
-    "tag:nil-receiver": ["architecture-patterns/nats-kv-graceful-degradation.md"],
-    "tag:go-idioms": ["architecture-patterns/nats-kv-graceful-degradation.md"],
-    "tag:operational": ["architecture-patterns/nats-kv-graceful-degradation.md"],
-    "tag:routing": ["envoy/listener-routing-by-topic-prefix.md"],
+    "tag:graceful-degradation": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:nil-receiver": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:go-idioms": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:operational": [
+      "architecture-patterns/nats-kv-graceful-degradation.md"
+    ],
+    "tag:routing": [
+      "envoy/listener-routing-by-topic-prefix.md"
+    ],
     "packages/envoy/infra": [
       "envoy/docker-tailscale-networking.md",
       "envoy/pulumi-remote-docker-patterns.md",
       "infra/mixed-runtime-type-boundaries.md",
       "envoy/multi-layer-service-consolidation.md"
     ],
-    "packages/envoy/scripts": ["envoy/pulumi-remote-docker-patterns.md"],
+    "packages/envoy/scripts": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
     "packages/envoy/deploy": [
       "envoy/docker-tailscale-networking.md",
       "envoy/pulumi-remote-docker-patterns.md",
       "envoy/multi-layer-service-consolidation.md"
     ],
-    "tag:tailscale": ["envoy/docker-tailscale-networking.md"],
-    "tag:bridge-networking": ["envoy/docker-tailscale-networking.md"],
-    "tag:magicdns": ["envoy/docker-tailscale-networking.md"],
-    "tag:pulumi": ["envoy/pulumi-remote-docker-patterns.md"],
-    "tag:deleteBeforeReplace": ["envoy/pulumi-remote-docker-patterns.md"],
-    "tag:infrastructure-as-code": ["envoy/pulumi-remote-docker-patterns.md"],
-    "tag:deployment": ["envoy/pulumi-remote-docker-patterns.md"],
-    "packages/contracts": ["envoy/contracts-and-handler-patterns.md", "envoy/adding-resource-level-subject-helpers.md"],
-    ".github/workflows": ["envoy/ghcr-docker-multiarch-ci.md", "ci/envoy-plugin-release-versioning.md", "envoy/multi-layer-service-consolidation.md"],
-    "packages/envoy/docker": ["envoy/ghcr-docker-multiarch-ci.md", "envoy/multi-layer-service-consolidation.md"],
-    "tag:knowledge-injection": ["skill-patterns/cross-cutting-workflow-concerns.md"],
-    "tag:cross-cutting": ["skill-patterns/cross-cutting-workflow-concerns.md"],
-    "tag:workflows": ["skill-patterns/cross-cutting-workflow-concerns.md"],
-    "tag:topic-filtering": ["envoy/adding-resource-level-subject-helpers.md"],
-    "packages/envoy/internal/routing": ["envoy/adding-resource-level-subject-helpers.md"],
-    "packages/daemon/src/index": ["daemon/codebase-index-file-placement.md"],
-    "tag:file-placement": ["daemon/codebase-index-file-placement.md"],
-    "tag:codebase-index": ["daemon/codebase-index-file-placement.md"],
-    "tag:xdg-state": ["daemon/codebase-index-file-placement.md"],
-    "tag:legionDir": ["daemon/codebase-index-file-placement.md"],
-    "tag:scanner-exclusions": ["daemon/codebase-index-file-placement.md"],
-    "packages/envoy/internal/bus": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:recovery": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:jetstream": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:health-check": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:subscription": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:goroutine-serialization": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:display-logic": ["daemon/state-machine-action-display-mismatch.md"],
-    "tag:formatter": ["daemon/state-machine-action-display-mismatch.md"],
-    "tag:poll": ["daemon/state-machine-action-display-mismatch.md"],
-    "packages/envoy/internal/mcpbridge": ["testing/sse-mock-initialization-order.md"],
+    "tag:tailscale": [
+      "envoy/docker-tailscale-networking.md"
+    ],
+    "tag:bridge-networking": [
+      "envoy/docker-tailscale-networking.md"
+    ],
+    "tag:magicdns": [
+      "envoy/docker-tailscale-networking.md"
+    ],
+    "tag:pulumi": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:deleteBeforeReplace": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:infrastructure-as-code": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "tag:deployment": [
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "packages/contracts": [
+      "envoy/contracts-and-handler-patterns.md",
+      "envoy/adding-resource-level-subject-helpers.md"
+    ],
+    ".github/workflows": [
+      "envoy/ghcr-docker-multiarch-ci.md",
+      "ci/envoy-plugin-release-versioning.md",
+      "envoy/multi-layer-service-consolidation.md"
+    ],
+    "packages/envoy/docker": [
+      "envoy/ghcr-docker-multiarch-ci.md",
+      "envoy/multi-layer-service-consolidation.md"
+    ],
+    "tag:knowledge-injection": [
+      "skill-patterns/cross-cutting-workflow-concerns.md"
+    ],
+    "tag:cross-cutting": [
+      "skill-patterns/cross-cutting-workflow-concerns.md"
+    ],
+    "tag:workflows": [
+      "skill-patterns/cross-cutting-workflow-concerns.md"
+    ],
+    "tag:topic-filtering": [
+      "envoy/adding-resource-level-subject-helpers.md"
+    ],
+    "packages/envoy/internal/routing": [
+      "envoy/adding-resource-level-subject-helpers.md"
+    ],
+    "packages/daemon/src/index": [
+      "daemon/codebase-index-file-placement.md"
+    ],
+    "tag:file-placement": [
+      "daemon/codebase-index-file-placement.md"
+    ],
+    "tag:codebase-index": [
+      "daemon/codebase-index-file-placement.md"
+    ],
+    "tag:xdg-state": [
+      "daemon/codebase-index-file-placement.md"
+    ],
+    "tag:legionDir": [
+      "daemon/codebase-index-file-placement.md"
+    ],
+    "tag:scanner-exclusions": [
+      "daemon/codebase-index-file-placement.md"
+    ],
+    "packages/envoy/internal/bus": [
+      "envoy/nats-bus-client-self-healing.md"
+    ],
+    "tag:recovery": [
+      "envoy/nats-bus-client-self-healing.md"
+    ],
+    "tag:jetstream": [
+      "envoy/nats-bus-client-self-healing.md"
+    ],
+    "tag:health-check": [
+      "envoy/nats-bus-client-self-healing.md"
+    ],
+    "tag:subscription": [
+      "envoy/nats-bus-client-self-healing.md"
+    ],
+    "tag:goroutine-serialization": [
+      "envoy/nats-bus-client-self-healing.md"
+    ],
+    "tag:display-logic": [
+      "daemon/state-machine-action-display-mismatch.md"
+    ],
+    "tag:formatter": [
+      "daemon/state-machine-action-display-mismatch.md"
+    ],
+    "tag:poll": [
+      "daemon/state-machine-action-display-mismatch.md"
+    ],
+    "packages/envoy/internal/mcpbridge": [
+      "testing/sse-mock-initialization-order.md"
+    ],
     "tag:notifications": [
       "skill-patterns/worker-notification-conventions.md",
       "daemon/envoy-auto-subscription-patterns.md"
@@ -483,7 +763,18 @@
     "tag:baseline-oscillation": [
       "daemon/health-tick-baseline-isolation.md"
     ],
-    "tag:social-enforcement": ["skill-patterns/agent-workflow-enforcement-patterns.md"],
-    "tag:layered-defense": ["skill-patterns/agent-workflow-enforcement-patterns.md"]
+    "tag:social-enforcement": [
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
+    ],
+    "tag:layered-defense": [
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
+    ],
+    ".opencode/skills/legion-retro": [
+      "delegation/subagent-plan-compliance.md"
+    ],
+    "packages/daemon/src/knowledge": [
+      "daemon/workspace-scanning-patterns.md",
+      "delegation/subagent-plan-compliance.md"
+    ]
   }
 }
