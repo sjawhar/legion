@@ -2,20 +2,20 @@
   "taskCount": 3,
   "independentTasks": 1,
   "routingHints": {
-    "complexity": "medium",
+    "complexity": "small",
     "estimatedImplementers": 1,
     "skipRetro": true,
     "skipArchitect": true
   },
   "concerns": [
-    "Titles require 3-line server.ts change — technically crosses daemon boundary but backward-compatible",
-    "cmdPoll tests mock global fetch — fragile if resolveLegionId or getDaemonPort have side effects in test env",
-    "IssueStateDict type import in poll-formatter.ts couples CLI to state module — acceptable given existing pattern"
+    "Regex change must not break simple {owner}-{repo}-{number} format — regression test exists at server.test.ts:1762",
+    "owner-repo-0 must remain invalid (preserve > 0 check)",
+    "owner-repo-123abc must NOT match (digits not followed by - or $)"
   ],
-  "learningsInjected": ["docs/solutions/daemon/controller-observability.md"],
-  "learningsHelpful": ["docs/solutions/daemon/controller-observability.md"],
-  "workflowRecommendation": "Simple feature — single implementer, skip architect. Tasks 1 is independent, Tasks 2-3 are sequential.",
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "workflowRecommendation": "Simple bug fix — single implementer, skip retro. Task 1 is independent, Tasks 2-3 are sequential.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T00:45:30.626Z"
+  "completed": "2026-04-11T02:40:58.741Z"
 }
