@@ -404,6 +404,7 @@
     "tag:jetstream": ["envoy/nats-bus-client-self-healing.md"],
     "tag:health-check": ["envoy/nats-bus-client-self-healing.md"],
     "tag:subscription": ["envoy/nats-bus-client-self-healing.md"],
-    "tag:goroutine-serialization": ["envoy/nats-bus-client-self-healing.md"]
+    "tag:goroutine-serialization": ["envoy/nats-bus-client-self-healing.md"],
+    "packages/envoy/internal/mcpbridge": ["testing/sse-mock-initialization-order.md"]
   }
 }
