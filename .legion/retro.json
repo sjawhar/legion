@@ -1,9 +1,7 @@
 {
-  "skipped": false,
-  "docsCreated": [
-    "docs/solutions/daemon/state-machine-action-display-mismatch.md"
-  ],
+  "skipped": true,
+  "reason": "no significant learnings — mechanical regex fix",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T01:27:27.039Z"
+  "completed": "2026-04-11T03:21:28.289Z"
 }
