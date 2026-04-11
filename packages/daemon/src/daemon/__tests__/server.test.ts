@@ -191,7 +191,7 @@ describe("daemon server", () => {
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: string };
-    expect(body.error).toBe("missing repo or workspace");
+    expect(body.error).toContain("missing_repo");
   });
 
   it("rejects relative workspace paths", async () => {
@@ -397,7 +397,153 @@ describe("daemon server", () => {
       });
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toEqual({ error: "missing repo or workspace" });
+      expect(await response.json()).toEqual({
+        error: "missing_repo: provide --repo or ensure issue appears in collected state",
+      });
+    });
+  });
+
+  describe("POST /workers auto-resolve repo from cache", () => {
+    const repoPaths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => false,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    it("auto-resolves repo when cache has valid source", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 42,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/42",
+                type: "Issue",
+              },
+              status: "Todo",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-42",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(createSessionCalls).toHaveLength(1);
+      expect(createSessionCalls[0].workspace).toBe(
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-42"
+      );
+    });
+
+    it("returns 400 when cache is empty", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-42",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("missing_repo");
+    });
+
+    it("returns 400 when cached issue has null source", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "linear",
+          issues: [
+            {
+              identifier: "LIN-99",
+              state: { name: "In Progress" },
+              labels: { nodes: [] },
+            },
+          ],
+        }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "LIN-99",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("missing_repo");
+    });
+
+    it("returns 400 when issue is not in cache", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 42,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/42",
+                type: "Issue",
+              },
+              status: "Todo",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-99",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("missing_repo");
     });
   });
 
@@ -1492,10 +1638,11 @@ describe("daemon server", () => {
       });
 
       it("returns HTTP 200 when one extra board fails", async () => {
-        boardMocks = new Map([
+        const boardEntries: Array<[string, unknown]> = [
           ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo", "Primary issue")]],
           ["acme/456", new Error("extra board unavailable")],
-        ]);
+        ];
+        boardMocks = new Map(boardEntries);
         mockBoardFetches();
         await startTestServer({ legionId: "acme/123", extraProjects: ["acme/456"] });
 
@@ -1512,10 +1659,11 @@ describe("daemon server", () => {
       });
 
       it("returns HTTP 500 when ALL boards fail", async () => {
-        boardMocks = new Map([
+        const boardEntries: Array<[string, unknown]> = [
           ["acme/123", new Error("primary failed")],
           ["acme/456", new Error("extra failed")],
-        ]);
+        ];
+        boardMocks = new Map(boardEntries);
         mockBoardFetches();
         await startTestServer({ legionId: "acme/123", extraProjects: ["acme/456"] });
 

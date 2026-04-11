@@ -607,7 +607,7 @@ export function startServer(opts: ServerOptions): {
 
             const issueId = payload.issueId;
             const mode = payload.mode;
-            const repo = payload.repo;
+            let repo = payload.repo;
             const workspace = payload.workspace;
             const version = typeof payload.version === "number" ? payload.version : 0;
             const envPayload = payload.env;
@@ -622,9 +622,6 @@ export function startServer(opts: ServerOptions): {
               return badRequest(
                 "repo and workspace are mutually exclusive — provide one or neither"
               );
-            }
-            if (typeof repo !== "string" && typeof workspace !== "string") {
-              return badRequest("missing repo or workspace");
             }
             if (
               version !== undefined &&
@@ -642,6 +639,19 @@ export function startServer(opts: ServerOptions): {
 
             // Phase prerequisite validation for gated modes
             const normalizedIssueId = issueId.toLowerCase();
+            if (typeof repo !== "string" && typeof workspace !== "string") {
+              const cachedState = issueStateCache.get(normalizedIssueId);
+              if (cachedState?.source) {
+                repo = `${cachedState.source.owner}/${cachedState.source.repo}`;
+                console.log(
+                  `[dispatch] auto-resolved repo ${repo} from issue state for ${issueId}`
+                );
+              } else {
+                return badRequest(
+                  "missing_repo: provide --repo or ensure issue appears in collected state"
+                );
+              }
+            }
             const forceDispatch = payload.force === true;
             if (!forceDispatch) {
               const cachedState = issueStateCache.get(normalizedIssueId);
