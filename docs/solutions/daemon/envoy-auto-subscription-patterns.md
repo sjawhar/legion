@@ -59,7 +59,7 @@ The controller uses the same fire-and-forget pattern in `subscribeControllerToEn
 
 ```typescript
 topics: [
-  "notifications.legion.controller",
+  "notifications.role.legion-controller",
   "notifications.slack.*.*.mention",
   "notifications.github.*.*.mention",
 ]

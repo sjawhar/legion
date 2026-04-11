@@ -93,7 +93,7 @@ The daemon automatically subscribes the controller to `notifications.agent.<sess
 
 The daemon subscribes the controller to these topics:
 
-- `notifications.legion.controller` — broadcast channel for controller-targeted messages
+- `notifications.role.legion-controller` — role-based route to the active controller session (claimed via `POST /v1/roles/set` on daemon startup)
 - `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
 - `notifications.github.*.*.mention` — @mentions across all GitHub repos
 - `notifications.github.{owner}.{repo}.ci` — CI events for repos with active workers (subscribed on first worker dispatch per repo, reconciled on daemon restart)

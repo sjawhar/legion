@@ -134,18 +134,31 @@ async function sendPromptWithRetry(
   throw lastError;
 }
 
-function subscribeControllerToEnvoy(sessionId: string) {
+async function subscribeControllerToEnvoy(sessionId: string) {
   const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  try {
+    const roleRes = await fetch(`${envoyUrl}/v1/roles/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        role: "legion-controller",
+      }),
+    });
+    if (!roleRes.ok) {
+      console.warn(`Envoy role set returned ${roleRes.status} (non-fatal)`);
+    } else {
+      console.log(`Controller claimed role legion-controller: session=${sessionId}`);
+    }
+  } catch (err) {
+    console.warn(`Envoy role set failed (non-fatal): ${err}`);
+  }
   fetch(`${envoyUrl}/v1/interests/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       session_id: sessionId,
-      topics: [
-        "notifications.legion.controller",
-        "notifications.slack.*.*.mention",
-        "notifications.github.*.*.mention",
-      ],
+      topics: ["notifications.slack.*.*.mention", "notifications.github.*.*.mention"],
     }),
   })
     .then((res) => {
@@ -153,7 +166,7 @@ function subscribeControllerToEnvoy(sessionId: string) {
         console.warn(`Envoy subscribe returned ${res.status} (non-fatal)`);
         return;
       }
-      console.log(`Controller subscribed to Envoy: session=${sessionId}`);
+      console.log(`Controller subscribed to Envoy mentions: session=${sessionId}`);
     })
     .catch((err) => {
       console.warn(`Envoy subscribe failed (non-fatal): ${err}`);

@@ -273,7 +273,7 @@ linear_linear(action="update",
 
 Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER architect completed. Sub-issues ready for planning.")
+envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER architect completed. Sub-issues ready for planning.")
 ```
 If `envoy_publish` fails, continue — the label is the source of truth.
 

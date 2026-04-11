@@ -13,11 +13,13 @@ import (
 )
 
 const Bucket = "envoy_interests"
+const RoleBucket = "envoy_roles"
 
 type Registry struct {
-	kv    nats.KeyValue
-	mu    sync.RWMutex
-	cache map[string]Interest
+	kv     nats.KeyValue
+	roleKV nats.KeyValue
+	mu     sync.RWMutex
+	cache  map[string]Interest
 }
 
 // OpenOption configures the registry.
@@ -39,19 +41,28 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := js.KeyValue(Bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: Bucket, Replicas: opts.replicas, Storage: nats.FileStorage})
-	}
+	kv, err := openBucket(js, Bucket, opts.replicas)
 	if err != nil {
 		return nil, err
 	}
-	r := &Registry{kv: kv, cache: map[string]Interest{}}
+	roleKV, err := openBucket(js, RoleBucket, opts.replicas)
+	if err != nil {
+		return nil, err
+	}
+	r := &Registry{kv: kv, roleKV: roleKV, cache: map[string]Interest{}}
 	// Skip eager load — watch() populates cache asynchronously via KV watcher.
 	// The synchronous load() did N individual kv.Get() calls that block indefinitely
 	// when the KV stream leader is on a remote node.
 	go r.watch()
 	return r, nil
+}
+
+func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.KeyValue, error) {
+	kv, err := js.KeyValue(bucket)
+	if errors.Is(err, nats.ErrBucketNotFound) {
+		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket, Replicas: replicas, Storage: nats.FileStorage})
+	}
+	return kv, err
 }
 
 func (r *Registry) watch() {
@@ -115,6 +126,31 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	}
 	_, err = r.kv.Put(sessionID, buf)
 	return err
+}
+
+func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) {
+	roleTopic := "notifications.role." + role
+	entry, err := r.roleKV.Get(role)
+	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		return Interest{}, err
+	}
+	if err == nil {
+		oldSessionID := string(entry.Value())
+		if oldSessionID != "" && oldSessionID != sessionID {
+			if removeErr := r.Remove(oldSessionID, []string{roleTopic}); removeErr != nil && !errors.Is(removeErr, nats.ErrKeyNotFound) {
+				return Interest{}, removeErr
+			}
+		}
+	}
+
+	item, err := r.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{roleTopic})
+	if err != nil {
+		return Interest{}, err
+	}
+	if _, err := r.roleKV.Put(role, []byte(sessionID)); err != nil {
+		return Interest{}, err
+	}
+	return item, nil
 }
 
 // Get returns the Interest for a session. Cache first, direct KV read on miss.

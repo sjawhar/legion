@@ -25,6 +25,19 @@ Example:
 
 - `notifications.agent.ses_2e6ca3034ffejVikSZ8mDwk0mR`
 
+### Role-based routing
+
+- Role topic:
+  - `notifications.role.<role>`
+
+Role topics route to exactly one session — whoever last called `envoy_role_set(role="<role>")`. Claiming a role transfers it from the previous holder using ordered last-writer-wins semantics.
+
+Examples:
+
+- `notifications.role.legion-controller` (routes to whoever holds the controller role)
+- `notifications.role.opencode-dev` (routes to the active dev session)
+- `notifications.role.legion-po` (routes to the product owner session)
+
 ### GitHub
 
 GitHub topics are **resource-scoped** — every event includes the resource type and number. There are no repo-wide event-type topics (except mentions and push).
@@ -146,6 +159,7 @@ You do NOT need to subscribe in order to send or publish.
 - `envoy_list()` — show current subscriptions
 - `envoy_send(target_session, message)` — send directly to a specific session (point-to-point)
 - `envoy_publish(topic, message)` — broadcast to any topic (all matching subscribers receive it)
+- `envoy_role_set(role)` — claim a named role for the current session (exactly-one-holder)
 
 ## Patterns
 
