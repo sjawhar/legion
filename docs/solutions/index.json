@@ -14,6 +14,7 @@
       "controller/controller-session-anti-patterns.md",
       "daemon/server-side-dispatch-validation.md",
       "daemon/state-machine-action-display-mismatch.md"
+      "daemon/session-adoption-api-pattern.md",
     ],
     "packages/daemon/src/daemon/serve-manager": [
       "daemon/opencode-serve-lifecycle.md",
@@ -46,6 +47,7 @@
       "testing/bun-mock-module-global-leak.md",
       "daemon/post-collection-processing-pattern.md",
       "testing/ci-merge-type-compatibility.md"
+      "daemon/session-adoption-api-pattern.md",
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -55,6 +57,7 @@
       "daemon/prompt-delivery-bootstrap-delay.md",
       "daemon/handoff-schema-migration-patterns.md",
       "daemon/state-machine-action-display-mismatch.md"
+      "daemon/session-adoption-api-pattern.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",

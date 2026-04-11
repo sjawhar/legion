@@ -1,25 +1,39 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 1,
+  "minor": 4,
   "verdict": "approved",
   "keyFindings": [
     {
       "severity": "P3",
-      "file": ".legion/implement.json",
-      "description": "Missing trailing newline — non-functional, already flagged by tester"
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "Duplicate session guard runs after createSession() — functionally correct (idempotent), but cleaner if moved before"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/__tests__/index.test.ts",
+      "description": "Missing test for workspace resolution failure path in cmdAdopt (CliError when --workspace not provided and registry returns null)"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/__tests__/index.test.ts",
+      "description": "Missing test for path traversal validation in scanOcRegistry (entryDir with '..' should be skipped)"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/index.ts",
+      "description": "No warning when OC registry lookup is skipped due to explicit --workspace — original standalone process may remain running"
     }
   ],
   "learningsInjected": [
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
-    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+    "docs/solutions/deterministic-session-ids.md",
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
+    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+    "docs/solutions/daemon/server-side-dispatch-validation.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T13:48:53.161Z"
+  "completed": "2026-04-11T16:47:43.441Z"
 }

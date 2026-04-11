@@ -14,6 +14,7 @@ import {
   GitHubPRRef,
   IssueStatus,
   LEGION_REPO_CONFIG,
+  SESSION_ID_PATTERN,
 } from "../types";
 
 describe("computeSessionId", () => {
@@ -154,6 +155,35 @@ describe("computeSessionId with non-UUID legion ID", () => {
     );
     const stringResult = computeSessionId("sjawhar/5", "ENG-21", "implement");
     expect(uuidResult).not.toBe(stringResult);
+  });
+});
+
+describe("SESSION_ID_PATTERN", () => {
+  it("matches valid session IDs from computeSessionId", () => {
+    const id = computeSessionId("sjawhar/5", "gh-42", "implement");
+    expect(SESSION_ID_PATTERN.test(id)).toBe(true);
+  });
+
+  it("matches known valid session IDs", () => {
+    expect(SESSION_ID_PATTERN.test("ses_31617365bffeUEa4wPBVIL2LBI")).toBe(true);
+    expect(SESSION_ID_PATTERN.test("ses_5f6e229e023c20L4w2B1RNa3WZ")).toBe(true);
+  });
+
+  it("rejects strings that are too short", () => {
+    expect(SESSION_ID_PATTERN.test("ses_abc")).toBe(false);
+  });
+
+  it("rejects strings without ses_ prefix", () => {
+    expect(SESSION_ID_PATTERN.test("31617365bffeUEa4wPBVIL2LBI")).toBe(false);
+  });
+
+  it("rejects empty string", () => {
+    expect(SESSION_ID_PATTERN.test("")).toBe(false);
+  });
+
+  it("rejects uppercase hex portion", () => {
+    // Hex portion (first 12 after ses_) must be lowercase
+    expect(SESSION_ID_PATTERN.test("ses_31617365BFFEUEa4wPBVIL2LBI")).toBe(false);
   });
 });
 

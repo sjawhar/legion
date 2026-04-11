@@ -316,6 +316,129 @@ describe("daemon server", () => {
     expect(entryBody.port).toBe(sharedServePort);
   });
 
+  it("returns 422 for invalid sessionId format", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-42",
+        mode: "implement",
+        workspace: "/tmp/work",
+        sessionId: "invalid_format",
+      }),
+    });
+    expect(response.status).toBe(422);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_session_id");
+  });
+
+  it("returns 422 for sessionId with wrong type", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-42",
+        mode: "implement",
+        workspace: "/tmp/work",
+        sessionId: 12345,
+      }),
+    });
+    expect(response.status).toBe(422);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.error).toBe("invalid_session_id");
+  });
+
+  it("returns 409 session_already_adopted when sessionId is tracked by live worker", async () => {
+    await startTestServer();
+    const first = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-42",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { sessionId: string };
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-99",
+        mode: "plan",
+        workspace: "/tmp/work",
+        sessionId: firstBody.sessionId,
+      }),
+    });
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.error).toBe("session_already_adopted");
+    expect(body.id).toBe("eng-42-implement");
+  });
+
+  it("allows adoption when existing worker with same sessionId is dead", async () => {
+    await startTestServer();
+    const first = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-42",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { id: string; sessionId: string };
+
+    await requestJson(`/workers/${firstBody.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "dead" }),
+    });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-99",
+        mode: "plan",
+        workspace: "/tmp/work",
+        sessionId: firstBody.sessionId,
+      }),
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("uses provided sessionId instead of computing one", async () => {
+    await startTestServer();
+    const customSessionId = "ses_31617365bffeUEa4wPBVIL2LBI";
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-42",
+        mode: "implement",
+        workspace: "/tmp/work",
+        sessionId: customSessionId,
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { id: string; sessionId: string };
+    expect(body.sessionId).toBe(customSessionId);
+    expect(createSessionCalls[0].sessionId).toBe(customSessionId);
+  });
+
+  it("computes sessionId normally when sessionId not provided", async () => {
+    await startTestServer();
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "ENG-42",
+        mode: "implement",
+        workspace: "/tmp/work",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { sessionId: string };
+    expect(body.sessionId).toBe(computeSessionId(legionId, "eng-42", "implement"));
+  });
+
   it("creates workers from repo by resolving workspace path", async () => {
     const paths: LegionPaths = {
       dataDir: "/tmp/legion-data",
