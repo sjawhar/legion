@@ -1,37 +1,41 @@
 {
-  "schemaVersion": 1,
-  "phase": "architect",
-  "completed": "2026-04-11T03:38:56.123Z",
-  "learningsInjected": [
-    "docs/solutions/daemon/controller-observability.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/daemon/state-machine-action-display-mismatch.md",
-    "docs/solutions/daemon/controller-lifecycle-separation.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/controller-observability.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/daemon/controller-lifecycle-separation.md"
-  ],
   "scope": "medium",
   "components": [
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/state-delta.ts",
-    "packages/daemon/src/state/types.ts"
+    ".opencode/skills/legion-worker/workflows/architect.md",
+    ".opencode/skills/legion-worker/workflows/plan.md",
+    ".opencode/skills/legion-worker/workflows/implement.md",
+    ".opencode/skills/legion-worker/workflows/test.md",
+    ".opencode/skills/legion-worker/workflows/review.md",
+    ".opencode/skills/legion-worker/references/knowledge-injection.md",
+    "packages/daemon/src/handoff/types.ts",
+    "packages/daemon/src/handoff/schema.ts"
   ],
-  "subIssues": [],
+  "subIssues": [
+    "sjawhar-legion-238",
+    "sjawhar-legion-239",
+    "sjawhar-legion-240"
+  ],
   "routingHints": {
     "complexity": "medium",
     "estimatedImplementers": 1,
-    "skipRetro": false
+    "skipRetro": true
   },
   "concerns": [
-    "Extract fetchAndCollectState() as a shared helper — do NOT self-call the daemon HTTP endpoint from the health tick (per controller-lifecycle-separation.md pattern)",
-    "Labels must be compared as sorted unique sets — raw array order must not trigger false positives",
-    "Delta payload includes full IssueStateDict for new/changed issues — changedFields is advisory for logging only, not for state reconstruction",
-    "previousIssueState baseline only advances on successful collection — failed fetches preserve last-known-good baseline",
-    "Envoy publish is fire-and-forget and best-effort — no subscriber (between daemon restart and controller spin-up) is expected and non-fatal",
-    "First cycle (previousIssueState is null) establishes baseline without publishing — prevents spurious everything-is-new notification on daemon startup"
-  ]
+    "Sub-issues #238 and #239 are already CLOSED (implemented, tested, merged). No further implementation needed.",
+    "Sub-issue #240 (index evolution) is intentionally blocked until 20+ issues accumulate feedback data — do NOT attempt to implement.",
+    "The cross-cutting-workflow-concerns learning (shared reference + inline config tables) was the pattern used for #238 — confirmed working.",
+    "Handoff schema migration pattern (learningsUsed → learningsInjected) uses Zod transform for backward compat — tested in ledger.test.ts."
+  ],
+  "learningsInjected": [
+    "skill-patterns/cross-cutting-workflow-concerns.md",
+    "daemon/handoff-schema-migration-patterns.md",
+    "skill-patterns/worker-skill-failure-modes.md"
+  ],
+  "learningsHelpful": [
+    "skill-patterns/cross-cutting-workflow-concerns.md",
+    "daemon/handoff-schema-migration-patterns.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "architect",
+  "completed": "2026-04-11T12:57:56.111Z"
 }

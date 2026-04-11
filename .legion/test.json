@@ -1,22 +1,23 @@
 {
-  "passed": 5,
+  "passed": 12,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description is excellent with clear sub-item separation. Two README files have stale references: deploy/README.md still lists ENVOY_REGISTRY_DIR as a required env var, infra/README.md still documents listener.registryDir as required. These should be cleaned up to avoid confusing deployers.",
+  "documentationFeedback": "knowledge-injection.md is clear and comprehensive (91 lines). P2: line 91 refers to deprecated `learningsUsed` instead of canonical `learningsInjected` — inconsistency introduced when #239 renamed the field but didn't update the reference file.",
   "observations": [
-    "P2: packages/envoy/deploy/README.md (lines 74, 83) still references ENVOY_REGISTRY_DIR",
-    "P2: packages/envoy/infra/README.md (line 108) still documents listener.registryDir as required",
-    "P2: No explicit negative test for file registry removal (implicitly tested by absence of file-based infrastructure)",
-    "Minor: listenerDeps.sessions uses concrete *SessionRegistry instead of SessionLookup interface (pragmatic — needed for List() on /v1/sessions)",
-    "Sub-item (3) oc ps changes are external to this repo (in ~/.dotfiles/scripts/oc) — marked N/A, not failed"
+    "P2: references/knowledge-injection.md line 91 says `learningsUsed` but canonical field is `learningsInjected` (renamed in #239)",
+    "Production evidence: #218's own architect handoff includes learningsInjected/learningsHelpful with real values, proving end-to-end functionality",
+    "Pre-existing test failures (3/1154): 2 from @pulumi/docker infra tests, 1 from daemon env var test — unrelated to #218"
   ],
   "learningsInjected": [
-    "testing/nats-kv-testing-patterns.md",
-    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-    "architecture-patterns/nats-kv-graceful-degradation.md"
+    "skill-patterns/cross-cutting-workflow-concerns.md",
+    "daemon/handoff-schema-migration-patterns.md",
+    "skill-patterns/worker-skill-failure-modes.md"
   ],
-  "learningsHelpful": ["testing/nats-kv-testing-patterns.md"],
+  "learningsHelpful": [
+    "skill-patterns/cross-cutting-workflow-concerns.md",
+    "daemon/handoff-schema-migration-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-10T23:56:46.858Z"
+  "completed": "2026-04-11T13:18:59.785Z"
 }
