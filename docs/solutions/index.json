@@ -13,8 +13,8 @@
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "controller/controller-session-anti-patterns.md",
       "daemon/server-side-dispatch-validation.md",
-      "daemon/state-machine-action-display-mismatch.md"
-      "daemon/session-adoption-api-pattern.md",
+      "daemon/state-machine-action-display-mismatch.md",
+      "daemon/session-adoption-api-pattern.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
       "daemon/opencode-serve-lifecycle.md",
@@ -46,8 +46,9 @@
       "daemon/codebase-index-file-placement.md",
       "testing/bun-mock-module-global-leak.md",
       "daemon/post-collection-processing-pattern.md",
-      "testing/ci-merge-type-compatibility.md"
+      "testing/ci-merge-type-compatibility.md",
       "daemon/session-adoption-api-pattern.md",
+      "daemon/health-tick-baseline-isolation.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -56,7 +57,7 @@
       "daemon/server-side-dispatch-validation.md",
       "daemon/prompt-delivery-bootstrap-delay.md",
       "daemon/handoff-schema-migration-patterns.md",
-      "daemon/state-machine-action-display-mismatch.md"
+      "daemon/state-machine-action-display-mismatch.md",
       "daemon/session-adoption-api-pattern.md"
     ],
     "packages/daemon": [
@@ -372,13 +373,13 @@
       "daemon/envoy-auto-subscription-patterns.md",
       "testing/bun-fetch-mocking-patterns.md",
       "envoy/listener-routing-by-topic-prefix.md",
-      "envoy/nats-bus-client-self-healing.md"
+      "envoy/nats-bus-client-self-healing.md",
       "envoy/publish-payload-source-validation.md"
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md",
       "envoy/contracts-and-handler-patterns.md",
-      "envoy/adding-resource-level-subject-helpers.md"
+      "envoy/adding-resource-level-subject-helpers.md",
       "envoy/publish-payload-source-validation.md"
     ],
     "tag:session-registry": [
@@ -455,6 +456,15 @@
     "tag:github-api": [
       "skill-patterns/merge-retry-race-condition-pattern.md",
       "github-api/graphql-org-user-fallback.md"
+    ],
+    "tag:health-tick": [
+      "daemon/health-tick-baseline-isolation.md"
+    ],
+    "tag:state-delta": [
+      "daemon/health-tick-baseline-isolation.md"
+    ],
+    "tag:baseline-oscillation": [
+      "daemon/health-tick-baseline-isolation.md"
     ]
   }
 }
