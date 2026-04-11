@@ -1,19 +1,22 @@
 {
-  "passed": 4,
+  "passed": 22,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body clearly explains regression origin (PR #393) and fix structure. Issue body enumerates fix points with CLI script correctly scoped out. No user-facing doc changes needed.",
+  "documentationFeedback": "PR body provides clear usage examples and verification stats. Issue body has comprehensive YAML schema reference. No dedicated docs file updated — appropriate for a refactor PR. Follow-up legion init command would benefit from generating commented config template.",
   "observations": [
-    "P3 formatting: gofmt reports indentation error in cmd/listener/main.go:308 — Title field uses single tab instead of double",
-    "P2 test gaps: no subscribe handler input test (Go), no race guard test (TS), no heartbeat title test (TS)",
-    "Plugin correctly handles async title fetch race with session-switch guard"
+    "P2: CLI test file missing error-path tests for cmdStart with missing config file and invalid YAML (tested at unit level in loadConfigFromFile)",
+    "P2: No explicit env-mutation regression test asserting process.env unchanged after cmdStart()",
+    "Test count increased from 861 to 862 due to main branch changes between implementation and testing"
   ],
   "learningsInjected": [
-    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-    "testing/nats-kv-testing-patterns.md"
+    "testing/bun-fetch-mocking-patterns.md",
+    "testing/bun-mock-module-global-leak.md",
+    "delegation/hardening-patterns.md"
   ],
-  "learningsHelpful": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md"],
+  "learningsHelpful": [
+    "testing/bun-mock-module-global-leak.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T22:04:48.232Z"
+  "completed": "2026-04-11T23:17:03.392Z"
 }
