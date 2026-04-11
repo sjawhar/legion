@@ -71,7 +71,6 @@ deploy/scripts/up-nats-peer.sh
 - `ENVOY_MACHINE_ID`
 - `NATS_URLS`
 - `ENVOY_HOME`
-- `ENVOY_REGISTRY_DIR`
 - `ENVOY_OPENCODE_BIN`
 
 Example:
@@ -80,7 +79,6 @@ Example:
 export ENVOY_MACHINE_ID=sami-agents-mx
 export NATS_URLS=nats://127.0.0.1:4222,nats://sami:4222,nats://sami-claude:4222
 export ENVOY_HOME=/home/ubuntu
-export ENVOY_REGISTRY_DIR=/tmp/opencode-1000
 export ENVOY_OPENCODE_BIN=/home/ubuntu/.mise/installs/github-sjawhar-opencode/1.3.2-sami.20260328-035401/opencode
 deploy/scripts/up-listener.sh
 ```

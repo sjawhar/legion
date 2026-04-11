@@ -105,7 +105,6 @@ Each machine in the `envoy:machines` array:
 | `machineId` | Yes | Machine ID passed to Envoy services as `ENVOY_MACHINE_ID` |
 | `sshHost` | No | SSH URI for Docker provider (e.g. `ssh://user@host`). **Omit for the local machine** — Docker uses the local socket instead. |
 | `nats.serverName` | No | NATS server name. Omit to skip NATS peer on this machine. |
-| `listener.registryDir` | Yes | Path to the OpenCode session registry directory on the machine |
 | `listener.tsnet.hostname` | No | Tailscale hostname for the listener's tsnet node (e.g., `envoy-listener-sami-agents-mx`). When set, enables tsnet: `/v1/*` served over TLS on the tsnet interface, legacy port restricted to `/healthz`. |
 | `listener.tsnet.stateDir` | No | Persistent state directory for the tsnet node (must be unique per service per machine, e.g., `/var/lib/envoy-tsnet/listener-sami-agents-mx/`) |
 | `receivers.github` | No | Deploy GitHub webhook receiver on this machine |

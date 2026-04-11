@@ -1,26 +1,15 @@
 {
-  "passed": 11,
+  "passed": 6,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "Implementation plan (docs/plans/2026-04-11-session-adoption.md) is comprehensive. PR description accurately reflects changes. No user-facing docs needed — CLI has inline descriptions.",
+  "documentationFeedback": "Both READMEs read cleanly after removals. infra/README.md machine config table flows naturally. deploy/README.md env list and example are coherent and consistent.",
   "observations": [
-    "P2: No warning emitted when OC registry lookup is skipped (--workspace provided externally) — original standalone process may remain running without user awareness",
-    "P2: Duplicate session guard runs after createSession() — not harmful due to idempotency, but placing guard before createSession() would be cleaner",
-    "P2: No test for CliError when --workspace not provided and registry lookup fails",
-    "P2: No test for path traversal validation in scanOcRegistry",
-    "Pre-existing: 3 test failures unrelated to this PR (2 @pulumi/docker, 1 daemon entry env vars)"
+    "listener.registryDir was marked Required:Yes in infra README — correct to remove since file registry no longer exists",
+    "Planner correctly identified that named code files were already clean; only doc refs remained"
   ],
-  "learningsInjected": [
-    "docs/solutions/deterministic-session-ids.md",
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T16:38:57.294Z"
+  "completed": "2026-04-11T17:11:02.612Z"
 }
