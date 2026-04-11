@@ -61,7 +61,9 @@ legion handoff write --phase retro --data '{
 
 # Verify handoff was written
 if [ ! -f .legion/retro.json ]; then
-  echo "ERROR: Handoff write failed — .legion/retro.json not created"
+  echo "FATAL: Handoff write failed — .legion/retro.json not created"
+  echo "STOP: Do NOT signal worker-done. Diagnose: Is 'legion' CLI in PATH? Is --workspace correct?"
+  echo "If write cannot be fixed, note the failure in your exit comment."
 fi
 
 ### 2. Get PR URL and Launch Background Subagent
@@ -227,7 +229,9 @@ legion handoff write --phase retro --data '{
 
 # Verify handoff was written
 if [ ! -f .legion/retro.json ]; then
-  echo "ERROR: Handoff write failed — .legion/retro.json not created"
+  echo "FATAL: Handoff write failed — .legion/retro.json not created"
+  echo "STOP: Do NOT signal worker-done. Diagnose: Is 'legion' CLI in PATH? Is --workspace correct?"
+  echo "If write cannot be fixed, note the failure in your exit comment."
 fi
 ```
 

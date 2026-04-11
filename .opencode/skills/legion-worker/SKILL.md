@@ -33,7 +33,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
    lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
 4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, unsubscribe from explicit Envoy topics (see Exiting), add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
-4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST attempt it before adding `worker-done`. The CLI will fail loudly if the write encounters an error. If the write fails, diagnose the issue and note it in your exit comment.
+4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST complete it and confirm `.legion/$MODE.json` exists before adding `worker-done`. If the file is missing, stop, diagnose the failure (for example: `legion` missing from `PATH` or wrong `--workspace`), and do not signal completion until the failure is fixed or explicitly documented in your exit comment.
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 6. **Notify the controller via Envoy** — after adding `worker-done`, send exactly one completion notification so the controller doesn't have to wait for its next polling cycle. Use `envoy_publish(topic="notifications.role.legion-controller", message="Worker done: <issue> <mode> <outcome>")`. If `envoy_publish` fails, that's fine — the label is the source of truth.
 
@@ -109,7 +109,10 @@ If you previously created a PR, re-subscribe to PR topics: `envoy_subscribe(["no
 **Before starting any workflow work**, create these todos (adapt the signal todo to your mode):
 
 1. Your workflow-specific work items (from the workflow file)
-2. A **signal completion** todo as the LAST item:
+2. A **write handoff data** todo:
+   - `Write handoff data: complete the workflow handoff write and verify .legion/$MODE.json exists before signaling completion`
+   - Keep this todo `pending` until the handoff file exists on disk
+3. A **signal completion** todo as the LAST item:
    - `Signal completion: push changes, unsubscribe from Envoy topics, add worker-done label, remove worker-active label, notify controller via Envoy`
    - Keep this todo `pending` until you have actually run the label commands and verified they succeeded
    - **Do not mark this complete early** — it is your contract with the controller
@@ -176,6 +179,18 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Escalation
 The controller will resume your session when the user responds.
 
 ### Exiting
+
+Before pushing, verify the required handoff file exists for modes that write handoff data:
+
+```bash
+if printf '%s\n' architect plan implement test review | grep -qx "$MODE"; then
+  if [ ! -f ".legion/${MODE}.json" ]; then
+    echo "FATAL: Missing required handoff file .legion/${MODE}.json"
+    echo "STOP: Do NOT push or signal worker-done. Return to the workflow handoff step and diagnose the failure."
+    echo "If the write cannot be fixed, document the failure in your exit comment before signaling completion."
+  fi
+fi
+```
 
 Always push before exiting:
 

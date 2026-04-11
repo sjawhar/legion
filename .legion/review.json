@@ -1,20 +1,21 @@
 {
   "critical": 0,
-  "important": 0,
-  "minor": 1,
+  "important": 1,
+  "minor": 0,
   "verdict": "approved",
   "keyFindings": [
     {
-      "severity": "P3",
-      "file": ".legion/implement.json",
-      "description": "Missing trailing newline in handoff JSON files — cosmetic, protected pipeline files, not actionable"
+      "severity": "P2",
+      "file": ".opencode/skills/legion-worker/workflows/test.md",
+      "description": "Line 322: 'MUST attempt... before continuing' contradicts FATAL/STOP block above. Same issue at review.md:243. Recommend updating to match Rule 4.5 language."
     }
   ],
   "learningsInjected": [
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md"
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
+    "docs/solutions/skill-patterns/worker-notification-conventions.md"
   ],
-  "learningsHelpful": [],
+  "learningsHelpful": ["docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md"],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T21:58:59.711Z"
+  "completed": "2026-04-11T22:06:03.197Z"
 }
