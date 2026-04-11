@@ -55,16 +55,18 @@ describe("formatPollOutput", () => {
     expect(output).toContain('#44  Todo  "Redesign settings page"');
   });
 
-  it("renders blocked issues (user-input-needed, stale worker-active, dependency-blocked)", () => {
+  it("renders blocked issues (user-input-needed, stale worker-active)", () => {
     const issues: Record<string, IssueStateDict> = {
       "acme-repo-50": makeIssue({
-        suggestedAction: "skip",
+        // Real state machine: user-input-needed issues may have relay_user_feedback action
+        suggestedAction: "relay_user_feedback",
         status: "In Progress",
         labels: ["user-input-needed"],
         source: { owner: "acme", repo: "repo", number: 50, url: "" },
       }),
       "acme-repo-51": makeIssue({
-        suggestedAction: "skip",
+        // Real state machine: stale worker-active gets remove_worker_active_and_redispatch
+        suggestedAction: "remove_worker_active_and_redispatch",
         status: "In Progress",
         labels: ["worker-active"],
         hasLiveWorker: false,
@@ -80,6 +82,8 @@ describe("formatPollOutput", () => {
     expect(output).toContain("BLOCKED (2):");
     expect(output).toContain('#50  user-input-needed  "Zendesk ticketing"');
     expect(output).toContain('#51  worker-active (stale)  "Profile pic storage"');
+    // These should NOT appear in ACTIONABLE
+    expect(output).not.toContain("ACTIONABLE");
   });
 
   it("renders summary counts for non-actionable skip issues", () => {
