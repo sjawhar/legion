@@ -1,41 +1,35 @@
 {
   "scope": "medium",
   "components": [
-    ".opencode/skills/legion-worker/workflows/architect.md",
-    ".opencode/skills/legion-worker/workflows/plan.md",
-    ".opencode/skills/legion-worker/workflows/implement.md",
-    ".opencode/skills/legion-worker/workflows/test.md",
-    ".opencode/skills/legion-worker/workflows/review.md",
-    ".opencode/skills/legion-worker/references/knowledge-injection.md",
-    "packages/daemon/src/handoff/types.ts",
-    "packages/daemon/src/handoff/schema.ts"
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/state/types.ts"
   ],
-  "subIssues": [
-    "sjawhar-legion-238",
-    "sjawhar-legion-239",
-    "sjawhar-legion-240"
-  ],
+  "subIssues": [],
   "routingHints": {
     "complexity": "medium",
     "estimatedImplementers": 1,
     "skipRetro": true
   },
   "concerns": [
-    "Sub-issues #238 and #239 are already CLOSED (implemented, tested, merged). No further implementation needed.",
-    "Sub-issue #240 (index evolution) is intentionally blocked until 20+ issues accumulate feedback data — do NOT attempt to implement.",
-    "The cross-cutting-workflow-concerns learning (shared reference + inline config tables) was the pattern used for #238 — confirmed working.",
-    "Handoff schema migration pattern (learningsUsed → learningsInjected) uses Zod transform for backward compat — tested in ledger.test.ts."
+    "Instance bootstrap on shared serve: sendPrompt readiness-wait pattern may be needed for adopted sessions that exist in SQLite but aren't loaded in-memory yet (see prompt-delivery-bootstrap-delay.md)",
+    "Duplicate session adoption guard: must scan all live worker entries for matching sessionId, not just check workerId conflict",
+    "OC registry contract is external (in ~/.dotfiles/scripts/oc) — parse defensively, tolerate missing/malformed entries",
+    "422 for invalid sessionId format is intentional (semantic validation) — document this API choice",
+    "SIGHUP PID is transient CLI concern only — do NOT persist in WorkerEntry or workers.json",
+    "Workspace resolution order: explicit --workspace flag > OC registry dir field > legion workspace default"
   ],
   "learningsInjected": [
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "daemon/handoff-schema-migration-patterns.md",
-    "skill-patterns/worker-skill-failure-modes.md"
+    "docs/solutions/deterministic-session-ids.md",
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
+    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md"
   ],
   "learningsHelpful": [
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "daemon/handoff-schema-migration-patterns.md"
+    "docs/solutions/deterministic-session-ids.md",
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
+    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md"
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T12:57:56.111Z"
+  "completed": "2026-04-11T13:05:33.313Z"
 }
