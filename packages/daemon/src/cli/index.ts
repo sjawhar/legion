@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { defineCommand, runMain } from "citty";
@@ -17,6 +18,7 @@ import {
 } from "../handoff/ledger";
 import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
 import type { HandoffPhase } from "../handoff/types";
+import { SESSION_ID_PATTERN } from "../state/types";
 import { resolveLegionId } from "./legion-resolver";
 import { formatPollOutput } from "./poll-formatter";
 
@@ -43,13 +45,15 @@ export function parseEnvJson(raw: string): Record<string, string> {
   }
 
   const obj = parsed as Record<string, unknown>;
+  const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(obj)) {
     if (typeof value !== "string") {
       throw new CliError(`Invalid --env value: key "${key}" must have a string value`);
     }
+    result[key] = value;
   }
 
-  return obj as Record<string, string>;
+  return result;
 }
 
 async function readStdin(): Promise<string> {
@@ -576,6 +580,179 @@ export async function cmdResetCrashes(
   }
 }
 
+interface OcRegistryEntry {
+  pid: number;
+  dir: string;
+}
+
+export async function scanOcRegistry(
+  sessionId: string,
+  registryDir?: string
+): Promise<OcRegistryEntry | null> {
+  const dir =
+    registryDir ??
+    (() => {
+      const uid = process.getuid?.();
+      if (uid === undefined) return null;
+      return `/run/user/${uid}/opencode-${uid}`;
+    })();
+  if (!dir) return null;
+
+  let files: string[];
+  try {
+    files = await readdir(dir);
+  } catch {
+    return null;
+  }
+
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const content = await readFile(path.join(dir, file), "utf-8");
+      const entry = JSON.parse(content) as Record<string, unknown>;
+      const session = entry.session as Record<string, unknown> | undefined;
+      if (session?.id === sessionId) {
+        const pid = typeof entry.pid === "number" ? entry.pid : undefined;
+        const entryDir = typeof entry.dir === "string" ? entry.dir : undefined;
+        if (pid !== undefined && entryDir !== undefined) {
+          // Validate path doesn't contain traversal sequences
+          if (entryDir.includes("..") || !entryDir.startsWith("/")) {
+            continue; // Skip malicious entries
+          }
+          return { pid, dir: entryDir };
+        }
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+interface AdoptOptions {
+  mode: string;
+  issue: string;
+  workspace?: string;
+  daemonPort?: number;
+}
+
+export async function cmdAdopt(team: string, session: string, opts: AdoptOptions): Promise<void> {
+  if (!SESSION_ID_PATTERN.test(session)) {
+    throw new CliError(
+      `Invalid session ID format: ${session}\nExpected: ses_ + 12 hex + 14 Base62`
+    );
+  }
+  if (!SAFE_IDENTIFIER_RE.test(opts.issue)) {
+    throw new CliError(`Invalid issue identifier: ${opts.issue} (must match [a-zA-Z0-9_-]+)`);
+  }
+  if (!SAFE_IDENTIFIER_RE.test(opts.mode)) {
+    throw new CliError(`Invalid mode: ${opts.mode} (must match [a-zA-Z0-9_-]+)`);
+  }
+
+  const legionId = await resolveLegionId(team);
+  const daemonPort = opts.daemonPort ?? (await getDaemonPort(legionId));
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  try {
+    const healthResp = await fetch(`${baseUrl}/health`);
+    if (!healthResp.ok) {
+      throw new CliError("Daemon is not healthy. Is it running?");
+    }
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/health`);
+  }
+
+  let workspace = opts.workspace;
+  let registryPid: number | undefined;
+  if (!workspace) {
+    const registryEntry = await scanOcRegistry(session);
+    if (registryEntry?.dir) {
+      workspace = registryEntry.dir;
+      registryPid = registryEntry.pid;
+      console.log(`Resolved workspace from OC registry: ${workspace}`);
+    }
+  }
+
+  if (!workspace) {
+    throw new CliError(
+      "Could not resolve workspace. Provide --workspace or ensure the session is in the OC registry."
+    );
+  }
+
+  const body: Record<string, unknown> = {
+    issueId: opts.issue,
+    mode: opts.mode,
+    workspace,
+    sessionId: session,
+    force: true,
+    prompt: `/legion-worker ${opts.mode} mode for ${opts.issue}`,
+  };
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/workers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/workers`);
+  }
+
+  let responseBody: Record<string, unknown>;
+  try {
+    responseBody = (await response.json()) as Record<string, unknown>;
+  } catch {
+    throw new CliError(`Daemon returned non-JSON response (status ${response.status})`);
+  }
+
+  if (response.status === 409) {
+    if (responseBody.error === "session_already_adopted") {
+      throw new CliError(`Session ${session} is already tracked by worker ${responseBody.id}`);
+    }
+    console.log(`Worker already running: ${responseBody.id}`);
+    console.log(`  port: ${responseBody.port}`);
+    console.log(`  session: ${responseBody.sessionId}`);
+    return;
+  }
+
+  if (response.status === 422) {
+    throw new CliError(`Invalid request: ${JSON.stringify(responseBody)}`);
+  }
+
+  if (!response.ok) {
+    throw new CliError(`Failed to adopt: ${JSON.stringify(responseBody)}`);
+  }
+
+  const workerId = responseBody.id as string;
+  const workerPort = responseBody.port as number;
+  const adoptedSessionId = responseBody.sessionId as string;
+
+  console.log(`Session adopted: ${workerId}`);
+  console.log(`  port: ${workerPort}`);
+  console.log(`  session: ${adoptedSessionId}`);
+
+  if (responseBody.promptDelivered === true) {
+    console.log(`Prompt sent: /legion-worker ${opts.mode} mode for ${opts.issue}`);
+  } else if (responseBody.promptDelivered === false) {
+    console.warn("Session adopted but prompt delivery failed. Send manually:");
+    console.warn(
+      `  legion prompt ${opts.issue} "/legion-worker ${opts.mode} mode for ${opts.issue}"`
+    );
+  }
+
+  if (registryPid) {
+    try {
+      process.kill(registryPid, "SIGHUP");
+      console.log(`Sent SIGHUP to original process (PID ${registryPid})`);
+    } catch (error) {
+      console.warn(`Could not send SIGHUP to PID ${registryPid}: ${(error as Error).message}`);
+    }
+  }
+
+  console.log(`\nTo attach: legion attach ${team} ${opts.issue}`);
+}
+
 async function checkDaemonHealth(port: number): Promise<DaemonHealth> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`);
@@ -796,6 +973,57 @@ export const attachCommand = defineCommand({
   async run({ args }) {
     try {
       await cmdAttach(args.team, args.issue, args.backend);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
+export const adoptCommand = defineCommand({
+  meta: {
+    name: "adopt",
+    description: "Adopt an existing OpenCode session as a Legion worker",
+  },
+  args: {
+    team: {
+      type: "positional",
+      description: "Legion key or ID (e.g., sjawhar/5)",
+      required: true,
+    },
+    session: {
+      type: "positional",
+      description: "OpenCode session ID (e.g., ses_...)",
+      required: true,
+    },
+    mode: {
+      type: "string",
+      alias: "m",
+      description: "Worker mode (architect, plan, implement, test, review, merge)",
+      required: true,
+    },
+    issue: {
+      type: "string",
+      alias: "i",
+      description: "Issue identifier (e.g., eng-21, gh-42)",
+      required: true,
+    },
+    workspace: {
+      type: "string",
+      alias: "w",
+      description: "Override workspace path (default: resolved from OC registry)",
+    },
+  },
+  async run({ args }) {
+    try {
+      await cmdAdopt(args.team, args.session, {
+        mode: args.mode as string,
+        issue: args.issue as string,
+        workspace: args.workspace as string | undefined,
+      });
     } catch (e) {
       if (e instanceof CliError) {
         console.error(e.message);
@@ -1151,6 +1379,7 @@ export const mainCommand = defineCommand({
     stop: stopCommand,
     status: statusCommand,
     attach: attachCommand,
+    adopt: adoptCommand,
     dispatch: dispatchCommand,
     prompt: promptCommand,
     "reset-crashes": resetCrashesCommand,

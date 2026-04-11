@@ -10,6 +10,7 @@ import {
   IssueState,
   type IssueStateDict,
   IssueStatus,
+  SESSION_ID_PATTERN,
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
@@ -609,11 +610,18 @@ export function startServer(opts: ServerOptions): {
               crashCount: w.crashCount,
               activity: activity
                 ? {
-                    type: (activity.type as string) ?? (activity.phase as string) ?? "unknown",
-                    messageCount: (activity.messageCount as number) ?? 0,
-                    turnCount: (activity.turnCount as number) ?? 0,
-                    tokensUsed: (activity.tokensUsed as number) ?? 0,
-                    lastActivityAt: (activity.lastActivityAt as string) ?? null,
+                    type:
+                      typeof activity.type === "string"
+                        ? activity.type
+                        : typeof activity.phase === "string"
+                          ? activity.phase
+                          : "unknown",
+                    messageCount:
+                      typeof activity.messageCount === "number" ? activity.messageCount : 0,
+                    turnCount: typeof activity.turnCount === "number" ? activity.turnCount : 0,
+                    tokensUsed: typeof activity.tokensUsed === "number" ? activity.tokensUsed : 0,
+                    lastActivityAt:
+                      typeof activity.lastActivityAt === "string" ? activity.lastActivityAt : null,
                   }
                 : null,
             });
@@ -688,6 +696,7 @@ export function startServer(opts: ServerOptions): {
               typeof payload.issueNumber === "number" ? payload.issueNumber : undefined;
 
             const prompt = payload.prompt;
+            const providedSessionId = payload.sessionId;
             if (typeof issueId !== "string" || typeof mode !== "string") {
               return badRequest("missing_fields");
             }
@@ -708,6 +717,19 @@ export function startServer(opts: ServerOptions): {
             const validModes = Object.values(WorkerMode);
             if (!validModes.includes(mode as WorkerModeLiteral)) {
               return badRequest(`invalid_mode: must be one of ${validModes.join(", ")}`);
+            }
+
+            if (
+              providedSessionId !== undefined &&
+              (typeof providedSessionId !== "string" || !SESSION_ID_PATTERN.test(providedSessionId))
+            ) {
+              return jsonResponse(
+                {
+                  error: "invalid_session_id",
+                  message: "sessionId must match format: ses_ + 12 hex + 14 Base62",
+                },
+                422
+              );
             }
 
             // Phase prerequisite validation for gated modes
@@ -839,12 +861,10 @@ export function startServer(opts: ServerOptions): {
               }
             }
 
-            const sessionId = computeSessionId(
-              opts.legionId,
-              issueId,
-              mode as WorkerModeLiteral,
-              version
-            );
+            const sessionId =
+              typeof providedSessionId === "string"
+                ? providedSessionId
+                : computeSessionId(opts.legionId, issueId, mode as WorkerModeLiteral, version);
 
             const workerAdapter =
               opts.getWorkerAdapter?.(mode as WorkerModeLiteral) ?? opts.adapter;
@@ -903,6 +923,25 @@ export function startServer(opts: ServerOptions): {
               ...(issueNumber !== undefined ? { issueNumber } : {}),
               ...(workerEnv ? { env: workerEnv } : {}),
             };
+
+            // Duplicate session guard: prevent same session from being tracked by multiple workers
+            if (typeof providedSessionId === "string") {
+              for (const [, existingEntry] of workers) {
+                if (
+                  existingEntry.status !== "dead" &&
+                  existingEntry.sessionId === providedSessionId
+                ) {
+                  return jsonResponse(
+                    {
+                      error: "session_already_adopted",
+                      id: existingEntry.id,
+                      sessionId: providedSessionId,
+                    },
+                    409
+                  );
+                }
+              }
+            }
 
             workers.set(entry.id, entry);
             await persistState();
@@ -1395,7 +1434,9 @@ export function startServer(opts: ServerOptions): {
 
           try {
             if (backend === "github") {
-              const legionId = (payload.legionId as string) ?? opts.legionId;
+              const providedLegionId =
+                typeof payload.legionId === "string" ? payload.legionId : null;
+              const legionId = providedLegionId ?? opts.legionId;
               const parts = legionId.split("/");
               if (parts.length !== 2 || !parts[1]) {
                 return badRequest("invalid_team_id: expected owner/project-number");

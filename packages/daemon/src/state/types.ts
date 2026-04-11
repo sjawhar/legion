@@ -551,6 +551,12 @@ function uuidToSessionId(uuid: string): string {
 }
 
 /**
+ * Session ID format regex.
+ * Matches OpenCode format: ses_ + 12 lowercase hex chars + 14 Base62 chars.
+ */
+export const SESSION_ID_PATTERN = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+
+/**
  * Compute deterministic session ID for a worker.
  *
  * Session IDs match OpenCode's format: ses_ + 12 hex + 14 Base62.

@@ -1,37 +1,37 @@
 {
-  "learningsInjected": [
-    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md"
-  ],
-  "scope": "small",
-  "components": [
-    ".opencode/skills/legion-worker/workflows/merge.md",
-    ".opencode/skills/legion-worker/SKILL.md",
-    ".opencode/skills/legion-worker/workflows/architect.md",
-    ".opencode/skills/legion-worker/workflows/plan.md"
-  ],
-  "planFile": "docs/superpowers/plans/2026-04-11-worker-failure-notifications-merge-retry.md",
-  "taskCount": 3,
-  "requiredSkills": [],
-  "subIssues": [],
+  "taskCount": 6,
+  "independentTasks": 1,
   "routingHints": {
-    "skipRetro": false,
-    "complexity": "small",
-    "estimatedImplementers": 1
+    "complexity": "none",
+    "estimatedImplementers": 0,
+    "skipRetro": true,
+    "skipArchitect": true
   },
   "concerns": [
-    "Merge retry substeps must NOT contain envoy_publish — only terminal exits notify",
-    "Permission errors and unknown errors are merged into one catch-all path using agent judgment on error output",
-    "implement.md and review.md have no inline escalation exits — they rely on SKILL.md shared protocol",
-    "test.md already has pass/fail notifications — only its escalation path via SKILL.md needs the new notification",
-    "Linear backend variants must be included alongside GitHub commands in all exit paths"
+    "Instance bootstrap on shared serve: adopted sessions exist in SQLite but may not have in-memory Instance — sendPrompt readiness-wait pattern handles this via existing SESSION_READY_DELAY_MS + retry",
+    "Duplicate session adoption guard must scan ALL live worker entries for matching sessionId, not just workerId conflict check",
+    "OC registry contract is external (in ~/.dotfiles/scripts/oc) — parse defensively, tolerate missing/malformed entries",
+    "422 for invalid sessionId format is intentional (semantic validation) — document this API choice",
+    "SIGHUP PID is transient CLI concern only — do NOT persist in WorkerEntry or workers.json",
+    "DuplicateIDError idempotent success is handled by existing serve-manager.ts code (lines 119-129) — no new code needed for this acceptance criterion"
   ],
+  "learningsInjected": [
+    "deterministic-session-ids.md",
+    "daemon/server-side-dispatch-validation.md",
+    "daemon/prompt-delivery-bootstrap-delay.md"
+  ],
+  "learningsHelpful": [
+    "deterministic-session-ids.md",
+    "daemon/server-side-dispatch-validation.md",
+    "daemon/prompt-delivery-bootstrap-delay.md"
+  ],
+  "workflowRecommendation": "Standard pipeline — all phases needed. Single implementer, TDD for server changes, mock-based CLI tests.",
+  "requiredSkills": {
+    "implement": ["test-driven-development", "envoy"],
+    "test": ["verification-before-completion"],
+    "review": []
+  },
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T13:18:43.284Z"
+  "completed": "2026-04-11T13:35:40.624Z"
 }

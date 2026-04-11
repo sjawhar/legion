@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock, test } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 
 // Mock child_process spawn to prevent actual process spawning in tests
@@ -27,8 +28,10 @@ mock.module("node:child_process", () => ({
 
 import { resolveLegionPaths } from "../../daemon/paths";
 import {
+  adoptCommand,
   attachCommand,
   CliError,
+  cmdAdopt,
   cmdDispatch,
   cmdPrompt,
   cmdResetCrashes,
@@ -39,6 +42,7 @@ import {
   parseEnvJson,
   promptCommand,
   resetCrashesCommand,
+  scanOcRegistry,
   startCommand,
   statusCommand,
   stopCommand,
@@ -57,6 +61,7 @@ interface StringArg {
   type: string;
   alias?: string;
   default?: string;
+  required?: boolean;
 }
 
 interface NumberArg {
@@ -119,6 +124,194 @@ async function resolveArgs(command: CommandWithArgs): Promise<Record<string, unk
   }
   return args as Record<string, unknown>;
 }
+
+describe("scanOcRegistry", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), "oc-registry-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("finds matching session entry", async () => {
+    const entry = {
+      pid: 12345,
+      port: 41089,
+      dir: "/home/ubuntu/agent-c/google",
+      started: "2026-03-14T20:43:57+00:00",
+      session: { id: "ses_316beec6dffevTRQ4mUzpuleS6", title: "Test" },
+    };
+    await writeFile(path.join(tempDir, "test.json"), JSON.stringify(entry));
+
+    const result = await scanOcRegistry("ses_316beec6dffevTRQ4mUzpuleS6", tempDir);
+    expect(result).toEqual({ pid: 12345, dir: "/home/ubuntu/agent-c/google" });
+  });
+
+  it("returns null when no match found", async () => {
+    const entry = {
+      pid: 12345,
+      dir: "/tmp",
+      session: { id: "ses_other000000000000000000" },
+    };
+    await writeFile(path.join(tempDir, "test.json"), JSON.stringify(entry));
+
+    const result = await scanOcRegistry("ses_316beec6dffevTRQ4mUzpuleS6", tempDir);
+    expect(result).toBeNull();
+  });
+
+  it("returns null when directory does not exist", async () => {
+    const result = await scanOcRegistry("ses_316beec6dffevTRQ4mUzpuleS6", "/nonexistent");
+    expect(result).toBeNull();
+  });
+
+  it("skips malformed JSON files", async () => {
+    await writeFile(path.join(tempDir, "bad.json"), "not json");
+    const entry = {
+      pid: 99,
+      dir: "/good",
+      session: { id: "ses_316beec6dffevTRQ4mUzpuleS6" },
+    };
+    await writeFile(path.join(tempDir, "good.json"), JSON.stringify(entry));
+
+    const result = await scanOcRegistry("ses_316beec6dffevTRQ4mUzpuleS6", tempDir);
+    expect(result).toEqual({ pid: 99, dir: "/good" });
+  });
+
+  it("skips entries with missing pid or dir", async () => {
+    const entry = {
+      session: { id: "ses_316beec6dffevTRQ4mUzpuleS6" },
+    };
+    await writeFile(path.join(tempDir, "test.json"), JSON.stringify(entry));
+
+    const result = await scanOcRegistry("ses_316beec6dffevTRQ4mUzpuleS6", tempDir);
+    expect(result).toBeNull();
+  });
+});
+
+describe("adoptCommand", () => {
+  it("has correct meta", async () => {
+    const meta = await Promise.resolve(adoptCommand.meta);
+    expect(meta?.name).toBe("adopt");
+  });
+
+  it("requires team and session as positional args", async () => {
+    const args = await resolveArgs(adoptCommand);
+    expect(args.team).toEqual(expect.objectContaining({ type: "positional", required: true }));
+    expect(args.session).toEqual(expect.objectContaining({ type: "positional", required: true }));
+  });
+
+  it("requires --mode and --issue flags", async () => {
+    const args = await resolveArgs(adoptCommand);
+    expect(args.mode).toEqual(expect.objectContaining({ type: "string", required: true }));
+    expect(args.issue).toEqual(expect.objectContaining({ type: "string", required: true }));
+  });
+
+  it("has optional --workspace flag", async () => {
+    const args = await resolveArgs(adoptCommand);
+    expect(args.workspace).toEqual(expect.objectContaining({ type: "string" }));
+    expect((args.workspace as StringArg).required).toBeFalsy();
+  });
+});
+
+describe("cmdAdopt behavior", () => {
+  const originalFetch = globalThis.fetch;
+  let capturedCalls: Array<{ url: string; body: Record<string, unknown> }>;
+
+  beforeEach(() => {
+    capturedCalls = [];
+    const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/health")) {
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }
+      if (url.includes("/workers") && init?.method === "POST") {
+        const body = JSON.parse(init.body as string) as Record<string, unknown>;
+        capturedCalls.push({ url, body });
+        return new Response(
+          JSON.stringify({
+            id: `${body.issueId}-${body.mode}`,
+            port: 13381,
+            sessionId: body.sessionId,
+            promptDelivered: true,
+          }),
+          { status: 200 }
+        );
+      }
+      return originalFetch(input, init);
+    };
+    globalThis.fetch = Object.assign(mockFn, {
+      preconnect: originalFetch.preconnect,
+    });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sends sessionId, force=true, and prompt in POST body", async () => {
+    const testSession = "ses_31617365bffeUEa4wPBVIL2LBI";
+    await cmdAdopt("sjawhar/5", testSession, {
+      mode: "implement",
+      issue: "eng-42",
+      workspace: "/tmp/test-workspace",
+      daemonPort: 13370,
+    });
+
+    expect(capturedCalls).toHaveLength(1);
+    expect(capturedCalls[0]?.body).toEqual(
+      expect.objectContaining({
+        issueId: "eng-42",
+        mode: "implement",
+        sessionId: testSession,
+        force: true,
+        prompt: "/legion-worker implement mode for eng-42",
+        workspace: "/tmp/test-workspace",
+      })
+    );
+  });
+
+  it("throws CliError for session_already_adopted 409", () => {
+    const mock409 = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/health")) {
+        return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      }
+      if (url.includes("/workers") && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({ error: "session_already_adopted", id: "eng-42-implement" }),
+          { status: 409 }
+        );
+      }
+      return originalFetch(input, init);
+    };
+    globalThis.fetch = Object.assign(mock409, {
+      preconnect: originalFetch.preconnect,
+    });
+
+    return expect(
+      cmdAdopt("sjawhar/5", "ses_31617365bffeUEa4wPBVIL2LBI", {
+        mode: "implement",
+        issue: "eng-42",
+        workspace: "/tmp/work",
+        daemonPort: 13370,
+      })
+    ).rejects.toThrow("already tracked by worker");
+  });
+
+  it("throws CliError for invalid session ID format", () => {
+    return expect(
+      cmdAdopt("sjawhar/5", "not-a-session-id", {
+        mode: "implement",
+        issue: "eng-42",
+        workspace: "/tmp/work",
+        daemonPort: 13370,
+      })
+    ).rejects.toThrow("Invalid session ID format");
+  });
+});
 
 describe("citty command definitions", () => {
   test("start command args are defined", async () => {
