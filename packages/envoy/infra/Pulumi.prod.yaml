@@ -7,7 +7,10 @@ config:
       machineId: sami-agents-mx
       nats:
         serverName: sami-agents-mx
-      listener: {}
+      listener:
+        tsnet:
+          hostname: envoy-listener-sami-agents-mx
+          stateDir: /var/lib/envoy-tsnet/listener-sami-agents-mx
       receivers:
         github: true
         slack: true
