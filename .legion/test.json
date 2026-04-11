@@ -1,32 +1,14 @@
 {
-  "passed": 2,
-  "failed": 4,
-  "failures": [
-    {
-      "criterion": "CLI reads JSONL + workspaces, produces per-learning stats report",
-      "evidence": "P1: scanForWorkspaceDirs recursive walk times out (131K dirs). P1: issueId derivation uses legionId suffix instead of workspace basename — all workspaces merge to 1 issue. P2: Human report omits stats."
-    },
-    {
-      "criterion": "Deduplication: no double-counting",
-      "evidence": "Dedup logic exists but all workspaces get same issueId due to P1 bug, so dedup merges everything into 1 entry."
-    },
-    {
-      "criterion": "--apply modifies index.json + front matter",
-      "evidence": "Front matter mutation works but writes 'stale' instead of 'needs-review'. setLearningStatus returns false when no status field exists. Index mutations untestable due to issueId bug."
-    },
-    {
-      "criterion": "Graceful degradation",
-      "evidence": "Missing log/files handled. Malformed JSONL lines silently swallowed (empty catch {} in collector.ts line 108, no warning)."
-    }
-  ],
-  "documentationFeedback": "No README or usage guide updates. CLI --help adequate. PR body describes architecture. No docs on JSONL format, schema versioning, or report interpretation.",
+  "passed": 8,
+  "failed": 0,
+  "failures": [],
+  "documentationFeedback": "No README updates. CLI --help adequate. PR body clear. No docs on JSONL format or schema versioning.",
   "observations": [
-    "P1: scanForWorkspaceDirs recursive walk makes CLI unusable on real data (131K dirs vs 274 workspaces)",
-    "P1: collectWorkspaceIssue uses legionId.split('/').at(-1) instead of path.basename(workspaceDir) for issueId",
-    "P2: Disposition naming drift — internal accepted/needs_review/archived/rejected vs spec promote/review/stale/keep. JSON exposes internal names.",
-    "P2: Status values written as review/stale instead of needs-review per spec",
-    "P2: Human report omits per-learning injected count, helpful count, ratio",
-    "P2: Test suite lacks exact boundary tests, end-to-end integration test, and multi-workspace integration test"
+    "P3: Human report omits per-learning injected/helpful/ratio stats (data only in --json)",
+    "P3: JSON disposition names use internal form (accepted/needs_review/archived/rejected) not spec form (promote/review/stale/keep)",
+    "P3: Malformed handoff JSON in workspace .legion/ dirs prints stack trace to stderr, not captured in report warnings",
+    "P3: canonicalizeLearningPath does not handle ./docs/solutions/ or absolute path variants",
+    "P3: generatedAt changes between idempotent runs (cosmetic)"
   ],
   "learningsInjected": [
     "daemon/handoff-schema-migration-patterns.md",
@@ -38,5 +20,5 @@
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T22:40:19.696Z"
+  "completed": "2026-04-11T22:54:15.691Z"
 }

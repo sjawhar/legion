@@ -13,12 +13,14 @@
     ".opencode/skills/legion-retro/SKILL.md"
   ],
   "trickyParts": [
-    "Retro SKILL.md snippet needed env/homeDir params added post-review — original plan omitted them",
-    "Subagents used different disposition names than plan (accepted/needs_review/archived/rejected vs promote/review/stale/keep) — functionally equivalent"
+    "Retro SKILL.md snippet needed env/homeDir params added post-review",
+    "scanForWorkspaceDirs was recursive causing timeout on real workspaces - fixed to shallow scan",
+    "collectWorkspaceIssue used legionId split instead of path.basename for issueId - fixed",
+    "Status values needed to be needs-review not review/stale - fixed"
   ],
   "deviations": [
-    "Subagents deviated from plan on disposition naming: accepted/needs_review/archived/rejected instead of promote/review/stale/keep",
-    "Aggregator uses different field names (path/issues/touchedPaths) than plan (learningPath/issueIdsInjected/helpfulIssues) — tests adapted to match"
+    "Subagents used different disposition names than plan (accepted/needs_review/archived/rejected vs promote/review/stale/keep) - functionally equivalent",
+    "Aggregator uses different field names (path/issues/touchedPaths) than plan"
   ],
   "openQuestions": [],
   "learningsInjected": [
@@ -29,5 +31,5 @@
   "learningsHelpful": ["daemon/handoff-schema-migration-patterns.md", "task-index-patterns.md"],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T22:21:46.398Z"
+  "completed": "2026-04-11T22:47:00.374Z"
 }
