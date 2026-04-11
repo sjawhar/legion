@@ -13,6 +13,7 @@
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "controller/controller-session-anti-patterns.md",
       "daemon/server-side-dispatch-validation.md"
+      "daemon/state-machine-action-display-mismatch.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
       "daemon/opencode-serve-lifecycle.md",
@@ -50,6 +51,7 @@
       "daemon/server-side-dispatch-validation.md",
       "daemon/prompt-delivery-bootstrap-delay.md",
       "daemon/handoff-schema-migration-patterns.md"
+      "daemon/state-machine-action-display-mismatch.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -253,6 +255,7 @@
     "tag:state-machine": [
       "daemon/controller-observability.md",
       "integration-issues/github-graphql-pr-draft-status.md"
+      "daemon/state-machine-action-display-mismatch.md"
     ],
     "tag:state-management": ["daemon/controller-lifecycle-separation.md"],
     "tag:subagents": ["skill-patterns/parallel-subagent-background-execution.md"],
@@ -267,6 +270,7 @@
       "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md",
       "github-api/graphql-org-user-fallback.md",
       "testing/worker-smoke-testing-requirements.md"
+      "daemon/state-machine-action-display-mismatch.md"
     ],
     "tag:tmux": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:validation": ["daemon/workspace-validation-retro.md"],
@@ -405,5 +409,8 @@
     "tag:health-check": ["envoy/nats-bus-client-self-healing.md"],
     "tag:subscription": ["envoy/nats-bus-client-self-healing.md"],
     "tag:goroutine-serialization": ["envoy/nats-bus-client-self-healing.md"]
+    "tag:display-logic": ["daemon/state-machine-action-display-mismatch.md"],
+    "tag:formatter": ["daemon/state-machine-action-display-mismatch.md"],
+    "tag:poll": ["daemon/state-machine-action-display-mismatch.md"]
   }
 }
