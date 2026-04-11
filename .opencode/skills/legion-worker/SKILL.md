@@ -63,7 +63,7 @@ jj new  # Fresh commit for this session
 Load repo-specific config from workspace root (if present):
 
 ```bash
-cat .legion/config.yml 2>/dev/null || true
+if [ -f .legion/config.yml ]; then cat .legion/config.yml; fi
 ```
 
 Then:
