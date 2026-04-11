@@ -1,16 +1,41 @@
 {
-  "passed": 5,
-  "failed": 0,
-  "failures": [],
-  "documentationFeedback": "PR body clearly explains fix strategy. No user-facing doc changes needed — internal daemon behavior. AGENTS.md daemon architecture docs adequate.",
-  "observations": [
-    "opts.fetchProjectItems injection is unrequested but narrowly scoped testability support — acceptable extra work",
-    "Criterion 2 passes under plan clarification (symptom not root cause) — no per-tick subscription call existed to move",
-    "3 pre-existing test failures on main: index.test.ts 'passes controller env vars' + 2 envoy infra missing @pulumi/docker"
+  "passed": 2,
+  "failed": 4,
+  "failures": [
+    {
+      "criterion": "Legacy port security (POST /v1/* returns 404)",
+      "evidence": "Cannot verify — deployment blocked by missing envoy:tsnetAuthKey. TS_AUTHKEY not in SOPS."
+    },
+    {
+      "criterion": "Healthz available on legacy port after deploy",
+      "evidence": "Cannot verify — deployment blocked."
+    },
+    {
+      "criterion": "tsnet API available to Tailscale peers",
+      "evidence": "Cannot verify — deployment blocked."
+    },
+    {
+      "criterion": "Other machines unaffected post-deploy",
+      "evidence": "Cannot verify — deployment blocked. Pulumi preview suggests unaffected (image-only updates)."
+    }
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "documentationFeedback": "README.md already documents tsnet integration, naming conventions, and auth key lifecycle. PR body clearly states deployment prerequisite. Plan doc is thorough.",
+  "observations": [
+    "P1: log.Fatal in cmd/listener/main.go:452 means tsnet startup failure crashes entire listener (no graceful degradation to legacy-only mode)",
+    "P2: Pulumi preview shows 11 container replacements including image updates for ALL machines — full fleet roll, not just sami-agents-mx config change",
+    "Pre-deploy vulnerability confirmed: /v1/messages/publish accessible on port 9020 (HTTP 500 from NATS, route exists)",
+    "Pulumi preview validates config correctness: only sami-agents-mx listener gets tsnet env vars and volume"
+  ],
+  "learningsInjected": [
+    "envoy/docker-tailscale-networking.md",
+    "envoy/pulumi-remote-docker-patterns.md",
+    "envoy/listener-routing-by-topic-prefix.md"
+  ],
+  "learningsHelpful": [
+    "envoy/docker-tailscale-networking.md",
+    "envoy/pulumi-remote-docker-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T19:37:09.972Z"
+  "completed": "2026-04-11T20:03:04.646Z"
 }
