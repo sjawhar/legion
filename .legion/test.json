@@ -1,22 +1,20 @@
 {
-  "passed": 25,
+  "passed": 6,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description clearly explains the 3-part implementation. Envoy SKILL.md has well-placed role-based routing section with examples. No setup instructions needed for backend feature.",
+  "documentationFeedback": "PR description is clear and comprehensive with design decisions documented inline. No README/usage docs updated, appropriate for operator CLI. In-code comments explain blocking-before-actionable precedence.",
   "observations": [
-    "P2: 2 missing integration tests (claim with no prior holder, idempotent) — covered by unit tests but spec requested integration tests",
-    "P2: subscribeControllerToEnvoy() uses global fetch instead of injected deps.fetch — testability concern, all daemon tests log 404 for role set",
-    "1 daemon test failure (passes controller env vars to adapter.start on startup) is pre-existing on main, not caused by this PR"
+    "Empty status strings from project board render as ': 35' in SUMMARY — minor UX issue, consider '(no status): 35'",
+    "Error handling with invalid team shows stack trace instead of clean error message (consistent with other commands but suboptimal UX)",
+    "CI did not trigger on PR #402 — statusCheckRollup empty. All checks run locally: biome clean, tsc clean, 729/730 tests pass (1 pre-existing failure)",
+    "Titles not visible in live test because daemon runs pre-PR code — unit tests verify title formatting works correctly"
   ],
   "learningsInjected": [
-    "testing/nats-kv-testing-patterns.md",
-    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-    "envoy/listener-routing-by-topic-prefix.md"
+    "docs/solutions/daemon/controller-observability.md",
+    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
   ],
-  "learningsHelpful": [
-    "testing/nats-kv-testing-patterns.md"
-  ],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T01:08:56.995Z"
+  "completed": "2026-04-11T01:10:59.680Z"
 }
