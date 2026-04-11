@@ -1,37 +1,36 @@
 {
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T02:47:38.501Z",
+  "completed": "2026-04-11T02:56:22.735Z",
   "learningsInjected": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/daemon/worker-directory-resolution.md",
-    "docs/solutions/integration-patterns/controller-worker-protocol.md",
-    "docs/solutions/daemon/workspace-validation-retro.md"
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/github-api/graphql-org-user-fallback.md",
+    "docs/solutions/daemon/controller-observability.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/integration-patterns/controller-worker-protocol.md"
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/github-api/graphql-org-user-fallback.md"
   ],
-  "scope": "medium",
+  "scope": "small",
   "components": [
-    "packages/daemon/src/daemon/config.ts",
-    "packages/daemon/src/daemon/server.ts",
-    ".opencode/skills/legion-controller/SKILL.md",
+    "packages/daemon/src/state/github-fetch.ts",
     "packages/daemon/src/state/backends/github.ts",
-    "packages/daemon/src/daemon/repo-manager.ts"
+    "packages/daemon/src/state/types.ts",
+    "packages/daemon/src/state/fetch.ts",
+    "packages/daemon/src/state/decision.ts",
+    "packages/daemon/src/cli/poll-formatter.ts"
   ],
   "subIssues": [],
   "routingHints": {
-    "skipRetro": false,
-    "complexity": "medium",
-    "estimatedImplementers": 1
+    "complexity": "small",
+    "estimatedImplementers": 1,
+    "skipRetro": true
   },
   "concerns": [
-    "Deduplication across boards requires canonical identity (source.owner/source.repo/source.number) — project item IDs differ across boards",
-    "Primary board wins on status conflicts — divergent statuses must be logged as warnings",
-    "Controller MUST pass --repo from IssueState.source (fresh collect data) — daemon auto-resolve is fallback for CLI only, not primary path",
-    "All-boards-fail must return HTTP 500, not empty 200 — controller must distinguish no issues from tracker unavailable",
-    "LEGION_EXTRA_PROJECTS parsing needs edge case handling: whitespace trimming, empty segments, duplicate entries",
-    "Daemon cache is empty after restart — auto-resolve returns 400 until first collect cycle completes"
+    "buildIssueId() is one-way — not safely reversible for display. Formatter must display canonical Legion IDs verbatim, not attempt #N formatting.",
+    "blockedBy(first: 50) connection returns open AND closed blockers — must filter to state==OPEN only to match existing issueDependenciesSummary.blockedBy semantics.",
+    "ORG_QUERY and USER_QUERY must stay in sync per graphql-org-user-fallback.md learning.",
+    "issueDependenciesSummary kept for this PR — removal is follow-on cleanup, not in scope.",
+    "blockedByIds must be deduplicated and sorted for stable test output and poll display."
   ]
 }
