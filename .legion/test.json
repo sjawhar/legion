@@ -1,18 +1,19 @@
 {
-  "passed": 7,
+  "passed": 4,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body clearly documents root cause, design constraints, and what changed. Investigation comment on #430 accurately corrects original symptom. Cross-cutting concern follows documented pattern.",
+  "documentationFeedback": "PR body clearly explains regression origin (PR #393) and fix structure. Issue body enumerates fix points with CLI script correctly scoped out. No user-facing doc changes needed.",
   "observations": [
-    "P2: review.md:243 and test.md:322 retain weaker 'MUST attempt... before continuing' prose that contradicts the FATAL/STOP bash blocks above them. Recommend updating to match Rule 4.5 language."
+    "P3 formatting: gofmt reports indentation error in cmd/listener/main.go:308 — Title field uses single tab instead of double",
+    "P2 test gaps: no subscribe handler input test (Go), no race guard test (TS), no heartbeat title test (TS)",
+    "Plugin correctly handles async title fetch race with session-switch guard"
   ],
   "learningsInjected": [
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
-    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
-    "docs/solutions/daemon/handoff-schema-migration-patterns.md"
+    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "testing/nats-kv-testing-patterns.md"
   ],
-  "learningsHelpful": ["docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md"],
+  "learningsHelpful": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md"],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T21:59:44.252Z"
+  "completed": "2026-04-11T22:04:48.232Z"
 }
