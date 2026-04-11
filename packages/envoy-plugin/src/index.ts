@@ -238,25 +238,18 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_whoami: tool({
         description:
-          "Returns this session's Envoy identity: session ID, machine ID, port, directory, and current topic subscriptions.",
+          "Returns this session's Envoy identity: session ID, machine ID, port, and directory.",
         args: {},
         async execute(_args, ctx) {
           ctx.metadata({ title: "Envoy whoami" });
           const sessionID = ctx.sessionID;
           const port = currentPort();
-          let topics: string[] = [];
-          try {
-            const res = await call(`/v1/interests/${sessionID}`);
-            const data = JSON.parse(res);
-            topics = data.topics || [];
-          } catch {}
           return JSON.stringify(
             {
               session_id: sessionID,
               machine_id: process.env.HOSTNAME || "unknown",
               port,
               dir: ctx.directory,
-              topics,
             },
             null,
             2

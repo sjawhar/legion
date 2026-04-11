@@ -70,7 +70,7 @@ describe("envoy plugin init", () => {
 });
 
 describe("envoy_whoami", () => {
-  it("returns session identity with empty topics when Envoy is unavailable", async () => {
+  it("returns session identity when Envoy is unavailable", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHostname = process.env.HOSTNAME;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
@@ -93,7 +93,7 @@ describe("envoy_whoami", () => {
       expect(parsed.session_id).toBe("ses_test_whoami");
       expect(parsed.machine_id).toBe("test-machine");
       expect(parsed.dir).toBe("/tmp/test-workspace");
-      expect(parsed.topics).toEqual([]);
+      expect(parsed).not.toHaveProperty("topics");
       expect(parsed.port === null || typeof parsed.port === "number").toBe(true);
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
