@@ -1,41 +1,18 @@
 {
-  "passed": 2,
-  "failed": 4,
-  "failures": [
-    {
-      "criterion": "Legacy port security (POST /v1/* returns 404)",
-      "evidence": "Cannot verify — deployment blocked by missing envoy:tsnetAuthKey. TS_AUTHKEY not in SOPS."
-    },
-    {
-      "criterion": "Healthz available on legacy port after deploy",
-      "evidence": "Cannot verify — deployment blocked."
-    },
-    {
-      "criterion": "tsnet API available to Tailscale peers",
-      "evidence": "Cannot verify — deployment blocked."
-    },
-    {
-      "criterion": "Other machines unaffected post-deploy",
-      "evidence": "Cannot verify — deployment blocked. Pulumi preview suggests unaffected (image-only updates)."
-    }
-  ],
-  "documentationFeedback": "README.md already documents tsnet integration, naming conventions, and auth key lifecycle. PR body clearly states deployment prerequisite. Plan doc is thorough.",
+  "passed": 3,
+  "failed": 0,
+  "failures": [],
+  "documentationFeedback": "references/config.md documentation example updated to match new pattern. Surrounding text accurately describes behavior. PR body clearly explains rationale with context links (#430, #411).",
   "observations": [
-    "P1: log.Fatal in cmd/listener/main.go:452 means tsnet startup failure crashes entire listener (no graceful degradation to legacy-only mode)",
-    "P2: Pulumi preview shows 11 container replacements including image updates for ALL machines — full fleet roll, not just sami-agents-mx config change",
-    "Pre-deploy vulnerability confirmed: /v1/messages/publish accessible on port 9020 (HTTP 500 from NATS, route exists)",
-    "Pulumi preview validates config correctness: only sami-agents-mx listener gets tsnet env vars and volume"
+    ".legion/implement.json updated with this issue's handoff data — expected workspace reuse behavior",
+    "Plan noted adjacent || echo '{}' patterns as same error-suppression class but explicitly deferred — correct scoping"
   ],
   "learningsInjected": [
-    "envoy/docker-tailscale-networking.md",
-    "envoy/pulumi-remote-docker-patterns.md",
-    "envoy/listener-routing-by-topic-prefix.md"
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md"
   ],
-  "learningsHelpful": [
-    "envoy/docker-tailscale-networking.md",
-    "envoy/pulumi-remote-docker-patterns.md"
-  ],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T20:03:04.646Z"
+  "completed": "2026-04-11T21:54:21.934Z"
 }
