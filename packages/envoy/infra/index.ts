@@ -4,12 +4,7 @@ import { pullImages } from "./images";
 import type { MachineConfig } from "./machines";
 import { createProvider } from "./machines";
 import { createNatsPeer } from "./nats";
-import {
-  createGhostWisprReceiver,
-  createGithubReceiver,
-  createListener,
-  createSlackReceiver,
-} from "./services";
+import { createListener } from "./services";
 
 const cfg = new pulumi.Config("envoy");
 
@@ -19,9 +14,10 @@ const imageTag = cfg.require("imageTag");
 const natsImage = cfg.get("natsImage") ?? "nats:2.11-alpine";
 const machines = cfg.requireObject<MachineConfig[]>("machines");
 
-// Secrets
-const githubWebhookSecret = cfg.requireSecret("githubWebhookSecret");
-const slackSigningSecret = cfg.requireSecret("slackSigningSecret");
+// Secrets — webhook secrets are optional at the Pulumi level.
+// Go startup validates required secrets via ENVOY_WEBHOOKS config-gating.
+const githubWebhookSecret = cfg.getSecret("githubWebhookSecret");
+const slackSigningSecret = cfg.getSecret("slackSigningSecret");
 const ghostWisprSigningSecret = cfg.getSecret("ghostWisprSigningSecret");
 const tsnetAuthKey = cfg.getSecret("tsnetAuthKey");
 
@@ -51,17 +47,4 @@ for (const machine of machines) {
 
   // Listener — on ALL machines
   createListener(provider, machine, machines, images.envoy, secrets, natsDependency);
-
-  // Receivers — only where configured
-  if (machine.receivers?.github) {
-    createGithubReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
-  }
-
-  if (machine.receivers?.slack) {
-    createSlackReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
-  }
-
-  if (machine.receivers?.ghostwispr) {
-    createGhostWisprReceiver(provider, machine, machines, images.envoy, secrets, natsDependency);
-  }
 }

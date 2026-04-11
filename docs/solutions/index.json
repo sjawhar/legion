@@ -351,7 +351,13 @@
       "envoy/listener-routing-by-topic-prefix.md",
       "envoy/async-health-startup-pattern.md",
       "envoy/contracts-and-handler-patterns.md",
-      "envoy/nats-bus-client-self-healing.md"
+      "envoy/nats-bus-client-self-healing.md",
+      "envoy/webhook-handler-extraction-and-testing.md",
+      "envoy/multi-layer-service-consolidation.md"
+    ],
+    "packages/envoy/internal/webhook": [
+      "envoy/webhook-handler-extraction-and-testing.md",
+      "envoy/multi-layer-service-consolidation.md"
     ],
     "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md", "ci/envoy-plugin-release-versioning.md", "envoy/publish-payload-source-validation.md"],
     "tag:nats": [
@@ -403,12 +409,14 @@
     "packages/envoy/infra": [
       "envoy/docker-tailscale-networking.md",
       "envoy/pulumi-remote-docker-patterns.md",
-      "infra/mixed-runtime-type-boundaries.md"
+      "infra/mixed-runtime-type-boundaries.md",
+      "envoy/multi-layer-service-consolidation.md"
     ],
     "packages/envoy/scripts": ["envoy/pulumi-remote-docker-patterns.md"],
     "packages/envoy/deploy": [
       "envoy/docker-tailscale-networking.md",
-      "envoy/pulumi-remote-docker-patterns.md"
+      "envoy/pulumi-remote-docker-patterns.md",
+      "envoy/multi-layer-service-consolidation.md"
     ],
     "tag:tailscale": ["envoy/docker-tailscale-networking.md"],
     "tag:bridge-networking": ["envoy/docker-tailscale-networking.md"],
@@ -418,8 +426,8 @@
     "tag:infrastructure-as-code": ["envoy/pulumi-remote-docker-patterns.md"],
     "tag:deployment": ["envoy/pulumi-remote-docker-patterns.md"],
     "packages/contracts": ["envoy/contracts-and-handler-patterns.md", "envoy/adding-resource-level-subject-helpers.md"],
-    ".github/workflows": ["envoy/ghcr-docker-multiarch-ci.md", "ci/envoy-plugin-release-versioning.md"],
-    "packages/envoy/docker": ["envoy/ghcr-docker-multiarch-ci.md"],
+    ".github/workflows": ["envoy/ghcr-docker-multiarch-ci.md", "ci/envoy-plugin-release-versioning.md", "envoy/multi-layer-service-consolidation.md"],
+    "packages/envoy/docker": ["envoy/ghcr-docker-multiarch-ci.md", "envoy/multi-layer-service-consolidation.md"],
     "tag:knowledge-injection": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:cross-cutting": ["skill-patterns/cross-cutting-workflow-concerns.md"],
     "tag:workflows": ["skill-patterns/cross-cutting-workflow-concerns.md"],

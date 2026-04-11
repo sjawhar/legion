@@ -82,23 +82,16 @@ jobs:
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
       - name: Build envoy services
-        run: |
-          go build ./cmd/github
-          go build ./cmd/slack
-          go build ./cmd/listener
+        run: go build ./cmd/listener
         working-directory: packages/envoy
       - name: Pack envoy binaries
         run: |
           mkdir -p ../../out/pr-artifacts/envoy-amd64
-          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-github ./cmd/github
-          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-slack ./cmd/slack
           GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-listener ./cmd/listener
-          tar czf ../../out/pr-artifacts/legion-envoy-amd64.tar.gz -C ../../out/pr-artifacts/envoy-amd64 envoy-github envoy-slack envoy-listener
+          tar czf ../../out/pr-artifacts/legion-envoy-amd64.tar.gz -C ../../out/pr-artifacts/envoy-amd64 envoy-listener
           mkdir -p ../../out/pr-artifacts/envoy-arm64
-          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-github ./cmd/github
-          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-slack ./cmd/slack
           GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-listener ./cmd/listener
-          tar czf ../../out/pr-artifacts/legion-envoy-arm64.tar.gz -C ../../out/pr-artifacts/envoy-arm64 envoy-github envoy-slack envoy-listener
+          tar czf ../../out/pr-artifacts/legion-envoy-arm64.tar.gz -C ../../out/pr-artifacts/envoy-arm64 envoy-listener
         working-directory: packages/envoy
       - uses: actions/upload-artifact@v4
         with:

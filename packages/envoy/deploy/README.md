@@ -2,24 +2,21 @@
 
 ## Layout
 
-- `compose/listener.compose.yml` — host-network listener with opencode registry and host home mounts
-- `compose/github.compose.yml` — host-network GitHub receiver
-- `compose/slack.compose.yml` — host-network Slack receiver
+- `compose/listener.compose.yml` — host-network listener (includes webhook handlers when `ENVOY_WEBHOOKS` is set)
 - `compose/nats/peer.compose.yml` — JetStream peer node (all machines run as peers via Tailscale)
 
 ## Secrets
 
-Never store plaintext secrets here. Launch ingress services with the wrapper scripts:
+Webhook secrets are passed via environment variables to the listener container.
+Required when the corresponding provider is enabled via `ENVOY_WEBHOOKS`:
 
-- `deploy/scripts/up-github.sh`
-- `deploy/scripts/up-slack.sh`
+## Webhook configuration
 
-These use `secrets ... -- docker compose ...` so the secrets exist only in the process environment at runtime.
-If the local SOPS file has a MAC mismatch, the helper falls back to a scoped `sops --ignore-mac` read for only the requested key.
+The listener handles webhooks when `ENVOY_WEBHOOKS` is set (comma-separated list of enabled providers: `github`, `slack`, `ghostwispr`).
 
-## GitHub mention trigger
+### GitHub mention trigger
 
-The GitHub receiver can publish a second `.mention` topic when a comment body contains a matching trigger.
+The listener can publish a second `.mention` topic when a comment body contains a matching trigger.
 
 - `ENVOY_GITHUB_MENTION_TRIGGER` — optional, defaults to `@legion`
 
@@ -72,6 +69,11 @@ deploy/scripts/up-nats-peer.sh
 - `NATS_URLS`
 - `ENVOY_HOME`
 - `ENVOY_OPENCODE_BIN`
+- `ENVOY_WEBHOOKS` — comma-separated enabled webhook providers (e.g., `github,slack,ghostwispr`)
+- `ENVOY_GITHUB_WEBHOOK_SECRET` — required when `github` is in `ENVOY_WEBHOOKS`
+- `ENVOY_GITHUB_MENTION_TRIGGER` — optional, default `@legion`
+- `ENVOY_SLACK_SIGNING_SECRET` — required when `slack` is in `ENVOY_WEBHOOKS`
+- `ENVOY_GHOSTWISPR_SIGNING_SECRET` — optional even when `ghostwispr` is in `ENVOY_WEBHOOKS`
 
 Example:
 
@@ -79,13 +81,8 @@ Example:
 export ENVOY_MACHINE_ID=sami-agents-mx
 export NATS_URLS=nats://127.0.0.1:4222,nats://sami:4222,nats://sami-claude:4222
 export ENVOY_HOME=/home/ubuntu
-export ENVOY_OPENCODE_BIN=/home/ubuntu/.mise/installs/github-sjawhar-opencode/1.3.2-sami.20260328-035401/opencode
+export ENVOY_WEBHOOKS=github,slack
+export ENVOY_GITHUB_WEBHOOK_SECRET=your-secret
+export ENVOY_SLACK_SIGNING_SECRET=your-secret
 deploy/scripts/up-listener.sh
 ```
-
-## GitHub receiver envs
-
-- `ENVOY_MACHINE_ID`
-- `NATS_URLS`
-- `ENVOY_GITHUB_WEBHOOK_SECRET`
-- `ENVOY_GITHUB_MENTION_TRIGGER` (optional, default `@legion`)

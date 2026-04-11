@@ -1,22 +1,17 @@
 {
-  "status": "complete",
-  "pr": 440,
-  "branch": "sjawhar-legion-432",
-  "filesChanged": [
-    "packages/envoy/internal/session/registry.go",
-    "packages/envoy/cmd/listener/main.go",
-    "packages/envoy/cmd/listener/main_test.go",
-    "packages/envoy-plugin/src/index.ts",
-    "packages/envoy-plugin/src/__tests__/index.test.ts"
+  "prNumber": 429,
+  "prUrl": "https://github.com/sjawhar/legion/pull/429",
+  "branch": "sjawhar-legion-427",
+  "summary": "Consolidated 3 standalone webhook receiver binaries into the listener process. Extracted handlers to internal/webhook/ behind Publisher interface, config-gated via ENVOY_WEBHOOKS env var. 42 new tests. Removed old cmd/, compose, Pulumi receiver infrastructure.",
+  "filesChanged": 28,
+  "testsAdded": 42,
+  "reviewFindings": [
+    "Added TrimSpace to config.go for env parity with old receivers",
+    "Made Pulumi secrets conditional (getSecret vs requireSecret)",
+    "Added whitespace-only secret regression tests"
   ],
-  "testsAdded": [
-    "TestSessionsHandler_IncludesTitle (Go)",
-    "session title > includes title in follow-up subscribe after session activation (TS)"
-  ],
-  "reviewFindings": "Oracle review found session-switch race in title fetch callback — fixed by guarding state mutation with activeSessionID === sessionID check",
-  "ciStatus": "6/6 green",
-  "notes": "Follow-up needed: update envoy CLI script in dotfiles repo to add TITLE column to envoy ps output",
+  "deploymentNotes": "Migration requires parallel operation: old receivers stay running while new listener serves webhooks on port 9020. Switch webhook URLs at providers, then remove old containers.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T21:58:38.461Z"
+  "completed": "2026-04-11T21:11:23.875Z"
 }
