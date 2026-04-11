@@ -202,7 +202,12 @@ The skill handles:
 2. Post a comment explaining what needs clarification:
    - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
-3. Exit immediately - do NOT add `worker-done`
+3. Notify controller (best-effort):
+   ```
+   envoy_publish(topic="notifications.role.legion-controller", message="Worker blocked: $ISSUE_NUMBER plan needs user input — requirements unclear")
+   ```
+   If `envoy_publish` fails, continue — the label is the source of truth.
+4. Exit immediately - do NOT add `worker-done`
 
 ### 3. Invoke /superpowers/writing-plans
 
@@ -314,7 +319,12 @@ This spawns parallel cross-family reviewers:
 2. Post a comment explaining unresolved review issues:
    - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
    - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
-3. Exit without `worker-done`
+3. Notify controller (best-effort):
+   ```
+   envoy_publish(topic="notifications.role.legion-controller", message="Worker blocked: $ISSUE_NUMBER plan review failed after 3 iterations")
+   ```
+   If `envoy_publish` fails, continue — the label is the source of truth.
+4. Exit without `worker-done`
 
 **If a reviewer fails/times out:** Proceed with partial results. Note the missing review in the issue comment.
 

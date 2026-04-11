@@ -1,24 +1,25 @@
 {
   "critical": 0,
-  "important": 1,
-  "minor": 0,
+  "important": 0,
+  "minor": 1,
   "verdict": "approved",
   "keyFindings": [
     {
-      "severity": "P2",
-      "file": ".opencode/skills/legion-worker/references/knowledge-injection.md",
-      "description": "Line 91 references deprecated `learningsUsed` field instead of canonical `learningsInjected`. Stale cross-reference missed during #239 field rename. The learning doc daemon/handoff-schema-migration-patterns.md (line 81) explicitly warned about this class of bug."
+      "severity": "P3",
+      "file": ".legion/implement.json",
+      "description": "Missing trailing newline — non-functional, already flagged by tester"
     }
   ],
   "learningsInjected": [
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "daemon/handoff-schema-migration-patterns.md",
-    "skill-patterns/worker-skill-failure-modes.md"
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
   ],
   "learningsHelpful": [
-    "daemon/handoff-schema-migration-patterns.md"
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T13:29:34.440Z"
+  "completed": "2026-04-11T13:48:53.161Z"
 }

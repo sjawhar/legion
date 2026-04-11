@@ -166,7 +166,12 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Escalation
 ```
 
 3. Update labels: add `user-input-needed`, remove `worker-active`
-4. Exit immediately
+4. Notify the controller via Envoy (best-effort):
+   ```
+   envoy_publish(topic="notifications.role.legion-controller", message="Worker blocked: $ISSUE_NUMBER [current mode] needs user input")
+   ```
+   If `envoy_publish` fails, continue — the label is the source of truth.
+5. Exit immediately
 
 The controller will resume your session when the user responds.
 

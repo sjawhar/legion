@@ -1,16 +1,27 @@
 {
-  "filesChanged": [],
+  "filesChanged": [
+    ".opencode/skills/legion-worker/workflows/merge.md",
+    ".opencode/skills/legion-worker/SKILL.md",
+    ".opencode/skills/legion-worker/workflows/architect.md",
+    ".opencode/skills/legion-worker/workflows/plan.md"
+  ],
   "trickyParts": [
-    "No implementation needed — all implementable sub-issues (#238, #239) were already completed and merged before this dispatch"
+    "Step 1 of merge.md required expanding two single-line bullets into multi-line structured blocks with both GitHub and Linear commands",
+    "Step 6 replacement was the largest change — the retry-aware merge section handles race conditions, PR state inspection, retry loops, and three distinct failure classification paths"
   ],
-  "deviations": [
-    "No-op implementation phase: architect and planner both confirmed no remaining work. #240 (index evolution) is intentionally deferred until 20+ issues accumulate feedback data."
-  ],
-  "openQuestions": [
-    "#240 remains open and blocked on data accumulation — should #218 be closed since Changes 1 and 2 are complete?"
-  ],
+  "deviations": [],
+  "openQuestions": [],
   "subPlanningNeeded": false,
+  "learningsInjected": [
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T13:07:41.264Z"
+  "completed": "2026-04-11T13:30:53.415Z"
 }

@@ -58,7 +58,19 @@ If still unclear, escalate.
 
 ### 3. Act
 
-**If unclear:** Add `user-input-needed` label, remove `worker-active` label, post comment with specific questions, exit.
+**If unclear:**
+- Add `user-input-needed` label:
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
+- Post comment with specific questions:
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+- Notify controller (best-effort):
+  ```
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker blocked: $ISSUE_NUMBER architect needs user input")
+  ```
+  If `envoy_publish` fails, continue — the label is the source of truth.
+- Exit
 
 **If too big:** Break down into sub-issues. Each sub-issue must be spec-ready:
 - Clear problem statement (what needs to change and why)
