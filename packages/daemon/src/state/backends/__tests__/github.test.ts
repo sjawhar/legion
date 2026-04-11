@@ -223,4 +223,63 @@ describe("GitHubTracker.parseIssues", () => {
     expect(tracker.parseIssues({ items: [] })).toEqual([]);
     expect(tracker.parseIssues([])).toEqual([]);
   });
+
+  it("maps blocker refs to blockedByIds and marks issues blocked", () => {
+    const result = tracker.parseIssues({
+      items: [
+        makeItem({
+          blockerRefs: [
+            { number: 110, repository: "sjawhar/legion" },
+            { number: 112, repository: "sjawhar/legion" },
+          ],
+        }),
+      ],
+    });
+
+    expect(result[0].blockedByIds).toEqual(["sjawhar-legion-110", "sjawhar-legion-112"]);
+    expect(result[0].isBlocked).toBe(true);
+  });
+
+  it("keeps blockedByIds empty when blockerRefs is an empty array", () => {
+    const result = tracker.parseIssues({ items: [makeItem({ blockerRefs: [] })] });
+
+    expect(result[0].blockedByIds).toEqual([]);
+    expect(result[0].isBlocked).toBe(false);
+  });
+
+  it("keeps blockedByIds empty when blockerRefs is absent", () => {
+    const result = tracker.parseIssues({ items: [makeItem()] });
+
+    expect(result[0].blockedByIds).toEqual([]);
+    expect(result[0].isBlocked).toBe(false);
+  });
+
+  it("deduplicates and sorts blockedByIds lexicographically", () => {
+    const result = tracker.parseIssues({
+      items: [
+        makeItem({
+          blockerRefs: [
+            { number: 112, repository: "sjawhar/legion" },
+            { number: 110, repository: "sjawhar/legion" },
+            { number: 112, repository: "sjawhar/legion" },
+          ],
+        }),
+      ],
+    });
+
+    expect(result[0].blockedByIds).toEqual(["sjawhar-legion-110", "sjawhar-legion-112"]);
+  });
+
+  it("builds blockedByIds for blockers from other repositories", () => {
+    const result = tracker.parseIssues({
+      items: [
+        makeItem({
+          blockerRefs: [{ number: 5, repository: "acme/other-repo" }],
+        }),
+      ],
+    });
+
+    expect(result[0].blockedByIds).toEqual(["acme-other-repo-5"]);
+    expect(result[0].isBlocked).toBe(true);
+  });
 });

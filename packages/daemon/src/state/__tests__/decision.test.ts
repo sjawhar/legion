@@ -448,6 +448,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -473,6 +475,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
@@ -497,6 +501,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -522,6 +528,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -547,6 +555,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -573,6 +583,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -602,6 +614,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -632,6 +646,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
     const stateTodo = buildIssueState(dataTodo, legionId);
@@ -654,6 +670,8 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
     const stateReview = buildIssueState(dataReview, legionId);
@@ -678,11 +696,102 @@ describe("buildIssueState", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
     expect(state.suggestedAction).toBe("relay_user_feedback");
+  });
+
+  it("overrides dispatch actions to skip when blockedByIds are present", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-99",
+      status: "Todo",
+      labels: [],
+      hasPr: false,
+      prIsDraft: null,
+      ciStatus: null,
+      mergeableStatus: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: false,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      blockedByIds: ["sjawhar-legion-110"],
+      isBlocked: true,
+      source: null,
+    };
+
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
+
+    expect(state.suggestedAction).toBe("skip");
+    expect(state.blockedByIds).toEqual(["sjawhar-legion-110"]);
+    expect(state.isBlocked).toBe(true);
+  });
+
+  it("does not override normal actions when blockedByIds is empty", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-100",
+      status: "Todo",
+      labels: [],
+      hasPr: false,
+      prIsDraft: null,
+      ciStatus: null,
+      mergeableStatus: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: false,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
+      source: null,
+    };
+
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
+
+    expect(state.suggestedAction).toBe("dispatch_planner");
+    expect(state.blockedByIds).toEqual([]);
+  });
+
+  it("threads blockedByIds through to issue state output", () => {
+    const data: FetchedIssueData = {
+      issueId: "ENG-101",
+      status: "In Progress",
+      labels: ["worker-done"],
+      hasPr: true,
+      prIsDraft: false,
+      ciStatus: "passing",
+      mergeableStatus: null,
+      hasLiveWorker: false,
+      workerMode: null,
+      workerStatus: null,
+      hasUserFeedback: false,
+      hasUserInputNeeded: false,
+      hasNeedsApproval: false,
+      hasHumanApproved: false,
+      hasTestPassed: false,
+      hasTestFailed: false,
+      blockedByIds: ["sjawhar-legion-110", "sjawhar-legion-112"],
+      isBlocked: true,
+      source: null,
+    };
+
+    const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
+
+    expect(state.suggestedAction).toBe("transition_to_testing");
+    expect(state.blockedByIds).toEqual(["sjawhar-legion-110", "sjawhar-legion-112"]);
+    expect(state.isBlocked).toBe(true);
   });
 });
 
@@ -705,6 +814,8 @@ describe("approval gate", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -730,6 +841,8 @@ describe("approval gate", () => {
       hasHumanApproved: true,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -755,6 +868,8 @@ describe("approval gate", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -782,6 +897,8 @@ describe("orphan detection", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -807,6 +924,8 @@ describe("orphan detection", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -832,6 +951,8 @@ describe("orphan detection", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -860,6 +981,8 @@ describe("orphan detection", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       };
 
@@ -886,6 +1009,8 @@ describe("orphan detection", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -918,6 +1043,8 @@ describe("buildCollectedState", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
       {
@@ -937,6 +1064,8 @@ describe("buildCollectedState", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
     ];
@@ -968,6 +1097,8 @@ describe("buildCollectedState", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
     ];
@@ -1000,6 +1131,8 @@ describe("buildCollectedState", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
       {
@@ -1019,6 +1152,8 @@ describe("buildCollectedState", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
       {
@@ -1038,6 +1173,8 @@ describe("buildCollectedState", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
     ];
@@ -1066,6 +1203,7 @@ describe("canDispatchMode", () => {
       suggestedAction: "dispatch_merger",
       sessionId: "ses_test123",
       hasUserFeedback: false,
+      blockedByIds: [],
       isBlocked: false,
       source: null,
       ...overrides,

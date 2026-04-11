@@ -319,6 +319,7 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
     suggestedAction: action,
     sessionId,
     hasUserFeedback: data.hasUserFeedback,
+    blockedByIds: data.blockedByIds ?? [],
     isBlocked: data.isBlocked ?? false,
     source: data.source,
   };

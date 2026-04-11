@@ -452,4 +452,140 @@ describe("fetchGitHubProjectItems", () => {
       expect((error as Error).message).toContain("GraphQL errors: Rate limit exceeded");
     }
   });
+
+  it("includes only open blocker refs for issue content", async () => {
+    const mockRunner: CommandRunner = async () => ({
+      stdout: JSON.stringify({
+        data: {
+          organization: {
+            projectV2: {
+              items: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: "item-blocked",
+                    fieldValueByName: { name: "In Progress" },
+                    labels: { labels: { nodes: [] } },
+                    content: {
+                      __typename: "Issue",
+                      number: 42,
+                      title: "Blocked Issue",
+                      url: "https://github.com/sjawhar/legion/issues/42",
+                      repository: { nameWithOwner: "sjawhar/legion" },
+                      issueDependenciesSummary: { blockedBy: 2 },
+                      blockedBy: {
+                        nodes: [
+                          {
+                            number: 110,
+                            state: "OPEN",
+                            repository: { nameWithOwner: "sjawhar/legion" },
+                          },
+                          {
+                            number: 112,
+                            state: "CLOSED",
+                            repository: { nameWithOwner: "sjawhar/legion" },
+                          },
+                        ],
+                      },
+                      linkedPullRequests: { nodes: [] },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const result = await fetchGitHubProjectItems("sjawhar", 1, mockRunner);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      blockerRefs: [{ number: 110, repository: "sjawhar/legion" }],
+    });
+    expect(result.items[0].blockerRefs as unknown[]).toHaveLength(1);
+  });
+
+  it("returns an empty blockerRefs array when blockedBy is null", async () => {
+    const mockRunner: CommandRunner = async () => ({
+      stdout: JSON.stringify({
+        data: {
+          organization: {
+            projectV2: {
+              items: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: "item-unblocked",
+                    fieldValueByName: { name: "Todo" },
+                    labels: { labels: { nodes: [] } },
+                    content: {
+                      __typename: "Issue",
+                      number: 43,
+                      title: "Unblocked Issue",
+                      url: "https://github.com/sjawhar/legion/issues/43",
+                      repository: { nameWithOwner: "sjawhar/legion" },
+                      issueDependenciesSummary: { blockedBy: 0 },
+                      blockedBy: null,
+                      linkedPullRequests: { nodes: [] },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const result = await fetchGitHubProjectItems("sjawhar", 1, mockRunner);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ blockerRefs: [] });
+  });
+
+  it("returns an empty blockerRefs array for pull request items", async () => {
+    const mockRunner: CommandRunner = async () => ({
+      stdout: JSON.stringify({
+        data: {
+          organization: {
+            projectV2: {
+              items: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [
+                  {
+                    id: "item-pr",
+                    fieldValueByName: { name: "Done" },
+                    labels: { labels: { nodes: [] } },
+                    content: {
+                      __typename: "PullRequest",
+                      number: 44,
+                      title: "Blocked PR",
+                      url: "https://github.com/sjawhar/legion/pull/44",
+                      repository: { nameWithOwner: "sjawhar/legion" },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const result = await fetchGitHubProjectItems("sjawhar", 1, mockRunner);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      blockerRefs: [],
+      content: { type: "PullRequest", number: 44 },
+    });
+  });
 });
