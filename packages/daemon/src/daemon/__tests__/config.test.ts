@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig } from "../config";
+import { loadConfig, loadConfigFromFile, resolveDaemonConfig } from "../config";
 
 describe("daemon config", () => {
   it("loads defaults when env missing", () => {
@@ -293,6 +293,292 @@ describe("daemon config", () => {
     it("falls back to default for invalid OPENCODE_RSS_CHECK_INTERVAL", () => {
       const config = loadConfig({ OPENCODE_RSS_CHECK_INTERVAL: "abc" });
       expect(config.rssCheckIntervalMs).toBe(60_000);
+    });
+  });
+
+  describe("loadConfigFromFile", () => {
+    it("maps YAML fields to flattened config fields", () => {
+      const result = loadConfigFromFile(
+        [
+          "project: team-123",
+          "workspace: ./workspace",
+          "port: 14000",
+          "backend: github",
+          "runtime: claude-code",
+          "controller:",
+          "  session_id: ses_controller",
+          "  prompt: keep going",
+          "memory:",
+          "  max_rss_gb: 10",
+          "  rss_check_interval_seconds: 120",
+          "envoy_url: http://127.0.0.1:9999",
+          "feedback:",
+          "  disabled: true",
+          "  max_bytes: 2048",
+        ].join("\n"),
+        "/tmp/x"
+      );
+
+      expect(result.fields).toMatchObject({
+        legionId: "team-123",
+        legionDir: "/tmp/x/workspace",
+        daemonPort: 14000,
+        controllerSessionId: "ses_controller",
+        controllerPrompt: "keep going",
+        maxRssBytes: 10 * 1024 * 1024 * 1024,
+        rssCheckIntervalMs: 120_000,
+        envoyUrl: "http://127.0.0.1:9999",
+        feedbackDisabled: true,
+        feedbackMaxBytes: 2048,
+        issueBackend: "github",
+        runtime: "claude-code",
+      });
+      expect(result.warnings).toEqual([]);
+    });
+
+    it("maps GitHub App fields for each role", () => {
+      const result = loadConfigFromFile(
+        [
+          "github_apps:",
+          "  impl:",
+          "    app_id: impl-app",
+          "    private_key_path: ./impl.pem",
+          "    installation_id: impl-install",
+          "  review:",
+          "    app_id: review-app",
+          "    private_key_path: /keys/review.pem",
+          "    installation_id: review-install",
+        ].join("\n"),
+        "/tmp/legion"
+      );
+
+      expect(result.fields).toMatchObject({
+        githubApps: {
+          impl: {
+            appId: "impl-app",
+            privateKeyPath: "/tmp/legion/impl.pem",
+            installationId: "impl-install",
+          },
+          review: {
+            appId: "review-app",
+            privateKeyPath: "/keys/review.pem",
+            installationId: "review-install",
+          },
+        },
+      });
+    });
+
+    it("normalizes relative paths against configDir and leaves absolute paths unchanged", () => {
+      const relativeWorkspace = loadConfigFromFile("workspace: ./workspace\n", "/tmp/x");
+      const absoluteWorkspace = loadConfigFromFile("workspace: /srv/legion\n", "/tmp/x");
+
+      expect(relativeWorkspace.fields.legionDir).toBe("/tmp/x/workspace");
+      expect(absoluteWorkspace.fields.legionDir).toBe("/srv/legion");
+    });
+
+    it("maps extra_projects arrays", () => {
+      const result = loadConfigFromFile(
+        ["backend: github", "extra_projects:", "  - acme/12", "  - globex/34"].join("\n"),
+        "/tmp/x"
+      );
+
+      expect(result.fields.extraProjects).toEqual(["acme/12", "globex/34"]);
+    });
+
+    it("throws with parse context for invalid YAML syntax", () => {
+      expect(() => loadConfigFromFile("controller: [unterminated\n", "/tmp/x")).toThrow(
+        /YAML|Parse/
+      );
+    });
+
+    it("throws for invalid backend values", () => {
+      expect(() => loadConfigFromFile("backend: jira\n", "/tmp/x")).toThrow(/backend/i);
+    });
+
+    it("throws for invalid runtime values", () => {
+      expect(() => loadConfigFromFile("runtime: invalid\n", "/tmp/x")).toThrow(/runtime/i);
+    });
+
+    it("throws for invalid controller.session_id values", () => {
+      expect(() => loadConfigFromFile("controller:\n  session_id: bad_value\n", "/tmp/x")).toThrow(
+        /session_id.*ses_/
+      );
+    });
+
+    it("throws for prompts longer than 10000 chars", () => {
+      const prompt = "a".repeat(10001);
+      expect(() => loadConfigFromFile(`controller:\n  prompt: ${prompt}\n`, "/tmp/x")).toThrow(
+        /10000/
+      );
+    });
+
+    it("throws for prompts with control characters", () => {
+      expect(() =>
+        loadConfigFromFile('controller:\n  prompt: "bad\u0007prompt"\n', "/tmp/x")
+      ).toThrow(/control characters/i);
+    });
+
+    it("throws when a GitHub App role is partial and lists missing fields", () => {
+      expect(() =>
+        loadConfigFromFile(["github_apps:", "  impl:", "    app_id: impl-app"].join("\n"), "/tmp/x")
+      ).toThrow(/github_apps\.impl.*private_key_path.*installation_id/i);
+    });
+
+    it("throws when extra_projects is set for linear backend", () => {
+      expect(() =>
+        loadConfigFromFile(
+          ["backend: linear", "extra_projects:", "  - acme/12"].join("\n"),
+          "/tmp/x"
+        )
+      ).toThrow(/extra_projects.*github/i);
+    });
+
+    it("throws when extra_projects entries do not match owner/number", () => {
+      expect(() =>
+        loadConfigFromFile(
+          ["backend: github", "extra_projects:", "  - bad-entry"].join("\n"),
+          "/tmp/x"
+        )
+      ).toThrow(/owner\/number/i);
+    });
+
+    it("warns on root unknown keys", () => {
+      const result = loadConfigFromFile("project: team-123\nextra_key: value\n", "/tmp/x");
+
+      expect(result.warnings).toContainEqual(expect.stringMatching(/extra_key/));
+    });
+
+    it("warns on nested unknown keys with full dotted paths", () => {
+      const result = loadConfigFromFile(
+        [
+          "github_apps:",
+          "  impl:",
+          "    app_id: impl-app",
+          "    private_key_path: ./impl.pem",
+          "    installation_id: impl-install",
+          "    extra_field: value",
+        ].join("\n"),
+        "/tmp/x"
+      );
+
+      expect(result.warnings).toContainEqual(
+        expect.stringMatching(/github_apps\.impl\.extra_field/)
+      );
+    });
+
+    it("keeps known sibling values when warnings are emitted", () => {
+      const result = loadConfigFromFile(
+        ["project: team-123", "feedback:", "  disabled: true", "  extra_field: value"].join("\n"),
+        "/tmp/x"
+      );
+
+      expect(result.fields).toMatchObject({
+        legionId: "team-123",
+        feedbackDisabled: true,
+      });
+      expect(result.warnings).toContainEqual(expect.stringMatching(/feedback\.extra_field/));
+    });
+  });
+
+  describe("resolveDaemonConfig", () => {
+    it("prefers config file values over env vars for the same field", () => {
+      const result = resolveDaemonConfig({
+        env: { LEGION_RUNTIME: "opencode" },
+        configFile: { fields: { runtime: "claude-code" }, warnings: [] },
+      });
+
+      expect(result.config.runtime).toBe("claude-code");
+    });
+
+    it("prefers CLI overrides over config file values", () => {
+      const result = resolveDaemonConfig({
+        configFile: { fields: { daemonPort: 14000 }, warnings: [] },
+        cliOverrides: { daemonPort: 15000 },
+      });
+
+      expect(result.config.daemonPort).toBe(15000);
+    });
+
+    it("fills defaults for absent fields", () => {
+      const result = resolveDaemonConfig({});
+
+      expect(result.config).toMatchObject({
+        daemonPort: 13370,
+        issueBackend: "linear",
+        runtime: "opencode",
+        envoyUrl: "http://127.0.0.1:9020",
+        feedbackDisabled: false,
+        feedbackMaxBytes: 50 * 1024 * 1024,
+        maxRssBytes: 20 * 1024 * 1024 * 1024,
+        rssCheckIntervalMs: 60_000,
+      });
+    });
+
+    it("sets daemonPortExplicit true for CLI or config values and false for defaults", () => {
+      expect(
+        resolveDaemonConfig({ cliOverrides: { daemonPort: 15000 } }).config.daemonPortExplicit
+      ).toBe(true);
+      expect(
+        resolveDaemonConfig({ configFile: { fields: { daemonPort: 14000 }, warnings: [] } }).config
+          .daemonPortExplicit
+      ).toBe(true);
+      expect(resolveDaemonConfig({}).config.daemonPortExplicit).toBe(false);
+      expect(
+        resolveDaemonConfig({ env: { LEGION_DAEMON_PORT: "16000" } }).config.daemonPortExplicit
+      ).toBe(false);
+    });
+
+    it.each([
+      ["ENVOY_URL", "envoyUrl", "http://127.0.0.1:9999"],
+      ["LEGION_FEEDBACK_DISABLED", "feedbackDisabled", "true"],
+      ["LEGION_FEEDBACK_MAX_BYTES", "feedbackMaxBytes", "1234"],
+      ["LEGION_ISSUE_BACKEND", "issueBackend", "github"],
+      ["LEGION_RUNTIME", "runtime", "claude-code"],
+      ["LEGION_DAEMON_PORT", "daemonPort", "14444"],
+    ])("emits deprecation warning when %s is the effective value", (envVar, fieldName, value) => {
+      const result = resolveDaemonConfig({
+        env: { [envVar]: value },
+      });
+
+      expect(result.warnings).toContainEqual(expect.stringMatching(new RegExp(envVar)));
+      expect(result.warnings).toContainEqual(expect.stringMatching(/deprecated/i));
+      expect(result.config).toHaveProperty(fieldName);
+    });
+
+    it.each([
+      ["ENVOY_URL", "envoyUrl", "http://127.0.0.1:9999", "http://127.0.0.1:7777"],
+      ["LEGION_FEEDBACK_DISABLED", "feedbackDisabled", "true", false],
+      ["LEGION_FEEDBACK_MAX_BYTES", "feedbackMaxBytes", "1234", 4321],
+      ["LEGION_ISSUE_BACKEND", "issueBackend", "github", "linear"],
+      ["LEGION_RUNTIME", "runtime", "claude-code", "opencode"],
+      ["LEGION_DAEMON_PORT", "daemonPort", "14444", 15555],
+    ])("does not emit deprecation warning when config file overrides %s", (envVar, fieldName, envValue, configValue) => {
+      const result = resolveDaemonConfig({
+        env: { [envVar]: envValue },
+        configFile: { fields: { [fieldName]: configValue }, warnings: [] },
+      });
+
+      expect(result.warnings.some((warning) => warning.includes(envVar))).toBe(false);
+      expect(result.config).toHaveProperty(fieldName, configValue);
+    });
+  });
+
+  describe("env compatibility for new fields", () => {
+    it("reads ENVOY_URL and defaults when unset", () => {
+      expect(loadConfig({ ENVOY_URL: "http://127.0.0.1:9999" }).envoyUrl).toBe(
+        "http://127.0.0.1:9999"
+      );
+      expect(loadConfig({}).envoyUrl).toBe("http://127.0.0.1:9020");
+    });
+
+    it("reads LEGION_FEEDBACK_DISABLED and defaults when unset", () => {
+      expect(loadConfig({ LEGION_FEEDBACK_DISABLED: "true" }).feedbackDisabled).toBe(true);
+      expect(loadConfig({}).feedbackDisabled).toBe(false);
+    });
+
+    it("reads LEGION_FEEDBACK_MAX_BYTES and defaults when unset", () => {
+      expect(loadConfig({ LEGION_FEEDBACK_MAX_BYTES: "1234" }).feedbackMaxBytes).toBe(1234);
+      expect(loadConfig({}).feedbackMaxBytes).toBe(50 * 1024 * 1024);
     });
   });
 });
