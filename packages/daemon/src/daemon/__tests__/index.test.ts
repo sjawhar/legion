@@ -328,6 +328,68 @@ describe("daemon entry", () => {
     });
   });
 
+  it("uses config envoyUrl for controller envoy subscriptions and server startup", async () => {
+    const envoyCalls: Array<{ url: string; body: { session_id: string; topics?: string[] } }> = [];
+    const startServerCalls: ServerOptions[] = [];
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://env-from-process.example:9020";
+
+    const envoyServer = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: async (request) => {
+        envoyCalls.push({
+          url: request.url,
+          body: (await request.json()) as { session_id: string; topics?: string[] },
+        });
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    try {
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          envoyUrl: `http://127.0.0.1:${envoyServer.port}`,
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: (opts) => {
+            startServerCalls.push(opts);
+            return {
+              server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+              fetchAndProcessState: async () => {},
+            };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      await Bun.sleep(50);
+      await handle.stop();
+      await Bun.sleep(50);
+
+      expect(startServerCalls).toHaveLength(1);
+      expect(startServerCalls[0]).toMatchObject({
+        envoyUrl: `http://127.0.0.1:${envoyServer.port}`,
+      });
+      expect(envoyCalls).not.toHaveLength(0);
+      expect(
+        envoyCalls.every((call) => call.url.startsWith(`http://127.0.0.1:${envoyServer.port}`))
+      ).toBe(true);
+    } finally {
+      envoyServer.stop(true);
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+
   describe("stale serve cleanup", () => {
     it("calls cleanupStaleServes on startup before port allocation", async () => {
       const cleanupCalls: Array<{ filePath: string; legionId: string }> = [];
@@ -1192,7 +1254,12 @@ describe("daemon entry", () => {
         issueBackend: "linear",
       },
       {
-        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        readStateFile: async () => ({
+          workers: {
+            [baseEntry.id]: baseEntry,
+          },
+          crashHistory: {},
+        }),
         writeStateFile: async () => {},
         adapter: {
           ...makeAdapter({ healthy: async () => false }),
@@ -1217,6 +1284,58 @@ describe("daemon entry", () => {
     expect(opts.env?.LEGION_ID).toBe(TEAM_ID);
     expect(opts.env?.LEGION_ISSUE_BACKEND).toBe("linear");
     expect(opts.env?.LEGION_DIR).toBeUndefined();
+    expect(opts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
+    expect(Number(opts.env?.LEGION_DAEMON_PORT)).toBeGreaterThanOrEqual(13370);
+  });
+
+  it("uses cliArgs overrides when building controller env on startup", async () => {
+    const startCalls: Array<{ workspace: string; logDir?: string; env?: Record<string, string> }> =
+      [];
+
+    await startDaemonForTest(
+      {
+        legionId: TEAM_ID,
+        cliArgs: {
+          workspace: "/test/legion",
+          port: "15555",
+          controllerSession: "ses_cli",
+          envoyUrl: "http://127.0.0.1:9900",
+          prompt: "review queue",
+          backend: "github",
+          runtime: "claude-code",
+        },
+      },
+      {
+        readStateFile: async () => ({
+          workers: {
+            [baseEntry.id]: baseEntry,
+          },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: {
+          ...makeAdapter({ healthy: async () => false }),
+          start: async (opts) => {
+            startCalls.push(opts);
+          },
+        },
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+          fetchAndProcessState: async () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    expect(startCalls).toHaveLength(1);
+    const opts = startCalls[0];
+    expect(opts.env).toBeDefined();
+    expect(opts.env?.LEGION_ID).toBe(TEAM_ID);
+    expect(opts.env?.LEGION_ISSUE_BACKEND).toBe("github");
+    expect(opts.env?.LEGION_CONTROLLER_SESSION_ID).toBe("ses_cli");
     expect(opts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(Number(opts.env?.LEGION_DAEMON_PORT)).toBeGreaterThanOrEqual(13370);
   });

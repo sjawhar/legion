@@ -7,7 +7,7 @@ import {
   createEmptyCodebaseIndexResponse,
 } from "../index/types";
 import { computeControllerSessionId } from "../state/types";
-import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import { type CliArgs, type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
 import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
 import { modeToRole, TokenManager } from "./github-apps";
 import {
@@ -47,6 +47,7 @@ interface DaemonDependencies {
 }
 
 interface DaemonOverrides extends Partial<DaemonConfig> {
+  cliArgs?: CliArgs;
   readLegionsRegistry?: typeof readLegionsRegistry;
   cleanupStaleServes?: typeof cleanupStaleServes;
   allocatePort?: typeof allocatePort;
@@ -137,8 +138,7 @@ async function sendPromptWithRetry(
   throw lastError;
 }
 
-async function subscribeControllerToEnvoy(sessionId: string) {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
   try {
     const roleRes = await fetch(`${envoyUrl}/v1/roles/set`, {
       method: "POST",
@@ -176,8 +176,7 @@ async function subscribeControllerToEnvoy(sessionId: string) {
     });
 }
 
-function unsubscribeFromEnvoy(sessionId: string) {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+function unsubscribeFromEnvoy(sessionId: string, envoyUrl: string) {
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -194,6 +193,7 @@ function buildControllerEnv(config: DaemonConfig): Record<string, string> {
     LEGION_ISSUE_BACKEND: config.issueBackend,
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
+    ENVOY_URL: config.envoyUrl,
   };
   if (config.controllerSessionId) {
     env.LEGION_CONTROLLER_SESSION_ID = config.controllerSessionId;
@@ -206,6 +206,7 @@ export async function startDaemon(
   deps?: Partial<DaemonDependencies>
 ): Promise<DaemonHandle> {
   const {
+    cliArgs,
     readLegionsRegistry: readLegionsRegistryOverride,
     cleanupStaleServes: cleanupStaleServesOverride,
     allocatePort: allocatePortOverride,
@@ -220,7 +221,7 @@ export async function startDaemon(
   const writeLegionEntryFn = writeLegionEntryOverride ?? writeLegionEntry;
   const removeLegionEntryFn = removeLegionEntryOverride ?? removeLegionEntry;
 
-  let config = { ...loadConfig(), ...configOverrides };
+  let config = { ...loadConfig(process.env, cliArgs), ...configOverrides };
   const legionId = config.legionId;
   if (!legionId) {
     throw new Error("Missing legionId for daemon");
@@ -472,6 +473,7 @@ export async function startDaemon(
         adapter: resolvedDeps.adapter,
         stateFilePath: config.stateFilePath,
         logDir: config.logDir,
+        envoyUrl: config.envoyUrl,
         runtime: config.runtime,
         extraProjects: config.extraProjects,
         tmuxSession:
@@ -531,11 +533,11 @@ export async function startDaemon(
     }
     // Unsubscribe old controller from Envoy if session ID changed
     if (existingController && existingController.sessionId !== config.controllerSessionId) {
-      unsubscribeFromEnvoy(existingController.sessionId);
+      unsubscribeFromEnvoy(existingController.sessionId, config.envoyUrl);
     }
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
-    subscribeControllerToEnvoy(config.controllerSessionId);
+    subscribeControllerToEnvoy(config.controllerSessionId, config.envoyUrl);
   } else {
     const requestedSessionId = computeControllerSessionId(legionId);
     let actualSessionId: string | undefined;
@@ -561,7 +563,7 @@ export async function startDaemon(
           resolvedDeps
         );
         console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
-        subscribeControllerToEnvoy(actualSessionId);
+        subscribeControllerToEnvoy(actualSessionId, config.envoyUrl);
       } catch (error) {
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
@@ -664,7 +666,7 @@ export async function startDaemon(
             for (const entry of liveWorkers) {
               const actualSessionId = recreatedSessions.get(entry.id);
               if (actualSessionId && entry.envoyTopics?.length) {
-                subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics);
+                subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics, config.envoyUrl);
               }
             }
 
@@ -681,7 +683,7 @@ export async function startDaemon(
                 }
                 // Unsubscribe old session ID if it changed
                 if (actualControllerSessionId !== controllerState.sessionId) {
-                  unsubscribeFromEnvoy(controllerState.sessionId);
+                  unsubscribeFromEnvoy(controllerState.sessionId, config.envoyUrl);
                 }
                 controllerState = {
                   ...controllerState,

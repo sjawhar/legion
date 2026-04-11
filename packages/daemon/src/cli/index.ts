@@ -5,7 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { defineCommand, runMain } from "citty";
-import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
+import { type CliArgs, type DaemonConfig, validateControllerPrompt } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { findLegionByProjectId } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
@@ -165,6 +165,23 @@ interface StartOptions {
   prompt?: string;
   backend?: string;
   runtime?: string;
+  projects?: string;
+  port?: string;
+  controllerSession?: string;
+  envoyUrl?: string;
+}
+
+export function buildStartCliArgs(opts: StartOptions): CliArgs {
+  return {
+    workspace: opts.workspace,
+    projects: opts.projects,
+    port: opts.port,
+    controllerSession: opts.controllerSession,
+    envoyUrl: opts.envoyUrl,
+    prompt: opts.prompt,
+    backend: opts.backend,
+    runtime: opts.runtime,
+  };
 }
 
 async function cmdStart(team: string, opts: StartOptions): Promise<void> {
@@ -179,21 +196,13 @@ async function cmdStart(team: string, opts: StartOptions): Promise<void> {
 
   fs.mkdirSync(instancePaths.legionStateDir, { recursive: true });
 
-  if (opts.backend) {
-    process.env.LEGION_ISSUE_BACKEND = opts.backend;
-  }
-
-  if (opts.runtime) {
-    process.env.LEGION_RUNTIME = opts.runtime;
-  }
-  const overrides: Partial<DaemonConfig> = {
+  const cliArgs = buildStartCliArgs(opts);
+  const overrides: Partial<DaemonConfig> & { cliArgs: CliArgs } = {
+    cliArgs,
     legionId,
     legionDir: opts.workspace,
     stateFilePath: instancePaths.workersFile,
   };
-  if (opts.prompt !== undefined) {
-    overrides.controllerPrompt = opts.prompt;
-  }
 
   const handle = await startDaemon(overrides);
 
@@ -916,6 +925,22 @@ export const startCommand = defineCommand({
       alias: "r",
       description: "Agent runtime (opencode or claude-code)",
     },
+    projects: {
+      type: "string",
+      description: "Comma-separated project list (first entry = primary project)",
+    },
+    port: {
+      type: "string",
+      description: "Daemon port override",
+    },
+    "controller-session": {
+      type: "string",
+      description: "External controller session ID",
+    },
+    "envoy-url": {
+      type: "string",
+      description: "Envoy base URL override",
+    },
   },
   async run({ args }) {
     await cmdStart(args.team, {
@@ -923,6 +948,10 @@ export const startCommand = defineCommand({
       prompt: args.prompt,
       backend: args.backend,
       runtime: args.runtime,
+      projects: args.projects,
+      port: args.port,
+      controllerSession: args["controller-session"],
+      envoyUrl: args["envoy-url"],
     });
   },
 });

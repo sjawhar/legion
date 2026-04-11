@@ -259,6 +259,98 @@ describe("daemon config", () => {
     });
   });
 
+  describe("CLI args precedence", () => {
+    it("prefers CLI args over env vars", () => {
+      const config = loadConfig(
+        {
+          LEGION_ID: "env-primary",
+          LEGION_EXTRA_PROJECTS: "env-owner/22",
+          LEGION_DAEMON_PORT: "14000",
+          LEGION_CONTROLLER_SESSION_ID: "ses_env",
+          LEGION_ISSUE_BACKEND: "linear",
+          LEGION_RUNTIME: "opencode",
+          ENVOY_URL: "http://env.example:9020",
+        },
+        {
+          projects: "cli-owner/11,cli-owner/22",
+          port: "15000",
+          controllerSession: "ses_cli",
+          backend: "github",
+          runtime: "claude-code",
+          envoyUrl: "http://cli.example:9123",
+        }
+      );
+
+      expect(config.legionId).toBe("cli-owner/11");
+      expect(config.extraProjects).toEqual(["cli-owner/22"]);
+      expect(config.daemonPort).toBe(15000);
+      expect(config.controllerSessionId).toBe("ses_cli");
+      expect(config.issueBackend).toBe("github");
+      expect(config.runtime).toBe("claude-code");
+      expect(config.envoyUrl).toBe("http://cli.example:9123");
+    });
+
+    it("falls back to env vars when CLI args are omitted", () => {
+      const config = loadConfig(
+        {
+          LEGION_ID: "env-primary",
+          LEGION_EXTRA_PROJECTS: "env-owner/22,env-owner/33",
+          LEGION_DAEMON_PORT: "14000",
+          LEGION_CONTROLLER_SESSION_ID: "ses_env",
+          LEGION_ISSUE_BACKEND: "github",
+          LEGION_RUNTIME: "claude-code",
+          ENVOY_URL: "http://env.example:9020",
+        },
+        {}
+      );
+
+      expect(config.legionId).toBe("env-primary");
+      expect(config.extraProjects).toEqual(["env-owner/22", "env-owner/33"]);
+      expect(config.daemonPort).toBe(14000);
+      expect(config.controllerSessionId).toBe("ses_env");
+      expect(config.issueBackend).toBe("github");
+      expect(config.runtime).toBe("claude-code");
+      expect(config.envoyUrl).toBe("http://env.example:9020");
+    });
+
+    it("defaults envoyUrl when neither CLI nor env provides one", () => {
+      const config = loadConfig({}, {});
+
+      expect(config.envoyUrl).toBe("http://127.0.0.1:9020");
+    });
+
+    it("rejects malformed --projects entries", () => {
+      expect(() => loadConfig({}, { projects: "cli-owner/not-a-number" })).toThrow("--projects");
+    });
+
+    it("parses --projects with first as legionId and rest as extraProjects", () => {
+      const config = loadConfig({}, { projects: "acme/1,beta/2,gamma/3" });
+
+      expect(config.legionId).toBe("acme/1");
+      expect(config.extraProjects).toEqual(["beta/2", "gamma/3"]);
+    });
+
+    it("deduplicates --projects entries", () => {
+      const config = loadConfig({}, { projects: "acme/1,beta/2,acme/1" });
+
+      expect(config.legionId).toBe("acme/1");
+      expect(config.extraProjects).toEqual(["beta/2"]);
+    });
+
+    it("CLI --projects overrides both LEGION_ID and LEGION_EXTRA_PROJECTS", () => {
+      const config = loadConfig(
+        {
+          LEGION_ID: "env-primary",
+          LEGION_EXTRA_PROJECTS: "env-owner/22,env-owner/33",
+        },
+        { projects: "cli-owner/11,cli-owner/22" }
+      );
+
+      expect(config.legionId).toBe("cli-owner/11");
+      expect(config.extraProjects).toEqual(["cli-owner/22"]);
+    });
+  });
+
   describe("RSS monitoring config", () => {
     it("defaults maxRssBytes to 20GB", () => {
       const config = loadConfig({});

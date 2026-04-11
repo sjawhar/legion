@@ -46,6 +46,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     legionDir: tempDir,
     adapter,
     stateFilePath,
+    envoyUrl: "http://127.0.0.1:9020",
   });
 
   try {

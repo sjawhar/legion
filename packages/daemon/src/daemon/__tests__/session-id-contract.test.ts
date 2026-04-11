@@ -52,6 +52,7 @@ describe("sessionId contract (daemon vs state)", () => {
       legionDir: tempDir,
       adapter,
       stateFilePath,
+      envoyUrl: "http://127.0.0.1:9020",
     });
     stopServer = stop;
 
@@ -99,6 +100,7 @@ describe("sessionId contract (daemon vs state)", () => {
       legionDir: tempDir,
       adapter,
       stateFilePath,
+      envoyUrl: "http://127.0.0.1:9020",
     });
     stopServer = stop;
 
@@ -152,6 +154,7 @@ describe("sessionId contract (daemon vs state)", () => {
       legionDir: tempDir,
       adapter,
       stateFilePath,
+      envoyUrl: "http://127.0.0.1:9020",
     });
     stopServer = stop;
 

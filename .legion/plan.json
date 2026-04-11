@@ -1,27 +1,28 @@
 {
-  "taskCount": 3,
+  "taskCount": 5,
   "independentTasks": 2,
   "routingHints": {
-    "complexity": "small",
+    "complexity": "medium",
     "estimatedImplementers": 1,
     "skipRetro": true,
     "skipArchitect": true
   },
   "concerns": [
-    "CLI change (~/.dotfiles/scripts/envoy) is in a separate repo from plugin changes — two separate commits needed",
-    "ses_* prefix heuristic for CLI send: any topic literally starting with 'ses_' would be treated as direct send"
+    "Primary-project semantics must be preserved: first entry in --projects = primary for filesystem, controller identity, dedup",
+    "Controller subprocess env contract (buildControllerEnv) must continue emitting LEGION_ID etc.",
+    "citty does not support array args: --projects must be comma-separated string with explicit parsing",
+    "Do NOT use default: process.env.X in citty arg definitions — resolve at runtime in loadConfig",
+    "Task 4 (ENVOY_URL centralization) is marked Independent but touches files also modified by Task 3 — implementer should sequence them",
+    "OPENCODE_AUTO_HEAP_SNAPSHOT and OPENCODE_FORCE_GC from issue table do not exist in codebase — dropped from scope"
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
-  "workflowRecommendation": "Simple feature additions — skip retro, single implementer. Two parallel lanes: plugin (Task 1) and CLI (Task 2) merge at verify (Task 3).",
-  "requiredSkills": {
-    "implement": [
-      "envoy"
-    ],
-    "test": [],
-    "review": []
-  },
+  "learningsInjected": [
+    "docs/solutions/deterministic-session-ids.md",
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
+    "docs/solutions/daemon/session-adoption-api-pattern.md"
+  ],
+  "learningsHelpful": ["docs/solutions/deterministic-session-ids.md"],
+  "workflowRecommendation": "Medium refactor — skip retro, single implementer, all phases needed",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T18:01:00.971Z"
+  "completed": "2026-04-11T17:49:21.045Z"
 }

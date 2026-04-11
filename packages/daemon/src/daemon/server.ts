@@ -55,6 +55,7 @@ export interface ServerOptions {
   repoManagerDeps?: RepoManagerDeps;
   stateFilePath: string;
   logDir?: string;
+  envoyUrl: string;
   shutdownFn?: () => void | Promise<void>;
   getControllerState?: () => ControllerState | undefined;
   runtime?: string;
@@ -192,9 +193,12 @@ export function buildPrTopics(owner: string, repo: string, prNumber: number): st
   return [`notifications.github.${owner}.${repo}.pr.${prNumber}.>`];
 }
 
-export function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): void {
+export function subscribeWorkerToEnvoy(
+  sessionId: string,
+  topics: string[],
+  envoyUrl: string
+): void {
   if (topics.length === 0) return;
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
   fetch(`${envoyUrl}/v1/interests/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -215,11 +219,10 @@ export function subscribeWorkerToEnvoy(sessionId: string, topics: string[]): voi
     });
 }
 
-function detachWorkerFromEnvoy(entry: BaseWorkerEntry, reason: string): void {
+function detachWorkerFromEnvoy(entry: BaseWorkerEntry, reason: string, envoyUrl: string): void {
   const hadTopics = entry.envoyTopics;
   entry.envoyTopics = undefined;
   if (!hadTopics?.length) return;
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -239,8 +242,7 @@ function detachWorkerFromEnvoy(entry: BaseWorkerEntry, reason: string): void {
     });
 }
 
-function publishStateDelta(delta: StateDelta): void {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+function publishStateDelta(delta: StateDelta, envoyUrl: string): void {
   fetch(`${envoyUrl}/v1/messages/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -257,8 +259,7 @@ function publishStateDelta(delta: StateDelta): void {
     });
 }
 
-function unsubscribeAllWorkerTopics(sessionId: string): void {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+function unsubscribeAllWorkerTopics(sessionId: string, envoyUrl: string): void {
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -368,7 +369,7 @@ export function startServer(opts: ServerOptions): {
 
       if (recoveredTopics?.length) {
         loadedEntry.envoyTopics = recoveredTopics;
-        subscribeWorkerToEnvoy(loadedEntry.sessionId, recoveredTopics);
+        subscribeWorkerToEnvoy(loadedEntry.sessionId, recoveredTopics, opts.envoyUrl);
       }
     }
   };
@@ -392,7 +393,7 @@ export function startServer(opts: ServerOptions): {
     if (previousIssueState !== null) {
       const delta = computeStateDelta(previousIssueState, currentDict);
       if (delta && opts.getControllerState?.()?.sessionId) {
-        publishStateDelta(delta);
+        publishStateDelta(delta, opts.envoyUrl);
       }
     }
 
@@ -467,8 +468,8 @@ export function startServer(opts: ServerOptions): {
         );
       }
 
-      detachWorkerFromEnvoy(entry, "auto-cleanup-done");
-      unsubscribeAllWorkerTopics(entry.sessionId);
+      detachWorkerFromEnvoy(entry, "auto-cleanup-done", opts.envoyUrl);
+      unsubscribeAllWorkerTopics(entry.sessionId, opts.envoyUrl);
       workers.delete(entry.id);
       crashHistory.delete(entry.id);
       cleanedIssueIds.add(issueId);
@@ -955,7 +956,7 @@ export function startServer(opts: ServerOptions): {
                 if (existingEntry.envoyTopics?.length) {
                   workerEntriesChanged = true;
                 }
-                detachWorkerFromEnvoy(existingEntry, "cross-mode-cleanup");
+                detachWorkerFromEnvoy(existingEntry, "cross-mode-cleanup", opts.envoyUrl);
               }
             }
 
@@ -964,7 +965,7 @@ export function startServer(opts: ServerOptions): {
             // Implement self-subscribes to PR topics after PR creation via envoy_subscribe.
             if (mode === WorkerMode.PLAN && repoRef && issueNumber !== undefined) {
               const topics = buildIssueTopics(repoRef.owner, repoRef.repo, issueNumber);
-              subscribeWorkerToEnvoy(actualSessionId, topics);
+              subscribeWorkerToEnvoy(actualSessionId, topics, opts.envoyUrl);
               entry.envoyTopics = topics;
               workerEntriesChanged = true;
             }
@@ -1095,7 +1096,7 @@ export function startServer(opts: ServerOptions): {
           workers.delete(workerId);
           crashHistory.delete(workerId);
           await persistState();
-          unsubscribeAllWorkerTopics(entry.sessionId);
+          unsubscribeAllWorkerTopics(entry.sessionId, opts.envoyUrl);
 
           return jsonResponse({ status: "cleaned", workerRemoved: true });
         }
@@ -1152,7 +1153,7 @@ export function startServer(opts: ServerOptions): {
               prunedWorkers.push(workerId);
               prunedSessionIds.push(entry.sessionId);
               // Clear daemon-managed topic tracking before deletion
-              detachWorkerFromEnvoy(entry, "prune-done");
+              detachWorkerFromEnvoy(entry, "prune-done", opts.envoyUrl);
             }
           }
           for (const id of prunedWorkers) {
@@ -1186,7 +1187,7 @@ export function startServer(opts: ServerOptions): {
           // may also have self-managed subscriptions (e.g. implementer PR topics)
           // that aren't tracked in entry.envoyTopics.
           for (const sessionId of prunedSessionIds) {
-            unsubscribeAllWorkerTopics(sessionId);
+            unsubscribeAllWorkerTopics(sessionId, opts.envoyUrl);
           }
 
           return jsonResponse({
@@ -1247,7 +1248,7 @@ export function startServer(opts: ServerOptions): {
               });
               // Clean up Envoy subscriptions on transition to dead (fire-and-forget)
               if (entry.status !== "dead") {
-                detachWorkerFromEnvoy(updated, "worker-dead");
+                detachWorkerFromEnvoy(updated, "worker-dead", opts.envoyUrl);
               }
             }
             await persistState();
@@ -1291,7 +1292,7 @@ export function startServer(opts: ServerOptions): {
             entry.envoyTopics = undefined;
             workers.delete(id);
             await persistState();
-            unsubscribeAllWorkerTopics(entry.sessionId);
+            unsubscribeAllWorkerTopics(entry.sessionId, opts.envoyUrl);
             return jsonResponse({ status: "stopped" });
           }
         }
@@ -1351,7 +1352,7 @@ export function startServer(opts: ServerOptions): {
             await promptAdapter.sendPrompt(entry.sessionId, text);
 
             if (entry.envoyTopics?.length) {
-              subscribeWorkerToEnvoy(entry.sessionId, entry.envoyTopics);
+              subscribeWorkerToEnvoy(entry.sessionId, entry.envoyTopics, opts.envoyUrl);
             }
 
             return jsonResponse({ ok: true });

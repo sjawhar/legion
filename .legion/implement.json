@@ -1,21 +1,36 @@
 {
   "filesChanged": [
-    "packages/envoy-plugin/src/index.ts",
-    "packages/envoy-plugin/src/__tests__/index.test.ts",
-    "packages/envoy-plugin/AGENTS.md"
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/__tests__/config.test.ts",
+    "packages/daemon/src/cli/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts",
+    "packages/daemon/src/__tests__/integration.test.ts",
+    "packages/daemon/src/daemon/__tests__/session-id-contract.test.ts"
   ],
   "trickyParts": [
-    "Cross-family review caught CLI publish using invalid source value 'cli' — Envoy contracts only allow agent/github/slack/whatsapp/ghostwispr. Fixed by omitting source (defaults to 'agent'). Also caught whoami returning string 'not yet resolved' for port instead of null — fixed to return currentPort() directly."
+    "coalesceValue() skips empty strings, so empty-string backend/runtime needed special backendValue/runtimeValue fallback logic to preserve existing throws-on-empty-string behavior",
+    "subscribeWorkerToEnvoy is exported and called from both server.ts and index.ts, so envoyUrl had to be added as a parameter (not closure-captured)",
+    "buildControllerEnv() was augmented to emit ENVOY_URL based on cross-family review finding that spawned sessions otherwise ignore --envoy-url"
   ],
   "deviations": [
-    "CLI publish payload: removed source:'cli' per Envoy contract validation (plan had it, but it would 400)",
-    "whoami port: returns null instead of 'not yet resolved' string for type consistency with spec"
+    "Added ENVOY_URL to buildControllerEnv() output — not in original plan but required for --envoy-url to propagate to controller subprocess (identified during cross-family review)"
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "--port flag is parsed by loadConfig but allocatePort() in startDaemon() overwrites config.daemonPort — same behavior as LEGION_DAEMON_PORT env var always had (pre-existing design, not introduced by this PR)",
+    "When --projects first entry differs from positional team arg, team wins per plan notes — may want to validate they match or warn"
+  ],
   "subPlanningNeeded": false,
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/deterministic-session-ids.md",
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
+    "docs/solutions/daemon/session-adoption-api-pattern.md"
+  ],
+  "learningsHelpful": ["docs/solutions/deterministic-session-ids.md"],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T18:18:01.159Z"
+  "completed": "2026-04-11T18:38:26.187Z"
 }

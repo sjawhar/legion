@@ -30,6 +30,7 @@ import { resolveLegionPaths } from "../../daemon/paths";
 import {
   adoptCommand,
   attachCommand,
+  buildStartCliArgs,
   CliError,
   cmdAdopt,
   cmdDispatch,
@@ -325,6 +326,27 @@ describe("citty command definitions", () => {
     expect(workspace.alias).toBe("w");
     expect(workspace.default).toBe(process.cwd());
     expect(stateDir.type).toBe("string");
+  });
+
+  test("start command exposes config flags for daemon startup", async () => {
+    const args = await resolveArgs(startCommand);
+    const projects = args.projects as StringArg;
+    expect(projects.type).toBe("string");
+    expect(projects.required).toBeFalsy();
+    const port = args.port as StringArg;
+    expect(port.type).toBe("string");
+    expect(port.required).toBeFalsy();
+    const controllerSession = args["controller-session"] as StringArg;
+    expect(controllerSession.type).toBe("string");
+    expect(controllerSession.required).toBeFalsy();
+    const envoyUrl = args["envoy-url"] as StringArg;
+    expect(envoyUrl.type).toBe("string");
+    expect(envoyUrl.required).toBeFalsy();
+    // Existing flags still work
+    const backend = args.backend as StringArg;
+    expect(backend.alias).toBe("b");
+    const runtime = args.runtime as StringArg;
+    expect(runtime.alias).toBe("r");
   });
 
   test("stop command args are defined", async () => {
@@ -1437,6 +1459,43 @@ describe("loadLegionsCache", () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+});
+
+test("buildStartCliArgs maps start options to CliArgs without mutating process.env", () => {
+  const originalBackend = process.env.LEGION_ISSUE_BACKEND;
+  const originalRuntime = process.env.LEGION_RUNTIME;
+
+  process.env.LEGION_ISSUE_BACKEND = "linear";
+  process.env.LEGION_RUNTIME = "opencode";
+
+  const cliArgs = buildStartCliArgs({
+    workspace: "/tmp/workspace",
+    projects: "acme/12,globex/34",
+    port: "15555",
+    controllerSession: "ses_cli",
+    envoyUrl: "http://127.0.0.1:9900",
+    prompt: "review queue",
+    backend: "github",
+    runtime: "claude-code",
+  });
+
+  expect(cliArgs).toEqual({
+    workspace: "/tmp/workspace",
+    projects: "acme/12,globex/34",
+    port: "15555",
+    controllerSession: "ses_cli",
+    envoyUrl: "http://127.0.0.1:9900",
+    prompt: "review queue",
+    backend: "github",
+    runtime: "claude-code",
+  });
+  expect(process.env.LEGION_ISSUE_BACKEND).toBe("linear");
+  expect(process.env.LEGION_RUNTIME).toBe("opencode");
+
+  if (originalBackend === undefined) delete process.env.LEGION_ISSUE_BACKEND;
+  else process.env.LEGION_ISSUE_BACKEND = originalBackend;
+  if (originalRuntime === undefined) delete process.env.LEGION_RUNTIME;
+  else process.env.LEGION_RUNTIME = originalRuntime;
 });
 
 describe("CLI XDG path migration", () => {

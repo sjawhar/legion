@@ -77,6 +77,7 @@ describe("daemon server", () => {
     legionId?: string;
     extraProjects?: string[];
     fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
+    envoyUrl?: string;
   }) {
     createSessionCalls = [];
     deleteSessionCalls = [];
@@ -99,6 +100,7 @@ describe("daemon server", () => {
       adapter,
       repoManagerDeps: options?.repoManagerDeps,
       stateFilePath,
+      envoyUrl: options?.envoyUrl ?? "http://127.0.0.1:9020",
       runtime: options?.runtime,
       tmuxSession: options?.tmuxSession,
       feedbackLogger: options?.feedbackLogger,
@@ -1781,6 +1783,7 @@ describe("daemon server", () => {
       legionDir: tempDir ?? os.tmpdir(),
       adapter: makeAdapter(),
       stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),
+      envoyUrl: "http://127.0.0.1:9020",
       shutdownFn: async () => {
         shutdownCalls += 1;
       },
@@ -2719,6 +2722,43 @@ describe("daemon server", () => {
         session_id: created.sessionId,
         topics: [],
       });
+    });
+
+    it("uses ServerOptions envoyUrl instead of process.env.ENVOY_URL for worker subscribe/unsubscribe", async () => {
+      const envoyCalls: EnvoySubscribeCall[] = [];
+      const originalEnvoyUrl = process.env.ENVOY_URL;
+      process.env.ENVOY_URL = "http://env-from-process.example:9020";
+      mockFetchForEnvoy(envoyCalls);
+
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        envoyUrl: "http://envoy-from-options.example:9020",
+      });
+
+      const createResponse = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-252",
+          mode: "plan",
+          repo: "acme/widgets",
+          issueNumber: 252,
+        }),
+      });
+      expect(createResponse.status).toBe(200);
+      const created = (await createResponse.json()) as { id: string; sessionId: string };
+      await Bun.sleep(50);
+
+      const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
+      expect(deleteResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(envoyCalls).toHaveLength(2);
+      expect(
+        envoyCalls.every((call) => call.url.startsWith("http://envoy-from-options.example:9020"))
+      ).toBe(true);
+
+      process.env.ENVOY_URL = originalEnvoyUrl;
     });
 
     it("delete succeeds even when envoy unsubscribe fails", async () => {
