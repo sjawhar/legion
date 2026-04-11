@@ -1,23 +1,24 @@
 {
-  "passed": 10,
+  "passed": 12,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description is clear and comprehensive. Code comments explain extraction and filtering logic. No README/usage docs needed for internal pipeline extension.",
+  "documentationFeedback": "PR description is clear and comprehensive. Code comments explain DI pattern motivation and buildCollectedState fix. No README changes needed for internal daemon/controller changes.",
   "observations": [
-    "P2: No single end-to-end pipeline test for blocked issues (AC9 verified piecemeal across 4 test files)",
-    "P3: poll-formatter test uses impossible fixture state (blockedByIds non-empty but isBlocked: false)",
-    "P3: FetchedIssueData test fixtures set isBlocked independently from blockedByIds",
-    "issueDependenciesSummary retained alongside blockedBy connection (intentional per plan, follow-on cleanup)",
-    "Defensive null-coalescing in decision.ts redundant but harmless"
+    "P2: No negative test for duplicate with identical statuses — dedup test only uses different statuses",
+    "P3: Duplicate warning fires for ALL duplicates, not just different-status ones (superset behavior, harmless)",
+    "P3: Warning message says 'using {firstBoard} (primary)' even when firstBoard is an extra board — cosmetically misleading if primary fetch failed",
+    "P3: Extra work — titles cache in fetch-and-collect not in AC but used by dashboard",
+    "P3: 1 pre-existing test failure in index.test.ts:1195 — unrelated to this PR"
   ],
   "learningsInjected": [
-    "docs/solutions/daemon/state-machine-action-display-mismatch.md",
-    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md"
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
+    "docs/solutions/testing/github-backend-collect-test-payloads.md",
+    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/daemon/state-machine-action-display-mismatch.md"
+    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T03:37:21.835Z"
+  "completed": "2026-04-11T04:12:44.280Z"
 }
