@@ -12,7 +12,7 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 
 | Task                | Location               | Notes                                                              |
 | ------------------- | ---------------------- | ------------------------------------------------------------------ |
-| Tool definitions    | `src/index.ts`         | `envoy_subscribe`, `envoy_unsubscribe`, `envoy_list`, `envoy_send` |
+| Tool definitions    | `src/index.ts`         | `envoy_subscribe`, `envoy_unsubscribe`, `envoy_list`, `envoy_send`, `envoy_publish`, `envoy_role_set`, `envoy_whoami`, `envoy_sessions` |
 | Packaging metadata  | `package.json`         | npm identity, build scripts                                        |
 | Distribution output | `dist/index.js`        | built plugin consumed by OpenCode                                  |
 | Host rollout helper | `scripts/sync-host.sh` | sync dist + shim to remote host                                    |

@@ -2,14 +2,15 @@
   "passed": 6,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "Both READMEs read cleanly after removals. infra/README.md machine config table flows naturally. deploy/README.md env list and example are coherent and consistent.",
+  "documentationFeedback": "AGENTS.md tool table updated with all 8 tools. Tool descriptions are self-documenting. CLI header comment and usage output are clear. No gaps for this scope.",
   "observations": [
-    "listener.registryDir was marked Required:Yes in infra README — correct to remove since file registry no longer exists",
-    "Planner correctly identified that named code files were already clean; only doc refs remained"
+    "P2: Missing unit test for envoy_sessions machine filter path (client-side filter logic untested)",
+    "P2: Missing happy-path unit tests for envoy_whoami with topics present and envoy_sessions unfiltered",
+    "ses_* prefix heuristic for CLI routing is a documented design choice — acceptable for current use case"
   ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T17:11:02.612Z"
+  "completed": "2026-04-11T18:25:11.098Z"
 }

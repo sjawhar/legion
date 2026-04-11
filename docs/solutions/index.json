@@ -348,7 +348,7 @@
       "envoy/contracts-and-handler-patterns.md",
       "envoy/nats-bus-client-self-healing.md"
     ],
-    "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md", "ci/envoy-plugin-release-versioning.md"],
+    "packages/envoy-plugin": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md", "ci/envoy-plugin-release-versioning.md", "envoy/publish-payload-source-validation.md"],
     "tag:nats": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
       "testing/nats-kv-testing-patterns.md",
@@ -373,11 +373,13 @@
       "testing/bun-fetch-mocking-patterns.md",
       "envoy/listener-routing-by-topic-prefix.md",
       "envoy/nats-bus-client-self-healing.md"
+      "envoy/publish-payload-source-validation.md"
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md",
       "envoy/contracts-and-handler-patterns.md",
       "envoy/adding-resource-level-subject-helpers.md"
+      "envoy/publish-payload-source-validation.md"
     ],
     "tag:session-registry": [
       "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
