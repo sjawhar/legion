@@ -75,23 +75,24 @@ function canonicalizeRecord(record: LearningFeedbackRecord): LearningFeedbackRec
 
 async function readLearningFeedbackLog(
   options: CollectLearningFeedbackOptions
-): Promise<CollectedIssueCandidate[]> {
+): Promise<{ candidates: CollectedIssueCandidate[]; warnings: string[] }> {
   const legionPaths = resolveLegionPaths(options.env, options.homeDir).forLegion(options.legionId);
   const logPath = path.join(legionPaths.legionStateDir, "learning-feedback.jsonl");
+  const warnings: string[] = [];
 
   let fileContents: string;
   try {
     fileContents = await readFile(logPath, "utf-8");
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return [];
+      return { candidates: [], warnings };
     }
     throw error;
   }
 
   const candidates: CollectedIssueCandidate[] = [];
 
-  for (const line of fileContents.split(/\r?\n/)) {
+  for (const [index, line] of fileContents.split(/\r?\n/).entries()) {
     const trimmedLine = line.trim();
     if (!trimmedLine) {
       continue;
@@ -105,41 +106,40 @@ async function readLearningFeedbackLog(
         source: "log",
         touchedPaths: [],
       });
-    } catch {}
-  }
-
-  return candidates;
-}
-
-async function scanForWorkspaceDirs(rootDir: string): Promise<string[]> {
-  const workspaceDirs = new Set<string>();
-
-  async function walk(currentDir: string): Promise<void> {
-    try {
-      const entries = await readdir(currentDir, { encoding: "utf8", withFileTypes: true });
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) {
-          continue;
-        }
-
-        if (entry.name === LEGION_DIR_NAME) {
-          workspaceDirs.add(currentDir);
-          continue;
-        }
-
-        await walk(path.join(currentDir, entry.name));
-      }
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-        return;
-      }
-      throw error;
+    } catch {
+      warnings.push(`[knowledge] Malformed JSONL at line ${index + 1}: skipped`);
     }
   }
 
-  await walk(rootDir);
-  return Array.from(workspaceDirs).sort();
+  return { candidates, warnings };
+}
+
+async function scanForWorkspaceDirs(rootDir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(rootDir, { encoding: "utf8", withFileTypes: true });
+    const workspaceDirs: string[] = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const candidate = path.join(rootDir, entry.name);
+      try {
+        const childEntries = await readdir(candidate, { encoding: "utf8" });
+        if (childEntries.includes(LEGION_DIR_NAME)) {
+          workspaceDirs.push(candidate);
+        }
+      } catch {}
+    }
+
+    return workspaceDirs.sort();
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
 }
 
 function buildWorkspacePhase(handoff: PhaseHandoff): LearningFeedbackPhase | null {
@@ -149,10 +149,7 @@ function buildWorkspacePhase(handoff: PhaseHandoff): LearningFeedbackPhase | nul
   });
 }
 
-function collectWorkspaceIssue(
-  workspaceDir: string,
-  legionId: string
-): CollectedIssueCandidate | null {
+function collectWorkspaceIssue(workspaceDir: string): CollectedIssueCandidate | null {
   const handoffs = readAllHandoffs(workspaceDir);
   const phases: LearningFeedbackRecord["phases"] = {};
   const timestamps: string[] = [];
@@ -181,7 +178,7 @@ function collectWorkspaceIssue(
     return null;
   }
 
-  const issueId = legionId.split("/").at(-1) ?? legionId;
+  const issueId = path.basename(workspaceDir);
   const timestamp = timestamps.sort().at(-1) ?? new Date().toISOString();
 
   return {
@@ -242,16 +239,19 @@ export function dedupeCollectedIssues(issues: CollectedIssueCandidate[]): Collec
 
 export async function collectLearningFeedback(
   options: CollectLearningFeedbackOptions
-): Promise<CollectedIssueFeedback[]> {
+): Promise<{ issues: CollectedIssueFeedback[]; warnings: string[] }> {
   const legionPaths = resolveLegionPaths(options.env, options.homeDir).forLegion(options.legionId);
-  const [logIssues, workspaceDirs] = await Promise.all([
+  const [logResult, workspaceDirs] = await Promise.all([
     readLearningFeedbackLog(options),
     scanForWorkspaceDirs(legionPaths.workspacesDir),
   ]);
 
   const workspaceIssues = workspaceDirs
-    .map((workspaceDir) => collectWorkspaceIssue(workspaceDir, options.legionId))
+    .map((workspaceDir) => collectWorkspaceIssue(workspaceDir))
     .filter((issue): issue is CollectedIssueCandidate => issue !== null);
 
-  return dedupeCollectedIssues([...logIssues, ...workspaceIssues]);
+  return {
+    issues: dedupeCollectedIssues([...logResult.candidates, ...workspaceIssues]),
+    warnings: logResult.warnings,
+  };
 }

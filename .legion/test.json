@@ -1,22 +1,42 @@
 {
-  "passed": 22,
-  "failed": 0,
-  "failures": [],
-  "documentationFeedback": "PR body provides clear usage examples and verification stats. Issue body has comprehensive YAML schema reference. No dedicated docs file updated — appropriate for a refactor PR. Follow-up legion init command would benefit from generating commented config template.",
+  "passed": 2,
+  "failed": 4,
+  "failures": [
+    {
+      "criterion": "CLI reads JSONL + workspaces, produces per-learning stats report",
+      "evidence": "P1: scanForWorkspaceDirs recursive walk times out (131K dirs). P1: issueId derivation uses legionId suffix instead of workspace basename — all workspaces merge to 1 issue. P2: Human report omits stats."
+    },
+    {
+      "criterion": "Deduplication: no double-counting",
+      "evidence": "Dedup logic exists but all workspaces get same issueId due to P1 bug, so dedup merges everything into 1 entry."
+    },
+    {
+      "criterion": "--apply modifies index.json + front matter",
+      "evidence": "Front matter mutation works but writes 'stale' instead of 'needs-review'. setLearningStatus returns false when no status field exists. Index mutations untestable due to issueId bug."
+    },
+    {
+      "criterion": "Graceful degradation",
+      "evidence": "Missing log/files handled. Malformed JSONL lines silently swallowed (empty catch {} in collector.ts line 108, no warning)."
+    }
+  ],
+  "documentationFeedback": "No README or usage guide updates. CLI --help adequate. PR body describes architecture. No docs on JSONL format, schema versioning, or report interpretation.",
   "observations": [
-    "P2: CLI test file missing error-path tests for cmdStart with missing config file and invalid YAML (tested at unit level in loadConfigFromFile)",
-    "P2: No explicit env-mutation regression test asserting process.env unchanged after cmdStart()",
-    "Test count increased from 861 to 862 due to main branch changes between implementation and testing"
+    "P1: scanForWorkspaceDirs recursive walk makes CLI unusable on real data (131K dirs vs 274 workspaces)",
+    "P1: collectWorkspaceIssue uses legionId.split('/').at(-1) instead of path.basename(workspaceDir) for issueId",
+    "P2: Disposition naming drift — internal accepted/needs_review/archived/rejected vs spec promote/review/stale/keep. JSON exposes internal names.",
+    "P2: Status values written as review/stale instead of needs-review per spec",
+    "P2: Human report omits per-learning injected count, helpful count, ratio",
+    "P2: Test suite lacks exact boundary tests, end-to-end integration test, and multi-workspace integration test"
   ],
   "learningsInjected": [
-    "testing/bun-fetch-mocking-patterns.md",
-    "testing/bun-mock-module-global-leak.md",
-    "delegation/hardening-patterns.md"
+    "daemon/handoff-schema-migration-patterns.md",
+    "task-index-patterns.md",
+    "skill-patterns/cross-cutting-workflow-concerns.md"
   ],
   "learningsHelpful": [
-    "testing/bun-mock-module-global-leak.md"
+    "daemon/handoff-schema-migration-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T23:17:03.392Z"
+  "completed": "2026-04-11T22:40:19.696Z"
 }

@@ -20,7 +20,7 @@ export interface ConsolidationStatusMutation {
   action: "set";
   learningPath: string;
   reason: string;
-  status: "review" | "stale";
+  status: "needs-review";
 }
 
 type ClassifiedAggregate = ReturnType<typeof classifyLearningAggregate>;
@@ -62,17 +62,24 @@ export async function consolidateKnowledge(options: {
 
   resolveLegionPaths(env, homeDir).forLegion(options.legionId);
   const logPath = getLearningFeedbackLogPath(options.legionId, env, homeDir);
-  const issues =
-    options.preCollectedIssues ??
-    (await collectLearningFeedback({
+  let issues: CollectedIssueFeedback[];
+  const warnings: string[] = [];
+
+  if (options.preCollectedIssues) {
+    issues = options.preCollectedIssues;
+  } else {
+    const collected = await collectLearningFeedback({
       env,
       homeDir,
       legionId: options.legionId,
-    }));
+    });
+    issues = collected.issues;
+    warnings.push(...collected.warnings);
+  }
+
   const aggregates = aggregateLearningFeedback(issues).map((aggregate) =>
     classifyLearningAggregate(aggregate, options.now)
   );
-  const warnings: string[] = [];
   const report: ConsolidationReport = {
     aggregates,
     apply: options.apply,
@@ -111,19 +118,15 @@ export async function consolidateKnowledge(options: {
   warnings.push(...promotionResult.warnings);
 
   for (const aggregate of aggregates) {
-    const nextStatus =
-      aggregate.disposition === "needs_review"
-        ? "review"
-        : aggregate.disposition === "archived"
-          ? "stale"
-          : null;
+    const isReviewCandidate =
+      aggregate.disposition === "needs_review" || aggregate.disposition === "archived";
 
-    if (!nextStatus) {
+    if (!isReviewCandidate) {
       continue;
     }
 
     try {
-      const updated = await setLearningStatus(path.join(docsRoot, aggregate.path), nextStatus);
+      const updated = await setLearningStatus(path.join(docsRoot, aggregate.path), "needs-review");
       if (!updated) {
         continue;
       }
@@ -131,8 +134,8 @@ export async function consolidateKnowledge(options: {
       report.statusMutations.push({
         action: "set",
         learningPath: aggregate.path,
-        reason: aggregate.notes ?? `Set learning status to ${nextStatus}.`,
-        status: nextStatus,
+        reason: aggregate.notes ?? "Set learning status to needs-review.",
+        status: "needs-review",
       });
     } catch (error) {
       warnings.push(

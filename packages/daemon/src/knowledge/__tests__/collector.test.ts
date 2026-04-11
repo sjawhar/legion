@@ -119,7 +119,7 @@ describe("collectLearningFeedback", () => {
       "utf-8"
     );
 
-    const workspaceDir = path.join(legionPaths.workspacesDir, "implement-worker");
+    const workspaceDir = path.join(legionPaths.workspacesDir, "sjawhar-legion-240");
     await mkdir(workspaceDir, { recursive: true });
     writePhaseHandoff(workspaceDir, "implement", {
       filesChanged: ["packages/daemon/src/knowledge/collector.ts"],
@@ -127,30 +127,14 @@ describe("collectLearningFeedback", () => {
       learningsInjected: ["docs/solutions/knowledge/workspace-helpful.md"],
     });
 
-    const issues = await collectLearningFeedback({
+    const result = await collectLearningFeedback({
       env,
       homeDir,
       legionId,
     });
 
-    expect(issues).toEqual([
-      {
-        issueId: "240",
-        records: [
-          {
-            issueId: "240",
-            phases: {
-              implement: {
-                helpful: ["knowledge/workspace-helpful.md"],
-                injected: ["knowledge/workspace-helpful.md"],
-              },
-            },
-            schemaVersion: 1,
-            timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-          },
-        ],
-        touchedPaths: ["packages/daemon/src/knowledge/collector.ts"],
-      },
+    expect(result.warnings).toEqual(["[knowledge] Malformed JSONL at line 2: skipped"]);
+    expect(result.issues).toEqual([
       {
         issueId: "241",
         records: [
@@ -167,6 +151,23 @@ describe("collectLearningFeedback", () => {
           },
         ],
         touchedPaths: [],
+      },
+      {
+        issueId: "sjawhar-legion-240",
+        records: [
+          {
+            issueId: "sjawhar-legion-240",
+            phases: {
+              implement: {
+                helpful: ["knowledge/workspace-helpful.md"],
+                injected: ["knowledge/workspace-helpful.md"],
+              },
+            },
+            schemaVersion: 1,
+            timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+          },
+        ],
+        touchedPaths: ["packages/daemon/src/knowledge/collector.ts"],
       },
     ]);
   });

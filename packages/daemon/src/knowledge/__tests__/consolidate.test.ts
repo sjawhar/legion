@@ -137,13 +137,13 @@ describe("consolidateKnowledge", () => {
         action: "set",
         learningPath: "knowledge/review.md",
         reason: "Review this learning because it is frequently injected but rarely helpful.",
-        status: "review",
+        status: "needs-review",
       },
     ]);
     expect(report.indexMutations).toEqual([]);
 
     const contents = await readFile(learningPath, "utf-8");
-    expect(contents).toContain("status: review");
+    expect(contents).toContain("status: needs-review");
   });
 
   it("stays idempotent across repeated apply runs when the learning is already indexed", async () => {
