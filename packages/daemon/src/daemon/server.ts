@@ -7,7 +7,8 @@ import { fetchGitHubProjectItems } from "../state/github-fetch";
 import {
   CollectedState,
   computeSessionId,
-  type IssueState,
+  IssueState,
+  type IssueStateDict,
   IssueStatus,
   WorkerMode,
   type WorkerModeLiteral,
@@ -25,6 +26,7 @@ import {
 } from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
 import type { WorkerEntry as BaseWorkerEntry } from "./serve-manager";
+import { computeStateDelta, type StateDelta } from "./state-delta";
 import {
   type ControllerState,
   type CrashHistoryEntry,
@@ -236,6 +238,24 @@ function detachWorkerFromEnvoy(entry: BaseWorkerEntry, reason: string): void {
     });
 }
 
+function publishStateDelta(delta: StateDelta): void {
+  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+  fetch(`${envoyUrl}/v1/messages/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: "notifications.role.legion-controller",
+      message: JSON.stringify(delta),
+    }),
+  })
+    .then((res) => {
+      if (!res.ok) console.warn(`[state-delta] publish failed: ${res.status} (non-fatal)`);
+    })
+    .catch((err) => {
+      console.warn(`[state-delta] publish error (non-fatal): ${err}`);
+    });
+}
+
 function unsubscribeAllWorkerTopics(sessionId: string): void {
   const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
@@ -258,6 +278,7 @@ function unsubscribeAllWorkerTopics(sessionId: string): void {
 export function startServer(opts: ServerOptions): {
   server: Server;
   stop: () => void;
+  fetchAndProcessState: () => Promise<void>;
 } {
   const hostname = opts.hostname ?? "127.0.0.1";
   const port = opts.port ?? 13370;
@@ -265,6 +286,7 @@ export function startServer(opts: ServerOptions): {
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
   const issueStateCache = new Map<string, IssueState>();
+  let previousIssueState: Record<string, IssueStateDict> | null = null;
   const issueTitleCache = new Map<string, string>();
   const recentEvents: DashboardRecentEvent[] = [];
 
@@ -349,6 +371,32 @@ export function startServer(opts: ServerOptions): {
       }
     }
   };
+
+  function runPostCollectionProcessing(state: CollectedState, titles?: Map<string, string>): void {
+    for (const [issueId, issueState] of Object.entries(state.issues)) {
+      issueStateCache.set(issueId.toLowerCase(), issueState);
+    }
+
+    if (titles) {
+      for (const [id, title] of titles) {
+        issueTitleCache.set(id, title);
+      }
+    }
+
+    const currentDict: Record<string, IssueStateDict> = {};
+    for (const [issueId, issueState] of Object.entries(state.issues)) {
+      currentDict[issueId] = IssueState.toDict(issueState);
+    }
+
+    if (previousIssueState !== null) {
+      const delta = computeStateDelta(previousIssueState, currentDict);
+      if (delta && opts.getControllerState?.()?.sessionId) {
+        publishStateDelta(delta);
+      }
+    }
+
+    previousIssueState = currentDict;
+  }
 
   const stateLoaded = loadState();
 
@@ -438,7 +486,30 @@ export function startServer(opts: ServerOptions): {
     }
   };
 
-  const server = Bun.serve({
+  let server: Server | null = null;
+
+  const fetchAndCollectState = async (
+    backend: Parameters<typeof getBackend>[0],
+    rawIssues: unknown
+  ): Promise<{ state: CollectedState; titles: Map<string, string> }> => {
+    if (!server) {
+      throw new Error("server_not_started");
+    }
+
+    const tracker = getBackend(backend);
+    const parsed = tracker.parseIssues(rawIssues);
+    const daemonUrl = `http://127.0.0.1:${server.port}`;
+    const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+    const state = buildCollectedState(issuesData, opts.legionId);
+    const titles =
+      backend === "github" && rawIssues
+        ? extractGitHubIssueTitles(rawIssues)
+        : new Map<string, string>();
+
+    return { state, titles };
+  };
+
+  server = Bun.serve({
     hostname,
     port,
     async fetch(request: Request): Promise<Response> {
@@ -1271,23 +1342,9 @@ export function startServer(opts: ServerOptions): {
           }
 
           try {
-            const tracker = getBackend(backend);
-            const parsed = tracker.parseIssues(issues);
-            const daemonUrl = `http://127.0.0.1:${server.port}`;
-            const issuesData = await enrichParsedIssues(parsed, daemonUrl);
-            const state = buildCollectedState(issuesData, opts.legionId);
+            const { state, titles } = await fetchAndCollectState(backend, issues);
 
-            // Populate dispatch validation cache
-            for (const [issueId, issueState] of Object.entries(state.issues)) {
-              issueStateCache.set(issueId.toLowerCase(), issueState);
-            }
-
-            // Populate issue title cache from raw GitHub project items
-            if (backend === "github") {
-              for (const [id, title] of extractGitHubIssueTitles(issues)) {
-                issueTitleCache.set(id, title);
-              }
-            }
+            runPostCollectionProcessing(state, backend === "github" ? titles : undefined);
 
             if (opts.feedbackLogger) {
               for (const [issueId, issueState] of Object.entries(state.issues)) {
@@ -1410,17 +1467,14 @@ export function startServer(opts: ServerOptions): {
                 }
               }
 
+              if (!server) {
+                return serverError("server_not_started");
+              }
               const daemonUrl = `http://127.0.0.1:${server.port}`;
               const issuesData = await enrichParsedIssues(parsed, daemonUrl);
               const state = buildCollectedState(issuesData, opts.legionId);
 
-              for (const [issueId, issueState] of Object.entries(state.issues)) {
-                issueStateCache.set(issueId.toLowerCase(), issueState);
-              }
-
-              for (const [id, title] of extractedTitles) {
-                issueTitleCache.set(id, title);
-              }
+              runPostCollectionProcessing(state, extractedTitles);
 
               cleanupDoneIssueWorkers(state).catch((err) =>
                 console.error(
@@ -1455,11 +1509,35 @@ export function startServer(opts: ServerOptions): {
     },
   });
 
+  const fetchAndProcessState = async (): Promise<void> => {
+    const legionId = opts.legionId;
+    const parts = legionId.split("/");
+    if (parts.length !== 2 || !parts[1]) {
+      return;
+    }
+
+    const [owner, numStr] = parts;
+    const projectNumber = Number(numStr);
+    if (!Number.isFinite(projectNumber)) {
+      return;
+    }
+
+    const rawIssues = await fetchGitHubProjectItems(owner, projectNumber);
+    const { state, titles: extractedTitles } = await fetchAndCollectState("github", rawIssues);
+
+    runPostCollectionProcessing(state, extractedTitles);
+
+    cleanupDoneIssueWorkers(state).catch((err) =>
+      console.error("[auto-cleanup] failed:", err instanceof Error ? err.message : String(err))
+    );
+  };
+
   return {
     server,
     stop: () => {
       releaseGauges();
       server.stop(true);
     },
+    fetchAndProcessState,
   };
 }

@@ -120,6 +120,80 @@ describe("daemon server", () => {
     return response;
   }
 
+  interface CapturedPublish {
+    url: string;
+    body: unknown;
+  }
+
+  function createGitHubProjectItem(overrides?: {
+    number?: number;
+    status?: string;
+    labels?: string[];
+  }) {
+    const number = overrides?.number ?? 42;
+    return {
+      id: `PVTI_${number}`,
+      content: {
+        number,
+        repository: "acme/widgets",
+        url: `https://github.com/acme/widgets/issues/${number}`,
+        type: "Issue" as const,
+      },
+      status: overrides?.status ?? "Todo",
+      labels: overrides?.labels ?? [],
+    };
+  }
+
+  function getFetchUrl(input: string | { href?: unknown; url?: unknown }) {
+    if (typeof input === "string") {
+      return input;
+    }
+    if (typeof input.href === "string") {
+      return input.href;
+    }
+    if (typeof input.url === "string") {
+      return input.url;
+    }
+    throw new Error("unsupported fetch input");
+  }
+
+  function mockFetchForPublish(calls: CapturedPublish[], statusCode = 200) {
+    const mockFn = async (
+      input: string | { href?: unknown; url?: unknown },
+      init?: { body?: unknown }
+    ) => {
+      const url = getFetchUrl(input);
+      if (url.includes("/v1/messages/publish")) {
+        calls.push({ url, body: JSON.parse(init?.body as string) });
+        if (statusCode === 200) {
+          return originalFetch("data:application/json,%7B%7D");
+        }
+        return new Response("{}", { status: statusCode });
+      }
+      return originalFetch(input as never, init as never);
+    };
+    globalThis.fetch = Object.assign(mockFn, {
+      preconnect: originalFetch.preconnect,
+    });
+  }
+
+  function mockFetchForRejectedPublish(calls: CapturedPublish[], error: Error) {
+    const mockFn = async (
+      input: string | { href?: unknown; url?: unknown },
+      init?: { body?: unknown }
+    ) => {
+      const url = getFetchUrl(input);
+      if (url.includes("/v1/messages/publish")) {
+        calls.push({ url, body: JSON.parse(init?.body as string) });
+        throw error;
+      }
+      return originalFetch(input as never, init as never);
+    };
+    globalThis.fetch = Object.assign(mockFn, {
+      preconnect: originalFetch.preconnect,
+    });
+  }
+
   afterEach(async () => {
     Bun.spawn = originalSpawn;
     globalThis.fetch = originalFetch;
@@ -1036,6 +1110,168 @@ describe("daemon server", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { issues: Record<string, unknown> };
       expect(body.issues).toEqual({});
+    });
+  });
+
+  describe("state delta notifications", () => {
+    it("does not publish on first state collection (baseline establishment)", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await Bun.sleep(50);
+      expect(publishCalls.length).toBe(0);
+    });
+
+    it("publishes delta on second collection with changes", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "In Progress" })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(1);
+      const payload = publishCalls[0]?.body as { topic: string; message: string };
+      expect(payload.topic).toBe("notifications.role.legion-controller");
+      const delta = JSON.parse(payload.message) as {
+        type: string;
+        changes: {
+          changed: Array<{ changedFields: string[] }>;
+        };
+      };
+      expect(delta.type).toBe("state_delta");
+      expect(delta.changes.changed.length).toBe(1);
+      expect(delta.changes.changed[0]?.changedFields.includes("status")).toBe(true);
+    });
+
+    it("does not publish when state is identical (label order invariant)", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ labels: ["worker-done", "test-passed"] })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ labels: ["test-passed", "worker-done"] })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(0);
+    });
+
+    it("swallows publish errors without affecting collect response", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      const warnCalls: unknown[][] = [];
+      mockFetchForRejectedPublish(publishCalls, new Error("publish boom"));
+      console.warn = (...args: unknown[]) => {
+        warnCalls.push(args);
+      };
+
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "In Progress" })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(1);
+      expect(warnCalls.length).toBe(1);
+      expect(
+        String(warnCalls[0]?.[0] ?? "").includes("[state-delta] publish error (non-fatal)")
+      ).toBe(true);
+    });
+
+    it("does not publish when no controller is active", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        getControllerState: () => undefined,
+      });
+
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "In Progress" })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(0);
     });
   });
 

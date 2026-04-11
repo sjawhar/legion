@@ -227,6 +227,7 @@ describe("daemon entry", () => {
             return {
               server: { port: opts.port } as ReturnType<typeof Bun.serve>,
               stop: () => {},
+              fetchAndProcessState: async () => {},
             };
           },
           setTimeout: silentSetTimeout,
@@ -269,6 +270,7 @@ describe("daemon entry", () => {
             return {
               server: { port: opts.port } as ReturnType<typeof Bun.serve>,
               stop: () => {},
+              fetchAndProcessState: async () => {},
             };
           },
           setTimeout: silentSetTimeout,
@@ -312,6 +314,7 @@ describe("daemon entry", () => {
             return {
               server: { port: opts.port } as ReturnType<typeof Bun.serve>,
               stop: () => {},
+              fetchAndProcessState: async () => {},
             };
           },
           setTimeout: silentSetTimeout,
@@ -345,6 +348,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: silentSetTimeout,
           clearTimeout: noopClearTimeout,
@@ -376,6 +380,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: silentSetTimeout,
           clearTimeout: noopClearTimeout,
@@ -401,6 +406,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: silentSetTimeout,
           clearTimeout: noopClearTimeout,
@@ -435,6 +441,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: silentSetTimeout,
         clearTimeout: noopClearTimeout,
@@ -467,6 +474,7 @@ describe("daemon entry", () => {
           return {
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           };
         },
         setTimeout: silentSetTimeout,
@@ -540,6 +548,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
@@ -623,6 +632,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
@@ -726,6 +736,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
@@ -795,6 +806,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
@@ -843,6 +855,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: silentSetTimeout,
         clearTimeout: noopClearTimeout,
@@ -873,6 +886,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: silentSetTimeout,
         clearTimeout: noopClearTimeout,
@@ -930,6 +944,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
@@ -970,6 +985,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: silentSetTimeout,
         clearTimeout: noopClearTimeout,
@@ -1013,6 +1029,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: retrySetTimeout,
         clearTimeout: noopClearTimeout,
@@ -1137,6 +1154,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: silentSetTimeout,
         clearTimeout: noopClearTimeout,
@@ -1185,6 +1203,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: silentSetTimeout,
         clearTimeout: noopClearTimeout,
@@ -1258,6 +1277,7 @@ describe("daemon entry", () => {
         startServer: () => ({
           server: { port: 15555 } as ReturnType<typeof Bun.serve>,
           stop: () => {},
+          fetchAndProcessState: async () => {},
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
@@ -1312,6 +1332,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: silentSetTimeout,
           clearTimeout: noopClearTimeout,
@@ -1378,6 +1399,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: mockSetTimeout,
           clearTimeout: () => {},
@@ -1414,6 +1436,7 @@ describe("daemon entry", () => {
             return {
               server: { port: opts.port } as ReturnType<typeof Bun.serve>,
               stop: () => {},
+              fetchAndProcessState: async () => {},
             };
           },
           setTimeout: silentSetTimeout,
@@ -1446,6 +1469,7 @@ describe("daemon entry", () => {
             return {
               server: { port: opts.port } as ReturnType<typeof Bun.serve>,
               stop: () => {},
+              fetchAndProcessState: async () => {},
             };
           },
           setTimeout: silentSetTimeout,
@@ -1476,6 +1500,7 @@ describe("daemon entry", () => {
             return {
               server: { port: opts.port } as ReturnType<typeof Bun.serve>,
               stop: () => {},
+              fetchAndProcessState: async () => {},
             };
           },
           setTimeout: silentSetTimeout,
@@ -1554,6 +1579,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: mockSetTimeout,
           clearTimeout: () => {},
@@ -1614,6 +1640,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: mockSetTimeout,
           clearTimeout: () => {},
@@ -1670,6 +1697,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: mockSetTimeout,
           clearTimeout: () => {},
@@ -1724,6 +1752,7 @@ describe("daemon entry", () => {
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
             stop: () => {},
+            fetchAndProcessState: async () => {},
           }),
           setTimeout: mockSetTimeout,
           clearTimeout: () => {},

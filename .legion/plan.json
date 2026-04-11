@@ -1,35 +1,38 @@
 {
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T03:13:46.064Z",
+  "completed": "2026-04-11T03:54:19.565Z",
+  "taskCount": 8,
+  "independentTasks": 3,
   "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1,
     "skipRetro": false,
-    "trickyParts": "Test seam for fetchGitHubProjectItems (Bun.spawn vs fetch), controller $REPO undefined in 32 places"
+    "skipArchitect": false
   },
   "concerns": [
-    "fetchGitHubProjectItems uses Bun.spawn not globalThis.fetch — tests must use mock.module()",
-    "Controller SKILL.md has 32 $OWNER/$REPO refs, $REPO never defined — all must update",
-    "index.ts must wire config.extraProjects into startServer()"
+    "fetchAndCollectState helper references server.port — implementer needs to handle forward declaration or use opts.port",
+    "previousIssueState uses IssueStateDict (serialized form) not IssueState — must convert via IssueState.toDict()",
+    "publishStateDelta is fire-and-forget — must not affect fetch-and-collect response",
+    "Label comparison must use sorted unique sets, not raw array equality",
+    "First cycle must not publish (baseline establishment)",
+    "Health tick guard: serveHealthy && !restartReason — skip when serve just restarted",
+    "Both /state/collect and /state/fetch-and-collect handlers need delta integration"
   ],
-  "tasks": 5,
-  "independent": 2,
-  "planPath": ".sisyphus/plans/multi-repo-issue-routing.md",
-  "errata": 5,
-  "keyFiles": [
-    "packages/daemon/src/daemon/config.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    ".opencode/skills/legion-controller/SKILL.md"
+  "learningsInjected": [
+    "daemon/controller-lifecycle-separation.md",
+    "daemon/envoy-auto-subscription-patterns.md",
+    "testing/bun-fetch-mocking-patterns.md"
   ],
-  "testFiles": [
-    "packages/daemon/src/daemon/__tests__/config.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+  "learningsHelpful": [
+    "daemon/controller-lifecycle-separation.md",
+    "daemon/envoy-auto-subscription-patterns.md",
+    "testing/bun-fetch-mocking-patterns.md"
   ],
-  "commits": [
-    "feat: parse and validate LEGION_EXTRA_PROJECTS config",
-    "feat: collect issues from multiple GitHub project boards",
-    "feat: auto-resolve worker repo from cached issue source",
-    "fix: route controller dispatches using canonical source metadata"
-  ],
-  "skills": []
+  "workflowRecommendation": "Standard pipeline — all phases needed. Single implementer, TDD for pure function, integration tests for publish and health tick.",
+  "requiredSkills": {
+    "implement": ["test-driven-development", "envoy"],
+    "test": ["verification-before-completion"],
+    "review": []
+  }
 }

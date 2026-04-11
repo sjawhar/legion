@@ -1,9 +1,10 @@
 {
-  "skipped": false,
-  "docsCreated": [
-    "docs/solutions/testing/bun-mock-module-global-leak.md"
-  ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T04:34:19.470Z"
+  "completed": "2026-04-11T05:06:52.662Z",
+  "skipped": false,
+  "docsCreated": [
+    "docs/solutions/daemon/post-collection-processing-pattern.md",
+    "docs/solutions/testing/ci-merge-type-compatibility.md"
+  ]
 }

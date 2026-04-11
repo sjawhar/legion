@@ -1,37 +1,37 @@
 {
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T02:47:38.501Z",
+  "completed": "2026-04-11T03:38:56.123Z",
   "learningsInjected": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/daemon/worker-directory-resolution.md",
-    "docs/solutions/integration-patterns/controller-worker-protocol.md",
-    "docs/solutions/daemon/workspace-validation-retro.md"
+    "docs/solutions/daemon/controller-observability.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
+    "docs/solutions/daemon/state-machine-action-display-mismatch.md",
+    "docs/solutions/daemon/controller-lifecycle-separation.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/integration-patterns/controller-worker-protocol.md"
+    "docs/solutions/daemon/controller-observability.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
+    "docs/solutions/daemon/controller-lifecycle-separation.md"
   ],
   "scope": "medium",
   "components": [
-    "packages/daemon/src/daemon/config.ts",
     "packages/daemon/src/daemon/server.ts",
-    ".opencode/skills/legion-controller/SKILL.md",
-    "packages/daemon/src/state/backends/github.ts",
-    "packages/daemon/src/daemon/repo-manager.ts"
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/state-delta.ts",
+    "packages/daemon/src/state/types.ts"
   ],
   "subIssues": [],
   "routingHints": {
-    "skipRetro": false,
     "complexity": "medium",
-    "estimatedImplementers": 1
+    "estimatedImplementers": 1,
+    "skipRetro": false
   },
   "concerns": [
-    "Deduplication across boards requires canonical identity (source.owner/source.repo/source.number) — project item IDs differ across boards",
-    "Primary board wins on status conflicts — divergent statuses must be logged as warnings",
-    "Controller MUST pass --repo from IssueState.source (fresh collect data) — daemon auto-resolve is fallback for CLI only, not primary path",
-    "All-boards-fail must return HTTP 500, not empty 200 — controller must distinguish no issues from tracker unavailable",
-    "LEGION_EXTRA_PROJECTS parsing needs edge case handling: whitespace trimming, empty segments, duplicate entries",
-    "Daemon cache is empty after restart — auto-resolve returns 400 until first collect cycle completes"
+    "Extract fetchAndCollectState() as a shared helper — do NOT self-call the daemon HTTP endpoint from the health tick (per controller-lifecycle-separation.md pattern)",
+    "Labels must be compared as sorted unique sets — raw array order must not trigger false positives",
+    "Delta payload includes full IssueStateDict for new/changed issues — changedFields is advisory for logging only, not for state reconstruction",
+    "previousIssueState baseline only advances on successful collection — failed fetches preserve last-known-good baseline",
+    "Envoy publish is fire-and-forget and best-effort — no subscriber (between daemon restart and controller spin-up) is expected and non-fatal",
+    "First cycle (previousIssueState is null) establishes baseline without publishing — prevents spurious everything-is-new notification on daemon startup"
   ]
 }
