@@ -1,16 +1,28 @@
 {
+  "outcome": "success",
+  "pr": 403,
+  "branch": "sjawhar-legion-399",
+  "base": "sjawhar-legion-373",
+  "summary": "Restored FileRegistry and SessionLookup pluggable interface that PR #393 over-scoped and removed. Created file_registry.go (filesystem-backed SessionLookup), restored NewSessionLookup factory, ParseRegistryMode, and listener main.go wiring. Added 20 new tests (8 FileRegistry, 4 ParseRegistryMode, 6 NewSessionLookup, 1 interface compliance, 1 nil-sessions-503). All CI green.",
   "filesChanged": [
-    "packages/envoy/internal/mcpbridge/http_server_test.go"
+    "packages/envoy/internal/session/file_registry.go",
+    "packages/envoy/internal/session/file_registry_test.go",
+    "packages/envoy/internal/session/lookup.go",
+    "packages/envoy/internal/session/lookup_test.go",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/main_test.go"
   ],
-  "trickyParts": [
-    "Race condition in test mock: sseWriter/sseConn were set AFTER writing the endpoint event, but the client reads the event and immediately POSTs to /message. On slow CI, sendSSE() found nil fields and silently dropped the initialize response, causing a 30s timeout."
-  ],
-  "deviations": [
-    "Fix is in test mock only (not production code) — the race was in the test helper, not the HTTPServer implementation"
-  ],
+  "testsAdded": 20,
+  "ciStatus": "all-green",
+  "notes": "PR base is sjawhar-legion-373 (PR #393), not main. PR #393 must merge first for this to land.",
+  "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "learningsInjected": [
+    "docs/solutions/architecture-patterns/sync-to-async-modular-refactoring.md"
+  ],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-10T23:50:29.040Z"
+  "completed": "2026-04-11T01:14:30.031Z"
 }

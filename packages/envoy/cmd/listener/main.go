@@ -29,7 +29,7 @@ import (
 type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
-	sessions *session.SessionRegistry
+	sessions session.SessionLookup
 }
 
 // readinessGate returns 503 until ready returns true, providing a single
@@ -321,7 +321,8 @@ func main() {
 	})
 	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
-		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
+		reg, _ := d.sessions.(*session.SessionRegistry)
+		sessionsHandler(d.registry, reg).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -412,13 +413,18 @@ func main() {
 		log.Fatal(err)
 	}
 
-	sessions, err := session.OpenSessionRegistry(
+	registryMode := session.ParseRegistryMode()
+	sessions, err := session.NewSessionLookup(
+		registryMode,
 		client.Conn,
+		os.Getenv("ENVOY_REGISTRY_DIR"),
+		cfg.MachineID,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("session registry mode=%s", registryMode)
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,

@@ -695,3 +695,17 @@ func TestSessionsHandler_NoInterestsData(t *testing.T) {
 		t.Fatalf("expected no topics for orphan session, got %v", items[0].Topics)
 	}
 }
+
+func TestSessionsHandler_NilSessions_Returns503(t *testing.T) {
+	// When sessions is nil (e.g., FileRegistry type assertion fails),
+	// sessionsHandler should return 503.
+	handler := sessionsHandler(nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

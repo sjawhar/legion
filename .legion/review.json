@@ -1,38 +1,32 @@
 {
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 2,
   "verdict": "approved",
   "keyFindings": [
     {
       "severity": "P2",
-      "file": "packages/envoy/deploy/README.md",
-      "description": "Lines 74, 83 still reference ENVOY_REGISTRY_DIR which was removed in this PR. Deployers following docs will try to set non-existent config."
+      "file": "packages/envoy/internal/session/file_registry.go",
+      "description": "Error masking: os.ReadFile failures unconditionally wrapped as os.ErrNotExist, flattening permission/IO errors into not-found (matches original PR #375 design, tester also flagged)"
     },
     {
-      "severity": "P2",
-      "file": "packages/envoy/infra/README.md",
-      "description": "Line 108 still documents listener.registryDir as required config, but the field was removed from ListenerConfig interface."
+      "severity": "P3",
+      "file": "packages/envoy/internal/session/file_registry.go",
+      "description": "No path traversal guard on sessionID in filepath.Join — low risk since FileRegistry is local-dev only"
     },
     {
       "severity": "P3",
       "file": "packages/envoy/cmd/listener/main.go",
-      "description": "listenerDeps.sessions uses concrete *SessionRegistry instead of SessionLookup interface. Pragmatic for List() needed by /v1/sessions, acceptable trade-off."
-    },
-    {
-      "severity": "P3",
-      "file": "packages/envoy/internal/mcpbridge/http_server_test.go",
-      "description": "Race condition fix is correct — sseWriter/sseConn now set before endpoint event write."
+      "description": "Type assertion discards bool without comment — intentional design but inline comment would help readability"
     }
   ],
   "learningsInjected": [
-    "docs/solutions/testing/nats-kv-testing-patterns.md",
-    "docs/solutions/architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
-  ],
-  "learningsHelpful": [
+    "docs/solutions/architecture-patterns/nats-kv-graceful-degradation.md",
+    "docs/solutions/architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
     "docs/solutions/testing/nats-kv-testing-patterns.md"
   ],
+  "learningsHelpful": ["docs/solutions/architecture-patterns/nats-kv-graceful-degradation.md"],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T00:03:37.343Z"
+  "completed": "2026-04-11T01:29:13.395Z"
 }
