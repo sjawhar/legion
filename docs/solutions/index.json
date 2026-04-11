@@ -58,7 +58,8 @@
       "daemon/prompt-delivery-bootstrap-delay.md",
       "daemon/handoff-schema-migration-patterns.md",
       "daemon/state-machine-action-display-mismatch.md",
-      "daemon/session-adoption-api-pattern.md"
+      "daemon/session-adoption-api-pattern.md",
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -79,7 +80,8 @@
       "skill-patterns/cross-cutting-workflow-concerns.md",
       "daemon/handoff-schema-migration-patterns.md",
       "skill-patterns/worker-notification-conventions.md",
-      "skill-patterns/merge-retry-race-condition-pattern.md"
+      "skill-patterns/merge-retry-race-condition-pattern.md",
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
     ],
     ".opencode/skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
@@ -97,7 +99,8 @@
       "delegation/hardening-patterns.md",
       "skill-patterns/cross-cutting-workflow-concerns.md",
       "skill-patterns/worker-notification-conventions.md",
-      "skill-patterns/merge-retry-race-condition-pattern.md"
+      "skill-patterns/merge-retry-race-condition-pattern.md",
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
     ],
     "tests": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
     "tag:SIGTERM": ["daemon/opencode-serve-lifecycle.md"],
@@ -165,7 +168,7 @@
     "tag:draft-status": ["integration-issues/github-graphql-pr-draft-status.md"],
     "tag:error-handling": ["integration-issues/linear-mcp-label-resolution.md"],
     "tag:external-repos": ["integration-issues/external-repo-pr-auto-transition-gap.md"],
-    "tag:failure-modes": ["skill-patterns/worker-skill-failure-modes.md"],
+    "tag:failure-modes": ["skill-patterns/worker-skill-failure-modes.md", "skill-patterns/agent-workflow-enforcement-patterns.md"],
     "tag:fallback-pattern": [
       "task-index-patterns.md",
       "github-api/graphql-org-user-fallback.md",
@@ -318,7 +321,8 @@
       "daemon/handoff-schema-migration-patterns.md"
     ],
     "tag:handoff": [
-      "daemon/handoff-schema-migration-patterns.md"
+      "daemon/handoff-schema-migration-patterns.md",
+      "skill-patterns/agent-workflow-enforcement-patterns.md"
     ],
     "tag:zod": [
       "daemon/handoff-schema-migration-patterns.md"
@@ -465,6 +469,8 @@
     ],
     "tag:baseline-oscillation": [
       "daemon/health-tick-baseline-isolation.md"
-    ]
+    ],
+    "tag:social-enforcement": ["skill-patterns/agent-workflow-enforcement-patterns.md"],
+    "tag:layered-defense": ["skill-patterns/agent-workflow-enforcement-patterns.md"]
   }
 }

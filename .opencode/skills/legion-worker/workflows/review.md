@@ -225,7 +225,9 @@ Verify the handoff was written:
 
 ```bash
 if [ ! -f .legion/review.json ]; then
-  echo "ERROR: Handoff write failed — .legion/review.json not created"
+  echo "FATAL: Handoff write failed — .legion/review.json not created"
+  echo "STOP: Do NOT signal worker-done. Diagnose: Is 'legion' CLI in PATH? Is --workspace correct?"
+  echo "If write cannot be fixed, note the failure in your exit comment."
 fi
 ```
 

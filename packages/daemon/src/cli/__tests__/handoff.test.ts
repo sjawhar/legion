@@ -128,6 +128,26 @@ describe("handoff command", () => {
     expect(exitCode).toBeUndefined();
   });
 
+  it("writes handoff JSON to the requested workspace and leaves a phase-matching file behind", async () => {
+    const workspaceDir = createTempDir();
+    const write = getSubCommand(handoffCommand, "write");
+
+    await runCommand(write, {
+      phase: "implement",
+      data: '{"filesChanged":["src/file.ts"]}',
+      workspace: workspaceDir,
+    });
+
+    const handoffPath = path.join(workspaceDir, ".legion", "implement.json");
+    expect(fs.existsSync(handoffPath)).toBe(true);
+
+    const payload = JSON.parse(fs.readFileSync(handoffPath, "utf-8")) as Record<string, unknown>;
+    expect(payload.phase).toBe("implement");
+    expect(payload.filesChanged).toEqual(["src/file.ts"]);
+
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
   it("reads a single phase handoff and prints JSON", async () => {
     const write = getSubCommand(handoffCommand, "write");
     const read = getSubCommand(handoffCommand, "read");
