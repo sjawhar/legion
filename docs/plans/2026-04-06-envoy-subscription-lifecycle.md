@@ -727,7 +727,7 @@ Near any existing Envoy or subscription references in the controller SKILL.md, a
 
 ```markdown
 **Envoy Subscription Policy:**
-- The controller is auto-subscribed to base topics on daemon startup: `notifications.legion.controller`, `notifications.slack.*.*.mention`, `notifications.github.*.*.mention`
+- The controller is auto-subscribed to base topics on daemon startup: `notifications.role.legion-controller`, `notifications.slack.*.*.mention`, `notifications.github.*.*.mention`
 - Per-repo CI subscriptions are added by the daemon on first worker dispatch for each GitHub repo
 - CI subscriptions persist for the daemon's lifetime (not tied to individual workers)
 - On daemon restart, CI subscriptions are reconciled from persisted worker state

@@ -408,7 +408,7 @@ func TestOpen_EmptyBucketSucceeds(t *testing.T) {
 // guaranteeing the cache is cold. This simulates the warm-up window after serve
 // restart when watch() hasn't populated the cache yet.
 
-// coldRegistry creates a Registry with an empty cache backed by the given KV bucket.
+// coldRegistry creates a Registry with an empty cache backed by the given KV buckets.
 // No watch() goroutine is started, so the cache stays cold for the test's lifetime.
 func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) {
 	t.Helper()
@@ -420,7 +420,11 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
-	return &Registry{kv: kv, cache: map[string]Interest{}}, kv
+	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Replicas: 1, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("failed to create role KV bucket: %v", err)
+	}
+	return &Registry{kv: kv, roleKV: roleKV, cache: map[string]Interest{}}, kv
 }
 
 func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
@@ -581,5 +585,156 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	}
 	if len(item.Topics) != 2 || item.Topics[0] != "topic.a" || item.Topics[1] != "topic.c" {
 		t.Fatalf("expected [topic.a topic.c], got %v", item.Topics)
+	}
+}
+
+func TestSetRole_ClaimNewRole(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+
+	got, err := reg.SetRole("ses_role_a", "m1", "legion-controller")
+	if err != nil {
+		t.Fatalf("SetRole failed: %v", err)
+	}
+
+	if got.SessionID != "ses_role_a" {
+		t.Fatalf("expected session ses_role_a, got %s", got.SessionID)
+	}
+	if got.MachineID != "m1" {
+		t.Fatalf("expected machine m1, got %s", got.MachineID)
+	}
+	if len(got.Topics) != 1 || got.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected role topic on returned interest, got %v", got.Topics)
+	}
+
+	entry, err := reg.roleKV.Get("legion-controller")
+	if err != nil {
+		t.Fatalf("roleKV.Get failed: %v", err)
+	}
+	if string(entry.Value()) != "ses_role_a" {
+		t.Fatalf("expected role holder ses_role_a, got %q", string(entry.Value()))
+	}
+
+	persisted, err := reg.Get("ses_role_a")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if len(persisted.Topics) != 1 || persisted.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected persisted role topic, got %v", persisted.Topics)
+	}
+}
+
+func TestSetRole_TransferRole(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_old", MachineID: "m1", Topics: []string{"notifications.role.legion-controller", "notifications.slack.>"}})
+	if _, err := reg.roleKV.Put("legion-controller", []byte("ses_old")); err != nil {
+		t.Fatalf("failed to seed role bucket: %v", err)
+	}
+
+	got, err := reg.SetRole("ses_new", "m2", "legion-controller")
+	if err != nil {
+		t.Fatalf("SetRole failed: %v", err)
+	}
+
+	if got.SessionID != "ses_new" {
+		t.Fatalf("expected session ses_new, got %s", got.SessionID)
+	}
+	if got.MachineID != "m2" {
+		t.Fatalf("expected machine m2, got %s", got.MachineID)
+	}
+
+	oldEntry, err := kv.Get("ses_old")
+	if err != nil {
+		t.Fatalf("Get old holder failed: %v", err)
+	}
+	var oldHolder Interest
+	if err := json.Unmarshal(oldEntry.Value(), &oldHolder); err != nil {
+		t.Fatalf("unmarshal old holder failed: %v", err)
+	}
+	if len(oldHolder.Topics) != 1 || oldHolder.Topics[0] != "notifications.slack.>" {
+		t.Fatalf("expected old holder to lose only role topic, got %v", oldHolder.Topics)
+	}
+
+	newEntry, err := kv.Get("ses_new")
+	if err != nil {
+		t.Fatalf("Get new holder failed: %v", err)
+	}
+	var newHolder Interest
+	if err := json.Unmarshal(newEntry.Value(), &newHolder); err != nil {
+		t.Fatalf("unmarshal new holder failed: %v", err)
+	}
+	if len(newHolder.Topics) != 1 || newHolder.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected new holder to gain role topic, got %v", newHolder.Topics)
+	}
+
+	entry, err := reg.roleKV.Get("legion-controller")
+	if err != nil {
+		t.Fatalf("roleKV.Get failed: %v", err)
+	}
+	if string(entry.Value()) != "ses_new" {
+		t.Fatalf("expected role holder ses_new, got %q", string(entry.Value()))
+	}
+}
+
+func TestSetRole_Idempotent(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_same", MachineID: "m1", Topics: []string{"notifications.role.legion-controller"}})
+	if _, err := reg.roleKV.Put("legion-controller", []byte("ses_same")); err != nil {
+		t.Fatalf("failed to seed role bucket: %v", err)
+	}
+
+	got, err := reg.SetRole("ses_same", "m1", "legion-controller")
+	if err != nil {
+		t.Fatalf("SetRole failed: %v", err)
+	}
+
+	if len(got.Topics) != 1 || got.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected single role topic, got %v", got.Topics)
+	}
+
+	persisted, err := reg.Get("ses_same")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if len(persisted.Topics) != 1 || persisted.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected persisted single role topic, got %v", persisted.Topics)
+	}
+}
+
+func TestSetRole_OldHolderMissing(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	if _, err := reg.roleKV.Put("legion-controller", []byte("ses_missing")); err != nil {
+		t.Fatalf("failed to seed role bucket: %v", err)
+	}
+
+	got, err := reg.SetRole("ses_fresh", "m1", "legion-controller")
+	if err != nil {
+		t.Fatalf("SetRole failed: %v", err)
+	}
+
+	if got.SessionID != "ses_fresh" {
+		t.Fatalf("expected session ses_fresh, got %s", got.SessionID)
+	}
+	if len(got.Topics) != 1 || got.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected returned role topic, got %v", got.Topics)
+	}
+
+	entry, err := reg.roleKV.Get("legion-controller")
+	if err != nil {
+		t.Fatalf("roleKV.Get failed: %v", err)
+	}
+	if string(entry.Value()) != "ses_fresh" {
+		t.Fatalf("expected role holder ses_fresh, got %q", string(entry.Value()))
 	}
 }

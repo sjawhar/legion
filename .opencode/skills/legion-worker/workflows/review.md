@@ -299,7 +299,7 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 
 Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER review completed. See PR for review outcome.")
+envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER review completed. See PR for review outcome.")
 ```
 If `envoy_publish` fails, continue — the label is the source of truth.
 

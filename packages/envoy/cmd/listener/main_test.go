@@ -12,8 +12,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -320,6 +320,109 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	}
 }
 
+func TestIsValidRole(t *testing.T) {
+	valid := []string{"legion-controller", "opencode_dev", "r2d2", "a"}
+	for _, role := range valid {
+		if !isValidRole(role) {
+			t.Fatalf("expected role %q to be valid", role)
+		}
+	}
+
+	invalid := []string{"", "Legion", "-bad", "bad.role", "bad role"}
+	for _, role := range invalid {
+		if isValidRole(role) {
+			t.Fatalf("expected role %q to be invalid", role)
+		}
+	}
+}
+
+func TestRoleSetHandler_Validation(t *testing.T) {
+	registry := setupAdminTestRegistry(t, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{registry: registry})
+	handler := roleSetHandler(&state, "test-machine")
+
+	cases := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{
+			name:       "empty session id",
+			body:       `{"session_id":"","role":"legion-controller"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "session_id is required",
+		},
+		{
+			name:       "empty role",
+			body:       `{"session_id":"ses_1","role":""}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "role is required",
+		},
+		{
+			name:       "invalid role",
+			body:       `{"session_id":"ses_1","role":"Legion"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "role must match ^[a-z0-9][a-z0-9_-]*$",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected %d, got %d: %s", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Fatalf("expected body to contain %q, got %q", tc.wantSubstr, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRoleSetHandler_SetsRole(t *testing.T) {
+	registry := setupAdminTestRegistry(t, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{registry: registry})
+	handler := roleSetHandler(&state, "test-machine")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role","role":"legion-controller"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var item store.Interest
+	if err := json.NewDecoder(rec.Body).Decode(&item); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if item.SessionID != "ses_role" {
+		t.Fatalf("expected session ses_role, got %s", item.SessionID)
+	}
+	if item.MachineID != "test-machine" {
+		t.Fatalf("expected machine test-machine, got %s", item.MachineID)
+	}
+	if len(item.Topics) != 1 || item.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected role topic, got %v", item.Topics)
+	}
+
+	persisted, err := registry.Get("ses_role")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if len(persisted.Topics) != 1 || persisted.Topics[0] != "notifications.role.legion-controller" {
+		t.Fatalf("expected persisted role topic, got %v", persisted.Topics)
+	}
+}
+
 func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.Registry {
 	t.Helper()
 	ctx := context.Background()
@@ -597,8 +700,8 @@ func TestSessionsHandler_OnlyLiveSessions(t *testing.T) {
 	// Sessions in interests but NOT in envoy_sessions should be excluded
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{
-			"ses_live":    {"notifications.test.>"},
-			"ses_dead":    {"notifications.github.>"},
+			"ses_live": {"notifications.test.>"},
+			"ses_dead": {"notifications.github.>"},
 		},
 		map[string]int{
 			"ses_live": 13382,

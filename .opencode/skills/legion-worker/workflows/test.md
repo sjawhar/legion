@@ -384,7 +384,7 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 
 Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER test passed.")
+envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER test passed.")
 ```
 
 **If any criterion fails:**
@@ -408,7 +408,7 @@ linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current_labels, "
 
 Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER test failed. See PR comments for details.")
+envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER test failed. See PR comments for details.")
 ```
 
 If `envoy_publish` fails, continue — the label is the source of truth.

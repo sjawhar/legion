@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -30,6 +31,14 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions session.SessionLookup
+}
+
+const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
+
+var rolePattern = regexp.MustCompile(rolePatternString)
+
+func isValidRole(role string) bool {
+	return rolePattern.MatchString(role)
 }
 
 // readinessGate returns 503 until ready returns true, providing a single
@@ -186,6 +195,49 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	}
 }
 
+func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SessionID string `json:"session_id"`
+			Role      string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		body.SessionID = strings.TrimSpace(body.SessionID)
+		body.Role = strings.TrimSpace(body.Role)
+		if body.SessionID == "" {
+			http.Error(w, "session_id is required", http.StatusBadRequest)
+			return
+		}
+		if body.Role == "" {
+			http.Error(w, "role is required", http.StatusBadRequest)
+			return
+		}
+		if !isValidRole(body.Role) {
+			http.Error(w, "role must match "+rolePatternString, http.StatusBadRequest)
+			return
+		}
+		d := state.Load()
+		if d == nil || d.registry == nil {
+			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			return
+		}
+		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(item)
+	}
+}
+
 func main() {
 	// Phase 1: Load config (synchronous, fast).
 	cfg, err := config.Load(9020)
@@ -299,6 +351,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	v1.HandleFunc("/v1/roles/set", roleSetHandler(&deps, cfg.MachineID))
 	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
 		if sessionID == "" {

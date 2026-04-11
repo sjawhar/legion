@@ -1,12 +1,38 @@
 {
   "critical": 0,
-  "important": 0,
-  "minor": 0,
+  "important": 3,
+  "minor": 2,
   "verdict": "approved",
-  "keyFindings": [],
+  "keyFindings": [
+    {
+      "severity": "P2",
+      "file": "packages/envoy/internal/mcpbridge/http_server_test.go",
+      "description": "CI envoy-go check fails: TestHTTPServer_StartAndStop WhatsApp MCP timeout. Unrelated to this PR (internal/mcpbridge package, not modified). Main passes consistently. Likely flaky — needs re-run or separate fix."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/envoy/internal/integration/delivery_test.go",
+      "description": "Issue AC specifies 3 integration tests (transfer, no-prior-holder, idempotent). Only transfer test added as integration test. Other two covered by unit tests in kv_test.go which also use testcontainers NATS."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/daemon/src/daemon/index.ts",
+      "description": "subscribeControllerToEnvoy() uses global fetch instead of injected deps.fetch. Daemon tests log 404 for /v1/roles/set. Pre-existing pattern but worsened by adding the role claim call."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/envoy/cmd/listener/main.go",
+      "description": "Redundant nil check in roleSetHandler (line 227) — readiness gate already ensures deps non-nil."
+    },
+    {
+      "severity": "P3",
+      "file": ".sisyphus/plans/396-role-based-routing.md",
+      "description": "Historical plan document still references old topic. Not runtime code."
+    }
+  ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T00:56:25.788Z"
+  "completed": "2026-04-11T01:17:31.160Z"
 }

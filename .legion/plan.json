@@ -1,15 +1,42 @@
 {
-  "taskCount": 6,
-  "independentTasks": 5,
+  "taskCount": 3,
+  "independentTasks": 3,
   "routingHints": {
-    "complexity": "small",
+    "complexity": "medium",
     "estimatedImplementers": 1,
     "skipRetro": true,
     "skipArchitect": true
   },
-  "concerns": [],
-  "workflowRecommendation": "Simple skill file fix — single Markdown file edit, skip retro. 5 independent tasks (Tasks 1-5) can be parallelized, Task 6 is final verification + commit.",
+  "concerns": [
+    "SetRole uses ordered last-writer-wins, not true transactions — partial failure leaves role temporarily unheld",
+    "Registry.List() is cache-only — SetRole MUST use dedicated envoy_roles KV bucket for old-holder lookup",
+    "Controller migration must be ordered: await role claim before fire-and-forget mention subscriptions",
+    "16 occurrences of notifications.legion.controller across 12 files (3 code, 2 docs, 11 skills) — issue AC only listed 6 doc files, plan adds 5 workflow files",
+    "roleKV field added to Registry struct — existing tests that construct Registry directly may need updating"
+  ],
+  "learningsInjected": [
+    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "envoy/listener-routing-by-topic-prefix.md",
+    "daemon/envoy-auto-subscription-patterns.md"
+  ],
+  "learningsHelpful": [
+    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
+    "daemon/envoy-auto-subscription-patterns.md"
+  ],
+  "workflowRecommendation": "Standard pipeline — all phases needed. All 3 tasks are independent and can be parallelized by the implementer.",
+  "requiredSkills": {
+    "implement": [
+      "envoy",
+      "test-driven-development"
+    ],
+    "test": [
+      "envoy"
+    ],
+    "review": [
+      "envoy"
+    ]
+  },
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T00:38:04.474Z"
+  "completed": "2026-04-11T00:20:49.123Z"
 }

@@ -430,7 +430,53 @@ func contains(s, sub string) bool {
 	return false
 }
 
+func containsTopic(topics []string, want string) bool {
+	for _, topic := range topics {
+		if topic == want {
+			return true
+		}
+	}
+	return false
+}
+
 // --- NEW TESTS ---
+
+func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
+	env := setupTestEnv(t)
+	portA, _, _, _ := mockSession(t)
+	portB, _, _, _ := mockSession(t)
+	env.registerSession("ses_role_a", portA, nil)
+	env.registerSession("ses_role_b", portB, nil)
+
+	if _, err := env.registry.SetRole("ses_role_a", "test-machine", "legion-controller"); err != nil {
+		t.Fatalf("SetRole for A failed: %v", err)
+	}
+	if _, err := env.registry.SetRole("ses_role_b", "test-machine", "legion-controller"); err != nil {
+		t.Fatalf("SetRole for B failed: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		a, errA := env.registry.Get("ses_role_a")
+		b, errB := env.registry.Get("ses_role_b")
+		matches := env.registry.Match("test-machine", "notifications.role.legion-controller")
+		if errA == nil && errB == nil && !containsTopic(a.Topics, "notifications.role.legion-controller") && containsTopic(b.Topics, "notifications.role.legion-controller") && len(matches) == 1 && matches[0].SessionID == "ses_role_b" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	a, err := env.registry.Get("ses_role_a")
+	if err != nil {
+		t.Fatalf("Get A failed: %v", err)
+	}
+	b, err := env.registry.Get("ses_role_b")
+	if err != nil {
+		t.Fatalf("Get B failed: %v", err)
+	}
+	matches := env.registry.Match("test-machine", "notifications.role.legion-controller")
+	t.Fatalf("timed out waiting for role transfer: A=%v B=%v matches=%v", a.Topics, b.Topics, matches)
+}
 
 func TestE2E_WildcardTopicMatching(t *testing.T) {
 	env := setupTestEnv(t)

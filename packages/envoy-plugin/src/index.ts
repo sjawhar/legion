@@ -256,11 +256,11 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_publish: tool({
         description:
-          "Publish an Envoy message to any topic. Use for broadcast to named topics like notifications.legion.controller, team channels, or custom routing. Subscribers matching the topic will receive the message. This is for BROADCAST, not session-targeted delivery (use envoy_send for that).",
+          "Publish an Envoy message to any topic. Use for broadcast to named topics like notifications.role.legion-controller, team channels, or custom routing. Subscribers matching the topic will receive the message. This is for BROADCAST, not session-targeted delivery (use envoy_send for that).",
         args: {
           topic: tool.schema
             .string()
-            .describe("NATS-style topic to publish to, e.g. notifications.legion.controller"),
+            .describe("NATS-style topic to publish to, e.g. notifications.role.legion-controller"),
           message: tool.schema.string().describe("Message body to broadcast"),
         },
         async execute(args, ctx) {
@@ -272,6 +272,28 @@ export default async (input: { serverUrl: URL }) => {
               source_session: ctx.sessionID,
               topic: args.topic,
               message: args.message,
+            }),
+          });
+        },
+      }),
+      envoy_role_set: tool({
+        description:
+          "Set the current session as the holder of a named role. Messages published to notifications.role.<role> will route to this session. Only one session holds a role at a time — claiming it removes it from the previous holder.",
+        args: {
+          role: tool.schema
+            .string()
+            .describe(
+              "Role name to claim (lowercase alphanumeric, hyphens, underscores). E.g. opencode-dev, legion-controller, legion-po"
+            ),
+        },
+        async execute(args, ctx) {
+          ctx.metadata({ title: "Set Envoy role" });
+          return call("/v1/roles/set", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: ctx.sessionID,
+              role: args.role,
             }),
           });
         },

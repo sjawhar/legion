@@ -420,7 +420,7 @@ Then remove `worker-active`:
 
 Then notify the controller via Envoy (best-effort, exactly one notification):
 ```
-envoy_publish(topic="notifications.legion.controller", message="Worker done: $ISSUE_NUMBER plan completed. Ready for implementation.")
+envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER plan completed. Ready for implementation.")
 ```
 If `envoy_publish` fails, continue — the label is the source of truth.
 
