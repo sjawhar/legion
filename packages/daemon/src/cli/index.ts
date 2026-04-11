@@ -10,7 +10,9 @@ import {
   type LoadedConfigFile,
   loadConfigFromFile,
   resolveDaemonConfig,
+  validateBackend,
   validateControllerPrompt,
+  validateRuntime,
 } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { findLegionByProjectId } from "../daemon/legions-registry";
@@ -206,10 +208,12 @@ export async function cmdStart(
     cliOverrides.controllerPrompt = opts.prompt;
   }
   if (opts.backend) {
-    cliOverrides.issueBackend = opts.backend as DaemonConfig["issueBackend"];
+    const validated = validateBackend(opts.backend, "--backend");
+    if (validated) cliOverrides.issueBackend = validated;
   }
   if (opts.runtime) {
-    cliOverrides.runtime = opts.runtime as DaemonConfig["runtime"];
+    const validated = validateRuntime(opts.runtime, "--runtime");
+    if (validated) cliOverrides.runtime = validated;
   }
   if (team) {
     cliOverrides.legionId = await deps.resolveLegionId(team, { backend: opts.backend });

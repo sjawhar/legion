@@ -201,25 +201,37 @@ describe("daemon config", () => {
     });
 
     it("parses single valid entry", () => {
-      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12" });
+      const config = loadConfig({
+        LEGION_EXTRA_PROJECTS: "acme/12",
+        LEGION_ISSUE_BACKEND: "github",
+      });
 
       expect(config.extraProjects).toEqual(["acme/12"]);
     });
 
     it("parses multiple comma-separated entries", () => {
-      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12,globex/34,initech/56" });
+      const config = loadConfig({
+        LEGION_EXTRA_PROJECTS: "acme/12,globex/34,initech/56",
+        LEGION_ISSUE_BACKEND: "github",
+      });
 
       expect(config.extraProjects).toEqual(["acme/12", "globex/34", "initech/56"]);
     });
 
     it("trims whitespace from entries", () => {
-      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "  acme/12 ,\tglobex/34\n" });
+      const config = loadConfig({
+        LEGION_EXTRA_PROJECTS: "  acme/12 ,\tglobex/34\n",
+        LEGION_ISSUE_BACKEND: "github",
+      });
 
       expect(config.extraProjects).toEqual(["acme/12", "globex/34"]);
     });
 
     it("ignores empty segments from trailing and double commas", () => {
-      const config = loadConfig({ LEGION_EXTRA_PROJECTS: "acme/12,,globex/34," });
+      const config = loadConfig({
+        LEGION_EXTRA_PROJECTS: "acme/12,,globex/34,",
+        LEGION_ISSUE_BACKEND: "github",
+      });
 
       expect(config.extraProjects).toEqual(["acme/12", "globex/34"]);
     });
@@ -227,6 +239,7 @@ describe("daemon config", () => {
     it("deduplicates entries preserving order", () => {
       const config = loadConfig({
         LEGION_EXTRA_PROJECTS: "acme/12,globex/34,acme/12,initech/56,globex/34",
+        LEGION_ISSUE_BACKEND: "github",
       });
 
       expect(config.extraProjects).toEqual(["acme/12", "globex/34", "initech/56"]);

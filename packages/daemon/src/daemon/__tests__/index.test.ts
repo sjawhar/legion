@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, mock } from "bun:test";
 import { createServer } from "node:net";
-import { resolveDaemonConfig, type DaemonConfig } from "../config";
+import { type DaemonConfig, resolveDaemonConfig } from "../config";
 import { resolveLegionPaths } from "../paths";
 import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";

@@ -205,7 +205,7 @@ export function validateControllerPrompt(prompt: string | undefined): void {
   }
 }
 
-function validateBackend(
+export function validateBackend(
   value: string | undefined,
   sourceName: string
 ): "linear" | "github" | undefined {
@@ -218,7 +218,7 @@ function validateBackend(
   return value;
 }
 
-function validateRuntime(
+export function validateRuntime(
   value: string | undefined,
   sourceName: string
 ): "opencode" | "claude-code" | undefined {
@@ -703,11 +703,7 @@ export function resolveDaemonConfig(
     DEFAULT_FEEDBACK_MAX_BYTES
   );
 
-  if (
-    extraProjects.value !== undefined &&
-    extraProjects.source !== "env" &&
-    issueBackend.value !== "github"
-  ) {
+  if (extraProjects.value !== undefined && issueBackend.value !== "github") {
     throw new Error("extra_projects requires backend: github");
   }
 

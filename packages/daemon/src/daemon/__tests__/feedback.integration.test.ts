@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { resolveDaemonConfig, type DaemonConfig } from "../config";
+import { type DaemonConfig, resolveDaemonConfig } from "../config";
 import { type FeedbackEvent, FeedbackEventSchema } from "../feedback";
 import { type DaemonHandle, startDaemon } from "../index";
 import { resolveLegionPaths } from "../paths";
