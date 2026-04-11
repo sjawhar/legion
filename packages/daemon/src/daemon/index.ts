@@ -32,10 +32,13 @@ import {
 } from "./telemetry";
 
 type ServerHandle = ReturnType<typeof startServer>;
+type StartServerDependency = (
+  ...args: Parameters<typeof startServer>
+) => Pick<ServerHandle, "server" | "stop"> & Partial<Pick<ServerHandle, "fetchAndProcessState">>;
 
 interface DaemonDependencies {
   adapter: RuntimeAdapter;
-  startServer: typeof startServer;
+  startServer: StartServerDependency;
   readStateFile: typeof readStateFile;
   writeStateFile: typeof writeStateFile;
   fetch: typeof fetch;
@@ -454,6 +457,7 @@ export async function startDaemon(
 
   let server: ServerHandle["server"];
   let stop: ServerHandle["stop"];
+  let fetchAndProcessState: ServerHandle["fetchAndProcessState"];
   let bindAttempts = 0;
 
   while (true) {
@@ -489,6 +493,7 @@ export async function startDaemon(
       });
       server = serverHandle.server;
       stop = serverHandle.stop;
+      fetchAndProcessState = serverHandle.fetchAndProcessState ?? (async () => {});
       break;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
@@ -697,6 +702,18 @@ export async function startDaemon(
             }
           } catch (error) {
             console.error(`Failed to restart shared serve: ${error}`);
+          }
+        }
+
+        // Fetch-and-collect state + delta notification (non-blocking)
+        // Only when serve is healthy and was NOT just restarted
+        if (serveHealthy && !restartReason) {
+          try {
+            await fetchAndProcessState();
+          } catch (error) {
+            console.warn(
+              `[health-tick] fetch-and-collect failed: ${error instanceof Error ? error.message : String(error)} (non-fatal)`
+            );
           }
         }
 
