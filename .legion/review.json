@@ -1,28 +1,36 @@
 {
   "critical": 0,
-  "important": 0,
-  "minor": 3,
+  "important": 2,
+  "minor": 2,
   "verdict": "approved",
   "keyFindings": [
     {
-      "severity": "P3",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "Dedup warning fires for ALL duplicates, not just different-status ones as AC specifies"
+      "severity": "P2",
+      "file": "packages/envoy/deploy/README.md",
+      "description": "Lines 74, 83 still reference ENVOY_REGISTRY_DIR which was removed in this PR. Deployers following docs will try to set non-existent config."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/envoy/infra/README.md",
+      "description": "Line 108 still documents listener.registryDir as required config, but the field was removed from ListenerConfig interface."
     },
     {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "Warning message says (primary) unconditionally — misleading when primary board fetch failed"
+      "file": "packages/envoy/cmd/listener/main.go",
+      "description": "listenerDeps.sessions uses concrete *SessionRegistry instead of SessionLookup interface. Pragmatic for List() needed by /v1/sessions, acceptable trade-off."
     },
     {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/__tests__/server.test.ts",
-      "description": "No test for same-status duplicate dedup (only different-status case covered)"
+      "file": "packages/envoy/internal/mcpbridge/http_server_test.go",
+      "description": "Race condition fix is correct — sseWriter/sseConn now set before endpoint event write."
     }
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/testing/nats-kv-testing-patterns.md",
+    "docs/solutions/architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+  ],
+  "learningsHelpful": ["docs/solutions/testing/nats-kv-testing-patterns.md"],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T04:27:13.595Z"
+  "completed": "2026-04-11T00:03:37.343Z"
 }
