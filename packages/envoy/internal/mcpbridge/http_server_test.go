@@ -44,18 +44,27 @@ func newMockHTTPMCPServer(opts ...func(*mockHTTPMCPServer)) *mockHTTPMCPServer {
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 
-		// Set SSE fields BEFORE writing the endpoint event so they're
-		// available when the client reads the event and sends requests.
-		// Otherwise there's a race: the client reads the endpoint event,
-		// immediately POSTs to /message, and sendSSE() finds nil fields.
+		// Set SSE fields and write endpoint event under the lock to
+		// serialize with sendSSE() calls from the /message handler.
+		// Fields must be set BEFORE the endpoint event: the client reads
+		// the event and immediately POSTs to /message, so sendSSE() needs
+		// non-nil fields by then.
+		messageURL := "http://" + r.Host + "/message"
 		m.mu.Lock()
 		m.sseWriter = flusher
 		m.sseConn = w
-		m.mu.Unlock()
-
-		messageURL := "http://" + r.Host + "/message"
 		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", messageURL)
 		flusher.Flush()
+		m.mu.Unlock()
+		// Clear fields when handler exits so sendSSE doesn't write to
+		// an invalidated ResponseWriter after Go's HTTP server finalizes
+		// the response on handler return.
+		defer func() {
+			m.mu.Lock()
+			m.sseWriter = nil
+			m.sseConn = nil
+			m.mu.Unlock()
+		}()
 
 		select {
 		case <-r.Context().Done():
