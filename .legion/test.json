@@ -1,16 +1,17 @@
 {
-  "passed": 6,
+  "passed": 9,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "AGENTS.md tool table updated with all 8 tools. Tool descriptions are self-documenting. CLI header comment and usage output are clear. No gaps for this scope.",
+  "documentationFeedback": "No documentation files changed. CLI flags are self-documenting via legion start --help. AGENTS.md still references env vars for controller config — updating to mention CLI flags would be a nice follow-up.",
   "observations": [
-    "P2: Missing unit test for envoy_sessions machine filter path (client-side filter logic untested)",
-    "P2: Missing happy-path unit tests for envoy_whoami with topics present and envoy_sessions unfiltered",
-    "ses_* prefix heuristic for CLI routing is a documented design choice — acceptable for current use case"
+    "--port flag parsed at config layer but allocatePort() in startDaemon() overwrites it (pre-existing behavior, not introduced by PR)",
+    "packages/envoy-plugin/src/index.ts still reads process.env.ENVOY_URL directly — outside daemon package scope",
+    "Pre-existing flaky test: serve-manager.test.ts > waitForHealthy > retries until healthy (timing-sensitive, not in PR files)",
+    "Pre-existing tsc warning: tsconfig.json uses deprecated baseUrl option (TS 6.0)"
   ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T18:25:11.098Z"
+  "completed": "2026-04-11T18:53:00.966Z"
 }
