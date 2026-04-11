@@ -115,7 +115,7 @@ Unknown keys are silently ignored. Malformed YAML causes the config to be skippe
 Each workflow loads config at startup:
 
 ```bash
-cat .legion/config.yml 2>/dev/null || true
+if [ -f .legion/config.yml ]; then cat .legion/config.yml; fi
 ```
 
 If the file is missing or malformed, workers proceed with defaults (no error).

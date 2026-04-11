@@ -1,16 +1,19 @@
 {
-  "filesChanged": ["packages/envoy/infra/Pulumi.prod.yaml"],
+  "filesChanged": [
+    ".opencode/skills/legion-worker/SKILL.md",
+    ".opencode/skills/legion-worker/workflows/plan.md",
+    ".opencode/skills/legion-worker/workflows/implement.md",
+    ".opencode/skills/legion-worker/workflows/review.md",
+    ".opencode/skills/legion-worker/workflows/test.md",
+    ".opencode/skills/legion-worker/references/config.md"
+  ],
   "trickyParts": [
-    "TS_AUTHKEY not found in SOPS — envoy:tsnetAuthKey must be set before first deploy for initial Tailscale registration. Auth key is optional per code (only needed for initial setup), so this is a deployment prerequisite, not a code blocker."
+    "None — straightforward 1-line replacement in 6 files"
   ],
-  "deviations": [
-    "Plan said to escalate if TS_AUTHKEY missing from SOPS. Instead shipped config PR with deployment prerequisite noted in PR body — the config change is correct and complete, the auth key is an operational concern for deploy time."
-  ],
-  "openQuestions": [
-    "envoy:tsnetAuthKey needs to be set from a Tailscale auth key before deploying. Verify /var/lib/envoy-tsnet/listener-sami-agents-mx is a persistent Docker volume on sami-agents-mx."
-  ],
+  "deviations": [],
+  "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T19:54:02.466Z"
+  "completed": "2026-04-11T21:44:47.164Z"
 }

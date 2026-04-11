@@ -42,7 +42,7 @@ Resolve any conflicts before proceeding.
 Read repo config from workspace root:
 
 ```bash
-cat .legion/config.yml 2>/dev/null || true
+if [ -f .legion/config.yml ]; then cat .legion/config.yml; fi
 ```
 
 Apply @references/config.md semantics:
