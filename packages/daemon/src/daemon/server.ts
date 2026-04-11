@@ -373,7 +373,11 @@ export function startServer(opts: ServerOptions): {
     }
   };
 
-  function runPostCollectionProcessing(state: CollectedState, titles?: Map<string, string>): void {
+  function runPostCollectionProcessing(
+    state: CollectedState,
+    titles?: Map<string, string>,
+    options?: { skipDelta?: boolean }
+  ): void {
     for (const [issueId, issueState] of Object.entries(state.issues)) {
       issueStateCache.set(issueId.toLowerCase(), issueState);
     }
@@ -384,19 +388,22 @@ export function startServer(opts: ServerOptions): {
       }
     }
 
-    const currentDict: Record<string, IssueStateDict> = {};
-    for (const [issueId, issueState] of Object.entries(state.issues)) {
-      currentDict[issueId] = IssueState.toDict(issueState);
-    }
-
-    if (previousIssueState !== null) {
-      const delta = computeStateDelta(previousIssueState, currentDict);
-      if (delta && opts.getControllerState?.()?.sessionId) {
-        publishStateDelta(delta);
+    // Delta computation — only for controller-initiated collections
+    if (!options?.skipDelta) {
+      const currentDict: Record<string, IssueStateDict> = {};
+      for (const [issueId, issueState] of Object.entries(state.issues)) {
+        currentDict[issueId] = IssueState.toDict(issueState);
       }
-    }
 
-    previousIssueState = currentDict;
+      if (previousIssueState !== null) {
+        const delta = computeStateDelta(previousIssueState, currentDict);
+        if (delta && opts.getControllerState?.()?.sessionId) {
+          publishStateDelta(delta);
+        }
+      }
+
+      previousIssueState = currentDict;
+    }
   }
 
   const stateLoaded = loadState();
@@ -1563,10 +1570,11 @@ export function startServer(opts: ServerOptions): {
       return;
     }
 
-    const rawIssues = await fetchGitHubProjectItems(owner, projectNumber);
+    const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
+    const rawIssues = await fetchFn(owner, projectNumber);
     const { state, titles: extractedTitles } = await fetchAndCollectState("github", rawIssues);
 
-    runPostCollectionProcessing(state, extractedTitles);
+    runPostCollectionProcessing(state, extractedTitles, { skipDelta: true });
 
     cleanupDoneIssueWorkers(state).catch((err) =>
       console.error("[auto-cleanup] failed:", err instanceof Error ? err.message : String(err))

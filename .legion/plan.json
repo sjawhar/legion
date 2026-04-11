@@ -1,6 +1,6 @@
 {
-  "taskCount": 3,
-  "independentTasks": 2,
+  "taskCount": 4,
+  "independentTasks": 1,
   "routingHints": {
     "complexity": "small",
     "estimatedImplementers": 1,
@@ -8,20 +8,17 @@
     "skipArchitect": true
   },
   "concerns": [
-    "CLI change (~/.dotfiles/scripts/envoy) is in a separate repo from plugin changes — two separate commits needed",
-    "ses_* prefix heuristic for CLI send: any topic literally starting with 'ses_' would be treated as direct send"
+    "Bug 2 (controller re-subscription) is a symptom of Bug 1 — subscribeControllerToEnvoy is only called at startup, not in tick loop. publishStateDelta delivers via role routing which cannot be unsubscribed.",
+    "fetchAndProcessState hardcodes fetchGitHubProjectItems — Change 1b fixes this for testability",
+    "Task 3c cache verification uses dispatch-without-repo which forces issueStateCache lookup — verify error is not missing_repo rather than asserting 200"
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
-  "workflowRecommendation": "Simple feature additions — skip retro, single implementer. Two parallel lanes: plugin (Task 1) and CLI (Task 2) merge at verify (Task 3).",
-  "requiredSkills": {
-    "implement": [
-      "envoy"
-    ],
-    "test": [],
-    "review": []
-  },
+  "learningsInjected": [
+    "daemon/post-collection-processing-pattern.md",
+    "testing/github-backend-collect-test-payloads.md"
+  ],
+  "learningsHelpful": ["daemon/post-collection-processing-pattern.md"],
+  "workflowRecommendation": "Simple bug fix — skip retro, single implementer",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T18:01:00.971Z"
+  "completed": "2026-04-11T18:46:28.307Z"
 }

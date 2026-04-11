@@ -17,6 +17,7 @@ describe("daemon server", () => {
   let tempDir: string | null = null;
   let stopServer: (() => void) | null = null;
   let baseUrl = "";
+  let serverFetchAndProcessState: (() => Promise<void>) | null = null;
   let createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
   let deleteSessionCalls: string[] = [];
   let sessionStatusHandler:
@@ -89,7 +90,7 @@ describe("daemon server", () => {
     if (options?.state) {
       await writeStateFile(stateFilePath, options.state);
     }
-    const { server, stop } = startServer({
+    const { server, stop, fetchAndProcessState } = startServer({
       port: 0,
       hostname: "127.0.0.1",
       legionId: options?.legionId ?? legionId,
@@ -105,6 +106,7 @@ describe("daemon server", () => {
       getControllerState: options?.getControllerState,
       fetchProjectItems: options?.fetchProjectItems,
     });
+    serverFetchAndProcessState = fetchAndProcessState;
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
   }
@@ -199,6 +201,7 @@ describe("daemon server", () => {
     globalThis.fetch = originalFetch;
     console.warn = originalConsoleWarn;
     sessionStatusHandler = null;
+    serverFetchAndProcessState = null;
     if (stopServer) {
       stopServer();
       stopServer = null;
@@ -1395,6 +1398,142 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       expect(publishCalls.length).toBe(0);
+    });
+
+    it("health tick interleaving does not produce false deltas", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        legionId: "acme/123",
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+        fetchProjectItems: async () => [createGitHubProjectItem({ status: "Todo" })],
+      });
+
+      // Establish baseline via controller-initiated /state/collect
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Run health tick (fetchAndProcessState) — should NOT affect baseline
+      expect(serverFetchAndProcessState).not.toBeNull();
+      await serverFetchAndProcessState?.();
+      await Bun.sleep(50);
+
+      // Re-collect identical data via controller — should produce zero deltas
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(0);
+    });
+
+    it("health tick with different issue set does not produce false deltas", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        legionId: "acme/123",
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+        fetchProjectItems: async () => [
+          createGitHubProjectItem({ number: 99, status: "In Progress" }),
+        ],
+      });
+
+      // Establish baseline via controller with issue 42
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Health tick fetches different issue set (number: 99) — should NOT corrupt baseline
+      expect(serverFetchAndProcessState).not.toBeNull();
+      await serverFetchAndProcessState?.();
+      await Bun.sleep(50);
+
+      // Re-collect same original data — should produce zero deltas
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(0);
+    });
+
+    it("health tick still populates issueStateCache for dispatch", async () => {
+      await startTestServer({
+        legionId: "acme/123",
+        fetchProjectItems: async () => [createGitHubProjectItem({ status: "Todo" })],
+      });
+
+      // Run health tick to populate cache
+      expect(serverFetchAndProcessState).not.toBeNull();
+      await serverFetchAndProcessState?.();
+      await Bun.sleep(50);
+
+      // Dispatch without repo — should succeed via cache auto-resolution
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-42",
+          mode: "implement",
+        }),
+      });
+
+      // Should NOT fail with missing_repo — cache provides the repo
+      const body = (await response.json()) as { error?: string; id?: string };
+      expect(body.error).not.toBe("missing_repo");
+    });
+
+    it("fetch-and-collect still publishes delta on changed second collection", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      let fetchStatus = "Todo";
+      await startTestServer({
+        legionId: "acme/123",
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+        fetchProjectItems: async () => [createGitHubProjectItem({ status: fetchStatus })],
+      });
+
+      // First fetch-and-collect establishes baseline
+      const firstResponse = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github" }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+      expect(publishCalls.length).toBe(0);
+
+      // Change fetcher response and fetch again — should publish delta
+      fetchStatus = "In Progress";
+      const secondResponse = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github" }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(1);
     });
   });
 
