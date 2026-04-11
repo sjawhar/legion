@@ -42,8 +42,10 @@
       "daemon/server-side-dispatch-validation.md",
       "testing/github-backend-collect-test-payloads.md",
       "daemon/prompt-delivery-bootstrap-delay.md",
-      "daemon/codebase-index-file-placement.md"
+      "daemon/codebase-index-file-placement.md",
       "testing/bun-mock-module-global-leak.md",
+      "daemon/post-collection-processing-pattern.md",
+      "testing/ci-merge-type-compatibility.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",

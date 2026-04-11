@@ -1467,17 +1467,14 @@ export function startServer(opts: ServerOptions): {
                 }
               }
 
+              if (!server) {
+                return serverError("server_not_started");
+              }
               const daemonUrl = `http://127.0.0.1:${server.port}`;
               const issuesData = await enrichParsedIssues(parsed, daemonUrl);
               const state = buildCollectedState(issuesData, opts.legionId);
 
-              for (const [issueId, issueState] of Object.entries(state.issues)) {
-                issueStateCache.set(issueId.toLowerCase(), issueState);
-              }
-
-              for (const [id, title] of extractedTitles) {
-                issueTitleCache.set(id, title);
-              }
+              runPostCollectionProcessing(state, extractedTitles);
 
               cleanupDoneIssueWorkers(state).catch((err) =>
                 console.error(
@@ -1493,25 +1490,6 @@ export function startServer(opts: ServerOptions): {
             } else {
               return badRequest("fetch-and-collect only supports github backend currently");
             }
-
-            const { state, titles: extractedTitles } = await fetchAndCollectState(
-              backend,
-              rawIssues
-            );
-
-            runPostCollectionProcessing(state, extractedTitles);
-
-            cleanupDoneIssueWorkers(state).catch((err) =>
-              console.error(
-                "[auto-cleanup] failed:",
-                err instanceof Error ? err.message : String(err)
-              )
-            );
-
-            return jsonResponse({
-              ...CollectedState.toDict(state),
-              titles: Object.fromEntries(extractedTitles),
-            });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
