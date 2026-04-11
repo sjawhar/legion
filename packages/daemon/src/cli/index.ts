@@ -977,7 +977,7 @@ export async function cmdPoll(team: string, opts: { json: boolean }): Promise<vo
     });
   } catch (_error) {
     throw new CliError(
-      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/state/fetch-and-collect`,
+      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/state/fetch-and-collect`
     );
   }
 

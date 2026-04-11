@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { formatPollOutput } from "../poll-formatter";
 import type { IssueStateDict } from "../../state/types";
+import { formatPollOutput } from "../poll-formatter";
 
 function makeIssue(overrides: Partial<IssueStateDict>): IssueStateDict {
   return {
