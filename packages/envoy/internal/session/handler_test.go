@@ -22,12 +22,12 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 
-	deliverer := newFileDeliverer(dir)
-
-	// Session exists in interest registry AND file registry — handler should use
+	// Session exists in interest registry AND session registry — handler should use
 	// interest path and NOT fall through to registry lookup
 	interest := &store.Interest{
 		SessionID: "ses_target",
@@ -62,10 +62,10 @@ func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
-
-	deliverer := newFileDeliverer(dir)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 
 	// No interest entry — handler should fall through to registry lookup
 	result := HandleAgentMessage(
@@ -87,8 +87,7 @@ func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 // TestHandleAgentMessage_UnknownSession tests that when no registry has the session,
 // the handler signals no delivery (ACK, don't NAK).
 func TestHandleAgentMessage_UnknownSession(t *testing.T) {
-	dir := t.TempDir() // empty
-	deliverer := newFileDeliverer(dir)
+	_, deliverer := newKVDeliverer(t)
 
 	result := HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_unknown", "test"),
@@ -115,10 +114,10 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	defer mock.Close()
 
 	port := mockPort(mock.URL)
-	dir := t.TempDir()
-	writeRegistryEntry(t, dir, 1, port, "ses_target")
-
-	deliverer := newFileDeliverer(dir)
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
+	}
 
 	// Interest exists but for a different machine
 	interest := &store.Interest{

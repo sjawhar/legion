@@ -136,19 +136,11 @@ export function createListener(
         "PORT=9020",
         `ENVOY_MACHINE_ID=${machine.machineId}`,
         `NATS_URLS=${natsUrls}`,
-        `ENVOY_REGISTRY_DIR=${machine.listener.registryDir}`,
         "ENVOY_HOST_BRIDGE=127.0.0.1",
         `ENVOY_KV_REPLICAS=${kvReplicas}`,
         ...tsnetEnvs,
       ],
-      volumes: [
-        {
-          hostPath: machine.listener.registryDir,
-          containerPath: machine.listener.registryDir,
-          readOnly: true,
-        },
-        ...tsnetVols.volumes,
-      ],
+      volumes: [...tsnetVols.volumes],
       healthcheck: {
         tests: ["CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"],
         interval: "10s",

@@ -1,33 +1,14 @@
 {
-  "schemaVersion": 1,
-  "phase": "implement",
-  "completed": "2026-04-11T04:36:05.254Z",
-  "learningsInjected": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/daemon/envoy-auto-subscription-patterns.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
-  ],
-  "filesChanged": [
-    "packages/daemon/src/daemon/state-delta.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/__tests__/state-delta.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "packages/daemon/src/daemon/__tests__/index.test.ts"
-  ],
+  "filesChanged": ["packages/envoy/internal/mcpbridge/http_server_test.go"],
   "trickyParts": [
-    "CI merges PR branch with main before running typecheck - needed to add blockedByIds to test helpers since main has the field but earlier branch commits removed it",
-    "server.ts changed from const server = Bun.serve to let server: Server | null = null to allow fetchAndCollectState closure to reference server.port",
-    "DaemonDependencies.startServer type widened to accept mock returns without fetchAndProcessState via Partial<Pick<>>"
+    "Race condition in test mock: sseWriter/sseConn were set AFTER writing the endpoint event, but the client reads the event and immediately POSTs to /message. On slow CI, sendSSE() found nil fields and silently dropped the initialize response, causing a 30s timeout."
   ],
   "deviations": [
-    "No separate health tick integration tests added - health tick already exercises fetchAndProcessState via the mock, and the 5 integration tests cover the delta detection path thoroughly"
+    "Fix is in test mock only (not production code) — the race was in the test helper, not the HTTPServer implementation"
   ],
   "openQuestions": [],
-  "subPlanningNeeded": false
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-10T23:50:29.040Z"
 }
