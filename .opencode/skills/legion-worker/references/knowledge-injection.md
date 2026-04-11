@@ -88,4 +88,4 @@ When a keyword source is unavailable (missing handoff data, empty fields, missin
 
 ## Integration with Handoffs
 
-If the phase writes handoff data, include a `learningsUsed` field listing the `docs/solutions/` relative paths of all injected learnings. This enables downstream phases to see what knowledge was available and supports future aggregation.
+If the phase writes handoff data, include a `learningsInjected` field listing the `docs/solutions/` relative paths of all injected learnings. This enables downstream phases to see what knowledge was available and supports future aggregation.
