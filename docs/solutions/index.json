@@ -43,6 +43,7 @@
       "testing/github-backend-collect-test-payloads.md",
       "daemon/prompt-delivery-bootstrap-delay.md",
       "daemon/codebase-index-file-placement.md"
+      "testing/bun-mock-module-global-leak.md",
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",

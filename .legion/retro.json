@@ -1,7 +1,9 @@
 {
-  "skipped": true,
-  "reason": "no significant learnings — clean pipeline extension following established patterns",
+  "skipped": false,
+  "docsCreated": [
+    "docs/solutions/testing/bun-mock-module-global-leak.md"
+  ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T03:52:17.269Z"
+  "completed": "2026-04-11T04:34:19.470Z"
 }
