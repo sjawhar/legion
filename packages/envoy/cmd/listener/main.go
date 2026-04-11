@@ -540,7 +540,7 @@ func main() {
 			_ = msg.Ack()
 			return
 		}
-		log.Printf("listener received machine=%s source=%s topic=%s event_id=%s", cfg.MachineID, item.Source, item.Topic, item.EventID)
+		log.Printf("listener received machine=%s source=%s source_session=%s topic=%s event_id=%s payload=%.80s", cfg.MachineID, item.Source, item.SourceSession, item.Topic, item.EventID, item.PayloadSummary)
 		if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
 			sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 			if dedupeCache.Seen(item.DedupeKey, sessionID) {
