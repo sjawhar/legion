@@ -1,14 +1,35 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 0,
+  "minor": 3,
   "verdict": "approved",
-  "keyFindings": [],
-  "learningsInjected": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md"
+  "keyFindings": [
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/state/decision.ts",
+      "description": "Redundant null coalescing on blockedByIds and isBlocked — both are required fields on FetchedIssueData"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/poll-formatter.ts",
+      "description": "Redundant optional chaining on blockedByIds — required string[] on IssueStateDict"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/cli/__tests__/poll-formatter.test.ts",
+      "description": "Test fixture with impossible state (isBlocked: false + non-empty blockedByIds) — needs clarifying comment"
+    }
   ],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/github-api/graphql-org-user-fallback.md",
+    "docs/solutions/daemon/controller-observability.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/github-api/graphql-org-user-fallback.md"
+  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T03:18:23.876Z"
+  "completed": "2026-04-11T03:46:49.900Z"
 }

@@ -39,7 +39,9 @@ function categorizeIssues(issues: Record<string, IssueStateDict>): CategorizedIs
     }
 
     if (issue.isBlocked) {
-      blocked.push({ issueId, reason: "blocked", source: issue.source });
+      const blockerList = issue.blockedByIds?.join(", ") ?? "";
+      const reason = blockerList ? `blocked by ${blockerList}` : "blocked";
+      blocked.push({ issueId, reason, source: issue.source });
       continue;
     }
 

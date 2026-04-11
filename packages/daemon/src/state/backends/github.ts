@@ -20,6 +20,7 @@ interface GitHubProjectItem {
   labels?: string[] | null;
   "linked pull requests"?: string[] | null;
   isBlocked?: boolean;
+  blockerRefs?: Array<{ number: number; repository: string }>;
   [key: string]: unknown;
 }
 
@@ -116,9 +117,24 @@ export class GitHubTracker implements IssueTracker {
         number,
         url: typeof content.url === "string" ? content.url : "",
       };
-      const isBlocked = typedItem.isBlocked === true;
+      // Build blockedByIds from raw blocker references
+      const blockedByIds: string[] = [];
+      if (Array.isArray(typedItem.blockerRefs)) {
+        for (const ref of typedItem.blockerRefs) {
+          if (typeof ref.number === "number" && typeof ref.repository === "string") {
+            const blockerOwnerRepo = parseOwnerRepo(ref.repository);
+            if (blockerOwnerRepo) {
+              blockedByIds.push(
+                buildIssueId(blockerOwnerRepo.owner, blockerOwnerRepo.repo, ref.number)
+              );
+            }
+          }
+        }
+      }
+      // Dedup and sort for stable output
+      const uniqueBlockedByIds = [...new Set(blockedByIds)].sort();
 
-      parsed.push(createParsedIssue(issueId, status, labels, prRef, source, isBlocked));
+      parsed.push(createParsedIssue(issueId, status, labels, prRef, source, uniqueBlockedByIds));
     }
 
     return parsed;

@@ -17,6 +17,7 @@ function makeIssue(overrides: Partial<IssueStateDict>): IssueStateDict {
     sessionId: "ses_test",
     hasUserFeedback: false,
     isBlocked: false,
+    blockedByIds: [],
     source: null,
     ...overrides,
   };
@@ -120,5 +121,51 @@ describe("formatPollOutput", () => {
     };
     const output = formatPollOutput(issues, {});
     expect(output).toContain("acme-repo-42  Todo");
+  });
+
+  it("renders blocker IDs for blocked issues", () => {
+    const issues: Record<string, IssueStateDict> = {
+      "sjawhar-legion-114": makeIssue({
+        isBlocked: true,
+        blockedByIds: ["sjawhar-legion-110", "sjawhar-legion-112"],
+        source: { owner: "sjawhar", repo: "legion", number: 114, url: "" },
+      }),
+    };
+
+    const output = formatPollOutput(issues, { "sjawhar-legion-114": "Track blockers" });
+
+    expect(output).toContain("blocked by sjawhar-legion-110, sjawhar-legion-112");
+  });
+
+  it("falls back to generic blocked text when blocker IDs are unavailable", () => {
+    const issues: Record<string, IssueStateDict> = {
+      "sjawhar-legion-115": makeIssue({
+        isBlocked: true,
+        blockedByIds: [],
+        source: { owner: "sjawhar", repo: "legion", number: 115, url: "" },
+      }),
+    };
+
+    const output = formatPollOutput(issues, {});
+
+    expect(output).toContain("#115  blocked");
+    expect(output).not.toContain("blocked by");
+  });
+
+  it("does not render blocker text for non-blocked issues", () => {
+    const issues: Record<string, IssueStateDict> = {
+      "sjawhar-legion-116": makeIssue({
+        suggestedAction: "dispatch_implementer",
+        isBlocked: false,
+        blockedByIds: ["sjawhar-legion-110"],
+        source: { owner: "sjawhar", repo: "legion", number: 116, url: "" },
+      }),
+    };
+
+    const output = formatPollOutput(issues, { "sjawhar-legion-116": "Implement feature" });
+
+    expect(output).not.toContain("blocked by");
+    expect(output).not.toContain("#116  blocked");
+    expect(output).toContain('#116  In Progress  "Implement feature"');
   });
 });

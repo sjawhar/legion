@@ -1,23 +1,38 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/daemon/src/state/types.ts",
+    "packages/daemon/src/state/github-fetch.ts",
+    "packages/daemon/src/state/backends/github.ts",
+    "packages/daemon/src/state/fetch.ts",
+    "packages/daemon/src/state/decision.ts",
+    "packages/daemon/src/cli/poll-formatter.ts",
+    "packages/daemon/src/state/__tests__/github-fetch.test.ts",
+    "packages/daemon/src/state/backends/__tests__/github.test.ts",
+    "packages/daemon/src/state/__tests__/decision.test.ts",
+    "packages/daemon/src/state/__tests__/decision-regressions.test.ts",
+    "packages/daemon/src/cli/__tests__/poll-formatter.test.ts",
+    "packages/daemon/src/__tests__/integration.test.ts"
   ],
   "trickyParts": [
-    "Brace nesting required extra closing } for the new if (match) block — original code had 2 levels (startsWith + isInteger), new code has 3 levels (startsWith + match + isInteger)"
+    "createParsedIssue() parameter changed from isBlocked:boolean to blockedByIds:string[] — all callers and test fixtures needed updating",
+    "FetchedIssueData.isBlocked changed from optional to required — test fixtures across 4 files needed blockedByIds:[] and isBlocked:false added",
+    "blockerRefs extracted in nodeToProjectItem() must filter to OPEN-only before passing to backend parser"
   ],
   "deviations": [
-    "Added 2 additional edge case tests (owner-repo-0, owner-repo-123abc) from cross-family review findings — plan only specified compound ID and no-digits tests",
-    "Updated comment in server.ts to reflect broader {owner}-{repo}-{number}[-{slug}] format"
+    "issueDependenciesSummary kept alongside blockedBy connection per plan — not removed in this PR"
   ],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/github-api/graphql-org-user-fallback.md",
+    "docs/solutions/daemon/controller-observability.md"
   ],
-  "learningsHelpful": [],
+  "learningsHelpful": [
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/github-api/graphql-org-user-fallback.md"
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T02:54:54.282Z"
+  "completed": "2026-04-11T03:25:22.808Z"
 }

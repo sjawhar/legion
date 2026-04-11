@@ -1,7 +1,7 @@
 {
   "skipped": true,
-  "reason": "no significant learnings — mechanical regex fix",
+  "reason": "no significant learnings — clean pipeline extension following established patterns",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T03:21:28.289Z"
+  "completed": "2026-04-11T03:52:17.269Z"
 }

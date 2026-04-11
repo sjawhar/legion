@@ -21,6 +21,8 @@ describe("decision regressions (known pipeline stalls)", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 
@@ -46,6 +48,8 @@ describe("decision regressions (known pipeline stalls)", () => {
       hasHumanApproved: false,
       hasTestPassed: false,
       hasTestFailed: false,
+      blockedByIds: [],
+      isBlocked: false,
       source: null,
     };
 

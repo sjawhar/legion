@@ -294,6 +294,7 @@ export interface ParsedIssue {
   labels: string[];
   prRef: GitHubPRRef | null;
   source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
+  blockedByIds: string[];
   isBlocked: boolean;
 
   // Computed properties (implemented as getters)
@@ -319,7 +320,7 @@ export function createParsedIssue(
   labels: string[],
   prRef: GitHubPRRef | null,
   source: IssueSource | null = null,
-  isBlocked: boolean = false
+  blockedByIds: string[] = []
 ): ParsedIssue {
   return {
     issueId,
@@ -327,8 +328,8 @@ export function createParsedIssue(
     labels,
     prRef,
     source,
-    isBlocked,
-
+    blockedByIds,
+    isBlocked: blockedByIds.length > 0,
     get hasWorkerDone() {
       return this.labels.includes("worker-done");
     },
@@ -404,7 +405,8 @@ export interface FetchedIssueData {
   hasHumanApproved: boolean;
   hasTestPassed: boolean;
   hasTestFailed: boolean;
-  isBlocked?: boolean;
+  blockedByIds: string[];
+  isBlocked: boolean;
   source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
 
@@ -424,6 +426,7 @@ export interface IssueStateDict {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  blockedByIds: string[];
   isBlocked: boolean;
   source: IssueSource | null;
 }
@@ -451,6 +454,7 @@ export interface IssueState {
   suggestedAction: ActionType;
   sessionId: string;
   hasUserFeedback: boolean;
+  blockedByIds: string[];
   isBlocked: boolean;
   source: IssueSource | null; // Canonical identity for GitHub issues, null for Linear
 }
@@ -473,6 +477,7 @@ export const IssueState = {
       suggestedAction: state.suggestedAction,
       sessionId: state.sessionId,
       hasUserFeedback: state.hasUserFeedback,
+      blockedByIds: state.blockedByIds,
       isBlocked: state.isBlocked,
       source: state.source,
     };

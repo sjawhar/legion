@@ -154,6 +154,8 @@ describe("Integration: state pipeline", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
       {
@@ -173,6 +175,8 @@ describe("Integration: state pipeline", () => {
         hasHumanApproved: false,
         hasTestPassed: false,
         hasTestFailed: false,
+        blockedByIds: [],
+        isBlocked: false,
         source: null,
       },
     ];

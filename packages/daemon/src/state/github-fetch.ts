@@ -31,6 +31,13 @@ interface GitHubProjectItemNode {
         issueDependenciesSummary?: {
           blockedBy: number;
         } | null;
+        blockedBy?: {
+          nodes: Array<{
+            number: number;
+            state: string;
+            repository: { nameWithOwner: string };
+          }>;
+        } | null;
         linkedPullRequests?: {
           nodes: Array<{ url: string }>;
         } | null;
@@ -99,6 +106,13 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
               url
               repository { nameWithOwner }
               issueDependenciesSummary { blockedBy }
+              blockedBy(first: 50) {
+                nodes {
+                  number
+                  state
+                  repository { nameWithOwner }
+                }
+              }
               linkedPullRequests: closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
                 nodes { url }
               }
@@ -150,6 +164,13 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
               url
               repository { nameWithOwner }
               issueDependenciesSummary { blockedBy }
+              blockedBy(first: 50) {
+                nodes {
+                  number
+                  state
+                  repository { nameWithOwner }
+                }
+              }
               linkedPullRequests: closedByPullRequestsReferences(first: 10, includeClosedPrs: true) {
                 nodes { url }
               }
@@ -223,6 +244,15 @@ function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown>
     labels,
     isBlocked:
       typename === "Issue" ? (content.issueDependenciesSummary?.blockedBy ?? 0) > 0 : false,
+    blockerRefs:
+      typename === "Issue" && content.blockedBy?.nodes
+        ? content.blockedBy.nodes
+            .filter((n) => n.state === "OPEN")
+            .map((n) => ({
+              number: n.number,
+              repository: n.repository.nameWithOwner,
+            }))
+        : [],
     ...(linkedPRs.length > 0 ? { "linked pull requests": linkedPRs } : {}),
   };
 }

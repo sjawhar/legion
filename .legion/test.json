@@ -1,19 +1,23 @@
 {
-  "passed": 5,
+  "passed": 10,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR description is clear and comprehensive — documents root cause, fix approach, and all test scenarios. Updated comment in server.ts accurately reflects new format support. No user-facing docs needed for this internal daemon fix.",
+  "documentationFeedback": "PR description is clear and comprehensive. Code comments explain extraction and filtering logic. No README/usage docs needed for internal pipeline extension.",
   "observations": [
-    "Bun --filter flag runs all 119 tests regardless of filter value — tests themselves verified correct by reading code and confirming assertions",
-    "All test runs consistent across 6 executions — no flakiness",
-    "New tests don't verify Envoy subscription for compound IDs — acceptable since Envoy depends on issueNumber being set (which IS verified) and separate pre-existing test covers Envoy-skip"
+    "P2: No single end-to-end pipeline test for blocked issues (AC9 verified piecemeal across 4 test files)",
+    "P3: poll-formatter test uses impossible fixture state (blockedByIds non-empty but isBlocked: false)",
+    "P3: FetchedIssueData test fixtures set isBlocked independently from blockedByIds",
+    "issueDependenciesSummary retained alongside blockedBy connection (intentional per plan, follow-on cleanup)",
+    "Defensive null-coalescing in decision.ts redundant but harmless"
   ],
   "learningsInjected": [
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/testing/bun-fetch-mocking-patterns.md"
+    "docs/solutions/daemon/state-machine-action-display-mismatch.md",
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md"
   ],
-  "learningsHelpful": [],
+  "learningsHelpful": [
+    "docs/solutions/daemon/state-machine-action-display-mismatch.md"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T03:07:12.583Z"
+  "completed": "2026-04-11T03:37:21.835Z"
 }
