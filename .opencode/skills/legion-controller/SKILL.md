@@ -180,14 +180,15 @@ These rules prevent the controller from burning its context window on redundant 
 ### 1. Fetch Issues
 
 ```bash
-# Derive OWNER from LEGION_ID for GitHub backend (used for label/PR operations below)
+# Derive OWNER from LEGION_ID for GitHub backend (still used for non-issue-scoped operations)
 # LEGION_ID format for GitHub: "owner/project-number"
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
   OWNER="${LEGION_ID%%/*}"
 fi
 
-# GitHub: the daemon fetches all project items internally (paginated GraphQL, 100 items/page)
-# and runs them through the state machine in one call.
+# GitHub: the daemon fetches all project items internally from primary + extra boards
+# (LEGION_EXTRA_PROJECTS), deduplicates by canonical identity, and runs them through
+# the state machine in one call.
 # Linear: fetch issues first, then pass to the state machine in step 3.
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
   COLLECTED=$(curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/fetch-and-collect \
@@ -260,6 +261,27 @@ The state machine returns a `suggestedAction`. Route by prefix:
 This routing is stable across code changes. New action types automatically route
 correctly if they follow the naming convention.
 
+At the top of the per-issue action-handling loop, extract canonical GitHub source metadata
+from `COLLECTED` exactly once and reuse it for **all** repo-scoped operations:
+
+```bash
+# Extract canonical repo for this issue from collect response
+SOURCE_OWNER=$(echo "$COLLECTED" | jq -r ".issues.\"$ISSUE_IDENTIFIER\".source.owner // empty")
+SOURCE_REPO=$(echo "$COLLECTED" | jq -r ".issues.\"$ISSUE_IDENTIFIER\".source.repo // empty")
+ISSUE_NUMBER=$(echo "$COLLECTED" | jq -r ".issues.\"$ISSUE_IDENTIFIER\".source.number // empty")
+ISSUE_REPO="${SOURCE_OWNER}/${SOURCE_REPO}"
+
+# Skip issue if source metadata is missing (shouldn't happen for GitHub issues)
+if [ -z "$SOURCE_OWNER" ] || [ -z "$SOURCE_REPO" ]; then
+  echo "[controller] WARNING: source metadata missing for $ISSUE_IDENTIFIER — skipping"
+  continue
+fi
+```
+
+Do **not** reconstruct owner/repo from `$ISSUE_IDENTIFIER`, and do **not** fall back to
+LEGION_ID-derived repo values for issue-scoped GitHub operations. Use `$ISSUE_REPO` (or `$SOURCE_OWNER` /
+`$SOURCE_REPO` when separate values are required) everywhere inside the loop.
+
 **Handling `investigate_no_pr`:** Worker marked done but no PR exists. Likely causes:
 1. Worker crashed before creating PR
 2. PR creation failed silently
@@ -277,7 +299,7 @@ GitHub API connectivity.
 CI failures). The state machine checks mergeability *before* CI status, so conflicts are resolved first.
 The controller should call GitHub's update-branch API:
 ```bash
-gh api repos/$OWNER/$REPO/pulls/$PR_NUMBER/update-branch -X PUT
+gh api repos/$ISSUE_REPO/pulls/$PR_NUMBER/update-branch -X PUT
 ```
 If the API fails (e.g., conflicts too severe for auto-rebase), fall back to
 `resume_implementer_for_changes` — the implementer will need to rebase manually.
@@ -334,11 +356,11 @@ creates fresh if the session was lost.
    gh issue edit $ISSUE_NUMBER \
      --remove-label "worker-done" \
      --add-label "worker-active" \
-     -R $OWNER/$REPO
+     -R $ISSUE_REPO
 
    # Dispatch architect with review prompt (reuses existing session if alive)
    legion dispatch "$ISSUE_IDENTIFIER" architect \
-     --repo "$OWNER/$REPO" \
+     --repo "$ISSUE_REPO" \
      --prompt "Invoke the /legion-worker skill for architect mode. You are being resumed to review the implementation plan for $ISSUE_IDENTIFIER.
 
    Read the latest issue comments to find the planner's output. Compare it against your original architectural spec (the issue body and your architect handoff).
@@ -353,7 +375,7 @@ creates fresh if the session was lost.
    If APPROVED — add labels: arch-review-approved, worker-done. Remove label: worker-active.
    If CHANGES NEEDED — post specific items to address. Add labels: arch-review-changes, worker-done. Remove label: worker-active.
 
-   (github backend, repo: $OWNER/$REPO)"
+   (github backend, repo: $ISSUE_REPO)"
    ```
 
 3. **Handle architect verdict — changes requested:**
@@ -364,11 +386,11 @@ creates fresh if the session was lost.
      --remove-label "arch-review-changes" \
      --remove-label "worker-done" \
      --add-label "worker-active" \
-     -R $OWNER/$REPO
+     -R $ISSUE_REPO
 
    # Resume planner with architect feedback
    legion prompt "$ISSUE_IDENTIFIER" --mode plan \
-     "Invoke the /legion-worker skill for plan mode. The architect has reviewed your plan and requested changes — read the latest issue comments for their feedback. Revise your plan accordingly. (github backend, repo: $OWNER/$REPO)"
+     "Invoke the /legion-worker skill for plan mode. The architect has reviewed your plan and requested changes — read the latest issue comments for their feedback. Revise your plan accordingly. (github backend, repo: $ISSUE_REPO)"
    ```
    The planner revises, adds `worker-done`, removes `worker-active`. The state machine
    suggests `transition_to_in_progress` again. The controller re-checks for `architect-continuity`
@@ -380,7 +402,7 @@ creates fresh if the session was lost.
    # Clean up transient verdict label
    gh issue edit $ISSUE_NUMBER \
      --remove-label "arch-review-approved" \
-     -R $OWNER/$REPO
+     -R $ISSUE_REPO
 
    # Proceed with normal transition_to_in_progress
    ```
@@ -463,7 +485,7 @@ Before requesting merge approval (or dispatching merger), the controller must ve
 contains the dispatched issue's closing keyword. If missing, patch the PR body automatically.
 
 ```bash
-PR_BODY=$(gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $OWNER/$REPO)
+PR_BODY=$(gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO)
 
 # Accept standard auto-close keyword variants for the dispatched issue
 if ! echo "$PR_BODY" | grep -Eiq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"; then
@@ -473,11 +495,11 @@ $PR_BODY
 Closes #$ISSUE_NUMBER
 EOF
 )"
-  gh pr edit "$LEGION_ISSUE_ID" --body "$UPDATED_PR_BODY" -R $OWNER/$REPO
+  gh pr edit "$LEGION_ISSUE_ID" --body "$UPDATED_PR_BODY" -R $ISSUE_REPO
 fi
 
 # Verify after edit (must pass before merge approval flow continues)
-gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $OWNER/$REPO | grep -Eq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"
+gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO | grep -Eq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"
 ```
 
 If this check/edit fails, do not proceed to merge approval. Re-dispatch implementer to repair PR
@@ -487,12 +509,12 @@ Before requesting merge approval, verify ALL conditions:
 
 | # | Condition | Verification |
 |---|-----------|-------------|
-| 1 | PR body includes a closing keyword for dispatched issue | `gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $OWNER/$REPO \| grep -Eq "(Closes\|Fixes\|Resolves) #$ISSUE_NUMBER"` |
-| 2 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID"` — all checks must show ✓ |
-| 3 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft` returns `false` |
-| 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep test-passed` |
+| 1 | PR body includes a closing keyword for dispatched issue | `gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO \| grep -Eq "(Closes\|Fixes\|Resolves) #$ISSUE_NUMBER"` |
+| 2 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID" -R $ISSUE_REPO` — all checks must show ✓ |
+| 3 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft -R $ISSUE_REPO` returns `false` |
+| 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep test-passed` |
 | 5 | Issue has been through retro (or skipped via routing hints) | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
-| 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $OWNER/$REPO \| grep -v user-input-needed` — must NOT match |
+| 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep -v user-input-needed` — must NOT match |
 
 If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
 
@@ -502,7 +524,7 @@ If ANY condition fails, do NOT request merge approval. Fix the failing condition
 
 ```bash
 legion dispatch "$ISSUE_IDENTIFIER" merge \
-  --repo "$OWNER/$REPO" \
+  --repo "$ISSUE_REPO" \
   --prompt "Invoke the /legion-worker skill for merge mode. Override: user approved with unmet conditions: [list waived conditions]. ($BACKEND_SUFFIX)"
 ```
 
@@ -510,12 +532,12 @@ legion dispatch "$ISSUE_IDENTIFIER" merge \
 
 If an issue remains in Retro after the merger exits, verify PR merge status:
 ```bash
-gh pr view "$LEGION_ISSUE_ID" --json state,merged
+gh pr view "$LEGION_ISSUE_ID" --json state,merged -R $ISSUE_REPO
 ```
 
 If the PR is merged but the issue isn't closed, close it explicitly:
 ```bash
-gh issue close $ISSUE_NUMBER -R $OWNER/$REPO
+gh issue close $ISSUE_NUMBER -R $ISSUE_REPO
 ```
 
 This handles edge cases where the merge workflow's explicit close failed or where GitHub auto-close didn't trigger. The `transition_to_done` action type exists in the state machine for this purpose.
@@ -564,7 +586,7 @@ For each Done issue that has worker entries (check the `/workers` response):
 # Use ANY worker ID for the issue — all modes share the same workspace
 curl -s -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/workspace" \
   -H 'Content-Type: application/json' \
-  -d '{"repo": "'"$OWNER/$REPO"'"}'
+  -d '{"repo": "'"$ISSUE_REPO"'"}'
 ```
 
 2. Prune all worker entries and crash history for the issue:
@@ -626,11 +648,11 @@ Supported schema and key precedence are documented at:
 Workers must know which backend they're on. The controller always includes the backend
 in dispatch and resume prompts so workers don't need to check environment variables.
 
-Build the backend suffix from `LEGION_ISSUE_BACKEND` and (for GitHub) the repo derived
-from the issue identifier:
+Build the backend suffix from `LEGION_ISSUE_BACKEND` and (for GitHub) the per-issue source
+metadata extracted from `COLLECTED` in the action loop:
 
-- **GitHub:** `(github backend, repo: $OWNER/$REPO)` — derive owner/repo from the issue
-  identifier (format: `owner-repo-number`, e.g. `acme-widgets-42` → `acme/widgets`)
+- **GitHub:** `(github backend, repo: $ISSUE_REPO)` — use the canonical `IssueState.source`
+  owner/repo for the current issue; do not parse repo identity from `$ISSUE_IDENTIFIER`
 - **Linear:** `(linear backend)`
 
 ### GitHub App Credentials (Worker Identity)
@@ -673,8 +695,8 @@ getting the full skill content.
 ```bash
 # GitHub example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --repo "$OWNER/$REPO" \
-  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO). Before starting, check for project-specific skills that may be relevant to this work."
+  --repo "$ISSUE_REPO" \
+  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $ISSUE_REPO). Before starting, check for project-specific skills that may be relevant to this work."
 
 # Linear example:
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
@@ -686,20 +708,25 @@ The `dispatch` command handles: workspace creation (jj workspace add), daemon AP
 For custom prompts, still include the backend suffix:
 ```bash
 legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --repo "$OWNER/$REPO" \
-  --prompt "Custom instructions here (github backend, repo: $OWNER/$REPO)"
+  --repo "$ISSUE_REPO" \
+  --prompt "Custom instructions here (github backend, repo: $ISSUE_REPO)"
 ```
+
+**Note:** The daemon also supports auto-resolving repo from `issueStateCache` when `--repo` is
+omitted. This is a **fallback for manual CLI callers** — the controller MUST always pass `--repo`
+explicitly because it has the freshest data from the collect response. Do not rely on daemon
+auto-resolve for controller dispatches.
 
 ### Resume (Prompt Existing Worker)
 
 ```bash
 # User feedback relay (GitHub):
 legion prompt "$ISSUE_IDENTIFIER" \
-  "Invoke the /legion-worker skill. Check issue comments for user feedback. (github backend, repo: $OWNER/$REPO)"
+  "Invoke the /legion-worker skill. Check issue comments for user feedback. (github backend, repo: $ISSUE_REPO)"
 
 # PR changes requested — tell them to invoke the skill, not give step-by-step fix instructions:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Invoke the /legion-worker skill for implement mode. CI is failing on your PR — check the failures and fix. (github backend, repo: $OWNER/$REPO)"
+  "Invoke the /legion-worker skill for implement mode. CI is failing on your PR — check the failures and fix. (github backend, repo: $ISSUE_REPO)"
 ```
 
 If multiple workers exist for the same issue (different modes), specify mode with `--mode`.
@@ -733,8 +760,8 @@ if [ "$SKIP_RETRO" = "true" ] && [ "$TRICKY_PARTS_COUNT" = "0" ] && [ "$DEVIATIO
   echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
   if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
     legion dispatch "$ISSUE_IDENTIFIER" merge \
-      --repo "$OWNER/$REPO" \
-      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $OWNER/$REPO)"
+      --repo "$ISSUE_REPO" \
+      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $ISSUE_REPO)"
   else
     legion dispatch "$ISSUE_IDENTIFIER" merge \
       --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (linear backend)"
@@ -750,7 +777,7 @@ fi
 ```bash
 # GitHub:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Invoke the /legion-retro skill. (github backend, repo: $OWNER/$REPO)"
+  "Invoke the /legion-retro skill. (github backend, repo: $ISSUE_REPO)"
 
 # Linear:
 legion prompt "$ISSUE_IDENTIFIER" --mode implement \
@@ -877,8 +904,8 @@ Combine multiple label changes on the same issue into a single `gh issue edit` c
 
 **Instead of multiple calls:**
 ```bash
-gh issue edit $ISSUE_NUMBER --remove-label "worker-done" -R $OWNER/$REPO
-gh issue edit $ISSUE_NUMBER --remove-label "test-passed" -R $OWNER/$REPO
+gh issue edit $ISSUE_NUMBER --remove-label "worker-done" -R $ISSUE_REPO
+gh issue edit $ISSUE_NUMBER --remove-label "test-passed" -R $ISSUE_REPO
 ```
 
 **Use a single batched call:**
@@ -886,7 +913,7 @@ gh issue edit $ISSUE_NUMBER --remove-label "test-passed" -R $OWNER/$REPO
 gh issue edit $ISSUE_NUMBER \
   --remove-label "worker-done" \
   --remove-label "test-passed" \
-  -R $OWNER/$REPO
+  -R $ISSUE_REPO
 ```
 
 **Combined add + remove:**
@@ -895,19 +922,19 @@ gh issue edit $ISSUE_NUMBER \
 gh issue edit $ISSUE_NUMBER \
   --remove-label "worker-done" \
   --remove-label "test-passed" \
-  -R $OWNER/$REPO
+  -R $ISSUE_REPO
 
 # Remove worker-done and worker-active, add nothing (after processing)
 gh issue edit $ISSUE_NUMBER \
   --remove-label "worker-done" \
   --remove-label "worker-active" \
-  -R $OWNER/$REPO
+  -R $ISSUE_REPO
 ```
 
 **When dispatching a worker, combine worker-active:**
 ```bash
 # Add worker-active in same call as status update where possible
-gh issue edit $ISSUE_NUMBER --add-label "worker-active" -R $OWNER/$REPO
+gh issue edit $ISSUE_NUMBER --add-label "worker-active" -R $ISSUE_REPO
 ```
 
 This reduces GitHub API calls from N individual calls to 1 batched call per label group.
