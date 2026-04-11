@@ -411,7 +411,7 @@ export interface FetchedIssueData {
 /**
  * Serialized form of IssueState.
  */
-interface IssueStateDict {
+export interface IssueStateDict {
   status: IssueStatusLiteral | string;
   labels: string[];
   hasPr: boolean;
