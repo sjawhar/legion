@@ -18,6 +18,7 @@ import {
 import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
 import type { HandoffPhase } from "../handoff/types";
 import { resolveLegionId } from "./legion-resolver";
+import { formatPollOutput } from "./poll-formatter";
 
 export class CliError extends Error {
   constructor(
@@ -962,6 +963,70 @@ export const collectStateCommand = defineCommand({
   },
 });
 
+export async function cmdPoll(team: string, opts: { json: boolean }): Promise<void> {
+  const legionId = await resolveLegionId(team, {});
+  const daemonPort = await getDaemonPort(legionId);
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/state/fetch-and-collect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ backend: "github" }),
+    });
+  } catch (_error) {
+    throw new CliError(
+      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/state/fetch-and-collect`,
+    );
+  }
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new CliError(`Daemon returned ${response.status}: ${body}`);
+  }
+
+  const data = (await response.json()) as {
+    issues: Record<string, import("../state/types").IssueStateDict>;
+    titles?: Record<string, string>;
+  };
+
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+    return;
+  }
+
+  const output = formatPollOutput(data.issues, data.titles ?? {});
+  if (output) {
+    console.log(output);
+  } else {
+    console.log("No issues found.");
+  }
+}
+
+export const pollCommand = defineCommand({
+  meta: { name: "poll", description: "Poll state machine for compact actionable summary" },
+  args: {
+    team: { type: "positional", description: "Legion key or UUID", required: true },
+    json: {
+      type: "boolean",
+      description: "Output raw JSON from fetch-and-collect",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    try {
+      await cmdPoll(args.team, { json: args.json });
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
 export const handoffCommand = defineCommand({
   meta: { name: "handoff", description: "Read and write local handoff files" },
   subCommands: {
@@ -1091,6 +1156,7 @@ export const mainCommand = defineCommand({
     "reset-crashes": resetCrashesCommand,
     teams: legionsCommand,
     "collect-state": collectStateCommand,
+    poll: pollCommand,
     handoff: handoffCommand,
   },
 });
