@@ -32,8 +32,8 @@ export function computeNatsUrls(
 // --- Pulumi resources ---
 
 interface ServiceSecrets {
-  githubWebhookSecret: pulumi.Output<string>;
-  slackSigningSecret: pulumi.Output<string>;
+  githubWebhookSecret?: pulumi.Output<string>;
+  slackSigningSecret?: pulumi.Output<string>;
   ghostWisprSigningSecret?: pulumi.Output<string>;
   tsnetAuthKey?: pulumi.Output<string>;
 }
@@ -60,7 +60,7 @@ function countNatsPeers(allMachines: MachineConfig[]): number {
  */
 export function computeTsnetEnvs(
   machine: MachineConfig,
-  secrets: ServiceSecrets,
+  secrets: ServiceSecrets
 ): pulumi.Input<string>[] {
   const tsnet = machine.listener.tsnet;
   if (!tsnet) {
@@ -82,7 +82,7 @@ export function computeTsnetEnvs(
  */
 export function computeTsnetVolumes(
   provider: docker.Provider,
-  machine: MachineConfig,
+  machine: MachineConfig
 ): { volumes: docker.types.input.ContainerVolume[]; dependsOn: pulumi.Resource[] } {
   const tsnet = machine.listener.tsnet;
   if (!tsnet) {
@@ -92,7 +92,7 @@ export function computeTsnetVolumes(
   const volume = new docker.Volume(
     `listener-tsnet-state-${machine.name}`,
     { name: volumeName },
-    { provider },
+    { provider }
   );
   return {
     volumes: [
@@ -117,11 +117,38 @@ export function createListener(
   allMachines: MachineConfig[],
   image: docker.RemoteImage,
   secrets: ServiceSecrets,
-  dependsOn: pulumi.Resource[],
+  dependsOn: pulumi.Resource[]
 ): docker.Container {
   const natsUrls = getNatsUrls(machine, allMachines);
   const kvReplicas = countNatsPeers(allMachines);
   const tsnetEnvs = computeTsnetEnvs(machine, secrets);
+  const webhookEnvs: pulumi.Input<string>[] = [];
+  const webhooks = machine.listener.webhooks;
+  if (webhooks) {
+    const enabled: string[] = [];
+    if (webhooks.github) enabled.push("github");
+    if (webhooks.slack) enabled.push("slack");
+    if (webhooks.ghostwispr) enabled.push("ghostwispr");
+    if (enabled.length > 0) {
+      webhookEnvs.push(`ENVOY_WEBHOOKS=${enabled.join(",")}`);
+    }
+    if (webhooks.github) {
+      webhookEnvs.push(
+        pulumi.interpolate`ENVOY_GITHUB_WEBHOOK_SECRET=${secrets.githubWebhookSecret}`
+      );
+      webhookEnvs.push("ENVOY_GITHUB_MENTION_TRIGGER=@legion");
+    }
+    if (webhooks.slack) {
+      webhookEnvs.push(
+        pulumi.interpolate`ENVOY_SLACK_SIGNING_SECRET=${secrets.slackSigningSecret}`
+      );
+    }
+    if (webhooks.ghostwispr && secrets.ghostWisprSigningSecret) {
+      webhookEnvs.push(
+        pulumi.interpolate`ENVOY_GHOSTWISPR_SIGNING_SECRET=${secrets.ghostWisprSigningSecret}`
+      );
+    }
+  }
   const tsnetVols = computeTsnetVolumes(provider, machine);
 
   return new docker.Container(
@@ -139,6 +166,7 @@ export function createListener(
         "ENVOY_HOST_BRIDGE=127.0.0.1",
         `ENVOY_KV_REPLICAS=${kvReplicas}`,
         ...tsnetEnvs,
+        ...webhookEnvs,
       ],
       volumes: [...tsnetVols.volumes],
       healthcheck: {
@@ -155,137 +183,6 @@ export function createListener(
       provider,
       dependsOn: [...dependsOn, ...tsnetVols.dependsOn],
       deleteBeforeReplace: true,
-    },
-  );
-}
-
-/**
- * Create the GitHub webhook receiver container.
- * Only on machines with receivers.github = true.
- */
-export function createGithubReceiver(
-  provider: docker.Provider,
-  machine: MachineConfig,
-  allMachines: MachineConfig[],
-  image: docker.RemoteImage,
-  secrets: ServiceSecrets,
-  dependsOn: pulumi.Resource[]
-): docker.Container {
-  const natsUrls = getNatsUrls(machine, allMachines);
-
-  return new docker.Container(
-    `github-${machine.name}`,
-    {
-      name: "envoy-github",
-      image: image.imageId,
-      command: ["/usr/local/bin/envoy-github"],
-      restart: "unless-stopped",
-      networkMode: "host",
-      envs: [
-        "PORT=9010",
-        `ENVOY_MACHINE_ID=${machine.machineId}`,
-        `NATS_URLS=${natsUrls}`,
-        pulumi.interpolate`ENVOY_GITHUB_WEBHOOK_SECRET=${secrets.githubWebhookSecret}`,
-        "ENVOY_GITHUB_MENTION_TRIGGER=@legion",
-      ],
-      healthcheck: {
-        tests: ["CMD", "curl", "-f", "http://127.0.0.1:9010/healthz"],
-        interval: "10s",
-        timeout: "3s",
-        retries: 3,
-        startPeriod: "5s",
-      },
-      wait: true,
-      waitTimeout: 30,
-    },
-    { provider, dependsOn, deleteBeforeReplace: true }
-  );
-}
-
-/**
- * Create the Slack webhook receiver container.
- * Only on machines with receivers.slack = true.
- */
-export function createSlackReceiver(
-  provider: docker.Provider,
-  machine: MachineConfig,
-  allMachines: MachineConfig[],
-  image: docker.RemoteImage,
-  secrets: ServiceSecrets,
-  dependsOn: pulumi.Resource[]
-): docker.Container {
-  const natsUrls = getNatsUrls(machine, allMachines);
-
-  return new docker.Container(
-    `slack-${machine.name}`,
-    {
-      name: "envoy-slack",
-      image: image.imageId,
-      command: ["/usr/local/bin/envoy-slack"],
-      restart: "unless-stopped",
-      networkMode: "host",
-      envs: [
-        "PORT=9011",
-        `ENVOY_MACHINE_ID=${machine.machineId}`,
-        `NATS_URLS=${natsUrls}`,
-        pulumi.interpolate`ENVOY_SLACK_SIGNING_SECRET=${secrets.slackSigningSecret}`,
-      ],
-      healthcheck: {
-        tests: ["CMD", "curl", "-f", "http://127.0.0.1:9011/healthz"],
-        interval: "10s",
-        timeout: "3s",
-        retries: 3,
-        startPeriod: "5s",
-      },
-      wait: true,
-      waitTimeout: 30,
-    },
-    { provider, dependsOn, deleteBeforeReplace: true }
-  );
-}
-
-/**
- * Create the Ghost Wispr webhook receiver container.
- * Only on machines with receivers.ghostwispr = true.
- */
-export function createGhostWisprReceiver(
-  provider: docker.Provider,
-  machine: MachineConfig,
-  allMachines: MachineConfig[],
-  image: docker.RemoteImage,
-  secrets: ServiceSecrets,
-  dependsOn: pulumi.Resource[]
-): docker.Container {
-  const port = 9012;
-  const natsUrls = getNatsUrls(machine, allMachines);
-  const envs: pulumi.Input<string>[] = [
-    `PORT=${port}`,
-    `ENVOY_MACHINE_ID=${machine.machineId}`,
-    `NATS_URLS=${natsUrls}`,
-    ...(secrets.ghostWisprSigningSecret
-      ? [pulumi.interpolate`ENVOY_GHOSTWISPR_SIGNING_SECRET=${secrets.ghostWisprSigningSecret}`]
-      : []),
-  ];
-
-  return new docker.Container(
-    `ghostwispr-${machine.name}`,
-    {
-      name: "envoy-ghostwispr",
-      image: image.imageId,
-      command: ["/usr/local/bin/envoy-ghostwispr"],
-      restart: "unless-stopped",
-      networkMode: "host",
-      envs,
-      healthcheck: {
-        tests: ["CMD", "curl", "-f", `http://127.0.0.1:${port}/healthz`],
-        interval: "10s",
-        timeout: "3s",
-        retries: 3,
-        startPeriod: "5s",
-      },
-      wait: true,
-      waitTimeout: 30,
-    },
-    { provider, dependsOn, deleteBeforeReplace: true }
+    }
   );
 }

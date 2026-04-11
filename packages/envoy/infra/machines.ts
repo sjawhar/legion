@@ -14,9 +14,10 @@ export interface TsnetConfig {
 export interface ListenerConfig {
   /** When set, the listener serves /v1/* exclusively on the tsnet TLS interface. */
   tsnet?: TsnetConfig;
+  webhooks?: WebhookConfig;
 }
 
-export interface ReceiverConfig {
+export interface WebhookConfig {
   github?: boolean;
   slack?: boolean;
   ghostwispr?: boolean;
@@ -28,7 +29,6 @@ export interface MachineConfig {
   machineId: string;
   nats?: NatsConfig;
   listener: ListenerConfig;
-  receivers?: ReceiverConfig;
 }
 
 export function createProvider(

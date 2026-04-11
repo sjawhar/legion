@@ -1,4 +1,4 @@
-package main
+package webhook
 
 import (
 	"encoding/json"
@@ -6,52 +6,12 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
-	"time"
 
-	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/verify"
 )
-
-func main() {
-	cfg, err := config.Load(9012)
-	if err != nil {
-		log.Fatal(err)
-	}
-	secret := getenvOptional("ENVOY_GHOSTWISPR_SIGNING_SECRET")
-	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer client.Conn.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := client.Conn.FlushTimeout(3 * time.Second); err != nil {
-			http.Error(w, "nats unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		writeOK(w)
-	})
-	mux.HandleFunc("/webhook/ghostwispr", webhookHandler(secret, client))
-
-	log.Printf("envoy-ghostwispr listening on %d", cfg.Port)
-	server := &http.Server{Addr: addr(cfg.Port), Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	log.Fatal(server.ListenAndServe())
-}
-
-func addr(port int) string {
-	return ":" + strconv.Itoa(port)
-}
-
-func getenvOptional(key string) string {
-	return strings.TrimSpace(os.Getenv(key))
-}
 
 // ghostWisprSkip returns true for event types that should be accepted but not published.
 func ghostWisprSkip(event string) bool {
@@ -62,21 +22,8 @@ func ghostWisprSkip(event string) bool {
 	return true
 }
 
-type envelopePublisher interface {
-	Publish(contracts.Envelope) error
-}
-
-var _ envelopePublisher = (*bus.Client)(nil)
-
-// publishFunc adapts plain functions for handler tests.
-type publishFunc func(contracts.Envelope) error
-
-func (fn publishFunc) Publish(item contracts.Envelope) error {
-	return fn(item)
-}
-
-// webhookHandler returns the HTTP handler for Ghost Wispr webhook events.
-func webhookHandler(secret string, publisher envelopePublisher) http.HandlerFunc {
+// GhostWisprHandler returns the HTTP handler for Ghost Wispr webhook events.
+func GhostWisprHandler(secret string, publisher Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)

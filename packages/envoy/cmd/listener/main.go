@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	envoytsnet "github.com/sjawhar/envoy/internal/tsnet"
+	"github.com/sjawhar/envoy/internal/webhook"
 )
 
 // listenerDeps holds NATS-dependent resources published atomically after
@@ -253,6 +254,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Load webhook config (fast — env var reads only).
+	webhookCfg, err := webhook.LoadWebhookConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Phase 2: Bind HTTP port deterministically in main goroutine before
 	// any NATS work begins. This guarantees /healthz is reachable as soon
 	// as Serve starts, regardless of NATS connection latency.
@@ -291,6 +298,30 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 	})
+
+	// Webhook routes — on public mux, gated by readiness.
+	// Publisher delegates to deps.client behind readinessGate.
+	webhookPublisher := webhook.PublisherFunc(func(item contracts.Envelope) error {
+		return deps.Load().client.Publish(item)
+	})
+	if webhookCfg.GitHub != nil {
+		mux.Handle("/webhook/github", readinessGate(
+			func() bool { return deps.Load() != nil },
+			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookPublisher),
+		))
+	}
+	if webhookCfg.Slack != nil {
+		mux.Handle("/webhook/slack", readinessGate(
+			func() bool { return deps.Load() != nil },
+			webhook.SlackHandler(webhookCfg.Slack.Secret, webhookPublisher),
+		))
+	}
+	if webhookCfg.GhostWispr != nil {
+		mux.Handle("/webhook/ghostwispr", readinessGate(
+			func() bool { return deps.Load() != nil },
+			webhook.GhostWisprHandler(webhookCfg.GhostWispr.Secret, webhookPublisher),
+		))
+	}
 
 	// /v1/* routes on a sub-mux, gated by a single readiness middleware.
 	v1 := http.NewServeMux()

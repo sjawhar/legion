@@ -1,44 +1,29 @@
-package main
+package webhook
 
 import (
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"strconv"
-	"strings"
-	"time"
 
-	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/verify"
 )
 
-func main() {
-	cfg, err := config.Load(9011)
-	if err != nil {
-		log.Fatal(err)
-	}
-	secret := getenv("ENVOY_SLACK_SIGNING_SECRET")
-	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer client.Conn.Close()
+func typeName(value any) string {
+	text, _ := value.(string)
+	return text
+}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := client.Conn.FlushTimeout(3 * time.Second); err != nil {
-			http.Error(w, "nats unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/webhook/slack", func(w http.ResponseWriter, r *http.Request) {
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+// SlackHandler returns the HTTP handler for Slack webhook events.
+func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -53,6 +38,7 @@ func main() {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		// URL verification must happen BEFORE signature check.
 		if typeName(payload["type"]) == "url_verification" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"challenge": payload["challenge"]})
@@ -68,7 +54,7 @@ func main() {
 				if err := item.Validate(); err != nil {
 					continue
 				}
-				if err := client.Publish(item); err != nil {
+				if err := publisher.Publish(item); err != nil {
 					log.Printf("slack publish failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return
@@ -77,31 +63,5 @@ func main() {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-	})
-
-	log.Printf("envoy-slack listening on %d", cfg.Port)
-	server := &http.Server{Addr: addr(cfg.Port), Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
-	log.Fatal(server.ListenAndServe())
-}
-
-func addr(port int) string {
-	return ":" + strconv.Itoa(port)
-}
-
-func getenv(key string) string {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		log.Fatalf("%s is required", key)
 	}
-	return value
-}
-
-func typeName(value any) string {
-	text, _ := value.(string)
-	return text
-}
-
-func stringValue(value any) string {
-	text, _ := value.(string)
-	return text
 }

@@ -172,10 +172,8 @@ jobs:
       - name: Build envoy binaries
         run: |
           mkdir -p out
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-github ./cmd/github
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-slack ./cmd/slack
           GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-listener ./cmd/listener
-          tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-github envoy-slack envoy-listener
+          tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener
         working-directory: packages/envoy
       - uses: actions/upload-artifact@v4
         with:

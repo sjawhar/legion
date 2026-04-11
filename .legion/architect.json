@@ -1,35 +1,44 @@
 {
   "scope": "medium",
   "components": [
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/state/types.ts"
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/github/main.go",
+    "packages/envoy/cmd/slack/main.go",
+    "packages/envoy/cmd/ghostwispr/main.go",
+    "packages/envoy/internal/webhook/",
+    "packages/envoy/internal/verify/",
+    "packages/envoy/internal/config/config.go",
+    "packages/envoy/docker/Dockerfile",
+    "packages/envoy/deploy/compose/",
+    "packages/envoy/infra/services.ts",
+    "packages/envoy/infra/machines.ts",
+    "packages/envoy/infra/index.ts",
+    "packages/envoy/AGENTS.md"
   ],
   "subIssues": [],
   "routingHints": {
     "complexity": "medium",
     "estimatedImplementers": 1,
-    "skipRetro": true
+    "skipRetro": false
   },
   "concerns": [
-    "Instance bootstrap on shared serve: sendPrompt readiness-wait pattern may be needed for adopted sessions that exist in SQLite but aren't loaded in-memory yet (see prompt-delivery-bootstrap-delay.md)",
-    "Duplicate session adoption guard: must scan all live worker entries for matching sessionId, not just check workerId conflict",
-    "OC registry contract is external (in ~/.dotfiles/scripts/oc) — parse defensively, tolerate missing/malformed entries",
-    "422 for invalid sessionId format is intentional (semantic validation) — document this API choice",
-    "SIGHUP PID is transient CLI concern only — do NOT persist in WorkerEntry or workers.json",
-    "Workspace resolution order: explicit --workspace flag > OC registry dir field > legion workspace default"
+    "Config-gated activation (ENVOY_WEBHOOKS env var) replaces secret-gated activation — enabled provider + missing required secret = startup failure",
+    "Ghost Wispr must be explicitly enabled via ENVOY_WEBHOOKS, not 'always registered' — prevents unintended exposure on non-receiver machines",
+    "Webhook handlers must take publisher interface, not atomic.Pointer[listenerDeps] — follow Ghost Wispr envelopePublisher pattern for testability",
+    "Startup readiness: listener binds port before NATS connects; webhook handlers behind readinessGate return 503 until NATS ready — acceptable because Docker healthcheck gates traffic",
+    "Migration requires parallel operation: old receivers stay running on 9010/9011/9012 while new listener serves 9020; switch webhook URLs at providers then remove old containers",
+    "Duplicate delivery risk during overlap is low: dedupe keys are source-derived (github.<delivery>, slack.<event_id>, ghostwispr.<delivery>)",
+    "When ENVOY_TSNET_ENABLED=false, /v1/* still served on public port (existing fallback behavior) — spec does not change this"
   ],
   "learningsInjected": [
-    "docs/solutions/deterministic-session-ids.md",
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md"
+    "envoy/listener-routing-by-topic-prefix.md",
+    "envoy/docker-tailscale-networking.md",
+    "envoy/contracts-and-handler-patterns.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/deterministic-session-ids.md",
-    "docs/solutions/daemon/server-side-dispatch-validation.md",
-    "docs/solutions/daemon/prompt-delivery-bootstrap-delay.md"
+    "envoy/contracts-and-handler-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T13:05:33.313Z"
+  "completed": "2026-04-11T20:21:30.953Z"
 }
