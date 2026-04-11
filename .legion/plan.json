@@ -1,5 +1,5 @@
 {
-  "taskCount": 1,
+  "taskCount": 2,
   "independentTasks": 1,
   "routingHints": {
     "complexity": "small",
@@ -8,19 +8,14 @@
     "skipArchitect": true
   },
   "concerns": [
-    "All 6 || true instances are identical config reads — genuinely best-effort but overly broad suppression",
-    "Adjacent || echo '{}' patterns on handoff reads are same error-suppression class but out of scope",
-    "Dangerous || true on handoff writes already fixed by #411 and #430"
+    "First subscribe after session activation sends empty title (title fetch is async); follow-up subscribe populates it once title arrives",
+    "envoy_subscribe tool may run before session.status event, so activeSessionTitle may be null — empty string is acceptable",
+    "envoy CLI script (dotfiles repo) needs separate follow-up to add TITLE column to envoy ps output"
   ],
-  "learningsInjected": [
-    "skill-patterns/worker-skill-failure-modes.md",
-    "skill-patterns/cross-cutting-workflow-concerns.md"
-  ],
-  "learningsHelpful": [
-    "skill-patterns/worker-skill-failure-modes.md"
-  ],
-  "workflowRecommendation": "Simple fix — single task replacing 6 identical lines. Skip retro, single implementer.",
+  "learningsInjected": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md"],
+  "learningsHelpful": ["architecture-patterns/nats-kv-dual-bucket-lifecycle.md"],
+  "workflowRecommendation": "Simple regression fix — skip retro, single implementer. Two tasks: Go plumbing (independent) then plugin (depends on Go). CLI script update is a separate dotfiles follow-up.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T21:38:49.870Z"
+  "completed": "2026-04-11T21:39:40.264Z"
 }
