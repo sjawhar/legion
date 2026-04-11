@@ -683,6 +683,58 @@ func TestSessionsHandler_JoinsRegistries(t *testing.T) {
 	}
 }
 
+func TestSessionsHandler_IncludesTitle(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect bus: %v", err)
+	}
+	t.Cleanup(func() { client.Conn.Close() })
+	resetListenerTestState(t, client.Conn)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create session registry: %v", err)
+	}
+	if _, err := registry.Upsert(store.Interest{
+		SessionID: "ses_titled",
+		MachineID: "test-machine",
+		Dir:       "/test/ses_titled",
+	}, []string{contracts.AgentSubject("ses_titled")}); err != nil {
+		t.Fatalf("failed to upsert interest: %v", err)
+	}
+	if err := sessions.Put("ses_titled", session.SessionEntry{
+		Port:      13382,
+		MachineID: "test-machine",
+		Dir:       "/test/ses_titled",
+		Title:     "My Session Title",
+	}); err != nil {
+		t.Fatalf("failed to put session entry: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	handler := sessionsHandler(registry, sessions)
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var items []sessionInfo
+	if err := json.NewDecoder(rec.Body).Decode(&items); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(items))
+	}
+	if items[0].Title != "My Session Title" {
+		t.Fatalf("expected title 'My Session Title', got %q", items[0].Title)
+	}
+}
+
 func TestSessionsHandler_NilSessionRegistry(t *testing.T) {
 	// When session registry is nil, endpoint returns 503
 	handler := sessionsHandler(nil, nil)
