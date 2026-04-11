@@ -138,7 +138,7 @@ digraph controller {
 The 9-step loop describes WHAT the controller does. Execution uses background polling via `task(run_in_background=true)`:
 
 1. **Main thread** — handles user messages, makes routing decisions, acts on poller reports. MUST never call `sleep` or block.
-2. **Background poller** — a persistent background task that fetches issues, posts to `/state/collect`, and reports state changes every ~60 seconds.
+2. **Background poller** — a persistent background task that calls `fetch-and-collect` (GitHub) or fetches issues and posts to `/state/collect` (Linear), and reports state changes every ~60 seconds.
 3. **Lifecycle:** Launch poller at session start. Check poller health each time the main thread processes a report — if the poller has stopped or timed out, re-launch immediately. The poller is disposable — cancel and re-launch freely.
 
 **Rules:**
@@ -180,16 +180,19 @@ These rules prevent the controller from burning its context window on redundant 
 ### 1. Fetch Issues
 
 ```bash
-# Derive OWNER and PROJECT_NUM from LEGION_ID for GitHub backend
+# Derive OWNER from LEGION_ID for GitHub backend (used for label/PR operations below)
 # LEGION_ID format for GitHub: "owner/project-number"
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
   OWNER="${LEGION_ID%%/*}"
-  PROJECT_NUM="${LEGION_ID##*/}"
 fi
 
-# Fetch issues based on backend
+# GitHub: the daemon fetches all project items internally (paginated GraphQL, 100 items/page)
+# and runs them through the state machine in one call.
+# Linear: fetch issues first, then pass to the state machine in step 3.
 if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
-  ISSUES_JSON=$(gh project item-list $PROJECT_NUM --owner $OWNER --format json)
+  COLLECTED=$(curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/fetch-and-collect \
+    -H 'Content-Type: application/json' \
+    -d '{"backend": "github"}')
 else
   ISSUES_JSON=$(linear_linear(action="search", query={"team": "$LEGION_ID"}))
 fi
@@ -197,7 +200,9 @@ fi
 ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
 ```
 
-**CRITICAL:** Pass `ISSUES_JSON` directly to the state endpoint in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles both Linear and GitHub formats. Injecting your own assumptions about labels, status, or other fields produces stale data and wrong actions.
+**CRITICAL (Linear only):** Pass `ISSUES_JSON` directly to the state endpoint in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles the raw Linear format.
+
+For GitHub, the daemon's `fetch-and-collect` endpoint handles fetching and state collection internally — no raw issue JSON is involved.
 
 ### 2. Relay User Feedback
 
@@ -209,10 +214,14 @@ When both `user-input-needed` AND `user-feedback-given` labels present:
 
 Analyze via daemon:
 ```bash
-COLLECTED=$(echo "$ISSUES_JSON" | jq -Rs --arg backend "$LEGION_ISSUE_BACKEND" \
-  '{"backend": $backend, "issues": (. | fromjson)}' | \
-  curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect \
-  -H 'Content-Type: application/json' --data @-)
+# For GitHub, COLLECTED was already set by fetch-and-collect in step 1.
+# For Linear, pipe issues to the state machine now.
+if [ "$LEGION_ISSUE_BACKEND" != "github" ]; then
+  COLLECTED=$(echo "$ISSUES_JSON" | jq -Rs --arg backend "$LEGION_ISSUE_BACKEND" \
+    '{"backend": $backend, "issues": (. | fromjson)}' | \
+    curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect \
+    -H 'Content-Type: application/json' --data @-)
+fi
 ```
 
 The state endpoint returns JSON with both `suggestedAction` and raw signals:
@@ -825,17 +834,18 @@ issue is fully complete and no further prompts will be sent.
 
 ### 1. Trust the state machine
 
-The state machine checks worker liveness, PR status, labels, and draft state. POST issue
-data to `/state/collect` and route by `suggestedAction`. Don't independently check PRs,
-ports, or process status — that's the state machine's job.
+The state machine checks worker liveness, PR status, labels, and draft state. Use
+`fetch-and-collect` (GitHub) or POST issue data to `/state/collect` (Linear) and route
+by `suggestedAction`. Don't independently check PRs, ports, or process status — that's
+the state machine's job.
 
 For the full observability architecture and failure case studies, see `docs/solutions/daemon/controller-observability.md`.
 
 ### 2. Never reconstruct state machine input
 
-Pass issue tracker output directly to `/state/collect`. Do not hand-craft JSON, filter
-issues, or inject your own assumptions about labels or status. The state machine's
-parser handles the raw format.
+For GitHub, call `fetch-and-collect` — the daemon fetches project items internally via
+paginated GraphQL. For Linear, pass tracker output directly to `/state/collect`. Never
+hand-craft JSON, filter issues, or inject your own assumptions about labels or status.
 
 ### 3. Fresh data every loop iteration
 
@@ -908,7 +918,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 
 | Thought | What to do instead |
 |---------|--------------------|
-| "Let me construct the JSON for the state machine" | POST tracker output to `/state/collect` directly — no hand-crafting |
+| "Let me construct the JSON for the state machine" | Use `fetch-and-collect` (GitHub) or POST tracker output to `/state/collect` (Linear) — no hand-crafting |
 | "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
 | "The changes are lost" | Check open PRs (`gh pr list`), worker workspaces (daemon API), and issue comments before concluding anything is lost. Do NOT run `jj` — dispatch a worker to check version control. |
 | "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Invoke the skill. Let the workflow guide the worker. |
