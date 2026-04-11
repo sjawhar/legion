@@ -2,22 +2,22 @@
   "passed": 12,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "knowledge-injection.md is clear and comprehensive (91 lines). P2: line 91 refers to deprecated `learningsUsed` instead of canonical `learningsInjected` — inconsistency introduced when #239 renamed the field but didn't update the reference file.",
+  "documentationFeedback": "PR description is clear and well-structured with changes listed by file and message format convention. Issue body describes both problems with evidence (PR #393 silent failure).",
   "observations": [
-    "P2: references/knowledge-injection.md line 91 says `learningsUsed` but canonical field is `learningsInjected` (renamed in #239)",
-    "Production evidence: #218's own architect handoff includes learningsInjected/learningsHelpful with real values, proving end-to-end functionality",
-    "Pre-existing test failures (3/1154): 2 from @pulumi/docker infra tests, 1 from daemon env var test — unrelated to #218"
+    "P3: .legion/implement.json missing trailing newline — non-functional",
+    "state: MERGED detection in step 6 is a good addition for handling concurrent merge processes",
+    "All envoy_publish calls follow fire-and-forget pattern consistent with envoy-auto-subscription-patterns.md"
   ],
   "learningsInjected": [
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "daemon/handoff-schema-migration-patterns.md",
-    "skill-patterns/worker-skill-failure-modes.md"
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
   ],
   "learningsHelpful": [
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "daemon/handoff-schema-migration-patterns.md"
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T13:18:59.785Z"
+  "completed": "2026-04-11T13:42:29.763Z"
 }

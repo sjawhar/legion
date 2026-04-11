@@ -13,8 +13,29 @@ Before doing anything, verify the PR is open and mergeable:
 gh pr view "$LEGION_ISSUE_ID" --json state,merged,mergeable
 ```
 
-- If **already merged**: verify changes are on main (`jj log --revisions main`), then exit cleanly.
-- If **closed without merge**: escalate with `user-input-needed` — something unexpected happened.
+- If **already merged**: verify changes are on main (`jj log --revisions main`), then notify the controller and exit cleanly:
+  - Remove `worker-active`:
+    - **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
+    - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active"])`
+  - Notify controller (best-effort):
+    ```
+    envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER merge skipped — PR already merged")
+    ```
+    If `envoy_publish` fails, continue — the label is the source of truth.
+  - Exit
+- If **closed without merge**: something unexpected happened.
+  - Post comment:
+    - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "PR was closed without merging. Unexpected state — needs investigation." -R $OWNER/$REPO`
+    - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="PR was closed without merging. Unexpected state.")`
+  - Add `user-input-needed`:
+    - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+    - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
+  - Notify controller (best-effort):
+    ```
+    envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge failed — PR closed without merge")
+    ```
+    If `envoy_publish` fails, continue — the label is the source of truth.
+  - Exit
 - If **open**: proceed to step 2.
 
 ### 2. Rebase onto Main
@@ -39,6 +60,11 @@ If rebase produces conflicts:
 - Post comment describing the conflict
   - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
   - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
+- Notify controller (best-effort):
+  ```
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge failed — unresolvable rebase conflict")
+  ```
+  If `envoy_publish` fails, continue — the label is the source of truth.
 - Exit
 
 **Protected files:** The `.legion/` directory contains handoff data between pipeline phases. These files are intentional and must be preserved during merge — do not remove them or add `.legion/` to `.gitignore`.
@@ -64,20 +90,80 @@ gh pr checks "$LEGION_ISSUE_ID" --watch
 
 Only escalate with `user-input-needed` if something has gone fundamentally wrong (e.g., infrastructure issues, impossible conflicts, external service failures). Normal code issues like type errors should be fixed, not escalated.
 
-### 6. Merge
+**If CI fails with a fundamental issue** (infrastructure failures, impossible conflicts, external service errors — NOT normal code issues):
+- Post comment explaining the fundamental failure:
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge blocked: CI has a fundamental failure that cannot be fixed by the merge worker. [describe the issue]" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge blocked: fundamental CI failure.")`
+- Add `user-input-needed` label:
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
+- Notify controller (best-effort):
+  ```
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge blocked — fundamental CI failure")
+  ```
+  If `envoy_publish` fails, continue — the label is the source of truth.
+- Exit
+
+### 6. Merge (with conflict retry)
+
+Attempt to merge. If the merge fails due to a race condition (main moved since rebase), retry.
 
 ```bash
 gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch
 ```
 
-**If merge fails with a permission error** (e.g., external repo you don't own):
-- Post a comment explaining the permission issue
-  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "..." -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="...")`
-- Add `user-input-needed` label
+**If merge succeeds:** Proceed to step 7.
+
+**If merge fails — classify the failure** by checking PR state:
+
+```bash
+gh pr view "$LEGION_ISSUE_ID" --json state,mergeable,mergeStateStatus -R $OWNER/$REPO
+```
+
+**If `state` is `MERGED`:** The PR was merged by another process (manual merge, auto-merge). Proceed to step 7 — this is a success, not a failure.
+
+**If `mergeStateStatus` is `BEHIND` or `DIRTY` (race condition — main moved):**
+
+Retry up to **2 times** (track your retry count):
+
+1. Rebase onto latest main:
+   ```bash
+   jj git fetch
+   jj rebase -d main
+   ```
+2. Verify clean rebase — `jj status` must show no conflicts. If conflicts exist, resolve them (same as step 3). If conflicts are unresolvable, exit via the unresolvable-conflict path in step 3.
+3. Push: `jj git push`
+4. Wait for CI: `gh pr checks "$LEGION_ISSUE_ID" --watch` — fix any CI failures (same as step 5)
+5. Retry merge: `gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch`
+6. If merge succeeds, proceed to step 7. If it fails again, go back to substep 1 (unless retries exhausted).
+
+**If merge still fails after 2 retries:**
+- Post comment:
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge failed after 2 conflict retries. The PR keeps falling behind main despite rebasing. Manual intervention needed." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge failed after 2 conflict retries. Manual intervention needed.")`
+- Add `user-input-needed` label:
   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
-- Exit — the user needs to merge manually or grant access
+- Notify controller (best-effort):
+  ```
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge failed after 2 conflict retries")
+  ```
+  If `envoy_publish` fails, continue — the label is the source of truth.
+- Exit
+
+**If merge fails for any other reason** (permission error, unknown error — inspect the error output to determine the cause):
+- Post a comment describing the failure and what you observed:
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge failed: [describe the error — permission denied, unexpected API error, etc.]. Manual intervention needed." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge failed: [describe error].")`
+- Add `user-input-needed` label:
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
+- Notify controller (best-effort):
+  ```
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge failed — [brief error description]")
+  ```
+  If `envoy_publish` fails, continue — the label is the source of truth.
+- Exit
 
 ### 7. Close Issue
 

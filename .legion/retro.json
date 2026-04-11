@@ -1,7 +1,10 @@
 {
-  "skipped": true,
-  "reason": "no significant learnings — implement phase was a no-op (sub-issues #238/#239 already complete)",
+  "skipped": false,
+  "docsCreated": [
+    "docs/solutions/skill-patterns/worker-notification-conventions.md",
+    "docs/solutions/skill-patterns/merge-retry-race-condition-pattern.md"
+  ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T13:31:56.968Z"
+  "completed": "2026-04-11T16:32:11.200Z"
 }

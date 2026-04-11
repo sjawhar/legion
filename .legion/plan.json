@@ -1,24 +1,37 @@
 {
-  "taskCount": 0,
-  "independentTasks": 0,
+  "learningsInjected": [
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
+    "docs/solutions/daemon/envoy-auto-subscription-patterns.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md",
+    "docs/solutions/skill-patterns/worker-skill-failure-modes.md"
+  ],
+  "scope": "small",
+  "components": [
+    ".opencode/skills/legion-worker/workflows/merge.md",
+    ".opencode/skills/legion-worker/SKILL.md",
+    ".opencode/skills/legion-worker/workflows/architect.md",
+    ".opencode/skills/legion-worker/workflows/plan.md"
+  ],
+  "planFile": "docs/superpowers/plans/2026-04-11-worker-failure-notifications-merge-retry.md",
+  "taskCount": 3,
+  "requiredSkills": [],
+  "subIssues": [],
   "routingHints": {
-    "complexity": "none",
-    "estimatedImplementers": 0,
-    "skipRetro": true,
-    "skipArchitect": true
+    "skipRetro": false,
+    "complexity": "small",
+    "estimatedImplementers": 1
   },
   "concerns": [
-    "All implementable sub-issues (#238, #239) are already CLOSED with worker-done and test-passed labels.",
-    "Sub-issue #240 (index evolution) is intentionally blocked until 20+ issues accumulate feedback data — do NOT attempt to implement.",
-    "No plan produced — nothing remains to implement for #218."
+    "Merge retry substeps must NOT contain envoy_publish — only terminal exits notify",
+    "Permission errors and unknown errors are merged into one catch-all path using agent judgment on error output",
+    "implement.md and review.md have no inline escalation exits — they rely on SKILL.md shared protocol",
+    "test.md already has pass/fail notifications — only its escalation path via SKILL.md needs the new notification",
+    "Linear backend variants must be included alongside GitHub commands in all exit paths"
   ],
-  "learningsInjected": [
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "daemon/handoff-schema-migration-patterns.md"
-  ],
-  "learningsHelpful": [],
-  "workflowRecommendation": "No implementation needed — close #218 as completed. #240 remains open as separate tracking ticket.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T13:02:16.603Z"
+  "completed": "2026-04-11T13:18:43.284Z"
 }

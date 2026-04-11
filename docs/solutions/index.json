@@ -12,7 +12,7 @@
       "github-api/graphql-org-user-fallback.md",
       "daemon/controller-retro-20h-bug-pipeline-optimization.md",
       "controller/controller-session-anti-patterns.md",
-      "daemon/server-side-dispatch-validation.md"
+      "daemon/server-side-dispatch-validation.md",
       "daemon/state-machine-action-display-mismatch.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
@@ -53,7 +53,7 @@
       "daemon/envoy-auto-subscription-patterns.md",
       "daemon/server-side-dispatch-validation.md",
       "daemon/prompt-delivery-bootstrap-delay.md",
-      "daemon/handoff-schema-migration-patterns.md"
+      "daemon/handoff-schema-migration-patterns.md",
       "daemon/state-machine-action-display-mismatch.md"
     ],
     "packages/daemon": [
@@ -73,7 +73,9 @@
       "testing/worker-smoke-testing-requirements.md",
       "daemon/envoy-auto-subscription-patterns.md",
       "skill-patterns/cross-cutting-workflow-concerns.md",
-      "daemon/handoff-schema-migration-patterns.md"
+      "daemon/handoff-schema-migration-patterns.md",
+      "skill-patterns/worker-notification-conventions.md",
+      "skill-patterns/merge-retry-race-condition-pattern.md"
     ],
     ".opencode/skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
@@ -89,7 +91,9 @@
       "skill-patterns/parallel-subagent-background-execution.md",
       "delegation/delegation-hardening-retro.md",
       "delegation/hardening-patterns.md",
-      "skill-patterns/cross-cutting-workflow-concerns.md"
+      "skill-patterns/cross-cutting-workflow-concerns.md",
+      "skill-patterns/worker-notification-conventions.md",
+      "skill-patterns/merge-retry-race-condition-pattern.md"
     ],
     "tests": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
     "tag:SIGTERM": ["daemon/opencode-serve-lifecycle.md"],
@@ -191,7 +195,10 @@
       "integration-issues/linear-mcp-label-resolution.md"
     ],
     "tag:mcp": ["integration-issues/linear-mcp-label-resolution.md"],
-    "tag:merge": ["skill-patterns/worker-skill-failure-modes.md"],
+    "tag:merge": [
+      "skill-patterns/worker-skill-failure-modes.md",
+      "skill-patterns/merge-retry-race-condition-pattern.md"
+    ],
     "tag:migration": ["architecture-patterns/plugin-migration-assessment.md"],
     "tag:mocking": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
     "tag:modular-architecture": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
@@ -228,7 +235,10 @@
     ],
     "tag:pytest-mock": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
     "tag:python": ["best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md"],
-    "tag:race-condition": ["architecture-patterns/shared-state-file-ownership.md"],
+    "tag:race-condition": [
+      "architecture-patterns/shared-state-file-ownership.md",
+      "skill-patterns/merge-retry-race-condition-pattern.md"
+    ],
     "tag:dead-code": ["best-practices/typescript-dead-code-audit.md"],
     "tag:noUnusedLocals": ["best-practices/typescript-dead-code-audit.md"],
     "tag:barrel-exports": ["best-practices/typescript-dead-code-audit.md"],
@@ -251,13 +261,14 @@
     "tag:skill-authoring": ["skill-patterns/parallel-subagent-background-execution.md"],
     "tag:skills": [
       "skill-patterns/worker-skill-failure-modes.md",
-      "skill-patterns/cross-cutting-workflow-concerns.md"
+      "skill-patterns/cross-cutting-workflow-concerns.md",
+      "skill-patterns/worker-notification-conventions.md"
     ],
     "tag:stale-detection": ["delegation/delegation-hardening-retro.md"],
     "tag:state-file": ["architecture-patterns/shared-state-file-ownership.md"],
     "tag:state-machine": [
       "daemon/controller-observability.md",
-      "integration-issues/github-graphql-pr-draft-status.md"
+      "integration-issues/github-graphql-pr-draft-status.md",
       "daemon/state-machine-action-display-mismatch.md"
     ],
     "tag:state-management": ["daemon/controller-lifecycle-separation.md"],
@@ -272,7 +283,7 @@
     "tag:testing": [
       "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md",
       "github-api/graphql-org-user-fallback.md",
-      "testing/worker-smoke-testing-requirements.md"
+      "testing/worker-smoke-testing-requirements.md",
       "daemon/state-machine-action-display-mismatch.md"
     ],
     "tag:tmux": ["integration-patterns/tmux-askuserquestion-navigation.md"],
@@ -281,10 +292,14 @@
     "tag:worker-isolation": ["daemon/worker-directory-resolution.md"],
     "tag:worker-lifecycle": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
-      "testing/worker-smoke-testing-requirements.md"
+      "testing/worker-smoke-testing-requirements.md",
+      "skill-patterns/worker-notification-conventions.md"
     ],
     "tag:worker-spawning": ["daemon/worker-directory-fix.md"],
-    "tag:workers": ["skill-patterns/worker-skill-failure-modes.md"],
+    "tag:workers": [
+      "skill-patterns/worker-skill-failure-modes.md",
+      "skill-patterns/worker-notification-conventions.md"
+    ],
     "tag:workflow-design": [
       "skill-patterns/parallel-subagent-background-execution.md",
       "skill-patterns/cross-cutting-workflow-concerns.md"
@@ -415,6 +430,26 @@
     "tag:display-logic": ["daemon/state-machine-action-display-mismatch.md"],
     "tag:formatter": ["daemon/state-machine-action-display-mismatch.md"],
     "tag:poll": ["daemon/state-machine-action-display-mismatch.md"],
-    "packages/envoy/internal/mcpbridge": ["testing/sse-mock-initialization-order.md"]
+    "packages/envoy/internal/mcpbridge": ["testing/sse-mock-initialization-order.md"],
+    "tag:notifications": [
+      "skill-patterns/worker-notification-conventions.md",
+      "daemon/envoy-auto-subscription-patterns.md"
+    ],
+    "tag:escalation": [
+      "skill-patterns/worker-notification-conventions.md"
+    ],
+    "tag:conventions": [
+      "skill-patterns/worker-notification-conventions.md"
+    ],
+    "tag:retry": [
+      "skill-patterns/merge-retry-race-condition-pattern.md"
+    ],
+    "tag:conflict-resolution": [
+      "skill-patterns/merge-retry-race-condition-pattern.md"
+    ],
+    "tag:github-api": [
+      "skill-patterns/merge-retry-race-condition-pattern.md",
+      "github-api/graphql-org-user-fallback.md"
+    ]
   }
 }
