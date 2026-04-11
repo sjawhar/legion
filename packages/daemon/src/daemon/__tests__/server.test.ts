@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -76,6 +76,7 @@ describe("daemon server", () => {
     getControllerState?: () => { sessionId: string; port?: number } | undefined;
     legionId?: string;
     extraProjects?: string[];
+    fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
   }) {
     createSessionCalls = [];
     deleteSessionCalls = [];
@@ -102,6 +103,7 @@ describe("daemon server", () => {
       tmuxSession: options?.tmuxSession,
       feedbackLogger: options?.feedbackLogger,
       getControllerState: options?.getControllerState,
+      fetchProjectItems: options?.fetchProjectItems,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -122,7 +124,6 @@ describe("daemon server", () => {
     Bun.spawn = originalSpawn;
     globalThis.fetch = originalFetch;
     console.warn = originalConsoleWarn;
-    mock.restore();
     sessionStatusHandler = null;
     if (stopServer) {
       stopServer();
@@ -1521,20 +1522,18 @@ describe("daemon server", () => {
     describe("multi-board fetch-and-collect", () => {
       let boardMocks = new Map<string, unknown>();
 
-      function mockBoardFetches() {
-        mock.module("../../state/github-fetch", () => ({
-          fetchGitHubProjectItems: async (owner: string, projectNumber: number) => {
-            const key = `${owner}/${projectNumber}`;
-            const result = boardMocks.get(key);
-            if (result instanceof Error) {
-              throw result;
-            }
-            if (result === undefined) {
-              throw new Error(`No mock for board ${key}`);
-            }
-            return result;
-          },
-        }));
+      function makeFetchProjectItems() {
+        return async (owner: string, projectNumber: number) => {
+          const key = `${owner}/${projectNumber}`;
+          const result = boardMocks.get(key);
+          if (result instanceof Error) {
+            throw result;
+          }
+          if (result === undefined) {
+            throw new Error(`No mock for board ${key}`);
+          }
+          return result;
+        };
       }
 
       function makeGitHubProjectItem(
@@ -1560,8 +1559,7 @@ describe("daemon server", () => {
         boardMocks = new Map([
           ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo", "Primary issue")]],
         ]);
-        mockBoardFetches();
-        await startTestServer({ legionId: "acme/123" });
+        await startTestServer({ legionId: "acme/123", fetchProjectItems: makeFetchProjectItems() });
 
         const response = await requestJson("/state/fetch-and-collect", {
           method: "POST",
@@ -1582,8 +1580,11 @@ describe("daemon server", () => {
           ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo", "Primary issue")]],
           ["acme/456", [makeGitHubProjectItem("other/repo", 5, "In Progress", "Extra issue")]],
         ]);
-        mockBoardFetches();
-        await startTestServer({ legionId: "acme/123", extraProjects: ["acme/456"] });
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
 
         const response = await requestJson("/state/fetch-and-collect", {
           method: "POST",
@@ -1613,8 +1614,11 @@ describe("daemon server", () => {
             [makeGitHubProjectItem("acme/widgets", 42, "In Progress", "Secondary copy")],
           ],
         ]);
-        mockBoardFetches();
-        await startTestServer({ legionId: "acme/123", extraProjects: ["acme/456"] });
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
 
         const response = await requestJson("/state/fetch-and-collect", {
           method: "POST",
@@ -1643,8 +1647,11 @@ describe("daemon server", () => {
           ["acme/456", new Error("extra board unavailable")],
         ];
         boardMocks = new Map(boardEntries);
-        mockBoardFetches();
-        await startTestServer({ legionId: "acme/123", extraProjects: ["acme/456"] });
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
 
         const response = await requestJson("/state/fetch-and-collect", {
           method: "POST",
@@ -1664,8 +1671,11 @@ describe("daemon server", () => {
           ["acme/456", new Error("extra failed")],
         ];
         boardMocks = new Map(boardEntries);
-        mockBoardFetches();
-        await startTestServer({ legionId: "acme/123", extraProjects: ["acme/456"] });
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
 
         const response = await requestJson("/state/fetch-and-collect", {
           method: "POST",

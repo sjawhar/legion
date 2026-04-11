@@ -63,6 +63,8 @@ export interface ServerOptions {
     rebuild: () => Promise<CodebaseIndexResponse>;
   };
   feedbackLogger?: FeedbackLogger;
+  /** Injectable fetcher for testing — defaults to fetchGitHubProjectItems */
+  fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
 }
 
 interface ErrorResponse {
@@ -1364,7 +1366,8 @@ export function startServer(opts: ServerOptions): {
                   if (!Number.isFinite(projectNumber)) {
                     throw new Error("invalid_team_id: project number not a number");
                   }
-                  const rawIssues = await fetchGitHubProjectItems(boardParts[0], projectNumber);
+                  const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
+                  const rawIssues = await fetchFn(boardParts[0], projectNumber);
                   collectedBoards.push({ boardId, rawIssues });
                 } catch (error) {
                   const message = error instanceof Error ? error.message : String(error);
