@@ -665,14 +665,17 @@ export function startServer(opts: ServerOptions): {
             let resolvedWorkspace: string | null = null;
             const repoRef = typeof repo === "string" ? parseIssueRepo(repo) : null;
             // Auto-extract issueNumber from issueId when not explicitly provided.
-            // GitHub issue IDs follow the format {owner}-{repo}-{number}.
+            // GitHub issue IDs follow the format {owner}-{repo}-{number}[-{slug}].
             if (issueNumber === undefined && repoRef) {
               const prefix = `${repoRef.owner}-${repoRef.repo}-`.toLowerCase();
               if (normalizedIssueId.startsWith(prefix)) {
-                const numStr = normalizedIssueId.slice(prefix.length);
-                const parsed = Number(numStr);
-                if (Number.isInteger(parsed) && parsed > 0) {
-                  issueNumber = parsed;
+                const remainder = normalizedIssueId.slice(prefix.length);
+                const match = remainder.match(/^(\d+)(?:-|$)/);
+                if (match) {
+                  const parsed = Number(match[1]);
+                  if (Number.isInteger(parsed) && parsed > 0) {
+                    issueNumber = parsed;
+                  }
                 }
               }
             }

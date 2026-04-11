@@ -1799,6 +1799,100 @@ describe("daemon server", () => {
       expect(planWorker?.issueNumber).toBe(44);
     });
 
+    it("auto-extracts issueNumber from compound issueId with trailing slug", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-44-calendar-email-expense-review",
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+
+      const workerRes = await requestJson("/workers");
+      const workers = (await workerRes.json()) as Array<{
+        id: string;
+        issueNumber?: number;
+      }>;
+      const worker = workers.find(
+        (w) => w.id === "acme-widgets-44-calendar-email-expense-review-implement"
+      );
+      expect(worker?.issueNumber).toBe(44);
+    });
+
+    it("does not extract issueNumber when no leading digits after prefix", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-calendar",
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+
+      const workerRes = await requestJson("/workers");
+      const workers = (await workerRes.json()) as Array<{
+        id: string;
+        issueNumber?: number;
+      }>;
+      const worker = workers.find((w) => w.id === "acme-widgets-calendar-implement");
+      expect(worker?.issueNumber).toBeUndefined();
+    });
+
+    it("does not extract issueNumber when issue number is zero", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-0",
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+
+      const workerRes = await requestJson("/workers");
+      const workers = (await workerRes.json()) as Array<{
+        id: string;
+        issueNumber?: number;
+      }>;
+      const worker = workers.find((w) => w.id === "acme-widgets-0-implement");
+      expect(worker?.issueNumber).toBeUndefined();
+    });
+
+    it("does not extract issueNumber when digits are followed by letters", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-123abc",
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+
+      const workerRes = await requestJson("/workers");
+      const workers = (await workerRes.json()) as Array<{
+        id: string;
+        issueNumber?: number;
+      }>;
+      const worker = workers.find((w) => w.id === "acme-widgets-123abc-implement");
+      expect(worker?.issueNumber).toBeUndefined();
+    });
+
     it("skips Envoy subscribe when issueNumber is absent", async () => {
       const envoySubscribeCalls: EnvoySubscribeCall[] = [];
       mockFetchForEnvoy(envoySubscribeCalls);

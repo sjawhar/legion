@@ -1,31 +1,23 @@
 {
   "filesChanged": [
-    "packages/daemon/src/cli/poll-formatter.ts",
-    "packages/daemon/src/cli/__tests__/poll-formatter.test.ts",
-    "packages/daemon/src/cli/index.ts",
     "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/state/types.ts"
+    "packages/daemon/src/daemon/__tests__/server.test.ts"
   ],
   "trickyParts": [
-    "Blocking conditions (user-input-needed, stale worker-active) must be checked BEFORE suggestedAction in the formatter — the state machine assigns non-skip actions like remove_worker_active_and_redispatch to stale workers, which would appear as ACTIONABLE without this precedence",
-    "IssueStateDict was not exported from types.ts — needed to export it for the formatter to type-check against, which is a minor cross-module coupling (acceptable given existing patterns)"
+    "Brace nesting required extra closing } for the new if (match) block — original code had 2 levels (startsWith + isInteger), new code has 3 levels (startsWith + match + isInteger)"
   ],
   "deviations": [
-    "Exported IssueStateDict from types.ts — plan referenced it in imports but it was not exported (prerequisite not in plan)",
-    "Refactored title extraction in server.ts to avoid double extraction — plan showed re-calling extractGitHubIssueTitles, implementation stores the Map and reuses it",
-    "CI checks never triggered on this PR despite workflow files existing — local verification (biome, tsc, bun test) passed; CI may need to be checked manually by tester/reviewer"
+    "Added 2 additional edge case tests (owner-repo-0, owner-repo-123abc) from cross-family review findings — plan only specified compound ID and no-digits tests",
+    "Updated comment in server.ts to reflect broader {owner}-{repo}-{number}[-{slug}] format"
   ],
-  "openQuestions": [
-    "CI did not trigger on PR #402 — may be a runner availability or repo configuration issue",
-    "1 pre-existing test failure in daemon/__tests__/index.test.ts (passes controller env vars to adapter.start on startup) — unrelated to poll changes"
-  ],
+  "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [
-    "docs/solutions/daemon/controller-observability.md",
+    "docs/solutions/daemon/server-side-dispatch-validation.md",
     "docs/solutions/testing/bun-fetch-mocking-patterns.md"
   ],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T01:03:17.869Z"
+  "completed": "2026-04-11T02:54:54.282Z"
 }
