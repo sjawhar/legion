@@ -49,6 +49,7 @@
       "testing/ci-merge-type-compatibility.md",
       "daemon/session-adoption-api-pattern.md",
       "daemon/health-tick-baseline-isolation.md"
+      "daemon/config-resolution-patterns.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -60,6 +61,7 @@
       "daemon/state-machine-action-display-mismatch.md",
       "daemon/session-adoption-api-pattern.md",
       "skill-patterns/agent-workflow-enforcement-patterns.md"
+      "daemon/config-resolution-patterns.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -142,6 +144,7 @@
     "tag:code-review": ["daemon/deferred-review-comments-pattern.md"],
     "tag:concurrency": ["delegation/delegation-hardening-retro.md"],
     "tag:config-schema": ["delegation/hardening-patterns.md"],
+    "tag:deprecation": ["daemon/config-resolution-patterns.md"],
     "tag:controller": [
       "daemon/controller-observability.md",
       "integration-patterns/controller-worker-protocol.md",
@@ -161,6 +164,7 @@
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "daemon/shared-serve-refactor.md",
       "daemon/shared-serve-retro.md"
+      "daemon/config-resolution-patterns.md"
     ],
     "tag:directory-resolution": ["daemon/worker-directory-fix.md"],
     "tag:dispatch": ["integration-patterns/controller-worker-protocol.md"],
@@ -295,6 +299,7 @@
     ],
     "tag:tmux": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:validation": ["daemon/workspace-validation-retro.md"],
+      "daemon/config-resolution-patterns.md"
     "tag:worker": ["integration-patterns/controller-worker-protocol.md"],
     "tag:worker-isolation": ["daemon/worker-directory-resolution.md"],
     "tag:worker-lifecycle": [
