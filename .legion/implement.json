@@ -1,27 +1,22 @@
 {
+  "status": "complete",
+  "pr": 440,
+  "branch": "sjawhar-legion-432",
   "filesChanged": [
-    ".opencode/skills/legion-worker/workflows/architect.md",
-    ".opencode/skills/legion-worker/workflows/plan.md",
-    ".opencode/skills/legion-worker/workflows/implement.md",
-    ".opencode/skills/legion-worker/workflows/test.md",
-    ".opencode/skills/legion-worker/workflows/review.md",
-    ".opencode/skills/legion-retro/SKILL.md",
-    ".opencode/skills/legion-worker/SKILL.md",
-    "packages/daemon/src/cli/__tests__/handoff.test.ts"
+    "packages/envoy/internal/session/registry.go",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/main_test.go",
+    "packages/envoy-plugin/src/index.ts",
+    "packages/envoy-plugin/src/__tests__/index.test.ts"
   ],
-  "trickyParts": [
-    "FATAL messaging is social enforcement, not mechanical — exit 1 in markdown code blocks kills the agent shell session, so we rely on FATAL + STOP directives that agents read as instructions. This was a deliberate plan constraint.",
-    "Exit gate must conditionally exclude merge mode since merge does not write handoff data"
+  "testsAdded": [
+    "TestSessionsHandler_IncludesTitle (Go)",
+    "session title > includes title in follow-up subscribe after session activation (TS)"
   ],
-  "deviations": [],
-  "openQuestions": [],
-  "subPlanningNeeded": false,
-  "learningsInjected": [
-    "docs/solutions/skill-patterns/worker-skill-failure-modes.md",
-    "docs/solutions/skill-patterns/cross-cutting-workflow-concerns.md"
-  ],
-  "learningsHelpful": ["docs/solutions/skill-patterns/worker-skill-failure-modes.md"],
+  "reviewFindings": "Oracle review found session-switch race in title fetch callback — fixed by guarding state mutation with activeSessionID === sessionID check",
+  "ciStatus": "6/6 green",
+  "notes": "Follow-up needed: update envoy CLI script in dotfiles repo to add TITLE column to envoy ps output",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T21:50:13.793Z"
+  "completed": "2026-04-11T21:58:38.461Z"
 }

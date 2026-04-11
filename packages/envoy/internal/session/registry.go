@@ -16,6 +16,7 @@ type SessionEntry struct {
 	Port      int    `json:"port"`
 	MachineID string `json:"machine_id"`
 	Dir       string `json:"dir"`
+	Title     string `json:"title"`
 	UpdatedAt int64  `json:"updated_at"`
 }
 

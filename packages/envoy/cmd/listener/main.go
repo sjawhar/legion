@@ -114,6 +114,7 @@ type sessionInfo struct {
 	MachineID string   `json:"machine_id"`
 	Dir       string   `json:"dir"`
 	Port      int      `json:"port"`
+	Title     string   `json:"title"`
 	Topics    []string `json:"topics"`
 	UpdatedAt int64    `json:"updated_at"`
 }
@@ -143,6 +144,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				MachineID: entry.MachineID,
 				Dir:       entry.Dir,
 				Port:      entry.Port,
+				Title:     entry.Title,
 				UpdatedAt: entry.UpdatedAt,
 			}
 			if registry != nil {
@@ -303,6 +305,7 @@ func main() {
 			Dir       string   `json:"dir"`
 			Topics    []string `json:"topics"`
 			Port      int      `json:"port"`
+		Title     string   `json:"title"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
@@ -323,6 +326,7 @@ func main() {
 				Port:      body.Port,
 				MachineID: cfg.MachineID,
 				Dir:       body.Dir,
+				Title:     body.Title,
 			}); err != nil {
 				log.Printf("listener session registry put failed session=%s: %v", body.SessionID, err)
 			}

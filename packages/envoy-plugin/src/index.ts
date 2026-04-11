@@ -18,6 +18,7 @@ async function call(path: string, init?: RequestInit) {
 
 export default async (input: { serverUrl: URL }) => {
   let activeSessionID: string | null = null;
+  let activeSessionTitle: string | null = null;
   /** Cached port — resolved asynchronously, null until first successful resolution. */
   let resolvedPort: number | null = null;
 
@@ -45,6 +46,20 @@ export default async (input: { serverUrl: URL }) => {
     return value !== null;
   };
 
+  /** Fetch session title from the OpenCode serve API. Best-effort — returns null on failure. */
+  const fetchTitle = async (sessionID: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`${input.serverUrl.href}session/${sessionID}`, {
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { title?: string };
+      return data.title ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   // Defer port resolution to background — never block plugin init.
   // The port sync loop retries every second until resolved.
   const timer = setInterval(() => {
@@ -70,6 +85,7 @@ export default async (input: { serverUrl: URL }) => {
           dir: process.cwd(),
           topics: [`notifications.agent.${activeSessionID}`],
           port,
+          title: activeSessionTitle ?? "",
         }),
       }).catch(() => {});
     },
@@ -96,8 +112,15 @@ export default async (input: { serverUrl: URL }) => {
         const sessionID = event.properties?.sessionID as string | undefined;
         if (sessionID && sessionID !== activeSessionID) {
           activeSessionID = sessionID;
+          activeSessionTitle = null;
           await syncPort();
           const port = currentPort();
+          // Fetch title — best-effort, non-blocking for initial subscribe
+          const titlePromise = fetchTitle(sessionID).then((t) => {
+            // Guard: only update if this session is still active (prevents race on fast switches)
+            if (t && activeSessionID === sessionID) activeSessionTitle = t;
+            return t;
+          });
           if (port) {
             call("/v1/interests/subscribe", {
               method: "POST",
@@ -107,8 +130,25 @@ export default async (input: { serverUrl: URL }) => {
                 dir: process.cwd(),
                 topics: [`notifications.agent.${sessionID}`],
                 port,
+                title: activeSessionTitle ?? "",
               }),
             }).catch(() => {});
+            // After title arrives, send one follow-up subscribe with title populated
+            titlePromise.then((title) => {
+              if (title && activeSessionID === sessionID) {
+                call("/v1/interests/subscribe", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    session_id: sessionID,
+                    dir: process.cwd(),
+                    topics: [`notifications.agent.${sessionID}`],
+                    port: currentPort() ?? 0,
+                    title,
+                  }),
+                }).catch(() => {});
+              }
+            });
           }
         }
       }
@@ -134,6 +174,7 @@ export default async (input: { serverUrl: URL }) => {
               dir: ctx.directory,
               topics: args.topics,
               port: currentPort() ?? 0,
+              title: activeSessionTitle ?? "",
             }),
           });
         },
@@ -258,7 +299,7 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_sessions: tool({
         description:
-          "List all live sessions registered with Envoy. Returns session ID, machine ID, port, directory, topics, and last-seen timestamp for each. Use the optional machine filter to show only sessions on a specific host.",
+          "List all live sessions registered with Envoy. Returns session ID, machine ID, port, directory, title, topics, and last-seen timestamp for each. Use the optional machine filter to show only sessions on a specific host.",
         args: {
           machine: tool.schema
             .string()
