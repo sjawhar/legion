@@ -1,10 +1,23 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 0,
+  "minor": 2,
   "verdict": "approved",
-  "keyFindings": [],
+  "keyFindings": [
+    {
+      "severity": "P3",
+      "file": "packages/envoy-plugin/src/__tests__/index.test.ts",
+      "description": "No unit test for envoy_sessions machine filter path (client-side filter logic untested). Trivial one-liner, low risk."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/envoy-plugin/src/__tests__/index.test.ts",
+      "description": "No happy-path tests for envoy_whoami with topics or envoy_sessions unfiltered. Requires live Envoy — acknowledged design constraint."
+    }
+  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T17:14:04.046Z"
+  "completed": "2026-04-11T18:32:06.993Z"
 }

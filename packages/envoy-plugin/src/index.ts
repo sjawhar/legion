@@ -236,6 +236,58 @@ export default async (input: { serverUrl: URL }) => {
           });
         },
       }),
+      envoy_whoami: tool({
+        description:
+          "Returns this session's Envoy identity: session ID, machine ID, port, directory, and current topic subscriptions.",
+        args: {},
+        async execute(_args, ctx) {
+          ctx.metadata({ title: "Envoy whoami" });
+          const sessionID = ctx.sessionID;
+          const port = currentPort();
+          let topics: string[] = [];
+          try {
+            const res = await call(`/v1/interests/${sessionID}`);
+            const data = JSON.parse(res);
+            topics = data.topics || [];
+          } catch {}
+          return JSON.stringify(
+            {
+              session_id: sessionID,
+              machine_id: process.env.HOSTNAME || "unknown",
+              port,
+              dir: ctx.directory,
+              topics,
+            },
+            null,
+            2
+          );
+        },
+      }),
+      envoy_sessions: tool({
+        description:
+          "List all live sessions registered with Envoy. Returns session ID, machine ID, port, directory, topics, and last-seen timestamp for each. Use the optional machine filter to show only sessions on a specific host.",
+        args: {
+          machine: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Filter to sessions on this machine ID (e.g. hostname). Omit to list all machines."
+            ),
+        },
+        async execute(args, ctx) {
+          ctx.metadata({ title: "Envoy sessions" });
+          const res = await call("/v1/sessions");
+          if (!args.machine) return res;
+          const sessions = JSON.parse(res) as Array<{
+            machine_id: string;
+          }>;
+          return JSON.stringify(
+            sessions.filter((s) => s.machine_id === args.machine),
+            null,
+            2
+          );
+        },
+      }),
     },
   };
 };
