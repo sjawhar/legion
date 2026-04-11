@@ -6,10 +6,10 @@ import path from "node:path";
 import { resolveLegionPaths } from "../../daemon/paths";
 import { writePhaseHandoff } from "../../handoff/ledger";
 import {
+  type CollectedIssueCandidate,
   canonicalizeLearningPath,
   collectLearningFeedback,
   dedupeCollectedIssues,
-  type CollectedIssueCandidate,
 } from "../collector";
 import { LearningFeedbackRecordSchema } from "../types";
 

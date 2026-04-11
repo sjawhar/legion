@@ -1,8 +1,7 @@
+import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-
-import { afterEach, describe, expect, it } from "bun:test";
 
 import { readLearningFrontMatter, setLearningStatus } from "../front-matter";
 

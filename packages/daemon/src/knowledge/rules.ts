@@ -1,5 +1,5 @@
-import type { ClassifiedLearningAggregate } from "./types";
 import type { AggregatedLearningFeedback } from "./aggregator";
+import type { ClassifiedLearningAggregate } from "./types";
 
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 

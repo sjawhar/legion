@@ -1,8 +1,8 @@
 import type { HandoffPhase } from "../handoff/types";
 import {
-  KNOWLEDGE_NON_ARCHITECT_PHASES,
   type CollectedIssueFeedback,
   type HelpfulIssueContext,
+  KNOWLEDGE_NON_ARCHITECT_PHASES,
   type LearningAggregate,
 } from "./types";
 

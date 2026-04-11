@@ -277,6 +277,41 @@ linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Retro Complete
 - [1-3 bullet summary of the most important learnings]")
 ```
 
+### 6.5. Persist Learning Feedback Log
+
+Append per-issue learning feedback to the durable JSONL log **before** worker completion signaling. This is best-effort and must never block retro completion.
+
+```bash
+bun -e '
+import os from "node:os";
+import { captureLearningFeedbackFromWorkspace } from "./packages/daemon/src/knowledge/feedback-logger";
+
+const workspaceDir = process.cwd();
+const issueId = workspaceDir.split("/").at(-1) ?? "unknown-issue";
+
+try {
+  const result = await captureLearningFeedbackFromWorkspace({
+    env: process.env,
+    homeDir: os.homedir(),
+    issueId,
+    workspaceDir,
+  });
+
+  if (result.written) {
+    console.log(`[retro] learning feedback appended to ${result.filePath}`);
+  } else {
+    console.log(`[retro] learning feedback skipped: ${result.reason}`);
+  }
+} catch (error) {
+  console.warn(
+    `[retro] learning feedback append skipped: ${error instanceof Error ? error.message : String(error)}`
+  );
+}
+'
+```
+
+If the append fails, continue immediately — the retro handoff and issue labels remain the source of truth.
+
 ### 7. Signal Completion
 
 Add `worker-done` label to the issue, then exit:
