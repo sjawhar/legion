@@ -1,7 +1,7 @@
 {
-  "skipped": false,
-  "docsCreated": ["docs/solutions/testing/sse-mock-initialization-order.md"],
+  "skipped": true,
+  "reason": "no significant learnings — implement phase was a no-op (sub-issues #238/#239 already complete)",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T00:08:06.342Z"
+  "completed": "2026-04-11T13:31:56.968Z"
 }
