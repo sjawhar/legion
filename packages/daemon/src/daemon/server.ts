@@ -1349,11 +1349,15 @@ export function startServer(opts: ServerOptions): {
               issueStateCache.set(issueId.toLowerCase(), issueState);
             }
 
-            // Populate issue title cache from raw GitHub project items
-            if (backend === "github" && rawIssues) {
-              for (const [id, title] of extractGitHubIssueTitles(rawIssues)) {
-                issueTitleCache.set(id, title);
-              }
+            // Extract titles from raw GitHub project items
+            const extractedTitles =
+              backend === "github" && rawIssues
+                ? extractGitHubIssueTitles(rawIssues)
+                : new Map<string, string>();
+
+            // Populate issue title cache
+            for (const [id, title] of extractedTitles) {
+              issueTitleCache.set(id, title);
             }
 
             cleanupDoneIssueWorkers(state).catch((err) =>
@@ -1363,7 +1367,10 @@ export function startServer(opts: ServerOptions): {
               )
             );
 
-            return jsonResponse(CollectedState.toDict(state));
+            return jsonResponse({
+              ...CollectedState.toDict(state),
+              titles: Object.fromEntries(extractedTitles),
+            });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
