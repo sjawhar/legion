@@ -1,28 +1,38 @@
 {
   "critical": 0,
   "important": 2,
-  "minor": 1,
+  "minor": 2,
   "verdict": "approved",
   "keyFindings": [
     {
       "severity": "P2",
-      "file": "packages/daemon/src/daemon/__tests__/server.test.ts",
-      "description": "No test for multi-worker-per-issue cleanup. When both implement and test workers exist for a Done issue, workspace cleanup deduplicates via cleanedWorkspaceIssueIds but this path is untested."
+      "file": "packages/envoy/deploy/README.md",
+      "description": "Lines 74, 83 still reference ENVOY_REGISTRY_DIR which was removed in this PR. Deployers following docs will try to set non-existent config."
     },
     {
       "severity": "P2",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "detachWorkerFromEnvoy() and unsubscribeAllWorkerTopics() called during auto-cleanup (line 418-419) have no test coverage. Stale Envoy subscriptions could accumulate."
+      "file": "packages/envoy/infra/README.md",
+      "description": "Line 108 still documents listener.registryDir as required config, but the field was removed from ListenerConfig interface."
     },
     {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/repo-manager.ts",
-      "description": "cleanupWorkspace() does not check jj workspace forget exit code (pre-existing). Benign for cleanup but worth documenting."
+      "file": "packages/envoy/cmd/listener/main.go",
+      "description": "listenerDeps.sessions uses concrete *SessionRegistry instead of SessionLookup interface. Pragmatic for List() needed by /v1/sessions, acceptable trade-off."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/envoy/internal/mcpbridge/http_server_test.go",
+      "description": "Race condition fix is correct — sseWriter/sseConn now set before endpoint event write."
     }
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/testing/nats-kv-testing-patterns.md",
+    "docs/solutions/architecture-patterns/nats-kv-dual-bucket-lifecycle.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/testing/nats-kv-testing-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-10T00:47:13.801Z"
+  "completed": "2026-04-11T00:03:37.343Z"
 }
