@@ -45,6 +45,7 @@ export interface ServerOptions {
   hostname?: string;
   legionId: string;
   projectId?: string;
+  extraProjects?: string[];
   legionDir?: string;
   paths?: LegionPaths;
   adapter: RuntimeAdapter;
@@ -62,6 +63,8 @@ export interface ServerOptions {
     rebuild: () => Promise<CodebaseIndexResponse>;
   };
   feedbackLogger?: FeedbackLogger;
+  /** Injectable fetcher for testing — defaults to fetchGitHubProjectItems */
+  fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
 }
 
 interface ErrorResponse {
@@ -606,7 +609,7 @@ export function startServer(opts: ServerOptions): {
 
             const issueId = payload.issueId;
             const mode = payload.mode;
-            const repo = payload.repo;
+            let repo = payload.repo;
             const workspace = payload.workspace;
             const version = typeof payload.version === "number" ? payload.version : 0;
             const envPayload = payload.env;
@@ -621,9 +624,6 @@ export function startServer(opts: ServerOptions): {
               return badRequest(
                 "repo and workspace are mutually exclusive — provide one or neither"
               );
-            }
-            if (typeof repo !== "string" && typeof workspace !== "string") {
-              return badRequest("missing repo or workspace");
             }
             if (
               version !== undefined &&
@@ -641,6 +641,19 @@ export function startServer(opts: ServerOptions): {
 
             // Phase prerequisite validation for gated modes
             const normalizedIssueId = issueId.toLowerCase();
+            if (typeof repo !== "string" && typeof workspace !== "string") {
+              const cachedState = issueStateCache.get(normalizedIssueId);
+              if (cachedState?.source) {
+                repo = `${cachedState.source.owner}/${cachedState.source.repo}`;
+                console.log(
+                  `[dispatch] auto-resolved repo ${repo} from issue state for ${issueId}`
+                );
+              } else {
+                return badRequest(
+                  "missing_repo: provide --repo or ensure issue appears in collected state"
+                );
+              }
+            }
             const forceDispatch = payload.force === true;
             if (!forceDispatch) {
               const cachedState = issueStateCache.get(normalizedIssueId);
@@ -1324,56 +1337,105 @@ export function startServer(opts: ServerOptions): {
           }
 
           try {
-            let rawIssues: unknown;
             if (backend === "github") {
               const legionId = (payload.legionId as string) ?? opts.legionId;
               const parts = legionId.split("/");
               if (parts.length !== 2 || !parts[1]) {
                 return badRequest("invalid_team_id: expected owner/project-number");
               }
-              const [owner, numStr] = parts;
-              const projectNumber = Number(numStr);
-              if (!Number.isFinite(projectNumber)) {
+              if (!Number.isFinite(Number(parts[1]))) {
                 return badRequest("invalid_team_id: project number not a number");
               }
-              rawIssues = await fetchGitHubProjectItems(owner, projectNumber);
+
+              const boardIds = [legionId, ...(opts.extraProjects ?? [])];
+              console.log(
+                `[fetch-and-collect] fetching from ${boardIds.length} boards: ${boardIds.join(", ")}`
+              );
+
+              const tracker = getBackend(backend);
+              const collectedBoards: Array<{ boardId: string; rawIssues: unknown }> = [];
+              const boardErrors: string[] = [];
+
+              for (const boardId of boardIds) {
+                try {
+                  const boardParts = boardId.split("/");
+                  if (boardParts.length !== 2 || !boardParts[0] || !boardParts[1]) {
+                    throw new Error("invalid_team_id: expected owner/project-number");
+                  }
+                  const projectNumber = Number(boardParts[1]);
+                  if (!Number.isFinite(projectNumber)) {
+                    throw new Error("invalid_team_id: project number not a number");
+                  }
+                  const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
+                  const rawIssues = await fetchFn(boardParts[0], projectNumber);
+                  collectedBoards.push({ boardId, rawIssues });
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  boardErrors.push(`${boardId}: ${message}`);
+                  console.error(`[fetch-and-collect] board=${boardId} error=${message}`);
+                }
+              }
+
+              if (collectedBoards.length === 0) {
+                return serverError(
+                  `fetch_and_collect_failed: ${boardErrors.join("; ") || "all boards failed"}`
+                );
+              }
+
+              const parsed = [];
+              const seenSources = new Map<string, string>();
+              const extractedTitles = new Map<string, string>();
+              for (const { boardId, rawIssues } of collectedBoards) {
+                const boardIssues = tracker.parseIssues(rawIssues);
+                for (const issue of boardIssues) {
+                  if (issue.source) {
+                    const sourceKey =
+                      `${issue.source.owner}/${issue.source.repo}#${issue.source.number}`.toLowerCase();
+                    const existingBoard = seenSources.get(sourceKey);
+                    if (existingBoard) {
+                      console.warn(
+                        `[fetch-and-collect] duplicate issue ${sourceKey} on boards ${existingBoard}, ${boardId} — using ${existingBoard} (primary)`
+                      );
+                      continue;
+                    }
+                    seenSources.set(sourceKey, boardId);
+                  }
+                  parsed.push(issue);
+                }
+
+                for (const [id, title] of extractGitHubIssueTitles(rawIssues)) {
+                  if (!extractedTitles.has(id)) {
+                    extractedTitles.set(id, title);
+                  }
+                }
+              }
+
+              const daemonUrl = `http://127.0.0.1:${server.port}`;
+              const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+              const state = buildCollectedState(issuesData, opts.legionId);
+
+              for (const [issueId, issueState] of Object.entries(state.issues)) {
+                issueStateCache.set(issueId.toLowerCase(), issueState);
+              }
+
+              for (const [id, title] of extractedTitles) {
+                issueTitleCache.set(id, title);
+              }
+
+              cleanupDoneIssueWorkers(state).catch((err) =>
+                console.error(
+                  "[auto-cleanup] failed:",
+                  err instanceof Error ? err.message : String(err)
+                )
+              );
+
+              return jsonResponse({
+                ...CollectedState.toDict(state),
+                titles: Object.fromEntries(extractedTitles),
+              });
             } else {
               return badRequest("fetch-and-collect only supports github backend currently");
             }
-
-            const tracker = getBackend(backend);
-            const parsed = tracker.parseIssues(rawIssues);
-            const daemonUrl = `http://127.0.0.1:${server.port}`;
-            const issuesData = await enrichParsedIssues(parsed, daemonUrl);
-            const state = buildCollectedState(issuesData, opts.legionId);
-
-            // Populate dispatch validation cache
-            for (const [issueId, issueState] of Object.entries(state.issues)) {
-              issueStateCache.set(issueId.toLowerCase(), issueState);
-            }
-
-            // Extract titles from raw GitHub project items
-            const extractedTitles =
-              backend === "github" && rawIssues
-                ? extractGitHubIssueTitles(rawIssues)
-                : new Map<string, string>();
-
-            // Populate issue title cache
-            for (const [id, title] of extractedTitles) {
-              issueTitleCache.set(id, title);
-            }
-
-            cleanupDoneIssueWorkers(state).catch((err) =>
-              console.error(
-                "[auto-cleanup] failed:",
-                err instanceof Error ? err.message : String(err)
-              )
-            );
-
-            return jsonResponse({
-              ...CollectedState.toDict(state),
-              titles: Object.fromEntries(extractedTitles),
-            });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);

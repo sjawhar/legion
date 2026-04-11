@@ -469,6 +469,7 @@ export async function startDaemon(
         stateFilePath: config.stateFilePath,
         logDir: config.logDir,
         runtime: config.runtime,
+        extraProjects: config.extraProjects,
         tmuxSession:
           config.runtime === "claude-code" && config.legionId
             ? `legion-${config.legionId}`

@@ -24,6 +24,7 @@ describe("daemon server", () => {
     | null = null;
   const originalSpawn = Bun.spawn;
   const originalFetch = globalThis.fetch;
+  const originalConsoleWarn = console.warn;
   const legionId = "123e4567-e89b-12d3-a456-426614174000";
 
   class RecordingFeedbackWriter implements FeedbackWriter {
@@ -73,6 +74,9 @@ describe("daemon server", () => {
     tmuxSession?: string;
     feedbackLogger?: FeedbackLogger;
     getControllerState?: () => { sessionId: string; port?: number } | undefined;
+    legionId?: string;
+    extraProjects?: string[];
+    fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
   }) {
     createSessionCalls = [];
     deleteSessionCalls = [];
@@ -88,7 +92,8 @@ describe("daemon server", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
-      legionId,
+      legionId: options?.legionId ?? legionId,
+      extraProjects: options?.extraProjects,
       legionDir: tempDir,
       paths: options?.paths,
       adapter,
@@ -98,6 +103,7 @@ describe("daemon server", () => {
       tmuxSession: options?.tmuxSession,
       feedbackLogger: options?.feedbackLogger,
       getControllerState: options?.getControllerState,
+      fetchProjectItems: options?.fetchProjectItems,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -117,6 +123,7 @@ describe("daemon server", () => {
   afterEach(async () => {
     Bun.spawn = originalSpawn;
     globalThis.fetch = originalFetch;
+    console.warn = originalConsoleWarn;
     sessionStatusHandler = null;
     if (stopServer) {
       stopServer();
@@ -185,7 +192,7 @@ describe("daemon server", () => {
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: string };
-    expect(body.error).toBe("missing repo or workspace");
+    expect(body.error).toContain("missing_repo");
   });
 
   it("rejects relative workspace paths", async () => {
@@ -391,7 +398,153 @@ describe("daemon server", () => {
       });
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toEqual({ error: "missing repo or workspace" });
+      expect(await response.json()).toEqual({
+        error: "missing_repo: provide --repo or ensure issue appears in collected state",
+      });
+    });
+  });
+
+  describe("POST /workers auto-resolve repo from cache", () => {
+    const repoPaths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => false,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    it("auto-resolves repo when cache has valid source", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 42,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/42",
+                type: "Issue",
+              },
+              status: "Todo",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-42",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(createSessionCalls).toHaveLength(1);
+      expect(createSessionCalls[0].workspace).toBe(
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-42"
+      );
+    });
+
+    it("returns 400 when cache is empty", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-42",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("missing_repo");
+    });
+
+    it("returns 400 when cached issue has null source", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "linear",
+          issues: [
+            {
+              identifier: "LIN-99",
+              state: { name: "In Progress" },
+              labels: { nodes: [] },
+            },
+          ],
+        }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "LIN-99",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("missing_repo");
+    });
+
+    it("returns 400 when issue is not in cache", async () => {
+      await startTestServer({ paths: repoPaths, repoManagerDeps });
+
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              content: {
+                number: 42,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/42",
+                type: "Issue",
+              },
+              status: "Todo",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "acme-widgets-99",
+          mode: "implement",
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toContain("missing_repo");
     });
   });
 
@@ -1364,6 +1517,175 @@ describe("daemon server", () => {
       expect(response.status).toBe(500);
       const body = (await response.json()) as { error: string };
       expect(body.error).toContain("fetch_and_collect_failed");
+    });
+
+    describe("multi-board fetch-and-collect", () => {
+      let boardMocks = new Map<string, unknown>();
+
+      function makeFetchProjectItems() {
+        return async (owner: string, projectNumber: number) => {
+          const key = `${owner}/${projectNumber}`;
+          const result = boardMocks.get(key);
+          if (result instanceof Error) {
+            throw result;
+          }
+          if (result === undefined) {
+            throw new Error(`No mock for board ${key}`);
+          }
+          return result;
+        };
+      }
+
+      function makeGitHubProjectItem(
+        repository: string,
+        number: number,
+        status: string,
+        title = `Issue ${number}`
+      ) {
+        return {
+          content: {
+            number,
+            repository,
+            url: `https://github.com/${repository}/issues/${number}`,
+            type: "Issue",
+            title,
+          },
+          status,
+          labels: [],
+        };
+      }
+
+      it("fetches from primary board only when no extras configured", async () => {
+        boardMocks = new Map([
+          ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo", "Primary issue")]],
+        ]);
+        await startTestServer({ legionId: "acme/123", fetchProjectItems: makeFetchProjectItems() });
+
+        const response = await requestJson("/state/fetch-and-collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "github" }),
+        });
+
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          issues: Record<string, { status: string }>;
+          titles: Record<string, string>;
+        };
+        expect(body.issues["acme-widgets-10"]).toBeDefined();
+        expect(body.titles["acme-widgets-10"]).toBe("Primary issue");
+      });
+
+      it("fetches from primary + extra boards and merges issues", async () => {
+        boardMocks = new Map([
+          ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo", "Primary issue")]],
+          ["acme/456", [makeGitHubProjectItem("other/repo", 5, "In Progress", "Extra issue")]],
+        ]);
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
+
+        const response = await requestJson("/state/fetch-and-collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "github" }),
+        });
+
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          issues: Record<string, { status: string }>;
+          titles: Record<string, string>;
+        };
+        expect(body.issues["acme-widgets-10"]).toBeDefined();
+        expect(body.issues["other-repo-5"]).toBeDefined();
+        expect(body.titles["acme-widgets-10"]).toBe("Primary issue");
+        expect(body.titles["other-repo-5"]).toBe("Extra issue");
+      });
+
+      it("deduplicates by canonical identity with primary board winning", async () => {
+        const warnCalls: string[] = [];
+        console.warn = (...args: unknown[]) => {
+          warnCalls.push(args.map((arg) => String(arg)).join(" "));
+        };
+        boardMocks = new Map([
+          ["acme/123", [makeGitHubProjectItem("acme/widgets", 42, "Todo", "Primary copy")]],
+          [
+            "acme/456",
+            [makeGitHubProjectItem("acme/widgets", 42, "In Progress", "Secondary copy")],
+          ],
+        ]);
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
+
+        const response = await requestJson("/state/fetch-and-collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "github" }),
+        });
+
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          issues: Record<string, { status: string }>;
+          titles: Record<string, string>;
+        };
+        expect(Object.keys(body.issues)).toEqual(["acme-widgets-42"]);
+        expect(body.issues["acme-widgets-42"]?.status).toBe("Todo");
+        expect(body.titles["acme-widgets-42"]).toBe("Primary copy");
+        expect(
+          warnCalls.some(
+            (message) =>
+              /duplicate issue.*on boards/.test(message) && message.includes("acme/widgets#42")
+          )
+        ).toBe(true);
+      });
+
+      it("returns HTTP 200 when one extra board fails", async () => {
+        const boardEntries: Array<[string, unknown]> = [
+          ["acme/123", [makeGitHubProjectItem("acme/widgets", 10, "Todo", "Primary issue")]],
+          ["acme/456", new Error("extra board unavailable")],
+        ];
+        boardMocks = new Map(boardEntries);
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
+
+        const response = await requestJson("/state/fetch-and-collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "github" }),
+        });
+
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          issues: Record<string, { status: string }>;
+        };
+        expect(body.issues["acme-widgets-10"]).toBeDefined();
+      });
+
+      it("returns HTTP 500 when ALL boards fail", async () => {
+        const boardEntries: Array<[string, unknown]> = [
+          ["acme/123", new Error("primary failed")],
+          ["acme/456", new Error("extra failed")],
+        ];
+        boardMocks = new Map(boardEntries);
+        await startTestServer({
+          legionId: "acme/123",
+          extraProjects: ["acme/456"],
+          fetchProjectItems: makeFetchProjectItems(),
+        });
+
+        const response = await requestJson("/state/fetch-and-collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "github" }),
+        });
+
+        expect(response.status).toBe(500);
+        const body = (await response.json()) as { error: string };
+        expect(body.error).toContain("fetch_and_collect_failed");
+      });
     });
   });
 

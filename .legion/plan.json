@@ -1,21 +1,35 @@
 {
-  "taskCount": 3,
-  "independentTasks": 1,
-  "routingHints": {
-    "complexity": "small",
-    "estimatedImplementers": 1,
-    "skipRetro": true,
-    "skipArchitect": true
-  },
-  "concerns": [
-    "Regex change must not break simple {owner}-{repo}-{number} format — regression test exists at server.test.ts:1762",
-    "owner-repo-0 must remain invalid (preserve > 0 check)",
-    "owner-repo-123abc must NOT match (digits not followed by - or $)"
-  ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
-  "workflowRecommendation": "Simple bug fix — single implementer, skip retro. Task 1 is independent, Tasks 2-3 are sequential.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T02:40:58.741Z"
+  "completed": "2026-04-11T03:13:46.064Z",
+  "routingHints": {
+    "skipRetro": false,
+    "trickyParts": "Test seam for fetchGitHubProjectItems (Bun.spawn vs fetch), controller $REPO undefined in 32 places"
+  },
+  "concerns": [
+    "fetchGitHubProjectItems uses Bun.spawn not globalThis.fetch — tests must use mock.module()",
+    "Controller SKILL.md has 32 $OWNER/$REPO refs, $REPO never defined — all must update",
+    "index.ts must wire config.extraProjects into startServer()"
+  ],
+  "tasks": 5,
+  "independent": 2,
+  "planPath": ".sisyphus/plans/multi-repo-issue-routing.md",
+  "errata": 5,
+  "keyFiles": [
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/index.ts",
+    ".opencode/skills/legion-controller/SKILL.md"
+  ],
+  "testFiles": [
+    "packages/daemon/src/daemon/__tests__/config.test.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts"
+  ],
+  "commits": [
+    "feat: parse and validate LEGION_EXTRA_PROJECTS config",
+    "feat: collect issues from multiple GitHub project boards",
+    "feat: auto-resolve worker repo from cached issue source",
+    "fix: route controller dispatches using canonical source metadata"
+  ],
+  "skills": []
 }
