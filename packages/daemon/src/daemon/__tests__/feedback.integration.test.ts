@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { resolveDaemonConfig, type DaemonConfig } from "../config";
 import { type FeedbackEvent, FeedbackEventSchema } from "../feedback";
 import { type DaemonHandle, startDaemon } from "../index";
 import { resolveLegionPaths } from "../paths";
@@ -31,14 +32,28 @@ function readJsonl(contents: string): FeedbackEvent[] {
     .map((line) => JSON.parse(line) as FeedbackEvent);
 }
 
+function buildConfig(
+  paths: ReturnType<typeof resolveLegionPaths>,
+  stateFilePath: string,
+  overrides: Partial<DaemonConfig> = {}
+): DaemonConfig {
+  const { config } = resolveDaemonConfig({ env: { LEGION_ID: "acme/widgets" } });
+  return {
+    ...config,
+    paths,
+    legionId: "acme/widgets",
+    stateFilePath,
+    daemonPort: 0,
+    controllerSessionId: "ses_test",
+    ...overrides,
+  };
+}
+
 describe("feedback logging integration", () => {
   let tempHome: string | null = null;
   let handle: DaemonHandle | null = null;
 
   afterEach(async () => {
-    process.env.LEGION_FEEDBACK_DISABLED = undefined;
-    process.env.LEGION_FEEDBACK_MAX_BYTES = undefined;
-
     if (handle) {
       await handle.stop();
       handle = null;
@@ -57,18 +72,9 @@ describe("feedback logging integration", () => {
     mkdirSync(paths.stateDir, { recursive: true });
 
     const stateFilePath = path.join(tempHome, "workers.json");
-    handle = await startDaemon(
-      {
-        legionId: "acme/widgets",
-        paths,
-        stateFilePath,
-        daemonPort: 0,
-        controllerSessionId: "ses_test",
-      },
-      {
-        adapter: makeAdapter(),
-      }
-    );
+    handle = await startDaemon(buildConfig(paths, stateFilePath), {
+      deps: { adapter: makeAdapter() },
+    });
 
     const baseUrl = `http://127.0.0.1:${handle.server.port}`;
     const workspace = path.join(tempHome, "workspace-one");
@@ -153,22 +159,12 @@ describe("feedback logging integration", () => {
   it("does not create feedback.jsonl when feedback logging is disabled", async () => {
     tempHome = await mkdtemp(path.join(os.tmpdir(), "feedback-integration-"));
     const paths = resolveLegionPaths({}, tempHome);
-    process.env.LEGION_FEEDBACK_DISABLED = "1";
     mkdirSync(paths.stateDir, { recursive: true });
 
     const stateFilePath = path.join(tempHome, "workers.json");
-    handle = await startDaemon(
-      {
-        legionId: "acme/widgets",
-        paths,
-        stateFilePath,
-        daemonPort: 0,
-        controllerSessionId: "ses_test",
-      },
-      {
-        adapter: makeAdapter(),
-      }
-    );
+    handle = await startDaemon(buildConfig(paths, stateFilePath, { feedbackDisabled: true }), {
+      deps: { adapter: makeAdapter() },
+    });
 
     const baseUrl = `http://127.0.0.1:${handle.server.port}`;
     const response = await fetch(`${baseUrl}/state/collect`, {
@@ -189,25 +185,15 @@ describe("feedback logging integration", () => {
     expect(feedbackStat).toBeNull();
   });
 
-  it("rotates feedback.jsonl when LEGION_FEEDBACK_MAX_BYTES is very small", async () => {
+  it("rotates feedback.jsonl when feedbackMaxBytes is very small", async () => {
     tempHome = await mkdtemp(path.join(os.tmpdir(), "feedback-integration-"));
     const paths = resolveLegionPaths({}, tempHome);
-    process.env.LEGION_FEEDBACK_MAX_BYTES = "100";
     mkdirSync(paths.stateDir, { recursive: true });
 
     const stateFilePath = path.join(tempHome, "workers.json");
-    handle = await startDaemon(
-      {
-        legionId: "acme/widgets",
-        paths,
-        stateFilePath,
-        daemonPort: 0,
-        controllerSessionId: "ses_test",
-      },
-      {
-        adapter: makeAdapter(),
-      }
-    );
+    handle = await startDaemon(buildConfig(paths, stateFilePath, { feedbackMaxBytes: 100 }), {
+      deps: { adapter: makeAdapter() },
+    });
 
     const baseUrl = `http://127.0.0.1:${handle.server.port}`;
 

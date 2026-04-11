@@ -5,7 +5,13 @@ import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { defineCommand, runMain } from "citty";
-import { type DaemonConfig, validateControllerPrompt } from "../daemon/config";
+import {
+  type DaemonConfig,
+  type LoadedConfigFile,
+  loadConfigFromFile,
+  resolveDaemonConfig,
+  validateControllerPrompt,
+} from "../daemon/config";
 import { startDaemon } from "../daemon/index";
 import { findLegionByProjectId } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
@@ -161,45 +167,82 @@ export function loadLegionsCache(
 }
 
 interface StartOptions {
-  workspace: string;
+  workspace?: string;
   prompt?: string;
   backend?: string;
   runtime?: string;
+  config?: string;
 }
 
-async function cmdStart(team: string, opts: StartOptions): Promise<void> {
-  const legionId = await resolveLegionId(team, { backend: opts.backend });
-  const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
+interface StartDependencies {
+  startDaemon: typeof startDaemon;
+  resolveLegionId: typeof resolveLegionId;
+}
 
+export async function cmdStart(
+  team: string | undefined,
+  opts: StartOptions,
+  deps: StartDependencies = { startDaemon, resolveLegionId }
+): Promise<void> {
   validateControllerPrompt(opts.prompt);
 
-  console.log(`Starting legion: ${legionId}`);
-  console.log(`Workspace: ${opts.workspace}`);
+  let configFile: LoadedConfigFile | undefined;
+  if (opts.config) {
+    const configPath = path.resolve(process.cwd(), opts.config);
+    let yamlText: string;
+    try {
+      yamlText = fs.readFileSync(configPath, "utf-8");
+    } catch {
+      throw new CliError(`Config file not found: ${configPath}`);
+    }
+    configFile = loadConfigFromFile(yamlText, path.dirname(configPath));
+  }
+
+  const cliOverrides: Partial<DaemonConfig> = {};
+  if (opts.workspace) {
+    cliOverrides.legionDir = opts.workspace;
+  }
+  if (opts.prompt !== undefined) {
+    cliOverrides.controllerPrompt = opts.prompt;
+  }
+  if (opts.backend) {
+    cliOverrides.issueBackend = opts.backend as DaemonConfig["issueBackend"];
+  }
+  if (opts.runtime) {
+    cliOverrides.runtime = opts.runtime as DaemonConfig["runtime"];
+  }
+  if (team) {
+    cliOverrides.legionId = await deps.resolveLegionId(team, { backend: opts.backend });
+  }
+
+  const { config, warnings } = resolveDaemonConfig({
+    env: process.env,
+    configFile,
+    cliOverrides,
+  });
+
+  if (!config.legionId) {
+    throw new CliError("Missing project: provide positional team arg or 'project' in config file");
+  }
+
+  for (const warning of warnings) {
+    console.error(`Warning: ${warning}`);
+  }
+
+  const instancePaths = config.paths.forLegion(config.legionId);
+
+  console.log(`Starting legion: ${config.legionId}`);
+  console.log(`Workspace: ${config.legionDir ?? process.cwd()}`);
   console.log(`State directory: ${instancePaths.legionStateDir}`);
 
   fs.mkdirSync(instancePaths.legionStateDir, { recursive: true });
+  config.stateFilePath = instancePaths.workersFile;
 
-  if (opts.backend) {
-    process.env.LEGION_ISSUE_BACKEND = opts.backend;
-  }
-
-  if (opts.runtime) {
-    process.env.LEGION_RUNTIME = opts.runtime;
-  }
-  const overrides: Partial<DaemonConfig> = {
-    legionId,
-    legionDir: opts.workspace,
-    stateFilePath: instancePaths.workersFile,
-  };
-  if (opts.prompt !== undefined) {
-    overrides.controllerPrompt = opts.prompt;
-  }
-
-  const handle = await startDaemon(overrides);
+  const handle = await deps.startDaemon(config);
 
   console.log(`Daemon started on port ${handle.config.daemonPort}`);
-  console.log(`\nTo check status: legion status ${team}`);
-  console.log(`To stop: legion stop ${team}`);
+  console.log(`\nTo check status: legion status ${team ?? config.legionId}`);
+  console.log(`To stop: legion stop ${team ?? config.legionId}`);
 
   await new Promise(() => {});
 }
@@ -893,12 +936,11 @@ function parseHandoffData(data: string | undefined): Record<string, unknown> {
 export const startCommand = defineCommand({
   meta: { name: "start", description: "Start the Legion swarm" },
   args: {
-    team: { type: "positional", description: "Legion key or UUID", required: true },
+    team: { type: "positional", description: "Legion key or UUID", required: false },
     workspace: {
       type: "string",
       alias: "w",
       description: "Workspace path",
-      default: process.cwd(),
     },
     "state-dir": { type: "string", description: "State directory path" },
     prompt: {
@@ -916,6 +958,7 @@ export const startCommand = defineCommand({
       alias: "r",
       description: "Agent runtime (opencode or claude-code)",
     },
+    config: { type: "string", alias: "c", description: "Config file path" },
   },
   async run({ args }) {
     await cmdStart(args.team, {
@@ -923,6 +966,7 @@ export const startCommand = defineCommand({
       prompt: args.prompt,
       backend: args.backend,
       runtime: args.runtime,
+      config: args.config,
     });
   },
 });

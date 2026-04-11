@@ -35,6 +35,7 @@ import {
   cmdDispatch,
   cmdPrompt,
   cmdResetCrashes,
+  cmdStart,
   dispatchCommand,
   getDaemonPort,
   legionsCommand,
@@ -191,6 +192,164 @@ describe("scanOcRegistry", () => {
   });
 });
 
+describe("cmdStart config wiring", () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const startDaemonCalls: Array<Record<string, unknown>> = [];
+  const resolveLegionIdCalls: Array<{ team: string; backend?: string }> = [];
+  let resolveLegionIdResult: string | undefined;
+  const START_DAEMON_ABORT = "__start-daemon-abort__";
+
+  function readBackendArg(
+    opts: string | { cacheDir?: string; backend?: string } | undefined
+  ): string | undefined {
+    return opts && typeof opts === "object" ? opts.backend : undefined;
+  }
+
+  beforeEach(() => {
+    startDaemonCalls.length = 0;
+    resolveLegionIdCalls.length = 0;
+    resolveLegionIdResult = undefined;
+    console.log = mock(() => {}) as typeof console.log;
+    console.error = mock(() => {}) as typeof console.error;
+  });
+
+  afterEach(() => {
+    console.log = originalLog;
+    console.error = originalError;
+  });
+
+  it("starts from --config without positional team when config provides project", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-config-"));
+    const configPath = path.join(tempDir, "legion.yml");
+
+    try {
+      await writeFile(
+        configPath,
+        ["project: acme/12", "workspace: /tmp/config-workspace", "port: 15432"].join("\n")
+      );
+
+      try {
+        await cmdStart(
+          undefined,
+          { config: configPath },
+          {
+            startDaemon: async (config) => {
+              startDaemonCalls.push(config as unknown as Record<string, unknown>);
+              throw new Error(START_DAEMON_ABORT);
+            },
+            resolveLegionId: async (team, opts) => {
+              resolveLegionIdCalls.push({ team, backend: readBackendArg(opts) });
+              return resolveLegionIdResult ?? team;
+            },
+          }
+        );
+        throw new Error("Expected cmdStart to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(START_DAEMON_ABORT);
+      }
+
+      expect(resolveLegionIdCalls).toHaveLength(0);
+      expect(startDaemonCalls).toHaveLength(1);
+      expect(startDaemonCalls[0]).toEqual(
+        expect.objectContaining({
+          legionId: "acme/12",
+          legionDir: "/tmp/config-workspace",
+          daemonPort: 15432,
+          daemonPortExplicit: true,
+        })
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers positional team over config project", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-config-"));
+    const configPath = path.join(tempDir, "legion.yml");
+    resolveLegionIdResult = "resolved/team";
+
+    try {
+      await writeFile(configPath, "project: from-config/99\nworkspace: /tmp/config-workspace\n");
+
+      try {
+        await cmdStart(
+          "cli-team",
+          { config: configPath },
+          {
+            startDaemon: async (config) => {
+              startDaemonCalls.push(config as unknown as Record<string, unknown>);
+              throw new Error(START_DAEMON_ABORT);
+            },
+            resolveLegionId: async (team, opts) => {
+              resolveLegionIdCalls.push({ team, backend: readBackendArg(opts) });
+              return resolveLegionIdResult ?? team;
+            },
+          }
+        );
+        throw new Error("Expected cmdStart to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(START_DAEMON_ABORT);
+      }
+
+      expect(resolveLegionIdCalls).toEqual([{ team: "cli-team", backend: undefined }]);
+      expect(startDaemonCalls).toHaveLength(1);
+      expect(startDaemonCalls[0]).toEqual(
+        expect.objectContaining({
+          legionId: "resolved/team",
+          legionDir: "/tmp/config-workspace",
+        })
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails when neither positional team nor config project is provided", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-config-"));
+    const configPath = path.join(tempDir, "legion.yml");
+    const originalLegionId = process.env.LEGION_ID;
+
+    try {
+      delete process.env.LEGION_ID;
+      await writeFile(configPath, "backend: github\nworkspace: /tmp/config-workspace\n");
+
+      try {
+        await cmdStart(
+          undefined,
+          { config: configPath },
+          {
+            startDaemon: async (config) => {
+              startDaemonCalls.push(config as unknown as Record<string, unknown>);
+              throw new Error(START_DAEMON_ABORT);
+            },
+            resolveLegionId: async (team, opts) => {
+              resolveLegionIdCalls.push({ team, backend: readBackendArg(opts) });
+              return resolveLegionIdResult ?? team;
+            },
+          }
+        );
+        throw new Error("Expected cmdStart to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(
+          "Missing project: provide positional team arg or 'project' in config file"
+        );
+      }
+      expect(startDaemonCalls).toHaveLength(0);
+    } finally {
+      if (originalLegionId === undefined) {
+        delete process.env.LEGION_ID;
+      } else {
+        process.env.LEGION_ID = originalLegionId;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("adoptCommand", () => {
   it("has correct meta", async () => {
     const meta = await Promise.resolve(adoptCommand.meta);
@@ -317,13 +476,15 @@ describe("citty command definitions", () => {
   test("start command args are defined", async () => {
     const args = await resolveArgs(startCommand);
     const team = args.team as PositionalArg;
+    const config = args.config as StringArg;
     const workspace = args.workspace as StringArg;
     const stateDir = args["state-dir"] as StringArg;
     expect(team.type).toBe("positional");
-    expect(team.required).toBe(true);
+    expect(team.required).toBe(false);
+    expect(config).toEqual(expect.objectContaining({ type: "string", alias: "c" }));
     expect(workspace.type).toBe("string");
     expect(workspace.alias).toBe("w");
-    expect(workspace.default).toBe(process.cwd());
+    expect(workspace.default).toBeUndefined();
     expect(stateDir.type).toBe("string");
   });
 

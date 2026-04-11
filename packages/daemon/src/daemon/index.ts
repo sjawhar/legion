@@ -7,7 +7,7 @@ import {
   createEmptyCodebaseIndexResponse,
 } from "../index/types";
 import { computeControllerSessionId } from "../state/types";
-import { type DaemonConfig, loadConfig, validateControllerPrompt } from "./config";
+import { type DaemonConfig, resolveDaemonConfig, validateControllerPrompt } from "./config";
 import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
 import { modeToRole, TokenManager } from "./github-apps";
 import {
@@ -46,12 +46,14 @@ interface DaemonDependencies {
   clearTimeout: typeof clearTimeout;
 }
 
-interface DaemonOverrides extends Partial<DaemonConfig> {
+interface DaemonStartOptions {
   readLegionsRegistry?: typeof readLegionsRegistry;
   cleanupStaleServes?: typeof cleanupStaleServes;
   allocatePort?: typeof allocatePort;
   writeLegionEntry?: typeof writeLegionEntry;
   removeLegionEntry?: typeof removeLegionEntry;
+  daemonPortExplicit?: boolean;
+  deps?: Partial<DaemonDependencies>;
 }
 
 export interface DaemonHandle {
@@ -137,8 +139,7 @@ async function sendPromptWithRetry(
   throw lastError;
 }
 
-async function subscribeControllerToEnvoy(sessionId: string) {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
   try {
     const roleRes = await fetch(`${envoyUrl}/v1/roles/set`, {
       method: "POST",
@@ -176,8 +177,7 @@ async function subscribeControllerToEnvoy(sessionId: string) {
     });
 }
 
-function unsubscribeFromEnvoy(sessionId: string) {
-  const envoyUrl = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
+function unsubscribeFromEnvoy(sessionId: string, envoyUrl: string) {
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -202,8 +202,8 @@ function buildControllerEnv(config: DaemonConfig): Record<string, string> {
 }
 
 export async function startDaemon(
-  overrides: DaemonOverrides = {},
-  deps?: Partial<DaemonDependencies>
+  inputConfig: DaemonConfig,
+  opts: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
   const {
     readLegionsRegistry: readLegionsRegistryOverride,
@@ -211,8 +211,9 @@ export async function startDaemon(
     allocatePort: allocatePortOverride,
     writeLegionEntry: writeLegionEntryOverride,
     removeLegionEntry: removeLegionEntryOverride,
-    ...configOverrides
-  } = overrides;
+    daemonPortExplicit,
+    deps,
+  } = opts;
 
   const readLegionsRegistryFn = readLegionsRegistryOverride ?? readLegionsRegistry;
   const cleanupStaleServesFn = cleanupStaleServesOverride ?? cleanupStaleServes;
@@ -220,7 +221,7 @@ export async function startDaemon(
   const writeLegionEntryFn = writeLegionEntryOverride ?? writeLegionEntry;
   const removeLegionEntryFn = removeLegionEntryOverride ?? removeLegionEntry;
 
-  let config = { ...loadConfig(), ...configOverrides };
+  let config = inputConfig;
   const legionId = config.legionId;
   if (!legionId) {
     throw new Error("Missing legionId for daemon");
@@ -234,11 +235,18 @@ export async function startDaemon(
   // This prevents orphaned serves from holding SQLite locks and occupying ports.
   await cleanupStaleServesFn(config.paths.legionsFile, legionId);
 
-  const { daemonPort, servePort } = allocatePortFn(registry);
+  const { daemonPort: allocatedDaemonPort, servePort } = allocatePortFn(registry);
 
-  let actualDaemonPort = daemonPort;
-  while (!(await isPortFree(actualDaemonPort))) {
-    actualDaemonPort++;
+  const daemonPortIsExplicit = daemonPortExplicit ?? config.daemonPortExplicit;
+  let actualDaemonPort = daemonPortIsExplicit ? config.daemonPort : allocatedDaemonPort;
+  if (daemonPortIsExplicit) {
+    if (!(await isPortFree(actualDaemonPort))) {
+      throw new Error(`Daemon port ${actualDaemonPort} is unavailable`);
+    }
+  } else {
+    while (!(await isPortFree(actualDaemonPort))) {
+      actualDaemonPort++;
+    }
   }
 
   let actualServePort = servePort;
@@ -255,11 +263,10 @@ export async function startDaemon(
   const resolvedDeps = resolveDependencies(config, deps);
 
   let feedbackLogger: FeedbackLogger | undefined;
-  if (!process.env.LEGION_FEEDBACK_DISABLED) {
+  if (!config.feedbackDisabled) {
     const feedbackPath = config.paths.forLegion(legionId).feedbackFile;
     mkdirSync(path.dirname(feedbackPath), { recursive: true });
-    const maxBytes = Number(process.env.LEGION_FEEDBACK_MAX_BYTES) || 50 * 1024 * 1024;
-    const writer = new FileFeedbackWriter(feedbackPath, maxBytes);
+    const writer = new FileFeedbackWriter(feedbackPath, config.feedbackMaxBytes);
     feedbackLogger = new FeedbackLogger(writer, legionId);
   }
 
@@ -485,6 +492,7 @@ export async function startDaemon(
         tokenManager,
         indexManager,
         feedbackLogger,
+        envoyUrl: config.envoyUrl,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
@@ -498,7 +506,7 @@ export async function startDaemon(
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       bindAttempts++;
-      if (err.code !== "EADDRINUSE" || bindAttempts >= 5) {
+      if (daemonPortIsExplicit || err.code !== "EADDRINUSE" || bindAttempts >= 5) {
         throw error;
       }
       config = { ...config, daemonPort: config.daemonPort + 1 };
@@ -531,11 +539,11 @@ export async function startDaemon(
     }
     // Unsubscribe old controller from Envoy if session ID changed
     if (existingController && existingController.sessionId !== config.controllerSessionId) {
-      unsubscribeFromEnvoy(existingController.sessionId);
+      unsubscribeFromEnvoy(existingController.sessionId, config.envoyUrl);
     }
     console.log(`External controller: session=${config.controllerSessionId}`);
     controllerState = { sessionId: config.controllerSessionId };
-    subscribeControllerToEnvoy(config.controllerSessionId);
+    subscribeControllerToEnvoy(config.controllerSessionId, config.envoyUrl);
   } else {
     const requestedSessionId = computeControllerSessionId(legionId);
     let actualSessionId: string | undefined;
@@ -561,7 +569,7 @@ export async function startDaemon(
           resolvedDeps
         );
         console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
-        subscribeControllerToEnvoy(actualSessionId);
+        subscribeControllerToEnvoy(actualSessionId, config.envoyUrl);
       } catch (error) {
         console.error(`Controller session created but prompt failed: ${error}`);
         console.error("Health loop will retry on next tick.");
@@ -664,7 +672,7 @@ export async function startDaemon(
             for (const entry of liveWorkers) {
               const actualSessionId = recreatedSessions.get(entry.id);
               if (actualSessionId && entry.envoyTopics?.length) {
-                subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics);
+                subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics, config.envoyUrl);
               }
             }
 
@@ -681,7 +689,7 @@ export async function startDaemon(
                 }
                 // Unsubscribe old session ID if it changed
                 if (actualControllerSessionId !== controllerState.sessionId) {
-                  unsubscribeFromEnvoy(controllerState.sessionId);
+                  unsubscribeFromEnvoy(controllerState.sessionId, config.envoyUrl);
                 }
                 controllerState = {
                   ...controllerState,
@@ -802,5 +810,6 @@ if (import.meta.main) {
   process.on("unhandledRejection", (reason) => {
     console.error("[daemon] unhandled rejection:", reason);
   });
-  void startDaemon();
+  const { config } = resolveDaemonConfig({ env: process.env });
+  void startDaemon(config);
 }
