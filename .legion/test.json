@@ -1,4 +1,31 @@
 {
+  "verdict": "pass",
+  "summary": "All 4 acceptance criteria verified. CI green (lint, typecheck, test). Workflow structure correct. Shell.env hook confirmed in built bundle.",
+  "findings": [],
+  "criteriaResults": [
+    {
+      "criterion": "Add npm publish to release workflow using OIDC pattern",
+      "result": "pass",
+      "evidence": "plugin job in release.yaml uses setup-node with registry-url + npm publish --provenance + id-token:write permission"
+    },
+    {
+      "criterion": "Package name @sjawhar/opencode-legion",
+      "result": "pass",
+      "evidence": "packages/opencode-plugin/package.json name field is @sjawhar/opencode-legion"
+    },
+    {
+      "criterion": "Include shell.env hook in published bundle",
+      "result": "pass",
+      "evidence": "github-app-credentials.ts imported in src/index.ts, shell.env handler at line 216, confirmed present in dist/index.js after build"
+    },
+    {
+      "criterion": "Update daemon file:// to npm package reference",
+      "result": "pass",
+      "evidence": "packages/daemon/src/daemon/index.ts line 199 already uses @sjawhar/opencode-legion@latest (pre-existing, no change needed)"
+    }
+  ],
+  "notes": "Package not yet on npm (404) — will publish on next release trigger. bin field points to src/cli/index.ts (pre-existing, requires Bun runtime, intentional). No files/.npmignore means src/ will be included in published package (pre-existing, not introduced by this PR).",
   "schemaVersion": 1,
-  "phase": "unknown"
+  "phase": "test",
+  "completed": "2026-04-12T20:34:39.348Z"
 }
