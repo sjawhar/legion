@@ -1,34 +1,30 @@
 {
-  "scope": "medium",
+  "scope": "small",
   "components": [
-    "packages/daemon/src/daemon/config.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/server.ts"
+    "src/delegation/background-manager.ts",
+    "src/delegation/types.ts",
+    "src/config/index.ts",
+    "src/delegation/__tests__/"
   ],
   "subIssues": [],
   "routingHints": {
-    "complexity": "medium",
+    "complexity": "small",
     "estimatedImplementers": 1,
     "skipRetro": false
   },
   "concerns": [
-    "startDaemon() currently overrides config.daemonPort via registry allocation — port from config must be authoritative",
-    "ENVOY_URL and LEGION_FEEDBACK_* are read directly from process.env outside loadConfig() — must migrate to config object",
-    "Relative paths in YAML (workspace, private_key_path) must resolve relative to config file directory, not cwd",
-    "extra_projects is GitHub-multi-board only — Linear backend with extra_projects should error",
-    "Deprecation warnings should only fire when env var is the effective value, not when overridden",
-    "Unknown key warnings must cover full key paths (nested), not just top-level keys"
+    "Reservation pattern must be atomic — set resource keys only after successful acquire to avoid double-release on finalize (see delegation-hardening-retro.md)",
+    "Concurrent spawn race at limit boundary — two simultaneous spawns must not both succeed",
+    "parentSessionID is already on BackgroundTask but depth is not tracked — need in-memory map from sessionID to depth/root"
   ],
   "learningsInjected": [
-    "delegation/hardening-patterns.md",
-    "daemon/controller-lifecycle-separation.md",
-    "daemon/shared-serve-refactor.md"
+    "docs/solutions/delegation/hardening-patterns.md",
+    "docs/solutions/delegation/delegation-hardening-retro.md"
   ],
   "learningsHelpful": [
-    "daemon/shared-serve-refactor.md"
+    "docs/solutions/delegation/delegation-hardening-retro.md"
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T21:45:53.294Z"
+  "completed": "2026-04-12T23:16:05.595Z"
 }
