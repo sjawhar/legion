@@ -1,32 +1,42 @@
 {
-  "result": "pass",
-  "summary": "All acceptance criteria verified. Controller skill updated: retro is MANDATORY, no skip conditions, no direct merge. 1287/1289 tests pass (2 pre-existing failures). TypeScript clean. Biome clean.",
-  "criteriaResults": [
+  "passed": 1,
+  "failed": 6,
+  "failures": [
     {
-      "criterion": "After review completes (approved), controller MUST dispatch retro worker — no exceptions",
-      "result": "pass",
-      "evidence": "Verified by code inspection: SKILL.md lines 749-753 — retro section now reads: The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions. Always dispatch retro after review approval. Do not check routing hints, skipRetro flags, or any other conditions."
+      "criterion": "Security group no longer allows inbound TCP port 22 from internet CIDRs",
+      "evidence": "nc -zw3 52.53.150.80 22 succeeded (exit code 0) — SSH port is still open. Pulumi.prod.yaml has sg-REPLACE_ME placeholder — pulumi up was never run."
     },
     {
-      "criterion": "Remove language allowing skipping retro",
-      "result": "pass",
-      "evidence": "Verified by diff: 57 lines deleted from SKILL.md including entire skipRetro bash block. grep for skipRetro/skip_retro/SKIP_RETRO in SKILL.md returns 0 code-path matches."
+      "criterion": "nc -zw3 52.53.150.80 22 fails",
+      "evidence": "FAIL: Connection to 52.53.150.80 22 port [tcp/ssh] succeeded! SSH is still accessible from the internet."
     },
     {
-      "criterion": "Add explicit enforcement: retro is MANDATORY",
-      "result": "pass",
-      "evidence": "Verified by code inspection: SKILL.md line 431 (MUST NOT skip list), line 749 (Retro section), line 753 (unconditional dispatch), line 769 (ADAPTIVE ROUTING GUARDRAILS), line 939 (anti-pattern table)."
+      "criterion": "aws ssm start-session --target i-0d1244b687e204a01 --profile dev still works",
+      "evidence": "Cannot verify — no AWS credentials available in test environment. Deployment not run (sg-REPLACE_ME placeholder in Pulumi.prod.yaml)."
     },
     {
-      "criterion": "worker-done on review should NOT trigger merge until retro completes",
-      "result": "pass",
-      "evidence": "Verified by code inspection: decision.ts lines 140-142 — IssueStatus.RETRO + hasWorkerDone → dispatch_merger. Pre-merge gate condition 5 requires retro handoff."
+      "criterion": "ssh sami@sami via Tailscale still works",
+      "evidence": "Cannot verify — no Tailscale access in test environment."
+    },
+    {
+      "criterion": "pulumi up in packages/envoy/infra/ succeeds",
+      "evidence": "Cannot verify — no AWS credentials available."
+    },
+    {
+      "criterion": "At least one team member besides the implementer has verified SSM access works",
+      "evidence": "No evidence of peer verification in issue comments or PR."
     }
   ],
-  "testCritique": "No new unit tests — change is purely to a skill markdown file. Existing decision.ts tests cover retro→merge transitions. CI: lint/test/typecheck all pass.",
-  "ciStatus": "pass",
-  "ciUrl": "https://github.com/sjawhar/legion/actions/runs/24317292849",
+  "documentationFeedback": "packages/aws-infra/docs/dev-box-access.md is excellent — comprehensive, covers all access paths (SSM, port forwarding, Tailscale SSH, emergency access), includes verification commands. README.md covers deployment steps clearly.",
+  "observations": [
+    "The Pulumi code itself is correct: ingress:[] declaratively removes all inbound rules. The approach is sound.",
+    "The deployment was not executed — Pulumi.prod.yaml still has sg-REPLACE_ME placeholder.",
+    "To unblock: fill in SG ID, run pulumi import, run pulumi up, verify nc fails, verify SSM works.",
+    "CI passes (lint/typecheck/test) — TypeScript compiles cleanly, existing daemon tests pass."
+  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T22:08:26.000Z"
+  "completed": "2026-04-12T23:31:38.572Z"
 }
