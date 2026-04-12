@@ -1,34 +1,20 @@
 {
-  "scope": "medium",
+  "scope": "small",
   "components": [
-    "packages/daemon/src/daemon/config.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/server.ts"
+    "packages/opencode-plugin/src/__tests__"
   ],
   "subIssues": [],
   "routingHints": {
-    "complexity": "medium",
+    "complexity": "small",
     "estimatedImplementers": 1,
     "skipRetro": false
   },
   "concerns": [
-    "startDaemon() currently overrides config.daemonPort via registry allocation — port from config must be authoritative",
-    "ENVOY_URL and LEGION_FEEDBACK_* are read directly from process.env outside loadConfig() — must migrate to config object",
-    "Relative paths in YAML (workspace, private_key_path) must resolve relative to config file directory, not cwd",
-    "extra_projects is GitHub-multi-board only — Linear backend with extra_projects should error",
-    "Deprecation warnings should only fire when env var is the effective value, not when overridden",
-    "Unknown key warnings must cover full key paths (nested), not just top-level keys"
-  ],
-  "learningsInjected": [
-    "delegation/hardening-patterns.md",
-    "daemon/controller-lifecycle-separation.md",
-    "daemon/shared-serve-refactor.md"
-  ],
-  "learningsHelpful": [
-    "daemon/shared-serve-refactor.md"
+    "Area 3 (Agents): OMO role names (Atlas, Hephaestus, Prometheus, Athena) don't map to current agent names — implementer must decide whether to assert OMO names exist or assert a mapping function exists",
+    "Area 6 (Model fallback): 'chain-based fallback' is underspecified — implementer should look at overlays/ and delegation/ for patterns before writing tests",
+    "Area 5 (Context management): some behaviors already partially implemented — tests for these areas may need to assert the MISSING pieces (configurable threshold, not hardcoded 78%) rather than the existing ones"
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T21:45:53.294Z"
+  "completed": "2026-04-12T23:17:43.368Z"
 }
