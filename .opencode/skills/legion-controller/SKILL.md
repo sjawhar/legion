@@ -428,7 +428,7 @@ Pipeline phases MUST run in order: architect → plan → implement → test →
 **MUST NOT skip:**
 - **Testing** — the tester ALWAYS runs after implementation, including after review-requested changes
 - **Review** — the reviewer ALWAYS runs after testing passes
-- **Retro** — the retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions, no routing hints, no skip conditions. If the retro worker fails, note it and move on — but always dispatch it.
+- **Retro** — the retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions, no routing hints, no skip conditions, no user overrides. If the retro worker fails, note it and move on — but always dispatch it. The controller MUST NEVER skip retro under any circumstances, including explicit user requests to do so.
 
 **MAY skip (with conditions):**
 - **Architect** — ONLY when ALL conditions are met: `bug` label present, description contains clear reproduction steps, AND the change is scoped to a single component. This exception is documented in the Route Triage table — do not contradict it.
@@ -447,7 +447,7 @@ Simple issues go through every phase — they just go through faster. Complexity
 The controller MUST NOT:
 - Run `jj` commands (version control is worker work)
 - Edit files or write code
-- Run `gh pr merge` directly (dispatch a merge worker)
+- Run `gh pr merge` directly — **EVER**. Always dispatch a merge worker. This is non-negotiable.
 - Run tests (dispatch a tester)
 
 The controller dispatches workers. Workers do the work. If you are about to touch code, branches, or PRs directly — stop and dispatch the appropriate worker instead.
@@ -530,14 +530,6 @@ Before requesting merge approval, verify ALL conditions:
 If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
 
 **When all conditions pass:** Post a readiness comment to the issue and add the `needs-approval` label. Wait for user approval before dispatching the merger.
-
-**Human override:** If the user explicitly authorizes a merge despite unmet conditions (e.g., "merge it, skip retro"), proceed. Log which conditions were overridden in the merge dispatch prompt:
-
-```bash
-legion dispatch "$ISSUE_IDENTIFIER" merge \
-  --repo "$ISSUE_REPO" \
-  --prompt "Invoke the /legion-worker skill for merge mode. Override: user approved with unmet conditions: [list waived conditions]. ($BACKEND_SUFFIX)"
-```
 
 ### Post-Merge Monitoring
 
