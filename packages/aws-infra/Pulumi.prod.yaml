@@ -1,0 +1,10 @@
+config:
+  aws:region: us-west-1
+  aws-infra:managementAccountId: "REPLACE_WITH_MANAGEMENT_ACCOUNT_ID"
+  aws-infra:devAccountId: "REPLACE_WITH_DEV_ACCOUNT_ID"
+  # aws-infra:stagingAccountId: "REPLACE_WITH_STAGING_ACCOUNT_ID"  # optional: omit if no staging account
+  aws-infra:prodAccountId: "REPLACE_WITH_PROD_ACCOUNT_ID"
+  aws-infra:adminEmails:
+    - "REPLACE_WITH_ADMIN_EMAIL@example.com"
+  aws-infra:engineerEmails:
+    - "REPLACE_WITH_ENGINEER_EMAIL@example.com"
