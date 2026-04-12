@@ -38,6 +38,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
       data: undefined,
     }),
     deleteSession: async () => {},
+    listActiveSessions: async (): Promise<Set<string>> => new Set<string>(),
   };
   const { server, stop } = startServer({
     port: randomPort(),

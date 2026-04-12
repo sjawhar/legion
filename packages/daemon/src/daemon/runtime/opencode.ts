@@ -146,4 +146,13 @@ export class OpenCodeAdapter implements RuntimeAdapter {
       return { data: sessionStatus };
     }
   }
+
+  async listActiveSessions(): Promise<Set<string>> {
+    const client = createWorkerClient(this.port, "");
+    const result = await client.session.status();
+    if (result.error || !result.data) {
+      throw new Error(`Failed to list sessions: ${JSON.stringify(result.error ?? "no data")}`);
+    }
+    return new Set(Object.keys(result.data as Record<string, unknown>));
+  }
 }
