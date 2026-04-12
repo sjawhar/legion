@@ -523,6 +523,7 @@
     "tag:handoff": [
       "daemon/handoff-schema-migration-patterns.md",
       "skill-patterns/agent-workflow-enforcement-patterns.md"
+      "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:zod": [
       "daemon/handoff-schema-migration-patterns.md"
@@ -554,6 +555,7 @@
       "envoy/nats-bus-client-self-healing.md",
       "envoy/webhook-handler-extraction-and-testing.md",
       "envoy/multi-layer-service-consolidation.md"
+      "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "packages/envoy/internal/webhook": [
       "envoy/webhook-handler-extraction-and-testing.md",
@@ -749,6 +751,7 @@
     ],
     "tag:conflict-resolution": [
       "skill-patterns/merge-retry-race-condition-pattern.md"
+      "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:github-api": [
       "skill-patterns/merge-retry-race-condition-pattern.md",
@@ -776,5 +779,11 @@
       "daemon/workspace-scanning-patterns.md",
       "delegation/subagent-plan-compliance.md"
     ]
+    ],
+    ".legion": [
+      "legion/handoff-file-conflicts-during-rebases.md"
+    ],
+    "tag:jj": [
+      "legion/handoff-file-conflicts-during-rebases.md"
   }
 }

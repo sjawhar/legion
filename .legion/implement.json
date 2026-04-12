@@ -1,22 +1,12 @@
 {
-  "filesChanged": [
-    ".opencode/skills/legion-controller/SKILL.md",
-    ".opencode/skills/legion-worker/workflows/review.md"
+  "filesChanged": ["packages/envoy/cmd/listener/main.go"],
+  "trickyParts": [
+    "Rebase onto main caused .legion/plan.json conflicts from concurrent issue #240 merge — required resolving both ancestor commits (vuvz and wytu) separately"
   ],
-  "trickyParts": [],
   "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
-  "learningsInjected": [
-    "skill-patterns/merge-retry-race-condition-pattern.md",
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "integration-patterns/controller-worker-protocol.md"
-  ],
-  "learningsHelpful": [
-    "skill-patterns/merge-retry-race-condition-pattern.md",
-    "integration-patterns/controller-worker-protocol.md"
-  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-12T13:28:32.037Z"
+  "completed": "2026-04-12T13:16:13.683Z"
 }

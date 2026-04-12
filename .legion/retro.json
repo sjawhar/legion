@@ -1,7 +1,7 @@
 {
-  "skipped": true,
-  "reason": "no significant learnings — mechanical skill file edits following exact plan",
+  "skipped": false,
+  "docsCreated": ["docs/solutions/legion/handoff-file-conflicts-during-rebases.md"],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-12T13:42:49.702Z"
+  "completed": "2026-04-12T13:34:36.609Z"
 }
