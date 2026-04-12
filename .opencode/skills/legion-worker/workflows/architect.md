@@ -108,6 +108,7 @@ Before signaling completion, spawn a cross-family review session to validate the
 1. Spawn a review session using the delegation tool:
    - Category: `review-architect`
    - Model override: Use a different model family than the one doing the architecture work
+   - **timeout_seconds: 180** (3 minutes — auto-cancels if the subagent stalls)
    - Prompt: Include the original issue description AND your architect output (sub-issues created, acceptance criteria written, or spec-readiness assessment)
 
 2. The reviewer evaluates:
@@ -121,6 +122,8 @@ Before signaling completion, spawn a cross-family review session to validate the
    - You do NOT need to re-review after fixes — one review pass is sufficient
 
 4. Only after incorporating review feedback, proceed to signal completion.
+
+**If cross-family review fails or times out (>3 min):** Skip the review step and proceed directly to signal completion. Note "Cross-family review skipped (subagent timeout)" in the handoff data. The downstream planner/reviewer will catch issues the cross-family reviewer would have found. **Do NOT stall waiting for the subagent — your primary obligation is to signal completion.**
 
 ## 5. Signal Handoff
 

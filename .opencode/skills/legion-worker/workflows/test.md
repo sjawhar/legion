@@ -150,6 +150,7 @@ Before booting anything, verify the code even attempts to address the spec. Disp
 - **What Was Requested:** the acceptance criteria from the issue
 - **What Implementer Claims They Built:** the PR title and body
 - **Code to inspect:** the workspace (already checked out)
+- **timeout_seconds: 180** (3 minutes — auto-cancels if the subagent stalls)
 
 The subagent reads the actual diff and verifies each acceptance criterion has corresponding code. It checks for:
 - Missing requirements (criterion has no code addressing it)
@@ -159,6 +160,8 @@ The subagent reads the actual diff and verifies each acceptance criterion has co
 **If ✅ spec compliant:** proceed to step 3.
 
 **If ❌ issues found:** include the findings in your test results and **fail immediately** — skip booting the environment. There's no point smoke-testing code that doesn't even attempt to implement the spec.
+
+**If spec compliance subagent fails or times out (>3 min):** Proceed to step 3 (boot and test). Note "Spec compliance check skipped (subagent timeout)" in your test results. The behavioral testing in subsequent steps will surface spec gaps through actual test failures. **Do NOT stall waiting for the subagent.**
 
 ### 2.5. Critique the Tests
 

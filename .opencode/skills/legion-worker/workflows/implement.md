@@ -177,9 +177,13 @@ they must be in the same wave (sequential) or one must `blockedBy` the other.
 policy (3 attempts before escalation). Other tasks in the wave continue independently.
 The next wave does NOT start until all tasks in the current wave are completed or cancelled.
 
+**Wave timeout:** If a wave has not converged (all tasks completed/cancelled) within **5 minutes**, cancel all remaining running tasks in the wave and proceed. Execute uncompleted tasks sequentially in the main session as a fallback. Note "Wave N timed out — executed remaining tasks sequentially" in the handoff. **Do NOT stall indefinitely waiting for subagent convergence.**
+
 ### 3. Analyze
 
 Invoke `/analyze` to run cleanup agents.
+
+**If `/analyze` fails or times out (>3 min):** Skip and proceed to Pre-Ship Verification. The pre-ship checks will catch anything critical. Note "Analyze skipped (timeout)" in the handoff.
 
 ### 4. Pre-Ship Verification
 
@@ -225,6 +229,7 @@ After all checks pass, spawn a cross-family review session before creating the P
 1. Spawn a review session using `background_task`:
    - Category: `review-implementation`
    - Model: Specify an explicit model from a different provider (e.g., `google/gemini-3-pro` or `openai/gpt-5.2-codex`)
+   - **timeout_seconds: 180** (3 minutes — auto-cancels if the subagent stalls)
    - Prompt: Include:
     - The original plan/requirements from the issue
      - A summary of what was implemented
@@ -242,6 +247,8 @@ After all checks pass, spawn a cross-family review session before creating the P
    - You do NOT need to re-review — one cross-family pass is sufficient
 
 4. Only after addressing review findings, proceed to Ship.
+
+**If cross-family review fails or times out (>3 min):** Skip the review step and proceed directly to Ship. Note "Cross-family review skipped (subagent timeout)" in the PR body summary. The downstream human/bot review will catch anything the cross-family reviewer would have found. **Do NOT stall waiting for the subagent — your primary obligation is to ship and signal completion.**
 
 ### 6. Ship
 

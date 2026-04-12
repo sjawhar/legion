@@ -220,4 +220,117 @@ describe("launch", () => {
     expect(task.completedAt).toBeDefined();
     expect(manager.getTask(task.id)).toBeUndefined();
   });
+
+  it("stores timeoutMs from launch options", async () => {
+    const { manager } = createManager();
+
+    const task = await manager.launch({
+      agent: "explore",
+      prompt: "hello",
+      description: "test launch",
+      timeoutMs: 5000,
+    });
+
+    expect(task.timeoutMs).toBe(5000);
+  });
+});
+
+describe("timeout", () => {
+  it("auto-fails task after timeoutMs expires", async () => {
+    const { manager, session } = createManager();
+    const abortSpy = spyOn(session, "abort");
+
+    const task = await manager.launch({
+      agent: "explore",
+      prompt: "hello",
+      description: "timeout test",
+      timeoutMs: 50,
+    });
+
+    // Task should initially be running/pending
+    expect(task.status === "running" || task.status === "pending").toBe(true);
+
+    // Wait for timeout to fire
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(task.status).toBe("failed");
+    expect(task.error).toContain("Timed out");
+    expect(task.completedAt).toBeDefined();
+    expect(abortSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire timeout when task completes in time", async () => {
+    const { manager } = createManager();
+
+    const task = await manager.launch({
+      agent: "explore",
+      prompt: "hello",
+      description: "fast task",
+      timeoutMs: 200,
+    });
+
+    // Manually set to running for finalize to accept
+    task.status = "running";
+
+    // Complete the task before timeout
+    await manager.finalize(task, "completed");
+
+    // Wait past the timeout period
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Task should stay completed, not be overwritten by timeout
+    expect(task.status as string).toBe("completed");
+    expect(task.error).toBeUndefined();
+  });
+
+  it("does not schedule timeout when timeoutMs is undefined", async () => {
+    const { manager } = createManager();
+
+    const task = await manager.launch({
+      agent: "explore",
+      prompt: "hello",
+      description: "no timeout",
+    });
+
+    const timers = (
+      manager as unknown as { timeoutTimers: Map<string, ReturnType<typeof setTimeout>> }
+    ).timeoutTimers;
+    expect(timers.has(task.id)).toBe(false);
+  });
+
+  it("does not schedule timeout when timeoutMs is 0", async () => {
+    const { manager } = createManager();
+
+    const task = await manager.launch({
+      agent: "explore",
+      prompt: "hello",
+      description: "zero timeout",
+      timeoutMs: 0,
+    });
+
+    const timers = (
+      manager as unknown as { timeoutTimers: Map<string, ReturnType<typeof setTimeout>> }
+    ).timeoutTimers;
+    expect(timers.has(task.id)).toBe(false);
+  });
+
+  it("clears timer on cancel", async () => {
+    const { manager } = createManager();
+
+    const task = await manager.launch({
+      agent: "explore",
+      prompt: "hello",
+      description: "cancel test",
+      timeoutMs: 5000,
+    });
+
+    const timers = (
+      manager as unknown as { timeoutTimers: Map<string, ReturnType<typeof setTimeout>> }
+    ).timeoutTimers;
+    expect(timers.has(task.id)).toBe(true);
+
+    await manager.cancel(task.id);
+
+    expect(timers.has(task.id)).toBe(false);
+  });
 });

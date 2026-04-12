@@ -1,31 +1,28 @@
 {
   "verdict": "pass",
-  "summary": "All 4 acceptance criteria verified. CI green (lint, typecheck, test). Workflow structure correct. Shell.env hook confirmed in built bundle.",
-  "findings": [],
+  "summary": "All acceptance criteria verified. timeout_seconds parameter added to background_task tool, scheduleTimeout auto-cancels tasks after timeoutMs, worker skill docs updated with Never stall on subagents rule (timeout_seconds: 180s). 16 new unit tests pass. TypeScript type error in test file fixed (task.status cast). Pre-existing envoy/infra @pulumi/docker failures unrelated to this PR.",
   "criteriaResults": [
     {
-      "criterion": "Add npm publish to release workflow using OIDC pattern",
+      "criterion": "Set maximum wait time for Oracle/subagent responses",
       "result": "pass",
-      "evidence": "plugin job in release.yaml uses setup-node with registry-url + npm publish --provenance + id-token:write permission"
+      "evidence": "timeout_seconds parameter added to background_task tool in delegation-tool.ts; timeoutMs stored in BackgroundTask type"
     },
     {
-      "criterion": "Package name @sjawhar/opencode-legion",
+      "criterion": "Auto-skip on timeout with note",
       "result": "pass",
-      "evidence": "packages/opencode-plugin/package.json name field is @sjawhar/opencode-legion"
+      "evidence": "scheduleTimeout() in background-manager.ts auto-fails task with Timed out after Xs error message and aborts the session"
     },
     {
-      "criterion": "Include shell.env hook in published bundle",
+      "criterion": "Continue with remaining workflow steps",
       "result": "pass",
-      "evidence": "github-app-credentials.ts imported in src/index.ts, shell.env handler at line 216, confirmed present in dist/index.js after build"
-    },
-    {
-      "criterion": "Update daemon file:// to npm package reference",
-      "result": "pass",
-      "evidence": "packages/daemon/src/daemon/index.ts line 199 already uses @sjawhar/opencode-legion@latest (pre-existing, no change needed)"
+      "evidence": "SKILL.md rule 7 and workflow files (implement.md, architect.md, test.md) all updated with timeout_seconds: 180 and explicit skip-on-timeout instructions"
     }
   ],
-  "notes": "Package not yet on npm (404) — will publish on next release trigger. bin field points to src/cli/index.ts (pre-existing, requires Bun runtime, intentional). No files/.npmignore means src/ will be included in published package (pre-existing, not introduced by this PR).",
+  "regressions": "None — 1281/1283 tests pass; 2 failures are pre-existing @pulumi/docker module-not-found errors in envoy/infra unrelated to this PR",
+  "fixesApplied": [
+    "Fixed TypeScript type error in finalize.test.ts line 282: cast task.status as string for toBe matcher compatibility"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T20:34:39.348Z"
+  "completed": "2026-04-12T20:41:43.348Z"
 }

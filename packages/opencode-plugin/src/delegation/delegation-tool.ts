@@ -40,6 +40,10 @@ export function createDelegationTools(
         .optional()
         .describe("Specific agent name (e.g. executor, explorer, oracle)"),
       description: z.string().describe("Short task description (5-10 words)"),
+      timeout_seconds: z
+        .number()
+        .optional()
+        .describe("Auto-cancel after this many seconds. Default: no timeout."),
     },
     async execute(args, toolContext) {
       const context = toolContext as DelegationToolContext | undefined;
@@ -69,6 +73,9 @@ export function createDelegationTools(
 
       const parentSessionId = context?.sessionID;
 
+      const timeoutSec = args.timeout_seconds as number | undefined;
+      const timeoutMs = timeoutSec !== undefined && timeoutSec > 0 ? timeoutSec * 1000 : undefined;
+
       const task = await manager.launch({
         agent: agentName,
         prompt: args.prompt as string,
@@ -76,19 +83,23 @@ export function createDelegationTools(
         model: resolvedModel,
         parentSessionId,
         systemPrompt: categoryConfig?.systemPrompt,
+        timeoutMs,
       });
 
-      return [
+      const lines = [
         "Session created.",
         "",
         `Session ID: ${task.sessionID ?? "pending"}`,
         `Task ID: ${task.id}`,
         `Agent: ${task.agent}`,
         `Model: ${task.model}`,
-        "",
-        `Attach: opencode attach ${task.sessionID ?? task.id}`,
-        `Output: Use background_output with task_id="${task.id}"`,
-      ].join("\n");
+      ];
+      if (timeoutMs) {
+        lines.push(`Timeout: ${timeoutSec}s`);
+      }
+      lines.push("", `Attach: opencode attach ${task.sessionID ?? task.id}`);
+      lines.push(`Output: Use background_output with task_id="${task.id}"`);
+      return lines.join("\n");
     },
   });
 

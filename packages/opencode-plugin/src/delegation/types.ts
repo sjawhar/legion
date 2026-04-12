@@ -10,6 +10,8 @@ export interface BackgroundTask {
   error?: string;
   createdAt: number;
   completedAt?: number;
+  /** Maximum duration in ms before auto-cancellation. Undefined = no timeout. */
+  timeoutMs?: number;
 }
 
 export interface LaunchOptions {
@@ -19,4 +21,6 @@ export interface LaunchOptions {
   parentSessionId?: string;
   model?: string;
   systemPrompt?: string;
+  /** Maximum duration in ms before auto-cancellation. Undefined = no timeout. */
+  timeoutMs?: number;
 }
