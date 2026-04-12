@@ -1,38 +1,26 @@
 {
-  "outcome": "approved",
-  "criticalCount": 0,
-  "importantCount": 1,
-  "minorCount": 2,
-  "prNumber": 464,
-  "prUrl": "https://github.com/sjawhar/legion/pull/464",
-  "findings": [
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "verdict": "changes_requested",
+  "keyFindings": [
     {
       "severity": "P2",
-      "location": "packages/daemon/src/daemon/runtime/opencode.ts:151",
-      "description": "listActiveSessions() has no unit test in OpenCodeAdapter or ClaudeCodeAdapter test files. Only tested via integration-level mocking."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "No unit tests for the new directory scan code path. Parent issue #468 explicitly required tests in packages/daemon/src/daemon/__tests__/. Existing auto-cleanup tests don't inject a mock listDir, so the new logic is never exercised."
     },
     {
       "severity": "P3",
-      "location": "packages/daemon/src/daemon/index.ts:731",
-      "description": "No guard for empty sessionId in liveness sweep. Schema allows empty string; defensive check would be safer."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "if (listDir) guard is dead code — defaultRepoManagerDeps.listDir is always defined, so the ?? fallback always resolves to a function."
     },
     {
       "severity": "P3",
-      "location": ".legion/implement.json",
-      "description": "Implement handoff lists wrong files (from issue 457, not 447). Stale data, no code impact."
+      "file": ".legion/implement.json",
+      "description": "Duplicate open PR: #474 (fix/listdir-fallback) points to the same commit as #475. PR #474 should be closed."
     }
   ],
-  "acCoverage": {
-    "AC1": "pass",
-    "AC2": "pass",
-    "AC3": "pass",
-    "AC4": "pass",
-    "AC5": "pass",
-    "AC6": "pass",
-    "AC7": "n/a",
-    "AC8": "pass"
-  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T21:19:37.124Z"
+  "completed": "2026-04-12T21:46:26.538Z"
 }
