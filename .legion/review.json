@@ -2,37 +2,25 @@
   "outcome": "approved",
   "criticalCount": 0,
   "importantCount": 1,
-  "minorCount": 2,
-  "prNumber": 464,
-  "prUrl": "https://github.com/sjawhar/legion/pull/464",
+  "minorCount": 1,
+  "prNumber": 473,
+  "prUrl": "https://github.com/sjawhar/legion/pull/473",
   "findings": [
     {
       "severity": "P2",
-      "location": "packages/daemon/src/daemon/runtime/opencode.ts:151",
-      "description": "listActiveSessions() has no unit test in OpenCodeAdapter or ClaudeCodeAdapter test files. Only tested via integration-level mocking."
+      "location": "packages/daemon/src/daemon/schemas.ts:19-20",
+      "description": "WorkerEntrySchema has no test coverage in schemas.test.ts. Other schemas have tests but WorkerEntrySchema and PersistedWorkerStateSchema are untested. Acceptable given narrow issue scope but worth a follow-up."
     },
     {
       "severity": "P3",
-      "location": "packages/daemon/src/daemon/index.ts:731",
-      "description": "No guard for empty sessionId in liveness sweep. Schema allows empty string; defensive check would be safer."
-    },
-    {
-      "severity": "P3",
-      "location": ".legion/implement.json",
-      "description": "Implement handoff lists wrong files (from issue 457, not 447). Stale data, no code impact."
+      "location": "PR description",
+      "description": "Description says fields now survive JSON round-trips but .passthrough() already preserved them at runtime. The actual fix is TypeScript type alignment. Fix is still correct and necessary."
     }
   ],
   "acCoverage": {
-    "AC1": "pass",
-    "AC2": "pass",
-    "AC3": "pass",
-    "AC4": "pass",
-    "AC5": "pass",
-    "AC6": "pass",
-    "AC7": "n/a",
-    "AC8": "pass"
+    "AC1": "pass"
   },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T21:19:37.124Z"
+  "completed": "2026-04-12T21:41:44.650Z"
 }
