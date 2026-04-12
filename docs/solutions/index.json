@@ -36,7 +36,8 @@
       "daemon/codebase-index-file-placement.md",
       "daemon/envoy-auto-subscription-patterns.md",
       "daemon/post-collection-processing-pattern.md",
-      "daemon/workspace-scanning-patterns.md"
+      "daemon/workspace-scanning-patterns.md",
+      "daemon/envoy-topic-pubsub-symmetry.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -522,7 +523,7 @@
     ],
     "tag:handoff": [
       "daemon/handoff-schema-migration-patterns.md",
-      "skill-patterns/agent-workflow-enforcement-patterns.md"
+      "skill-patterns/agent-workflow-enforcement-patterns.md",
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:zod": [
@@ -554,7 +555,7 @@
       "envoy/contracts-and-handler-patterns.md",
       "envoy/nats-bus-client-self-healing.md",
       "envoy/webhook-handler-extraction-and-testing.md",
-      "envoy/multi-layer-service-consolidation.md"
+      "envoy/multi-layer-service-consolidation.md",
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "packages/envoy/internal/webhook": [
@@ -590,7 +591,8 @@
       "testing/bun-fetch-mocking-patterns.md",
       "envoy/listener-routing-by-topic-prefix.md",
       "envoy/nats-bus-client-self-healing.md",
-      "envoy/publish-payload-source-validation.md"
+      "envoy/publish-payload-source-validation.md",
+      "daemon/envoy-topic-pubsub-symmetry.md"
     ],
     "packages/envoy/internal/contracts": [
       "envoy/structured-json-summary-patterns.md",
@@ -738,7 +740,8 @@
     ],
     "tag:notifications": [
       "skill-patterns/worker-notification-conventions.md",
-      "daemon/envoy-auto-subscription-patterns.md"
+      "daemon/envoy-auto-subscription-patterns.md",
+      "daemon/envoy-topic-pubsub-symmetry.md"
     ],
     "tag:escalation": [
       "skill-patterns/worker-notification-conventions.md"
@@ -750,7 +753,7 @@
       "skill-patterns/merge-retry-race-condition-pattern.md"
     ],
     "tag:conflict-resolution": [
-      "skill-patterns/merge-retry-race-condition-pattern.md"
+      "skill-patterns/merge-retry-race-condition-pattern.md",
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:github-api": [
@@ -761,7 +764,8 @@
       "daemon/health-tick-baseline-isolation.md"
     ],
     "tag:state-delta": [
-      "daemon/health-tick-baseline-isolation.md"
+      "daemon/health-tick-baseline-isolation.md",
+      "daemon/envoy-topic-pubsub-symmetry.md"
     ],
     "tag:baseline-oscillation": [
       "daemon/health-tick-baseline-isolation.md"
@@ -778,12 +782,19 @@
     "packages/daemon/src/knowledge": [
       "daemon/workspace-scanning-patterns.md",
       "delegation/subagent-plan-compliance.md"
-    ]
     ],
     ".legion": [
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:jj": [
       "legion/handoff-file-conflicts-during-rebases.md"
+    ],
+    "tag:topic-routing": [
+      "daemon/envoy-topic-pubsub-symmetry.md",
+      "envoy/listener-routing-by-topic-prefix.md"
+    ],
+    "tag:silent-failure": [
+      "daemon/envoy-topic-pubsub-symmetry.md"
+    ]
   }
 }

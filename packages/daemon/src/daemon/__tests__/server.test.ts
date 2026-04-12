@@ -1289,7 +1289,7 @@ describe("daemon server", () => {
 
       expect(publishCalls.length).toBe(1);
       const payload = publishCalls[0]?.body as { topic: string; message: string };
-      expect(payload.topic).toBe("notifications.role.legion-controller");
+      expect(payload.topic).toBe("notifications.legion.controller");
       const delta = JSON.parse(payload.message) as {
         type: string;
         changes: {
