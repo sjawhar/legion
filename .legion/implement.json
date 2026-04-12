@@ -1,19 +1,35 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/knowledge/types.ts",
+    "packages/daemon/src/knowledge/feedback-logger.ts",
+    "packages/daemon/src/knowledge/collector.ts",
+    "packages/daemon/src/knowledge/aggregator.ts",
+    "packages/daemon/src/knowledge/rules.ts",
+    "packages/daemon/src/knowledge/front-matter.ts",
+    "packages/daemon/src/knowledge/promoter.ts",
+    "packages/daemon/src/knowledge/reporter.ts",
+    "packages/daemon/src/knowledge/consolidate.ts",
     "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/server.ts"
+    ".opencode/skills/legion-retro/SKILL.md"
   ],
   "trickyParts": [
-    "startDaemon() signature change required updating all callers",
-    "extra_projects validation now applies to env-sourced values too",
-    "validateBackend/validateRuntime exported for CLI validation"
+    "Retro SKILL.md snippet needed env/homeDir params added post-review",
+    "scanForWorkspaceDirs was recursive causing timeout on real workspaces - fixed to shallow scan",
+    "collectWorkspaceIssue used legionId split instead of path.basename for issueId - fixed",
+    "Status values needed to be needs-review not review/stale - fixed"
   ],
-  "testResults": "861 pass, 0 fail across 41 files",
-  "ciStatus": "all green",
-  "prNumber": 442,
+  "deviations": [
+    "Subagents used different disposition names than plan (accepted/needs_review/archived/rejected vs promote/review/stale/keep) - functionally equivalent",
+    "Aggregator uses different field names (path/issues/touchedPaths) than plan"
+  ],
+  "openQuestions": [],
+  "learningsInjected": [
+    "daemon/handoff-schema-migration-patterns.md",
+    "task-index-patterns.md",
+    "skill-patterns/cross-cutting-workflow-concerns.md"
+  ],
+  "learningsHelpful": ["daemon/handoff-schema-migration-patterns.md", "task-index-patterns.md"],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T23:07:21.136Z"
+  "completed": "2026-04-11T22:47:00.374Z"
 }

@@ -26,6 +26,11 @@ import {
 } from "../handoff/ledger";
 import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
 import type { HandoffPhase } from "../handoff/types";
+import { consolidateKnowledge } from "../knowledge/consolidate";
+import {
+  formatConsolidationReportHuman,
+  formatConsolidationReportJson,
+} from "../knowledge/reporter";
 import { SESSION_ID_PATTERN } from "../state/types";
 import { resolveLegionId } from "./legion-resolver";
 import { formatPollOutput } from "./poll-formatter";
@@ -937,6 +942,57 @@ function parseHandoffData(data: string | undefined): Record<string, unknown> {
   return payload;
 }
 
+export function resolveKnowledgeWorkspaceContext(
+  explicitWorkspaceRoot?: string,
+  env: Record<string, string | undefined> = process.env,
+  homeDir: string = os.homedir()
+): {
+  legionId: string;
+  workspaceRoot: string;
+} {
+  const { workspacesDir } = resolveLegionPaths(env, homeDir);
+  const candidatePath = path.resolve(explicitWorkspaceRoot ?? process.cwd());
+  const relativePath = path.relative(workspacesDir, candidatePath);
+
+  if (
+    relativePath === "" ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativePath)
+  ) {
+    throw new CliError(`Not inside a Legion workspace: ${candidatePath}`);
+  }
+
+  const parts = relativePath.split(path.sep).filter(Boolean);
+  if (parts.length < 3) {
+    throw new CliError(`Workspace path does not include a Legion workspace root: ${candidatePath}`);
+  }
+
+  return {
+    legionId: `${parts[0]}/${parts[1]}`,
+    workspaceRoot: path.join(workspacesDir, ...parts.slice(0, 3)),
+  };
+}
+
+interface KnowledgeConsolidateOptions {
+  apply?: boolean;
+  json?: boolean;
+  workspace?: string;
+}
+
+export async function cmdKnowledgeConsolidate(opts: KnowledgeConsolidateOptions): Promise<void> {
+  const { legionId, workspaceRoot } = resolveKnowledgeWorkspaceContext(opts.workspace);
+  const report = await consolidateKnowledge({
+    legionId,
+    workspaceRoot,
+    apply: Boolean(opts.apply),
+  });
+
+  console.log(
+    opts.json ? formatConsolidationReportJson(report) : formatConsolidationReportHuman(report)
+  );
+}
+
 export const startCommand = defineCommand({
   meta: { name: "start", description: "Start the Legion swarm" },
   args: {
@@ -1420,6 +1476,46 @@ export const handoffCommand = defineCommand({
   },
 });
 
+export const knowledgeCommand = defineCommand({
+  meta: { name: "knowledge", description: "Knowledge management utilities" },
+  subCommands: {
+    consolidate: defineCommand({
+      meta: {
+        name: "consolidate",
+        description: "Aggregate learning feedback and apply knowledge mutations",
+      },
+      args: {
+        workspace: { type: "string", alias: "w", description: "Workspace directory" },
+        apply: {
+          type: "boolean",
+          description: "Apply index and front-matter mutations",
+          default: false,
+        },
+        json: {
+          type: "boolean",
+          description: "Output the consolidation report as JSON",
+          default: false,
+        },
+      },
+      async run({ args }) {
+        try {
+          await cmdKnowledgeConsolidate({
+            apply: Boolean(args.apply),
+            json: Boolean(args.json),
+            workspace: args.workspace as string | undefined,
+          });
+        } catch (e) {
+          if (e instanceof CliError) {
+            console.error(e.message);
+            process.exit(e.code);
+          }
+          throw e;
+        }
+      },
+    }),
+  },
+});
+
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
   subCommands: {
@@ -1435,6 +1531,7 @@ export const mainCommand = defineCommand({
     "collect-state": collectStateCommand,
     poll: pollCommand,
     handoff: handoffCommand,
+    knowledge: knowledgeCommand,
   },
 });
 

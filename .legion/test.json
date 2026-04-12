@@ -1,22 +1,24 @@
 {
-  "passed": 22,
+  "passed": 8,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body provides clear usage examples and verification stats. Issue body has comprehensive YAML schema reference. No dedicated docs file updated — appropriate for a refactor PR. Follow-up legion init command would benefit from generating commented config template.",
+  "documentationFeedback": "No README updates. CLI --help adequate. PR body clear. No docs on JSONL format or schema versioning.",
   "observations": [
-    "P2: CLI test file missing error-path tests for cmdStart with missing config file and invalid YAML (tested at unit level in loadConfigFromFile)",
-    "P2: No explicit env-mutation regression test asserting process.env unchanged after cmdStart()",
-    "Test count increased from 861 to 862 due to main branch changes between implementation and testing"
+    "P3: Human report omits per-learning injected/helpful/ratio stats (data only in --json)",
+    "P3: JSON disposition names use internal form (accepted/needs_review/archived/rejected) not spec form (promote/review/stale/keep)",
+    "P3: Malformed handoff JSON in workspace .legion/ dirs prints stack trace to stderr, not captured in report warnings",
+    "P3: canonicalizeLearningPath does not handle ./docs/solutions/ or absolute path variants",
+    "P3: generatedAt changes between idempotent runs (cosmetic)"
   ],
   "learningsInjected": [
-    "testing/bun-fetch-mocking-patterns.md",
-    "testing/bun-mock-module-global-leak.md",
-    "delegation/hardening-patterns.md"
+    "daemon/handoff-schema-migration-patterns.md",
+    "task-index-patterns.md",
+    "skill-patterns/cross-cutting-workflow-concerns.md"
   ],
   "learningsHelpful": [
-    "testing/bun-mock-module-global-leak.md"
+    "daemon/handoff-schema-migration-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T23:17:03.392Z"
+  "completed": "2026-04-11T22:54:15.691Z"
 }

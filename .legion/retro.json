@@ -1,9 +1,10 @@
 {
   "skipped": false,
   "docsCreated": [
-    "docs/solutions/daemon/config-resolution-patterns.md"
+    "docs/solutions/daemon/workspace-scanning-patterns.md",
+    "docs/solutions/delegation/subagent-plan-compliance.md"
   ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-11T23:52:25.336Z"
+  "completed": "2026-04-11T23:13:43.152Z"
 }

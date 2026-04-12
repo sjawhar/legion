@@ -1,17 +1,44 @@
 {
   "critical": 0,
-  "important": 2,
-  "minor": 2,
+  "important": 0,
+  "minor": 5,
   "verdict": "approved",
   "keyFindings": [
-    {"severity": "P2", "file": "packages/daemon/src/daemon/config.ts", "description": "loadGitHubApps() (env-based, L312-329) still silently ignores partial GitHub App role config. Plan says 'Make partial GitHub App role config a hard error' — YAML path validates correctly but env path does not."},
-    {"severity": "P2", "file": "packages/daemon/src/cli/index.ts", "description": "L243: config.stateFilePath mutation after resolveDaemonConfig() breaks 'resolve once, use everywhere' contract. Value is redundant with what resolveDaemonConfig already computes."},
-    {"severity": "P3", "file": "packages/daemon/src/daemon/index.ts", "description": "Dual daemonPortExplicit sources (DaemonConfig and DaemonStartOptions) without documenting the override chain."},
-    {"severity": "P3", "file": "packages/daemon/src/cli/__tests__/index.test.ts", "description": "Missing integration-level error-path tests for cmdStart with missing config file and invalid YAML (unit-level coverage exists in loadConfigFromFile tests)."}
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/knowledge/types.ts",
+      "description": "Dead type definitions (ConsolidationReport, IndexMutation, StatusMutation) have zero external references — superseded by implementation-specific types in consolidate.ts and promoter.ts"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/knowledge/consolidate.ts",
+      "description": "Unused side-effect call on line 63: resolveLegionPaths return value discarded (appears to be validation)"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/knowledge/collector.ts",
+      "description": "canonicalizeLearningPath doesn't strip ./docs/solutions/ prefix variant (minor edge case)"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/knowledge/reporter.ts",
+      "description": "Disposition naming drift: JSON output uses internal names (accepted/needs_review/archived/rejected) vs spec (promote/review/stale/keep). Human report maps correctly."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/knowledge/consolidate.ts",
+      "description": "generatedAt changes between idempotent runs (cosmetic, expected behavior)"
+    }
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "daemon/handoff-schema-migration-patterns.md",
+    "task-index-patterns.md",
+    "skill-patterns/cross-cutting-workflow-concerns.md"
+  ],
+  "learningsHelpful": [
+    "daemon/handoff-schema-migration-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T23:45:00.000Z"
+  "completed": "2026-04-11T23:01:45.681Z"
 }

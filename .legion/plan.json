@@ -4,28 +4,32 @@
   "routingHints": {
     "complexity": "medium",
     "estimatedImplementers": 1,
-    "skipRetro": false
+    "skipRetro": false,
+    "skipArchitect": false
   },
   "concerns": [
-    "startDaemon() shallow merge must be replaced with single resolved-config contract",
-    "Port authority: explicit config port must bypass registry allocation",
-    "ENVOY_URL and LEGION_FEEDBACK_* must migrate from process.env to config object",
-    "Relative paths in YAML must resolve against config file directory not cwd",
-    "Deprecation warnings only fire when env var is the effective value",
-    "Unknown-key warnings use full dotted paths via simple recursive walker",
-    "getDaemonPort() in non-start CLI commands may remain as env read"
+    "Oracle simplicity review suggests collapsing 9 knowledge/ modules to 3-4 files (feedback-log.ts, consolidate.ts, apply.ts, types.ts) — implementer should evaluate",
+    "FileLearningFeedbackWriter log rotation is YAGNI — plain append-only JSONL is sufficient for acceptance criteria",
+    "trimToSoftCap may be scope expansion if not explicitly required by issue spec — verify before implementing",
+    "Path resolution helpers need traversal validation (reject .. paths) to prevent misclassification",
+    "Recursive .legion workspace scanning may be overkill — shallow scan of direct children is simpler and sufficient",
+    "Architect concern: index.json has pre-existing JSON syntax errors — consolidation must be resilient to malformed JSON",
+    "Architect concern: path canonicalization must strip docs/solutions/ prefix variants consistently",
+    "Architect concern: promotion key derivation must reuse exact retro directory-prefix rule"
   ],
   "learningsInjected": [
-    "delegation/hardening-patterns.md",
-    "daemon/shared-serve-refactor.md",
-    "daemon/controller-lifecycle-separation.md"
+    "daemon/handoff-schema-migration-patterns.md",
+    "task-index-patterns.md",
+    "skill-patterns/cross-cutting-workflow-concerns.md"
   ],
-  "learningsHelpful": [
-    "delegation/hardening-patterns.md",
-    "daemon/controller-lifecycle-separation.md"
-  ],
-  "workflowRecommendation": "Standard pipeline. Medium complexity, single implementer. 3 waves: W1 config resolver (independent), W2 CLI+daemon+server integration (depends W1), W3 audit+verification (depends W1+W2).",
+  "learningsHelpful": ["daemon/handoff-schema-migration-patterns.md", "task-index-patterns.md"],
+  "workflowRecommendation": "Standard pipeline — all phases needed. Medium complexity, single implementer. Retro workflow modification requires legion-retro skill.",
+  "requiredSkills": {
+    "implement": ["legion-retro"],
+    "test": [],
+    "review": []
+  },
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T22:17:54.461Z"
+  "completed": "2026-04-11T21:46:58.290Z"
 }
