@@ -1,18 +1,20 @@
 {
-  "schemaVersion": 1,
-  "phase": "test",
-  "completed": "2026-04-12T13:33:54.605Z",
   "learningsInjected": [
     "skill-patterns/merge-retry-race-condition-pattern.md",
     "integration-patterns/controller-worker-protocol.md",
     "skill-patterns/cross-cutting-workflow-concerns.md"
   ],
   "learningsHelpful": [
-    "skill-patterns/merge-retry-race-condition-pattern.md"
+    "integration-patterns/controller-worker-protocol.md"
   ],
-  "passed": 5,
+  "passed": 4,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "PR body clearly describes the two-layer approach. No public docs needed — changes are internal agent skill files. Controller SKILL.md inline documentation is clear and actionable.",
-  "observations": []
+  "documentationFeedback": "PR body clearly describes the two-layer fix (publish topic + subscription registration). Root cause, impact, and deviation necessity are well-documented. No public docs needed — internal daemon plumbing.",
+  "observations": [
+    "Pre-existing tsc deprecation warning for baseUrl in tsconfig.json — unrelated to PR"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-12T14:14:06.700Z"
 }
