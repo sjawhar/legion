@@ -1,35 +1,32 @@
 {
   "result": "pass",
-  "summary": "Fix verified: listDir fallback enables directory scan in production. 1287 tests pass, 2 pre-existing envoy infra failures. TypeScript clean. Biome clean.",
+  "summary": "All acceptance criteria verified. Controller skill updated: retro is MANDATORY, no skip conditions, no direct merge. 1287/1289 tests pass (2 pre-existing failures). TypeScript clean. Biome clean.",
   "criteriaResults": [
     {
-      "id": "AC1",
-      "status": "pass",
-      "evidence": "server.ts:506 uses opts.repoManagerDeps?.listDir ?? defaultRepoManagerDeps.listDir — when repoManagerDeps is not injected, defaultRepoManagerDeps.listDir (readdir-based) is used, enabling directory scan in production"
+      "criterion": "After review completes (approved), controller MUST dispatch retro worker — no exceptions",
+      "result": "pass",
+      "evidence": "Verified by code inspection: SKILL.md lines 749-753 — retro section now reads: The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions. Always dispatch retro after review approval. Do not check routing hints, skipRetro flags, or any other conditions."
     },
     {
-      "id": "AC2",
-      "status": "pass",
-      "evidence": "removeDir(workspacePath, opts.repoManagerDeps) at server.ts:527 — when opts.repoManagerDeps is undefined, removeDir defaults to defaultDeps.rmDir (real filesystem rmDir)"
+      "criterion": "Remove language allowing skipping retro",
+      "result": "pass",
+      "evidence": "Verified by diff: 57 lines deleted from SKILL.md including entire skipRetro bash block. grep for skipRetro/skip_retro/SKIP_RETRO in SKILL.md returns 0 code-path matches."
     },
     {
-      "id": "AC3",
-      "status": "pass",
-      "evidence": "defaultDeps exported as defaultRepoManagerDeps from repo-manager.ts — TypeScript type check clean, no import errors"
+      "criterion": "Add explicit enforcement: retro is MANDATORY",
+      "result": "pass",
+      "evidence": "Verified by code inspection: SKILL.md line 431 (MUST NOT skip list), line 749 (Retro section), line 753 (unconditional dispatch), line 769 (ADAPTIVE ROUTING GUARDRAILS), line 939 (anti-pattern table)."
+    },
+    {
+      "criterion": "worker-done on review should NOT trigger merge until retro completes",
+      "result": "pass",
+      "evidence": "Verified by code inspection: decision.ts lines 140-142 — IssueStatus.RETRO + hasWorkerDone → dispatch_merger. Pre-merge gate condition 5 requires retro handoff."
     }
   ],
-  "testStats": {
-    "total": 1289,
-    "pass": 1287,
-    "fail": 2,
-    "preExistingFailures": 2,
-    "newFailures": 0
-  },
-  "preExistingFailures": [
-    "packages/envoy/infra/__tests__/nats.test.ts — Cannot find module @pulumi/docker (pre-exists on main)",
-    "packages/envoy/infra/__tests__/services.test.ts — Cannot find module @pulumi/docker (pre-exists on main)"
-  ],
+  "testCritique": "No new unit tests — change is purely to a skill markdown file. Existing decision.ts tests cover retro→merge transitions. CI: lint/test/typecheck all pass.",
+  "ciStatus": "pass",
+  "ciUrl": "https://github.com/sjawhar/legion/actions/runs/24317292849",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T21:39:04.417Z"
+  "completed": "2026-04-12T22:08:26.000Z"
 }
