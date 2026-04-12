@@ -148,11 +148,14 @@ export class OpenCodeAdapter implements RuntimeAdapter {
   }
 
   async listActiveSessions(): Promise<Set<string>> {
-    const client = createWorkerClient(this.port, "");
-    const result = await client.session.status();
-    if (result.error || !result.data) {
-      throw new Error(`Failed to list sessions: ${JSON.stringify(result.error ?? "no data")}`);
+    // Use the session list endpoint (GET /session) which returns ALL sessions (busy + idle).
+    // The previous implementation used session.status() which only returns BUSY sessions,
+    // causing idle workers to be falsely marked as dead.
+    const res = await fetch(`http://127.0.0.1:${this.port}/session`);
+    if (!res.ok) {
+      throw new Error(`Failed to list sessions: HTTP ${res.status}`);
     }
-    return new Set(Object.keys(result.data as Record<string, unknown>));
+    const sessions = (await res.json()) as Array<{ id: string }>;
+    return new Set(sessions.map((s) => s.id));
   }
 }
