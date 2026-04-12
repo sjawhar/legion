@@ -160,6 +160,18 @@ Include the CI status in your review summary (step 3). If CI is failing, note wh
 checks are failing and treat it as a P1 issue — the implementer should have fixed this
 before opening the PR.
 
+### 2.7. Check PR Mergeability
+
+```bash
+MERGEABLE=$(gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R $OWNER/$REPO)
+```
+
+- **MERGEABLE:** Proceed to step 3.
+- **CONFLICTING:** P1 issue. Increment CRITICAL_COUNT. Include in review summary: "PR has merge conflicts with main. Implementer must rebase." Elevated CRITICAL_COUNT triggers changes-requested in step 5.
+- **UNKNOWN:** Proceed. Controller's Pre-Merge Gate is the primary gate.
+
+Do NOT rebase or push — review identity lacks Contents write permission.
+
 ### 3. Post Summary Comment
 
 Post a top-level PR comment with the review summary:

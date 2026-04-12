@@ -515,6 +515,17 @@ Before requesting merge approval, verify ALL conditions:
 | 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep test-passed` |
 | 5 | Issue has been through retro (or skipped via routing hints) | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
 | 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep -v user-input-needed` — must NOT match |
+| 7 | PR is mergeable (not CONFLICTING or UNKNOWN) | `gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R $ISSUE_REPO` returns `MERGEABLE` |
+
+**Mergeability gate (condition 7) — handling by state:**
+
+| `mergeable` value | Action |
+|-------------------|--------|
+| `MERGEABLE` | Proceed with approval flow |
+| `CONFLICTING` | Auto-rebase via existing pattern: `gh api repos/$ISSUE_REPO/pulls/$PR_NUMBER/update-branch -X PUT`. If successful, defer to next loop (CI re-runs). If failed, `resume_implementer_for_changes`. |
+| `UNKNOWN` / null / API failure | Defer to next loop. Do NOT add `needs-approval`. |
+
+**Resolving PR number:** `PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $ISSUE_REPO)`
 
 If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
 
@@ -756,15 +767,33 @@ SKIP_RETRO=$(echo "$HANDOFF" | jq -r '.plan.routingHints.skipRetro // false')
 TRICKY_PARTS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.trickyParts // []) | length')
 DEVIATIONS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.deviations // []) | length')
 
+# Check mergeability before dispatching merge (retro-skip bypasses Pre-Merge Gate)
+LEGION_ISSUE_ID="$ISSUE_IDENTIFIER"
+PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $ISSUE_REPO 2>/dev/null)
+MERGEABLE=$(gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R $ISSUE_REPO 2>/dev/null)
+
 if [ "$SKIP_RETRO" = "true" ] && [ "$TRICKY_PARTS_COUNT" = "0" ] && [ "$DEVIATIONS_COUNT" = "0" ]; then
-  echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
-  if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
-    legion dispatch "$ISSUE_IDENTIFIER" merge \
-      --repo "$ISSUE_REPO" \
-      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $ISSUE_REPO)"
+  if [ "$MERGEABLE" = "MERGEABLE" ]; then
+    echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
+    if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
+      legion dispatch "$ISSUE_IDENTIFIER" merge \
+        --repo "$ISSUE_REPO" \
+        --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $ISSUE_REPO)"
+    else
+      legion dispatch "$ISSUE_IDENTIFIER" merge \
+        --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (linear backend)"
+    fi
+  elif [ "$MERGEABLE" = "CONFLICTING" ]; then
+    echo "Retro-skip: PR has merge conflicts — auto-rebasing before merge"
+    if ! gh api repos/$ISSUE_REPO/pulls/$PR_NUMBER/update-branch -X PUT 2>/dev/null; then
+      echo "Auto-rebase failed — resuming implementer to rebase manually"
+      legion prompt "$ISSUE_IDENTIFIER" --mode implement \
+        "Invoke the /legion-worker skill for implement mode. PR has merge conflicts that could not be auto-resolved. Rebase onto main and push. (${LEGION_ISSUE_BACKEND} backend, repo: $ISSUE_REPO)"
+    else
+      echo "Auto-rebase succeeded — deferring to next loop for CI"
+    fi
   else
-    legion dispatch "$ISSUE_IDENTIFIER" merge \
-      --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (linear backend)"
+    echo "Retro-skip: mergeability unknown ($MERGEABLE) — deferring to next loop"
   fi
 else
   echo "Running full pipeline: retro required (missing/corrupt hints or skip conditions unmet)"
