@@ -153,4 +153,20 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
     return "none";
   }
+
+  async listActiveSessions(): Promise<Set<string>> {
+    const result = this.spawn([
+      "tmux",
+      "list-windows",
+      "-t",
+      this.sessionName,
+      "-F",
+      "#{window_name}",
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(`Failed to list tmux windows for session ${this.sessionName}`);
+    }
+    const windowNames = (result.stdout ?? "").split("\n").filter(Boolean);
+    return new Set(windowNames);
+  }
 }

@@ -1,15 +1,30 @@
 {
-  "taskCount": 2,
-  "independentTasks": 1,
+  "taskCount": 3,
+  "independentTasks": 2,
   "routingHints": {
     "complexity": "small",
     "estimatedImplementers": 1,
-    "skipRetro": true,
-    "skipArchitect": true
+    "skipRetro": false,
+    "skipArchitect": false
   },
-  "concerns": [],
-  "workflowRecommendation": "Simple single-line fix — skip retro, single implementer",
+  "concerns": [
+    "Startup session recreation uses shared adapter for ALL workers including role workers — union approach in liveness handles this routing ambiguity",
+    "Test harness must use startDaemonForTest + captured timeoutCallback pattern, not direct startDaemon",
+    "All 5 test files with RuntimeAdapter mocks need listActiveSessions added for type check",
+    "Session-ID-mismatch scenario acknowledged in existing code — liveness checks by ID presence in bulk status map, not status type",
+    "PATCH to daemon's own HTTP API requires mockable fetch in DaemonDependencies (already injectable)"
+  ],
+  "learningsInjected": [
+    "daemon/health-tick-baseline-isolation.md",
+    "daemon/shared-serve-refactor.md",
+    "daemon/opencode-serve-lifecycle.md"
+  ],
+  "learningsHelpful": [
+    "daemon/shared-serve-refactor.md",
+    "daemon/opencode-serve-lifecycle.md"
+  ],
+  "workflowRecommendation": "Standard pipeline — all phases needed. Medium complexity, single implementer.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T19:00:06.801Z"
+  "completed": "2026-04-12T14:12:59.838Z"
 }

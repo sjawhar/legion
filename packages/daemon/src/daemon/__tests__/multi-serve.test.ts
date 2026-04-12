@@ -39,6 +39,9 @@ function createMockAdapter(port: number): RuntimeAdapter & {
       return { data: { type: "idle" } };
     },
     async deleteSession() {},
+    async listActiveSessions() {
+      return new Set(sessions.keys());
+    },
   };
 }
 

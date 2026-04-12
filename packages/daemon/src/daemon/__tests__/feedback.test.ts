@@ -226,8 +226,8 @@ describe("FeedbackLogger", () => {
     await logger.flush();
 
     expect(writer.lines).toHaveLength(2);
-    expect((JSON.parse(writer.lines[0]) as FeedbackEvent).issueId).toBe("ENG-21");
-    expect((JSON.parse(writer.lines[1]) as FeedbackEvent).issueId).toBe("ENG-22");
+    expect((JSON.parse(writer.lines[0]) as { issueId: string }).issueId).toBe("ENG-21");
+    expect((JSON.parse(writer.lines[1]) as { issueId: string }).issueId).toBe("ENG-22");
     expect(writer.flushCalls).toBe(1);
   });
 
@@ -276,6 +276,34 @@ describe("FeedbackLogger", () => {
     if (event.event === "daemon.health_tick") {
       expect(event.workerCount).toBe(3);
     }
+  });
+
+  it("validates daemon.worker_reaped event", () => {
+    const event = {
+      schemaVersion: 1,
+      timestamp: "2026-04-12T00:00:00.000Z",
+      legionId: "test-team",
+      event: "daemon.worker_reaped" as const,
+      workerId: "test-repo-42-implement",
+      sessionId: "ses_abc123def456ABCDEFGHIJKLMN",
+      mode: "implement",
+      serveType: "shared",
+      reason: "session_missing",
+    };
+    const result = FeedbackEventSchema.safeParse(event);
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects daemon.worker_reaped with missing fields", () => {
+    const event = {
+      schemaVersion: 1,
+      timestamp: "2026-04-12T00:00:00.000Z",
+      legionId: "test-team",
+      event: "daemon.worker_reaped" as const,
+      workerId: "test-repo-42-implement",
+    };
+    const result = FeedbackEventSchema.safeParse(event);
+    expect(result.success).toBe(false);
   });
 });
 

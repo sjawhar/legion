@@ -1,10 +1,11 @@
 {
   "scope": "medium",
   "components": [
-    "packages/daemon/src/daemon/config.ts",
-    "packages/daemon/src/cli/index.ts",
     "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/server.ts"
+    "packages/daemon/src/daemon/runtime/types.ts",
+    "packages/daemon/src/daemon/runtime/opencode.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/multi-serve.ts"
   ],
   "subIssues": [],
   "routingHints": {
@@ -13,16 +14,16 @@
     "skipRetro": false
   },
   "concerns": [
-    "startDaemon() currently overrides config.daemonPort via registry allocation — port from config must be authoritative",
-    "ENVOY_URL and LEGION_FEEDBACK_* are read directly from process.env outside loadConfig() — must migrate to config object",
-    "Relative paths in YAML (workspace, private_key_path) must resolve relative to config file directory, not cwd",
-    "extra_projects is GitHub-multi-board only — Linear backend with extra_projects should error",
-    "Deprecation warnings should only fire when env var is the effective value, not when overridden",
-    "Unknown key warnings must cover full key paths (nested), not just top-level keys"
+    "getSessionStatus() masks dead sessions by defaulting to { type: 'idle' } for non-existent sessions (opencode.ts:97) — liveness check must use session existence in the status map, not status type",
+    "Health tick must NOT run liveness checks on ticks that just restarted the serve — newly recreated sessions would be immediately reaped",
+    "Workers in 'starting' status should be excluded from liveness checks — they may not have sessions yet",
+    "Multi-serve: workers on role-specific serves must be checked against the correct serve instance via roleServeManager",
+    "RuntimeAdapter needs a new bulk method (listActiveSessions) — per-worker getSessionStatus calls are N+1 and mask missing sessions",
+    "Dead-marking logic in server.ts (crash history, Envoy detach) may need extraction for reuse by health tick in index.ts"
   ],
   "learningsInjected": [
-    "delegation/hardening-patterns.md",
-    "daemon/controller-lifecycle-separation.md",
+    "daemon/health-tick-baseline-isolation.md",
+    "daemon/opencode-serve-lifecycle.md",
     "daemon/shared-serve-refactor.md"
   ],
   "learningsHelpful": [
@@ -30,5 +31,5 @@
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T21:45:53.294Z"
+  "completed": "2026-04-12T13:43:44.429Z"
 }

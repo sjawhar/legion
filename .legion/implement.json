@@ -1,12 +1,43 @@
 {
-  "filesChanged": ["packages/envoy/cmd/listener/main.go"],
-  "trickyParts": [
-    "Rebase onto main caused .legion/plan.json conflicts from concurrent issue #240 merge — required resolving both ancestor commits (vuvz and wytu) separately"
+  "filesChanged": [
+    "packages/daemon/src/daemon/runtime/types.ts",
+    "packages/daemon/src/daemon/runtime/opencode.ts",
+    "packages/daemon/src/daemon/runtime/claude-code.ts",
+    "packages/daemon/src/daemon/feedback.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/feedback.test.ts",
+    "packages/daemon/src/daemon/__tests__/multi-serve.test.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts",
+    "packages/daemon/src/daemon/__tests__/session-id-contract.test.ts",
+    "packages/daemon/src/daemon/__tests__/feedback.integration.test.ts",
+    "packages/daemon/src/__tests__/integration.test.ts"
   ],
-  "deviations": [],
-  "openQuestions": [],
+  "trickyParts": [
+    "Brace nesting in the health tick is deep (10+ levels) — the liveness sweep adds another 3-4 levels of nesting on top",
+    "The union approach for multi-serve required tracking both restartedRoles AND failedRoles to avoid false positives",
+    "Cross-family review caught that the initial implementation was missing failedRoles tracking and PATCH response checking — both were in the plan but missed by the subagent"
+  ],
+  "deviations": [
+    "Added failedRoles tracking to skip workers on role serves that failed listActiveSessions — was in the plan but initially missed",
+    "Added PATCH response.ok check before emitting daemon.worker_reaped — Oracle review caught this gap",
+    "Resolved serveType dynamically from worker mode instead of hardcoding 'shared' — Oracle review improvement"
+  ],
+  "openQuestions": [
+    "No concurrency protection between state file read and PATCH — a newly replaced worker could theoretically be marked dead by a stale sweep. Low risk since health tick runs every 60s."
+  ],
   "subPlanningNeeded": false,
+  "learningsInjected": [
+    "daemon/health-tick-baseline-isolation.md",
+    "daemon/shared-serve-refactor.md",
+    "daemon/opencode-serve-lifecycle.md",
+    "testing/bun-fetch-mocking-patterns.md"
+  ],
+  "learningsHelpful": [
+    "daemon/shared-serve-refactor.md",
+    "daemon/opencode-serve-lifecycle.md"
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-12T13:16:13.683Z"
+  "completed": "2026-04-12T14:55:02.810Z"
 }

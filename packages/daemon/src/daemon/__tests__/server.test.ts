@@ -63,6 +63,7 @@ describe("daemon server", () => {
       deleteSession: async (sessionId: string) => {
         deleteSessionCalls.push(sessionId);
       },
+      listActiveSessions: async () => new Set<string>(),
     };
   }
 

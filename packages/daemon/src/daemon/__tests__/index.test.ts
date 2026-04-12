@@ -106,6 +106,7 @@ function makeAdapter(overrides?: {
   stopServeCalls?: number[];
   createSessionCalls?: Array<{ sessionId: string; workspace: string }>;
   getServePid?: () => number;
+  listActiveSessions?: () => Promise<Set<string>>;
 }): RuntimeAdapter {
   const createSessionCalls = overrides?.createSessionCalls ?? [];
   const stopServeCalls = overrides?.stopServeCalls ?? [];
@@ -130,6 +131,7 @@ function makeAdapter(overrides?: {
     },
     getSessionStatus: async () => ({ data: undefined }),
     deleteSession: async () => {},
+    listActiveSessions: overrides?.listActiveSessions ?? (async () => new Set<string>()),
   };
 }
 
@@ -1906,5 +1908,270 @@ describe("daemon entry", () => {
       // No restart should happen — getServePid returns 0
       expect(stopCalls).toHaveLength(0);
     });
+  });
+
+  it("marks running worker as dead when session is missing from serve", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [baseEntry.id]: baseEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter({
+          listActiveSessions: async () => new Set<string>(),
+        }),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+          fetchAndProcessState: async () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const url =
+              typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            if (url.includes("/workers/") && init?.method === "PATCH") {
+              patchCalls.push({
+                url,
+                body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>,
+              });
+              return new Response("{}", { status: 200 });
+            }
+            return originalFetch(input, init);
+          },
+          { preconnect: originalFetch.preconnect }
+        ) as typeof fetch,
+      }
+    );
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    expect(patchCalls).toHaveLength(1);
+    expect(patchCalls[0]?.url).toContain(`/workers/${baseEntry.id}`);
+    expect(patchCalls[0]?.body.status).toBe("dead");
+    expect(patchCalls[0]?.body.crashCount).toBe(1);
+  });
+
+  it("does not mark workers dead when listActiveSessions fails", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [baseEntry.id]: baseEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter({
+          listActiveSessions: async () => {
+            throw new Error("connection refused");
+          },
+        }),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+          fetchAndProcessState: async () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const url =
+              typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            if (url.includes("/workers/") && init?.method === "PATCH") {
+              patchCalls.push({
+                url,
+                body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>,
+              });
+              return new Response("{}", { status: 200 });
+            }
+            return originalFetch(input, init);
+          },
+          { preconnect: originalFetch.preconnect }
+        ) as typeof fetch,
+      }
+    );
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it("skips liveness check when serve was restarted this tick", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    let healthCallCount = 0;
+    let listActiveSessionsCalls = 0;
+    const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [baseEntry.id]: baseEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter({
+          healthy: async () => {
+            healthCallCount += 1;
+            if (healthCallCount === 1) return true;
+            if (healthCallCount === 2) return false;
+            return true;
+          },
+          listActiveSessions: async () => {
+            listActiveSessionsCalls += 1;
+            return new Set<string>();
+          },
+        }),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+          fetchAndProcessState: async () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const url =
+              typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            if (url.includes("/workers/") && init?.method === "PATCH") {
+              patchCalls.push({
+                url,
+                body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>,
+              });
+              return new Response("{}", { status: 200 });
+            }
+            return originalFetch(input, init);
+          },
+          { preconnect: originalFetch.preconnect }
+        ) as typeof fetch,
+      }
+    );
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    expect(listActiveSessionsCalls).toBe(0);
+    expect(patchCalls).toHaveLength(0);
+  });
+
+  it("does not check liveness of workers in starting status", async () => {
+    let timeoutCallback: TimeoutCallback | null = null;
+    const mockSetTimeout: typeof setTimeout = Object.assign(
+      ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+        timeoutCallback = callback as TimeoutCallback;
+        return {} as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      { __promisify__: setTimeout.__promisify__ }
+    );
+
+    const startingEntry: WorkerEntry = {
+      ...baseEntry,
+      status: "starting",
+    };
+    const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        checkIntervalMs: 1000,
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [startingEntry.id]: startingEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter({
+          listActiveSessions: async () => new Set<string>(),
+        }),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+          fetchAndProcessState: async () => {},
+        }),
+        setTimeout: mockSetTimeout,
+        clearTimeout: () => {},
+        fetch: Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const url =
+              typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            if (url.includes("/workers/") && init?.method === "PATCH") {
+              patchCalls.push({
+                url,
+                body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>,
+              });
+              return new Response("{}", { status: 200 });
+            }
+            return originalFetch(input, init);
+          },
+          { preconnect: originalFetch.preconnect }
+        ) as typeof fetch,
+      }
+    );
+
+    if (!timeoutCallback) {
+      throw new Error("Expected health loop callback to be scheduled");
+    }
+    await (timeoutCallback as () => Promise<void>)();
+
+    expect(patchCalls).toHaveLength(0);
   });
 });

@@ -732,6 +732,8 @@ export async function startDaemon(
           console.error(`Failed to update codebase index incrementally: ${error}`);
         }
 
+        const restartedRoles = new Set<string>();
+
         // Check role serves health
         if (roleServeManager?.hasRoleServes()) {
           const unhealthyRoles = await roleServeManager.checkHealth();
@@ -745,6 +747,7 @@ export async function startDaemon(
                 config.logDir
               );
               roleServeRestarts += 1;
+              restartedRoles.add(role);
               console.log(`Role serve '${role}' restarted`);
               // Re-create sessions for workers on this role
               const roleAdapter = roleServeManager.getAdapterForRole(role);
@@ -762,6 +765,118 @@ export async function startDaemon(
             } catch (restartError) {
               console.error(`Failed to restart role serve '${role}': ${restartError}`);
             }
+          }
+        }
+
+        // Session liveness sweep — detect dead serve sessions (AC1-AC8)
+        const allActiveSessions = new Set<string>();
+        let sharedServeQueried = false;
+        const failedRoles = new Set<string>();
+
+        if (serveHealthy && !restartReason) {
+          try {
+            const sessions = await resolvedDeps.adapter.listActiveSessions();
+            for (const s of sessions) allActiveSessions.add(s);
+            sharedServeQueried = true;
+          } catch (err) {
+            console.warn(`[liveness] Shared serve session list failed (non-fatal): ${err}`);
+          }
+        }
+
+        if (roleServeManager?.hasRoleServes()) {
+          for (const roleEntry of roleServeManager.getEntries()) {
+            if (restartedRoles.has(roleEntry.role)) continue;
+            try {
+              const sessions = await roleEntry.adapter.listActiveSessions();
+              for (const s of sessions) allActiveSessions.add(s);
+            } catch (err) {
+              failedRoles.add(roleEntry.role);
+              console.warn(
+                `[liveness] Role serve '${roleEntry.role}' session list failed (non-fatal): ${err}`
+              );
+            }
+          }
+        }
+
+        if (sharedServeQueried) {
+          try {
+            const livenessState = await resolvedDeps.readStateFile(config.stateFilePath);
+
+            for (const worker of Object.values(livenessState.workers)) {
+              if (worker.status !== "running") continue;
+              if (allActiveSessions.has(worker.sessionId)) continue;
+
+              const workerMode = worker.id.split("-").pop();
+
+              // Skip workers whose role serve was restarted or failed listing this tick
+              if (roleServeManager?.hasRoleServes() && workerMode) {
+                try {
+                  const role = modeToRole(workerMode);
+                  const roleAdapter = roleServeManager.getAdapterForRole(role);
+                  if (
+                    roleAdapter !== resolvedDeps.adapter &&
+                    (failedRoles.has(role) || restartedRoles.has(role))
+                  ) {
+                    continue;
+                  }
+                } catch {
+                  // Unknown mode — only shared serve matters
+                }
+              }
+
+              const now = new Date().toISOString();
+              try {
+                const patchRes = await resolvedDeps.fetch(
+                  `http://127.0.0.1:${config.daemonPort}/workers/${worker.id}`,
+                  {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      status: "dead",
+                      crashCount: worker.crashCount + 1,
+                      lastCrashAt: now,
+                    }),
+                  }
+                );
+
+                if (patchRes.ok) {
+                  // Determine serve type for feedback event
+                  let serveType = "shared";
+                  if (roleServeManager?.hasRoleServes() && workerMode) {
+                    try {
+                      const role = modeToRole(workerMode);
+                      const roleAdapter = roleServeManager.getAdapterForRole(role);
+                      if (roleAdapter !== resolvedDeps.adapter) {
+                        serveType = `role:${role}`;
+                      }
+                    } catch {
+                      // Unknown mode — shared serve
+                    }
+                  }
+
+                  feedbackLogger?.log({
+                    event: "daemon.worker_reaped",
+                    workerId: worker.id,
+                    sessionId: worker.sessionId,
+                    mode: workerMode ?? "unknown",
+                    serveType,
+                    reason: "session_missing",
+                  });
+
+                  console.warn(
+                    `[liveness] Reaped worker ${worker.id}: session ${worker.sessionId} not found`
+                  );
+                } else {
+                  console.warn(
+                    `[liveness] PATCH to mark worker ${worker.id} as dead returned ${patchRes.status}`
+                  );
+                }
+              } catch (patchErr) {
+                console.warn(`[liveness] Failed to mark worker ${worker.id} as dead: ${patchErr}`);
+              }
+            }
+          } catch (livenessErr) {
+            console.warn(`[liveness] Session liveness check failed (non-fatal): ${livenessErr}`);
           }
         }
 
