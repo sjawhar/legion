@@ -1,26 +1,14 @@
 {
   "outcome": "approved",
   "criticalCount": 0,
-  "importantCount": 1,
-  "minorCount": 1,
-  "prNumber": 473,
-  "prUrl": "https://github.com/sjawhar/legion/pull/473",
-  "findings": [
-    {
-      "severity": "P2",
-      "location": "packages/daemon/src/daemon/schemas.ts:19-20",
-      "description": "WorkerEntrySchema has no test coverage in schemas.test.ts. Other schemas have tests but WorkerEntrySchema and PersistedWorkerStateSchema are untested. Acceptable given narrow issue scope but worth a follow-up."
-    },
-    {
-      "severity": "P3",
-      "location": "PR description",
-      "description": "Description says fields now survive JSON round-trips but .passthrough() already preserved them at runtime. The actual fix is TypeScript type alignment. Fix is still correct and necessary."
-    }
-  ],
-  "acCoverage": {
-    "AC1": "pass"
-  },
+  "importantCount": 0,
+  "minorCount": 0,
+  "prNumber": 477,
+  "prUrl": "https://github.com/sjawhar/legion/pull/477",
+  "findings": [],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T21:41:44.650Z"
+  "completed": "2026-04-12T22:11:16.377Z"
 }

@@ -428,10 +428,10 @@ Pipeline phases MUST run in order: architect → plan → implement → test →
 **MUST NOT skip:**
 - **Testing** — the tester ALWAYS runs after implementation, including after review-requested changes
 - **Review** — the reviewer ALWAYS runs after testing passes
+- **Retro** — the retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions, no routing hints, no skip conditions. If the retro worker fails, note it and move on — but always dispatch it.
 
 **MAY skip (with conditions):**
 - **Architect** — ONLY when ALL conditions are met: `bug` label present, description contains clear reproduction steps, AND the change is scoped to a single component. This exception is documented in the Route Triage table — do not contradict it.
-- **Retro** — ONLY when ALL skip conditions are met per the routing hints (see Retro section)
 
 **Optional checkpoints (opt-in):**
 - **Architect-Review (post-plan)** — when `architect-continuity` label is present, the controller
@@ -513,7 +513,7 @@ Before requesting merge approval, verify ALL conditions:
 | 2 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID" -R $ISSUE_REPO` — all checks must show ✓ |
 | 3 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft -R $ISSUE_REPO` returns `false` |
 | 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep test-passed` |
-| 5 | Issue has been through retro (or skipped via routing hints) | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
+| 5 | Issue has been through retro | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
 | 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep -v user-input-needed` — must NOT match |
 | 7 | PR is mergeable (not CONFLICTING or UNKNOWN) | `gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R $ISSUE_REPO` returns `MERGEABLE` |
 
@@ -746,62 +746,11 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 
 ### Retro
 
+**The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions.**
+
 Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
 
-Before dispatching retro, consume routing hints conservatively:
-
-- The handoff read should use the workspace path if available (from the daemon's
-  `/workers` response), or the current working directory as fallback.
-- **Default: full pipeline.** If handoff data is missing, unreadable, or routing hints are
-  unknown, dispatch retro normally. The skip only fires when ALL conditions are explicitly
-  met.
-
-```bash
-# Get the worker's workspace path from the daemon API:
-WORKSPACE_PATH=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID | jq -r '.workspace')
-
-# Read handoff data from the worker's workspace:
-HANDOFF=$(legion handoff read --workspace "$WORKSPACE_PATH" 2>/dev/null || echo '{}')
-
-SKIP_RETRO=$(echo "$HANDOFF" | jq -r '.plan.routingHints.skipRetro // false')
-TRICKY_PARTS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.trickyParts // []) | length')
-DEVIATIONS_COUNT=$(echo "$HANDOFF" | jq -r '(.implement.deviations // []) | length')
-
-# Check mergeability before dispatching merge (retro-skip bypasses Pre-Merge Gate)
-LEGION_ISSUE_ID="$ISSUE_IDENTIFIER"
-PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $ISSUE_REPO 2>/dev/null)
-MERGEABLE=$(gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R $ISSUE_REPO 2>/dev/null)
-
-if [ "$SKIP_RETRO" = "true" ] && [ "$TRICKY_PARTS_COUNT" = "0" ] && [ "$DEVIATIONS_COUNT" = "0" ]; then
-  if [ "$MERGEABLE" = "MERGEABLE" ]; then
-    echo "Skipping retro: skipRetro=true with no implementer trickyParts/deviations; dispatching merger directly"
-    if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
-      legion dispatch "$ISSUE_IDENTIFIER" merge \
-        --repo "$ISSUE_REPO" \
-        --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (github backend, repo: $ISSUE_REPO)"
-    else
-      legion dispatch "$ISSUE_IDENTIFIER" merge \
-        --prompt "Invoke the /legion-worker skill for merge mode for $ISSUE_IDENTIFIER (linear backend)"
-    fi
-  elif [ "$MERGEABLE" = "CONFLICTING" ]; then
-    echo "Retro-skip: PR has merge conflicts — auto-rebasing before merge"
-    if ! gh api repos/$ISSUE_REPO/pulls/$PR_NUMBER/update-branch -X PUT 2>/dev/null; then
-      echo "Auto-rebase failed — resuming implementer to rebase manually"
-      legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-        "Invoke the /legion-worker skill for implement mode. PR has merge conflicts that could not be auto-resolved. Rebase onto main and push. (${LEGION_ISSUE_BACKEND} backend, repo: $ISSUE_REPO)"
-    else
-      echo "Auto-rebase succeeded — deferring to next loop for CI"
-    fi
-  else
-    echo "Retro-skip: mergeability unknown ($MERGEABLE) — deferring to next loop"
-  fi
-else
-  echo "Running full pipeline: retro required (missing/corrupt hints or skip conditions unmet)"
-  # Proceed with normal retro resume below
-fi
-```
-
-**Use skill invocation for retro too:**
+Always dispatch retro after review approval. Do not check routing hints, `skipRetro` flags, or any other conditions — retro runs unconditionally.
 
 ```bash
 # GitHub:
@@ -817,6 +766,7 @@ legion prompt "$ISSUE_IDENTIFIER" --mode implement \
 
 **ADAPTIVE ROUTING GUARDRAILS — MUST NEVER BE SKIPPED:**
 - Testing phase CANNOT be skipped — tester ALWAYS runs
+- Retro phase CANNOT be skipped — retro ALWAYS runs after review approval
 - Routing hints are ADVISORY — labels, PR state, daemon state remain authoritative
 - When hints are missing/corrupt: fall back to full pipeline
 - When multiple hints conflict: fall back to full pipeline
@@ -986,7 +936,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "This worker keeps failing, let me increment the version" | **NEVER increment `--version` during normal operation.** Version increments destroy all worker context. Re-dispatch without version — the worker resumes with full context of prior work. Version is an escape hatch for unrecoverable sessions only. |
 | "Let me skip planning, the issue is simple enough" | STOP. Every phase runs. No exceptions. |
 | "Testing isn't needed, it's a trivial change" | STOP. The tester ALWAYS runs. |
-| "Let me skip retro, the PR is clean" | Check routing hints. Only skip when ALL conditions met. |
+| "Let me skip retro, the PR is clean" | STOP. Retro is MANDATORY. Always dispatch retro after review approval. |
 | "Let me just merge this PR directly" | STOP. Dispatch a merge worker. |
 | "I'll rebase and push this fix" | STOP. Dispatch an implementer. |
 | "I'll run the tests myself" | STOP. Dispatch a tester. |
