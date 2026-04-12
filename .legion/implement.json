@@ -1,20 +1,4 @@
 {
   "schemaVersion": 1,
-  "phase": "implement",
-  "completed": "2026-04-12T14:07:17.088Z",
-  "filesChanged": [
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
-  ],
-  "trickyParts": [
-    "Issue described a one-line fix but the publish topic change also required adding the new topic to the controller's explicit subscription list in index.ts to ensure delivery"
-  ],
-  "deviations": [
-    "Added subscription registration in index.ts (not mentioned in issue) — required because changing the publish topic without subscribing would break delivery"
-  ],
-  "openQuestions": [
-    "CI did not trigger on the PR branch — may need manual re-trigger or token permissions check"
-  ],
-  "subPlanningNeeded": false
+  "phase": "unknown"
 }

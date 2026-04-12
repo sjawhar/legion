@@ -1,34 +1,5 @@
 {
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-12T00:06:18.564Z",
-  "learningsInjected": [
-    "skill-patterns/merge-retry-race-condition-pattern.md",
-    "skill-patterns/cross-cutting-workflow-concerns.md",
-    "integration-patterns/controller-worker-protocol.md"
-  ],
-  "learningsHelpful": [
-    "skill-patterns/merge-retry-race-condition-pattern.md",
-    "integration-patterns/controller-worker-protocol.md"
-  ],
-  "taskCount": 2,
-  "independentTasks": 2,
-  "routingHints": {
-    "skipRetro": true,
-    "skipArchitect": true,
-    "complexity": "small",
-    "estimatedImplementers": 1
-  },
-  "concerns": [
-    "Review worker lacks Contents write permission — must NOT rebase or push; detect-and-stop only",
-    "State machine keys off prIsDraft, not GitHub review API state — reviewer must use draft status for signaling conflicts",
-    "UNKNOWN mergeability must be treated as non-pass at controller (fail closed), but pass-through at worker",
-    "Retro-skip path bypasses Pre-Merge Gate — needs its own inline mergeability check before dispatching merge"
-  ],
-  "workflowRecommendation": "Simple docs-only fix — skip retro, single implementer. Two independent tasks can run in parallel but both touch the same controller file, so sequential is safer.",
-  "requiredSkills": {
-    "implement": [],
-    "test": [],
-    "review": []
-  }
+  "issueNumber": 444
 }
