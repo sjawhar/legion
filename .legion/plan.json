@@ -1,4 +1,28 @@
 {
+  "taskCount": 5,
+  "independentTasks": 1,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1,
+    "skipRetro": false,
+    "skipArchitect": false
+  },
+  "concerns": [
+    "Reservation pattern must be atomic — check+increment synchronously before any await to prevent race window",
+    "Concurrent spawn race at limit boundary — two simultaneous spawns must not both succeed",
+    "Rollback on session creation failure — descendant counter must be decremented if session.create() throws",
+    "Config test file path is .opencode/opencode-legion.json (not .opencode.json) — verified against loadPluginConfig implementation"
+  ],
+  "learningsInjected": [
+    "docs/solutions/delegation/hardening-patterns.md",
+    "docs/solutions/delegation/delegation-hardening-retro.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/delegation/delegation-hardening-retro.md"
+  ],
+  "workflowRecommendation": "Standard pipeline — all phases needed",
+  "requiredSkills": {},
   "schemaVersion": 1,
-  "phase": "unknown"
+  "phase": "plan",
+  "completed": "2026-04-12T23:27:31.232Z"
 }
