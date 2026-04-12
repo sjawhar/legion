@@ -1,35 +1,31 @@
 {
-  "taskCount": 5,
-  "independentTasks": 3,
+  "taskCount": 3,
+  "independentTasks": 1,
   "routingHints": {
     "complexity": "medium",
     "estimatedImplementers": 1,
-    "skipRetro": false,
-    "skipArchitect": false
+    "skipRetro": false
   },
   "concerns": [
-    "Ghost Wispr secret is optional even when provider is enabled — different from GitHub/Slack which require secrets",
-    "Webhook handlers use contracts.{GithubEnvelopes,SlackEnvelopes,GhostWisprEnvelope} for envelope creation — do NOT hand-build envelopes",
-    "GitHub mention fan-out produces 3 envelopes (base + resource-specific mention + repo-wide mention), not 2",
-    "Slack url_verification must happen BEFORE signature verification",
-    "Slack handler skips invalid envelopes with continue, not error — preserves current behavior",
-    "Non-POST requests return 200 for all handlers, not 405",
-    "Pulumi secrets (githubWebhookSecret, slackSigningSecret) remain requireSecret at config level — config-gated activation is at Go level only",
-    "Pulumi.prod.yaml must be updated to move receivers to listener.webhooks"
+    "startDaemon() shallow merge must be replaced with single resolved-config contract",
+    "Port authority: explicit config port must bypass registry allocation",
+    "ENVOY_URL and LEGION_FEEDBACK_* must migrate from process.env to config object",
+    "Relative paths in YAML must resolve against config file directory not cwd",
+    "Deprecation warnings only fire when env var is the effective value",
+    "Unknown-key warnings use full dotted paths via simple recursive walker",
+    "getDaemonPort() in non-start CLI commands may remain as env read"
   ],
   "learningsInjected": [
-    "envoy/contracts-and-handler-patterns.md",
-    "envoy/listener-routing-by-topic-prefix.md",
-    "envoy/docker-tailscale-networking.md"
+    "delegation/hardening-patterns.md",
+    "daemon/shared-serve-refactor.md",
+    "daemon/controller-lifecycle-separation.md"
   ],
-  "learningsHelpful": ["envoy/contracts-and-handler-patterns.md"],
-  "workflowRecommendation": "Standard pipeline — all phases needed. Tasks 2+3 can run in parallel after Task 1. Medium complexity, single implementer.",
-  "requiredSkills": {
-    "implement": ["envoy"],
-    "test": [],
-    "review": []
-  },
+  "learningsHelpful": [
+    "delegation/hardening-patterns.md",
+    "daemon/controller-lifecycle-separation.md"
+  ],
+  "workflowRecommendation": "Standard pipeline. Medium complexity, single implementer. 3 waves: W1 config resolver (independent), W2 CLI+daemon+server integration (depends W1), W3 audit+verification (depends W1+W2).",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-11T20:43:31.451Z"
+  "completed": "2026-04-11T22:17:54.461Z"
 }

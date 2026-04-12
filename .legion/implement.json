@@ -1,17 +1,19 @@
 {
-  "prNumber": 429,
-  "prUrl": "https://github.com/sjawhar/legion/pull/429",
-  "branch": "sjawhar-legion-427",
-  "summary": "Consolidated 3 standalone webhook receiver binaries into the listener process. Extracted handlers to internal/webhook/ behind Publisher interface, config-gated via ENVOY_WEBHOOKS env var. 42 new tests. Removed old cmd/, compose, Pulumi receiver infrastructure.",
-  "filesChanged": 28,
-  "testsAdded": 42,
-  "reviewFindings": [
-    "Added TrimSpace to config.go for env parity with old receivers",
-    "Made Pulumi secrets conditional (getSecret vs requireSecret)",
-    "Added whitespace-only secret regression tests"
+  "filesChanged": [
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/server.ts"
   ],
-  "deploymentNotes": "Migration requires parallel operation: old receivers stay running while new listener serves webhooks on port 9020. Switch webhook URLs at providers, then remove old containers.",
+  "trickyParts": [
+    "startDaemon() signature change required updating all callers",
+    "extra_projects validation now applies to env-sourced values too",
+    "validateBackend/validateRuntime exported for CLI validation"
+  ],
+  "testResults": "861 pass, 0 fail across 41 files",
+  "ciStatus": "all green",
+  "prNumber": 442,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-11T21:11:23.875Z"
+  "completed": "2026-04-11T23:07:21.136Z"
 }

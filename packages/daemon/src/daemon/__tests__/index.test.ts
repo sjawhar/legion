@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, mock } from "bun:test";
 import { createServer } from "node:net";
+import { type DaemonConfig, resolveDaemonConfig } from "../config";
 import { resolveLegionPaths } from "../paths";
 import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
@@ -83,6 +84,9 @@ const silentSetTimeout: typeof setTimeout = Object.assign(
 );
 const noopClearTimeout = (() => {}) as typeof clearTimeout;
 
+type DaemonStartOpts = NonNullable<Parameters<typeof startDaemon>[1]>;
+type DaemonDepsOverride = NonNullable<DaemonStartOpts["deps"]>;
+
 function filterControllerPrompts(
   prompts: Array<{ sessionID: string; parts: unknown[] }>
 ): Array<{ sessionID: string; parts: unknown[] }> {
@@ -152,35 +156,51 @@ async function getFreePort(): Promise<number> {
 }
 
 function startDaemonForTest(
-  overrides: Parameters<typeof startDaemon>[0],
-  deps?: Parameters<typeof startDaemon>[1]
+  overrides: Partial<DaemonConfig>,
+  deps?: Partial<DaemonDepsOverride>,
+  startOpts?: Omit<DaemonStartOpts, "deps">
 ): Promise<Awaited<ReturnType<typeof startDaemon>>> {
-  return startDaemon(
-    {
-      paths: TEST_PATHS,
-      readLegionsRegistry: async () => mockedRegistry,
-      cleanupStaleServes: async () => {},
-      allocatePort: () => mockedAllocatedPorts,
-      writeLegionEntry: async (
-        filePath: string,
-        projectId: string,
-        entry: {
-          port: number;
-          servePort: number;
-          pid: number;
-          servePid?: number;
-          startedAt: string;
-        }
-      ) => {
-        writeLegionEntryCalls.push({ filePath, projectId, entry });
-      },
-      removeLegionEntry: async (filePath: string, projectId: string) => {
-        removeLegionEntryCalls.push({ filePath, projectId });
-      },
-      ...overrides,
+  const legionId = overrides.legionId ?? TEAM_ID;
+  const instancePaths = TEST_PATHS.forLegion(legionId);
+  const { config: baseConfig } = resolveDaemonConfig({
+    env: {
+      LEGION_ID: legionId,
+      XDG_DATA_HOME: "/tmp/legion-test-data",
+      XDG_STATE_HOME: "/tmp/legion-test-state",
     },
-    deps
-  );
+  });
+  const config: DaemonConfig = {
+    ...baseConfig,
+    paths: TEST_PATHS,
+    legionId,
+    logDir: instancePaths.logDir,
+    stateFilePath: overrides.stateFilePath ?? instancePaths.workersFile,
+    ...overrides,
+  };
+
+  return startDaemon(config, {
+    readLegionsRegistry: async () => mockedRegistry,
+    cleanupStaleServes: async () => {},
+    allocatePort: () => mockedAllocatedPorts,
+    writeLegionEntry: async (
+      filePath: string,
+      projectId: string,
+      entry: {
+        port: number;
+        servePort: number;
+        pid: number;
+        servePid?: number;
+        startedAt: string;
+      }
+    ) => {
+      writeLegionEntryCalls.push({ filePath, projectId, entry });
+    },
+    removeLegionEntry: async (filePath: string, projectId: string) => {
+      removeLegionEntryCalls.push({ filePath, projectId });
+    },
+    ...startOpts,
+    deps,
+  });
 }
 
 describe("daemon entry", () => {
@@ -200,11 +220,93 @@ describe("daemon entry", () => {
     mockedRegistry = {};
     mockedAllocatedPorts = { daemonPort: 13370, servePort: 13381 };
     startServerCalls.length = 0;
-    process.env.LEGION_FEEDBACK_DISABLED = undefined;
-    process.env.LEGION_FEEDBACK_MAX_BYTES = undefined;
   });
 
   describe("port allocation", () => {
+    it("uses the exact explicit daemon port when it is free", async () => {
+      const explicitPort = await getFreePort();
+      const startServerCalls: ServerOptions[] = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          daemonPort: explicitPort,
+          daemonPortExplicit: true,
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: (opts) => {
+            startServerCalls.push(opts);
+            return {
+              server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+              fetchAndProcessState: async () => {},
+            };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(startServerCalls).toHaveLength(1);
+      expect(startServerCalls[0].port).toBe(explicitPort);
+      expect(writeLegionEntryCalls[0].entry.port).toBe(explicitPort);
+    });
+
+    it("throws when the explicit daemon port is occupied", async () => {
+      const occupiedPort = await getFreePort();
+      const blocker = createServer();
+      await new Promise<void>((resolve, reject) => {
+        blocker.once("error", reject);
+        blocker.listen(occupiedPort, "127.0.0.1", () => resolve());
+      });
+
+      try {
+        try {
+          await startDaemonForTest(
+            {
+              stateFilePath: "/tmp/daemon-workers.json",
+              legionId: TEAM_ID,
+              controllerSessionId: "ses_test",
+              daemonPort: occupiedPort,
+              daemonPortExplicit: true,
+            },
+            {
+              readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+              writeStateFile: async () => {},
+              adapter: makeAdapter(),
+              startServer: (opts) => ({
+                server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+                stop: () => {},
+                fetchAndProcessState: async () => {},
+              }),
+              setTimeout: silentSetTimeout,
+              clearTimeout: noopClearTimeout,
+              fetch: originalFetch,
+            }
+          );
+          throw new Error("Expected startDaemonForTest to reject");
+        } catch (error) {
+          expect(error).toBeInstanceOf(Error);
+        }
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          blocker.close((error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          });
+        });
+      }
+    });
+
     it("starts on base port 13370 when registry is empty", async () => {
       const basePort = await getFreePort();
       mockedRegistry = {};
@@ -239,6 +341,43 @@ describe("daemon entry", () => {
       expect(startServerCalls).toHaveLength(1);
       expect(startServerCalls[0].port).toBe(basePort);
       expect(writeLegionEntryCalls[0].entry.port).toBe(basePort);
+    });
+
+    it("keeps allocation behavior when daemon port is not explicit", async () => {
+      const allocatedPort = await getFreePort();
+      mockedAllocatedPorts = { daemonPort: allocatedPort, servePort: allocatedPort + 100 };
+
+      const startServerCalls: ServerOptions[] = [];
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          daemonPort: allocatedPort - 10,
+          daemonPortExplicit: false,
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: (opts) => {
+            startServerCalls.push(opts);
+            return {
+              server: { port: opts.port } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+              fetchAndProcessState: async () => {},
+            };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      expect(startServerCalls).toHaveLength(1);
+      expect(startServerCalls[0].port).toBe(allocatedPort);
+      expect(writeLegionEntryCalls[0].entry.port).toBe(allocatedPort);
     });
 
     it("starts on 13371 when registry already uses 13370", async () => {
@@ -337,9 +476,6 @@ describe("daemon entry", () => {
           stateFilePath: "/tmp/daemon-workers.json",
           legionId: TEAM_ID,
           controllerSessionId: "ses_test",
-          cleanupStaleServes: async (filePath: string, legionId: string) => {
-            cleanupCalls.push({ filePath, legionId });
-          },
         },
         {
           readStateFile: async () => ({ workers: {}, crashHistory: {} }),
@@ -353,6 +489,11 @@ describe("daemon entry", () => {
           setTimeout: silentSetTimeout,
           clearTimeout: noopClearTimeout,
           fetch: originalFetch,
+        },
+        {
+          cleanupStaleServes: async (filePath: string, legionId: string) => {
+            cleanupCalls.push({ filePath, legionId });
+          },
         }
       );
 
@@ -1451,14 +1592,13 @@ describe("daemon entry", () => {
       await handle.stop();
     });
 
-    it("skips feedback logger creation when LEGION_FEEDBACK_DISABLED=1", async () => {
-      process.env.LEGION_FEEDBACK_DISABLED = "1";
-
+    it("skips feedback logger creation when feedback is disabled in config", async () => {
       const handle = await startDaemonForTest(
         {
           stateFilePath: "/tmp/daemon-workers.json",
           legionId: TEAM_ID,
           controllerSessionId: "ses_test",
+          feedbackDisabled: true,
         },
         {
           readStateFile: async () => ({ workers: {}, crashHistory: {} }),

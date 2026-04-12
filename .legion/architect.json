@@ -1,19 +1,10 @@
 {
   "scope": "medium",
   "components": [
-    "packages/envoy/cmd/listener/main.go",
-    "packages/envoy/cmd/github/main.go",
-    "packages/envoy/cmd/slack/main.go",
-    "packages/envoy/cmd/ghostwispr/main.go",
-    "packages/envoy/internal/webhook/",
-    "packages/envoy/internal/verify/",
-    "packages/envoy/internal/config/config.go",
-    "packages/envoy/docker/Dockerfile",
-    "packages/envoy/deploy/compose/",
-    "packages/envoy/infra/services.ts",
-    "packages/envoy/infra/machines.ts",
-    "packages/envoy/infra/index.ts",
-    "packages/envoy/AGENTS.md"
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/server.ts"
   ],
   "subIssues": [],
   "routingHints": {
@@ -22,23 +13,22 @@
     "skipRetro": false
   },
   "concerns": [
-    "Config-gated activation (ENVOY_WEBHOOKS env var) replaces secret-gated activation — enabled provider + missing required secret = startup failure",
-    "Ghost Wispr must be explicitly enabled via ENVOY_WEBHOOKS, not 'always registered' — prevents unintended exposure on non-receiver machines",
-    "Webhook handlers must take publisher interface, not atomic.Pointer[listenerDeps] — follow Ghost Wispr envelopePublisher pattern for testability",
-    "Startup readiness: listener binds port before NATS connects; webhook handlers behind readinessGate return 503 until NATS ready — acceptable because Docker healthcheck gates traffic",
-    "Migration requires parallel operation: old receivers stay running on 9010/9011/9012 while new listener serves 9020; switch webhook URLs at providers then remove old containers",
-    "Duplicate delivery risk during overlap is low: dedupe keys are source-derived (github.<delivery>, slack.<event_id>, ghostwispr.<delivery>)",
-    "When ENVOY_TSNET_ENABLED=false, /v1/* still served on public port (existing fallback behavior) — spec does not change this"
+    "startDaemon() currently overrides config.daemonPort via registry allocation — port from config must be authoritative",
+    "ENVOY_URL and LEGION_FEEDBACK_* are read directly from process.env outside loadConfig() — must migrate to config object",
+    "Relative paths in YAML (workspace, private_key_path) must resolve relative to config file directory, not cwd",
+    "extra_projects is GitHub-multi-board only — Linear backend with extra_projects should error",
+    "Deprecation warnings should only fire when env var is the effective value, not when overridden",
+    "Unknown key warnings must cover full key paths (nested), not just top-level keys"
   ],
   "learningsInjected": [
-    "envoy/listener-routing-by-topic-prefix.md",
-    "envoy/docker-tailscale-networking.md",
-    "envoy/contracts-and-handler-patterns.md"
+    "delegation/hardening-patterns.md",
+    "daemon/controller-lifecycle-separation.md",
+    "daemon/shared-serve-refactor.md"
   ],
   "learningsHelpful": [
-    "envoy/contracts-and-handler-patterns.md"
+    "daemon/shared-serve-refactor.md"
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T20:21:30.953Z"
+  "completed": "2026-04-11T21:45:53.294Z"
 }

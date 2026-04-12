@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { parse } from "yaml";
 import type { LegionPaths } from "./paths";
 import { resolveLegionPaths } from "./paths";
 
@@ -15,6 +16,7 @@ export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig
 
 export interface DaemonConfig {
   daemonPort: number;
+  daemonPortExplicit: boolean;
   legionId?: string;
   legionDir?: string;
   paths: LegionPaths;
@@ -28,28 +30,155 @@ export interface DaemonConfig {
   extraProjects?: string[];
   runtime: "opencode" | "claude-code";
   githubApps?: GitHubAppsConfig;
+  envoyUrl: string;
+  feedbackDisabled: boolean;
+  feedbackMaxBytes: number;
   /** RSS threshold in bytes; serve restarts when exceeded. 0 = disabled. */
   maxRssBytes: number;
   /** Minimum interval between RSS checks in ms. */
   rssCheckIntervalMs: number;
 }
 
+export interface LoadedConfigFile {
+  fields: Record<string, unknown>;
+  warnings: string[];
+}
+
+export interface ResolveDaemonConfigOptions {
+  env?: Record<string, string | undefined>;
+  configFile?: LoadedConfigFile;
+  cliOverrides?: Partial<DaemonConfig>;
+}
+
+export interface ResolveDaemonConfigResult {
+  config: DaemonConfig;
+  warnings: string[];
+}
+
+interface ConfigSchema {
+  [key: string]: ConfigSchema | null;
+}
+type ValueSource = "cli" | "config" | "env" | "default";
+
 const BASE_DAEMON_PORT = 13370;
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
 const DEFAULT_BASE_WORKER_PORT = 13381;
 const DEFAULT_MAX_RSS_GB = 20;
 const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
+const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
+const DEFAULT_FEEDBACK_MAX_BYTES = 50 * 1024 * 1024;
 const EXTRA_PROJECT_PATTERN = /^[^/]+\/\d+$/;
+const GITHUB_APP_ROLES: GitHubAppRole[] = ["impl", "review"];
+const GITHUB_APP_FIELD_NAMES = ["app_id", "private_key_path", "installation_id"] as const;
+const CONFIG_SCHEMA: ConfigSchema = {
+  project: null,
+  extra_projects: null,
+  backend: null,
+  runtime: null,
+  workspace: null,
+  port: null,
+  controller: {
+    session_id: null,
+    prompt: null,
+  },
+  github_apps: {
+    impl: {
+      app_id: null,
+      private_key_path: null,
+      installation_id: null,
+    },
+    review: {
+      app_id: null,
+      private_key_path: null,
+      installation_id: null,
+    },
+  },
+  memory: {
+    max_rss_gb: null,
+    rss_check_interval_seconds: null,
+  },
+  envoy_url: null,
+  feedback: {
+    disabled: null,
+    max_bytes: null,
+  },
+};
 
-function parseNumber(value: string | undefined, fallback: number): number {
-  if (!value) {
-    return fallback;
+function parseOptionalNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
   }
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return fallback;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseOptionalBoolean(value: string | undefined): boolean | undefined {
+  if (value === undefined || value === "") {
+    return undefined;
   }
-  return parsed;
+  if (value === "true" || value === "1") {
+    return true;
+  }
+  if (value === "false" || value === "0") {
+    return false;
+  }
+  return undefined;
+}
+
+function resolveValue<T>(
+  cliValue: T | undefined,
+  configValue: T | undefined,
+  envValue: T | undefined,
+  defaultValue: T
+): { value: T; source: ValueSource } {
+  if (cliValue !== undefined) {
+    return { value: cliValue, source: "cli" };
+  }
+  if (configValue !== undefined) {
+    return { value: configValue, source: "config" };
+  }
+  if (envValue !== undefined) {
+    return { value: envValue, source: "env" };
+  }
+  return { value: defaultValue, source: "default" };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown, fieldPath: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${fieldPath} must be a string`);
+  }
+  return value;
+}
+
+function readNumber(value: unknown, fieldPath: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${fieldPath} must be a number`);
+  }
+  return value;
+}
+
+function readBoolean(value: unknown, fieldPath: string): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`${fieldPath} must be a boolean`);
+  }
+  return value;
+}
+
+function normalizeConfigPath(value: string, configDir: string): string {
+  return path.isAbsolute(value) ? value : path.resolve(configDir, value);
 }
 
 export function validateControllerPrompt(prompt: string | undefined): void {
@@ -74,6 +203,45 @@ export function validateControllerPrompt(prompt: string | undefined): void {
   if (hasControlChars) {
     throw new Error("Controller prompt contains invalid control characters");
   }
+}
+
+export function validateBackend(
+  value: string | undefined,
+  sourceName: string
+): "linear" | "github" | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "linear" && value !== "github") {
+    throw new Error(`${sourceName} must be 'linear' or 'github' (got: ${value})`);
+  }
+  return value;
+}
+
+export function validateRuntime(
+  value: string | undefined,
+  sourceName: string
+): "opencode" | "claude-code" | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "opencode" && value !== "claude-code") {
+    throw new Error(`${sourceName} must be 'opencode' or 'claude-code' (got: ${value})`);
+  }
+  return value;
+}
+
+function validateControllerSessionId(
+  value: string | undefined,
+  sourceName: string
+): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (!value.startsWith("ses_")) {
+    throw new Error(`${sourceName} must start with 'ses_' (got: ${value})`);
+  }
+  return value;
 }
 
 function parseExtraProjects(value: string | undefined): string[] | undefined {
@@ -101,72 +269,47 @@ function parseExtraProjects(value: string | undefined): string[] | undefined {
   return extraProjects.length > 0 ? extraProjects : undefined;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
-  const legionDir = env.LEGION_DIR;
-  const legionId = env.LEGION_ID;
-  const paths = resolveLegionPaths(env, os.homedir());
-  const stateFilePath = legionId
-    ? paths.forLegion(legionId).workersFile
-    : path.join(paths.stateDir, "daemon", "workers.json");
-  const logDir = legionId
-    ? paths.forLegion(legionId).logDir
-    : path.join(paths.stateDir, "daemon", "logs");
-  const controllerSessionId = env.LEGION_CONTROLLER_SESSION_ID || undefined;
-  const controllerPrompt = env.LEGION_CONTROLLER_PROMPT || undefined;
-
-  if (controllerSessionId && !controllerSessionId.startsWith("ses_")) {
-    throw new Error(
-      `LEGION_CONTROLLER_SESSION_ID must start with 'ses_' (got: ${controllerSessionId})`
-    );
+function parseExtraProjectsArray(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("extra_projects must be an array");
   }
 
-  validateControllerPrompt(controllerPrompt);
-
-  const rawBackend = env.LEGION_ISSUE_BACKEND;
-  if (rawBackend !== undefined && rawBackend !== "linear" && rawBackend !== "github") {
-    throw new Error(`LEGION_ISSUE_BACKEND must be 'linear' or 'github' (got: ${rawBackend})`);
+  const extraProjects: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      throw new Error("extra_projects entries must be strings matching owner/number");
+    }
+    if (!EXTRA_PROJECT_PATTERN.test(entry)) {
+      throw new Error(`extra_projects entries must match owner/number (got: ${entry})`);
+    }
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      extraProjects.push(entry);
+    }
   }
-  const issueBackend = rawBackend === "github" ? "github" : "linear";
 
-  const rawRuntime = env.LEGION_RUNTIME;
-  if (rawRuntime !== undefined && rawRuntime !== "opencode" && rawRuntime !== "claude-code") {
-    throw new Error(`LEGION_RUNTIME must be 'opencode' or 'claude-code' (got: ${rawRuntime})`);
-  }
-  const runtime = rawRuntime === "claude-code" ? "claude-code" : "opencode";
-  const githubApps = loadGitHubApps(env);
-  const extraProjects = parseExtraProjects(env.LEGION_EXTRA_PROJECTS);
-  const maxRssGb = parseNumber(env.OPENCODE_MAX_RSS_GB, DEFAULT_MAX_RSS_GB);
-  const maxRssBytes = maxRssGb > 0 ? maxRssGb * 1024 * 1024 * 1024 : 0;
-  const rssCheckIntervalS = parseNumber(
-    env.OPENCODE_RSS_CHECK_INTERVAL,
-    DEFAULT_RSS_CHECK_INTERVAL_S
-  );
-  const rssCheckIntervalMs =
-    rssCheckIntervalS > 0 ? rssCheckIntervalS * 1000 : DEFAULT_RSS_CHECK_INTERVAL_S * 1000;
-
-  return {
-    daemonPort: parseNumber(env.LEGION_DAEMON_PORT, BASE_DAEMON_PORT),
-    legionId,
-    legionDir,
-    paths,
-    checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
-    baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
-    maxRssBytes,
-    rssCheckIntervalMs,
-    stateFilePath,
-    logDir,
-    controllerSessionId,
-    controllerPrompt,
-    issueBackend,
-    extraProjects,
-    runtime,
-    githubApps,
-  };
+  return extraProjects.length > 0 ? extraProjects : undefined;
 }
 
-const GITHUB_APP_ROLES: GitHubAppRole[] = ["impl", "review"];
+function parseMaxRssBytesFromGb(maxRssGb: number | undefined): number | undefined {
+  if (maxRssGb === undefined) {
+    return undefined;
+  }
+  return maxRssGb > 0 ? maxRssGb * 1024 * 1024 * 1024 : 0;
+}
 
-function loadGitHubApps(env: NodeJS.ProcessEnv): GitHubAppsConfig | undefined {
+function parseRssCheckIntervalMsFromSeconds(seconds: number | undefined): number | undefined {
+  if (seconds === undefined || seconds <= 0) {
+    return undefined;
+  }
+  return seconds * 1000;
+}
+
+function loadGitHubApps(env: Record<string, string | undefined>): GitHubAppsConfig | undefined {
   const config: GitHubAppsConfig = {};
   let hasAny = false;
 
@@ -183,4 +326,505 @@ function loadGitHubApps(env: NodeJS.ProcessEnv): GitHubAppsConfig | undefined {
   }
 
   return hasAny ? config : undefined;
+}
+
+function collectUnknownKeys(
+  value: unknown,
+  schema: ConfigSchema | null,
+  pathParts: string[],
+  warnings: string[]
+): void {
+  if (!schema || !isRecord(value)) {
+    return;
+  }
+
+  for (const [key, childValue] of Object.entries(value)) {
+    const childSchema = schema[key];
+    if (childSchema === undefined) {
+      warnings.push(`Unknown config key: ${[...pathParts, key].join(".")}`);
+      continue;
+    }
+    collectUnknownKeys(childValue, childSchema, [...pathParts, key], warnings);
+  }
+}
+
+function loadGitHubAppsFromFile(value: unknown, configDir: string): GitHubAppsConfig | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error("github_apps must be a mapping");
+  }
+
+  const config: GitHubAppsConfig = {};
+  let hasAny = false;
+
+  for (const role of GITHUB_APP_ROLES) {
+    const roleValue = value[role];
+    if (roleValue === undefined || roleValue === null) {
+      continue;
+    }
+    if (!isRecord(roleValue)) {
+      throw new Error(`github_apps.${role} must be a mapping`);
+    }
+
+    const appId = readString(roleValue.app_id, `github_apps.${role}.app_id`);
+    const privateKeyPath = readString(
+      roleValue.private_key_path,
+      `github_apps.${role}.private_key_path`
+    );
+    const installationId = readString(
+      roleValue.installation_id,
+      `github_apps.${role}.installation_id`
+    );
+
+    const missing = GITHUB_APP_FIELD_NAMES.filter((fieldName) => {
+      const fieldValue = roleValue[fieldName];
+      return fieldValue === undefined || fieldValue === null || fieldValue === "";
+    });
+    const hasAnyField = GITHUB_APP_FIELD_NAMES.some((fieldName) => {
+      const fieldValue = roleValue[fieldName];
+      return fieldValue !== undefined && fieldValue !== null && fieldValue !== "";
+    });
+
+    if (!hasAnyField) {
+      continue;
+    }
+    if (missing.length > 0) {
+      throw new Error(`github_apps.${role} is missing required fields: ${missing.join(", ")}`);
+    }
+
+    config[role] = {
+      appId: appId as string,
+      privateKeyPath: normalizeConfigPath(privateKeyPath as string, configDir),
+      installationId: installationId as string,
+    };
+    hasAny = true;
+  }
+
+  return hasAny ? config : undefined;
+}
+
+function maybeReadStringField(fields: Record<string, unknown>, key: string): string | undefined {
+  const value = fields[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function maybeReadNumberField(fields: Record<string, unknown>, key: string): number | undefined {
+  const value = fields[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function maybeReadBooleanField(fields: Record<string, unknown>, key: string): boolean | undefined {
+  const value = fields[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function maybeReadStringArrayField(
+  fields: Record<string, unknown>,
+  key: string
+): string[] | undefined {
+  const value = fields[key];
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? value
+    : undefined;
+}
+
+function maybeReadIssueBackend(
+  fields: Record<string, unknown>,
+  key: string
+): "linear" | "github" | undefined {
+  const value = fields[key];
+  return value === "linear" || value === "github" ? value : undefined;
+}
+
+function maybeReadRuntime(
+  fields: Record<string, unknown>,
+  key: string
+): "opencode" | "claude-code" | undefined {
+  const value = fields[key];
+  return value === "opencode" || value === "claude-code" ? value : undefined;
+}
+
+function maybeReadGitHubApps(
+  fields: Record<string, unknown>,
+  key: string
+): GitHubAppsConfig | undefined {
+  const value = fields[key];
+  return isRecord(value) ? (value as GitHubAppsConfig) : undefined;
+}
+
+function pushEnvDeprecationWarning(
+  warnings: string[],
+  source: ValueSource,
+  env: Record<string, string | undefined>,
+  envVar: string,
+  yamlKey: string
+): void {
+  if (source === "env" && env[envVar] !== undefined) {
+    warnings.push(`${envVar} is deprecated; move this value to legion.yaml as '${yamlKey}'.`);
+  }
+}
+
+export function loadConfigFromFile(yamlText: string, configDir: string): LoadedConfigFile {
+  let parsed: unknown;
+  try {
+    parsed = parse(yamlText);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid YAML config: ${message}`);
+  }
+
+  if (parsed === undefined || parsed === null) {
+    return { fields: {}, warnings: [] };
+  }
+  if (!isRecord(parsed)) {
+    throw new Error("Config file root must be a mapping");
+  }
+
+  const warnings: string[] = [];
+  collectUnknownKeys(parsed, CONFIG_SCHEMA, [], warnings);
+
+  const fields: Record<string, unknown> = {};
+
+  const project = readString(parsed.project, "project");
+  if (project !== undefined) {
+    fields.legionId = project;
+  }
+
+  const workspace = readString(parsed.workspace, "workspace");
+  if (workspace !== undefined) {
+    fields.legionDir = normalizeConfigPath(workspace, configDir);
+  }
+
+  const port = readNumber(parsed.port, "port");
+  if (port !== undefined) {
+    fields.daemonPort = port;
+  }
+
+  const backend = validateBackend(readString(parsed.backend, "backend"), "backend");
+  if (backend !== undefined) {
+    fields.issueBackend = backend;
+  }
+
+  const runtime = validateRuntime(readString(parsed.runtime, "runtime"), "runtime");
+  if (runtime !== undefined) {
+    fields.runtime = runtime;
+  }
+
+  const controller = parsed.controller;
+  if (controller !== undefined && controller !== null) {
+    if (!isRecord(controller)) {
+      throw new Error("controller must be a mapping");
+    }
+    const sessionId = validateControllerSessionId(
+      readString(controller.session_id, "controller.session_id"),
+      "controller.session_id"
+    );
+    const prompt = readString(controller.prompt, "controller.prompt");
+    validateControllerPrompt(prompt);
+
+    if (sessionId !== undefined) {
+      fields.controllerSessionId = sessionId;
+    }
+    if (prompt !== undefined) {
+      fields.controllerPrompt = prompt;
+    }
+  }
+
+  const githubApps = loadGitHubAppsFromFile(parsed.github_apps, configDir);
+  if (githubApps !== undefined) {
+    fields.githubApps = githubApps;
+  }
+
+  const memory = parsed.memory;
+  if (memory !== undefined && memory !== null) {
+    if (!isRecord(memory)) {
+      throw new Error("memory must be a mapping");
+    }
+    const maxRssGb = readNumber(memory.max_rss_gb, "memory.max_rss_gb");
+    const rssCheckIntervalSeconds = readNumber(
+      memory.rss_check_interval_seconds,
+      "memory.rss_check_interval_seconds"
+    );
+    const maxRssBytes = parseMaxRssBytesFromGb(maxRssGb);
+    const rssCheckIntervalMs = parseRssCheckIntervalMsFromSeconds(rssCheckIntervalSeconds);
+
+    if (maxRssBytes !== undefined) {
+      fields.maxRssBytes = maxRssBytes;
+    }
+    if (rssCheckIntervalMs !== undefined) {
+      fields.rssCheckIntervalMs = rssCheckIntervalMs;
+    }
+  }
+
+  const envoyUrl = readString(parsed.envoy_url, "envoy_url");
+  if (envoyUrl !== undefined) {
+    fields.envoyUrl = envoyUrl;
+  }
+
+  const feedback = parsed.feedback;
+  if (feedback !== undefined && feedback !== null) {
+    if (!isRecord(feedback)) {
+      throw new Error("feedback must be a mapping");
+    }
+    const disabled = readBoolean(feedback.disabled, "feedback.disabled");
+    const maxBytes = readNumber(feedback.max_bytes, "feedback.max_bytes");
+    if (disabled !== undefined) {
+      fields.feedbackDisabled = disabled;
+    }
+    if (maxBytes !== undefined) {
+      fields.feedbackMaxBytes = maxBytes;
+    }
+  }
+
+  const extraProjects = parseExtraProjectsArray(parsed.extra_projects);
+  const effectiveBackend = (fields.issueBackend as "linear" | "github" | undefined) ?? "linear";
+  if (extraProjects !== undefined) {
+    if (effectiveBackend !== "github") {
+      throw new Error("extra_projects requires backend: github");
+    }
+    fields.extraProjects = extraProjects;
+  }
+
+  return { fields, warnings };
+}
+
+export function resolveDaemonConfig(
+  opts: ResolveDaemonConfigOptions = {}
+): ResolveDaemonConfigResult {
+  const env = opts.env ?? {};
+  const configFields = opts.configFile?.fields ?? {};
+  const warnings = [...(opts.configFile?.warnings ?? [])];
+
+  const envLegionId = env.LEGION_ID || undefined;
+  const envLegionDir = env.LEGION_DIR || undefined;
+  const envDaemonPort = parseOptionalNumber(env.LEGION_DAEMON_PORT);
+  const envControllerSessionId = validateControllerSessionId(
+    env.LEGION_CONTROLLER_SESSION_ID || undefined,
+    "LEGION_CONTROLLER_SESSION_ID"
+  );
+  const envControllerPrompt = env.LEGION_CONTROLLER_PROMPT || undefined;
+  validateControllerPrompt(envControllerPrompt);
+  const envIssueBackend = validateBackend(env.LEGION_ISSUE_BACKEND, "LEGION_ISSUE_BACKEND");
+  const envRuntime = validateRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME");
+  const envExtraProjects = parseExtraProjects(env.LEGION_EXTRA_PROJECTS);
+  const envGithubApps = loadGitHubApps(env);
+  const envMaxRssBytes = parseMaxRssBytesFromGb(parseOptionalNumber(env.OPENCODE_MAX_RSS_GB));
+  const envRssCheckIntervalMs = parseRssCheckIntervalMsFromSeconds(
+    parseOptionalNumber(env.OPENCODE_RSS_CHECK_INTERVAL)
+  );
+  const envEnvoyUrl = env.ENVOY_URL || undefined;
+  const envFeedbackDisabled = parseOptionalBoolean(env.LEGION_FEEDBACK_DISABLED);
+  const envFeedbackMaxBytes = parseOptionalNumber(env.LEGION_FEEDBACK_MAX_BYTES);
+
+  const legionId = resolveValue(
+    opts.cliOverrides?.legionId,
+    maybeReadStringField(configFields, "legionId"),
+    envLegionId,
+    undefined
+  );
+  const legionDir = resolveValue(
+    opts.cliOverrides?.legionDir,
+    maybeReadStringField(configFields, "legionDir"),
+    envLegionDir,
+    undefined
+  );
+  const daemonPort = resolveValue(
+    opts.cliOverrides?.daemonPort,
+    maybeReadNumberField(configFields, "daemonPort"),
+    envDaemonPort,
+    BASE_DAEMON_PORT
+  );
+  const controllerSessionId = resolveValue(
+    opts.cliOverrides?.controllerSessionId,
+    maybeReadStringField(configFields, "controllerSessionId"),
+    envControllerSessionId,
+    undefined
+  );
+  const controllerPrompt = resolveValue(
+    opts.cliOverrides?.controllerPrompt,
+    maybeReadStringField(configFields, "controllerPrompt"),
+    envControllerPrompt,
+    undefined
+  );
+  const issueBackend = resolveValue<DaemonConfig["issueBackend"]>(
+    opts.cliOverrides?.issueBackend,
+    maybeReadIssueBackend(configFields, "issueBackend"),
+    envIssueBackend,
+    "linear"
+  );
+  const extraProjects = resolveValue(
+    opts.cliOverrides?.extraProjects,
+    maybeReadStringArrayField(configFields, "extraProjects"),
+    envExtraProjects,
+    undefined
+  );
+  const runtime = resolveValue<DaemonConfig["runtime"]>(
+    opts.cliOverrides?.runtime,
+    maybeReadRuntime(configFields, "runtime"),
+    envRuntime,
+    "opencode"
+  );
+  const githubApps = resolveValue(
+    opts.cliOverrides?.githubApps,
+    maybeReadGitHubApps(configFields, "githubApps"),
+    envGithubApps,
+    undefined
+  );
+  const maxRssBytes = resolveValue(
+    opts.cliOverrides?.maxRssBytes,
+    maybeReadNumberField(configFields, "maxRssBytes"),
+    envMaxRssBytes,
+    DEFAULT_MAX_RSS_GB * 1024 * 1024 * 1024
+  );
+  const rssCheckIntervalMs = resolveValue(
+    opts.cliOverrides?.rssCheckIntervalMs,
+    maybeReadNumberField(configFields, "rssCheckIntervalMs"),
+    envRssCheckIntervalMs,
+    DEFAULT_RSS_CHECK_INTERVAL_S * 1000
+  );
+  const envoyUrl = resolveValue(
+    opts.cliOverrides?.envoyUrl,
+    maybeReadStringField(configFields, "envoyUrl"),
+    envEnvoyUrl,
+    DEFAULT_ENVOY_URL
+  );
+  const feedbackDisabled = resolveValue(
+    opts.cliOverrides?.feedbackDisabled,
+    maybeReadBooleanField(configFields, "feedbackDisabled"),
+    envFeedbackDisabled,
+    false
+  );
+  const feedbackMaxBytes = resolveValue(
+    opts.cliOverrides?.feedbackMaxBytes,
+    maybeReadNumberField(configFields, "feedbackMaxBytes"),
+    envFeedbackMaxBytes,
+    DEFAULT_FEEDBACK_MAX_BYTES
+  );
+
+  if (extraProjects.value !== undefined && issueBackend.value !== "github") {
+    throw new Error("extra_projects requires backend: github");
+  }
+
+  const paths = resolveLegionPaths(env, os.homedir());
+  const stateFilePath = legionId.value
+    ? paths.forLegion(legionId.value).workersFile
+    : path.join(paths.stateDir, "daemon", "workers.json");
+  const logDir = legionId.value
+    ? paths.forLegion(legionId.value).logDir
+    : path.join(paths.stateDir, "daemon", "logs");
+
+  pushEnvDeprecationWarning(warnings, legionId.source, env, "LEGION_ID", "project");
+  pushEnvDeprecationWarning(
+    warnings,
+    extraProjects.source,
+    env,
+    "LEGION_EXTRA_PROJECTS",
+    "extra_projects"
+  );
+  pushEnvDeprecationWarning(warnings, issueBackend.source, env, "LEGION_ISSUE_BACKEND", "backend");
+  pushEnvDeprecationWarning(warnings, runtime.source, env, "LEGION_RUNTIME", "runtime");
+  pushEnvDeprecationWarning(warnings, legionDir.source, env, "LEGION_DIR", "workspace");
+  pushEnvDeprecationWarning(warnings, daemonPort.source, env, "LEGION_DAEMON_PORT", "port");
+  pushEnvDeprecationWarning(
+    warnings,
+    controllerSessionId.source,
+    env,
+    "LEGION_CONTROLLER_SESSION_ID",
+    "controller.session_id"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
+    controllerPrompt.source,
+    env,
+    "LEGION_CONTROLLER_PROMPT",
+    "controller.prompt"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
+    maxRssBytes.source,
+    env,
+    "OPENCODE_MAX_RSS_GB",
+    "memory.max_rss_gb"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
+    rssCheckIntervalMs.source,
+    env,
+    "OPENCODE_RSS_CHECK_INTERVAL",
+    "memory.rss_check_interval_seconds"
+  );
+  pushEnvDeprecationWarning(warnings, envoyUrl.source, env, "ENVOY_URL", "envoy_url");
+  pushEnvDeprecationWarning(
+    warnings,
+    feedbackDisabled.source,
+    env,
+    "LEGION_FEEDBACK_DISABLED",
+    "feedback.disabled"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
+    feedbackMaxBytes.source,
+    env,
+    "LEGION_FEEDBACK_MAX_BYTES",
+    "feedback.max_bytes"
+  );
+
+  if (githubApps.source === "env") {
+    for (const role of GITHUB_APP_ROLES) {
+      const prefix = `LEGION_GITHUB_APP_${role.toUpperCase()}`;
+      pushEnvDeprecationWarning(
+        warnings,
+        githubApps.source,
+        env,
+        `${prefix}_ID`,
+        `github_apps.${role}.app_id`
+      );
+      pushEnvDeprecationWarning(
+        warnings,
+        githubApps.source,
+        env,
+        `${prefix}_PRIVATE_KEY_PATH`,
+        `github_apps.${role}.private_key_path`
+      );
+      pushEnvDeprecationWarning(
+        warnings,
+        githubApps.source,
+        env,
+        `${prefix}_INSTALLATION_ID`,
+        `github_apps.${role}.installation_id`
+      );
+    }
+  }
+
+  return {
+    config: {
+      daemonPort: daemonPort.value,
+      daemonPortExplicit: daemonPort.source === "cli" || daemonPort.source === "config",
+      legionId: legionId.value,
+      legionDir: legionDir.value,
+      paths,
+      checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
+      baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
+      stateFilePath,
+      logDir,
+      controllerSessionId: controllerSessionId.value,
+      controllerPrompt: controllerPrompt.value,
+      issueBackend: issueBackend.value,
+      extraProjects: extraProjects.value,
+      runtime: runtime.value,
+      githubApps: githubApps.value,
+      envoyUrl: envoyUrl.value,
+      feedbackDisabled: feedbackDisabled.value,
+      feedbackMaxBytes: feedbackMaxBytes.value,
+      maxRssBytes: maxRssBytes.value,
+      rssCheckIntervalMs: rssCheckIntervalMs.value,
+    },
+    warnings,
+  };
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
+  return resolveDaemonConfig({ env }).config;
 }

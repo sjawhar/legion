@@ -1,27 +1,17 @@
 {
   "critical": 0,
-  "important": 1,
-  "minor": 1,
+  "important": 2,
+  "minor": 2,
   "verdict": "approved",
   "keyFindings": [
-    {
-      "severity": "P2",
-      "file": "packages/envoy/cmd/listener/main_test.go",
-      "description": "Test coverage gaps: no subscribe handler input test (Go), no race guard test (TS), no heartbeat title test (TS). Existing tests cover happy path only."
-    },
-    {
-      "severity": "P3",
-      "file": "packages/envoy/cmd/listener/main.go",
-      "description": "gofmt formatting error at line 308 — Title field uses 2 tabs instead of 3 in subscribe handler body struct. Confirmed by gofmt -d."
-    }
+    {"severity": "P2", "file": "packages/daemon/src/daemon/config.ts", "description": "loadGitHubApps() (env-based, L312-329) still silently ignores partial GitHub App role config. Plan says 'Make partial GitHub App role config a hard error' — YAML path validates correctly but env path does not."},
+    {"severity": "P2", "file": "packages/daemon/src/cli/index.ts", "description": "L243: config.stateFilePath mutation after resolveDaemonConfig() breaks 'resolve once, use everywhere' contract. Value is redundant with what resolveDaemonConfig already computes."},
+    {"severity": "P3", "file": "packages/daemon/src/daemon/index.ts", "description": "Dual daemonPortExplicit sources (DaemonConfig and DaemonStartOptions) without documenting the override chain."},
+    {"severity": "P3", "file": "packages/daemon/src/cli/__tests__/index.test.ts", "description": "Missing integration-level error-path tests for cmdStart with missing config file and invalid YAML (unit-level coverage exists in loadConfigFromFile tests)."}
   ],
-  "learningsInjected": [
-    "architecture-patterns/nats-kv-dual-bucket-lifecycle.md",
-    "testing/nats-kv-testing-patterns.md",
-    "architecture-patterns/nats-kv-graceful-degradation.md"
-  ],
+  "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-11T22:11:01.295Z"
+  "completed": "2026-04-11T23:45:00.000Z"
 }
