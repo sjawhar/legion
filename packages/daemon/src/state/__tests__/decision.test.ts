@@ -312,7 +312,7 @@ describe("suggestAction", () => {
     expect(action).toBe("dispatch_reviewer");
   });
 
-  it("needs_review_worker_done_conflicting_pr_rebases", () => {
+  it("needs_review_worker_done_conflicting_pr_resumes_implementer", () => {
     const action = suggestAction(
       IssueStatus.NEEDS_REVIEW,
       true,
@@ -323,10 +323,10 @@ describe("suggestAction", () => {
       CiStatus.PASSING,
       MergeableStatus.CONFLICTING
     );
-    expect(action).toBe("rebase_pr");
+    expect(action).toBe("resume_implementer_for_changes");
   });
 
-  it("needs_review_worker_done_conflicting_pr_with_failing_ci_still_rebases", () => {
+  it("needs_review_worker_done_conflicting_pr_with_failing_ci_resumes_implementer", () => {
     const action = suggestAction(
       IssueStatus.NEEDS_REVIEW,
       true,
@@ -337,10 +337,10 @@ describe("suggestAction", () => {
       CiStatus.FAILING,
       MergeableStatus.CONFLICTING
     );
-    expect(action).toBe("rebase_pr");
+    expect(action).toBe("resume_implementer_for_changes");
   });
 
-  it("needs_review_worker_done_conflicting_pr_with_pending_ci_still_rebases", () => {
+  it("needs_review_worker_done_conflicting_pr_with_pending_ci_resumes_implementer", () => {
     const action = suggestAction(
       IssueStatus.NEEDS_REVIEW,
       true,
@@ -351,7 +351,7 @@ describe("suggestAction", () => {
       CiStatus.PENDING,
       MergeableStatus.CONFLICTING
     );
-    expect(action).toBe("rebase_pr");
+    expect(action).toBe("resume_implementer_for_changes");
   });
 
   it("needs_review_worker_done_unknown_mergeable_retries", () => {
@@ -396,7 +396,7 @@ describe("suggestAction", () => {
     expect(action).toBe("resume_implementer_for_ci_failure");
   });
 
-  it("needs_review_no_worker_done_conflicting_pr_rebases", () => {
+  it("needs_review_no_worker_done_conflicting_pr_resumes_implementer", () => {
     const action = suggestAction(
       IssueStatus.NEEDS_REVIEW,
       false,
@@ -407,7 +407,7 @@ describe("suggestAction", () => {
       CiStatus.PASSING,
       MergeableStatus.CONFLICTING
     );
-    expect(action).toBe("rebase_pr");
+    expect(action).toBe("resume_implementer_for_changes");
   });
 
   it("needs_review_no_worker_done_mergeable_pr_dispatches_reviewer", () => {
@@ -424,8 +424,8 @@ describe("suggestAction", () => {
     expect(action).toBe("dispatch_reviewer");
   });
 
-  it("rebase_pr_maps_to_review_mode", () => {
-    expect(ACTION_TO_MODE.rebase_pr).toBe("review");
+  it("conflicting_pr_maps_to_implement_mode_via_resume_implementer_for_changes", () => {
+    expect(ACTION_TO_MODE.resume_implementer_for_changes).toBe("implement");
   });
 });
 
@@ -457,7 +457,7 @@ describe("buildIssueState", () => {
     expect(state.suggestedAction).toBe("dispatch_planner");
   });
 
-  it("builds_state_with_conflicting_pr_suggests_rebase", () => {
+  it("builds_state_with_conflicting_pr_resumes_implementer", () => {
     const data: FetchedIssueData = {
       issueId: "ENG-21",
       status: "Needs Review",
@@ -480,7 +480,7 @@ describe("buildIssueState", () => {
       source: null,
     };
     const state = buildIssueState(data, "00000000-0000-0000-0000-000000000000");
-    expect(state.suggestedAction).toBe("rebase_pr");
+    expect(state.suggestedAction).toBe("resume_implementer_for_changes");
   });
 
   it("skips_when_user_input_needed", () => {

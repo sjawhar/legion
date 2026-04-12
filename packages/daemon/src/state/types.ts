@@ -105,8 +105,7 @@ export type ActionType =
   | "add_needs_approval"
   | "retry_pr_check"
   | "resume_implementer_for_ci_failure"
-  | "retry_ci_check"
-  | "rebase_pr";
+  | "retry_ci_check";
 
 /**
  * CI check status for a PR.

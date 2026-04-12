@@ -1,32 +1,48 @@
 {
-  "result": "pass",
-  "summary": "All acceptance criteria verified. Controller skill updated: retro is MANDATORY, no skip conditions, no direct merge. 1287/1289 tests pass (2 pre-existing failures). TypeScript clean. Biome clean.",
-  "criteriaResults": [
+  "passed": true,
+  "summary": "All acceptance criteria verified. 88 decision tests pass. Type check clean. Biome lint clean.",
+  "criteria": [
     {
-      "criterion": "After review completes (approved), controller MUST dispatch retro worker — no exceptions",
+      "criterion": "CONFLICTING + not approved → resume_implementer_for_changes (not rebase_pr)",
       "result": "pass",
-      "evidence": "Verified by code inspection: SKILL.md lines 749-753 — retro section now reads: The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions. Always dispatch retro after review approval. Do not check routing hints, skipRetro flags, or any other conditions."
+      "evidence": "decision.ts lines 115-116 and 129-130 both return resume_implementer_for_changes for CONFLICTING mergeability"
     },
     {
-      "criterion": "Remove language allowing skipping retro",
+      "criterion": "Controller NEVER rebases directly",
       "result": "pass",
-      "evidence": "Verified by diff: 57 lines deleted from SKILL.md including entire skipRetro bash block. grep for skipRetro/skip_retro/SKIP_RETRO in SKILL.md returns 0 code-path matches."
+      "evidence": "rebase_pr removed from ActionType union in types.ts; removed from ACTION_TO_MODE in decision.ts; SKILL.md handler updated with explicit MUST NOT call update-branch API"
     },
     {
-      "criterion": "Add explicit enforcement: retro is MANDATORY",
+      "criterion": "No rebase_pr references remain in state module",
       "result": "pass",
-      "evidence": "Verified by code inspection: SKILL.md line 431 (MUST NOT skip list), line 749 (Retro section), line 753 (unconditional dispatch), line 769 (ADAPTIVE ROUTING GUARDRAILS), line 939 (anti-pattern table)."
+      "evidence": "grep finds zero occurrences in types.ts, decision.ts, decision.test.ts"
     },
     {
-      "criterion": "worker-done on review should NOT trigger merge until retro completes",
+      "criterion": "SKILL.md routing table updated",
       "result": "pass",
-      "evidence": "Verified by code inspection: decision.ts lines 140-142 — IssueStatus.RETRO + hasWorkerDone → dispatch_merger. Pre-merge gate condition 5 requires retro handoff."
+      "evidence": "rebase_ prefix row now says removed; conflict row shows resume_implementer_for_changes; condition 7 table updated"
+    },
+    {
+      "criterion": "Unit tests pass",
+      "result": "pass",
+      "evidence": "88/88 decision tests pass; 1289/1291 total pass; 2 failures are pre-existing @pulumi/docker missing module errors unrelated to this PR"
+    },
+    {
+      "criterion": "TypeScript type check clean",
+      "result": "pass",
+      "evidence": "bunx tsc --noEmit produces no errors"
+    },
+    {
+      "criterion": "Biome lint clean",
+      "result": "pass",
+      "evidence": "bunx biome check src/ — Checked 99 files. No fixes applied."
     }
   ],
-  "testCritique": "No new unit tests — change is purely to a skill markdown file. Existing decision.ts tests cover retro→merge transitions. CI: lint/test/typecheck all pass.",
-  "ciStatus": "pass",
-  "ciUrl": "https://github.com/sjawhar/legion/actions/runs/24317292849",
+  "preExistingFailures": [
+    "packages/envoy/infra/__tests__/nats.test.ts — Cannot find module @pulumi/docker (pre-existing, unrelated)",
+    "packages/envoy/infra/__tests__/services.test.ts — Cannot find module @pulumi/docker (pre-existing, unrelated)"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T22:08:26.000Z"
+  "completed": "2026-04-12T23:13:34.729Z"
 }
