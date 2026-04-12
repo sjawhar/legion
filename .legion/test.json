@@ -1,18 +1,4 @@
 {
-  "passed": 1,
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Bug 2: Directory scan removes workspaces for issues removed from board",
-      "evidence": "The directory scan guard at server.ts:500 is `if (opts.paths && opts.repoManagerDeps?.listDir)`. In production, `repoManagerDeps` is never passed to `startServer()` in index.ts (zero references confirmed). The scan is dead code in production. Fix: fall back to `defaultDeps.listDir` when `opts.repoManagerDeps?.listDir` is undefined."
-    }
-  ],
-  "documentationFeedback": "Issue body clearly describes both bugs with root cause and evidence. The 'one-line addition to serialization' description for Bug 1 was slightly misleading but the implementer documented the deviation.",
-  "observations": [
-    "Bug 2 fix requires one-line change: use `opts.repoManagerDeps?.listDir ?? defaultDeps.listDir` in server.ts:500 instead of requiring repoManagerDeps to be injected",
-    "jj workspace forget omission for off-board workspaces is acceptable — repo is unknown for off-board workspaces",
-    "906/906 daemon tests pass; biome clean; tsc clean (pre-existing deprecation warning only)"
-  ],
   "learningsInjected": [
     "daemon/workspace-scanning-patterns.md",
     "testing/worker-smoke-testing-requirements.md"
@@ -20,7 +6,17 @@
   "learningsHelpful": [
     "daemon/workspace-scanning-patterns.md"
   ],
+  "passed": 2,
+  "failed": 0,
+  "failures": [],
+  "documentationFeedback": "Issue body clearly describes both bugs with root cause and evidence. Previous test run found Bug 2 fix was dead code (repoManagerDeps never injected in production). Implementer fixed by falling back to defaultRepoManagerDeps.listDir.",
+  "observations": [
+    "Bug 1 fix verified: repo and issueNumber explicitly declared in WorkerEntrySchema (schemas.ts:19-20) — persists through daemon restart",
+    "Bug 2 fix verified: directory scan uses opts.repoManagerDeps?.listDir ?? defaultRepoManagerDeps.listDir (server.ts:502) — scan runs in production without injection",
+    "906/906 daemon tests pass; biome clean; tsc clean",
+    "Both specific acceptance criteria tests pass: Bug 1 restart test + Bug 2 off-board scan test"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T20:01:01.409Z"
+  "completed": "2026-04-12T20:32:43.114Z"
 }
