@@ -251,7 +251,7 @@ function publishStateDelta(delta: StateDelta, envoyUrl = "http://127.0.0.1:9020"
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      topic: "notifications.role.legion-controller",
+      topic: "notifications.legion.controller",
       message: JSON.stringify(delta),
     }),
   })
