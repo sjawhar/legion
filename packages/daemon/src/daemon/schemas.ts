@@ -16,6 +16,8 @@ export const WorkerEntrySchema = z
     crashCount: z.number(),
     lastCrashAt: z.string().nullable(),
     envoyTopics: z.array(z.string()).optional(),
+    repo: z.string().optional(),
+    issueNumber: z.number().optional(),
   })
   .passthrough();
 
