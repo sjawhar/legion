@@ -186,6 +186,32 @@ interface StartDependencies {
   resolveLegionId: typeof resolveLegionId;
 }
 
+export function discoverConfigPath(
+  cwd: string,
+  env: Record<string, string | undefined>,
+  homeDir: string
+): string | undefined {
+  const xdgConfigHome = env.XDG_CONFIG_HOME;
+  if (xdgConfigHome) {
+    const xdgConfigPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+    if (fs.existsSync(xdgConfigPath)) {
+      return xdgConfigPath;
+    }
+  }
+
+  const homeConfigPath = path.join(homeDir, ".config", "legion", "legion.yaml");
+  if (fs.existsSync(homeConfigPath)) {
+    return homeConfigPath;
+  }
+
+  const localConfigPath = path.join(cwd, "legion.yaml");
+  if (fs.existsSync(localConfigPath)) {
+    return localConfigPath;
+  }
+
+  return undefined;
+}
+
 export async function cmdStart(
   team: string | undefined,
   opts: StartOptions,
@@ -203,6 +229,13 @@ export async function cmdStart(
       throw new CliError(`Config file not found: ${configPath}`);
     }
     configFile = loadConfigFromFile(yamlText, path.dirname(configPath));
+  } else {
+    const configPath = discoverConfigPath(process.cwd(), process.env, os.homedir());
+    if (configPath) {
+      console.log(`Using config: ${configPath}`);
+      const yamlText = fs.readFileSync(configPath, "utf-8");
+      configFile = loadConfigFromFile(yamlText, path.dirname(configPath));
+    }
   }
 
   const cliOverrides: Partial<DaemonConfig> = {};

@@ -9,6 +9,7 @@ import { anthropicEffortHook } from "./hooks/anthropic-effort";
 import { createBackgroundNotificationHook } from "./hooks/background-notification";
 import { COMPACTION_CONTEXT_TEMPLATE } from "./hooks/compaction-context-injector";
 import { createCompactionTodoPreserverHook } from "./hooks/compaction-todo-preserver";
+import { createGitHubAppCredentialsHook } from "./hooks/github-app-credentials";
 import { nonInteractiveEnvHook } from "./hooks/non-interactive-env";
 import { createOutputCompressionHook } from "./hooks/output-compression";
 import { createPreemptiveCompactionHook } from "./hooks/preemptive-compaction";
@@ -86,6 +87,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
   });
   const preemptiveCompactionHook = createPreemptiveCompactionHook(ctx);
   const outputCompressionHook = createOutputCompressionHook(pluginConfig.outputCompression ?? {});
+  const githubAppCredentialsHook = createGitHubAppCredentialsHook();
   const contextSearchTool = createContextSearchTool(outputCompressionHook.getStore);
   const sessionRecoveryHook = createSessionRecoveryHook(ctx);
   const stopContinuationGuardHook = createStopContinuationGuardHook();
@@ -213,6 +215,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
     },
     "shell.env": async (input, output) => {
       nonInteractiveEnvHook(input, output);
+      await githubAppCredentialsHook(input, output);
     },
     "experimental.chat.messages.transform": async (input, output) => {
       thinkingBlockValidatorHook(input, output);

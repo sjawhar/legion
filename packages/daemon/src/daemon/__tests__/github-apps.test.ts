@@ -40,9 +40,9 @@ async function generateTestKeyPair() {
 }
 
 describe("modeToRole", () => {
-  it("maps implement and merge to impl", () => {
-    expect(modeToRole("implement")).toBe("impl");
-    expect(modeToRole("merge")).toBe("impl");
+  it("maps implement and merge to implement", () => {
+    expect(modeToRole("implement")).toBe("implement");
+    expect(modeToRole("merge")).toBe("implement");
   });
 
   it("maps review to review", () => {
@@ -62,10 +62,10 @@ describe("modeToRole", () => {
 
 describe("getGitIdentity", () => {
   it("returns bot-format name and email", () => {
-    const identity = getGitIdentity("12345", "legion-impl");
+    const identity = getGitIdentity("12345", "legion-implement");
     expect(identity).toEqual({
-      name: "legion-impl[bot]",
-      email: "12345+legion-impl[bot]@users.noreply.github.com",
+      name: "legion-implement[bot]",
+      email: "12345+legion-implement[bot]@users.noreply.github.com",
     });
   });
 });
@@ -131,82 +131,125 @@ describe("exchangeToken", () => {
       return new Response(JSON.stringify({ message: "forbidden" }), { status: 403 });
     }) as unknown as typeof fetch;
 
-    await expect(exchangeToken("jwt", "42", fetchFn)).rejects.toThrow(
-      "GitHub App token exchange failed (403)"
-    );
+    expect(async () => {
+      await exchangeToken("jwt", "42", fetchFn);
+    }).toThrow("GitHub App token exchange failed (403)");
   });
 });
 
 describe("TokenManager", () => {
-  const implConfig: GitHubAppsConfig = {
-    impl: {
+  const implementConfig: GitHubAppsConfig = {
+    implement: {
       appId: "111",
-      privateKeyPath: "/tmp/impl.pem",
-      installationId: "222",
+      privateKey: "unused-in-shared-fixture",
+      installations: {
+        acme: "222",
+      },
     },
   };
 
   it("reports configured roles", () => {
-    const manager = new TokenManager(implConfig);
-    expect(manager.isConfigured("impl")).toBe(true);
+    const manager = new TokenManager(implementConfig);
+    expect(manager.isConfigured("implement")).toBe(true);
     expect(manager.isConfigured("review")).toBe(false);
-    expect(manager.getConfiguredRoles()).toEqual(["impl"]);
+    expect(manager.getConfiguredRoles()).toEqual(["implement"]);
   });
 
   it("throws for unconfigured role", async () => {
-    const manager = new TokenManager(implConfig);
-    await expect(manager.getToken("review")).rejects.toThrow("role_not_configured: review");
+    const manager = new TokenManager(implementConfig);
+    expect(async () => {
+      await manager.getToken("review", "acme");
+    }).toThrow("role_not_configured: review");
   });
 
-  it("generates and caches tokens", async () => {
+  it("throws when owner installation is not configured", async () => {
+    const manager = new TokenManager(implementConfig);
+    expect(async () => {
+      await manager.getToken("implement", "missing-owner");
+    }).toThrow("installation_not_configured: implement:missing-owner");
+  });
+
+  it("caches tokens per role and owner until the refresh window", async () => {
     const { privatePem } = await generateTestKeyPair();
     let fetchCalls = 0;
 
-    const fetchFn = mock(async () => {
+    const fetchFn = mock(async (input: string | URL | Request) => {
       fetchCalls++;
+      const installationId = String(input).match(/installations\/(.+)\/access_tokens$/)?.[1];
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       return new Response(
-        JSON.stringify({ token: `ghs_token_${fetchCalls}`, expires_at: expiresAt }),
+        JSON.stringify({ token: `ghs_${installationId}_${fetchCalls}`, expires_at: expiresAt }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
 
-    const readFile = mock(async () => privatePem);
+    const manager = new TokenManager(
+      {
+        implement: {
+          appId: "111",
+          privateKey: privatePem,
+          installations: {
+            acme: "222",
+            beta: "333",
+          },
+        },
+      },
+      { fetchFn }
+    );
 
-    const manager = new TokenManager(implConfig, { fetchFn, readFile });
-
-    const first = await manager.getToken("impl");
-    expect(first.token).toBe("ghs_token_1");
-    expect(first.gitIdentity.name).toBe("legion-impl[bot]");
+    const first = await manager.getToken("implement", "acme");
+    expect(first.token).toBe("ghs_222_1");
+    expect(first.gitIdentity.name).toBe("legion-implement[bot]");
 
     // Second call should return cached token
-    const second = await manager.getToken("impl");
-    expect(second.token).toBe("ghs_token_1");
+    const second = await manager.getToken("implement", "acme");
+    expect(second.token).toBe("ghs_222_1");
     expect(fetchCalls).toBe(1);
+
+    const differentOwner = await manager.getToken("implement", "beta");
+    expect(differentOwner.token).toBe("ghs_333_2");
+    expect(fetchCalls).toBe(2);
   });
 
-  it("deduplicates concurrent requests", async () => {
+  it("deduplicates concurrent requests per role and owner", async () => {
     const { privatePem } = await generateTestKeyPair();
     let fetchCalls = 0;
 
-    const fetchFn = mock(async () => {
+    const fetchFn = mock(async (input: string | URL | Request) => {
       fetchCalls++;
       await new Promise((resolve) => setTimeout(resolve, 50));
+      const installationId = String(input).match(/installations\/(.+)\/access_tokens$/)?.[1];
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       return new Response(
-        JSON.stringify({ token: `ghs_token_${fetchCalls}`, expires_at: expiresAt }),
+        JSON.stringify({ token: `ghs_${installationId}_${fetchCalls}`, expires_at: expiresAt }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
 
-    const readFile = mock(async () => privatePem);
-    const manager = new TokenManager(implConfig, { fetchFn, readFile });
+    const manager = new TokenManager(
+      {
+        implement: {
+          appId: "111",
+          privateKey: privatePem,
+          installations: {
+            acme: "222",
+            beta: "333",
+          },
+        },
+      },
+      { fetchFn }
+    );
 
-    // Fire two concurrent requests
-    const [r1, r2] = await Promise.all([manager.getToken("impl"), manager.getToken("impl")]);
+    const [r1, r2, otherOwner] = await Promise.all([
+      manager.getToken("implement", "acme"),
+      manager.getToken("implement", "acme"),
+      manager.getToken("implement", "beta"),
+    ]);
 
     expect(r1.token).toBe(r2.token);
-    expect(fetchCalls).toBe(1);
+    expect(r1.token).toStartWith("ghs_222_");
+    expect(otherOwner.token).toStartWith("ghs_333_");
+    expect(fetchCalls).toBe(2);
   });
 });
 
@@ -223,8 +266,8 @@ describe("buildRoleEnv", () => {
     };
 
     const identity = {
-      name: "legion-impl[bot]",
-      email: "111+legion-impl[bot]@users.noreply.github.com",
+      name: "legion-implement[bot]",
+      email: "111+legion-implement[bot]@users.noreply.github.com",
     };
     const result = buildRoleEnv("ghs_role_token", identity, baseEnv);
 
@@ -236,41 +279,41 @@ describe("buildRoleEnv", () => {
     // Role-specific values
     expect(result.GH_TOKEN).toBe("ghs_role_token");
     expect(result.GH_CONFIG_DIR).toBe("/dev/null");
-    expect(result.GIT_AUTHOR_NAME).toBe("legion-impl[bot]");
-    expect(result.GIT_AUTHOR_EMAIL).toBe("111+legion-impl[bot]@users.noreply.github.com");
-    expect(result.GIT_COMMITTER_NAME).toBe("legion-impl[bot]");
-    expect(result.GIT_COMMITTER_EMAIL).toBe("111+legion-impl[bot]@users.noreply.github.com");
+    expect(result.GIT_AUTHOR_NAME).toBe("legion-implement[bot]");
+    expect(result.GIT_AUTHOR_EMAIL).toBe("111+legion-implement[bot]@users.noreply.github.com");
+    expect(result.GIT_COMMITTER_NAME).toBe("legion-implement[bot]");
+    expect(result.GIT_COMMITTER_EMAIL).toBe("111+legion-implement[bot]@users.noreply.github.com");
 
     // Non-sensitive keys preserved
     expect(result.PATH).toBe("/usr/bin");
     expect(result.LEGION_ID).toBe("team-1");
   });
 
-  it("scrubs LEGION_GITHUB_APP_* env vars containing private key paths", () => {
+  it("scrubs LEGION_GITHUB_APP_* env vars containing inline app credentials", () => {
     const baseEnv: Record<string, string> = {
       PATH: "/usr/bin",
       LEGION_ID: "team-1",
-      LEGION_GITHUB_APP_IMPL_ID: "12345",
-      LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/etc/legion/keys/impl.pem",
-      LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "777",
+      LEGION_GITHUB_APP_IMPLEMENT_ID: "12345",
+      LEGION_GITHUB_APP_IMPLEMENT_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----...",
+      LEGION_GITHUB_APP_IMPLEMENT_INSTALLATIONS_ACME: "777",
       LEGION_GITHUB_APP_REVIEW_ID: "333",
-      LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY_PATH: "/etc/legion/keys/review.pem",
-      LEGION_GITHUB_APP_REVIEW_INSTALLATION_ID: "444",
+      LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----...",
+      LEGION_GITHUB_APP_REVIEW_INSTALLATIONS_ACME: "444",
     };
 
     const identity = {
-      name: "legion-impl[bot]",
-      email: "12345+legion-impl[bot]@users.noreply.github.com",
+      name: "legion-implement[bot]",
+      email: "12345+legion-implement[bot]@users.noreply.github.com",
     };
     const result = buildRoleEnv("ghs_token", identity, baseEnv);
 
     // LEGION_GITHUB_APP_* vars should all be scrubbed
-    expect(result.LEGION_GITHUB_APP_IMPL_ID).toBeUndefined();
-    expect(result.LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH).toBeUndefined();
-    expect(result.LEGION_GITHUB_APP_IMPL_INSTALLATION_ID).toBeUndefined();
+    expect(result.LEGION_GITHUB_APP_IMPLEMENT_ID).toBeUndefined();
+    expect(result.LEGION_GITHUB_APP_IMPLEMENT_PRIVATE_KEY).toBeUndefined();
+    expect(result.LEGION_GITHUB_APP_IMPLEMENT_INSTALLATIONS_ACME).toBeUndefined();
     expect(result.LEGION_GITHUB_APP_REVIEW_ID).toBeUndefined();
-    expect(result.LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY_PATH).toBeUndefined();
-    expect(result.LEGION_GITHUB_APP_REVIEW_INSTALLATION_ID).toBeUndefined();
+    expect(result.LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY).toBeUndefined();
+    expect(result.LEGION_GITHUB_APP_REVIEW_INSTALLATIONS_ACME).toBeUndefined();
 
     // Non-LEGION_GITHUB_APP vars preserved
     expect(result.PATH).toBe("/usr/bin");

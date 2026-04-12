@@ -1,9 +1,9 @@
 import { createPrivateKey } from "node:crypto";
-import type { GitHubAppRole, GitHubAppsConfig } from "./config";
+import type { GitHubAppRole, GitHubAppRoleConfig, GitHubAppsConfig } from "./config";
 
 const MODE_TO_ROLE: Record<string, GitHubAppRole> = {
-  implement: "impl",
-  merge: "impl",
+  implement: "implement",
+  merge: "implement",
   review: "review",
   test: "review",
   architect: "review",
@@ -11,7 +11,7 @@ const MODE_TO_ROLE: Record<string, GitHubAppRole> = {
 };
 
 const ROLE_TO_APP_NAME: Record<GitHubAppRole, string> = {
-  impl: "legion-impl",
+  implement: "legion-implement",
   review: "legion-review",
 };
 
@@ -127,21 +127,17 @@ interface CachedToken {
 }
 
 export class TokenManager {
-  private readonly cache = new Map<GitHubAppRole, CachedToken>();
-  private readonly pending = new Map<GitHubAppRole, Promise<CachedToken>>();
-  private readonly keyCache = new Map<GitHubAppRole, string>();
+  private readonly cache = new Map<string, CachedToken>();
+  private readonly pending = new Map<string, Promise<CachedToken>>();
   private readonly fetchFn: typeof fetch;
-  private readonly readFile: (path: string) => Promise<string>;
 
   constructor(
     private readonly config: GitHubAppsConfig,
     opts?: {
       fetchFn?: typeof fetch;
-      readFile?: (path: string) => Promise<string>;
     }
   ) {
     this.fetchFn = opts?.fetchFn ?? globalThis.fetch;
-    this.readFile = opts?.readFile ?? ((p: string) => Bun.file(p).text());
   }
 
   isConfigured(role: GitHubAppRole): boolean {
@@ -155,15 +151,23 @@ export class TokenManager {
   }
 
   async getToken(
-    role: GitHubAppRole
+    role: GitHubAppRole,
+    owner: string
   ): Promise<{ token: string; expiresAt: string; gitIdentity: { name: string; email: string } }> {
     const roleConfig = this.config[role];
     if (!roleConfig) {
       throw new Error(`role_not_configured: ${role}`);
     }
 
+    const installationId = roleConfig.installations[owner];
+    if (!installationId) {
+      throw new Error(`installation_not_configured: ${role}:${owner}`);
+    }
+
+    const cacheKey = `${role}:${owner}`;
+
     // Check cache
-    const cached = this.cache.get(role);
+    const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt.getTime() - Date.now() > REFRESH_WINDOW_MS) {
       return {
         token: cached.token,
@@ -173,7 +177,7 @@ export class TokenManager {
     }
 
     // Deduplicate concurrent requests
-    const existing = this.pending.get(role);
+    const existing = this.pending.get(cacheKey);
     if (existing) {
       const result = await existing;
       return {
@@ -183,8 +187,8 @@ export class TokenManager {
       };
     }
 
-    const promise = this.generateToken(role, roleConfig);
-    this.pending.set(role, promise);
+    const promise = this.generateToken(role, roleConfig, installationId, cacheKey);
+    this.pending.set(cacheKey, promise);
 
     try {
       const result = await promise;
@@ -194,21 +198,18 @@ export class TokenManager {
         gitIdentity: result.gitIdentity,
       };
     } finally {
-      this.pending.delete(role);
+      this.pending.delete(cacheKey);
     }
   }
 
   private async generateToken(
     role: GitHubAppRole,
-    roleConfig: { appId: string; privateKeyPath: string; installationId: string }
+    roleConfig: GitHubAppRoleConfig,
+    installationId: string,
+    cacheKey: string
   ): Promise<CachedToken> {
-    let privateKey = this.keyCache.get(role);
-    if (!privateKey) {
-      privateKey = await this.readFile(roleConfig.privateKeyPath);
-      this.keyCache.set(role, privateKey);
-    }
-    const jwt = await generateJwt(roleConfig.appId, privateKey);
-    const { token, expiresAt } = await exchangeToken(jwt, roleConfig.installationId, this.fetchFn);
+    const jwt = await generateJwt(roleConfig.appId, roleConfig.privateKey);
+    const { token, expiresAt } = await exchangeToken(jwt, installationId, this.fetchFn);
 
     const appName = ROLE_TO_APP_NAME[role];
     const gitIdentity = getGitIdentity(roleConfig.appId, appName);
@@ -218,7 +219,7 @@ export class TokenManager {
       gitIdentity,
     };
 
-    this.cache.set(role, result);
+    this.cache.set(cacheKey, result);
     return result;
   }
 }
