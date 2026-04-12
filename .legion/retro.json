@@ -1,10 +1,10 @@
 {
   "skipped": false,
-  "docsCreated": [
-    "docs/solutions/best-practices/git-stash-jj-working-copy-interference.md",
-    "docs/solutions/controller/skill-vs-state-machine-policy-boundary.md"
+  "docs": [
+    "docs/solutions/controller/removing-state-machine-action-type.md"
   ],
+  "summary": "Documented blast radius checklist for removing a state machine action type: types.ts, decision.ts (call sites + ACTION_TO_MODE), tests (expectations + descriptions), and 5 SKILL.md locations. Also noted merge conflict resolution pattern for parallel PRs touching the same skill section.",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-12T22:16:22.134Z"
+  "completed": "2026-04-12T23:27:52.552Z"
 }
