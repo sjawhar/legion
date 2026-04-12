@@ -1,9 +1,16 @@
 {
-  "name": "opencode-legion",
+  "name": "@sjawhar/opencode-legion",
   "version": "0.16.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sjawhar/legion"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "opencode-legion": "./src/cli/index.ts"
   },
