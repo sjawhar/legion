@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   version:
@@ -123,7 +124,7 @@ jobs:
           path: legion-${{ matrix.target }}.tar.gz
 
   plugin:
-    name: Build Plugin
+    name: Build and Publish Plugin
     needs: version
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
@@ -132,6 +133,11 @@ jobs:
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -145,6 +151,24 @@ jobs:
 
       - name: Build plugin
         run: bun run build
+        working-directory: packages/opencode-plugin
+
+      - name: Check if already published
+        id: check
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion/${VERSION}")
+          if [ "$STATUS" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "✓ @sjawhar/opencode-legion@${VERSION} already published"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.skip != 'true'
+        run: npm publish --access public --provenance
         working-directory: packages/opencode-plugin
 
       - name: Pack plugin

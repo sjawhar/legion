@@ -1,4 +1,13 @@
 {
+  "pr": "https://github.com/sjawhar/legion/pull/462",
+  "filesChanged": [
+    "packages/opencode-plugin/package.json",
+    ".github/workflows/release.yaml"
+  ],
+  "summary": "Published opencode-legion plugin to npm as @sjawhar/opencode-legion using OIDC. Updated package.json name/publishConfig, added id-token:write permission and npm publish step to release.yaml.",
+  "concerns": [],
+  "testStatus": "pre-existing failures only (58 fail, unrelated to changes)",
   "schemaVersion": 1,
-  "phase": "unknown"
+  "phase": "implement",
+  "completed": "2026-04-12T17:22:54.181Z"
 }
