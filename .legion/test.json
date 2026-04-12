@@ -1,11 +1,21 @@
 {
   "result": "pass",
-  "summary": "1/1 acceptance criteria verified. repo and issueNumber survive JSON round-trip through state file. 1287/1289 tests pass (2 pre-existing @pulumi/docker failures unrelated to this change). TypeScript clean. Biome clean.",
+  "summary": "Fix verified: listDir fallback enables directory scan in production. 1287 tests pass, 2 pre-existing envoy infra failures. TypeScript clean. Biome clean.",
   "criteriaResults": [
     {
       "id": "AC1",
       "status": "pass",
-      "evidence": "Code inspection: packages/daemon/src/daemon/schemas.ts lines 19-20. Manual round-trip test: bun run /tmp/test-roundtrip.ts → repo: sjawhar/legion, issueNumber: 471, PASS: true"
+      "evidence": "server.ts:506 uses opts.repoManagerDeps?.listDir ?? defaultRepoManagerDeps.listDir — when repoManagerDeps is not injected, defaultRepoManagerDeps.listDir (readdir-based) is used, enabling directory scan in production"
+    },
+    {
+      "id": "AC2",
+      "status": "pass",
+      "evidence": "removeDir(workspacePath, opts.repoManagerDeps) at server.ts:527 — when opts.repoManagerDeps is undefined, removeDir defaults to defaultDeps.rmDir (real filesystem rmDir)"
+    },
+    {
+      "id": "AC3",
+      "status": "pass",
+      "evidence": "defaultDeps exported as defaultRepoManagerDeps from repo-manager.ts — TypeScript type check clean, no import errors"
     }
   ],
   "testStats": {
@@ -21,5 +31,5 @@
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T21:36:24.930Z"
+  "completed": "2026-04-12T21:39:04.417Z"
 }

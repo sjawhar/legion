@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import type { CodebaseIndexResponse } from "../index/types";
 import { getBackend, isBackendName } from "../state/backends/index";
 import { buildCollectedState, canDispatchMode } from "../state/decision";
@@ -20,9 +20,11 @@ import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
   cleanupWorkspace,
+  defaultDeps as defaultRepoManagerDeps,
   ensureWorkspace,
   parseIssueRepo,
   type RepoManagerDeps,
+  removeDir,
   startBackgroundFetch,
 } from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
@@ -419,9 +421,6 @@ export function startServer(opts: ServerOptions): {
     const doneIssueIds = Object.entries(collectedState.issues)
       .filter(([, issueState]) => issueState.status === IssueStatus.DONE)
       .map(([issueId]) => issueId.toLowerCase());
-    if (doneIssueIds.length === 0) {
-      return;
-    }
 
     const doneIssueIdSet = new Set(doneIssueIds);
     const cleanedIssueIds = new Set<string>();
@@ -496,6 +495,41 @@ export function startServer(opts: ServerOptions): {
       console.log(
         `[auto-cleanup] Cleaned ${cleanedWorkers} workers for ${cleanedIssueIds.size} Done issues`
       );
+    }
+
+    // Directory scan fallback: remove workspaces for issues no longer on the board
+    // (not Done — just removed/archived). Shallow scan only — never recurse into workspaces.
+    if (opts.paths) {
+      const listDir = opts.repoManagerDeps?.listDir ?? defaultRepoManagerDeps.listDir;
+      if (listDir) {
+        const workspacesDir = opts.paths.forLegion(opts.legionId).workspacesDir;
+        const entries = await listDir(workspacesDir);
+        const boardIssueIds = new Set(
+          Object.keys(collectedState.issues).map((id) => id.toLowerCase())
+        );
+        const activeWorkerIssueIds = new Set<string>();
+        for (const workerId of workers.keys()) {
+          const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
+          if (issueId) {
+            activeWorkerIssueIds.add(issueId);
+          }
+        }
+        for (const entry of entries) {
+          const issueId = basename(entry).toLowerCase();
+          if (boardIssueIds.has(issueId) || activeWorkerIssueIds.has(issueId)) {
+            continue;
+          }
+          const workspacePath = join(workspacesDir, basename(entry));
+          try {
+            await removeDir(workspacePath, opts.repoManagerDeps);
+            console.log(`[auto-cleanup] Removed off-board workspace: ${workspacePath}`);
+          } catch (error) {
+            console.warn(
+              `[auto-cleanup] Failed to remove off-board workspace ${workspacePath}: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+      }
     }
   };
 

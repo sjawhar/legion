@@ -1,26 +1,27 @@
 {
-  "outcome": "approved",
-  "criticalCount": 0,
-  "importantCount": 1,
-  "minorCount": 1,
-  "prNumber": 473,
-  "prUrl": "https://github.com/sjawhar/legion/pull/473",
-  "findings": [
+  "outcome": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "verdict": "changes_requested",
+  "keyFindings": [
     {
       "severity": "P2",
-      "location": "packages/daemon/src/daemon/schemas.ts:19-20",
-      "description": "WorkerEntrySchema has no test coverage in schemas.test.ts. Other schemas have tests but WorkerEntrySchema and PersistedWorkerStateSchema are untested. Acceptable given narrow issue scope but worth a follow-up."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "No unit tests for the new directory scan code path. Existing auto-cleanup tests don't inject a mock listDir, so the new logic is never exercised."
     },
     {
       "severity": "P3",
-      "location": "PR description",
-      "description": "Description says fields now survive JSON round-trips but .passthrough() already preserved them at runtime. The actual fix is TypeScript type alignment. Fix is still correct and necessary."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "if (listDir) guard is dead code — defaultRepoManagerDeps.listDir is always defined, so the ?? fallback always resolves to a function."
+    },
+    {
+      "severity": "P3",
+      "file": ".legion/implement.json",
+      "description": "Duplicate open PR: #474 (fix/listdir-fallback) points to the same commit as #475. PR #474 should be closed."
     }
   ],
-  "acCoverage": {
-    "AC1": "pass"
-  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T21:41:44.650Z"
+  "completed": "2026-04-12T21:46:26.538Z"
 }
