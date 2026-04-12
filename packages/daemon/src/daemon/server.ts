@@ -20,9 +20,11 @@ import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
   cleanupWorkspace,
+  defaultDeps as defaultRepoManagerDeps,
   ensureWorkspace,
   parseIssueRepo,
   type RepoManagerDeps,
+  removeDir,
   startBackgroundFetch,
 } from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
@@ -497,9 +499,10 @@ export function startServer(opts: ServerOptions): {
 
     // Directory scan fallback: remove workspaces for issues no longer on the board
     // (not Done — just removed/archived). Shallow scan only — never recurse into workspaces.
-    if (opts.paths && opts.repoManagerDeps?.listDir) {
+    const listDir = opts.repoManagerDeps?.listDir ?? defaultRepoManagerDeps.listDir;
+    if (opts.paths && listDir) {
       const workspacesDir = opts.paths.forLegion(opts.legionId).workspacesDir;
-      const entries = await opts.repoManagerDeps.listDir(workspacesDir);
+      const entries = await listDir(workspacesDir);
       const boardIssueIds = new Set(
         Object.keys(collectedState.issues).map((id) => id.toLowerCase())
       );
@@ -519,7 +522,7 @@ export function startServer(opts: ServerOptions): {
         }
         try {
           const workspacePath = join(workspacesDir, basename(entry));
-          await opts.repoManagerDeps.rmDir(workspacePath);
+          await removeDir(workspacePath, opts.repoManagerDeps);
           scannedCleanups += 1;
           console.log(`[auto-cleanup] Removed off-board workspace: ${workspacePath}`);
         } catch (error) {

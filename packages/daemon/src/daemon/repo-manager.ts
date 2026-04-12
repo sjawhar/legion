@@ -21,7 +21,7 @@ export interface RepoManagerDeps {
   listDir?: (path: string) => Promise<string[]>;
 }
 
-const defaultDeps: RepoManagerDeps = {
+export const defaultDeps: RepoManagerDeps = {
   runJj: async (args) => {
     const proc = Bun.spawn(["jj", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -190,4 +190,29 @@ export async function cleanupWorkspace(
   await deps.runJj(["workspace", "forget", issueId.toLowerCase(), "-R", clonePath]);
 
   await deps.rmDir(workspacePath);
+}
+
+/**
+ * List direct children of a workspace directory (shallow scan only — never recurse).
+ * Returns an empty array if the directory does not exist.
+ */
+export async function listWorkspaceEntries(
+  workspacesDir: string,
+  deps: RepoManagerDeps = defaultDeps
+): Promise<string[]> {
+  const listFn = deps.listDir ?? defaultDeps.listDir;
+  if (!listFn) {
+    return [];
+  }
+  return listFn(workspacesDir);
+}
+
+/**
+ * Remove a directory using the provided deps (or defaultDeps).
+ */
+export async function removeDir(
+  dirPath: string,
+  deps: RepoManagerDeps = defaultDeps
+): Promise<void> {
+  return deps.rmDir(dirPath);
 }
