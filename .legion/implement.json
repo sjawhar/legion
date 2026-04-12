@@ -1,31 +1,18 @@
 {
   "filesChanged": [
     "packages/aws-infra/index.ts",
-    "packages/aws-infra/Pulumi.yaml",
-    "packages/aws-infra/Pulumi.prod.yaml",
-    "packages/aws-infra/package.json",
-    "packages/aws-infra/tsconfig.json",
-    "packages/aws-infra/docs/saml-setup-runbook.md",
-    "AGENTS.md",
-    "package.json",
-    "bun.lock"
+    "packages/aws-infra/docs/ssm-setup-runbook.md"
   ],
   "trickyParts": [
-    "packages/aws-infra/ is a Node.js/ts-node Pulumi package — must NOT be in Bun workspace (would pollute @types/node version and break daemon typecheck). Excluded by listing explicit workspaces in root package.json instead of packages/*.",
-    "getInstances() returns Promise<T> — must wrap with pulumi.output() to get Output<T> for use in resource args.",
-    "getUser() takes plain string identityStoreId, not Input<string> — must use identityStoreId.apply() to unwrap Output before calling.",
-    "GroupMembership resource names use sanitized email (not index) to prevent Pulumi churn on list reorder.",
-    "Staging account assignment is optional (cfg.get vs cfg.require) — omit stagingAccountId from Pulumi.prod.yaml to skip."
+    "Branch based on sjawhar-legion-451 (not main) since aws-infra package does not exist on main yet; PR #480 targets sjawhar-legion-451 as base",
+    "Instance profile attachment to i-0d1244b687e204a01 is a CLI operation (documented in runbook) since the EC2 instance is not Pulumi-managed"
   ],
-  "concerns": [
-    "pulumi preview -s prod requires real AWS credentials and an active Identity Center instance — cannot be verified in CI.",
-    "SCIM token expires after 1 year — runbook documents renewal but no automated reminder is set up.",
-    "SSM inline policy uses Resource: * — could be tightened to specific instance ARNs in future."
+  "deviations": [
+    "PR base is sjawhar-legion-451 (not main) to pick up the aws-infra Pulumi project created in #450/#451"
   ],
-  "prNumber": 463,
-  "learningsInjected": ["infra/mixed-runtime-type-boundaries.md"],
-  "learningsHelpful": ["infra/mixed-runtime-type-boundaries.md"],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-12T17:56:13.481Z"
+  "completed": "2026-04-12T23:16:50.094Z"
 }

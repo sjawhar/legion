@@ -204,6 +204,38 @@ new aws.ssoadmin.AccountAssignment("engineers-prod-readOnly", {
 });
 
 // ---------------------------------------------------------------------------
+// SSM Session Manager — EC2 dev box access
+// ---------------------------------------------------------------------------
+
+// IAM role for EC2 instances to communicate with SSM
+const ec2SsmRole = new aws.iam.Role("EC2SSMRole", {
+  name: "EC2SSMRole",
+  assumeRolePolicy: JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "ec2.amazonaws.com" },
+        Action: "sts:AssumeRole",
+      },
+    ],
+  }),
+  description: "Allows EC2 instances to use SSM Session Manager",
+});
+
+// AmazonSSMManagedInstanceCore covers: ssm:*, ssmmessages:*, ec2messages:*, s3:GetObject (for patch manager)
+new aws.iam.RolePolicyAttachment("EC2SSMRole-ssm-core", {
+  role: ec2SsmRole.name,
+  policyArn: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+});
+
+// Instance profile wrapping the role — attach this to the dev box
+const ec2SsmInstanceProfile = new aws.iam.InstanceProfile("EC2SSMInstanceProfile", {
+  name: "EC2SSMInstanceProfile",
+  role: ec2SsmRole.name,
+});
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -212,3 +244,6 @@ export const developerPermissionSetArn = developerPermissionSet.arn;
 export const readOnlyPermissionSetArn = readOnlyPermissionSet.arn;
 export const adminsGroupId = adminsGroup.groupId;
 export const engineersGroupId = engineersGroup.groupId;
+export const ec2SsmRoleArn = ec2SsmRole.arn;
+export const ec2SsmInstanceProfileArn = ec2SsmInstanceProfile.arn;
+export const ec2SsmInstanceProfileName = ec2SsmInstanceProfile.name;
