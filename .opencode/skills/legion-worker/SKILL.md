@@ -36,6 +36,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST complete it and confirm `.legion/$MODE.json` exists before adding `worker-done`. If the file is missing, stop, diagnose the failure (for example: `legion` missing from `PATH` or wrong `--workspace`), and do not signal completion until the failure is fixed or explicitly documented in your exit comment.
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 6. **Notify the controller via Envoy** — after adding `worker-done`, send exactly one completion notification so the controller doesn't have to wait for its next polling cycle. Use `envoy_publish(topic="notifications.role.legion-controller", message="Worker done: <issue> <mode> <outcome>")`. If `envoy_publish` fails, that's fine — the label is the source of truth.
+7. **Never stall on subagents** — when spawning background tasks (cross-family review, Oracle, spec compliance, etc.), always set `timeout_seconds` (typically 180s). If the subagent times out or fails, skip that step and continue with the workflow. Your primary obligation is to complete the workflow and signal `worker-done`. Subagent steps are quality improvements, not hard prerequisites — the downstream human/bot review is the authoritative quality gate.
 
 ## Skill Discipline
 
@@ -245,6 +246,8 @@ Review signals outcome via PR draft status BEFORE `worker-done`:
 ## Research Before Escalating
 
 Before blocking on user input, workers should invoke `/legion-oracle [your question]` to search institutional knowledge (docs/solutions/, codebase patterns). Only escalate to the user (via issue comment + label) if the legion-oracle cannot answer.
+
+**If Oracle times out or fails:** Proceed with your best judgment or escalate to the user directly. Do not stall waiting for Oracle — it is an optimization, not a gate.
 
 ## Reference
 

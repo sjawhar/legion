@@ -76,6 +76,7 @@ Use `background_task` tool to spawn a fresh subagent:
 
 - **Category:** `unspecified-low`
 - **Description:** "Retro analysis for $LEGION_ISSUE_ID"
+- **timeout_seconds: 180** (3 minutes — auto-cancels if the subagent stalls)
 - **Prompt:**
 
 > You are analyzing a completed PR to capture learnings.
@@ -100,6 +101,8 @@ While the subagent runs, capture your own perspective:
 ### 4. Integrate Both Perspectives
 
 When the subagent completes, review its suggestions alongside your own analysis.
+
+**If the subagent fails or times out (>3 min):** Proceed with your own analysis only. Note "Outside perspective skipped (subagent timeout)" in the retro output. Your implementation context is the primary value of the retro — the outside perspective is supplementary. **Do NOT stall waiting for the subagent.**
 
 **You are the integrator.** The subagent provides an outside view, but you have the
 implementation context. Push back on suggestions that miss context, and incorporate

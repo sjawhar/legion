@@ -1,10 +1,17 @@
 {
-  "verdict": "approved",
-  "pr": "https://github.com/sjawhar/legion/pull/462",
-  "summary": "PR approved. All 4 requirements met. OIDC pattern matches reference (release-envoy-and-plugin.yaml). CI green. No blocking issues.",
-  "findings": [],
-  "concerns": [],
+  "verdict": "changes-requested",
+  "criticalCount": 1,
+  "summary": "Implementation is correct and well-tested. One P1 blocker: PR has merge conflicts with main (implement.json and test.json conflict with PR #462). Rebase onto main and keep 457-branch versions of .legion/ handoff files. All code changes are approved — timeout infrastructure is sound, 16 new tests pass, TypeScript clean, lint clean.",
+  "findings": [
+    {
+      "severity": "P1",
+      "description": "PR has merge conflicts with main. implement.json and test.json conflict with changes from PR #462. Implementer must rebase onto main and keep 457-branch versions of .legion/ handoff files.",
+      "file": ".legion/implement.json"
+    }
+  ],
+  "approved": false,
+  "notes": "Code quality is high. The timeout mechanism (scheduleTimeout + clearTimeout + finalize idempotency) is correctly implemented. Workflow docs updated correctly across 4 workflows. Only blocker is the merge conflict.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T20:37:58.033Z"
+  "completed": "2026-04-12T20:47:17.443Z"
 }

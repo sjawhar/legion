@@ -18,6 +18,7 @@ function generateTaskId(): string {
 export class BackgroundTaskManager {
   private tasks = new Map<string, BackgroundTask>();
   private tasksBySessionId = new Map<string, string>();
+  private timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private client: OpencodeClient;
   private directory: string;
 
@@ -89,12 +90,17 @@ export class BackgroundTaskManager {
       }
 
       task.sessionID = session.data.id;
+      task.timeoutMs = opts.timeoutMs;
       this.tasksBySessionId.set(session.data.id, task.id);
       registerSubagentSession(session.data.id);
 
       await writeTask(this.directory, task).catch((err) => {
         console.warn(`[background-manager] Failed to persist task ${task.id}:`, err);
       });
+
+      if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
+        this.scheduleTimeout(task.id, opts.timeoutMs);
+      }
 
       this.startPrompt(task, opts).catch(() => {});
     } catch (err) {
@@ -197,6 +203,39 @@ export class BackgroundTaskManager {
     return count;
   }
 
+  private scheduleTimeout(taskId: string, timeoutMs: number): void {
+    const timer = setTimeout(async () => {
+      this.timeoutTimers.delete(taskId);
+      const task = this.tasks.get(taskId);
+      if (!task || (task.status !== "running" && task.status !== "pending")) {
+        return;
+      }
+      console.warn(
+        `[background-manager] Task ${taskId} timed out after ${timeoutMs}ms — auto-cancelling`
+      );
+      await this.finalize(task, "failed", {
+        error: `Timed out after ${Math.floor(timeoutMs / 1000)}s`,
+      });
+      if (task.sessionID) {
+        this.client.session
+          .abort({
+            path: { id: task.sessionID },
+            query: { directory: this.directory },
+          })
+          .catch(() => {});
+      }
+    }, timeoutMs);
+    this.timeoutTimers.set(taskId, timer);
+  }
+
+  private clearTimeout(taskId: string): void {
+    const timer = this.timeoutTimers.get(taskId);
+    if (timer) {
+      globalThis.clearTimeout(timer);
+      this.timeoutTimers.delete(taskId);
+    }
+  }
+
   /**
    * Handle session.status events for completion detection.
    * Wire this into the plugin's event handler.
@@ -261,6 +300,7 @@ export class BackgroundTaskManager {
       return;
     }
 
+    this.clearTimeout(task.id);
     task.status = status;
     task.completedAt = Date.now();
     if (opts?.error) {
