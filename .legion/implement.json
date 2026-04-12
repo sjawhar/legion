@@ -1,14 +1,32 @@
 {
-  "filesChanged": [".opencode/skills/legion-controller/SKILL.md"],
+  "filesChanged": [
+    "packages/aws-infra/Pulumi.yaml",
+    "packages/aws-infra/Pulumi.prod.yaml",
+    "packages/aws-infra/package.json",
+    "packages/aws-infra/tsconfig.json",
+    "packages/aws-infra/index.ts",
+    "packages/aws-infra/README.md",
+    "packages/aws-infra/docs/dev-box-access.md",
+    "bun.lock"
+  ],
   "trickyParts": [
-    "git stash accidentally reverted changes mid-session — had to pop stash to restore; jj auto-snapshot didn't capture the edit because git stash ran first"
+    "Adding packages/aws-infra/ as a new bun workspace package required updating bun.lock. The initial @types/node version in package.json (^20.0.0) downgraded the workspace-wide @types/node from 25.5.0 to 20.x, breaking daemon typecheck. Fixed by removing @types/node from aws-infra devDependencies entirely.",
+    "The packages/aws-infra/ is a new Pulumi project for brownfield adoption — uses Pulumi import option to adopt the existing security group rather than creating a new one. Operator must set devBoxSecurityGroupId in Pulumi.prod.yaml before first run.",
+    "No plan comments existed on issue 453 — implemented directly from issue body requirements."
   ],
   "deviations": [
-    "Issue mentioned possibly updating decision.ts for retro-done gate, but the state machine already correctly gates merge behind Retro status via IssueStatus.RETRO + worker-done → dispatch_merger. No decision.ts change needed."
+    "No plan phase was run for this issue — implemented directly from issue body. The architect.json in .legion/ was from a previous issue that used this workspace.",
+    "The Pulumi project uses ingress:[] (empty ingress) rather than explicitly removing a specific SSH rule, since we don't know the current rule set. This is the correct declarative approach — Pulumi will reconcile to the desired state on first apply."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "The devBoxSecurityGroupId in Pulumi.prod.yaml is set to sg-REPLACE_ME — operator must fill in the actual SG ID before running pulumi up.",
+    "The Pulumi import step (pulumi import aws:ec2/securityGroup:SecurityGroup dev-box-sg <sg-id> -s prod) must be run before the first pulumi up to adopt the existing security group.",
+    "Verification of nc -zw3 52.53.150.80 22 failing and SSM working requires actual AWS access — cannot be verified in this environment."
+  ],
   "subPlanningNeeded": false,
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-12T21:53:40.351Z"
+  "completed": "2026-04-12T23:25:38.349Z"
 }

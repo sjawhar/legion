@@ -1,0 +1,6 @@
+name: aws-infra
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: AWS infrastructure for the dev box (security groups, IAM, etc.)

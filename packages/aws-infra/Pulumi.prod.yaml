@@ -1,0 +1,8 @@
+config:
+  aws:region: us-west-1
+  aws-infra:devBoxInstanceId: i-0d1244b687e204a01
+  aws-infra:devBoxPublicIp: 52.53.150.80
+  # Set this to the actual security group ID before running pulumi up.
+  # Get it with: aws ec2 describe-instances --instance-ids i-0d1244b687e204a01 \
+  #   --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text --profile dev
+  aws-infra:devBoxSecurityGroupId: sg-REPLACE_ME
