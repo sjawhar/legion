@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
@@ -1838,6 +1838,107 @@ describe("daemon server", () => {
       expect(workers[0]?.id).toBe("acme-widgets-46-implement");
       // Session should NOT have been deleted
       expect(deleteSessionCalls).toEqual([]);
+    });
+
+    it("directory scan uses real fs listDir when repoManagerDeps.listDir is not injected", async () => {
+      // Simulate production: repoManagerDeps has rmDir captured but no listDir,
+      // so opts.repoManagerDeps?.listDir is undefined and the fallback fires.
+      const rmDirCalls: string[] = [];
+      const scanWorkspacesDir = await mkdtemp(path.join(os.tmpdir(), "legion-scan-"));
+      try {
+        // Create two workspace dirs on disk: one off-board, one on-board
+        await mkdir(path.join(scanWorkspacesDir, "acme-widgets-51"));
+        await mkdir(path.join(scanWorkspacesDir, "acme-widgets-999"));
+
+        const scanPaths: LegionPaths = {
+          ...paths,
+          forLegion: (projectId: string) => ({
+            ...paths.forLegion(projectId),
+            workspacesDir: scanWorkspacesDir,
+          }),
+        };
+
+        // No listDir in repoManagerDeps — fallback to defaultDeps.listDir must fire
+        await startTestServer({
+          paths: scanPaths,
+          repoManagerDeps: makeRepoManagerDeps({
+            rmDir: async (p: string) => {
+              rmDirCalls.push(p);
+            },
+          }),
+        });
+
+        // acme-widgets-51 is on the board; acme-widgets-999 is off-board
+        const response = await requestJson("/state/collect", {
+          method: "POST",
+          body: JSON.stringify({
+            backend: "github",
+            issues: [
+              {
+                id: "PVTI_scan1",
+                content: {
+                  number: 51,
+                  repository: "acme/widgets",
+                  url: "https://github.com/acme/widgets/issues/51",
+                  type: "Issue",
+                },
+                status: "In Progress",
+                labels: [],
+              },
+            ],
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        // Only the off-board workspace should be removed
+        expect(rmDirCalls).toHaveLength(1);
+        expect(rmDirCalls[0]).toBe(path.join(scanWorkspacesDir, "acme-widgets-999"));
+      } finally {
+        await rm(scanWorkspacesDir, { recursive: true, force: true });
+      }
+    });
+
+    it("directory scan skips workspace for issue with active worker when listDir not injected", async () => {
+      const rmDirCalls: string[] = [];
+      const scanWorkspacesDir = await mkdtemp(path.join(os.tmpdir(), "legion-scan-"));
+      try {
+        await mkdir(path.join(scanWorkspacesDir, "acme-widgets-52"));
+
+        const scanPaths: LegionPaths = {
+          ...paths,
+          forLegion: (projectId: string) => ({
+            ...paths.forLegion(projectId),
+            workspacesDir: scanWorkspacesDir,
+          }),
+        };
+
+        await startTestServer({
+          paths: scanPaths,
+          repoManagerDeps: makeRepoManagerDeps({
+            rmDir: async (p: string) => {
+              rmDirCalls.push(p);
+            },
+          }),
+        });
+
+        // Dispatch a worker for acme-widgets-52 so it has an active worker entry
+        await createRepoWorker("acme-widgets-52");
+
+        // acme-widgets-52 is NOT on the board but has an active worker — must not be removed
+        const response = await requestJson("/state/collect", {
+          method: "POST",
+          body: JSON.stringify({ backend: "github", issues: [] }),
+        });
+
+        expect(response.status).toBe(200);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(rmDirCalls).toHaveLength(0);
+      } finally {
+        await rm(scanWorkspacesDir, { recursive: true, force: true });
+      }
     });
   });
 

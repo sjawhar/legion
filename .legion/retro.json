@@ -1,16 +1,10 @@
 {
-  "docsWritten": [
-    "docs/solutions/delegation/subagent-timeout-stall-prevention.md",
-    "docs/solutions/delegation/bun-node-timer-type-portability.md"
+  "skipped": false,
+  "docs": [
+    "docs/solutions/daemon/optional-dep-fallback-and-early-return-guard.md"
   ],
-  "keyLearnings": [
-    "Two-layer fix: infrastructure timeout mechanism (timeoutMs in BackgroundTaskManager) + workflow policy (skill docs with explicit timeout values and skip instructions)",
-    "Quality gates must be optional — subagent steps are quality improvements, not hard prerequisites; always provide a skip path",
-    "Timer type portability: use ReturnType<typeof setTimeout> and globalThis.clearTimeout for Bun/Node/browser compatibility",
-    "Idempotency is critical for async timeout callbacks — finalize() must guard against already-terminal tasks"
-  ],
-  "indexUpdated": true,
+  "summary": "Two learnings: early-return guard blocking independent code paths; dead if(x) after ?? always-defined fallback. Optional dep fallback pattern documented.",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-12T20:53:55.563Z"
+  "completed": "2026-04-12T22:08:48.840Z"
 }
