@@ -1,34 +1,41 @@
 {
-  "scope": "medium",
+  "scope": "large",
   "components": [
-    "packages/daemon/src/daemon/config.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/daemon/server.ts"
+    "packages/aws-infra/",
+    "packages/envoy/infra/",
+    "AGENTS.md"
   ],
-  "subIssues": [],
+  "subIssues": [
+    "450",
+    "451",
+    "452",
+    "453"
+  ],
   "routingHints": {
-    "complexity": "medium",
+    "complexity": "large",
     "estimatedImplementers": 1,
     "skipRetro": false
   },
   "concerns": [
-    "startDaemon() currently overrides config.daemonPort via registry allocation — port from config must be authoritative",
-    "ENVOY_URL and LEGION_FEEDBACK_* are read directly from process.env outside loadConfig() — must migrate to config object",
-    "Relative paths in YAML (workspace, private_key_path) must resolve relative to config file directory, not cwd",
-    "extra_projects is GitHub-multi-board only — Linear backend with extra_projects should error",
-    "Deprecation warnings should only fire when env var is the effective value, not when overridden",
-    "Unknown key warnings must cover full key paths (nested), not just top-level keys"
+    "Google Workspace SAML setup is entirely manual (console-to-console) — cannot be automated via Pulumi",
+    "Google SCIM only syncs users, NOT groups — groups must be Pulumi-managed via aws.identitystore.Group",
+    "IAM Identity Center is region-locked once enabled — choose us-west-1 to match dev box region",
+    "SCIM access token is shown exactly once in AWS Console — must capture immediately",
+    "AWS Organization is a prerequisite — Identity Center requires organization instance for permission sets",
+    "Attaching instance profile to running EC2 may require stop/start if a different profile is already attached",
+    "Closing SSH port 22 in security group does NOT affect Tailscale SSH (different network layer)",
+    "packages/envoy/docs/constraints.md has hard rule: No more AWS changes from envoy work — new infra must be separate project",
+    "Pulumi runtime must be Node.js/ts-node, not Bun — follow packages/envoy/infra/tsconfig.json pattern",
+    "SCIM token expires after 1 year — renewal process should be documented in runbook",
+    "Cross-family review was skipped (Oracle timeout) — downstream planner should note this gap"
   ],
   "learningsInjected": [
-    "delegation/hardening-patterns.md",
-    "daemon/controller-lifecycle-separation.md",
-    "daemon/shared-serve-refactor.md"
+    "envoy/pulumi-remote-docker-patterns.md"
   ],
   "learningsHelpful": [
-    "daemon/shared-serve-refactor.md"
+    "envoy/pulumi-remote-docker-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-11T21:45:53.294Z"
+  "completed": "2026-04-12T13:41:48.997Z"
 }
