@@ -1,51 +1,16 @@
 {
   "result": "pass",
-  "summary": "All 8 acceptance criteria verified. 38 daemon index tests pass (0 fail). 2 pre-existing envoy infra failures unrelated to this change. TypeScript type check clean. Biome lint clean.",
+  "summary": "1/1 acceptance criteria verified. repo and issueNumber survive JSON round-trip through state file. 1287/1289 tests pass (2 pre-existing @pulumi/docker failures unrelated to this change). TypeScript clean. Biome clean.",
   "criteriaResults": [
     {
       "id": "AC1",
       "status": "pass",
-      "evidence": "Test: marks running worker as dead when session is missing from serve — PATCH called with status=dead, crashCount incremented"
-    },
-    {
-      "id": "AC2",
-      "status": "pass",
-      "evidence": "Single listActiveSessions() call per tick in index.ts:718, result reused for all workers in loop"
-    },
-    {
-      "id": "AC3",
-      "status": "pass",
-      "evidence": "Tests: skips liveness sweep when serve is unhealthy, skips liveness sweep when serve was just restarted — listActiveSessionsCalls.toHaveLength(0)"
-    },
-    {
-      "id": "AC4",
-      "status": "pass",
-      "evidence": "Test: skips liveness sweep and marks no workers dead when listActiveSessions throws — patchCalls.toHaveLength(0)"
-    },
-    {
-      "id": "AC5",
-      "status": "pass",
-      "evidence": "Liveness check PATCHes /workers/:id with status=dead, crashCount+1, lastCrashAt. PATCH handler in server.ts:1230 updates crashHistory, calls detachWorkerFromEnvoy, persists state"
-    },
-    {
-      "id": "AC6",
-      "status": "pass",
-      "evidence": "feedbackLogger.log({event: daemon.worker_reaped, workerId, sessionId, mode, serveType, reason: session_missing}) at index.ts:749. Test in feedback.test.ts verifies event schema"
-    },
-    {
-      "id": "AC7",
-      "status": "n/a",
-      "evidence": "No role/multi-serve infrastructure exists in codebase. serveType hardcoded to shared which is correct for current architecture. AC7 is conditional (if role serves are configured)"
-    },
-    {
-      "id": "AC8",
-      "status": "pass",
-      "evidence": "listActiveSessions(): Promise<Set<string>> added to RuntimeAdapter interface (types.ts:37) and implemented in OpenCodeAdapter (opencode.ts:150) via client.session.status() bulk endpoint"
+      "evidence": "Code inspection: packages/daemon/src/daemon/schemas.ts lines 19-20. Manual round-trip test: bun run /tmp/test-roundtrip.ts → repo: sjawhar/legion, issueNumber: 471, PASS: true"
     }
   ],
   "testStats": {
-    "total": 1283,
-    "pass": 1281,
+    "total": 1289,
+    "pass": 1287,
     "fail": 2,
     "preExistingFailures": 2,
     "newFailures": 0
@@ -56,5 +21,5 @@
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T19:50:40.259Z"
+  "completed": "2026-04-12T21:36:24.930Z"
 }
