@@ -9,7 +9,7 @@ import {
 import { computeControllerSessionId } from "../state/types";
 import { type DaemonConfig, resolveDaemonConfig, validateControllerPrompt } from "./config";
 import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
-import { modeToRole, TokenManager } from "./github-apps";
+import { TokenManager } from "./github-apps";
 import {
   allocatePort,
   cleanupStaleServes,
@@ -17,7 +17,6 @@ import {
   removeLegionEntry,
   writeLegionEntry,
 } from "./legions-registry";
-import { RoleServeManager } from "./multi-serve";
 import { isPortFree } from "./ports";
 import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
@@ -189,16 +188,26 @@ function unsubscribeFromEnvoy(sessionId: string, envoyUrl: string) {
   }).catch(() => {});
 }
 
-function buildControllerEnv(config: DaemonConfig): Record<string, string> {
-  // config.legionId is guaranteed non-empty by the startDaemon guard at line 107-109.
-  // The "" fallback is unreachable dead code — kept to satisfy the type checker.
+function buildServeEnv(config: DaemonConfig): Record<string, string> {
   const legionId = config.legionId ?? "";
   const env: Record<string, string> = {
     LEGION_ID: legionId,
     LEGION_ISSUE_BACKEND: config.issueBackend,
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+      plugin: ["@sjawhar/opencode-legion@latest"],
+    }),
   };
+  if (config.envoyUrl) {
+    env.ENVOY_URL = config.envoyUrl;
+  }
+  if (config.feedbackDisabled) {
+    env.LEGION_FEEDBACK_DISABLED = "true";
+  }
+  if (config.feedbackMaxBytes) {
+    env.LEGION_FEEDBACK_MAX_BYTES = String(config.feedbackMaxBytes);
+  }
   if (config.controllerSessionId) {
     env.LEGION_CONTROLLER_SESSION_ID = config.controllerSessionId;
   }
@@ -278,7 +287,6 @@ export async function startDaemon(
   const startedAt = Date.now();
   let healthTicks = 0;
   let sharedServeRestarts = 0;
-  let roleServeRestarts = 0;
   let controllerRecreates = 0;
   let indexInitializations = 0;
   let indexIncrementalUpdates = 0;
@@ -293,13 +301,11 @@ export async function startDaemon(
     daemon_shared_serve_port: sharedServePort,
     daemon_health_ticks: healthTicks,
     daemon_shared_restarts: sharedServeRestarts,
-    daemon_role_restarts: roleServeRestarts,
     daemon_controller_recreates: controllerRecreates,
     daemon_index_initializations: indexInitializations,
     daemon_index_incrementals: indexIncrementalUpdates,
     daemon_controller_present: controllerState ? 1 : 0,
     daemon_rss_restarts: rssRestarts,
-    daemon_role_serves: roleServeManager?.getEntries().length ?? 0,
   }));
   const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
   const hasIndexRoot = !!config.legionDir && existsSync(config.legionDir);
@@ -316,7 +322,7 @@ export async function startDaemon(
 
   // Configure the adapter with start opts for lazy serve startup.
   const serveStartOpts: RuntimeStartOptions = {
-    env: buildControllerEnv(config),
+    env: buildServeEnv(config),
     workspace: controllerWorkspace,
     logDir: config.logDir,
   };
@@ -325,28 +331,9 @@ export async function startDaemon(
   };
   adapterConfigure.configure?.(serveStartOpts);
 
-  // Initialize per-role serves for credential isolation (when GitHub Apps configured)
-  let roleServeManager: RoleServeManager | undefined;
   let tokenManager: TokenManager | undefined;
   if (config.githubApps) {
     tokenManager = new TokenManager(config.githubApps);
-    roleServeManager = new RoleServeManager({
-      githubApps: config.githubApps,
-      tokenManager,
-      runtime: config.runtime,
-      basePort: sharedServePort + 1,
-      shortId: legionId.slice(0, 8),
-      fallbackAdapter: resolvedDeps.adapter,
-    });
-    try {
-      await roleServeManager.start(buildControllerEnv(config), controllerWorkspace, config.logDir);
-      const entries = roleServeManager.getEntries();
-      console.log(`Role serves started: ${entries.map((e) => `${e.role}:${e.port}`).join(", ")}`);
-    } catch (error) {
-      console.error(`Failed to start role serves: ${error}`);
-      console.error("Falling back to shared serve for all workers");
-      roleServeManager = undefined;
-    }
   }
 
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -446,9 +433,6 @@ export async function startDaemon(
     } catch {}
 
     await resolvedDeps.adapter.stop();
-    if (roleServeManager) {
-      await roleServeManager.stop();
-    }
 
     controllerState = undefined;
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -490,9 +474,6 @@ export async function startDaemon(
             ? `legion-${config.legionId}`
             : undefined,
         getControllerState: () => controllerState,
-        getWorkerAdapter: roleServeManager
-          ? (mode) => roleServeManager.getAdapterForMode(mode)
-          : undefined,
         tokenManager,
         indexManager,
         feedbackLogger,
@@ -734,39 +715,6 @@ export async function startDaemon(
           indexIncrementalUpdates += 1;
         } catch (error) {
           console.error(`Failed to update codebase index incrementally: ${error}`);
-        }
-
-        // Check role serves health
-        if (roleServeManager?.hasRoleServes()) {
-          const unhealthyRoles = await roleServeManager.checkHealth();
-          for (const role of unhealthyRoles) {
-            console.error(`Role serve '${role}' is unhealthy, restarting...`);
-            try {
-              await roleServeManager.restartRole(
-                role,
-                buildControllerEnv(config),
-                controllerWorkspace,
-                config.logDir
-              );
-              roleServeRestarts += 1;
-              console.log(`Role serve '${role}' restarted`);
-              // Re-create sessions for workers on this role
-              const roleAdapter = roleServeManager.getAdapterForRole(role);
-              const state = await resolvedDeps.readStateFile(config.stateFilePath);
-              for (const workerEntry of Object.values(state.workers)) {
-                try {
-                  const workerMode = workerEntry.id.split("-").pop();
-                  if (workerMode && modeToRole(workerMode) === role) {
-                    await roleAdapter.createSession(workerEntry.sessionId, workerEntry.workspace);
-                  }
-                } catch {
-                  // Best effort — worker may not match this role
-                }
-              }
-            } catch (restartError) {
-              console.error(`Failed to restart role serve '${role}': ${restartError}`);
-            }
-          }
         }
 
         const workerState = await resolvedDeps.readStateFile(config.stateFilePath);

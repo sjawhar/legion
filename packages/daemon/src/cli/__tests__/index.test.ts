@@ -36,6 +36,7 @@ import {
   cmdPrompt,
   cmdResetCrashes,
   cmdStart,
+  discoverConfigPath,
   dispatchCommand,
   getDaemonPort,
   legionsCommand,
@@ -192,9 +193,92 @@ describe("scanOcRegistry", () => {
   });
 });
 
+describe("discoverConfigPath", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), "legion-discover-config-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns XDG_CONFIG_HOME path when it exists", async () => {
+    const cwd = path.join(tempDir, "cwd");
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg");
+    const xdgConfigPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(homeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(xdgConfigPath), { recursive: true });
+    await writeFile(xdgConfigPath, "project: from-xdg\n");
+
+    expect(discoverConfigPath(cwd, { XDG_CONFIG_HOME: xdgConfigHome }, homeDir)).toBe(
+      xdgConfigPath
+    );
+  });
+
+  it("falls back to ~/.config/legion/legion.yaml when XDG is not set", async () => {
+    const cwd = path.join(tempDir, "cwd");
+    const homeDir = path.join(tempDir, "home");
+    const homeConfigPath = path.join(homeDir, ".config", "legion", "legion.yaml");
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.dirname(homeConfigPath), { recursive: true });
+    await writeFile(homeConfigPath, "project: from-home\n");
+
+    expect(discoverConfigPath(cwd, {}, homeDir)).toBe(homeConfigPath);
+  });
+
+  it("falls back to ./legion.yaml when XDG and home config do not exist", async () => {
+    const cwd = path.join(tempDir, "cwd");
+    const homeDir = path.join(tempDir, "home");
+    const cwdConfigPath = path.join(cwd, "legion.yaml");
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(homeDir, { recursive: true });
+    await writeFile(cwdConfigPath, "project: from-cwd\n");
+
+    expect(discoverConfigPath(cwd, {}, homeDir)).toBe(cwdConfigPath);
+  });
+
+  it("returns undefined when no config exists anywhere", () => {
+    const cwd = path.join(tempDir, "cwd");
+    const homeDir = path.join(tempDir, "home");
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(homeDir, { recursive: true });
+
+    expect(discoverConfigPath(cwd, {}, homeDir)).toBeUndefined();
+  });
+
+  it("prefers XDG_CONFIG_HOME over ~/.config", async () => {
+    const cwd = path.join(tempDir, "cwd");
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg");
+    const xdgConfigPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+    const homeConfigPath = path.join(homeDir, ".config", "legion", "legion.yaml");
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.dirname(xdgConfigPath), { recursive: true });
+    fs.mkdirSync(path.dirname(homeConfigPath), { recursive: true });
+    await writeFile(xdgConfigPath, "project: from-xdg\n");
+    await writeFile(homeConfigPath, "project: from-home\n");
+
+    expect(discoverConfigPath(cwd, { XDG_CONFIG_HOME: xdgConfigHome }, homeDir)).toBe(
+      xdgConfigPath
+    );
+  });
+});
+
 describe("cmdStart config wiring", () => {
   const originalLog = console.log;
   const originalError = console.error;
+  const originalCwd = process.cwd();
+  const originalHome = process.env.HOME;
+  const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
   const startDaemonCalls: Array<Record<string, unknown>> = [];
   const resolveLegionIdCalls: Array<{ team: string; backend?: string }> = [];
   let resolveLegionIdResult: string | undefined;
@@ -217,6 +301,128 @@ describe("cmdStart config wiring", () => {
   afterEach(() => {
     console.log = originalLog;
     console.error = originalError;
+    process.chdir(originalCwd);
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    if (originalXdgConfigHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+    }
+  });
+
+  it("auto-discovers config and passes it to resolveDaemonConfig", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-autodiscover-"));
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg");
+    const configPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+
+    try {
+      fs.mkdirSync(homeDir, { recursive: true });
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      await writeFile(
+        configPath,
+        ["project: auto/team", "workspace: /tmp/auto-workspace", "port: 15433"].join("\n")
+      );
+      process.chdir(tempDir);
+      process.env.HOME = homeDir;
+      process.env.XDG_CONFIG_HOME = xdgConfigHome;
+
+      try {
+        await cmdStart(
+          undefined,
+          {},
+          {
+            startDaemon: async (config) => {
+              startDaemonCalls.push(config as unknown as Record<string, unknown>);
+              throw new Error(START_DAEMON_ABORT);
+            },
+            resolveLegionId: async (team, opts) => {
+              resolveLegionIdCalls.push({ team, backend: readBackendArg(opts) });
+              return resolveLegionIdResult ?? team;
+            },
+          }
+        );
+        throw new Error("Expected cmdStart to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(START_DAEMON_ABORT);
+      }
+
+      expect(resolveLegionIdCalls).toHaveLength(0);
+      expect(startDaemonCalls).toHaveLength(1);
+      expect(startDaemonCalls[0]).toEqual(
+        expect.objectContaining({
+          legionId: "auto/team",
+          legionDir: "/tmp/auto-workspace",
+          daemonPort: 15433,
+          daemonPortExplicit: true,
+        })
+      );
+      expect(console.log).toHaveBeenCalledWith(`Using config: ${configPath}`);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("explicit --config overrides auto-discovery", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-explicit-config-"));
+    const homeDir = path.join(tempDir, "home");
+    const autoConfigPath = path.join(tempDir, "legion.yaml");
+    const explicitConfigPath = path.join(tempDir, "explicit.yaml");
+
+    try {
+      fs.mkdirSync(homeDir, { recursive: true });
+      await writeFile(
+        autoConfigPath,
+        "project: auto/team\nworkspace: /tmp/auto-workspace\nport: 15433\n"
+      );
+      await writeFile(
+        explicitConfigPath,
+        "project: explicit/team\nworkspace: /tmp/explicit-workspace\nport: 15434\n"
+      );
+      process.chdir(tempDir);
+      process.env.HOME = homeDir;
+      delete process.env.XDG_CONFIG_HOME;
+
+      try {
+        await cmdStart(
+          undefined,
+          { config: explicitConfigPath },
+          {
+            startDaemon: async (config) => {
+              startDaemonCalls.push(config as unknown as Record<string, unknown>);
+              throw new Error(START_DAEMON_ABORT);
+            },
+            resolveLegionId: async (team, opts) => {
+              resolveLegionIdCalls.push({ team, backend: readBackendArg(opts) });
+              return resolveLegionIdResult ?? team;
+            },
+          }
+        );
+        throw new Error("Expected cmdStart to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(START_DAEMON_ABORT);
+      }
+
+      expect(resolveLegionIdCalls).toHaveLength(0);
+      expect(startDaemonCalls).toHaveLength(1);
+      expect(startDaemonCalls[0]).toEqual(
+        expect.objectContaining({
+          legionId: "explicit/team",
+          legionDir: "/tmp/explicit-workspace",
+          daemonPort: 15434,
+          daemonPortExplicit: true,
+        })
+      );
+      expect(console.log).not.toHaveBeenCalledWith(`Using config: ${autoConfigPath}`);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("starts from --config without positional team when config provides project", async () => {

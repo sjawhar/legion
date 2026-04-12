@@ -60,7 +60,6 @@ export interface ServerOptions {
   getControllerState?: () => ControllerState | undefined;
   runtime?: string;
   tmuxSession?: string;
-  getWorkerAdapter?: (mode: WorkerModeLiteral) => RuntimeAdapter;
   tokenManager?: TokenManager;
   indexManager?: {
     getResponse: () => CodebaseIndexResponse;
@@ -560,10 +559,8 @@ export function startServer(opts: ServerOptions): {
           // Fetch activity for all workers in parallel (with timeout)
           const activityResults = await Promise.allSettled(
             allWorkers.map(async (w) => {
-              const mode = extractModeFromWorkerId(w.id);
-              const adapter = mode ? (opts.getWorkerAdapter?.(mode) ?? opts.adapter) : opts.adapter;
               const result = await Promise.race([
-                adapter.getSessionStatus(w.sessionId),
+                opts.adapter.getSessionStatus(w.sessionId),
                 new Promise<{ data?: unknown; error: string }>((resolve) =>
                   setTimeout(() => resolve({ error: "timeout" }), ACTIVITY_FETCH_TIMEOUT_MS)
                 ),
@@ -879,11 +876,9 @@ export function startServer(opts: ServerOptions): {
                 ? providedSessionId
                 : computeSessionId(opts.legionId, issueId, mode as WorkerModeLiteral, version);
 
-            const workerAdapter =
-              opts.getWorkerAdapter?.(mode as WorkerModeLiteral) ?? opts.adapter;
+            const workerAdapter = opts.adapter;
 
-            // Auto-inject role credentials when GitHub Apps configured
-            let workerEnv: Record<string, string> | undefined = isRecord(envPayload)
+            const workerEnv: Record<string, string> | undefined = isRecord(envPayload)
               ? (envPayload as Record<string, string>)
               : undefined;
             if (workerEnv) {
@@ -891,27 +886,6 @@ export function startServer(opts: ServerOptions): {
                 if (typeof v !== "string") {
                   return badRequest(`env values must be strings (key "${k}")`);
                 }
-              }
-            }
-            if (opts.tokenManager) {
-              try {
-                const role = modeToRole(mode);
-                if (opts.tokenManager.isConfigured(role)) {
-                  const cred = await opts.tokenManager.getToken(role);
-                  workerEnv = {
-                    ...workerEnv,
-                    GH_TOKEN: cred.token,
-                    GIT_AUTHOR_NAME: cred.gitIdentity.name,
-                    GIT_AUTHOR_EMAIL: cred.gitIdentity.email,
-                    GIT_COMMITTER_NAME: cred.gitIdentity.name,
-                    GIT_COMMITTER_EMAIL: cred.gitIdentity.email,
-                    LEGION_APP_ROLE: role,
-                  };
-                }
-              } catch (error) {
-                console.error(
-                  `Failed to inject role credentials for ${mode}: ${(error as Error).message}`
-                );
               }
             }
 
@@ -1321,11 +1295,7 @@ export function startServer(opts: ServerOptions): {
           }
 
           try {
-            const statusMode = extractModeFromWorkerId(entry.id);
-            const statusAdapter = statusMode
-              ? (opts.getWorkerAdapter?.(statusMode) ?? opts.adapter)
-              : opts.adapter;
-            const result = await statusAdapter.getSessionStatus(entry.sessionId);
+            const result = await opts.adapter.getSessionStatus(entry.sessionId);
             if (result.error || !result.data) {
               return badGateway();
             }
@@ -1357,11 +1327,7 @@ export function startServer(opts: ServerOptions): {
             return badRequest("missing_fields");
           }
           try {
-            const promptMode = extractModeFromWorkerId(entry.id);
-            const promptAdapter = promptMode
-              ? (opts.getWorkerAdapter?.(promptMode) ?? opts.adapter)
-              : opts.adapter;
-            await promptAdapter.sendPrompt(entry.sessionId, text);
+            await opts.adapter.sendPrompt(entry.sessionId, text);
 
             if (entry.envoyTopics?.length) {
               subscribeWorkerToEnvoy(entry.sessionId, entry.envoyTopics, envoyUrl);
@@ -1373,7 +1339,58 @@ export function startServer(opts: ServerOptions): {
           }
         }
 
-        // Credential endpoint removed — credentials are auto-injected in POST /workers
+        if (segments.length === 3 && segments[0] === "workers" && segments[2] === "token") {
+          await stateLoaded;
+          if (method !== "GET") {
+            return notFound();
+          }
+          const id = segments[1].toLowerCase();
+          const entry = workers.get(id);
+          if (!entry) {
+            return notFound();
+          }
+          if (!opts.tokenManager) {
+            return notFound("token_manager_unavailable");
+          }
+
+          const mode = extractModeFromWorkerId(entry.id);
+          if (!mode) {
+            return notFound();
+          }
+
+          const repoRef = entry.repo ? parseIssueRepo(entry.repo) : null;
+          if (!repoRef) {
+            return badRequest("missing_repo");
+          }
+
+          const role = modeToRole(mode);
+          if (!opts.tokenManager.isConfigured(role)) {
+            return notFound("role_not_configured");
+          }
+
+          try {
+            const credential = await opts.tokenManager.getToken(role, repoRef.owner);
+            return jsonResponse({
+              role,
+              owner: repoRef.owner,
+              expiresAt: credential.expiresAt,
+              env: {
+                GH_TOKEN: credential.token,
+                GIT_AUTHOR_NAME: credential.gitIdentity.name,
+                GIT_AUTHOR_EMAIL: credential.gitIdentity.email,
+                GIT_COMMITTER_NAME: credential.gitIdentity.name,
+                GIT_COMMITTER_EMAIL: credential.gitIdentity.email,
+                LEGION_APP_ROLE: role,
+              },
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (message.startsWith("role_not_configured:")) {
+              return notFound("role_not_configured");
+            }
+            return serverError(message);
+          }
+        }
 
         if (method === "POST" && url.pathname === "/state/collect") {
           let payload: Record<string, unknown>;

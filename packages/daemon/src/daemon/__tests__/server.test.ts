@@ -3,7 +3,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
+import type { GitHubAppsConfig } from "../config";
 import { type FeedbackEvent, FeedbackLogger, type FeedbackWriter } from "../feedback";
+import { TokenManager } from "../github-apps";
 import type { LegionPaths } from "../paths";
 import type { RepoManagerDeps } from "../repo-manager";
 import type { RuntimeAdapter } from "../runtime/types";
@@ -71,6 +73,7 @@ describe("daemon server", () => {
     adapterOverrides?: Partial<RuntimeAdapter>;
     paths?: LegionPaths;
     repoManagerDeps?: RepoManagerDeps;
+    tokenManager?: TokenManager;
     runtime?: string;
     tmuxSession?: string;
     feedbackLogger?: FeedbackLogger;
@@ -99,6 +102,7 @@ describe("daemon server", () => {
       paths: options?.paths,
       adapter,
       repoManagerDeps: options?.repoManagerDeps,
+      tokenManager: options?.tokenManager,
       stateFilePath,
       runtime: options?.runtime,
       tmuxSession: options?.tmuxSession,
@@ -194,6 +198,19 @@ describe("daemon server", () => {
     globalThis.fetch = Object.assign(mockFn, {
       preconnect: originalFetch.preconnect,
     });
+  }
+
+  function createTestTokenManager(config: GitHubAppsConfig, token = "ghs_owner_token") {
+    const manager = new TokenManager(config);
+    manager.getToken = async (role, owner) => ({
+      token: `${token}:${role}:${owner}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      gitIdentity: {
+        name: `${role}-bot[bot]`,
+        email: `${owner}+${role}@users.noreply.github.com`,
+      },
+    });
+    return manager;
   }
 
   afterEach(async () => {
@@ -2326,6 +2343,147 @@ describe("daemon server", () => {
     await startTestServer();
     const res = await requestJson("/credentials/impl");
     expect(res.status).toBe(404);
+  });
+
+  it("GET /workers/{id}/token returns owner-scoped credentials", async () => {
+    const tokenManager = createTestTokenManager({
+      implement: {
+        appId: "app-1",
+        privateKey: "unused",
+        installations: { acme: "111" },
+      },
+    });
+
+    await startTestServer({
+      tokenManager,
+      state: {
+        workers: {
+          "eng-520-implement": {
+            id: "eng-520-implement",
+            port: sharedServePort,
+            sessionId: "ses_eng_520",
+            workspace: "/tmp/work-520",
+            startedAt: "2026-02-01T00:00:00.000Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+          },
+        },
+        crashHistory: {},
+      },
+    });
+
+    const response = await requestJson("/workers/eng-520-implement/token");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      role: string;
+      owner: string;
+      expiresAt: string;
+      env: Record<string, string>;
+    };
+
+    expect(body).toEqual({
+      role: "implement",
+      owner: "acme",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      env: {
+        GH_TOKEN: "ghs_owner_token:implement:acme",
+        GIT_AUTHOR_NAME: "implement-bot[bot]",
+        GIT_AUTHOR_EMAIL: "acme+implement@users.noreply.github.com",
+        GIT_COMMITTER_NAME: "implement-bot[bot]",
+        GIT_COMMITTER_EMAIL: "acme+implement@users.noreply.github.com",
+        LEGION_APP_ROLE: "implement",
+      },
+    });
+  });
+
+  it("GET /workers/{id}/token rejects workers without repo", async () => {
+    await startTestServer({
+      tokenManager: createTestTokenManager({
+        implement: {
+          appId: "app-1",
+          privateKey: "unused",
+          installations: { acme: "111" },
+        },
+      }),
+      state: {
+        workers: {
+          "eng-521-implement": {
+            id: "eng-521-implement",
+            port: sharedServePort,
+            sessionId: "ses_eng_521",
+            workspace: "/tmp/work-521",
+            startedAt: "2026-02-01T00:00:00.000Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+          },
+        },
+        crashHistory: {},
+      },
+    });
+
+    const response = await requestJson("/workers/eng-521-implement/token");
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "missing_repo" });
+  });
+
+  it("GET /workers/{id}/token returns 404 when token manager is unavailable", async () => {
+    await startTestServer({
+      state: {
+        workers: {
+          "eng-522-implement": {
+            id: "eng-522-implement",
+            port: sharedServePort,
+            sessionId: "ses_eng_522",
+            workspace: "/tmp/work-522",
+            startedAt: "2026-02-01T00:00:00.000Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+          },
+        },
+        crashHistory: {},
+      },
+    });
+
+    const response = await requestJson("/workers/eng-522-implement/token");
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "token_manager_unavailable" });
+  });
+
+  it("GET /workers/{id}/token returns 404 for unconfigured role", async () => {
+    await startTestServer({
+      tokenManager: createTestTokenManager({
+        review: {
+          appId: "app-2",
+          privateKey: "unused",
+          installations: { acme: "222" },
+        },
+      }),
+      state: {
+        workers: {
+          "eng-523-implement": {
+            id: "eng-523-implement",
+            port: sharedServePort,
+            sessionId: "ses_eng_523",
+            workspace: "/tmp/work-523",
+            startedAt: "2026-02-01T00:00:00.000Z",
+            status: "running",
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+          },
+        },
+        crashHistory: {},
+      },
+    });
+
+    const response = await requestJson("/workers/eng-523-implement/token");
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "role_not_configured" });
   });
 
   it("GET /workers/{id}/env strips credential vars from response", async () => {

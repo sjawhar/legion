@@ -115,75 +115,19 @@ describe("daemon config", () => {
   });
 
   describe("githubApps", () => {
-    it("is undefined when no github app env vars are set", () => {
+    it("is undefined when no github app config is set", () => {
       const config = loadConfig({});
       expect(config.githubApps).toBeUndefined();
     });
 
-    it("loads a single configured role when all role vars are present", () => {
+    it("ignores legacy github app env vars because github apps are config-file-only", () => {
       const config = loadConfig({
         LEGION_GITHUB_APP_IMPL_ID: "12345",
         LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
         LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "777",
       });
 
-      expect(config.githubApps).toEqual({
-        impl: {
-          appId: "12345",
-          privateKeyPath: "/tmp/impl.pem",
-          installationId: "777",
-        },
-      });
-    });
-
-    it("loads all configured roles simultaneously", () => {
-      const config = loadConfig({
-        LEGION_GITHUB_APP_IMPL_ID: "111",
-        LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
-        LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "222",
-        LEGION_GITHUB_APP_REVIEW_ID: "333",
-        LEGION_GITHUB_APP_REVIEW_PRIVATE_KEY_PATH: "/tmp/review.pem",
-        LEGION_GITHUB_APP_REVIEW_INSTALLATION_ID: "444",
-      });
-
-      expect(config.githubApps).toEqual({
-        impl: {
-          appId: "111",
-          privateKeyPath: "/tmp/impl.pem",
-          installationId: "222",
-        },
-        review: {
-          appId: "333",
-          privateKeyPath: "/tmp/review.pem",
-          installationId: "444",
-        },
-      });
-    });
-
-    it("does not load partially configured role", () => {
-      const config = loadConfig({
-        LEGION_GITHUB_APP_IMPL_ID: "12345",
-      });
-
       expect(config.githubApps).toBeUndefined();
-    });
-
-    it("loads only fully configured roles from mixed env", () => {
-      const config = loadConfig({
-        LEGION_GITHUB_APP_IMPL_ID: "111",
-        LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
-        LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "222",
-        LEGION_GITHUB_APP_REVIEW_ID: "333",
-        // review missing PRIVATE_KEY_PATH and INSTALLATION_ID
-      });
-
-      expect(config.githubApps).toEqual({
-        impl: {
-          appId: "111",
-          privateKeyPath: "/tmp/impl.pem",
-          installationId: "222",
-        },
-      });
     });
   });
 
@@ -353,32 +297,60 @@ describe("daemon config", () => {
       const result = loadConfigFromFile(
         [
           "github_apps:",
-          "  impl:",
+          "  implement:",
           "    app_id: impl-app",
-          "    private_key_path: ./impl.pem",
-          "    installation_id: impl-install",
+          "    private_key: |",
+          "      -----BEGIN PRIVATE KEY-----",
+          "      impl-key",
+          "      -----END PRIVATE KEY-----",
+          "    installations:",
+          "      acme: impl-install",
+          "      globex: impl-install-2",
           "  review:",
           "    app_id: review-app",
-          "    private_key_path: /keys/review.pem",
-          "    installation_id: review-install",
+          '    private_key: "review-inline-key"',
+          "    installations:",
+          "      acme: review-install",
         ].join("\n"),
         "/tmp/legion"
       );
 
       expect(result.fields).toMatchObject({
         githubApps: {
-          impl: {
+          implement: {
             appId: "impl-app",
-            privateKeyPath: "/tmp/legion/impl.pem",
-            installationId: "impl-install",
+            privateKey: "-----BEGIN PRIVATE KEY-----\nimpl-key\n-----END PRIVATE KEY-----\n",
+            installations: {
+              acme: "impl-install",
+              globex: "impl-install-2",
+            },
           },
           review: {
             appId: "review-app",
-            privateKeyPath: "/keys/review.pem",
-            installationId: "review-install",
+            privateKey: "review-inline-key",
+            installations: {
+              acme: "review-install",
+            },
           },
         },
       });
+    });
+
+    it("accepts arbitrary installation owner keys without unknown-key warnings", () => {
+      const result = loadConfigFromFile(
+        [
+          "github_apps:",
+          "  implement:",
+          "    app_id: impl-app",
+          '    private_key: "inline-key"',
+          "    installations:",
+          "      acme-inc: install-1",
+          "      globex-labs: install-2",
+        ].join("\n"),
+        "/tmp/x"
+      );
+
+      expect(result.warnings).toEqual([]);
     });
 
     it("normalizes relative paths against configDir and leaves absolute paths unchanged", () => {
@@ -433,8 +405,28 @@ describe("daemon config", () => {
 
     it("throws when a GitHub App role is partial and lists missing fields", () => {
       expect(() =>
-        loadConfigFromFile(["github_apps:", "  impl:", "    app_id: impl-app"].join("\n"), "/tmp/x")
-      ).toThrow(/github_apps\.impl.*private_key_path.*installation_id/i);
+        loadConfigFromFile(
+          ["github_apps:", "  implement:", "    app_id: impl-app"].join("\n"),
+          "/tmp/x"
+        )
+      ).toThrow(/github_apps\.implement.*private_key.*installations/i);
+    });
+
+    it("throws when github app installations values are not strings", () => {
+      expect(() =>
+        loadConfigFromFile(
+          [
+            "github_apps:",
+            "  implement:",
+            "    app_id: impl-app",
+            '    private_key: "inline-key"',
+            "    installations:",
+            "      acme:",
+            "        nested: nope",
+          ].join("\n"),
+          "/tmp/x"
+        )
+      ).toThrow(/github_apps\.implement\.installations\.acme must be a string/i);
     });
 
     it("throws when extra_projects is set for linear backend", () => {
@@ -465,17 +457,18 @@ describe("daemon config", () => {
       const result = loadConfigFromFile(
         [
           "github_apps:",
-          "  impl:",
+          "  implement:",
           "    app_id: impl-app",
-          "    private_key_path: ./impl.pem",
-          "    installation_id: impl-install",
+          '    private_key: "inline-key"',
+          "    installations:",
+          "      acme: impl-install",
           "    extra_field: value",
         ].join("\n"),
         "/tmp/x"
       );
 
       expect(result.warnings).toContainEqual(
-        expect.stringMatching(/github_apps\.impl\.extra_field/)
+        expect.stringMatching(/github_apps\.implement\.extra_field/)
       );
     });
 
@@ -573,6 +566,19 @@ describe("daemon config", () => {
 
       expect(result.warnings.some((warning) => warning.includes(envVar))).toBe(false);
       expect(result.config).toHaveProperty(fieldName, configValue);
+    });
+
+    it("ignores github app env vars without emitting deprecation warnings", () => {
+      const result = resolveDaemonConfig({
+        env: {
+          LEGION_GITHUB_APP_IMPL_ID: "111",
+          LEGION_GITHUB_APP_IMPL_PRIVATE_KEY_PATH: "/tmp/impl.pem",
+          LEGION_GITHUB_APP_IMPL_INSTALLATION_ID: "222",
+        },
+      });
+
+      expect(result.config.githubApps).toBeUndefined();
+      expect(result.warnings.some((warning) => warning.includes("LEGION_GITHUB_APP_"))).toBe(false);
     });
   });
 

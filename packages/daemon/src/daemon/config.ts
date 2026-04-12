@@ -4,12 +4,12 @@ import { parse } from "yaml";
 import type { LegionPaths } from "./paths";
 import { resolveLegionPaths } from "./paths";
 
-export type GitHubAppRole = "impl" | "review";
+export type GitHubAppRole = "implement" | "review";
 
 export interface GitHubAppRoleConfig {
   appId: string;
-  privateKeyPath: string;
-  installationId: string;
+  privateKey: string;
+  installations: Record<string, string>;
 }
 
 export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig>>;
@@ -55,8 +55,11 @@ export interface ResolveDaemonConfigResult {
   warnings: string[];
 }
 
+const CONFIG_ANY_KEY = Symbol("config-any-key");
+
 interface ConfigSchema {
   [key: string]: ConfigSchema | null;
+  [CONFIG_ANY_KEY]?: ConfigSchema | null;
 }
 type ValueSource = "cli" | "config" | "env" | "default";
 
@@ -68,8 +71,8 @@ const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 const DEFAULT_FEEDBACK_MAX_BYTES = 50 * 1024 * 1024;
 const EXTRA_PROJECT_PATTERN = /^[^/]+\/\d+$/;
-const GITHUB_APP_ROLES: GitHubAppRole[] = ["impl", "review"];
-const GITHUB_APP_FIELD_NAMES = ["app_id", "private_key_path", "installation_id"] as const;
+const GITHUB_APP_ROLES: GitHubAppRole[] = ["implement", "review"];
+const GITHUB_APP_FIELD_NAMES = ["app_id", "private_key", "installations"] as const;
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   extra_projects: null,
@@ -82,15 +85,19 @@ const CONFIG_SCHEMA: ConfigSchema = {
     prompt: null,
   },
   github_apps: {
-    impl: {
+    implement: {
       app_id: null,
-      private_key_path: null,
-      installation_id: null,
+      private_key: null,
+      installations: {
+        [CONFIG_ANY_KEY]: null,
+      },
     },
     review: {
       app_id: null,
-      private_key_path: null,
-      installation_id: null,
+      private_key: null,
+      installations: {
+        [CONFIG_ANY_KEY]: null,
+      },
     },
   },
   memory: {
@@ -155,6 +162,25 @@ function readString(value: unknown, fieldPath: string): string | undefined {
     throw new Error(`${fieldPath} must be a string`);
   }
   return value;
+}
+
+function readStringRecord(value: unknown, fieldPath: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new Error(`${fieldPath} must be a mapping`);
+  }
+
+  const result: Record<string, string> = {};
+  for (const [key, entryValue] of Object.entries(value)) {
+    if (typeof entryValue !== "string") {
+      throw new Error(`${fieldPath}.${key} must be a string`);
+    }
+    result[key] = entryValue;
+  }
+
+  return result;
 }
 
 function readNumber(value: unknown, fieldPath: string): number | undefined {
@@ -309,25 +335,6 @@ function parseRssCheckIntervalMsFromSeconds(seconds: number | undefined): number
   return seconds * 1000;
 }
 
-function loadGitHubApps(env: Record<string, string | undefined>): GitHubAppsConfig | undefined {
-  const config: GitHubAppsConfig = {};
-  let hasAny = false;
-
-  for (const role of GITHUB_APP_ROLES) {
-    const prefix = `LEGION_GITHUB_APP_${role.toUpperCase()}`;
-    const appId = env[`${prefix}_ID`];
-    const privateKeyPath = env[`${prefix}_PRIVATE_KEY_PATH`];
-    const installationId = env[`${prefix}_INSTALLATION_ID`];
-
-    if (appId && privateKeyPath && installationId) {
-      config[role] = { appId, privateKeyPath, installationId };
-      hasAny = true;
-    }
-  }
-
-  return hasAny ? config : undefined;
-}
-
 function collectUnknownKeys(
   value: unknown,
   schema: ConfigSchema | null,
@@ -339,7 +346,7 @@ function collectUnknownKeys(
   }
 
   for (const [key, childValue] of Object.entries(value)) {
-    const childSchema = schema[key];
+    const childSchema = Object.hasOwn(schema, key) ? schema[key] : schema[CONFIG_ANY_KEY];
     if (childSchema === undefined) {
       warnings.push(`Unknown config key: ${[...pathParts, key].join(".")}`);
       continue;
@@ -348,7 +355,7 @@ function collectUnknownKeys(
   }
 }
 
-function loadGitHubAppsFromFile(value: unknown, configDir: string): GitHubAppsConfig | undefined {
+function loadGitHubAppsFromFile(value: unknown): GitHubAppsConfig | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
@@ -369,13 +376,10 @@ function loadGitHubAppsFromFile(value: unknown, configDir: string): GitHubAppsCo
     }
 
     const appId = readString(roleValue.app_id, `github_apps.${role}.app_id`);
-    const privateKeyPath = readString(
-      roleValue.private_key_path,
-      `github_apps.${role}.private_key_path`
-    );
-    const installationId = readString(
-      roleValue.installation_id,
-      `github_apps.${role}.installation_id`
+    const privateKey = readString(roleValue.private_key, `github_apps.${role}.private_key`);
+    const installations = readStringRecord(
+      roleValue.installations,
+      `github_apps.${role}.installations`
     );
 
     const missing = GITHUB_APP_FIELD_NAMES.filter((fieldName) => {
@@ -396,8 +400,8 @@ function loadGitHubAppsFromFile(value: unknown, configDir: string): GitHubAppsCo
 
     config[role] = {
       appId: appId as string,
-      privateKeyPath: normalizeConfigPath(privateKeyPath as string, configDir),
-      installationId: installationId as string,
+      privateKey: privateKey as string,
+      installations: installations as Record<string, string>,
     };
     hasAny = true;
   }
@@ -532,7 +536,7 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
     }
   }
 
-  const githubApps = loadGitHubAppsFromFile(parsed.github_apps, configDir);
+  const githubApps = loadGitHubAppsFromFile(parsed.github_apps);
   if (githubApps !== undefined) {
     fields.githubApps = githubApps;
   }
@@ -609,7 +613,6 @@ export function resolveDaemonConfig(
   const envIssueBackend = validateBackend(env.LEGION_ISSUE_BACKEND, "LEGION_ISSUE_BACKEND");
   const envRuntime = validateRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME");
   const envExtraProjects = parseExtraProjects(env.LEGION_EXTRA_PROJECTS);
-  const envGithubApps = loadGitHubApps(env);
   const envMaxRssBytes = parseMaxRssBytesFromGb(parseOptionalNumber(env.OPENCODE_MAX_RSS_GB));
   const envRssCheckIntervalMs = parseRssCheckIntervalMsFromSeconds(
     parseOptionalNumber(env.OPENCODE_RSS_CHECK_INTERVAL)
@@ -669,7 +672,7 @@ export function resolveDaemonConfig(
   const githubApps = resolveValue(
     opts.cliOverrides?.githubApps,
     maybeReadGitHubApps(configFields, "githubApps"),
-    envGithubApps,
+    undefined,
     undefined
   );
   const maxRssBytes = resolveValue(
@@ -770,33 +773,6 @@ export function resolveDaemonConfig(
     "LEGION_FEEDBACK_MAX_BYTES",
     "feedback.max_bytes"
   );
-
-  if (githubApps.source === "env") {
-    for (const role of GITHUB_APP_ROLES) {
-      const prefix = `LEGION_GITHUB_APP_${role.toUpperCase()}`;
-      pushEnvDeprecationWarning(
-        warnings,
-        githubApps.source,
-        env,
-        `${prefix}_ID`,
-        `github_apps.${role}.app_id`
-      );
-      pushEnvDeprecationWarning(
-        warnings,
-        githubApps.source,
-        env,
-        `${prefix}_PRIVATE_KEY_PATH`,
-        `github_apps.${role}.private_key_path`
-      );
-      pushEnvDeprecationWarning(
-        warnings,
-        githubApps.source,
-        env,
-        `${prefix}_INSTALLATION_ID`,
-        `github_apps.${role}.installation_id`
-      );
-    }
-  }
 
   return {
     config: {

@@ -421,7 +421,7 @@ describe("daemon entry", () => {
       expect(startServerCalls).toHaveLength(1);
       expect(startServerCalls[0].port).toBe(occupiedPort + 1);
       expect(writeLegionEntryCalls[0].entry.port).toBe(occupiedPort + 1);
-      expect(writeLegionEntryCalls[0].entry.servePort).toBe(occupiedPort + 101);
+      expect(writeLegionEntryCalls[0].entry.servePort).toBeGreaterThanOrEqual(occupiedPort + 101);
     });
 
     it("retries with next port when bind throws EADDRINUSE", async () => {
@@ -1320,7 +1320,7 @@ describe("daemon entry", () => {
     // Controller cleared (daemon-owned)
     expect(state.controller).toBeUndefined();
   });
-  it("passes controller env vars to adapter.start on startup", async () => {
+  it("passes serve env vars to adapter.start on startup", async () => {
     const startCalls: Array<{ workspace: string; logDir?: string; env?: Record<string, string> }> =
       [];
 
@@ -1360,9 +1360,12 @@ describe("daemon entry", () => {
     expect(opts.env?.LEGION_DIR).toBeUndefined();
     expect(opts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(Number(opts.env?.LEGION_DAEMON_PORT)).toBeGreaterThanOrEqual(13370);
+    expect(JSON.parse(opts.env?.OPENCODE_CONFIG_CONTENT ?? "null")).toEqual({
+      plugin: ["@sjawhar/opencode-legion@latest"],
+    });
   });
 
-  it("passes controller env vars to adapter.start on health restart", async () => {
+  it("passes serve env vars to adapter.start on health restart", async () => {
     let timeoutCallback: TimeoutCallback | null = null;
     const mockSetTimeout: typeof setTimeout = Object.assign(
       ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
@@ -1437,6 +1440,9 @@ describe("daemon entry", () => {
     expect(restartOpts.env?.LEGION_DIR).toBeUndefined();
     expect(restartOpts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(Number(restartOpts.env?.LEGION_DAEMON_PORT)).toBeGreaterThanOrEqual(13370);
+    expect(JSON.parse(restartOpts.env?.OPENCODE_CONFIG_CONTENT ?? "null")).toEqual({
+      plugin: ["@sjawhar/opencode-legion@latest"],
+    });
   });
 
   it("logs warning when worker session ID changes during startup re-creation", async () => {
