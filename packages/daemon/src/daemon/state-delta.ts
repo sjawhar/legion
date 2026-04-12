@@ -40,7 +40,7 @@ export function computeStateDelta(
   current: Record<string, IssueStateDict>
 ): StateDelta | null {
   const newIssues = Object.keys(current)
-    .filter((issueId) => !(issueId in previous))
+    .filter((issueId) => !(issueId in previous) && current[issueId].source !== null)
     .sort()
     .map((issueId) => ({
       issueId,
@@ -48,7 +48,7 @@ export function computeStateDelta(
     }));
 
   const removed = Object.keys(previous)
-    .filter((issueId) => !(issueId in current))
+    .filter((issueId) => !(issueId in current) && previous[issueId].source !== null)
     .sort();
 
   const changed = Object.keys(current)

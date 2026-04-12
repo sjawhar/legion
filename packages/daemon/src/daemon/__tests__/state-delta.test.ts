@@ -3,6 +3,13 @@ import { describe, expect, it } from "bun:test";
 import type { IssueStateDict } from "../../state/types";
 import { computeStateDelta } from "../state-delta";
 
+const DEFAULT_SOURCE = {
+  owner: "acme",
+  repo: "widgets",
+  number: 1,
+  url: "https://github.com/acme/widgets/issues/1",
+};
+
 function createIssueState(overrides: Partial<IssueStateDict> = {}): IssueStateDict {
   return {
     status: "Todo",
@@ -19,7 +26,7 @@ function createIssueState(overrides: Partial<IssueStateDict> = {}): IssueStateDi
     hasUserFeedback: false,
     isBlocked: false,
     blockedByIds: [],
-    source: null,
+    source: DEFAULT_SOURCE,
     ...overrides,
   };
 }
@@ -361,5 +368,105 @@ describe("computeStateDelta", () => {
         changedFields: ["labels"],
       },
     ]);
+  });
+
+  describe("source: null filtering (Linear-synced issues)", () => {
+    const githubSource = DEFAULT_SOURCE;
+
+    it("ignores new issues with source: null", () => {
+      const current = {
+        "ENG-1": createIssueState({ source: null }),
+      };
+
+      expect(computeStateDelta({}, current)).toBeNull();
+    });
+
+    it("ignores removed issues with source: null", () => {
+      const previous = {
+        "ENG-0": createIssueState({ source: null }),
+      };
+
+      expect(computeStateDelta(previous, {})).toBeNull();
+    });
+
+    it("suppresses cycling Linear-synced IDs (removed+added with source: null)", () => {
+      const previous = {
+        "ENG-0": createIssueState({ source: null }),
+        "ENG-1": createIssueState({ source: null }),
+      };
+      const current = {
+        "ENG-1": createIssueState({ source: null }),
+        "ENG-2": createIssueState({ source: null }),
+      };
+
+      // ENG-0 removed, ENG-2 added — both source: null, should be suppressed
+      expect(computeStateDelta(previous, current)).toBeNull();
+    });
+
+    it("still reports new issues with a GitHub source", () => {
+      const current = {
+        "issue-1": createIssueState({ source: githubSource }),
+      };
+
+      const delta = computeStateDelta({}, current);
+      expect(delta?.changes.new).toEqual([{ issueId: "issue-1", state: current["issue-1"] }]);
+    });
+
+    it("still reports removed issues with a GitHub source", () => {
+      const previous = {
+        "issue-1": createIssueState({ source: githubSource }),
+      };
+
+      const delta = computeStateDelta(previous, {});
+      expect(delta?.changes.removed).toEqual(["issue-1"]);
+    });
+
+    it("still reports changed issues with source: null (stable Linear issues)", () => {
+      const previous = {
+        "ENG-21": createIssueState({ source: null, status: "Todo" }),
+      };
+      const current = {
+        "ENG-21": createIssueState({ source: null, status: "In Progress" }),
+      };
+
+      const delta = computeStateDelta(previous, current);
+      expect(delta?.changes.changed).toEqual([
+        {
+          issueId: "ENG-21",
+          state: current["ENG-21"],
+          changedFields: ["status"],
+        },
+      ]);
+    });
+
+    it("mixes source: null and GitHub issues correctly", () => {
+      const originalDateNow = Date.now;
+      Date.now = () => 999;
+
+      try {
+        const previous = {
+          "ENG-0": createIssueState({ source: null }),
+          "issue-1": createIssueState({ source: githubSource }),
+        };
+        const current = {
+          "ENG-1": createIssueState({ source: null }), // cycling ID — should be suppressed
+          "issue-2": createIssueState({ source: githubSource }), // new GitHub issue — should appear
+        };
+
+        const delta = computeStateDelta(previous, current);
+        expect(delta).toEqual({
+          type: "state_delta",
+          timestamp: 999,
+          changes: {
+            new: [{ issueId: "issue-2", state: current["issue-2"] }],
+            removed: ["issue-1"],
+            changed: [],
+            summary: "1 new, 1 removed, 0 changed",
+          },
+        });
+      } finally {
+        Date.now = originalDateNow;
+      }
+    });
   });
 });

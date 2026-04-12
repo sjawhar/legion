@@ -1,4 +1,16 @@
 {
+  "issueId": "sjawhar-legion-465",
+  "mode": "fresh",
+  "prUrl": "https://github.com/sjawhar/legion/pull/467",
+  "prBranch": "sjawhar-legion-465",
+  "filesChanged": [
+    "packages/daemon/src/daemon/state-delta.ts",
+    "packages/daemon/src/daemon/__tests__/state-delta.test.ts"
+  ],
+  "summary": "Filter source:null issues from state delta new/removed to suppress Linear-synced ID cycling noise",
+  "learnings": [],
+  "concerns": [],
   "schemaVersion": 1,
-  "phase": "unknown"
+  "phase": "implement",
+  "completed": "2026-04-12T19:05:39.954Z"
 }
