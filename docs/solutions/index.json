@@ -36,7 +36,8 @@
       "daemon/codebase-index-file-placement.md",
       "daemon/envoy-auto-subscription-patterns.md",
       "daemon/post-collection-processing-pattern.md",
-      "daemon/workspace-scanning-patterns.md"
+      "daemon/workspace-scanning-patterns.md",
+      "daemon/liveness-sweep-multi-serve-patterns.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -218,7 +219,8 @@
     "tag:delegation": [
       "delegation/delegation-hardening-retro.md",
       "delegation/hardening-patterns.md",
-      "delegation/subagent-plan-compliance.md"
+      "delegation/subagent-plan-compliance.md",
+      "delegation/cross-family-review-validates-subagent-output.md"
     ],
     "tag:dependency-injection": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
@@ -522,7 +524,7 @@
     ],
     "tag:handoff": [
       "daemon/handoff-schema-migration-patterns.md",
-      "skill-patterns/agent-workflow-enforcement-patterns.md"
+      "skill-patterns/agent-workflow-enforcement-patterns.md",
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:zod": [
@@ -554,7 +556,7 @@
       "envoy/contracts-and-handler-patterns.md",
       "envoy/nats-bus-client-self-healing.md",
       "envoy/webhook-handler-extraction-and-testing.md",
-      "envoy/multi-layer-service-consolidation.md"
+      "envoy/multi-layer-service-consolidation.md",
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "packages/envoy/internal/webhook": [
@@ -750,7 +752,7 @@
       "skill-patterns/merge-retry-race-condition-pattern.md"
     ],
     "tag:conflict-resolution": [
-      "skill-patterns/merge-retry-race-condition-pattern.md"
+      "skill-patterns/merge-retry-race-condition-pattern.md",
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:github-api": [
@@ -758,7 +760,8 @@
       "github-api/graphql-org-user-fallback.md"
     ],
     "tag:health-tick": [
-      "daemon/health-tick-baseline-isolation.md"
+      "daemon/health-tick-baseline-isolation.md",
+      "daemon/liveness-sweep-multi-serve-patterns.md"
     ],
     "tag:state-delta": [
       "daemon/health-tick-baseline-isolation.md"
@@ -778,12 +781,29 @@
     "packages/daemon/src/knowledge": [
       "daemon/workspace-scanning-patterns.md",
       "delegation/subagent-plan-compliance.md"
-    ]
     ],
     ".legion": [
       "legion/handoff-file-conflicts-during-rebases.md"
     ],
     "tag:jj": [
       "legion/handoff-file-conflicts-during-rebases.md"
+    ],
+    "tag:liveness": [
+      "daemon/liveness-sweep-multi-serve-patterns.md"
+    ],
+    "tag:multi-serve": [
+      "daemon/liveness-sweep-multi-serve-patterns.md"
+    ],
+    "tag:cross-family-review": [
+      "delegation/cross-family-review-validates-subagent-output.md"
+    ],
+    "tag:subagent-fidelity": [
+      "delegation/cross-family-review-validates-subagent-output.md"
+    ],
+    "tag:session-management": [
+      "daemon/worker-directory-resolution.md",
+      "controller/controller-session-anti-patterns.md",
+      "daemon/liveness-sweep-multi-serve-patterns.md"
+    ]
   }
 }
