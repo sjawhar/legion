@@ -1,0 +1,3 @@
+name: aws-infra
+runtime: nodejs
+description: AWS IAM Identity Center permission sets, groups, and account assignments

@@ -70,6 +70,7 @@ legion handoff write|read|message    # Workers: write/read structured handoff da
 | Envoy event routing    | `packages/envoy/`                             | See @packages/envoy/AGENTS.md             |
 | Shared event contracts | `packages/contracts/`                         | See @packages/contracts/AGENTS.md         |
 | Envoy OpenCode bridge  | `packages/envoy-plugin/`                      | See @packages/envoy-plugin/AGENTS.md      |
+| AWS IAM/SSM infra      | `packages/aws-infra/`                         | Pulumi (Node.js/ts-node, not Bun); see `packages/aws-infra/docs/saml-setup-runbook.md` for manual SAML setup |
 
 ## Conventions
 
