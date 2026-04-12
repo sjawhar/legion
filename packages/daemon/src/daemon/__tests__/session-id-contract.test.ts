@@ -41,6 +41,7 @@ describe("sessionId contract (daemon vs state)", () => {
       sendPrompt: async () => {},
       getSessionStatus: async () => ({ data: undefined }),
       deleteSession: async () => {},
+      listActiveSessions: async () => new Set<string>(),
     };
 
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-session-contract-"));
@@ -88,6 +89,7 @@ describe("sessionId contract (daemon vs state)", () => {
       sendPrompt: async () => {},
       getSessionStatus: async () => ({ data: undefined }),
       deleteSession: async () => {},
+      listActiveSessions: async () => new Set<string>(),
     };
 
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-session-contract-"));
@@ -141,6 +143,7 @@ describe("sessionId contract (daemon vs state)", () => {
       },
       getSessionStatus: async () => ({ data: undefined }),
       deleteSession: async () => {},
+      listActiveSessions: async () => new Set<string>(),
     };
 
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-session-contract-"));

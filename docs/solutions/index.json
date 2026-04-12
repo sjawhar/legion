@@ -27,7 +27,8 @@
       "delegation/hardening-patterns.md",
       "integration-patterns/controller-worker-protocol.md",
       "architecture-patterns/task-index-retro.md",
-      "task-index-patterns.md"
+      "task-index-patterns.md",
+      "daemon/session-liveness-detection-pattern.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md"
@@ -173,7 +174,8 @@
     "tag:dependency-injection": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "daemon/shared-serve-refactor.md",
-      "daemon/shared-serve-retro.md"
+      "daemon/shared-serve-retro.md",
+      "daemon/session-liveness-detection-pattern.md"
     ],
     "tag:directory-resolution": [
       "daemon/worker-directory-fix.md"
@@ -349,7 +351,8 @@
       "daemon/opencode-serve-lifecycle.md"
     ],
     "tag:session-management": [
-      "daemon/worker-directory-resolution.md"
+      "daemon/worker-directory-resolution.md",
+      "daemon/session-liveness-detection-pattern.md"
     ],
     "tag:sessions": [
       "daemon/shared-serve-refactor.md",
@@ -399,7 +402,8 @@
       "daemon/controller-lifecycle-separation.md",
       "daemon/graceful-worker-shutdown.md",
       "daemon/shared-serve-retro.md",
-      "delegation/delegation-hardening-retro.md"
+      "delegation/delegation-hardening-retro.md",
+      "daemon/session-liveness-detection-pattern.md"
     ],
     "tag:tmux": [
       "integration-patterns/tmux-askuserquestion-navigation.md"
@@ -414,7 +418,8 @@
       "daemon/worker-directory-resolution.md"
     ],
     "tag:worker-lifecycle": [
-      "integration-issues/external-repo-pr-auto-transition-gap.md"
+      "integration-issues/external-repo-pr-auto-transition-gap.md",
+      "daemon/session-liveness-detection-pattern.md"
     ],
     "tag:worker-spawning": [
       "daemon/worker-directory-fix.md"
@@ -442,7 +447,8 @@
       "delegation/subagent-timeout-stall-prevention.md"
     ],
     "tag:reliability": [
-      "delegation/subagent-timeout-stall-prevention.md"
+      "delegation/subagent-timeout-stall-prevention.md",
+      "daemon/session-liveness-detection-pattern.md"
     ],
     "tag:typescript": [
       "delegation/bun-node-timer-type-portability.md"
@@ -455,6 +461,18 @@
     ],
     "tag:portability": [
       "delegation/bun-node-timer-type-portability.md"
+    ],
+    "packages/daemon/src/daemon/runtime": [
+      "daemon/session-liveness-detection-pattern.md"
+    ],
+    "tag:health-tick": [
+      "daemon/session-liveness-detection-pattern.md"
+    ],
+    "tag:liveness": [
+      "daemon/session-liveness-detection-pattern.md"
+    ],
+    "tag:dead-worker": [
+      "daemon/session-liveness-detection-pattern.md"
     ]
   }
 }

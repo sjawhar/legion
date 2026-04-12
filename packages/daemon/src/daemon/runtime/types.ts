@@ -33,4 +33,6 @@ export interface RuntimeAdapter {
 
   /** Get the PID of the serve process (0 if not applicable or not started). */
   getServePid(): number;
+  /** Return the set of session IDs currently known to the serve. */
+  listActiveSessions(): Promise<Set<string>>;
 }

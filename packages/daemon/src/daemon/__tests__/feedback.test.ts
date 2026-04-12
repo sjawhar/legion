@@ -96,6 +96,17 @@ function validEvents(): FeedbackEvent[] {
       sessionsRecreated: 0,
       rssRestarts: 0,
     },
+    {
+      schemaVersion: 1,
+      timestamp: "2026-04-04T12:00:00.000Z",
+      legionId: "team/project",
+      event: "daemon.worker_reaped",
+      workerId: "test-repo-42-implement",
+      sessionId: "ses_abc123def456ABCDEFGHIJKLMN",
+      mode: "implement",
+      serveType: "shared",
+      reason: "session_missing",
+    },
   ];
 }
 
@@ -226,8 +237,8 @@ describe("FeedbackLogger", () => {
     await logger.flush();
 
     expect(writer.lines).toHaveLength(2);
-    expect((JSON.parse(writer.lines[0]) as FeedbackEvent).issueId).toBe("ENG-21");
-    expect((JSON.parse(writer.lines[1]) as FeedbackEvent).issueId).toBe("ENG-22");
+    expect((JSON.parse(writer.lines[0]) as { issueId?: string }).issueId).toBe("ENG-21");
+    expect((JSON.parse(writer.lines[1]) as { issueId?: string }).issueId).toBe("ENG-22");
     expect(writer.flushCalls).toBe(1);
   });
 
@@ -275,6 +286,29 @@ describe("FeedbackLogger", () => {
     expect(event.event).toBe("daemon.health_tick");
     if (event.event === "daemon.health_tick") {
       expect(event.workerCount).toBe(3);
+    }
+  });
+
+  it("writes daemon.worker_reaped events", async () => {
+    const writer = new RecordingWriter();
+    const logger = new FeedbackLogger(writer, "team/project");
+
+    logger.log({
+      event: "daemon.worker_reaped",
+      workerId: "test-repo-42-implement",
+      sessionId: "ses_abc123def456ABCDEFGHIJKLMN",
+      mode: "implement",
+      serveType: "shared",
+      reason: "session_missing",
+    });
+
+    await logger.flush();
+
+    const event = JSON.parse(writer.lines[0]) as FeedbackEvent;
+    expect(event.event).toBe("daemon.worker_reaped");
+    if (event.event === "daemon.worker_reaped") {
+      expect(event.workerId).toBe("test-repo-42-implement");
+      expect(event.reason).toBe("session_missing");
     }
   });
 });

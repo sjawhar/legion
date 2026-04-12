@@ -710,6 +710,69 @@ export async function startDaemon(
           }
         }
 
+        // Session liveness sweep — detect workers whose serve sessions have died (AC1-AC4)
+        // Only runs when serve is healthy and was NOT just restarted (AC3)
+        if (serveHealthy && !restartReason) {
+          let activeSessions: Set<string> | null = null;
+          try {
+            activeSessions = await resolvedDeps.adapter.listActiveSessions();
+          } catch (err) {
+            console.warn(
+              `[liveness] Failed to fetch active sessions (non-fatal, skipping sweep): ${err}`
+            );
+          }
+
+          if (activeSessions !== null) {
+            try {
+              const livenessState = await resolvedDeps.readStateFile(config.stateFilePath);
+              for (const worker of Object.values(livenessState.workers)) {
+                if (worker.status !== "running") continue;
+                if (activeSessions.has(worker.sessionId)) continue;
+
+                const workerMode = worker.id.split("-").pop() ?? "unknown";
+                const now = new Date().toISOString();
+                try {
+                  const patchRes = await resolvedDeps.fetch(
+                    `http://127.0.0.1:${config.daemonPort}/workers/${worker.id}`,
+                    {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        status: "dead",
+                        crashCount: worker.crashCount + 1,
+                        lastCrashAt: now,
+                      }),
+                    }
+                  );
+                  if (patchRes.ok) {
+                    feedbackLogger?.log({
+                      event: "daemon.worker_reaped",
+                      workerId: worker.id,
+                      sessionId: worker.sessionId,
+                      mode: workerMode,
+                      serveType: "shared",
+                      reason: "session_missing",
+                    });
+                    console.warn(
+                      `[liveness] Reaped worker ${worker.id}: session ${worker.sessionId} not found in serve`
+                    );
+                  } else {
+                    console.warn(
+                      `[liveness] PATCH to mark worker ${worker.id} dead returned ${patchRes.status}`
+                    );
+                  }
+                } catch (patchErr) {
+                  console.warn(
+                    `[liveness] Failed to mark worker ${worker.id} as dead: ${patchErr}`
+                  );
+                }
+              }
+            } catch (livenessErr) {
+              console.warn(`[liveness] Session liveness check failed (non-fatal): ${livenessErr}`);
+            }
+          }
+        }
+
         try {
           await indexManager.incrementalUpdate();
           indexIncrementalUpdates += 1;
