@@ -1838,6 +1838,189 @@ describe("daemon server", () => {
       // Session should NOT have been deleted
       expect(deleteSessionCalls).toEqual([]);
     });
+
+    it("cleans up Done issue workspace loaded from state file (Bug 1: repo field after restart)", async () => {
+      // Simulate daemon restart: pre-load state file with a worker that has repo field
+      const rmDirCalls: string[] = [];
+      const preloadedState = {
+        workers: {
+          "acme-widgets-47-implement": {
+            id: "acme-widgets-47-implement",
+            port: sharedServePort,
+            sessionId: computeSessionId(legionId, "acme-widgets-47", "implement"),
+            workspace:
+              "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-47",
+            startedAt: "2026-01-01T00:00:00.000Z",
+            status: "running" as const,
+            crashCount: 0,
+            lastCrashAt: null,
+            repo: "acme/widgets",
+            issueNumber: 47,
+          },
+        },
+        crashHistory: {},
+      };
+
+      await startTestServer({
+        paths,
+        state: preloadedState,
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      // Trigger cleanup with the issue marked as Done
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_restart",
+              content: {
+                number: 47,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/47",
+                type: "Issue",
+              },
+              status: "Done",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Worker should be cleaned up
+      const workersResponse = await requestJson("/workers");
+      expect((await workersResponse.json()) as WorkerEntry[]).toEqual([]);
+      // Workspace should have been removed using the repo field from state file
+      expect(rmDirCalls).toEqual([
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-47",
+      ]);
+    });
+
+    it("removes off-board workspaces via directory scan (Bug 2: no cleanup for removed issues)", async () => {
+      // Simulate 225+ workspaces for issues no longer on the board
+      const rmDirCalls: string[] = [];
+      const listedDirs: string[] = [];
+
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          listDir: async (dirPath: string) => {
+            listedDirs.push(dirPath);
+            // Return workspace dirs: one for an active worker, one for an off-board issue
+            return ["acme-widgets-48", "acme-widgets-999"];
+          },
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      // Create a worker for acme-widgets-48 (active, on board)
+      await createRepoWorker("acme-widgets-48");
+
+      // Trigger state collect with only acme-widgets-48 on the board (acme-widgets-999 is off-board)
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_active",
+              content: {
+                number: 48,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/48",
+                type: "Issue",
+              },
+              status: "In Progress",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // acme-widgets-48 worker should still exist (active)
+      const workersResponse = await requestJson("/workers");
+      const workers = (await workersResponse.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(1);
+      expect(workers[0]?.id).toBe("acme-widgets-48-implement");
+
+      // Directory scan should have been triggered
+      expect(listedDirs).toContain(
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000"
+      );
+
+      // Off-board workspace (acme-widgets-999) should have been removed
+      // Active worker workspace (acme-widgets-48) should NOT have been removed
+      expect(rmDirCalls).toEqual([
+        "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-999",
+      ]);
+    });
+
+    it("directory scan skips workspaces for issues still on the board", async () => {
+      const rmDirCalls: string[] = [];
+
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          listDir: async () => ["acme-widgets-50", "acme-widgets-51"],
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      // Both issues are on the board (one Done, one In Progress)
+      const response = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_done",
+              content: {
+                number: 50,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/50",
+                type: "Issue",
+              },
+              status: "Done",
+              labels: [],
+            },
+            {
+              id: "PVTI_inprog",
+              content: {
+                number: 51,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/51",
+                type: "Issue",
+              },
+              status: "In Progress",
+              labels: [],
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Neither workspace should be removed by directory scan (both are on the board)
+      // acme-widgets-50 might be removed by Done cleanup if it has a worker, but
+      // since no workers were created, rmDirCalls should be empty
+      expect(rmDirCalls).toEqual([]);
+    });
   });
 
   describe("POST /workers/:id/prompt", () => {

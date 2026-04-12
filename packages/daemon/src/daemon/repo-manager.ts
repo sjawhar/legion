@@ -18,6 +18,7 @@ export interface RepoManagerDeps {
   exists: (path: string) => Promise<boolean>;
   rmDir: (path: string) => Promise<void>;
   symlink: (target: string, linkPath: string) => Promise<void>;
+  listDir?: (path: string) => Promise<string[]>;
 }
 
 const defaultDeps: RepoManagerDeps = {
@@ -48,6 +49,18 @@ const defaultDeps: RepoManagerDeps = {
   symlink: async (target, linkPath) => {
     const { symlink } = await import("node:fs/promises");
     await symlink(target, linkPath);
+  },
+  listDir: async (p) => {
+    const { readdir } = await import("node:fs/promises");
+    try {
+      return await readdir(p, { encoding: "utf8" });
+    } catch (err) {
+      const error = err as NodeJS.ErrnoException;
+      if (error.code === "ENOENT") {
+        return [];
+      }
+      throw err;
+    }
   },
 };
 

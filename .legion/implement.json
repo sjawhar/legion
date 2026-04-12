@@ -1,4 +1,32 @@
 {
+  "filesChanged": [
+    "packages/daemon/src/daemon/schemas.ts",
+    "packages/daemon/src/daemon/repo-manager.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts"
+  ],
+  "trickyParts": [
+    "The early return 'if (doneIssueIds.length === 0) { return; }' had to be removed so the directory scan runs even when there are no Done issues — the first/second passes are no-ops when the set is empty",
+    "listDir made optional in RepoManagerDeps to avoid breaking all existing test fixtures that don't provide it",
+    "Workspace scanning uses shallow scan (direct children only) per workspace-scanning-patterns.md — never recurse into workspaces",
+    "basename(entry) used for issueId derivation per workspace-scanning-patterns.md"
+  ],
+  "deviations": [
+    "Bug 1 fix: The issue said 'one-line addition to serialization' but the actual fix was adding repo/issueNumber to WorkerEntrySchema explicitly. The passthrough() already preserved them at runtime, but explicit schema fields ensure proper typing and validation.",
+    "listDir added as optional (not required) to avoid breaking existing test fixtures"
+  ],
+  "openQuestions": [
+    "Should the directory scan also use the default deps (defaultDeps.listDir) when opts.repoManagerDeps is undefined? Currently it only runs when opts.repoManagerDeps?.listDir is provided.",
+    "The directory scan removes workspaces but does NOT call jj workspace forget — this is intentional since we don't know the repo for off-board workspaces. Is this acceptable?"
+  ],
+  "subPlanningNeeded": false,
+  "learningsInjected": [
+    "daemon/workspace-scanning-patterns.md"
+  ],
+  "learningsHelpful": [
+    "daemon/workspace-scanning-patterns.md"
+  ],
   "schemaVersion": 1,
-  "phase": "unknown"
+  "phase": "implement",
+  "completed": "2026-04-12T19:54:59.157Z"
 }

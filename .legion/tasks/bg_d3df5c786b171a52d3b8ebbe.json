@@ -1,0 +1,10 @@
+{
+  "id": "bg_d3df5c786b171a52d3b8ebbe",
+  "status": "pending",
+  "agent": "oracle",
+  "model": "anthropic/claude-opus-4-6",
+  "description": "Cross-family review of implementation",
+  "parentSessionID": "ses_27cc88a8bffeevlnmYN6LfobFI",
+  "createdAt": 1776023649015,
+  "sessionID": "ses_27cbdc505ffee8ZEfyE91jHKno"
+}
