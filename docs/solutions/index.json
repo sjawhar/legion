@@ -46,7 +46,8 @@
     ".opencode/skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
       "daemon/controller-lifecycle-separation.md",
-      "daemon/controller-observability.md"
+      "daemon/controller-observability.md",
+      "controller/skill-vs-state-machine-policy-boundary.md"
     ],
     ".opencode/skills/linear": ["integration-issues/linear-mcp-label-resolution.md"],
     ".opencode/skills": [
@@ -142,7 +143,8 @@
     "tag:implement": ["skill-patterns/worker-skill-failure-modes.md"],
     "tag:jj-workspaces": [
       "daemon/worker-directory-fix.md",
-      "daemon/worker-directory-resolution.md"
+      "daemon/worker-directory-resolution.md",
+      "best-practices/git-stash-jj-working-copy-interference.md"
     ],
     "tag:keyboard-navigation": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:labels": ["integration-issues/linear-mcp-label-resolution.md"],
@@ -206,14 +208,17 @@
     "tag:shared-serve": ["daemon/shared-serve-refactor.md", "daemon/shared-serve-retro.md"],
     "tag:skill-authoring": [
       "skill-patterns/parallel-subagent-background-execution.md",
-      "delegation/subagent-timeout-stall-prevention.md"
+      "delegation/subagent-timeout-stall-prevention.md",
+      "controller/skill-vs-state-machine-policy-boundary.md",
+      "best-practices/git-stash-jj-working-copy-interference.md"
     ],
     "tag:skills": ["skill-patterns/worker-skill-failure-modes.md"],
     "tag:stale-detection": ["delegation/delegation-hardening-retro.md"],
     "tag:state-file": ["architecture-patterns/shared-state-file-ownership.md"],
     "tag:state-machine": [
       "daemon/controller-observability.md",
-      "integration-issues/github-graphql-pr-draft-status.md"
+      "integration-issues/github-graphql-pr-draft-status.md",
+      "controller/skill-vs-state-machine-policy-boundary.md"
     ],
     "tag:state-management": ["daemon/controller-lifecycle-separation.md"],
     "tag:subagents": [
@@ -266,6 +271,11 @@
     "packages/daemon/src/daemon/runtime": ["daemon/session-liveness-detection-pattern.md"],
     "tag:health-tick": ["daemon/session-liveness-detection-pattern.md"],
     "tag:liveness": ["daemon/session-liveness-detection-pattern.md"],
-    "tag:dead-worker": ["daemon/session-liveness-detection-pattern.md"]
+    "tag:dead-worker": ["daemon/session-liveness-detection-pattern.md"],
+    "tag:jj": ["best-practices/git-stash-jj-working-copy-interference.md"],
+    "tag:footgun": ["best-practices/git-stash-jj-working-copy-interference.md"],
+    "tag:version-control": ["best-practices/git-stash-jj-working-copy-interference.md"],
+    "tag:policy": ["controller/skill-vs-state-machine-policy-boundary.md"],
+    "tag:decision-engine": ["controller/skill-vs-state-machine-policy-boundary.md"]
   }
 }
