@@ -1,28 +1,60 @@
 {
-  "verdict": "pass",
-  "summary": "All acceptance criteria verified. timeout_seconds parameter added to background_task tool, scheduleTimeout auto-cancels tasks after timeoutMs, worker skill docs updated with Never stall on subagents rule (timeout_seconds: 180s). 16 new unit tests pass. TypeScript type error in test file fixed (task.status cast). Pre-existing envoy/infra @pulumi/docker failures unrelated to this PR.",
+  "result": "pass",
+  "summary": "All 8 acceptance criteria verified. 38 daemon index tests pass (0 fail). 2 pre-existing envoy infra failures unrelated to this change. TypeScript type check clean. Biome lint clean.",
   "criteriaResults": [
     {
-      "criterion": "Set maximum wait time for Oracle/subagent responses",
-      "result": "pass",
-      "evidence": "timeout_seconds parameter added to background_task tool in delegation-tool.ts; timeoutMs stored in BackgroundTask type"
+      "id": "AC1",
+      "status": "pass",
+      "evidence": "Test: marks running worker as dead when session is missing from serve — PATCH called with status=dead, crashCount incremented"
     },
     {
-      "criterion": "Auto-skip on timeout with note",
-      "result": "pass",
-      "evidence": "scheduleTimeout() in background-manager.ts auto-fails task with Timed out after Xs error message and aborts the session"
+      "id": "AC2",
+      "status": "pass",
+      "evidence": "Single listActiveSessions() call per tick in index.ts:718, result reused for all workers in loop"
     },
     {
-      "criterion": "Continue with remaining workflow steps",
-      "result": "pass",
-      "evidence": "SKILL.md rule 7 and workflow files (implement.md, architect.md, test.md) all updated with timeout_seconds: 180 and explicit skip-on-timeout instructions"
+      "id": "AC3",
+      "status": "pass",
+      "evidence": "Tests: skips liveness sweep when serve is unhealthy, skips liveness sweep when serve was just restarted — listActiveSessionsCalls.toHaveLength(0)"
+    },
+    {
+      "id": "AC4",
+      "status": "pass",
+      "evidence": "Test: skips liveness sweep and marks no workers dead when listActiveSessions throws — patchCalls.toHaveLength(0)"
+    },
+    {
+      "id": "AC5",
+      "status": "pass",
+      "evidence": "Liveness check PATCHes /workers/:id with status=dead, crashCount+1, lastCrashAt. PATCH handler in server.ts:1230 updates crashHistory, calls detachWorkerFromEnvoy, persists state"
+    },
+    {
+      "id": "AC6",
+      "status": "pass",
+      "evidence": "feedbackLogger.log({event: daemon.worker_reaped, workerId, sessionId, mode, serveType, reason: session_missing}) at index.ts:749. Test in feedback.test.ts verifies event schema"
+    },
+    {
+      "id": "AC7",
+      "status": "n/a",
+      "evidence": "No role/multi-serve infrastructure exists in codebase. serveType hardcoded to shared which is correct for current architecture. AC7 is conditional (if role serves are configured)"
+    },
+    {
+      "id": "AC8",
+      "status": "pass",
+      "evidence": "listActiveSessions(): Promise<Set<string>> added to RuntimeAdapter interface (types.ts:37) and implemented in OpenCodeAdapter (opencode.ts:150) via client.session.status() bulk endpoint"
     }
   ],
-  "regressions": "None — 1281/1283 tests pass; 2 failures are pre-existing @pulumi/docker module-not-found errors in envoy/infra unrelated to this PR",
-  "fixesApplied": [
-    "Fixed TypeScript type error in finalize.test.ts line 282: cast task.status as string for toBe matcher compatibility"
+  "testStats": {
+    "total": 1283,
+    "pass": 1281,
+    "fail": 2,
+    "preExistingFailures": 2,
+    "newFailures": 0
+  },
+  "preExistingFailures": [
+    "packages/envoy/infra/__tests__/nats.test.ts — Cannot find module @pulumi/docker (pre-exists on main)",
+    "packages/envoy/infra/__tests__/services.test.ts — Cannot find module @pulumi/docker (pre-exists on main)"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T20:41:43.348Z"
+  "completed": "2026-04-12T19:50:40.259Z"
 }
