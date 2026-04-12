@@ -1,14 +1,19 @@
 {
-  "filesChanged": [".opencode/skills/legion-controller/SKILL.md"],
+  "filesChanged": [
+    "packages/daemon/src/state/decision.ts",
+    "packages/daemon/src/state/types.ts",
+    "packages/daemon/src/state/__tests__/decision.test.ts",
+    ".opencode/skills/legion-controller/SKILL.md"
+  ],
   "trickyParts": [
-    "git stash accidentally reverted changes mid-session — had to pop stash to restore; jj auto-snapshot didn't capture the edit because git stash ran first"
+    "The rebase_pr action appeared in two separate branches of decision.ts (hasWorkerDone path and no-worker-done path) — both needed updating",
+    "The retro-skip code block in SKILL.md had an if/elif/else structure where the CONFLICTING branch called update-branch with a fallback — replaced with direct resume_implementer dispatch",
+    "The ACTION_TO_MODE entry for rebase_pr was removed entirely since the action no longer exists"
   ],
-  "deviations": [
-    "Issue mentioned possibly updating decision.ts for retro-done gate, but the state machine already correctly gates merge behind Retro status via IssueStatus.RETRO + worker-done → dispatch_merger. No decision.ts change needed."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-12T21:53:40.351Z"
+  "completed": "2026-04-12T22:56:41.332Z"
 }

@@ -239,7 +239,7 @@ about what to do:
 | `skip` | `hasPr: true`, status: In Progress, `hasLiveWorker: true` | Live implementer still working on PR; wait for it to finish |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
 | `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
-| `rebase_pr` | `mergeableStatus: "conflicting"` | PR has conflicts; auto-rebase via GitHub update-branch API |
+| `resume_implementer_for_changes` (conflict) | `mergeableStatus: "conflicting"` | PR has conflicts; resume implementer to rebase and resolve |
 
 ### Routing by Action Intent
 
@@ -254,7 +254,7 @@ The state machine returns a `suggestedAction`. Route by prefix:
 | `add_` | Add label | Add the specified label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --add-label`) |
 | `remove_` | Remove label + retry | Remove label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --remove-label`), then re-evaluate |
 | `retry_` | Wait | Do nothing this iteration, re-check next loop |
-| `rebase_` | Auto-rebase PR branch | Use GitHub update-branch API, re-check next iteration |
+| `rebase_` | *(removed — conflicts route to `resume_implementer_for_changes`)* | N/A |
 | `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
 | `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
 
@@ -295,14 +295,10 @@ don't dispatch a worker, don't transition status. The next loop iteration will r
 which will retry the GitHub API call. If this persists across multiple iterations, investigate the
 GitHub API connectivity.
 
-**`rebase_pr`:** The PR has merge conflicts but CI checks may have passed (or conflicts may be causing
-CI failures). The state machine checks mergeability *before* CI status, so conflicts are resolved first.
-The controller should call GitHub's update-branch API:
-```bash
-gh api repos/$ISSUE_REPO/pulls/$PR_NUMBER/update-branch -X PUT
-```
-If the API fails (e.g., conflicts too severe for auto-rebase), fall back to
-`resume_implementer_for_changes` — the implementer will need to rebase manually.
+**`resume_implementer_for_changes` (conflict):** The PR has merge conflicts. The state machine returns
+`resume_implementer_for_changes` — the controller must resume the implementer worker to rebase and
+resolve conflicts. The controller MUST NOT call the GitHub update-branch API or push directly.
+The implementer's merge workflow already contains rebase logic for post-approval conflicts.
 
 ### Implement → Testing → Review Handoff
 
@@ -448,9 +444,14 @@ The controller MUST NOT:
 - Run `jj` commands (version control is worker work)
 - Edit files or write code
 - Run `gh pr merge` directly — **EVER**. Always dispatch a merge worker. This is non-negotiable.
+- Run `jj git push` directly (dispatch a worker)
 - Run tests (dispatch a tester)
 
 The controller dispatches workers. Workers do the work. If you are about to touch code, branches, or PRs directly — stop and dispatch the appropriate worker instead.
+
+**Merge routing rule (no exceptions):**
+- **Pre-approval conflicts** (review changes requested, CI failing, bot comments) → resume the implementer worker. Never merge or push to resolve conflicts yourself.
+- **Post-approval** (all Pre-Merge Gate conditions met, user approved) → dispatch a merger worker. Never run `gh pr merge` or `jj git push` yourself.
 
 ### CI Gates (Enforced by Decision Engine)
 
@@ -522,7 +523,7 @@ Before requesting merge approval, verify ALL conditions:
 | `mergeable` value | Action |
 |-------------------|--------|
 | `MERGEABLE` | Proceed with approval flow |
-| `CONFLICTING` | Auto-rebase via existing pattern: `gh api repos/$ISSUE_REPO/pulls/$PR_NUMBER/update-branch -X PUT`. If successful, defer to next loop (CI re-runs). If failed, `resume_implementer_for_changes`. |
+| `CONFLICTING` | Resume the implementer: `legion prompt "$ISSUE_IDENTIFIER" --mode implement "...PR has merge conflicts. Rebase onto main and resolve conflicts."`. Do NOT call the GitHub update-branch API directly. |
 | `UNKNOWN` / null / API failure | Defer to next loop. Do NOT add `needs-approval`. |
 
 **Resolving PR number:** `PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $ISSUE_REPO)`
@@ -743,6 +744,8 @@ Use resume for: user feedback relay, PR changes requested, retro after review ap
 Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
 
 Always dispatch retro after review approval. Do not check routing hints, `skipRetro` flags, or any other conditions — retro runs unconditionally.
+
+**Use skill invocation for retro too:**
 
 ```bash
 # GitHub:

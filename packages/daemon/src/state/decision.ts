@@ -113,7 +113,7 @@ export function suggestAction(
           return "retry_pr_check";
         }
         if (mergeableStatus === MergeableStatus.CONFLICTING) {
-          return "rebase_pr";
+          return "resume_implementer_for_changes";
         }
         if (ciStatus === CiStatus.FAILING) {
           return "resume_implementer_for_ci_failure";
@@ -127,7 +127,7 @@ export function suggestAction(
         return "skip";
       }
       if (hasPr && mergeableStatus === MergeableStatus.CONFLICTING) {
-        return "rebase_pr";
+        return "resume_implementer_for_changes";
       }
       if (hasPr && ciStatus === CiStatus.FAILING) {
         return "resume_implementer_for_ci_failure";
@@ -176,7 +176,6 @@ export const ACTION_TO_MODE: Record<ActionType, WorkerModeLiteral> = {
   dispatch_tester: WorkerMode.TEST,
   transition_to_testing: WorkerMode.TEST,
   resume_implementer_for_test_failure: WorkerMode.IMPLEMENT,
-  rebase_pr: WorkerMode.REVIEW,
 };
 
 /**
