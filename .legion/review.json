@@ -1,4 +1,10 @@
 {
+  "verdict": "approved",
+  "pr": "https://github.com/sjawhar/legion/pull/462",
+  "summary": "PR approved. All 4 requirements met. OIDC pattern matches reference (release-envoy-and-plugin.yaml). CI green. No blocking issues.",
+  "findings": [],
+  "concerns": [],
   "schemaVersion": 1,
-  "phase": "unknown"
+  "phase": "review",
+  "completed": "2026-04-12T20:37:58.033Z"
 }
