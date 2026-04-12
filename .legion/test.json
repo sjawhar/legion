@@ -1,24 +1,18 @@
 {
-  "passed": 8,
+  "passed": 5,
   "failed": 0,
   "failures": [],
-  "documentationFeedback": "No README updates. CLI --help adequate. PR body clear. No docs on JSONL format or schema versioning.",
-  "observations": [
-    "P3: Human report omits per-learning injected/helpful/ratio stats (data only in --json)",
-    "P3: JSON disposition names use internal form (accepted/needs_review/archived/rejected) not spec form (promote/review/stale/keep)",
-    "P3: Malformed handoff JSON in workspace .legion/ dirs prints stack trace to stderr, not captured in report warnings",
-    "P3: canonicalizeLearningPath does not handle ./docs/solutions/ or absolute path variants",
-    "P3: generatedAt changes between idempotent runs (cosmetic)"
-  ],
+  "documentationFeedback": "PR body clearly describes the two-layer approach. No public docs needed — changes are internal agent skill files. Controller SKILL.md inline documentation is clear and actionable.",
+  "observations": [],
   "learningsInjected": [
-    "daemon/handoff-schema-migration-patterns.md",
-    "task-index-patterns.md",
+    "skill-patterns/merge-retry-race-condition-pattern.md",
+    "integration-patterns/controller-worker-protocol.md",
     "skill-patterns/cross-cutting-workflow-concerns.md"
   ],
   "learningsHelpful": [
-    "daemon/handoff-schema-migration-patterns.md"
+    "skill-patterns/merge-retry-race-condition-pattern.md"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-11T22:54:15.691Z"
+  "completed": "2026-04-12T13:33:54.605Z"
 }
