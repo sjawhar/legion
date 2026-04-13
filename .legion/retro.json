@@ -1,10 +1,10 @@
 {
   "skipped": false,
   "docsCreated": [
-    "docs/solutions/testing/mock-envoy-server-pattern.md",
-    "docs/solutions/testing/call-site-audit-for-test-isolation.md"
+    "docs/solutions/testing/async-fire-and-forget-polling-pattern.md",
+    "docs/solutions/delegation/model-fallback-implementation-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-13T17:29:20.204Z"
+  "completed": "2026-04-13T20:35:29.848Z"
 }
