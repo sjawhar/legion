@@ -1,4 +1,5 @@
 import type { PluginInput } from "@opencode-ai/plugin";
+import type { SpawnLimitsConfig } from "../config/index";
 import {
   registerSubagentSession,
   unregisterSubagentSession,
@@ -21,10 +22,78 @@ export class BackgroundTaskManager {
   private timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private client: OpencodeClient;
   private directory: string;
+  private taskDepths = new Map<string, number>();
+  private rootDescendantCounts = new Map<string, number>();
+  private spawnLimits: Required<SpawnLimitsConfig>;
 
-  constructor(ctx: PluginInput) {
+  constructor(ctx: PluginInput, spawnLimits?: SpawnLimitsConfig) {
     this.client = ctx.client;
     this.directory = ctx.directory;
+    this.spawnLimits = {
+      maxDepth: spawnLimits?.maxDepth ?? 5,
+      maxDescendants: spawnLimits?.maxDescendants ?? 20,
+    };
+  }
+
+  /**
+   * Resolve spawn context for a new task.
+   * Returns { depth, rootSessionID } based on parent's tracked depth.
+   * Orphan tasks (unknown parent) are treated as roots (depth=0).
+   * MUST be called synchronously before any await to prevent race conditions.
+   */
+  private resolveSpawnContext(parentSessionId?: string): {
+    depth: number;
+    rootSessionID: string | undefined;
+  } {
+    if (!parentSessionId) {
+      return { depth: 0, rootSessionID: undefined };
+    }
+    const parentDepth = this.taskDepths.get(parentSessionId);
+    if (parentDepth === undefined) {
+      // Orphan: parent not tracked (unknown or from different manager instance)
+      return { depth: 0, rootSessionID: undefined };
+    }
+    // Find the parent task to get its rootSessionID
+    const parentTaskId = this.tasksBySessionId.get(parentSessionId);
+    const parentTask = parentTaskId ? this.tasks.get(parentTaskId) : undefined;
+    const rootSessionID = parentTask?.rootSessionID ?? parentSessionId;
+    return { depth: parentDepth + 1, rootSessionID };
+  }
+
+  /**
+   * Validate spawn limits synchronously. Throws if limits are exceeded.
+   * Increments descendant counter atomically before any await.
+   * Returns a rollback function to undo the counter increment on failure.
+   * MUST be called synchronously before any await to prevent race conditions.
+   */
+  private validateAndReserveSpawn(depth: number, rootSessionID: string | undefined): () => void {
+    // Check depth limit
+    if (depth >= this.spawnLimits.maxDepth) {
+      throw new Error(
+        `Spawn rejected: max depth ${this.spawnLimits.maxDepth} reached (current depth: ${depth})`
+      );
+    }
+
+    // Check descendant limit for non-root tasks
+    if (rootSessionID !== undefined) {
+      const currentCount = this.rootDescendantCounts.get(rootSessionID) ?? 0;
+      if (currentCount >= this.spawnLimits.maxDescendants) {
+        throw new Error(
+          `Spawn rejected: max descendants ${this.spawnLimits.maxDescendants} reached for root session ${rootSessionID}`
+        );
+      }
+      // Atomically increment before any await
+      this.rootDescendantCounts.set(rootSessionID, currentCount + 1);
+      return () => {
+        // Rollback: decrement on failure
+        const count = this.rootDescendantCounts.get(rootSessionID) ?? 0;
+        if (count > 0) {
+          this.rootDescendantCounts.set(rootSessionID, count - 1);
+        }
+      };
+    }
+
+    return () => {};
   }
 
   /**
@@ -55,6 +124,20 @@ export class BackgroundTaskManager {
       this.tasks.set(task.id, task);
       // Don't index in tasksBySessionId — rehydrated tasks are all terminal
       // (completed/failed/cancelled) and shouldn't trigger todoContinuationEnforcer
+
+      // Restore depth tracking for rehydrated tasks so child spawns resolve correctly
+      if (task.sessionID !== undefined && task.depth !== undefined) {
+        this.taskDepths.set(task.sessionID, task.depth);
+      }
+      // Restore descendant counts for root tasks
+      if (
+        task.sessionID !== undefined &&
+        task.rootSessionID !== undefined &&
+        task.rootSessionID !== task.sessionID
+      ) {
+        const rootCount = this.rootDescendantCounts.get(task.rootSessionID) ?? 0;
+        this.rootDescendantCounts.set(task.rootSessionID, rootCount + 1);
+      }
     }
   }
 
@@ -64,6 +147,12 @@ export class BackgroundTaskManager {
    * then starts the prompt in background.
    */
   async launch(opts: LaunchOptions): Promise<BackgroundTask> {
+    // Resolve spawn context synchronously before any await (prevents race window)
+    const { depth, rootSessionID } = this.resolveSpawnContext(opts.parentSessionId);
+
+    // Validate limits synchronously and reserve slot (throws on rejection)
+    const rollback = this.validateAndReserveSpawn(depth, rootSessionID);
+
     const task: BackgroundTask = {
       id: generateTaskId(),
       status: "pending",
@@ -71,6 +160,7 @@ export class BackgroundTaskManager {
       model: opts.model ?? "anthropic/claude-sonnet-4-20250514",
       description: opts.description,
       parentSessionID: opts.parentSessionId,
+      depth,
       createdAt: Date.now(),
     };
 
@@ -90,7 +180,17 @@ export class BackgroundTaskManager {
       }
 
       task.sessionID = session.data.id;
+      task.rootSessionID = rootSessionID ?? session.data.id;
       task.timeoutMs = opts.timeoutMs;
+
+      // Track depth by sessionID for child spawn resolution
+      this.taskDepths.set(session.data.id, depth);
+
+      // If this is a root task, initialize its descendant counter
+      if (rootSessionID === undefined) {
+        this.rootDescendantCounts.set(session.data.id, 0);
+      }
+
       this.tasksBySessionId.set(session.data.id, task.id);
       registerSubagentSession(session.data.id);
 
@@ -104,6 +204,12 @@ export class BackgroundTaskManager {
 
       this.startPrompt(task, opts).catch(() => {});
     } catch (err) {
+      rollback();
+      // Clean up taskDepths if we managed to set it before the error
+      if (task.sessionID) {
+        this.taskDepths.delete(task.sessionID);
+        this.rootDescendantCounts.delete(task.sessionID);
+      }
       await this.finalize(task, "failed", {
         error: err instanceof Error ? err.message : String(err),
       });
