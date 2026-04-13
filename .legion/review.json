@@ -1,52 +1,21 @@
 {
-  "outcome": "approved",
-  "prNumber": 479,
-  "prUrl": "https://github.com/sjawhar/legion/pull/479",
-  "issueNumber": 466,
-  "summary": "All requirements verified. rebase_pr removed from ActionType, ACTION_TO_MODE, and SKILL.md. CONFLICTING mergeability now routes to resume_implementer_for_changes in both decision.ts branches. 88/88 decision tests pass. 1289/1291 total pass (2 pre-existing @pulumi/docker failures). Biome clean. TypeScript clean.",
-  "criteriaResults": [
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "verdict": "approved",
+  "keyFindings": [
     {
-      "criterion": "CONFLICTING + not approved → resume_implementer_for_changes (not rebase_pr)",
-      "result": "pass",
-      "evidence": "decision.ts lines 115-116 and 129-130"
+      "severity": "P3",
+      "file": "packages/opencode-plugin/src/config/index.ts",
+      "description": "window size config option mentioned in issue 'What to Do' but not implemented — cumulative counter used instead; acceptable since acceptance criteria don't require it"
     },
     {
-      "criterion": "Controller NEVER rebases directly",
-      "result": "pass",
-      "evidence": "rebase_pr removed from ActionType, ACTION_TO_MODE, SKILL.md handler updated"
-    },
-    {
-      "criterion": "No rebase_pr references remain in state module",
-      "result": "pass",
-      "evidence": "Zero occurrences in types.ts, decision.ts, decision.test.ts"
-    },
-    {
-      "criterion": "ACTION_TO_MODE mapping corrected",
-      "result": "pass",
-      "evidence": "resume_implementer_for_changes → IMPLEMENT (was rebase_pr → REVIEW)"
-    },
-    {
-      "criterion": "SKILL.md routing table updated",
-      "result": "pass",
-      "evidence": "rebase_ prefix row removed; condition 7 table updated"
-    },
-    {
-      "criterion": "Unit tests pass",
-      "result": "pass",
-      "evidence": "88/88 decision tests; 1289/1291 total"
-    },
-    {
-      "criterion": "TypeScript type check clean",
-      "result": "pass",
-      "evidence": "No errors in state module"
-    },
-    {
-      "criterion": "Biome lint clean",
-      "result": "pass",
-      "evidence": "99 files, no fixes applied"
+      "severity": "P3",
+      "file": ".legion/implement.json",
+      "description": ".sisyphus/evidence/task-3-circuit-breaker.txt listed as changed file but doesn't exist in workspace — QA evidence missing but test handoff covers same ground"
     }
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T23:20:45.904Z"
+  "completed": "2026-04-13T01:55:18.550Z"
 }

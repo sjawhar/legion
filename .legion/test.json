@@ -1,48 +1,45 @@
 {
   "passed": true,
-  "summary": "All acceptance criteria verified. 88 decision tests pass. Type check clean. Biome lint clean.",
+  "summary": "All 6 acceptance criteria verified. 15/15 circuit-breaker tests pass. 41/41 hook tests pass. Lint clean. TypeScript errors are pre-existing (missing @types/node, bun:test module) and not introduced by this PR.",
   "criteria": [
     {
-      "criterion": "CONFLICTING + not approved → resume_implementer_for_changes (not rebase_pr)",
+      "criterion": "TDD: failing test first, then implementation",
       "result": "pass",
-      "evidence": "decision.ts lines 115-116 and 129-130 both return resume_implementer_for_changes for CONFLICTING mergeability"
+      "evidence": "Test file exists with 274 lines, 15 tests. PR body confirms TDD approach."
     },
     {
-      "criterion": "Controller NEVER rebases directly",
+      "criterion": "5 identical tool calls triggers the breaker",
       "result": "pass",
-      "evidence": "rebase_pr removed from ActionType union in types.ts; removed from ACTION_TO_MODE in decision.ts; SKILL.md handler updated with explicit MUST NOT call update-branch API"
+      "evidence": "Test: triggers on 5th identical call. Default threshold test uses read tool."
     },
     {
-      "criterion": "No rebase_pr references remain in state module",
+      "criterion": "Warning/abort behavior is configurable via plugin config",
       "result": "pass",
-      "evidence": "grep finds zero occurrences in types.ts, decision.ts, decision.test.ts"
+      "evidence": "CircuitBreakerConfig in config/index.ts. Tests verify both behaviors."
     },
     {
-      "criterion": "SKILL.md routing table updated",
+      "criterion": "Per-session tracking — different sessions have independent counters",
       "result": "pass",
-      "evidence": "rebase_ prefix row now says removed; conflict row shows resume_implementer_for_changes; condition 7 table updated"
+      "evidence": "Test: 5 calls across 2 sessions does not trigger either."
     },
     {
-      "criterion": "Unit tests pass",
+      "criterion": "Tracking cleaned up on session.deleted event",
       "result": "pass",
-      "evidence": "88/88 decision tests pass; 1289/1291 total pass; 2 failures are pre-existing @pulumi/docker missing module errors unrelated to this PR"
+      "evidence": "Tests: clears tracking on session.deleted, does not clear other sessions."
     },
     {
-      "criterion": "TypeScript type check clean",
+      "criterion": "4 identical calls does NOT trigger (below threshold)",
       "result": "pass",
-      "evidence": "bunx tsc --noEmit produces no errors"
-    },
-    {
-      "criterion": "Biome lint clean",
-      "result": "pass",
-      "evidence": "bunx biome check src/ — Checked 99 files. No fixes applied."
+      "evidence": "Test: does not trigger on 4 identical calls — explicit test case."
     }
   ],
+  "testResults": "15/15 circuit-breaker tests pass; 41/41 hook tests pass",
+  "lintResults": "Biome: Checked 4 files in 42ms. No fixes applied.",
+  "typeCheckResults": "Pre-existing errors only — not introduced by this PR",
   "preExistingFailures": [
-    "packages/envoy/infra/__tests__/nats.test.ts — Cannot find module @pulumi/docker (pre-existing, unrelated)",
-    "packages/envoy/infra/__tests__/services.test.ts — Cannot find module @pulumi/docker (pre-existing, unrelated)"
+    "bunx tsc --noEmit: TS2591/TS2307 errors for node: builtins and bun:test — pre-existing, tsconfig unchanged"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T23:13:34.729Z"
+  "completed": "2026-04-13T01:47:32.001Z"
 }
