@@ -336,12 +336,13 @@ func main() {
 			Dir       string   `json:"dir"`
 			Topics    []string `json:"topics"`
 			Port      int      `json:"port"`
-		Title     string   `json:"title"`
+			Title     string   `json:"title"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		log.Printf("listener subscribe session=%s topics=%v port=%d dir=%s", body.SessionID, body.Topics, body.Port, body.Dir)
 		d := deps.Load()
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
@@ -378,6 +379,7 @@ func main() {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		log.Printf("listener unsubscribe session=%s topics=%v", body.SessionID, body.Topics)
 		d := deps.Load()
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
