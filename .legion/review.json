@@ -1,62 +1,42 @@
 {
-  "outcome": "approved",
-  "prNumber": 463,
-  "prUrl": "https://github.com/sjawhar/legion/pull/463",
-  "issueNumber": 451,
-  "summary": "All requirements verified. Merge conflict resolved — PR is now CLEAN/MERGEABLE. 7/7 code-verifiable acceptance criteria pass. 1289/1291 tests pass (2 pre-existing @pulumi/docker failures). Biome clean. TypeScript clean.",
+  "outcome": "changes_requested",
+  "prNumber": 485,
+  "prUrl": "https://github.com/sjawhar/legion/pull/485",
+  "issueNumber": 469,
+  "summary": "CRITICAL: Implementation is missing. PR 485 contains only documentation changes. The branch is 1 commit ahead of main with zero implementation code. state-delta.ts has no trackedIssueIds param, server.ts has no tracking endpoints, cmdPoll still calls fetch-and-collect. Implement worker crashed twice. Implementation must be written from scratch per docs/plans/2026-04-12-tracked-issue-notifications.md.",
   "criteriaResults": [
     {
-      "criterion": "3 permission sets: Administrator, Developer, ReadOnly",
-      "result": "pass",
-      "evidence": "index.ts lines 30, 44, 75"
+      "criterion": "computeStateDelta has optional trackedIssueIds param",
+      "result": "fail",
+      "evidence": "state-delta.ts on branch identical to main"
     },
     {
-      "criterion": "Administrator has AdministratorAccess managed policy",
-      "result": "pass",
-      "evidence": "index.ts line 40"
+      "criterion": "server.ts tracking endpoints GET/POST/DELETE /state/track",
+      "result": "fail",
+      "evidence": "no tracking endpoints in server.ts on branch"
     },
     {
-      "criterion": "Developer has PowerUserAccess + SSM inline policy (StartSession, TerminateSession, ResumeSession)",
-      "result": "pass",
-      "evidence": "index.ts lines 54, 67"
+      "criterion": "Auto-track/untrack on worker dispatch/cleanup",
+      "result": "fail",
+      "evidence": "no auto-track logic in server.ts"
     },
     {
-      "criterion": "ReadOnly has ReadOnlyAccess managed policy",
-      "result": "pass",
-      "evidence": "index.ts line 85"
+      "criterion": "GET /state/materialized endpoint",
+      "result": "fail",
+      "evidence": "no materialized endpoint in server.ts"
     },
     {
-      "criterion": "2 groups: Admins, Engineers",
-      "result": "pass",
-      "evidence": "index.ts lines 92, 98"
+      "criterion": "cmdPoll calls GET /state/materialized",
+      "result": "fail",
+      "evidence": "cli/index.ts still calls fetch-and-collect"
     },
     {
-      "criterion": "At least one user added to each group via GroupMembership",
-      "result": "pass",
-      "evidence": "index.ts lines 113-158"
-    },
-    {
-      "criterion": "Account assignments link groups to accounts with correct permission sets",
-      "result": "pass",
-      "evidence": "index.ts lines 165-204"
-    },
-    {
-      "criterion": "pulumi up -s prod succeeds",
-      "result": "skip",
-      "evidence": "Cannot verify in CI"
-    },
-    {
-      "criterion": "aws sso login --profile dev works",
-      "result": "skip",
-      "evidence": "Cannot verify in CI"
-    },
-    {
-      "criterion": "aws sts get-caller-identity --profile dev returns expected ARN",
-      "result": "skip",
-      "evidence": "Cannot verify in CI"
+      "criterion": "Tests for all new functionality",
+      "result": "fail",
+      "evidence": "test files identical to main"
     }
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T01:11:42.762Z"
+  "completed": "2026-04-13T00:43:26.561Z"
 }
