@@ -1364,6 +1364,16 @@ export async function cmdPoll(team: string, opts: { json: boolean }): Promise<vo
   } else {
     console.log("No issues found.");
   }
+
+  const newIssues = data.newIssues ?? [];
+  if (newIssues.length > 0) {
+    console.log(`\nNEW (${newIssues.length}):`);
+    for (const entry of newIssues) {
+      const title = data.titles?.[entry.issueId];
+      const titlePart = title ? `  "${title}"` : "";
+      console.log(`  ${entry.issueId}  ${entry.state.status}${titlePart}`);
+    }
+  }
 }
 
 export const pollCommand = defineCommand({
