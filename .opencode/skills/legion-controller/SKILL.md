@@ -737,6 +737,51 @@ If multiple workers exist for the same issue (different modes), specify mode wit
 
 Use resume for: user feedback relay, PR changes requested, retro after review approval.
 
+### Advance (Preferred for Normal Flow)
+
+`legion advance` is a high-level command that reads `suggestedAction` from the daemon's
+state cache and executes it — dispatching workers, transitioning issue status, or resuming
+workers as appropriate. It replaces manual dispatch + transition sequences for normal flow:
+
+```bash
+# Advance an issue to its next stage (reads suggestedAction from daemon cache)
+legion advance "$ISSUE_IDENTIFIER"
+
+# Force a specific stage (equivalent to dispatch --force)
+legion advance "$ISSUE_IDENTIFIER" --stage implement
+
+# See what would happen without doing it
+legion advance "$ISSUE_IDENTIFIER" --dry-run
+```
+
+**`advance` handles:**
+- `dispatch_*` actions → dispatches worker with correct mode and prompt
+- `transition_to_*` actions → updates issue status in tracker + removes `worker-done` label
+- `resume_*` actions → dispatches worker with appropriate resume prompt
+- `skip`/`investigate`/`retry` → returns actionable message without executing
+
+**When to use `advance` vs manual `dispatch`:**
+- Use `advance` for normal lifecycle progression (it handles the full action mapping)
+- Use `dispatch` directly when you need custom prompts, env vars, or workspace overrides
+
+#### Auto-Progression
+
+When `LEGION_AUTO_ADVANCE=true` is set (in `legion.yaml` as `auto_advance: true`):
+- The daemon automatically dispatches the next worker when the current one finishes
+- After each state collection (60s health tick), ready issues are auto-advanced
+- The controller's role shifts to exception handling, triage, and priority management
+- Check `LEGION_AUTO_ADVANCE` env var before manual dispatch — skip if auto-advance handles it
+
+```bash
+# In the loop body, check auto-advance before manual dispatch:
+if [ "$LEGION_AUTO_ADVANCE" = "true" ]; then
+  # Only handle exceptions — auto-advance handles normal flow
+else
+  # Use legion advance for each actionable issue
+  legion advance "$ISSUE_IDENTIFIER"
+fi
+```
+
 ### Retro
 
 **The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions.**

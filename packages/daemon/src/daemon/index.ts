@@ -478,6 +478,8 @@ export async function startDaemon(
         indexManager,
         feedbackLogger,
         envoyUrl: config.envoyUrl,
+        issueBackend: config.issueBackend,
+        autoAdvance: config.autoAdvance,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);

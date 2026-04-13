@@ -1,15 +1,18 @@
 import { basename, isAbsolute, join } from "node:path";
 import type { CodebaseIndexResponse } from "../index/types";
 import { getBackend, isBackendName } from "../state/backends/index";
-import { buildCollectedState, canDispatchMode } from "../state/decision";
+import type { BackendName } from "../state/backends/issue-tracker";
+import { ACTION_TO_MODE, buildCollectedState, canDispatchMode } from "../state/decision";
 import { enrichParsedIssues } from "../state/fetch";
 import { fetchGitHubProjectItems } from "../state/github-fetch";
 import {
+  type ActionType,
   CollectedState,
   computeSessionId,
   IssueState,
   type IssueStateDict,
   IssueStatus,
+  type IssueStatusLiteral,
   SESSION_ID_PATTERN,
   WorkerMode,
   type WorkerModeLiteral,
@@ -70,6 +73,10 @@ export interface ServerOptions {
   feedbackLogger?: FeedbackLogger;
   /** Injectable fetcher for testing — defaults to fetchGitHubProjectItems */
   fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
+  /** Issue tracker backend name (needed for advance endpoint mutations) */
+  issueBackend?: "linear" | "github";
+  /** Auto-advance: dispatch next worker when current one finishes */
+  autoAdvance?: boolean;
 }
 
 interface ErrorResponse {
@@ -1674,6 +1681,276 @@ export function startServer(opts: ServerOptions): {
           return jsonResponse({ issues, titles, newIssues });
         }
 
+        // POST /state/advance — advance an issue to its next lifecycle stage
+        if (method === "POST" && url.pathname === "/state/advance") {
+          await stateLoaded;
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          if (typeof payload.issueId !== "string" || !payload.issueId) {
+            return badRequest("missing_issue_id");
+          }
+
+          const issueId = payload.issueId.toLowerCase();
+          const cachedState = issueStateCache.get(issueId);
+
+          if (!cachedState) {
+            return jsonResponse(
+              { error: "issue_not_in_cache", message: "Run 'legion poll <team>' first" },
+              412
+            );
+          }
+
+          // If --stage was provided, delegate to POST /workers with force=true
+          if (typeof payload.stage === "string") {
+            const mode = payload.stage as WorkerModeLiteral;
+            const repo = cachedState.source
+              ? `${cachedState.source.owner}/${cachedState.source.repo}`
+              : undefined;
+            const backendName = opts.issueBackend ?? "github";
+            const defaultPrompt = repo
+              ? `Invoke the /legion-worker skill for ${mode} mode for ${issueId} (${backendName} backend, repo: ${repo}). Before starting, check for project-specific skills that may be relevant to this work.`
+              : `Invoke the /legion-worker skill for ${mode} mode for ${issueId}`;
+            if (!server) {
+              return serverError("server_not_started");
+            }
+            const dispatchResponse = await fetch(`http://127.0.0.1:${server.port}/workers`, {
+              method: "POST",
+              headers: JSON_HEADERS,
+              body: JSON.stringify({
+                issueId,
+                mode,
+                force: true,
+                ...(repo ? { repo } : {}),
+                prompt: defaultPrompt,
+              }),
+            });
+            const dispatchResult = (await dispatchResponse.json()) as Record<string, unknown>;
+            if (!dispatchResponse.ok) {
+              return jsonResponse(
+                { action: `dispatch_${mode}`, executed: "error", ...dispatchResult },
+                dispatchResponse.status
+              );
+            }
+            return jsonResponse({
+              action: `dispatch_${mode}`,
+              executed: "dispatched",
+              workerId: dispatchResult.id,
+              sessionId: dispatchResult.sessionId,
+              port: dispatchResult.port,
+            });
+          }
+
+          const action = cachedState.suggestedAction;
+
+          // Skip/retry/investigate — return without executing
+          if (action === "skip" || action === "retry_pr_check" || action === "retry_ci_check") {
+            return jsonResponse({
+              action,
+              executed: "skipped",
+              reason: `Issue is not ready to advance: ${action}`,
+            });
+          }
+          if (action === "investigate_no_pr") {
+            return jsonResponse({
+              action,
+              executed: "error",
+              reason: "Issue has worker-done but no PR — needs investigation",
+            });
+          }
+          if (action === "add_needs_approval") {
+            return jsonResponse({
+              action,
+              executed: "skipped",
+              reason: "Issue needs approval before advancing",
+            });
+          }
+
+          // Dispatch and resume actions — dispatch via internal POST /workers
+          if (
+            action.startsWith("dispatch_") ||
+            action.startsWith("resume_") ||
+            action === "relay_user_feedback" ||
+            action === "remove_worker_active_and_redispatch"
+          ) {
+            // Check for live worker before dispatch
+            if (cachedState.hasLiveWorker) {
+              const mode = ACTION_TO_MODE[action];
+              return jsonResponse(
+                {
+                  error: "worker_already_running",
+                  action,
+                  workerId: `${issueId}-${mode}`,
+                },
+                409
+              );
+            }
+
+            const mode = ACTION_TO_MODE[action];
+            const repo = cachedState.source
+              ? `${cachedState.source.owner}/${cachedState.source.repo}`
+              : undefined;
+            const backendName = opts.issueBackend ?? "github";
+            const repoSuffix = repo ? ` (${backendName} backend, repo: ${repo})` : "";
+            let prompt: string;
+
+            switch (action) {
+              case "resume_implementer_for_changes":
+                prompt = `Invoke the /legion-worker skill for implement mode. The reviewer has requested changes on your PR — check the review comments and address them${repoSuffix}.`;
+                break;
+              case "resume_implementer_for_retro":
+              case "dispatch_implementer_for_retro":
+                prompt = "/legion-retro";
+                break;
+              case "resume_implementer_for_ci_failure":
+                prompt = `Invoke the /legion-worker skill for implement mode. CI is failing on your PR — check the failures and fix${repoSuffix}.`;
+                break;
+              case "resume_implementer_for_test_failure":
+                prompt = `Invoke the /legion-worker skill for implement mode. The tester found issues — check the test feedback and fix${repoSuffix}.`;
+                break;
+              default:
+                prompt = `Invoke the /legion-worker skill for ${mode} mode for ${issueId}${repoSuffix}. Before starting, check for project-specific skills that may be relevant to this work.`;
+                break;
+            }
+
+            if (!server) {
+              return serverError("server_not_started");
+            }
+            const dispatchResponse = await fetch(`http://127.0.0.1:${server.port}/workers`, {
+              method: "POST",
+              headers: JSON_HEADERS,
+              body: JSON.stringify({
+                issueId,
+                mode,
+                force: true,
+                ...(repo ? { repo } : {}),
+                prompt,
+              }),
+            });
+            const dispatchResult = (await dispatchResponse.json()) as Record<string, unknown>;
+
+            if (!dispatchResponse.ok) {
+              return jsonResponse(
+                { action, executed: "error", ...dispatchResult },
+                dispatchResponse.status
+              );
+            }
+            return jsonResponse({
+              action,
+              executed: "dispatched",
+              workerId: dispatchResult.id,
+              sessionId: dispatchResult.sessionId,
+              port: dispatchResult.port,
+            });
+          }
+
+          // Transition actions — update issue status in tracker
+          if (action.startsWith("transition_to_")) {
+            const TRANSITION_STATUS: Partial<Record<ActionType, IssueStatusLiteral>> = {
+              transition_to_todo: "Todo",
+              transition_to_in_progress: "In Progress",
+              transition_to_testing: "Testing",
+              transition_to_needs_review: "Needs Review",
+              transition_to_retro: "Retro",
+              transition_to_done: "Done",
+            };
+            const targetStatus = TRANSITION_STATUS[action];
+            if (!targetStatus) {
+              return jsonResponse(
+                { action, executed: "error", reason: `Unknown transition action: ${action}` },
+                500
+              );
+            }
+
+            const backendName = (opts.issueBackend ?? "github") as BackendName;
+            const tracker = getBackend(backendName);
+            try {
+              if (tracker.transitionIssue) {
+                await tracker.transitionIssue(issueId, targetStatus);
+              }
+              if (tracker.removeLabel) {
+                await tracker.removeLabel(issueId, "worker-done");
+              }
+            } catch (err) {
+              return jsonResponse(
+                {
+                  action,
+                  executed: "error",
+                  reason: `Transition failed: ${err instanceof Error ? err.message : String(err)}`,
+                },
+                500
+              );
+            }
+            return jsonResponse({ action, executed: "transitioned", newStatus: targetStatus });
+          }
+
+          // Unhandled action
+          return jsonResponse({
+            action,
+            executed: "skipped",
+            reason: `Unhandled action: ${action}`,
+          });
+        }
+
+        // POST /state/auto-advance — advance all ready issues (internal + testing)
+        if (method === "POST" && url.pathname === "/state/auto-advance") {
+          await stateLoaded;
+          if (!opts.autoAdvance) {
+            return jsonResponse({ advanced: [], reason: "auto_advance_disabled" });
+          }
+
+          const AUTO_ADVANCE_ACTIONS: ReadonlySet<string> = new Set([
+            "dispatch_architect",
+            "dispatch_planner",
+            "dispatch_implementer",
+            "dispatch_implementer_for_retro",
+            "dispatch_tester",
+            "dispatch_reviewer",
+            "dispatch_merger",
+            "transition_to_todo",
+            "transition_to_in_progress",
+            "transition_to_testing",
+            "transition_to_needs_review",
+            "transition_to_retro",
+          ]);
+
+          const advanced: Array<{
+            issueId: string;
+            action: string;
+            result: string;
+          }> = [];
+
+          for (const [id, state] of issueStateCache) {
+            if (!AUTO_ADVANCE_ACTIONS.has(state.suggestedAction)) continue;
+            if (state.hasLiveWorker) continue;
+
+            try {
+              if (!server) continue;
+              const advanceResponse = await fetch(`http://127.0.0.1:${server.port}/state/advance`, {
+                method: "POST",
+                headers: JSON_HEADERS,
+                body: JSON.stringify({ issueId: id }),
+              });
+              const result = (await advanceResponse.json()) as Record<string, unknown>;
+              advanced.push({
+                issueId: id,
+                action: state.suggestedAction,
+                result: (result.executed as string) ?? "unknown",
+              });
+            } catch (err) {
+              console.error(
+                `[auto-advance] ${id}: ${err instanceof Error ? err.message : String(err)}`
+              );
+            }
+          }
+
+          return jsonResponse({ advanced });
+        }
+
         if (method === "POST" && url.pathname === "/shutdown") {
           await opts.shutdownFn?.();
           return jsonResponse({ status: "shutting_down" });
@@ -1708,6 +1985,28 @@ export function startServer(opts: ServerOptions): {
     cleanupDoneIssueWorkers(state).catch((err) =>
       console.error("[auto-cleanup] failed:", err instanceof Error ? err.message : String(err))
     );
+
+    // Auto-advance after state refresh (fire-and-forget)
+    if (opts.autoAdvance && server) {
+      fetch(`http://127.0.0.1:${server.port}/state/auto-advance`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: "{}",
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            const body = (await res.json()) as { advanced?: unknown[] };
+            if (body.advanced && (body.advanced as unknown[]).length > 0) {
+              console.log(`[auto-advance] Advanced ${(body.advanced as unknown[]).length} issues`);
+            }
+          }
+        })
+        .catch((err) => {
+          console.error(
+            `[auto-advance] Error: ${err instanceof Error ? err.message : String(err)}`
+          );
+        });
+    }
   };
 
   return {

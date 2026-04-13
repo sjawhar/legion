@@ -37,6 +37,8 @@ export interface DaemonConfig {
   maxRssBytes: number;
   /** Minimum interval between RSS checks in ms. */
   rssCheckIntervalMs: number;
+  /** When true, daemon auto-dispatches next worker when current finishes. */
+  autoAdvance: boolean;
 }
 
 export interface LoadedConfigFile {
@@ -109,6 +111,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
     disabled: null,
     max_bytes: null,
   },
+  auto_advance: null,
 };
 
 function parseOptionalNumber(value: string | undefined): number | undefined {
@@ -582,6 +585,11 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
     }
   }
 
+  const autoAdvance = readBoolean(parsed.auto_advance, "auto_advance");
+  if (autoAdvance !== undefined) {
+    fields.autoAdvance = autoAdvance;
+  }
+
   const extraProjects = parseExtraProjectsArray(parsed.extra_projects);
   const effectiveBackend = (fields.issueBackend as "linear" | "github" | undefined) ?? "linear";
   if (extraProjects !== undefined) {
@@ -620,6 +628,7 @@ export function resolveDaemonConfig(
   const envEnvoyUrl = env.ENVOY_URL || undefined;
   const envFeedbackDisabled = parseOptionalBoolean(env.LEGION_FEEDBACK_DISABLED);
   const envFeedbackMaxBytes = parseOptionalNumber(env.LEGION_FEEDBACK_MAX_BYTES);
+  const envAutoAdvance = parseOptionalBoolean(env.LEGION_AUTO_ADVANCE);
 
   const legionId = resolveValue(
     opts.cliOverrides?.legionId,
@@ -704,6 +713,12 @@ export function resolveDaemonConfig(
     maybeReadNumberField(configFields, "feedbackMaxBytes"),
     envFeedbackMaxBytes,
     DEFAULT_FEEDBACK_MAX_BYTES
+  );
+  const autoAdvance = resolveValue(
+    opts.cliOverrides?.autoAdvance,
+    maybeReadBooleanField(configFields, "autoAdvance"),
+    envAutoAdvance,
+    false
   );
 
   if (extraProjects.value !== undefined && issueBackend.value !== "github") {
@@ -796,6 +811,7 @@ export function resolveDaemonConfig(
       feedbackMaxBytes: feedbackMaxBytes.value,
       maxRssBytes: maxRssBytes.value,
       rssCheckIntervalMs: rssCheckIntervalMs.value,
+      autoAdvance: autoAdvance.value,
     },
     warnings,
   };
