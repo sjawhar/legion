@@ -1,18 +1,48 @@
 {
-  "critical": 0,
-  "important": 0,
-  "minor": 1,
-  "verdict": "approved",
+  "critical": 1,
+  "important": 2,
+  "minor": 3,
+  "verdict": "changes_requested",
   "keyFindings": [
     {
+      "severity": "P1",
+      "file": "PR-level",
+      "description": "PR has merge conflicts with main (CONFLICTING). Implementer must rebase before merge."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/opencode-plugin/src/overlays/index.ts",
+      "description": "getModelOverlay _options parameter accepted but never used — misleading API surface. Remove or document."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "Redundant null check at line 259 — sessionID already guarded at line 252. Dead code suggests unclear control flow."
+    },
+    {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/__tests__/mock-envoy-server.ts",
-      "description": "MockEnvoyServer.subscribeError is declared in the interface, initialized in state, and reset in reset(), but the subscribe handler never checks it. Dead code — no test uses it."
+      "file": "packages/opencode-plugin/src/delegation/index.ts",
+      "description": "AllModelsFailed error class not re-exported from barrel file, unlike related types."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/opencode-plugin/src/delegation/__tests__/model-fallback-integration.test.ts",
+      "description": "setTimeout(100) for fire-and-forget startPrompt timing is fragile."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/opencode-plugin/src/config/index.ts",
+      "description": "mergeRetry and applyDefaults correctly preserve fallbackModels — good handling of tricky part."
     }
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/architecture-patterns/opencode-plugin-hook-authoring-patterns.md",
+    "docs/solutions/delegation/subagent-timeout-stall-prevention.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T17:16:56.752Z"
+  "completed": "2026-04-13T18:05:37.522Z"
 }

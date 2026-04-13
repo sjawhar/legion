@@ -4,7 +4,9 @@ import {
   registerSubagentSession,
   unregisterSubagentSession,
 } from "../hooks/subagent-question-blocker";
+import { createModelFallbackChain } from "../overlays";
 import { getAgentToolRestrictions } from "./agent-restrictions";
+import { createRetryWithFallback } from "./retry-with-fallback";
 import { deleteTask, listTasks, writeTask } from "./task-storage";
 import type { BackgroundTask, LaunchOptions } from "./types";
 
@@ -219,31 +221,49 @@ export class BackgroundTaskManager {
     return task;
   }
 
+  private async sendPrompt(
+    sessionID: string,
+    modelStr: string,
+    opts: LaunchOptions
+  ): Promise<void> {
+    const slashIdx = modelStr.indexOf("/");
+    const providerID = slashIdx >= 0 ? modelStr.slice(0, slashIdx) : modelStr;
+    const modelID = slashIdx >= 0 ? modelStr.slice(slashIdx + 1) : modelStr;
+
+    await this.client.session.promptAsync({
+      path: { id: sessionID },
+      body: {
+        agent: opts.agent,
+        model: { providerID, modelID },
+        parts: [{ type: "text" as const, text: opts.prompt }],
+        ...(opts.systemPrompt ? { system: opts.systemPrompt } : {}),
+        tools: {
+          ...getAgentToolRestrictions(opts.agent),
+          question: false,
+          askuserquestion: false,
+        },
+      },
+      query: { directory: this.directory },
+    });
+  }
+
   private async startPrompt(task: BackgroundTask, opts: LaunchOptions): Promise<void> {
     try {
       if (task.status === "cancelled" || !task.sessionID) return;
       task.status = "running";
 
-      const modelStr = task.model;
-      const slashIdx = modelStr.indexOf("/");
-      const providerID = slashIdx >= 0 ? modelStr.slice(0, slashIdx) : modelStr;
-      const modelID = slashIdx >= 0 ? modelStr.slice(slashIdx + 1) : modelStr;
+      const chain = createModelFallbackChain(task.model, opts.fallbackModels);
 
-      await this.client.session.promptAsync({
-        path: { id: task.sessionID },
-        body: {
-          agent: opts.agent,
-          model: { providerID, modelID },
-          parts: [{ type: "text" as const, text: opts.prompt }],
-          ...(opts.systemPrompt ? { system: opts.systemPrompt } : {}),
-          tools: {
-            ...getAgentToolRestrictions(opts.agent),
-            question: false,
-            askuserquestion: false,
-          },
-        },
-        query: { directory: this.directory },
-      });
+      if (chain.fallbacks.length > 0) {
+        const sessionID = task.sessionID;
+        const { model: successModel } = await createRetryWithFallback(chain, async (modelStr) =>
+          this.sendPrompt(sessionID, modelStr, opts)
+        );
+        // Update task model to reflect which model actually succeeded
+        task.model = successModel;
+      } else {
+        await this.sendPrompt(task.sessionID, task.model, opts);
+      }
     } catch (err) {
       await this.finalize(task, "failed", {
         error: err instanceof Error ? err.message : String(err),

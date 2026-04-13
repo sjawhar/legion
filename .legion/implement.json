@@ -1,14 +1,30 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/opencode-plugin/src/overlays/types.ts",
+    "packages/opencode-plugin/src/overlays/index.ts",
+    "packages/opencode-plugin/src/delegation/retry-with-fallback.ts",
+    "packages/opencode-plugin/src/delegation/index.ts",
+    "packages/opencode-plugin/src/delegation/background-manager.ts",
+    "packages/opencode-plugin/src/delegation/types.ts",
+    "packages/opencode-plugin/src/config/index.ts",
+    "packages/opencode-plugin/src/delegation/__tests__/model-fallback.test.ts",
+    "packages/opencode-plugin/src/delegation/__tests__/model-fallback-integration.test.ts",
+    "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts"
   ],
   "trickyParts": [
-    "6 direct startServer() calls in server.test.ts bypassed the startTestServer() helper and were missing envoyUrl: '' — these were in the dead worker cleanup and shutdown sections, not caught in earlier review rounds because the audit focused on startTestServer() rather than all startServer() calls"
+    "Removed unused FallbackChainOptions type and getModelOverlay 3rd parameter per review — required updating contract test arity check and unit tests that called getModelOverlay with 3 args",
+    "Integration test setTimeout(100) replaced with waitForTaskSettled polling helper to avoid timing-dependent flakes",
+    "Merge conflict resolution on rebase: .legion/implement.json and .legion/review.json had conflicts from other branches merged to main — resolved by keeping our branch's content"
   ],
-  "deviations": [],
+  "deviations": [
+    "Removed FallbackChainOptions interface entirely (reviewer flagged unused parameter, type had no other consumers)",
+    "Test count dropped from 24 to 23 after consolidating getModelOverlay tests (removed test for 3rd param that no longer exists)"
+  ],
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T16:44:04.524Z"
+  "completed": "2026-04-13T18:16:11.409Z"
 }

@@ -24,6 +24,8 @@ export interface LaunchOptions {
   description: string;
   parentSessionId?: string;
   model?: string;
+  /** Ordered list of fallback models to try if the primary model fails. */
+  fallbackModels?: string[];
   systemPrompt?: string;
   /** Maximum duration in ms before auto-cancellation. Undefined = no timeout. */
   timeoutMs?: number;

@@ -7,5 +7,11 @@ export type {
 } from "./category-router";
 export { resolveCategory } from "./category-router";
 export { createDelegationTools } from "./delegation-tool";
+export type {
+  FallbackAttempt,
+  FallbackResult,
+  RetryWithFallbackOptions,
+} from "./retry-with-fallback";
+export { AllModelsFailed, createRetryWithFallback } from "./retry-with-fallback";
 export { deleteTask, listTasks, readTask, writeTask } from "./task-storage";
 export type { BackgroundTask, LaunchOptions } from "./types";
