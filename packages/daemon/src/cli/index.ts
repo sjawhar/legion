@@ -1263,6 +1263,146 @@ export const dispatchCommand = defineCommand({
   },
 });
 
+export async function cmdAdvance(
+  issue: string,
+  advanceOpts: {
+    stage?: string;
+    dryRun?: boolean;
+    daemonPort?: number;
+  }
+): Promise<void> {
+  if (!SAFE_IDENTIFIER_RE.test(issue)) {
+    throw new CliError(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
+  }
+  const daemonPort = advanceOpts.daemonPort ?? (await getDaemonPort());
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  // Health check first
+  try {
+    const healthResp = await fetch(`${baseUrl}/health`);
+    if (!healthResp.ok) {
+      throw new CliError("Daemon is not healthy. Is it running?");
+    }
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw error;
+    }
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/health`);
+  }
+
+  if (advanceOpts.dryRun) {
+    const stateResp = await fetch(`${baseUrl}/state/materialized`);
+    if (!stateResp.ok) {
+      throw new CliError("Could not fetch materialized state from daemon");
+    }
+    const state = (await stateResp.json()) as Record<string, unknown>;
+    const issues = state.issues as Record<string, Record<string, unknown>> | undefined;
+    const normalizedIssue = issue.toLowerCase();
+    const issueState = issues?.[issue] ?? issues?.[normalizedIssue];
+    if (!issueState) {
+      throw new CliError(`Issue ${issue} not found in state cache. Run: legion poll <team>`);
+    }
+    console.log(`Dry run: would execute action "${issueState.suggestedAction}" for ${issue}`);
+    return;
+  }
+
+  const body: Record<string, unknown> = { issueId: issue };
+  if (advanceOpts.stage) {
+    body.stage = advanceOpts.stage;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/state/advance`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (_error) {
+    throw new CliError(
+      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/state/advance`
+    );
+  }
+
+  let responseBody: Record<string, unknown>;
+  try {
+    responseBody = (await response.json()) as Record<string, unknown>;
+  } catch {
+    throw new CliError(`Daemon returned non-JSON response (status ${response.status})`);
+  }
+
+  if (response.status === 412) {
+    throw new CliError(`Issue ${issue} not in state cache. Run: legion poll <team>`);
+  }
+
+  if (response.status === 409) {
+    console.log(`Worker already running for ${issue}: ${responseBody.workerId}`);
+    return;
+  }
+
+  if (!response.ok) {
+    throw new CliError(`Advance failed: ${JSON.stringify(responseBody)}`);
+  }
+
+  switch (responseBody.executed) {
+    case "dispatched":
+      console.log(
+        `Dispatched ${responseBody.action} → worker ${responseBody.workerId} (session ${responseBody.sessionId})`
+      );
+      break;
+    case "transitioned":
+      console.log(`Transitioned ${issue} → ${responseBody.newStatus}`);
+      break;
+    case "skipped":
+      console.log(`Skipped: ${responseBody.reason}`);
+      break;
+    case "error":
+      throw new CliError(`Error: ${responseBody.reason}`);
+    default:
+      console.log(`Result: ${JSON.stringify(responseBody)}`);
+  }
+}
+
+export const advanceCommand = defineCommand({
+  meta: { name: "advance", description: "Advance an issue to its next lifecycle stage" },
+  args: {
+    issue: {
+      type: "positional",
+      description: "Issue identifier (e.g., sjawhar-legion-494)",
+      required: true,
+    },
+    stage: {
+      type: "string",
+      alias: "s",
+      description: "Force advance to specific stage (architect|plan|implement|test|review|merge)",
+    },
+    "dry-run": {
+      type: "boolean",
+      description: "Print action without executing",
+      default: false,
+    },
+    "daemon-port": {
+      type: "string",
+      description: "Override daemon port",
+    },
+  },
+  async run({ args }) {
+    try {
+      await cmdAdvance(args.issue, {
+        stage: args.stage,
+        dryRun: Boolean(args["dry-run"]),
+        daemonPort: args["daemon-port"] ? Number(args["daemon-port"]) : undefined,
+      });
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
 export const promptCommand = defineCommand({
   meta: { name: "prompt", description: "Send a prompt to an existing worker" },
   args: {
@@ -1564,6 +1704,7 @@ export const mainCommand = defineCommand({
     status: statusCommand,
     attach: attachCommand,
     adopt: adoptCommand,
+    advance: advanceCommand,
     dispatch: dispatchCommand,
     prompt: promptCommand,
     "reset-crashes": resetCrashesCommand,

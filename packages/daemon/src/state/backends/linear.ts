@@ -3,9 +3,10 @@ import {
   GitHubPRRef,
   type GitHubPRRef as GitHubPRRefType,
   IssueStatus,
+  type IssueStatusLiteral,
   type ParsedIssue,
 } from "../types";
-import type { IssueTracker } from "./issue-tracker";
+import type { IssueMutationTarget, IssueTracker } from "./issue-tracker";
 
 export interface LinearStateDict {
   name: string;
@@ -113,5 +114,22 @@ export class LinearTracker implements IssueTracker {
     }
 
     return parsed;
+  }
+
+  async transitionIssue(
+    _target: IssueMutationTarget,
+    _newStatus: IssueStatusLiteral
+  ): Promise<void> {
+    throw new Error(
+      "LinearTracker.transitionIssue not implemented — Linear status transitions " +
+        "are handled by the controller via Linear MCP, not by the daemon CLI."
+    );
+  }
+
+  async removeLabel(_target: IssueMutationTarget, _label: string): Promise<void> {
+    throw new Error(
+      "LinearTracker.removeLabel not implemented — Linear label mutations " +
+        "are handled by the controller via Linear MCP, not by the daemon CLI."
+    );
   }
 }
