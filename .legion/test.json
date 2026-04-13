@@ -1,48 +1,47 @@
 {
-  "passed": true,
-  "summary": "All acceptance criteria verified. 88 decision tests pass. Type check clean. Biome lint clean.",
-  "criteria": [
+  "phase": "test",
+  "issueId": "469",
+  "prNumber": 492,
+  "outcome": "fail",
+  "summary": "Implementation is functionally correct and all tests pass, but two issues require fixes before approval: (1) TypeScript type error in server.ts POST /state/track handler — `payload.issueId` accessed on `object` type without narrowing; (2) Missing integration test for the acceptance criterion 'untracked issue changes state → no changed entry emitted in poll cycle delta'.",
+  "findings": [
     {
-      "criterion": "CONFLICTING + not approved → resume_implementer_for_changes (not rebase_pr)",
-      "result": "pass",
-      "evidence": "decision.ts lines 115-116 and 129-130 both return resume_implementer_for_changes for CONFLICTING mergeability"
+      "severity": "P1",
+      "type": "type-error",
+      "description": "TypeScript error: Property 'issueId' does not exist on type 'object' at server.ts:1632,1635. The `request.json()` return is typed as `unknown`, narrowed to `object` by the typeof check, but TypeScript still cannot access `.issueId` without a type assertion or proper narrowing.",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "lines": [1632, 1635]
     },
     {
-      "criterion": "Controller NEVER rebases directly",
-      "result": "pass",
-      "evidence": "rebase_pr removed from ActionType union in types.ts; removed from ACTION_TO_MODE in decision.ts; SKILL.md handler updated with explicit MUST NOT call update-branch API"
-    },
-    {
-      "criterion": "No rebase_pr references remain in state module",
-      "result": "pass",
-      "evidence": "grep finds zero occurrences in types.ts, decision.ts, decision.test.ts"
-    },
-    {
-      "criterion": "SKILL.md routing table updated",
-      "result": "pass",
-      "evidence": "rebase_ prefix row now says removed; conflict row shows resume_implementer_for_changes; condition 7 table updated"
-    },
-    {
-      "criterion": "Unit tests pass",
-      "result": "pass",
-      "evidence": "88/88 decision tests pass; 1289/1291 total pass; 2 failures are pre-existing @pulumi/docker missing module errors unrelated to this PR"
-    },
-    {
-      "criterion": "TypeScript type check clean",
-      "result": "pass",
-      "evidence": "bunx tsc --noEmit produces no errors"
-    },
-    {
-      "criterion": "Biome lint clean",
-      "result": "pass",
-      "evidence": "bunx biome check src/ — Checked 99 files. No fixes applied."
+      "severity": "P2",
+      "type": "missing-test",
+      "description": "Acceptance criterion 'Integration test: untracked issue changes state → no changed entry emitted in the poll cycle delta' has no corresponding integration test in server.test.ts. The unit tests in state-delta.test.ts cover the filtering logic, and the materialized endpoint test verifies untracked issues don't appear there, but no test verifies that the Envoy publish delta omits changed entries for untracked issues.",
+      "file": "packages/daemon/src/daemon/__tests__/server.test.ts"
     }
   ],
-  "preExistingFailures": [
-    "packages/envoy/infra/__tests__/nats.test.ts — Cannot find module @pulumi/docker (pre-existing, unrelated)",
-    "packages/envoy/infra/__tests__/services.test.ts — Cannot find module @pulumi/docker (pre-existing, unrelated)"
-  ],
-  "schemaVersion": 1,
-  "phase": "test",
-  "completed": "2026-04-12T23:13:34.729Z"
+  "testResults": {
+    "unitTests": {
+      "stateDelta": "26 pass, 0 fail — all 8 trackedIssueIds cases covered",
+      "server": "165 pass, 0 fail — 16 new tracking endpoint tests pass"
+    },
+    "fullSuite": "1313 pass, 2 fail (pre-existing: packages/envoy/infra/__tests__/nats.test.ts and services.test.ts — @pulumi/docker missing, unrelated to this PR)",
+    "typeCheck": "2 errors in packages/daemon/src/daemon/server.ts (lines 1632, 1635)",
+    "lint": "0 errors (biome check passes)"
+  },
+  "specCompliance": {
+    "trackingApi": "8/8 covered",
+    "deltaFiltering": "4/5 covered (missing integration test for untracked→no changed delta)",
+    "legionPoll": "4/4 covered"
+  },
+  "testCritique": {
+    "strengths": [
+      "8 unit tests for computeStateDelta with trackedIssueIds cover all spec cases: undefined (backward compat), empty set, populated set, new-always-flows, filtered changed, filtered removed",
+      "16 integration tests for tracking endpoints cover all CRUD operations with idempotency and validation",
+      "Existing tests correctly updated to track issues before expecting changed delta entries",
+      "Tests for auto-track on POST /workers and auto-untrack in cleanupDoneIssueWorkers"
+    ],
+    "weaknesses": [
+      "Missing integration test: untracked issue state change → no changed entry in Envoy publish delta (the key behavioral guarantee of this feature)"
+    ]
+  }
 }
