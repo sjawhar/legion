@@ -1,27 +1,18 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 2,
+  "minor": 1,
   "verdict": "approved",
   "keyFindings": [
     {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "No issueStateCache cleanup for dead workers (correct: dead worker != done issue, cache needed for redispatch)"
-    },
-    {
-      "severity": "P3",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "Legacy workspace-based workers skip filesystem cleanup but get state removed (correct: external directories not daemon-owned)"
+      "file": "packages/daemon/src/daemon/__tests__/mock-envoy-server.ts",
+      "description": "MockEnvoyServer.subscribeError is declared in the interface, initialized in state, and reset in reset(), but the subscribe handler never checks it. Dead code — no test uses it."
     }
   ],
-  "learningsInjected": [
-    "docs/solutions/daemon/session-liveness-detection-pattern.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/session-liveness-detection-pattern.md"
-  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T15:52:34.021Z"
+  "completed": "2026-04-13T17:16:56.752Z"
 }

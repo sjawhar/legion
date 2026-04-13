@@ -1,18 +1,14 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/repo-manager.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/repo-manager.test.ts",
     "packages/daemon/src/daemon/__tests__/server.test.ts"
   ],
   "trickyParts": [
-    "jj bookmark list template syntax required careful testing — tracking_ahead_count is a SizeHint type, not Boolean, so if() guards needed .lower() conversion",
-    "Directory scan fallback has no repo info for off-board workspaces — derived clone path from existing workers as best-effort"
+    "6 direct startServer() calls in server.test.ts bypassed the startTestServer() helper and were missing envoyUrl: '' — these were in the dead worker cleanup and shutdown sections, not caught in earlier review rounds because the audit focused on startTestServer() rather than all startServer() calls"
   ],
   "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T15:33:38.242Z"
+  "completed": "2026-04-13T16:44:04.524Z"
 }

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createMockEnvoyServer } from "../daemon/__tests__/mock-envoy-server";
 import type { WorkerEntry } from "../daemon/serve-manager";
 import { startServer } from "../daemon/server";
 import { buildCollectedState } from "../state/decision";
@@ -40,9 +41,11 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     deleteSession: async () => {},
     listActiveSessions: async (): Promise<Set<string>> => new Set<string>(),
   };
+  const mockEnvoy = createMockEnvoyServer();
   const { server, stop } = startServer({
     port: randomPort(),
     hostname: "127.0.0.1",
+    envoyUrl: mockEnvoy.url,
     legionId: TEAM_ID,
     legionDir: tempDir,
     adapter,
@@ -53,6 +56,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
     await run({ baseUrl: `http://127.0.0.1:${server.port}`, createSessionCalls });
   } finally {
     stop();
+    mockEnvoy.stop();
     await rm(tempDir, { recursive: true, force: true });
   }
 }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,7 @@ import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import { startServer } from "../server";
 import { type PersistedWorkerState, writeStateFile } from "../state-file";
+import { createMockEnvoyServer, type MockEnvoyServer } from "./mock-envoy-server";
 
 const sharedServePort = 15500;
 
@@ -29,6 +30,11 @@ describe("daemon server", () => {
   const originalFetch = globalThis.fetch;
   const originalConsoleWarn = console.warn;
   const legionId = "123e4567-e89b-12d3-a456-426614174000";
+  let mockEnvoy: MockEnvoyServer;
+
+  beforeEach(() => {
+    mockEnvoy = createMockEnvoyServer();
+  });
 
   class RecordingFeedbackWriter implements FeedbackWriter {
     lines: string[] = [];
@@ -82,6 +88,7 @@ describe("daemon server", () => {
     legionId?: string;
     extraProjects?: string[];
     fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
+    envoyUrl?: string;
   }) {
     createSessionCalls = [];
     deleteSessionCalls = [];
@@ -97,6 +104,7 @@ describe("daemon server", () => {
     const { server, stop, fetchAndProcessState } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: options?.envoyUrl ?? mockEnvoy.url,
       legionId: options?.legionId ?? legionId,
       extraProjects: options?.extraProjects,
       legionDir: tempDir,
@@ -125,11 +133,6 @@ describe("daemon server", () => {
       },
     });
     return response;
-  }
-
-  interface CapturedPublish {
-    url: string;
-    body: unknown;
   }
 
   function createGitHubProjectItem(overrides?: {
@@ -164,43 +167,6 @@ describe("daemon server", () => {
     throw new Error("unsupported fetch input");
   }
 
-  function mockFetchForPublish(calls: CapturedPublish[], statusCode = 200) {
-    const mockFn = async (
-      input: string | { href?: unknown; url?: unknown },
-      init?: { body?: unknown }
-    ) => {
-      const url = getFetchUrl(input);
-      if (url.includes("/v1/messages/publish")) {
-        calls.push({ url, body: JSON.parse(init?.body as string) });
-        if (statusCode === 200) {
-          return originalFetch("data:application/json,%7B%7D");
-        }
-        return new Response("{}", { status: statusCode });
-      }
-      return originalFetch(input as never, init as never);
-    };
-    globalThis.fetch = Object.assign(mockFn, {
-      preconnect: originalFetch.preconnect,
-    });
-  }
-
-  function mockFetchForRejectedPublish(calls: CapturedPublish[], error: Error) {
-    const mockFn = async (
-      input: string | { href?: unknown; url?: unknown },
-      init?: { body?: unknown }
-    ) => {
-      const url = getFetchUrl(input);
-      if (url.includes("/v1/messages/publish")) {
-        calls.push({ url, body: JSON.parse(init?.body as string) });
-        throw error;
-      }
-      return originalFetch(input as never, init as never);
-    };
-    globalThis.fetch = Object.assign(mockFn, {
-      preconnect: originalFetch.preconnect,
-    });
-  }
-
   function createTestTokenManager(config: GitHubAppsConfig, token = "ghs_owner_token") {
     const manager = new TokenManager(config);
     manager.getToken = async (role, owner) => ({
@@ -228,6 +194,7 @@ describe("daemon server", () => {
       await rm(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+    mockEnvoy.stop();
   });
 
   it("returns health data with default runtime", async () => {
@@ -1269,8 +1236,6 @@ describe("daemon server", () => {
 
   describe("state delta notifications", () => {
     it("does not publish on first state collection (baseline establishment)", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
@@ -1285,12 +1250,10 @@ describe("daemon server", () => {
 
       expect(response.status).toBe(200);
       await Bun.sleep(50);
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
     });
 
     it("publishes delta on second collection with changes", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
@@ -1322,8 +1285,8 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(1);
-      const payload = publishCalls[0]?.body as { topic: string; message: string };
+      expect(mockEnvoy.publishCalls.length).toBe(1);
+      const payload = mockEnvoy.publishCalls[0] as { topic: string; message: string };
       expect(payload.topic).toBe("notifications.legion.controller");
       const delta = JSON.parse(payload.message) as {
         type: string;
@@ -1337,8 +1300,6 @@ describe("daemon server", () => {
     });
 
     it("does not publish when state is identical (label order invariant)", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
@@ -1363,13 +1324,28 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
     });
 
     it("swallows publish errors without affecting collect response", async () => {
-      const publishCalls: CapturedPublish[] = [];
       const warnCalls: unknown[][] = [];
-      mockFetchForRejectedPublish(publishCalls, new Error("publish boom"));
+      // Override fetch to throw on publish — simulates network error, not server error.
+      // This must use fetch interception because a mock HTTP server can't make fetch() reject.
+      const publishAttempts: unknown[] = [];
+      const mockFn = async (
+        input: string | { href?: unknown; url?: unknown },
+        init?: { body?: unknown }
+      ) => {
+        const url = getFetchUrl(input);
+        if (url.includes("/v1/messages/publish")) {
+          publishAttempts.push({ url, body: JSON.parse(init?.body as string) });
+          throw new Error("publish boom");
+        }
+        return originalFetch(input as never, init as never);
+      };
+      globalThis.fetch = Object.assign(mockFn, {
+        preconnect: originalFetch.preconnect,
+      });
       console.warn = (...args: unknown[]) => {
         warnCalls.push(args);
       };
@@ -1405,7 +1381,7 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(1);
+      expect(publishAttempts.length).toBe(1);
       expect(warnCalls.length).toBe(1);
       expect(
         String(warnCalls[0]?.[0] ?? "").includes("[state-delta] publish error (non-fatal)")
@@ -1413,8 +1389,6 @@ describe("daemon server", () => {
     });
 
     it("does not publish when no controller is active", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         getControllerState: () => undefined,
       });
@@ -1439,12 +1413,10 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
     });
 
     it("does not publish changed entries for untracked issues", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
@@ -1472,12 +1444,10 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // No publish because changed entries are filtered to tracked set
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
     });
 
     it("publishes changed entries only for tracked issues when mixed", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
@@ -1515,17 +1485,15 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(1);
+      expect(mockEnvoy.publishCalls.length).toBe(1);
       const delta = JSON.parse(
-        (publishCalls[0]?.body as { topic: string; message: string }).message
+        (mockEnvoy.publishCalls[0] as { topic: string; message: string }).message
       ) as { changes: { changed: Array<{ issueId: string }> } };
       expect(delta.changes.changed).toHaveLength(1);
       expect(delta.changes.changed[0]?.issueId).toBe("acme-widgets-42");
     });
 
     it("health tick interleaving does not produce false deltas", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         legionId: "acme/123",
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
@@ -1559,12 +1527,10 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
     });
 
     it("health tick with different issue set does not produce false deltas", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       await startTestServer({
         legionId: "acme/123",
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
@@ -1600,7 +1566,7 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
     });
 
     it("health tick still populates issueStateCache for dispatch", async () => {
@@ -1629,8 +1595,6 @@ describe("daemon server", () => {
     });
 
     it("fetch-and-collect still publishes delta on changed second collection", async () => {
-      const publishCalls: CapturedPublish[] = [];
-      mockFetchForPublish(publishCalls);
       let fetchStatus = "Todo";
       await startTestServer({
         legionId: "acme/123",
@@ -1652,7 +1616,7 @@ describe("daemon server", () => {
       });
       expect(firstResponse.status).toBe(200);
       await Bun.sleep(50);
-      expect(publishCalls.length).toBe(0);
+      expect(mockEnvoy.publishCalls.length).toBe(0);
 
       // Change fetcher response and fetch again — should publish delta
       fetchStatus = "In Progress";
@@ -1663,7 +1627,7 @@ describe("daemon server", () => {
       expect(secondResponse.status).toBe(200);
       await Bun.sleep(50);
 
-      expect(publishCalls.length).toBe(1);
+      expect(mockEnvoy.publishCalls.length).toBe(1);
     });
   });
 
@@ -2101,6 +2065,7 @@ describe("daemon server", () => {
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
+        envoyUrl: mockEnvoy.url,
         legionId,
         paths,
         adapter: makeAdapter(),
@@ -2184,6 +2149,7 @@ describe("daemon server", () => {
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
+        envoyUrl: mockEnvoy.url,
         legionId,
         paths,
         adapter: makeAdapter(),
@@ -2239,6 +2205,7 @@ describe("daemon server", () => {
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
+        envoyUrl: mockEnvoy.url,
         legionId,
         paths,
         adapter: makeAdapter(),
@@ -2289,6 +2256,7 @@ describe("daemon server", () => {
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
+        envoyUrl: mockEnvoy.url,
         legionId,
         paths,
         adapter: makeAdapter(),
@@ -2344,6 +2312,7 @@ describe("daemon server", () => {
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
+        envoyUrl: mockEnvoy.url,
         legionId,
         paths,
         adapter: makeAdapter(),
@@ -2488,6 +2457,7 @@ describe("daemon server", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: "",
       legionId,
       legionDir: tempDir ?? os.tmpdir(),
       adapter: makeAdapter(),
@@ -3217,29 +3187,6 @@ describe("daemon server", () => {
   });
 
   describe("Envoy worker auto-subscribe", () => {
-    interface EnvoySubscribeCall {
-      url: string;
-      body: { session_id: string; topics: string[] };
-    }
-
-    function mockFetchForEnvoy(calls: EnvoySubscribeCall[], statusCode = 200) {
-      const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
-        const url =
-          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url.includes("/v1/interests/subscribe") || url.includes("/v1/interests/unsubscribe")) {
-          calls.push({
-            url,
-            body: JSON.parse(init?.body as string),
-          });
-          return new Response("{}", { status: statusCode });
-        }
-        return originalFetch(input, init);
-      };
-      globalThis.fetch = Object.assign(mockFn, {
-        preconnect: originalFetch.preconnect,
-      });
-    }
-
     const repoPaths: LegionPaths = {
       dataDir: "/tmp/legion-data",
       stateDir: "/tmp/legion-state",
@@ -3264,9 +3211,6 @@ describe("daemon server", () => {
     };
 
     it("subscribes plan worker to Envoy issue topic when repo and issueNumber present", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       const response = await requestJson("/workers", {
@@ -3285,17 +3229,14 @@ describe("daemon server", () => {
       // Flush fire-and-forget microtasks
       await Bun.sleep(50);
 
-      expect(envoySubscribeCalls).toHaveLength(1);
-      expect(envoySubscribeCalls[0].body.session_id).toBe(body.sessionId);
-      expect(envoySubscribeCalls[0].body.topics).toEqual([
+      expect(mockEnvoy.subscribeCalls).toHaveLength(1);
+      expect(mockEnvoy.subscribeCalls[0].session_id).toBe(body.sessionId);
+      expect(mockEnvoy.subscribeCalls[0].topics).toEqual([
         "notifications.github.acme.widgets.issue.42.>",
       ]);
     });
 
     it("auto-extracts issueNumber from issueId and subscribes plan worker to Envoy", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch plan worker WITHOUT explicit issueNumber — matches real controller behavior
@@ -3314,9 +3255,9 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Should still subscribe — issueNumber auto-extracted from issueId
-      expect(envoySubscribeCalls).toHaveLength(1);
-      expect(envoySubscribeCalls[0].body.session_id).toBe(body.sessionId);
-      expect(envoySubscribeCalls[0].body.topics).toEqual([
+      expect(mockEnvoy.subscribeCalls).toHaveLength(1);
+      expect(mockEnvoy.subscribeCalls[0].session_id).toBe(body.sessionId);
+      expect(mockEnvoy.subscribeCalls[0].topics).toEqual([
         "notifications.github.acme.widgets.issue.44.>",
       ]);
 
@@ -3427,9 +3368,6 @@ describe("daemon server", () => {
     });
 
     it("skips Envoy subscribe when issueNumber is absent", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       const response = await requestJson("/workers", {
@@ -3443,13 +3381,10 @@ describe("daemon server", () => {
 
       expect(response.status).toBe(200);
       await Bun.sleep(50);
-      expect(envoySubscribeCalls).toHaveLength(0);
+      expect(mockEnvoy.subscribeCalls).toHaveLength(0);
     });
 
     it("skips Envoy subscribe when repo is absent (workspace mode)", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer();
 
       const response = await requestJson("/workers", {
@@ -3464,12 +3399,11 @@ describe("daemon server", () => {
 
       expect(response.status).toBe(200);
       await Bun.sleep(50);
-      expect(envoySubscribeCalls).toHaveLength(0);
+      expect(mockEnvoy.subscribeCalls).toHaveLength(0);
     });
 
     it("returns 200 even when Envoy subscribe fails with HTTP 500", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls, 500);
+      mockEnvoy.subscribeStatus = 500;
 
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
@@ -3485,23 +3419,19 @@ describe("daemon server", () => {
 
       expect(response.status).toBe(200);
       await Bun.sleep(50);
-      expect(envoySubscribeCalls).toHaveLength(1);
+      expect(mockEnvoy.subscribeCalls).toHaveLength(1);
     });
 
     it("returns 200 even when Envoy subscribe fails with network error", async () => {
-      const mockFn = async (input: string | URL | Request, init?: RequestInit) => {
-        const url =
-          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url.includes("/v1/interests/subscribe")) {
-          throw new Error("connection refused");
-        }
-        return originalFetch(input, init);
-      };
-      globalThis.fetch = Object.assign(mockFn, {
-        preconnect: originalFetch.preconnect,
-      });
+      // Stop the mock server so fetch() genuinely fails with a network error
+      const deadPort = mockEnvoy.url.split(":").pop();
+      mockEnvoy.stop();
 
-      await startTestServer({ paths: repoPaths, repoManagerDeps });
+      await startTestServer({
+        paths: repoPaths,
+        repoManagerDeps,
+        envoyUrl: `http://127.0.0.1:${deadPort}`,
+      });
 
       const response = await requestJson("/workers", {
         method: "POST",
@@ -3538,9 +3468,6 @@ describe("daemon server", () => {
     });
 
     it("unsubscribes worker from envoy on delete", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       const createResponse = await requestJson("/workers", {
@@ -3556,26 +3483,26 @@ describe("daemon server", () => {
       const created = (await createResponse.json()) as { id: string; sessionId: string };
       await Bun.sleep(50);
 
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       const deleteResponse = await requestJson(`/workers/${created.id}`, { method: "DELETE" });
       expect(deleteResponse.status).toBe(200);
 
       await Bun.sleep(50);
 
-      const unsubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/unsubscribe")
-      );
+      const unsubCalls = mockEnvoy.unsubscribeCalls;
       expect(unsubCalls).toHaveLength(1);
-      expect(unsubCalls[0].body).toEqual({
-        session_id: created.sessionId,
-        topics: [],
-      });
+      expect(unsubCalls[0]).toEqual(
+        expect.objectContaining({
+          session_id: created.sessionId,
+          topics: [],
+        })
+      );
     });
 
     it("delete succeeds even when envoy unsubscribe fails", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls, 500);
+      mockEnvoy.unsubscribeStatus = 500;
 
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
@@ -3597,9 +3524,6 @@ describe("daemon server", () => {
     });
 
     it("does not subscribe non-plan modes to Envoy even with repo and issueNumber", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       for (const mode of ["implement", "test", "review", "architect"]) {
@@ -3630,18 +3554,13 @@ describe("daemon server", () => {
 
       await Bun.sleep(50);
 
-      const issueSubscribeCalls = envoySubscribeCalls.filter(
-        (c) =>
-          c.url.includes("/v1/interests/subscribe") &&
-          c.body.topics.some((topic) => topic.includes(".issue."))
+      const issueSubscribeCalls = mockEnvoy.subscribeCalls.filter((c) =>
+        c.topics.some((topic) => topic.includes(".issue."))
       );
       expect(issueSubscribeCalls).toHaveLength(0);
     });
 
     it("unsubscribes existing plan worker when dispatching implement for same issue", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch plan worker
@@ -3659,14 +3578,13 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Verify plan was subscribed
-      const subscribeCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/subscribe")
-      );
+      const subscribeCalls = mockEnvoy.subscribeCalls;
       expect(subscribeCalls).toHaveLength(1);
-      expect(subscribeCalls[0].body.session_id).toBe(planWorker.sessionId);
+      expect(subscribeCalls[0].session_id).toBe(planWorker.sessionId);
 
       // Reset tracking
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       // Dispatch implement worker for same issue
       const implResponse = await requestJson("/workers", {
@@ -3682,24 +3600,17 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Plan worker should be unsubscribed, implement should NOT be subscribed
-      const unsubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/unsubscribe")
-      );
+      const unsubCalls = mockEnvoy.unsubscribeCalls;
       expect(unsubCalls).toHaveLength(1);
-      expect(unsubCalls[0].body.session_id).toBe(planWorker.sessionId);
+      expect(unsubCalls[0].session_id).toBe(planWorker.sessionId);
 
-      const issueSubscribeCalls = envoySubscribeCalls.filter(
-        (c) =>
-          c.url.includes("/v1/interests/subscribe") &&
-          c.body.topics.some((topic) => topic.includes(".issue."))
+      const issueSubscribeCalls = mockEnvoy.subscribeCalls.filter((c) =>
+        c.topics.some((topic) => topic.includes(".issue."))
       );
       expect(issueSubscribeCalls).toHaveLength(0);
     });
 
     it("includes envoyTopics in GET /workers for plan mode dispatch", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       await requestJson("/workers", {
@@ -3724,9 +3635,6 @@ describe("daemon server", () => {
     });
 
     it("does not subscribe planner to PR topics", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       await requestJson("/workers", {
@@ -3740,20 +3648,15 @@ describe("daemon server", () => {
       });
       await Bun.sleep(50);
 
-      const subscribeCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/subscribe")
-      );
+      const subscribeCalls = mockEnvoy.subscribeCalls;
       expect(subscribeCalls).toHaveLength(1);
-      const topics = subscribeCalls[0].body.topics;
+      const topics = subscribeCalls[0].topics;
       expect(topics).toEqual(["notifications.github.acme.widgets.issue.72.>"]);
       // Explicitly verify no PR topic
       expect(topics.some((t) => t.includes(".pr."))).toBe(false);
     });
 
     it("omits envoyTopics for non-plan mode dispatch", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       await requestJson("/workers", {
@@ -3777,9 +3680,6 @@ describe("daemon server", () => {
     });
 
     it("unsubscribes and clears envoyTopics when worker status changes to dead", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch plan worker (gets envoyTopics)
@@ -3797,7 +3697,8 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Reset tracking
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       // PATCH status to dead
       const patchResponse = await requestJson(`/workers/${created.id}`, {
@@ -3812,11 +3713,9 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Should trigger unsubscribe
-      const unsubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/unsubscribe")
-      );
+      const unsubCalls = mockEnvoy.unsubscribeCalls;
       expect(unsubCalls).toHaveLength(1);
-      expect(unsubCalls[0].body.session_id).toBe(created.sessionId);
+      expect(unsubCalls[0].session_id).toBe(created.sessionId);
 
       // envoyTopics should be cleared
       const getResponse = await requestJson(`/workers/${created.id}`);
@@ -3826,9 +3725,6 @@ describe("daemon server", () => {
     });
 
     it("cross-mode cleanup clears envoyTopics on old worker", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch plan worker
@@ -3873,9 +3769,6 @@ describe("daemon server", () => {
     });
 
     it("does not unsubscribe workers for a different issue on cross-mode dispatch", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch plan worker for issue 50
@@ -3889,7 +3782,8 @@ describe("daemon server", () => {
         }),
       });
       await Bun.sleep(50);
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       // Dispatch implement worker for issue 51 (different issue)
       await requestJson("/workers", {
@@ -3904,16 +3798,11 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // No unsubscribe calls — issue 50's plan worker untouched
-      const unsubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/unsubscribe")
-      );
+      const unsubCalls = mockEnvoy.unsubscribeCalls;
       expect(unsubCalls).toHaveLength(0);
     });
 
     it("re-subscribes worker to issue topics on resume via prompt", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({
         paths: repoPaths,
         repoManagerDeps,
@@ -3934,7 +3823,8 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Clear calls from dispatch
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       // Resume worker via prompt
       const promptResponse = await requestJson(`/workers/${created.id}/prompt`, {
@@ -3945,19 +3835,15 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Should have re-subscribed to issue topics
-      const issueSubs = envoySubscribeCalls.filter(
-        (c) =>
-          c.url.includes("/subscribe") && c.body.topics.some((t: string) => t.includes("issue.305"))
+      const issueSubs = mockEnvoy.subscribeCalls.filter((c) =>
+        c.topics.some((t: string) => t.includes("issue.305"))
       );
       expect(issueSubs).toHaveLength(1);
-      expect(issueSubs[0].body.session_id).toBe(created.sessionId);
-      expect(issueSubs[0].body.topics).toEqual(["notifications.github.acme.widgets.issue.305.>"]);
+      expect(issueSubs[0].session_id).toBe(created.sessionId);
+      expect(issueSubs[0].topics).toEqual(["notifications.github.acme.widgets.issue.305.>"]);
     });
 
     it("skips resume re-subscription for workspace-only workers", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer();
 
       // Create a workspace-only worker (no repo/issueNumber)
@@ -3973,7 +3859,7 @@ describe("daemon server", () => {
       const created = (await createResponse.json()) as { id: string };
       await Bun.sleep(50);
 
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
 
       // Resume worker via prompt
       const promptResponse = await requestJson(`/workers/${created.id}/prompt`, {
@@ -3984,13 +3870,10 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // No subscribe calls — workspace-only worker has no repo/issueNumber
-      expect(envoySubscribeCalls).toHaveLength(0);
+      expect(mockEnvoy.subscribeCalls).toHaveLength(0);
     });
 
     it("persists repo and issueNumber in worker entry", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       await requestJson("/workers", {
@@ -4014,9 +3897,6 @@ describe("daemon server", () => {
     });
 
     it("prune unsubscribes workers from Envoy on Done cleanup", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch plan worker (gets daemon-managed envoyTopics)
@@ -4033,7 +3913,8 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Reset tracking
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       // Prune the issue (simulates Done cleanup)
       const pruneRes = await requestJson("/workers/prune", {
@@ -4046,17 +3927,12 @@ describe("daemon server", () => {
       // detachWorkerFromEnvoy fires targeted unsubscribe for daemon-managed topics,
       // unsubscribeAllWorkerTopics fires blanket unsubscribe for self-managed topics.
       // Plan worker has envoyTopics, so both fire (2 calls).
-      const unsubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/unsubscribe")
-      );
+      const unsubCalls = mockEnvoy.unsubscribeCalls;
       expect(unsubCalls.length).toBeGreaterThanOrEqual(1);
-      expect(unsubCalls.every((c) => c.body.session_id === planWorker.sessionId)).toBe(true);
+      expect(unsubCalls.every((c) => c.session_id === planWorker.sessionId)).toBe(true);
     });
 
     it("prune blanket-unsubscribes workers without daemon-managed topics", async () => {
-      const envoySubscribeCalls: EnvoySubscribeCall[] = [];
-      mockFetchForEnvoy(envoySubscribeCalls);
-
       await startTestServer({ paths: repoPaths, repoManagerDeps });
 
       // Dispatch implement worker (no daemon-managed envoyTopics)
@@ -4073,7 +3949,8 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Reset tracking
-      envoySubscribeCalls.length = 0;
+      mockEnvoy.subscribeCalls.length = 0;
+      mockEnvoy.unsubscribeCalls.length = 0;
 
       // Prune the issue
       const pruneRes = await requestJson("/workers/prune", {
@@ -4084,11 +3961,9 @@ describe("daemon server", () => {
       await Bun.sleep(50);
 
       // Blanket unsubscribe catches self-managed subscriptions (e.g. PR topics)
-      const unsubCalls = envoySubscribeCalls.filter((c) =>
-        c.url.includes("/v1/interests/unsubscribe")
-      );
+      const unsubCalls = mockEnvoy.unsubscribeCalls;
       expect(unsubCalls).toHaveLength(1);
-      expect(unsubCalls[0].body.session_id).toBe(implWorker.sessionId);
+      expect(unsubCalls[0].session_id).toBe(implWorker.sessionId);
     });
   });
 

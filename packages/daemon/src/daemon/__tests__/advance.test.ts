@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { RuntimeAdapter } from "../runtime/types";
 import { startServer } from "../server";
+import { createMockEnvoyServer, type MockEnvoyServer } from "./mock-envoy-server";
 
 const sharedServePort = 15500;
 
@@ -15,6 +16,11 @@ describe("POST /state/advance", () => {
   let deleteSessionCalls: string[] = [];
   const originalFetch = globalThis.fetch;
   const legionId = "test-org/1";
+  let mockEnvoy: MockEnvoyServer;
+
+  beforeEach(() => {
+    mockEnvoy = createMockEnvoyServer();
+  });
 
   function makeAdapter(): RuntimeAdapter {
     return {
@@ -77,6 +83,7 @@ describe("POST /state/advance", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: mockEnvoy.url,
       legionId,
       legionDir: tempDir,
       paths: makePaths(tempDir),
@@ -138,6 +145,7 @@ describe("POST /state/advance", () => {
       await rm(tempDir, { recursive: true, force: true }).catch(() => {});
       tempDir = null;
     }
+    mockEnvoy.stop();
   });
 
   it("returns 400 when issueId is missing", async () => {
@@ -285,6 +293,11 @@ describe("POST /state/auto-advance", () => {
   let baseUrl = "";
   const originalFetch = globalThis.fetch;
   const legionId = "test-org/1";
+  let mockEnvoy: MockEnvoyServer;
+
+  beforeEach(() => {
+    mockEnvoy = createMockEnvoyServer();
+  });
 
   function makeAdapter(): RuntimeAdapter {
     return {
@@ -337,6 +350,7 @@ describe("POST /state/auto-advance", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: mockEnvoy.url,
       legionId,
       legionDir: tempDir,
       paths: makePaths(tempDir),
@@ -391,6 +405,7 @@ describe("POST /state/auto-advance", () => {
       await rm(tempDir, { recursive: true, force: true }).catch(() => {});
       tempDir = null;
     }
+    mockEnvoy.stop();
   });
 
   it("does nothing when autoAdvance is disabled", async () => {
