@@ -65,6 +65,14 @@ const OutputCompressionConfigSchema = z
   })
   .strict();
 
+const CircuitBreakerConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    threshold: z.number().optional(),
+    action: z.enum(["warn", "abort"]).optional(),
+  })
+  .strict();
+
 const PluginConfigSchema = z
   .object({
     $schema: z.string().optional(),
@@ -77,6 +85,7 @@ const PluginConfigSchema = z
     retry: RetryConfigSchema.optional(),
     taskRetentionMs: z.number().optional(),
     outputCompression: OutputCompressionConfigSchema.optional(),
+    circuitBreaker: CircuitBreakerConfigSchema.optional(),
   })
   .passthrough();
 
@@ -104,6 +113,12 @@ export interface OutputCompressionConfig {
   maxIndexSizeMB?: number;
 }
 
+export interface CircuitBreakerConfig {
+  enabled?: boolean;
+  threshold?: number;
+  action?: "warn" | "abort";
+}
+
 export interface PluginConfig {
   agents?: {
     [agentName: string]: AgentOverrideConfig;
@@ -116,6 +131,7 @@ export interface PluginConfig {
   retry?: RetryConfig;
   taskRetentionMs?: number;
   outputCompression?: OutputCompressionConfig;
+  circuitBreaker?: CircuitBreakerConfig;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -228,6 +244,10 @@ function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
     concurrency: mergeConcurrency(base.concurrency, override.concurrency),
     retry: mergeRetry(base.retry, override.retry),
     outputCompression: mergeOutputCompression(base.outputCompression, override.outputCompression),
+    circuitBreaker:
+      base.circuitBreaker || override.circuitBreaker
+        ? { ...base.circuitBreaker, ...override.circuitBreaker }
+        : undefined,
   };
 }
 
