@@ -11,6 +11,7 @@ config:
         tsnet:
           hostname: envoy-listener-sami-agents-mx
           stateDir: /var/lib/envoy-tsnet/listener-sami-agents-mx
+          tags: "tag:envoy"
         webhooks:
           github: true
           slack: true

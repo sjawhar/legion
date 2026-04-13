@@ -19,13 +19,15 @@ const machines = cfg.requireObject<MachineConfig[]>("machines");
 const githubWebhookSecret = cfg.getSecret("githubWebhookSecret");
 const slackSigningSecret = cfg.getSecret("slackSigningSecret");
 const ghostWisprSigningSecret = cfg.getSecret("ghostWisprSigningSecret");
-const tsnetAuthKey = cfg.getSecret("tsnetAuthKey");
+const tsnetOAuthClientId = cfg.getSecret("tsnetOAuthClientId");
+const tsnetOAuthClientSecret = cfg.getSecret("tsnetOAuthClientSecret");
 
 const secrets = {
   githubWebhookSecret,
   slackSigningSecret,
   ghostWisprSigningSecret,
-  tsnetAuthKey,
+  tsnetOAuthClientId,
+  tsnetOAuthClientSecret,
 };
 
 // Registry auth for GHCR (private packages)

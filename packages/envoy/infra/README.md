@@ -83,7 +83,8 @@ The passphrase itself has no external recovery path — if lost, you must choose
 | `envoy:githubWebhookSecret` | `ENVOY_GITHUB_WEBHOOK_SECRET` | Validates incoming GitHub webhook payloads |
 | `envoy:slackSigningSecret` | `ENVOY_SLACK_SIGNING_SECRET` | Validates incoming Slack event payloads |
 | `envoy:ghcrToken` | `GHCR_TOKEN` | Pulls container images from GHCR |
-| `envoy:tsnetAuthKey` | `TS_AUTHKEY` | Tailscale auth key for tsnet node registration (optional — only for initial setup) |
+| `envoy:tsnetOAuthClientId` | — | Tailscale OAuth client ID for tsnet node registration (preferred) |
+| `envoy:tsnetOAuthClientSecret` | — | Tailscale OAuth client secret (required with client ID) |
 ## Stack Configuration
 
 Non-secret config in `Pulumi.prod.yaml`:
@@ -119,7 +120,8 @@ When `listener.tsnet` is configured on a machine, the listener creates an embedd
 - **Hostname convention**: `envoy-{service}-{machineName}` (e.g., `envoy-listener-sami-agents-mx`)
 - **State directory convention**: `/var/lib/envoy-tsnet/{service}-{machineName}/`
 - **Docker capabilities**: None required — tsnet uses userspace networking (gVisor netstack)
-- **Auth key lifecycle**: Only needed for initial node registration. Once state is persisted (named Docker volume), the node reconnects without it.
+- **Auth (OAuth client — preferred)**: Create an OAuth client in the Tailscale admin console with the `auth_keys` scope and appropriate tags (e.g., `tag:envoy`). Set `envoy:tsnetOAuthClientId` and `envoy:tsnetOAuthClientSecret` in Pulumi config, and `tags: "tag:envoy"` in the machine's tsnet config. The Go config constructs the auth key automatically.
+- **Auth (legacy key)**: `ENVOY_TSNET_AUTH_KEY` is still supported for backward compatibility but is mutually exclusive with OAuth credentials.
 - **MagicDNS**: tsnet sidesteps the Docker bridge DNS limitation (see `docs/solutions/envoy/docker-tailscale-networking.md`) because the Tailscale node is embedded in the Go process itself.
 ### Local Machine (no sshHost)
 

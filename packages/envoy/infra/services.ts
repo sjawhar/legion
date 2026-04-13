@@ -35,7 +35,8 @@ interface ServiceSecrets {
   githubWebhookSecret?: pulumi.Output<string>;
   slackSigningSecret?: pulumi.Output<string>;
   ghostWisprSigningSecret?: pulumi.Output<string>;
-  tsnetAuthKey?: pulumi.Output<string>;
+  tsnetOAuthClientId?: pulumi.Output<string>;
+  tsnetOAuthClientSecret?: pulumi.Output<string>;
 }
 
 function getNatsUrls(machine: MachineConfig, allMachines: MachineConfig[]): string {
@@ -70,8 +71,12 @@ export function computeTsnetEnvs(
     "ENVOY_TSNET_ENABLED=true",
     `ENVOY_TSNET_HOSTNAME=${tsnet.hostname}`,
     `ENVOY_TSNET_STATE_DIR=${tsnet.stateDir}`,
-    ...(secrets.tsnetAuthKey
-      ? [pulumi.interpolate`ENVOY_TSNET_AUTH_KEY=${secrets.tsnetAuthKey}`]
+    ...(tsnet.tags ? [`ENVOY_TSNET_TAGS=${tsnet.tags}`] : []),
+    ...(secrets.tsnetOAuthClientId
+      ? [pulumi.interpolate`ENVOY_TSNET_OAUTH_CLIENT_ID=${secrets.tsnetOAuthClientId}`]
+      : []),
+    ...(secrets.tsnetOAuthClientSecret
+      ? [pulumi.interpolate`ENVOY_TSNET_OAUTH_CLIENT_SECRET=${secrets.tsnetOAuthClientSecret}`]
       : []),
   ];
 }
