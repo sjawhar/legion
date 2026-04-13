@@ -72,6 +72,78 @@ export interface RetryWithFallback {
  * When used with executeWithFallback, exhausted retries on transient errors
  * trigger the fallback function (e.g., to try a different model).
  */
+// ─── Model Fallback Chain Executor ───────────────────────────────────────────
+
+export interface FallbackAttempt {
+  model: string;
+  error: string;
+}
+
+export interface FallbackResult<T> {
+  /** The model that succeeded. */
+  model: string;
+  /** The result from the successful model. */
+  result: T;
+  /** Total number of attempts made (including the successful one). */
+  attempts: number;
+}
+
+export interface ModelFallbackOptions {
+  /** Delay in milliseconds between attempts. Default: 0. */
+  delayMs?: number;
+}
+
+export class AllModelsFailed extends Error {
+  /** Structured details of each failed attempt. */
+  readonly attempts: FallbackAttempt[];
+
+  constructor(attempts: FallbackAttempt[]) {
+    const count = attempts.length;
+    const models = attempts.map((a) => a.model).join(", ");
+    super(
+      `All ${count} model(s) failed. Tried: ${models}. ` +
+        attempts.map((a) => `${a.model}: ${a.error}`).join("; ")
+    );
+    this.name = "AllModelsFailed";
+    this.attempts = attempts;
+  }
+}
+
+/**
+ * Execute an operation with model fallback. Tries each model in the chain
+ * in order; returns the first success or throws AllModelsFailed with details
+ * of every attempt.
+ */
+export async function executeWithModelFallback<T>(
+  chain: Iterable<string>,
+  operation: (model: string) => Promise<T>,
+  options?: ModelFallbackOptions
+): Promise<FallbackResult<T>> {
+  const failedAttempts: FallbackAttempt[] = [];
+  const delayMs = options?.delayMs ?? 0;
+  let attemptCount = 0;
+
+  for (const model of chain) {
+    if (attemptCount > 0 && delayMs > 0) {
+      await delay(delayMs);
+    }
+    attemptCount++;
+    try {
+      const result = await operation(model);
+      return { model, result, attempts: attemptCount };
+    } catch (err) {
+      failedAttempts.push({
+        model,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  throw new AllModelsFailed(failedAttempts);
+}
+
+// ─── Transient Error Retry ───────────────────────────────────────────────────
+
 export function createRetryWithFallback(config: RetryConfig): RetryWithFallback {
   const maxRetries = config.maxRetries ?? RETRY_DEFAULTS.maxRetries;
   const delayMs = config.delayMs ?? RETRY_DEFAULTS.delayMs;

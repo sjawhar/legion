@@ -253,6 +253,9 @@ $RECYCLE.BIN/
 
 # End of https://www.toptal.com/developers/gitignore/api/linux,windows,macos,git,node,vim
 
+# Watchman cookie files
+.watchman-cookie-*
+
 .sisyphus/*
 !.sisyphus/rules/
 # .legion/ handoff data must be committed — do not ignore the directory
