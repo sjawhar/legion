@@ -30,7 +30,8 @@
       "daemon/multi-backend-mutation-target-pattern.md",
       "daemon/self-fetch-endpoint-composition.md",
       "daemon/pre-cleanup-branch-push-verification.md",
-      "best-practices/jj-bookmark-template-syntax-gotchas.md"
+      "best-practices/jj-bookmark-template-syntax-gotchas.md",
+      "daemon/dead-worker-workspace-reclamation.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -96,7 +97,8 @@
       "daemon/deferred-review-comments-pattern.md",
       "daemon/graceful-worker-shutdown.md",
       "daemon/optional-dep-fallback-and-early-return-guard.md",
-      "daemon/pre-cleanup-branch-push-verification.md"
+      "daemon/pre-cleanup-branch-push-verification.md",
+      "daemon/dead-worker-workspace-reclamation.md"
     ],
     "tag:cli-interaction": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:code-review": ["daemon/deferred-review-comments-pattern.md"],
@@ -159,7 +161,8 @@
       "daemon/worker-directory-resolution.md",
       "best-practices/git-stash-jj-working-copy-interference.md",
       "daemon/pre-cleanup-branch-push-verification.md",
-      "best-practices/jj-bookmark-template-syntax-gotchas.md"
+      "best-practices/jj-bookmark-template-syntax-gotchas.md",
+      "daemon/dead-worker-workspace-reclamation.md"
     ],
     "tag:keyboard-navigation": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:labels": ["integration-issues/linear-mcp-label-resolution.md"],
@@ -263,7 +266,8 @@
       "daemon/shared-serve-retro.md",
       "delegation/delegation-hardening-retro.md",
       "daemon/session-liveness-detection-pattern.md",
-      "daemon/optional-dep-fallback-and-early-return-guard.md"
+      "daemon/optional-dep-fallback-and-early-return-guard.md",
+      "daemon/dead-worker-workspace-reclamation.md"
     ],
     "tag:tmux": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:validation": ["daemon/workspace-validation-retro.md"],
@@ -271,7 +275,8 @@
     "tag:worker-isolation": ["daemon/worker-directory-resolution.md"],
     "tag:worker-lifecycle": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
-      "daemon/session-liveness-detection-pattern.md"
+      "daemon/session-liveness-detection-pattern.md",
+      "daemon/dead-worker-workspace-reclamation.md"
     ],
     "tag:worker-spawning": ["daemon/worker-directory-fix.md"],
     "tag:workers": ["skill-patterns/worker-skill-failure-modes.md"],
@@ -306,9 +311,15 @@
     "tag:timer": ["delegation/bun-node-timer-type-portability.md"],
     "tag:portability": ["delegation/bun-node-timer-type-portability.md"],
     "packages/daemon/src/daemon/runtime": ["daemon/session-liveness-detection-pattern.md"],
-    "tag:health-tick": ["daemon/session-liveness-detection-pattern.md"],
+    "tag:health-tick": [
+      "daemon/session-liveness-detection-pattern.md",
+      "daemon/dead-worker-workspace-reclamation.md"
+    ],
     "tag:liveness": ["daemon/session-liveness-detection-pattern.md"],
-    "tag:dead-worker": ["daemon/session-liveness-detection-pattern.md"],
+    "tag:dead-worker": [
+      "daemon/session-liveness-detection-pattern.md",
+      "daemon/dead-worker-workspace-reclamation.md"
+    ],
     "tag:jj": [
       "best-practices/git-stash-jj-working-copy-interference.md",
       "best-practices/jj-bookmark-template-syntax-gotchas.md"
@@ -364,6 +375,9 @@
     "tag:fail-safe": ["daemon/pre-cleanup-branch-push-verification.md"],
     "tag:destructive-operations": ["daemon/pre-cleanup-branch-push-verification.md"],
     "tag:bookmark-parsing": ["best-practices/jj-bookmark-template-syntax-gotchas.md"],
-    "tag:template-syntax": ["best-practices/jj-bookmark-template-syntax-gotchas.md"]
+    "tag:template-syntax": ["best-practices/jj-bookmark-template-syntax-gotchas.md"],
+    "tag:two-pass-pattern": ["daemon/dead-worker-workspace-reclamation.md"],
+    "tag:failure-isolation": ["daemon/dead-worker-workspace-reclamation.md"],
+    "tag:workspace-management": ["daemon/dead-worker-workspace-reclamation.md"]
   }
 }
