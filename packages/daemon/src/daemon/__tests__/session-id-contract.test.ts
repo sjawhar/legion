@@ -1,17 +1,23 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { computeSessionId } from "../../state/types";
 import type { RuntimeAdapter } from "../runtime/types";
 import { startServer } from "../server";
+import { createMockEnvoyServer, type MockEnvoyServer } from "./mock-envoy-server";
 
 describe("sessionId contract (daemon vs state)", () => {
   let tempDir: string | null = null;
   let stopServer: (() => void) | null = null;
+  let mockEnvoy: MockEnvoyServer;
 
   const originalFetch = globalThis.fetch;
   const legionId = "123e4567-e89b-12d3-a456-426614174000";
+
+  beforeEach(() => {
+    mockEnvoy = createMockEnvoyServer();
+  });
 
   afterEach(async () => {
     globalThis.fetch = originalFetch;
@@ -23,6 +29,7 @@ describe("sessionId contract (daemon vs state)", () => {
       await rm(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+    mockEnvoy.stop();
   });
 
   it("uses the same deterministic sessionId as the state machine (case-insensitive issue IDs)", async () => {
@@ -49,6 +56,7 @@ describe("sessionId contract (daemon vs state)", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: mockEnvoy.url,
       legionId,
       legionDir: tempDir,
       adapter,
@@ -97,6 +105,7 @@ describe("sessionId contract (daemon vs state)", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: mockEnvoy.url,
       legionId,
       legionDir: tempDir,
       adapter,
@@ -151,6 +160,7 @@ describe("sessionId contract (daemon vs state)", () => {
     const { server, stop } = startServer({
       port: 0,
       hostname: "127.0.0.1",
+      envoyUrl: mockEnvoy.url,
       legionId,
       legionDir: tempDir,
       adapter,

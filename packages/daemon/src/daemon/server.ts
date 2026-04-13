@@ -208,6 +208,7 @@ export function subscribeWorkerToEnvoy(
   envoyUrl = "http://127.0.0.1:9020"
 ): void {
   if (topics.length === 0) return;
+  if (!envoyUrl) return;
   fetch(`${envoyUrl}/v1/interests/subscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -236,6 +237,7 @@ function detachWorkerFromEnvoy(
   const hadTopics = entry.envoyTopics;
   entry.envoyTopics = undefined;
   if (!hadTopics?.length) return;
+  if (!envoyUrl) return;
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -256,6 +258,7 @@ function detachWorkerFromEnvoy(
 }
 
 function publishStateDelta(delta: StateDelta, envoyUrl = "http://127.0.0.1:9020"): void {
+  if (!envoyUrl) return;
   fetch(`${envoyUrl}/v1/messages/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -273,6 +276,7 @@ function publishStateDelta(delta: StateDelta, envoyUrl = "http://127.0.0.1:9020"
 }
 
 function unsubscribeAllWorkerTopics(sessionId: string, envoyUrl = "http://127.0.0.1:9020"): void {
+  if (!envoyUrl) return;
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

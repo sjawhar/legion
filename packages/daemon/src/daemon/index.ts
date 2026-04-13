@@ -140,6 +140,7 @@ async function sendPromptWithRetry(
 }
 
 async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
+  if (!envoyUrl) return;
   try {
     const roleRes = await fetch(`${envoyUrl}/v1/roles/set`, {
       method: "POST",
@@ -182,6 +183,7 @@ async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
 }
 
 function unsubscribeFromEnvoy(sessionId: string, envoyUrl: string) {
+  if (!envoyUrl) return;
   fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

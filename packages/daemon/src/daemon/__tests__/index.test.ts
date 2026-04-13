@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { createServer } from "node:net";
 import { type DaemonConfig, resolveDaemonConfig } from "../config";
 import { resolveLegionPaths } from "../paths";
@@ -6,6 +6,9 @@ import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import type { ServerOptions } from "../server";
 import type { PersistedWorkerState } from "../state-file";
+import { createMockEnvoyServer, type MockEnvoyServer } from "./mock-envoy-server";
+
+let currentMockEnvoy: MockEnvoyServer | null = null;
 
 const promptAsyncCalls: Array<{ sessionID: string; parts: unknown[] }> = [];
 let promptAsyncFailures = 0;
@@ -173,6 +176,7 @@ function startDaemonForTest(
   });
   const config: DaemonConfig = {
     ...baseConfig,
+    envoyUrl: overrides.envoyUrl ?? currentMockEnvoy?.url ?? "",
     paths: TEST_PATHS,
     legionId,
     logDir: instancePaths.logDir,
@@ -210,6 +214,12 @@ describe("daemon entry", () => {
   const originalExit = process.exit;
   const originalFetch = globalThis.fetch;
   const startServerCalls: ServerOptions[] = [];
+  let mockEnvoy: MockEnvoyServer;
+
+  beforeEach(() => {
+    mockEnvoy = createMockEnvoyServer();
+    currentMockEnvoy = mockEnvoy;
+  });
 
   afterEach(() => {
     process.on = originalOn;
@@ -222,6 +232,8 @@ describe("daemon entry", () => {
     mockedRegistry = {};
     mockedAllocatedPorts = { daemonPort: 13370, servePort: 13381 };
     startServerCalls.length = 0;
+    mockEnvoy.stop();
+    currentMockEnvoy = null;
   });
 
   describe("port allocation", () => {
@@ -720,10 +732,6 @@ describe("daemon entry", () => {
 
     let healthCallCount = 0;
     const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
-    const envoySubscribeCalls: Array<{
-      url: string;
-      body: { session_id: string; topics: string[] };
-    }> = [];
 
     const workerWithTopics: WorkerEntry = {
       ...baseEntry,
@@ -732,18 +740,6 @@ describe("daemon entry", () => {
     const workerWithoutTopics: WorkerEntry = {
       ...secondEntry,
       envoyTopics: undefined,
-    };
-
-    const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes("/v1/interests/subscribe")) {
-        envoySubscribeCalls.push({
-          url,
-          body: JSON.parse(init?.body as string),
-        });
-        return new Response("{}", { status: 200 });
-      }
-      return originalFetch(input, init);
     };
 
     await startDaemonForTest(
@@ -779,36 +775,28 @@ describe("daemon entry", () => {
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
-        fetch: Object.assign(mockFetch, {
-          preconnect: originalFetch.preconnect,
-        }),
+        fetch: originalFetch,
       }
     );
 
-    envoySubscribeCalls.length = 0;
-
-    // subscribeWorkerToEnvoy uses globalThis.fetch directly (not DI'd)
-    globalThis.fetch = Object.assign(mockFetch, {
-      preconnect: originalFetch.preconnect,
-    });
+    mockEnvoy.subscribeCalls.length = 0;
 
     if (!timeoutCallback) {
       throw new Error("Expected health loop callback to be scheduled");
     }
     await (timeoutCallback as () => Promise<void>)();
+    await Bun.sleep(100); // Flush fire-and-forget Envoy calls
 
     // Worker with topics should be re-subscribed
-    const workerSubscriptions = envoySubscribeCalls.filter(
-      (c) => c.body.session_id === workerWithTopics.sessionId
+    const workerSubscriptions = mockEnvoy.subscribeCalls.filter(
+      (c) => c.session_id === workerWithTopics.sessionId
     );
     expect(workerSubscriptions).toHaveLength(1);
-    expect(workerSubscriptions[0].body.topics).toEqual([
-      "notifications.github.acme.widgets.issue.42.>",
-    ]);
+    expect(workerSubscriptions[0].topics).toEqual(["notifications.github.acme.widgets.issue.42.>"]);
 
     // Worker without topics should NOT be subscribed
-    const noTopicSubscriptions = envoySubscribeCalls.filter(
-      (c) => c.body.session_id === workerWithoutTopics.sessionId
+    const noTopicSubscriptions = mockEnvoy.subscribeCalls.filter(
+      (c) => c.session_id === workerWithoutTopics.sessionId
     );
     expect(noTopicSubscriptions).toHaveLength(0);
   });
@@ -824,26 +812,10 @@ describe("daemon entry", () => {
     );
 
     let healthCallCount = 0;
-    const envoySubscribeCalls: Array<{
-      url: string;
-      body: { session_id: string; topics: string[] };
-    }> = [];
 
     const workerWithTopics: WorkerEntry = {
       ...baseEntry,
       envoyTopics: ["notifications.github.acme.widgets.issue.42.>"],
-    };
-
-    const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes("/v1/interests/subscribe")) {
-        envoySubscribeCalls.push({
-          url,
-          body: JSON.parse(init?.body as string),
-        });
-        return new Response("{}", { status: 200 });
-      }
-      return originalFetch(input, init);
     };
 
     // Adapter whose createSession always throws
@@ -883,17 +855,11 @@ describe("daemon entry", () => {
         }),
         setTimeout: mockSetTimeout,
         clearTimeout: () => {},
-        fetch: Object.assign(mockFetch, {
-          preconnect: originalFetch.preconnect,
-        }),
+        fetch: originalFetch,
       }
     );
 
-    envoySubscribeCalls.length = 0;
-
-    globalThis.fetch = Object.assign(mockFetch, {
-      preconnect: originalFetch.preconnect,
-    });
+    mockEnvoy.subscribeCalls.length = 0;
 
     if (!timeoutCallback) {
       throw new Error("Expected health loop callback to be scheduled");
@@ -901,8 +867,8 @@ describe("daemon entry", () => {
     await (timeoutCallback as () => Promise<void>)();
 
     // No envoy subscribes should have happened since all sessions failed to recreate
-    const workerSubscriptions = envoySubscribeCalls.filter(
-      (c) => c.body.session_id === workerWithTopics.sessionId
+    const workerSubscriptions = mockEnvoy.subscribeCalls.filter(
+      (c) => c.session_id === workerWithTopics.sessionId
     );
     expect(workerSubscriptions).toHaveLength(0);
   });

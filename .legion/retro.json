@@ -1,11 +1,10 @@
 {
   "skipped": false,
   "docsCreated": [
-    "docs/solutions/daemon/pre-cleanup-branch-push-verification.md",
-    "docs/solutions/best-practices/jj-bookmark-template-syntax-gotchas.md",
-    "docs/solutions/daemon/dead-worker-workspace-reclamation.md"
+    "docs/solutions/testing/mock-envoy-server-pattern.md",
+    "docs/solutions/testing/call-site-audit-for-test-isolation.md"
   ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-13T15:59:20.586Z"
+  "completed": "2026-04-13T17:29:20.204Z"
 }
