@@ -294,6 +294,7 @@ export function startServer(opts: ServerOptions): {
   server: Server;
   stop: () => void;
   fetchAndProcessState: () => Promise<void>;
+  cleanupDeadWorkers: () => Promise<void>;
 } {
   const hostname = opts.hostname ?? "127.0.0.1";
   const port = opts.port ?? 13370;
@@ -2023,6 +2024,103 @@ export function startServer(opts: ServerOptions): {
     },
   });
 
+  /**
+   * Clean up workspaces for dead workers on the health tick.
+   *
+   * For each worker with status === "dead":
+   * 1. jj workspace forget + rm -rf the workspace directory
+   * 2. Delete the serve session
+   * 3. Detach from Envoy
+   * 4. Remove worker + crash history from in-memory maps
+   * 5. Persist state
+   *
+   * This prevents dead worktrees from blocking future dispatches to the same issue.
+   */
+  const cleanupDeadWorkers = async (): Promise<void> => {
+    await stateLoaded;
+
+    const deadWorkerIds: string[] = [];
+    for (const [workerId, entry] of workers.entries()) {
+      if (entry.status === "dead") {
+        deadWorkerIds.push(workerId);
+      }
+    }
+
+    if (deadWorkerIds.length === 0) {
+      return;
+    }
+
+    const failedWorkspaceIssueIds = new Set<string>();
+    const cleanedWorkspaceIssueIds = new Set<string>();
+    let cleanedWorkers = 0;
+
+    // First pass: attempt workspace cleanup (once per issue)
+    for (const workerId of deadWorkerIds) {
+      const entry = workers.get(workerId);
+      if (!entry) continue;
+
+      const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
+      if (!issueId) continue;
+
+      if (cleanedWorkspaceIssueIds.has(issueId) || failedWorkspaceIssueIds.has(issueId)) {
+        continue;
+      }
+
+      if (opts.paths && typeof entry.repo === "string") {
+        const repoRef = parseIssueRepo(entry.repo);
+        if (repoRef) {
+          try {
+            await cleanupWorkspace(
+              opts.paths,
+              opts.legionId,
+              issueId,
+              repoRef,
+              opts.repoManagerDeps
+            );
+            cleanedWorkspaceIssueIds.add(issueId);
+          } catch (error) {
+            console.warn(
+              `[dead-worker-cleanup] workspace cleanup failed for ${issueId}: ${error instanceof Error ? error.message : String(error)}`
+            );
+            failedWorkspaceIssueIds.add(issueId);
+          }
+        }
+      }
+    }
+
+    // Second pass: remove worker state only for issues where workspace was cleaned (or no workspace)
+    for (const workerId of deadWorkerIds) {
+      const entry = workers.get(workerId);
+      if (!entry) continue;
+
+      const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
+
+      // Skip issues where workspace cleanup failed — preserve state for retry
+      if (issueId && failedWorkspaceIssueIds.has(issueId)) {
+        continue;
+      }
+
+      try {
+        await opts.adapter.deleteSession(entry.sessionId);
+      } catch (error) {
+        console.warn(
+          `[dead-worker-cleanup] session delete failed for ${entry.id}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+
+      detachWorkerFromEnvoy(entry, "dead-worker-cleanup", envoyUrl);
+      unsubscribeAllWorkerTopics(entry.sessionId, envoyUrl);
+      workers.delete(entry.id);
+      crashHistory.delete(entry.id);
+      cleanedWorkers += 1;
+    }
+
+    if (cleanedWorkers > 0) {
+      await persistState();
+      console.log(`[dead-worker-cleanup] Cleaned ${cleanedWorkers} dead workers`);
+    }
+  };
+
   const fetchAndProcessState = async (): Promise<void> => {
     const legionId = opts.legionId;
     const parts = legionId.split("/");
@@ -2076,5 +2174,6 @@ export function startServer(opts: ServerOptions): {
       server.stop(true);
     },
     fetchAndProcessState,
+    cleanupDeadWorkers,
   };
 }

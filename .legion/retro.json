@@ -2,9 +2,10 @@
   "skipped": false,
   "docsCreated": [
     "docs/solutions/daemon/pre-cleanup-branch-push-verification.md",
-    "docs/solutions/best-practices/jj-bookmark-template-syntax-gotchas.md"
+    "docs/solutions/best-practices/jj-bookmark-template-syntax-gotchas.md",
+    "docs/solutions/daemon/dead-worker-workspace-reclamation.md"
   ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-13T15:48:04.601Z"
+  "completed": "2026-04-13T15:59:20.586Z"
 }

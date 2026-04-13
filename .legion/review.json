@@ -1,43 +1,27 @@
 {
   "critical": 0,
-  "important": 3,
-  "minor": 3,
+  "important": 0,
+  "minor": 2,
   "verdict": "approved",
   "keyFindings": [
     {
-      "severity": "P2",
-      "file": "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-      "description": "Area 3 agent tests lock in OMO's Greek mythology role names — may need adjustment if downstream uses a mapping lookup instead of renaming agents"
-    },
-    {
-      "severity": "P2",
-      "file": "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-      "description": "Area 2 tests prescribe specific public API method names (getDepth, getDescendantCount, enforceSpawnLimits) that may not match the final implementation design"
-    },
-    {
-      "severity": "P2",
-      "file": "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-      "description": "Function.length arity checks (lines 146, 172) won't detect implementations using default parameters"
+      "severity": "P3",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "No issueStateCache cleanup for dead workers (correct: dead worker != done issue, cache needed for redispatch)"
     },
     {
       "severity": "P3",
-      "file": "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-      "description": "Header comment references #200 but PR closes #270 — both correct but could confuse readers"
-    },
-    {
-      "severity": "P3",
-      "file": "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-      "description": "No meta-test enforcing 'all 23 tests fail' invariant"
-    },
-    {
-      "severity": "P3",
-      "file": "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-      "description": "asRecord helper could use a JSDoc note explaining its purpose"
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "Legacy workspace-based workers skip filesystem cleanup but get state removed (correct: external directories not daemon-owned)"
     }
   ],
-  "learningsInjected": [],
-  "learningsHelpful": [],
+  "learningsInjected": [
+    "docs/solutions/daemon/session-liveness-detection-pattern.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/daemon/session-liveness-detection-pattern.md"
+  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T14:55:33.538Z"
+  "completed": "2026-04-13T15:52:34.021Z"
 }

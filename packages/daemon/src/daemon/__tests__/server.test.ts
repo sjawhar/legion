@@ -2054,6 +2054,347 @@ describe("daemon server", () => {
     });
   });
 
+  describe("dead worker cleanup", () => {
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+
+    function makeRepoManagerDeps(overrides?: Partial<RepoManagerDeps>): RepoManagerDeps {
+      return {
+        runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        exists: async () => true,
+        rmDir: async () => {},
+        symlink: async () => {},
+        ...overrides,
+      };
+    }
+
+    async function createRepoWorker(issueId: string) {
+      const response = await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId,
+          mode: "implement",
+          repo: "acme/widgets",
+        }),
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as { id: string; sessionId: string };
+    }
+
+    it("cleans up workspaces for dead workers via cleanupDeadWorkers", async () => {
+      const rmDirCalls: string[] = [];
+      const jjCalls: string[][] = [];
+      const { server, stop, cleanupDeadWorkers } = startServer({
+        port: 0,
+        hostname: "127.0.0.1",
+        legionId,
+        paths,
+        adapter: makeAdapter(),
+        repoManagerDeps: makeRepoManagerDeps({
+          runJj: async (args) => {
+            jjCalls.push(args);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+        stateFilePath: path.join(
+          await mkdtemp(path.join(os.tmpdir(), "legion-dead-")),
+          "workers.json"
+        ),
+      });
+      const localBaseUrl = `http://127.0.0.1:${server.port}`;
+      try {
+        // Create a worker, then mark it dead
+        const createRes = await originalFetch(`${localBaseUrl}/workers`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            issueId: "acme-widgets-60",
+            mode: "implement",
+            repo: "acme/widgets",
+          }),
+        });
+        expect(createRes.status).toBe(200);
+        const created = (await createRes.json()) as { id: string; sessionId: string };
+
+        const patchRes = await originalFetch(`${localBaseUrl}/workers/${created.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "dead" }),
+        });
+        expect(patchRes.status).toBe(200);
+
+        // Run cleanup
+        await cleanupDeadWorkers();
+
+        // Verify workspace was cleaned: jj workspace forget + rmDir
+        const forgetCall = jjCalls.find((args) => args[0] === "workspace" && args[1] === "forget");
+        expect(forgetCall).toBeDefined();
+        expect(forgetCall).toContain("acme-widgets-60");
+        expect(rmDirCalls).toEqual([`/tmp/legion-data/workspaces/${legionId}/acme-widgets-60`]);
+
+        // Verify worker was removed from the map
+        const workersRes = await originalFetch(`${localBaseUrl}/workers`);
+        const workers = (await workersRes.json()) as WorkerEntry[];
+        expect(workers).toEqual([]);
+      } finally {
+        stop();
+      }
+    });
+
+    it("does not clean up running workers", async () => {
+      const rmDirCalls: string[] = [];
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+      });
+
+      // Create a worker but leave it in "starting" status (default)
+      await createRepoWorker("acme-widgets-61");
+
+      // Run cleanup via fetchAndProcessState (which triggers cleanup path)
+      // Dead worker cleanup only targets status === "dead"
+      const workersRes = await requestJson("/workers");
+      const workers = (await workersRes.json()) as WorkerEntry[];
+      expect(workers).toHaveLength(1);
+      expect(rmDirCalls).toEqual([]);
+    });
+
+    it("preserves dead worker state when workspace cleanup fails", async () => {
+      const { server, stop, cleanupDeadWorkers } = startServer({
+        port: 0,
+        hostname: "127.0.0.1",
+        legionId,
+        paths,
+        adapter: makeAdapter(),
+        repoManagerDeps: makeRepoManagerDeps({
+          runJj: async () => {
+            throw new Error("jj workspace forget failed");
+          },
+        }),
+        stateFilePath: path.join(
+          await mkdtemp(path.join(os.tmpdir(), "legion-dead-")),
+          "workers.json"
+        ),
+      });
+      const localBaseUrl = `http://127.0.0.1:${server.port}`;
+      try {
+        // Create and mark dead
+        const createRes = await originalFetch(`${localBaseUrl}/workers`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            issueId: "acme-widgets-62",
+            mode: "implement",
+            repo: "acme/widgets",
+          }),
+        });
+        expect(createRes.status).toBe(200);
+        const created = (await createRes.json()) as { id: string };
+
+        await originalFetch(`${localBaseUrl}/workers/${created.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "dead" }),
+        });
+
+        // Suppress console.warn for expected error log
+        console.warn = () => {};
+
+        // Run cleanup — should fail workspace cleanup but not crash
+        await cleanupDeadWorkers();
+
+        // Worker should still exist because workspace cleanup failed
+        const workersRes = await originalFetch(`${localBaseUrl}/workers`);
+        const workers = (await workersRes.json()) as WorkerEntry[];
+        expect(workers).toHaveLength(1);
+        expect(workers[0]?.status).toBe("dead");
+      } finally {
+        stop();
+      }
+    });
+
+    it("is idempotent — second call is a no-op after first succeeds", async () => {
+      const rmDirCalls: string[] = [];
+      const { server, stop, cleanupDeadWorkers } = startServer({
+        port: 0,
+        hostname: "127.0.0.1",
+        legionId,
+        paths,
+        adapter: makeAdapter(),
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+        stateFilePath: path.join(
+          await mkdtemp(path.join(os.tmpdir(), "legion-dead-")),
+          "workers.json"
+        ),
+      });
+      const localBaseUrl = `http://127.0.0.1:${server.port}`;
+      try {
+        const createRes = await originalFetch(`${localBaseUrl}/workers`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            issueId: "acme-widgets-63",
+            mode: "implement",
+            repo: "acme/widgets",
+          }),
+        });
+        expect(createRes.status).toBe(200);
+        const created = (await createRes.json()) as { id: string };
+
+        await originalFetch(`${localBaseUrl}/workers/${created.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "dead" }),
+        });
+
+        // First cleanup removes the worker
+        await cleanupDeadWorkers();
+        expect(rmDirCalls).toHaveLength(1);
+
+        // Second cleanup is a no-op
+        await cleanupDeadWorkers();
+        expect(rmDirCalls).toHaveLength(1);
+      } finally {
+        stop();
+      }
+    });
+
+    it("cleans up multiple dead workers for the same issue", async () => {
+      const rmDirCalls: string[] = [];
+      const { server, stop, cleanupDeadWorkers } = startServer({
+        port: 0,
+        hostname: "127.0.0.1",
+        legionId,
+        paths,
+        adapter: makeAdapter(),
+        repoManagerDeps: makeRepoManagerDeps({
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+        stateFilePath: path.join(
+          await mkdtemp(path.join(os.tmpdir(), "legion-dead-")),
+          "workers.json"
+        ),
+      });
+      const localBaseUrl = `http://127.0.0.1:${server.port}`;
+      try {
+        // Create two workers for the same issue (different modes)
+        for (const mode of ["implement", "test"]) {
+          const createRes = await originalFetch(`${localBaseUrl}/workers`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              issueId: "acme-widgets-64",
+              mode,
+              repo: "acme/widgets",
+            }),
+          });
+          expect(createRes.status).toBe(200);
+          const created = (await createRes.json()) as { id: string };
+
+          await originalFetch(`${localBaseUrl}/workers/${created.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ status: "dead" }),
+          });
+        }
+
+        await cleanupDeadWorkers();
+
+        // Workspace cleanup should happen once (deduplicated by issue ID)
+        expect(rmDirCalls).toHaveLength(1);
+        expect(rmDirCalls[0]).toContain("acme-widgets-64");
+
+        // Both workers should be removed
+        const workersRes = await originalFetch(`${localBaseUrl}/workers`);
+        const workers = (await workersRes.json()) as WorkerEntry[];
+        expect(workers).toEqual([]);
+      } finally {
+        stop();
+      }
+    });
+
+    it("allows new dispatch after dead worker is cleaned up", async () => {
+      const { server, stop, cleanupDeadWorkers } = startServer({
+        port: 0,
+        hostname: "127.0.0.1",
+        legionId,
+        paths,
+        adapter: makeAdapter(),
+        repoManagerDeps: makeRepoManagerDeps(),
+        stateFilePath: path.join(
+          await mkdtemp(path.join(os.tmpdir(), "legion-dead-")),
+          "workers.json"
+        ),
+      });
+      const localBaseUrl = `http://127.0.0.1:${server.port}`;
+      try {
+        // Create, mark dead, cleanup
+        const createRes = await originalFetch(`${localBaseUrl}/workers`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            issueId: "acme-widgets-65",
+            mode: "implement",
+            repo: "acme/widgets",
+          }),
+        });
+        expect(createRes.status).toBe(200);
+        const created = (await createRes.json()) as { id: string };
+
+        await originalFetch(`${localBaseUrl}/workers/${created.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "dead" }),
+        });
+
+        await cleanupDeadWorkers();
+
+        // Should be able to create a new worker for the same issue
+        const newRes = await originalFetch(`${localBaseUrl}/workers`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            issueId: "acme-widgets-65",
+            mode: "implement",
+            repo: "acme/widgets",
+          }),
+        });
+        expect(newRes.status).toBe(200);
+        const newWorker = (await newRes.json()) as { id: string };
+        expect(newWorker.id).toBe("acme-widgets-65-implement");
+      } finally {
+        stop();
+      }
+    });
+  });
+
   describe("POST /workers/:id/prompt", () => {
     const baseWorkerEntry: WorkerEntry = {
       id: "leg-42-implement",

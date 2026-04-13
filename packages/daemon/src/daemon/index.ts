@@ -33,7 +33,8 @@ import {
 type ServerHandle = ReturnType<typeof startServer>;
 type StartServerDependency = (
   ...args: Parameters<typeof startServer>
-) => Pick<ServerHandle, "server" | "stop"> & Partial<Pick<ServerHandle, "fetchAndProcessState">>;
+) => Pick<ServerHandle, "server" | "stop"> &
+  Partial<Pick<ServerHandle, "fetchAndProcessState" | "cleanupDeadWorkers">>;
 
 interface DaemonDependencies {
   adapter: RuntimeAdapter;
@@ -453,6 +454,7 @@ export async function startDaemon(
   let server: ServerHandle["server"];
   let stop: ServerHandle["stop"];
   let fetchAndProcessState: ServerHandle["fetchAndProcessState"];
+  let cleanupDeadWorkers: ServerHandle["cleanupDeadWorkers"];
   let bindAttempts = 0;
 
   while (true) {
@@ -489,6 +491,7 @@ export async function startDaemon(
       server = serverHandle.server;
       stop = serverHandle.stop;
       fetchAndProcessState = serverHandle.fetchAndProcessState ?? (async () => {});
+      cleanupDeadWorkers = serverHandle.cleanupDeadWorkers ?? (async () => {});
       break;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
@@ -772,6 +775,18 @@ export async function startDaemon(
             } catch (livenessErr) {
               console.warn(`[liveness] Session liveness check failed (non-fatal): ${livenessErr}`);
             }
+          }
+        }
+
+        // Clean up dead worker workspaces (non-blocking)
+        // Runs after liveness sweep so newly-reaped workers are included.
+        if (serveHealthy && !restartReason) {
+          try {
+            await cleanupDeadWorkers();
+          } catch (error) {
+            console.warn(
+              `[health-tick] dead worker cleanup failed: ${error instanceof Error ? error.message : String(error)} (non-fatal)`
+            );
           }
         }
 
