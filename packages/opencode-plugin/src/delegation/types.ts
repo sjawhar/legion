@@ -6,6 +6,10 @@ export interface BackgroundTask {
   description: string;
   sessionID?: string;
   parentSessionID?: string;
+  /** Spawn depth: 0 for root tasks, parent.depth + 1 for children. */
+  depth?: number;
+  /** Session ID of the root ancestor task. Same as sessionID for root tasks. */
+  rootSessionID?: string;
   result?: string;
   error?: string;
   createdAt: number;

@@ -147,7 +147,7 @@ describe("depth boundary", () => {
   });
 
   it("depth counters unchanged after rejection — subsequent valid spawn still works", async () => {
-    const manager = createManager({}, { maxDepth: 2 });
+    const manager = createManager({}, { maxDepth: 3 });
     const root = await manager.launch({
       agent: "explore",
       prompt: "test",
@@ -166,7 +166,7 @@ describe("depth boundary", () => {
       parentSessionId: child.sessionID,
     });
 
-    // depth=3 should fail (maxDepth=2 means max allowed depth index is 1)
+    // depth=3 should fail (maxDepth=3 means max allowed depth index is 2)
     await expect(
       manager.launch({
         agent: "explore",
@@ -174,9 +174,9 @@ describe("depth boundary", () => {
         description: "rejected",
         parentSessionId: grandchild.sessionID,
       })
-    ).rejects.toThrow("Spawn rejected: max depth 2 reached (current depth: 3)");
+    ).rejects.toThrow("Spawn rejected: max depth 3 reached (current depth: 3)");
 
-    // After rejection, a sibling of grandchild (depth=2) should still fail too
+    // After rejection, a sibling of grandchild (depth=3) should still fail too
     // (counters not corrupted — limit still enforced correctly)
     await expect(
       manager.launch({
@@ -185,7 +185,7 @@ describe("depth boundary", () => {
         description: "also-rejected",
         parentSessionId: grandchild.sessionID,
       })
-    ).rejects.toThrow("Spawn rejected: max depth 2 reached (current depth: 3)");
+    ).rejects.toThrow("Spawn rejected: max depth 3 reached (current depth: 3)");
   });
 });
 
@@ -284,8 +284,8 @@ describe("descendant boundary", () => {
 });
 
 describe("config overrides", () => {
-  it("custom maxDepth=3 rejects at 4th level", async () => {
-    const manager = createManager({}, { maxDepth: 3 });
+  it("custom maxDepth=4 rejects at depth=4", async () => {
+    const manager = createManager({}, { maxDepth: 4 });
     let current = await manager.launch({
       agent: "explore",
       prompt: "test",
@@ -307,7 +307,7 @@ describe("config overrides", () => {
         description: "depth-4-rejected",
         parentSessionId: current.sessionID,
       })
-    ).rejects.toThrow("Spawn rejected: max depth 3 reached (current depth: 4)");
+    ).rejects.toThrow("Spawn rejected: max depth 4 reached (current depth: 4)");
   });
 
   it("custom maxDescendants=10 rejects at 11th descendant", async () => {
@@ -415,7 +415,7 @@ describe("concurrent spawns", () => {
 
 describe("error message format", () => {
   it("depth rejection includes limit type and current value", async () => {
-    const manager = createManager({}, { maxDepth: 1 });
+    const manager = createManager({}, { maxDepth: 2 });
     const root = await manager.launch({
       agent: "explore",
       prompt: "test",
@@ -434,7 +434,7 @@ describe("error message format", () => {
         description: "grandchild",
         parentSessionId: child.sessionID,
       })
-    ).rejects.toThrow("Spawn rejected: max depth 1 reached (current depth: 2)");
+    ).rejects.toThrow("Spawn rejected: max depth 2 reached (current depth: 2)");
   });
 
   it("descendant rejection includes limit type and root session ID", async () => {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { loadPluginConfig } from "../index";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { loadPluginConfig } from "../index";
 
 describe("spawnLimits config", () => {
   it("applies default spawnLimits when not configured", async () => {

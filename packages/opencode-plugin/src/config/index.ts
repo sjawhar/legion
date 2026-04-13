@@ -65,6 +65,13 @@ const OutputCompressionConfigSchema = z
   })
   .strict();
 
+const SpawnLimitsConfigSchema = z
+  .object({
+    maxDepth: z.number().optional(),
+    maxDescendants: z.number().optional(),
+  })
+  .strict();
+
 const PluginConfigSchema = z
   .object({
     $schema: z.string().optional(),
@@ -77,6 +84,7 @@ const PluginConfigSchema = z
     retry: RetryConfigSchema.optional(),
     taskRetentionMs: z.number().optional(),
     outputCompression: OutputCompressionConfigSchema.optional(),
+    spawnLimits: SpawnLimitsConfigSchema.optional(),
   })
   .passthrough();
 
@@ -104,6 +112,11 @@ export interface OutputCompressionConfig {
   maxIndexSizeMB?: number;
 }
 
+export interface SpawnLimitsConfig {
+  maxDepth?: number;
+  maxDescendants?: number;
+}
+
 export interface PluginConfig {
   agents?: {
     [agentName: string]: AgentOverrideConfig;
@@ -116,6 +129,7 @@ export interface PluginConfig {
   retry?: RetryConfig;
   taskRetentionMs?: number;
   outputCompression?: OutputCompressionConfig;
+  spawnLimits?: SpawnLimitsConfig;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -129,6 +143,10 @@ const DEFAULT_CONFIG: PluginConfig = {
     delayMs: 2000,
   },
   taskRetentionMs: 3600000,
+  spawnLimits: {
+    maxDepth: 5,
+    maxDescendants: 20,
+  },
 };
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -218,6 +236,15 @@ function mergeOutputCompression(
   };
 }
 
+function mergeSpawnLimits(
+  base?: SpawnLimitsConfig,
+  override?: SpawnLimitsConfig
+): SpawnLimitsConfig | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return { ...base, ...override };
+}
+
 function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
   return {
     ...base,
@@ -228,6 +255,7 @@ function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
     concurrency: mergeConcurrency(base.concurrency, override.concurrency),
     retry: mergeRetry(base.retry, override.retry),
     outputCompression: mergeOutputCompression(base.outputCompression, override.outputCompression),
+    spawnLimits: mergeSpawnLimits(base.spawnLimits, override.spawnLimits),
   };
 }
 
@@ -245,6 +273,11 @@ function applyDefaults(config: PluginConfig): PluginConfig {
       fallbackModel: config.retry?.fallbackModel ?? DEFAULT_CONFIG.retry?.fallbackModel,
     },
     taskRetentionMs: config.taskRetentionMs ?? DEFAULT_CONFIG.taskRetentionMs,
+    spawnLimits: {
+      maxDepth: config.spawnLimits?.maxDepth ?? DEFAULT_CONFIG.spawnLimits?.maxDepth,
+      maxDescendants:
+        config.spawnLimits?.maxDescendants ?? DEFAULT_CONFIG.spawnLimits?.maxDescendants,
+    },
   };
 }
 
