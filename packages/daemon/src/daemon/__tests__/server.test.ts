@@ -5040,6 +5040,27 @@ describe("daemon server", () => {
     });
   });
 
+  describe("GET /dashboard/ui", () => {
+    it("returns HTML page with correct content-type", async () => {
+      await startTestServer();
+      const response = await originalFetch(`${baseUrl}/dashboard/ui`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      const html = await response.text();
+      expect(html).toContain("<!DOCTYPE html>");
+      expect(html).toContain("Legion Dashboard");
+      expect(html).toContain('fetch("/dashboard")');
+    });
+
+    it("includes auto-refresh and responsive meta tag", async () => {
+      await startTestServer();
+      const response = await originalFetch(`${baseUrl}/dashboard/ui`);
+      const html = await response.text();
+      expect(html).toContain('name="viewport"');
+      expect(html).toContain("REFRESH_INTERVAL = 30");
+    });
+  });
+
   describe("GET /state/track", () => {
     it("returns empty list when no issues tracked", async () => {
       await startTestServer({});
