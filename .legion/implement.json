@@ -1,19 +1,18 @@
 {
   "filesChanged": [
-    "packages/opencode-plugin/src/delegation/__tests__/retry-with-fallback.test.ts",
-    ".legion/implement.json",
-    ".legion/review.json"
+    ".opencode/skills/legion-worker/workflows/smoke-testing.md",
+    ".changelog/516.md"
   ],
   "trickyParts": [
-    "Merge conflicts in .legion/implement.json and .legion/review.json required careful resolution — the files contained data from other issues that had been merged to main. Resolved by keeping issue 276 version.",
-    "504 Gateway Timeout was in TRANSIENT_STATUS_CODES but lacked a dedicated test — added to make the contract explicit."
+    "Resolved rebase conflicts in .legion/implement.json and .legion/review.json caused by concurrent merges to main",
+    "Renamed smoke-test.md to smoke-testing.md to match existing references in test.md and plan.md"
   ],
-  "deviations": ["None — followed the issue directive exactly"],
+  "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T18:10:22.056Z"
+  "completed": "2026-04-13T21:07:45.345Z"
 }
