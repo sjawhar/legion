@@ -29,6 +29,7 @@ import {
   type RepoManagerDeps,
   removeDir,
   startBackgroundFetch,
+  verifyBranchPushed,
 } from "./repo-manager";
 import type { RuntimeAdapter } from "./runtime/types";
 import type { WorkerEntry as BaseWorkerEntry } from "./serve-manager";
@@ -537,11 +538,47 @@ export function startServer(opts: ServerOptions): {
             activeWorkerIssueIds.add(issueId);
           }
         }
+
+        // Derive repo clone path from any existing worker (all workers share the same repo)
+        let fallbackClonePath: string | null = null;
+        for (const workerEntry of workers.values()) {
+          if (typeof workerEntry.repo === "string") {
+            const ref = parseIssueRepo(workerEntry.repo);
+            if (ref) {
+              fallbackClonePath = opts.paths.repoClonePath(ref.host, ref.owner, ref.repo);
+              break;
+            }
+          }
+        }
+
         for (const entry of entries) {
           const issueId = basename(entry).toLowerCase();
           if (boardIssueIds.has(issueId) || activeWorkerIssueIds.has(issueId)) {
             continue;
           }
+
+          // Best-effort branch push check before removing off-board workspace
+          if (fallbackClonePath) {
+            try {
+              const pushCheck = await verifyBranchPushed(
+                fallbackClonePath,
+                issueId,
+                opts.repoManagerDeps
+              );
+              if (!pushCheck.safe) {
+                console.warn(
+                  `[auto-cleanup] Skipping off-board workspace ${issueId}: ${pushCheck.reason}`
+                );
+                continue;
+              }
+            } catch (error) {
+              console.warn(
+                `[auto-cleanup] Branch push check failed for ${issueId}, skipping removal: ${error instanceof Error ? error.message : String(error)}`
+              );
+              continue;
+            }
+          }
+
           const workspacePath = join(workspacesDir, basename(entry));
           try {
             await removeDir(workspacePath, opts.repoManagerDeps);

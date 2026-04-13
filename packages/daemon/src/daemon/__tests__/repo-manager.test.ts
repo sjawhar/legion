@@ -8,6 +8,7 @@ import {
   type RepoManagerDeps,
   resolveWorkspacePath,
   startBackgroundFetch,
+  verifyBranchPushed,
 } from "../repo-manager";
 
 describe("parseIssueRepo", () => {
@@ -305,13 +306,146 @@ describe("ensureWorkspace", () => {
   });
 });
 
+describe("verifyBranchPushed", () => {
+  it("returns safe when no bookmark exists", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    const result = await verifyBranchPushed("/clone", "acme-widgets-7", deps);
+    expect(result).toEqual({ safe: true });
+  });
+
+  it("returns safe when jj command fails", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 1, stdout: "", stderr: "error" }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    const result = await verifyBranchPushed("/clone", "acme-widgets-7", deps);
+    expect(result).toEqual({ safe: true });
+  });
+
+  it("returns safe when bookmark is synced with origin (ahead:0)", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({
+        exitCode: 0,
+        stdout: [
+          "acme-widgets-7 local",
+          "acme-widgets-7 remote:git ahead:0",
+          "acme-widgets-7 remote:origin ahead:0",
+        ].join("\n"),
+        stderr: "",
+      }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    const result = await verifyBranchPushed("/clone", "acme-widgets-7", deps);
+    expect(result).toEqual({ safe: true });
+  });
+
+  it("returns unsafe when bookmark is ahead of origin", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({
+        exitCode: 0,
+        stdout: [
+          "acme-widgets-7 local",
+          "acme-widgets-7 remote:git ahead:0",
+          "acme-widgets-7 remote:origin ahead:3",
+        ].join("\n"),
+        stderr: "",
+      }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    const result = await verifyBranchPushed("/clone", "acme-widgets-7", deps);
+    expect(result.safe).toBe(false);
+    expect(result.reason).toContain("3 commit(s) ahead of origin");
+  });
+
+  it("returns unsafe when bookmark has no origin remote tracking", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({
+        exitCode: 0,
+        stdout: ["acme-widgets-7 local", "acme-widgets-7 remote:git ahead:0"].join("\n"),
+        stderr: "",
+      }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    const result = await verifyBranchPushed("/clone", "acme-widgets-7", deps);
+    expect(result.safe).toBe(false);
+    expect(result.reason).toContain("no remote tracking on origin");
+  });
+
+  it("returns safe when only remote entries exist (no local bookmark)", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({
+        exitCode: 0,
+        stdout: ["acme-widgets-7 remote:git ahead:0", "acme-widgets-7 remote:origin ahead:0"].join(
+          "\n"
+        ),
+        stderr: "",
+      }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    const result = await verifyBranchPushed("/clone", "acme-widgets-7", deps);
+    expect(result).toEqual({ safe: true });
+  });
+
+  it("passes correct arguments to runJj", async () => {
+    const commands: string[][] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        commands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+
+    await verifyBranchPushed("/my/clone", "ACME-Widgets-7", deps);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("bookmark");
+    expect(commands[0]).toContain("list");
+    expect(commands[0]).toContain("acme-widgets-7"); // lowercased
+    expect(commands[0]).toContain("--all");
+    expect(commands[0]).toContain("-R");
+    expect(commands[0]).toContain("/my/clone");
+  });
+});
+
 describe("cleanupWorkspace", () => {
-  it("forgets jj workspace and removes directory", async () => {
+  it("forgets jj workspace and removes directory when branch is pushed", async () => {
     const commands: string[][] = [];
     const removedPaths: string[] = [];
     const deps: RepoManagerDeps = {
       runJj: async (args) => {
         commands.push(args);
+        // bookmark list returns synced bookmark
+        if (args.includes("bookmark")) {
+          return {
+            exitCode: 0,
+            stdout: ["acme-widgets-7 local", "acme-widgets-7 remote:origin ahead:0"].join("\n"),
+            stderr: "",
+          };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
       exists: async () => true,
@@ -330,6 +464,88 @@ describe("cleanupWorkspace", () => {
     expect(removedPaths).toContain(
       "/home/test/.local/share/legion/workspaces/sjawhar/42/acme-widgets-7"
     );
+  });
+
+  it("refuses to clean when branch has unpushed commits", async () => {
+    const removedPaths: string[] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        if (args.includes("bookmark")) {
+          return {
+            exitCode: 0,
+            stdout: ["acme-widgets-7 local", "acme-widgets-7 remote:origin ahead:5"].join("\n"),
+            stderr: "",
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async (p) => {
+        removedPaths.push(p);
+      },
+      symlink: async () => {},
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+
+    await expect(
+      cleanupWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps)
+    ).rejects.toThrow("Refusing to clean workspace");
+    expect(removedPaths).toEqual([]);
+  });
+
+  it("refuses to clean when bookmark has no origin tracking", async () => {
+    const removedPaths: string[] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        if (args.includes("bookmark")) {
+          return {
+            exitCode: 0,
+            stdout: "acme-widgets-7 local\n",
+            stderr: "",
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async (p) => {
+        removedPaths.push(p);
+      },
+      symlink: async () => {},
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+
+    await expect(
+      cleanupWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps)
+    ).rejects.toThrow("Refusing to clean workspace");
+    expect(removedPaths).toEqual([]);
+  });
+
+  it("allows cleanup when no bookmark exists (no work done)", async () => {
+    const commands: string[][] = [];
+    const removedPaths: string[] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        commands.push(args);
+        if (args.includes("bookmark")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async (p) => {
+        removedPaths.push(p);
+      },
+      symlink: async () => {},
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await cleanupWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    const forgetCmd = commands.find((c) => c.includes("forget"));
+    expect(forgetCmd).toBeDefined();
+    expect(removedPaths).toHaveLength(1);
   });
 });
 

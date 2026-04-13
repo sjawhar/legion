@@ -177,6 +177,75 @@ export async function startBackgroundFetch(
   return result;
 }
 
+/**
+ * Check whether a bookmark (branch) for the given issue has been pushed to origin.
+ *
+ * Returns `{ safe: true }` when either:
+ * - No local bookmark matching the issueId exists (nothing to lose), OR
+ * - The local bookmark exists and is not ahead of origin (all commits pushed).
+ *
+ * Returns `{ safe: false, reason: string }` when unpushed commits would be lost.
+ */
+export async function verifyBranchPushed(
+  clonePath: string,
+  issueId: string,
+  deps: RepoManagerDeps = defaultDeps
+): Promise<{ safe: boolean; reason?: string }> {
+  // List all remotes for this bookmark using a template that outputs one line per entry:
+  //   "local" for the local bookmark
+  //   "remote:<name> ahead:<N>" for each tracked remote
+  const result = await deps.runJj([
+    "bookmark",
+    "list",
+    issueId.toLowerCase(),
+    "--all",
+    "-T",
+    'name ++ if(remote, " remote:" ++ remote ++ " ahead:" ++ tracking_ahead_count.lower(), " local") ++ "\n"',
+    "-R",
+    clonePath,
+  ]);
+
+  // If jj fails or returns no output, the bookmark doesn't exist — safe to clean
+  if (result.exitCode !== 0 || !result.stdout.trim()) {
+    return { safe: true };
+  }
+
+  const lines = result.stdout
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Check if there's a local bookmark (indicates work was done on this branch)
+  const hasLocal = lines.some((line) => line.endsWith(" local"));
+  if (!hasLocal) {
+    // No local bookmark — only remote tracking entries exist, safe to clean
+    return { safe: true };
+  }
+
+  // Check the origin remote specifically — is the local bookmark ahead of origin?
+  const originLine = lines.find((line) => line.includes(" remote:origin "));
+  if (!originLine) {
+    // Local bookmark exists but no origin remote tracking — not pushed at all
+    return {
+      safe: false,
+      reason: `Bookmark ${issueId.toLowerCase()} exists locally but has no remote tracking on origin — unpushed work would be lost`,
+    };
+  }
+
+  // Parse ahead count from the origin line
+  const aheadMatch = originLine.match(/ahead:(\d+)/);
+  const aheadCount = aheadMatch ? parseInt(aheadMatch[1], 10) : 0;
+  if (aheadCount > 0) {
+    return {
+      safe: false,
+      reason: `Bookmark ${issueId.toLowerCase()} is ${aheadCount} commit(s) ahead of origin — unpushed work would be lost`,
+    };
+  }
+
+  return { safe: true };
+}
+
 export async function cleanupWorkspace(
   paths: LegionPaths,
   projectId: string,
@@ -186,6 +255,12 @@ export async function cleanupWorkspace(
 ): Promise<void> {
   const clonePath = paths.repoClonePath(repo.host, repo.owner, repo.repo);
   const workspacePath = resolveWorkspacePath(paths, projectId, issueId);
+
+  // Verify the branch has been pushed before destroying the workspace
+  const pushCheck = await verifyBranchPushed(clonePath, issueId, deps);
+  if (!pushCheck.safe) {
+    throw new Error(`Refusing to clean workspace for ${issueId}: ${pushCheck.reason}`);
+  }
 
   await deps.runJj(["workspace", "forget", issueId.toLowerCase(), "-R", clonePath]);
 

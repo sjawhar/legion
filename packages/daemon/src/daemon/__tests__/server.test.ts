@@ -1087,8 +1087,18 @@ describe("daemon server", () => {
 
     expect(cleanupResponse.status).toBe(200);
     expect(await cleanupResponse.json()).toEqual({ status: "cleaned", workerRemoved: true });
-    expect(runJjCalls).toEqual([
-      ["workspace", "forget", "eng-79", "-R", "/tmp/legion-data/repos/github.com/acme/widgets"],
+    expect(runJjCalls).toHaveLength(2);
+    // First call: verifyBranchPushed checks if bookmark is pushed
+    expect(runJjCalls[0]).toContain("bookmark");
+    expect(runJjCalls[0]).toContain("list");
+    expect(runJjCalls[0]).toContain("eng-79");
+    // Second call: workspace forget
+    expect(runJjCalls[1]).toEqual([
+      "workspace",
+      "forget",
+      "eng-79",
+      "-R",
+      "/tmp/legion-data/repos/github.com/acme/widgets",
     ]);
     expect(rmDirCalls).toEqual([
       "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/eng-79",
