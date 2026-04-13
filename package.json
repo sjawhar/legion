@@ -5,6 +5,9 @@
   "description": "Autonomous development swarm using OpenCode agents",
   "private": true,
   "workspaces": [
-    "packages/*"
+    "packages/contracts",
+    "packages/daemon",
+    "packages/envoy-plugin",
+    "packages/opencode-plugin"
   ]
 }

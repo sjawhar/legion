@@ -59,6 +59,32 @@ Add a comment in tsconfig or README explaining the runtime choice. Any package w
 - [ ] README states which runtime is used and why
 - [ ] If secrets are involved, README includes passphrase/env var recovery steps
 
+## Bun Workspace Exclusion
+
+Bun's workspace glob (`"workspaces": ["packages/*"]`) includes ALL packages, including
+Node.js-runtime ones. This causes Bun to try to resolve Node.js packages' dependencies
+through its own resolver, which can pollute `@types/node` versions and break the daemon's
+typecheck.
+
+**Fix:** Switch from glob to explicit list in root `package.json`:
+
+```json
+{
+  "workspaces": [
+    "packages/contracts",
+    "packages/daemon",
+    "packages/envoy",
+    "packages/envoy-plugin",
+    "packages/opencode-plugin"
+    // packages/aws-infra intentionally excluded — Node.js/ts-node runtime
+    // packages/envoy/infra intentionally excluded — Node.js/ts-node runtime
+  ]
+}
+```
+
+Add a comment explaining why the package is excluded. Run `bun install` after changing
+the workspace list to regenerate `bun.lock`.
+
 ## Anti-Pattern: Copy-Paste from Sibling Packages
 
 The root cause was inheriting Bun-specific config from sibling packages when creating a Node.js-runtime package. When creating a new package that runs under a different runtime, start from a clean tsconfig for that runtime rather than copying from an existing Bun package.

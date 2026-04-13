@@ -1,10 +1,11 @@
 {
   "skipped": false,
   "docs": [
-    "docs/solutions/controller/removing-state-machine-action-type.md"
+    "docs/solutions/infra/pulumi-aws-identity-center-patterns.md",
+    "docs/solutions/infra/mixed-runtime-type-boundaries.md"
   ],
-  "summary": "Documented blast radius checklist for removing a state machine action type: types.ts, decision.ts (call sites + ACTION_TO_MODE), tests (expectations + descriptions), and 5 SKILL.md locations. Also noted merge conflict resolution pattern for parallel PRs touching the same skill section.",
+  "summary": "Documented Pulumi AWS Identity Center resource patterns (async data source wrapping, Output unwrapping, stable GroupMembership naming, SCIM vs Pulumi groups, optional config). Updated mixed-runtime-type-boundaries.md with Bun workspace exclusion pattern (explicit list vs packages/*).",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-12T23:27:52.552Z"
+  "completed": "2026-04-13T01:20:01.519Z"
 }
