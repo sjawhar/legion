@@ -394,6 +394,12 @@
     "tag:template-syntax": ["best-practices/jj-bookmark-template-syntax-gotchas.md"],
     "tag:two-pass-pattern": ["daemon/dead-worker-workspace-reclamation.md"],
     "tag:failure-isolation": ["daemon/dead-worker-workspace-reclamation.md"],
-    "tag:workspace-management": ["daemon/dead-worker-workspace-reclamation.md"]
+    "tag:workspace-management": ["daemon/dead-worker-workspace-reclamation.md"],
+    "tag:hook-ordering": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
+    "tag:json-repair": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
+    "tag:text-parsing": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
+    "packages/opencode-plugin/src": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ]
   }
 }

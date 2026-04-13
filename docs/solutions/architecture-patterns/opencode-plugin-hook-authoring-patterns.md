@@ -8,17 +8,24 @@ tags:
   - config
   - factory-pattern
   - session-cleanup
+  - hook-ordering
+  - json-repair
+  - text-parsing
 date: 2026-04-13
 status: active
 module: opencode-plugin
 related_issues:
   - "272"
+  - "274"
 symptoms:
   - "hook sees empty args"
   - "output.args vs input.args"
   - "how to add a new hook"
   - "config not taking effect"
   - "session cleanup memory leak"
+  - "hook execution order matters"
+  - "regex fails on nested quotes"
+  - "char-by-char vs regex for string transforms"
 ---
 
 # OpenCode Plugin Hook Authoring Patterns
@@ -171,3 +178,113 @@ function sortedStringify(value: unknown): string {
 This ensures `{b:1, a:2}` and `{a:2, b:1}` produce identical strings.
 The replacer recursively sorts nested objects too. No external hash
 library needed — the string itself is the comparison key.
+
+## 6. Hook Ordering in `tool.execute.before`
+
+Hooks in the same hook point run sequentially in registration order (see `index.ts`).
+**Order matters when hooks have semantic dependencies.**
+
+Example from #274: `jsonErrorRecoveryHook` must run **before** `circuitBreakerHook`:
+
+```typescript
+"tool.execute.before": async (input, output) => {
+  jsonErrorRecoveryHook(input, output);      // ← normalizes args first
+  circuitBreakerHook["tool.execute.before"](input, output);  // ← hashes normalized args
+  subagentQuestionBlockerHook(input, output);
+  // ...
+}
+```
+
+Why: circuit-breaker hashes `output.args` to detect repetitive tool calls.
+If JSON recovery ran after circuit-breaker, the same logical call with
+`{'key': 'val'}` (single-quoted) and `{"key": "val"}` (double-quoted) would
+produce different hashes, defeating dedup. Recovery first ensures the
+circuit-breaker always sees canonical JSON.
+
+**General principle:** normalizers/canonicalizers go first, detectors/blockers
+go second, transformers go last. When adding a new hook, ask: "does any
+existing hook read `output.args` after my hook writes it?"
+
+## 7. Guard-and-Skip Pattern for Arg Iteration
+
+When a hook needs to inspect all tool arguments (not just a known key):
+
+```typescript
+for (const key of Object.keys(output.args)) {
+  const value = output.args[key];
+  if (typeof value !== "string") continue;    // type guard
+  if (!looksLikeJson(value)) continue;         // cheap heuristic guard
+  // expensive operation only on candidates
+}
+```
+
+This avoids assuming which arg contains the data you care about — agents
+may pass JSON in any argument. The heuristic guard (`looksLikeJson` checks
+for leading `{` or `[`) prevents expensive parsing on non-candidates.
+
+**Test the multi-key case:** if the hook iterates all args, verify it handles
+multiple matching args in one call (e.g., `{ a: "{'k':'v'}", b: "{x: 1,}" }`).
+This gap was caught in code review for #274.
+
+## 8. Char-by-Char Parsing vs Regex for String Transforms
+
+**Use regex** for structural transforms outside strings (trailing commas,
+quoting bareword keys):
+
+```typescript
+// Trailing commas: safe — regex operates on structural tokens
+repaired = repaired.replace(/,\s*([}\]])/g, "$1");
+
+// Unquoted keys: safe — anchored after { or , (structural positions)
+repaired = repaired.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*:)/g, '$1"$2"$3');
+```
+
+**Use a character-by-character state machine** when the transform must
+understand string boundaries (anything involving quotes, escaping, nesting):
+
+```typescript
+// Single→double quote conversion: MUST use char-by-char
+// because regex can't reliably handle:
+//   - escaped quotes within strings
+//   - double quotes inside single-quoted strings needing escaping
+//   - mixed quote types: {'key': "it's a value"}
+function replaceSingleQuotes(input: string): string {
+  const chars: string[] = [];
+  let i = 0;
+  while (i < input.length) {
+    if (input[i] === '"') { /* pass through double-quoted string */ }
+    else if (input[i] === "'") { /* convert to double-quoted, escape inner " */ }
+    else { chars.push(input[i]); i++; }
+  }
+  return chars.join("");
+}
+```
+
+**When multiple transforms compose**, order matters: single quotes → unquoted
+keys → trailing commas. Single quotes first because the unquoted-key regex
+assumes strings are already double-quoted. Trailing commas last because
+earlier transforms may leave trailing commas as artifacts.
+
+## 9. Pure Function + Thin Hook Wrapper
+
+Export the core logic as a pure function alongside the hook:
+
+```typescript
+// Pure, independently testable
+export function repairJson(input: string): string | null { ... }
+
+// Thin wrapper: walks args, calls pure function, mutates output
+export function jsonErrorRecoveryHook(input, output): void {
+  for (const key of Object.keys(output.args)) {
+    const repaired = repairJson(output.args[key]);
+    if (repaired !== null && repaired !== value) output.args[key] = repaired;
+  }
+}
+```
+
+This gives test suites two levels:
+- **Unit tests** on the pure function: exercise edge cases without constructing
+  hook input/output shapes
+- **Integration tests** on the hook: verify arg iteration, passthrough, multi-key behavior
+
+The pure function export also enables reuse outside the hook context.
