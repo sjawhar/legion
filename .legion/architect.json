@@ -1,6 +1,29 @@
 {
-  "summary": "Architecture for legion advance command and auto-progression",
-  "planFile": "docs/plans/2026-04-13-advance-command-auto-progression.md",
+  "scope": "medium",
+  "components": [
+    "packages/daemon/src/state/backends/issue-tracker.ts",
+    "packages/daemon/src/state/backends/github.ts",
+    "packages/daemon/src/state/backends/linear.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/cli/index.ts",
+    ".opencode/skills/legion-controller/SKILL.md"
+  ],
+  "subIssues": [],
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1,
+    "skipRetro": false
+  },
+  "concerns": [
+    "GitHub Projects V2 status transition requires field ID and option ID — planner must read github.ts to understand existing gh CLI patterns and determine if field/option IDs need dynamic fetch or can be hardcoded",
+    "Linear transitionIssue requires workflow state IDs — planner must read linear.ts for existing patterns",
+    "Daemon does NOT currently subscribe to Envoy for worker-done events — new subscription needed in index.ts",
+    "Auto-progression Envoy trigger: daemon needs to subscribe to notifications.role.legion-controller or a new dedicated topic",
+    "Health tick fallback already in place via fetchAndProcessState() — auto-progression just needs to hook into post-collection processing",
+    "Race condition safe: hasLiveWorker check + 409 from POST /workers handles concurrent triggers"
+  ],
   "keyDecisions": [
     "advance reuses existing POST /workers dispatch logic via new POST /state/advance endpoint",
     "IssueTracker interface extended with transitionIssue() and removeLabel() for transition_to_* actions",
@@ -8,16 +31,11 @@
     "Envoy fast path + periodic poll fallback for auto-progression trigger",
     "--stage flag on advance is equivalent to dispatch --force"
   ],
-  "openQuestions": [
-    "GitHub Projects V2 field/option IDs for status transitions — check github.ts",
-    "Linear workflow state IDs — check linear.ts",
-    "Does daemon currently subscribe to Envoy topics for worker-done events?"
-  ],
-  "filesChanged": [],
-  "newFiles": [
-    "docs/plans/2026-04-13-advance-command-auto-progression.md"
-  ],
+  "openQuestions": [],
+  "crossFamilyReview": "Cross-family review skipped (subagent timeout)",
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "architect",
-  "completed": "2026-04-13T04:32:26.499Z"
+  "completed": "2026-04-13T04:53:12.752Z"
 }

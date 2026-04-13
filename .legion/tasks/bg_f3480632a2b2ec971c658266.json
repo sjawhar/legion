@@ -1,0 +1,13 @@
+{
+  "id": "bg_f3480632a2b2ec971c658266",
+  "status": "failed",
+  "agent": "oracle",
+  "model": "anthropic/claude-opus-4-6",
+  "description": "Cross-family review of architect output",
+  "parentSessionID": "ses_9d186e55403529CWBL4BRy7qYd",
+  "createdAt": 1776055780403,
+  "sessionID": "ses_27ad37bcaffeJTvW32687jIyNO",
+  "timeoutMs": 180000,
+  "completedAt": 1776055960416,
+  "error": "Timed out after 180s"
+}

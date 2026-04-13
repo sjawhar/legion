@@ -357,15 +357,15 @@ The Envoy fast path gives sub-second response to worker completion. The poll fal
 
 ---
 
-## Open Questions
+## Open Questions — Resolved
 
-1. **GitHub status transition API**: The GitHub Projects V2 API requires knowing the field ID and option ID for status values. Does the daemon already have this? If not, we need a one-time fetch of project field metadata. The `github.ts` backend may need a `getProjectFields()` helper.
+1. **GitHub status transition API** ✅ RESOLVED: The `github.ts` backend only parses issues (read-only). It has no mutation methods. The `transitionIssue()` implementation will need to use `gh project item-edit` with the GraphQL API to set the Status field. The planner should read `github.ts` to understand the existing `gh` CLI patterns and determine whether field/option IDs need to be fetched dynamically or can be hardcoded from the project schema.
 
-2. **Linear `transitionIssue`**: Linear uses workflow state IDs, not names. Same question — does the daemon have these cached?
+2. **Linear `transitionIssue`** ✅ RESOLVED: Same situation — `linear.ts` is read-only. The implementation will use the Linear MCP tool or Linear REST API to update workflow state. The planner should read `linear.ts` to understand existing patterns.
 
-3. **Envoy subscriber in daemon**: Does the daemon currently subscribe to Envoy topics? If not, we need to add subscription logic in `index.ts` or `server.ts`. The envoy-plugin handles this for workers, but the daemon itself may not be subscribed.
+3. **Envoy subscriber in daemon** ✅ RESOLVED: The daemon does NOT currently subscribe to Envoy topics for worker-done events. The controller subscribes (via `subscribeControllerToEnvoy` in `index.ts`), but the daemon process itself has no Envoy subscription. The auto-progression Envoy trigger needs to be added to `index.ts` — the daemon needs to subscribe to `notifications.role.legion-controller` (or a new dedicated topic) to receive worker-done signals. The health tick fallback (Path B) is already in place via `fetchAndProcessState()` in the health tick loop.
 
-4. **Race condition**: If two workers finish simultaneously for the same issue (unlikely but possible), both Envoy events would trigger `autoAdvanceIssue`. The existing `hasLiveWorker` check + 409 from `POST /workers` handles this gracefully.
+4. **Race condition** ✅ CONFIRMED SAFE: The existing `hasLiveWorker` check in the state machine + 409 from `POST /workers` handles simultaneous triggers gracefully. No additional protection needed.
 
 ---
 
