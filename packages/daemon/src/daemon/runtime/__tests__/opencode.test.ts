@@ -334,4 +334,44 @@ describe("OpenCodeAdapter", () => {
       expect(data.tokensUsed).toBe(1500); // only from second message
     });
   });
+  describe("listActiveSessions", () => {
+    it("returns all sessions including idle ones (not just busy)", async () => {
+      const adapter = new OpenCodeAdapter(13381);
+      const originalFetch = globalThis.fetch;
+      try {
+        globalThis.fetch = (async (url: string | URL | Request) => {
+          const urlStr = String(url);
+          if (urlStr.includes("/session") && !urlStr.includes("/session/")) {
+            return new Response(
+              JSON.stringify([{ id: "ses_busy_1" }, { id: "ses_idle_2" }, { id: "ses_idle_3" }]),
+              { status: 200 }
+            );
+          }
+          return originalFetch(url);
+        }) as typeof fetch;
+
+        const sessions = await adapter.listActiveSessions();
+        expect(sessions.size).toBe(3);
+        expect(sessions.has("ses_busy_1")).toBe(true);
+        expect(sessions.has("ses_idle_2")).toBe(true);
+        expect(sessions.has("ses_idle_3")).toBe(true);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("throws on non-200 response", async () => {
+      const adapter = new OpenCodeAdapter(13381);
+      const originalFetch = globalThis.fetch;
+      try {
+        globalThis.fetch = Object.assign(async () => new Response("error", { status: 500 }), {
+          preconnect: originalFetch.preconnect,
+        }) as typeof fetch;
+
+        await expect(adapter.listActiveSessions()).rejects.toThrow("HTTP 500");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
 });
