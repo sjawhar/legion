@@ -16,6 +16,7 @@ status: active
 module: opencode-plugin
 related_issues:
   - "272"
+  - "273"
   - "274"
 symptoms:
   - "hook sees empty args"
@@ -288,3 +289,39 @@ This gives test suites two levels:
 - **Integration tests** on the hook: verify arg iteration, passthrough, multi-key behavior
 
 The pure function export also enables reuse outside the hook context.
+
+## 10. Separated Registry Pattern for Cross-Hook State
+
+When a hook's internal state may be useful to other hooks, extract the state
+management into a separately-exported factory:
+
+```typescript
+// Exported independently — other hooks can query without depending on the guard
+export function createReadFileRegistry(): ReadFileRegistry {
+  const sessions = new Map<string, Set<string>>();
+  return {
+    trackRead(sessionID: string, filePath: string): void { ... },
+    hasRead(sessionID: string, filePath: string): boolean { ... },
+    cleanup(sessionID: string): void { ... },
+  };
+}
+
+// Guard hook creates its own registry instance internally
+export function createWriteExistingFileGuard(): WriteExistingFileGuard {
+  const registry = createReadFileRegistry();
+  // ... uses registry in lifecycle handlers ...
+}
+```
+
+**When to use:** Any hook that accumulates per-session state that another hook might
+need to query. Examples: "has this file been read?", "has this session hit a circuit
+breaker?", "how many tool calls has this session made?"
+
+**Key design points:**
+- Export the registry factory AND the hook factory — consumers choose their coupling level
+- The hook creates its own registry internally (encapsulation by default)
+- If cross-hook sharing is needed, create the registry in `index.ts` and pass it to both hooks
+- Interface-first: define `ReadFileRegistry` (or similar) as an exported interface for type safety
+
+This pattern was established in #273 (write-existing-file guard) and enables composability
+across the OMO replacement hook matrix.
