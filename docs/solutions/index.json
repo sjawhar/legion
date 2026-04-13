@@ -33,6 +33,10 @@
       "best-practices/jj-bookmark-template-syntax-gotchas.md",
       "daemon/dead-worker-workspace-reclamation.md"
     ],
+    "packages/daemon/src/__tests__": [
+      "testing/mock-envoy-server-pattern.md",
+      "testing/call-site-audit-for-test-isolation.md"
+    ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
       "daemon/targeted-delta-filtering-pattern.md",
@@ -101,7 +105,10 @@
       "daemon/dead-worker-workspace-reclamation.md"
     ],
     "tag:cli-interaction": ["integration-patterns/tmux-askuserquestion-navigation.md"],
-    "tag:code-review": ["daemon/deferred-review-comments-pattern.md"],
+    "tag:code-review": [
+      "daemon/deferred-review-comments-pattern.md",
+      "testing/call-site-audit-for-test-isolation.md"
+    ],
     "tag:concurrency": ["delegation/delegation-hardening-retro.md"],
     "tag:config-schema": [
       "delegation/hardening-patterns.md",
@@ -259,6 +266,13 @@
       "task-index-patterns.md"
     ],
     "tag:testability": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
+    "tag:test-isolation": [
+      "testing/mock-envoy-server-pattern.md",
+      "testing/call-site-audit-for-test-isolation.md"
+    ],
+    "tag:mock-server": ["testing/mock-envoy-server-pattern.md"],
+    "tag:envoy": ["testing/mock-envoy-server-pattern.md"],
+    "tag:audit-pattern": ["testing/call-site-audit-for-test-isolation.md"],
     "tag:testing": [
       "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md",
       "daemon/controller-lifecycle-separation.md",
@@ -267,7 +281,9 @@
       "delegation/delegation-hardening-retro.md",
       "daemon/session-liveness-detection-pattern.md",
       "daemon/optional-dep-fallback-and-early-return-guard.md",
-      "daemon/dead-worker-workspace-reclamation.md"
+      "daemon/dead-worker-workspace-reclamation.md",
+      "testing/mock-envoy-server-pattern.md",
+      "testing/call-site-audit-for-test-isolation.md"
     ],
     "tag:tmux": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:validation": ["daemon/workspace-validation-retro.md"],
