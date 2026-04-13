@@ -65,6 +65,14 @@ const OutputCompressionConfigSchema = z
   })
   .strict();
 
+const CircuitBreakerConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    threshold: z.number().optional(),
+    action: z.enum(["warn", "abort"]).optional(),
+  })
+  .strict();
+
 const SpawnLimitsConfigSchema = z
   .object({
     maxDepth: z.number().optional(),
@@ -85,6 +93,7 @@ const PluginConfigSchema = z
     taskRetentionMs: z.number().optional(),
     outputCompression: OutputCompressionConfigSchema.optional(),
     spawnLimits: SpawnLimitsConfigSchema.optional(),
+    circuitBreaker: CircuitBreakerConfigSchema.optional(),
   })
   .passthrough();
 
@@ -112,6 +121,12 @@ export interface OutputCompressionConfig {
   maxIndexSizeMB?: number;
 }
 
+export interface CircuitBreakerConfig {
+  enabled?: boolean;
+  threshold?: number;
+  action?: "warn" | "abort";
+}
+
 export interface SpawnLimitsConfig {
   maxDepth?: number;
   maxDescendants?: number;
@@ -130,6 +145,7 @@ export interface PluginConfig {
   taskRetentionMs?: number;
   outputCompression?: OutputCompressionConfig;
   spawnLimits?: SpawnLimitsConfig;
+  circuitBreaker?: CircuitBreakerConfig;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -245,6 +261,15 @@ function mergeSpawnLimits(
   return { ...base, ...override };
 }
 
+function mergeCircuitBreaker(
+  base?: CircuitBreakerConfig,
+  override?: CircuitBreakerConfig
+): CircuitBreakerConfig | undefined {
+  if (!base) return override;
+  if (!override) return base;
+  return { ...base, ...override };
+}
+
 function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
   return {
     ...base,
@@ -256,6 +281,7 @@ function mergeConfig(base: PluginConfig, override: PluginConfig): PluginConfig {
     retry: mergeRetry(base.retry, override.retry),
     outputCompression: mergeOutputCompression(base.outputCompression, override.outputCompression),
     spawnLimits: mergeSpawnLimits(base.spawnLimits, override.spawnLimits),
+    circuitBreaker: mergeCircuitBreaker(base.circuitBreaker, override.circuitBreaker),
   };
 }
 

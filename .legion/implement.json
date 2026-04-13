@@ -1,28 +1,21 @@
 {
-  "summary": "Implemented tracked issue notifications for targeted controller delta filtering",
   "filesChanged": [
-    "packages/daemon/src/daemon/state-delta.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/daemon/__tests__/state-delta.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/opencode-plugin/src/config/index.ts",
+    "packages/opencode-plugin/src/hooks/circuit-breaker.ts",
+    "packages/opencode-plugin/src/hooks/__tests__/circuit-breaker.test.ts",
+    "packages/opencode-plugin/src/index.ts"
   ],
-  "concerns": [],
-  "testResults": {
-    "stateDelta": "26 pass (8 new trackedIssueIds tests)",
-    "server": "165 pass (16 new tracking/materialized tests)",
-    "fullSuite": "1313 pass, 2 pre-existing failures in ledger.test.ts and serve-manager.test.ts (unrelated)"
-  },
-  "designDecisions": [
-    "trackedIssueIds undefined = full delta (backward compat)",
-    "new issues always flow regardless of tracked set",
-    "changed/removed filtered to tracked set when provided",
-    "auto-track on POST /workers dispatch",
-    "auto-untrack on cleanupDoneIssueWorkers for all Done issues",
-    "newIssuesSinceLastPoll accumulator drains on GET /state/materialized read",
-    "legion poll now calls GET /state/materialized instead of POST /state/fetch-and-collect"
+  "trickyParts": [
+    "output.args is the source of parsed tool input in tool.execute.before — not input.args. Using input.args would cause the hook to always see the raw args, not the parsed ones.",
+    "JSON.stringify key order is not guaranteed — needed sortedStringify with recursive key sorting for stable arg hashing across different key insertion orders.",
+    "Duplicate CircuitBreakerConfig interface existed in both config/index.ts and circuit-breaker.ts initially — consolidated to import from config (single source of truth)."
   ],
+  "deviations": [
+    "Plan had duplicate CircuitBreakerConfig interface in circuit-breaker.ts — cross-family review caught this, consolidated to import from config/index.ts instead."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T01:05:11.122Z"
+  "completed": "2026-04-13T05:33:10.900Z"
 }
