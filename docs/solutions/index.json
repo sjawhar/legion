@@ -7,7 +7,8 @@
       "architecture-patterns/shared-state-file-ownership.md",
       "integration-issues/github-graphql-pr-draft-status.md",
       "integration-issues/external-repo-pr-auto-transition-gap.md",
-      "integration-issues/linear-mcp-label-resolution.md"
+      "integration-issues/linear-mcp-label-resolution.md",
+      "daemon/multi-backend-mutation-target-pattern.md"
     ],
     "packages/daemon/src/daemon/serve-manager": [
       "daemon/opencode-serve-lifecycle.md",
@@ -25,15 +26,16 @@
       "daemon/controller-observability.md",
       "delegation/hardening-patterns.md",
       "integration-patterns/controller-worker-protocol.md",
-      "architecture-patterns/task-index-retro.md",
-      "task-index-patterns.md",
       "daemon/session-liveness-detection-pattern.md",
       "daemon/optional-dep-fallback-and-early-return-guard.md",
-      "daemon/targeted-delta-filtering-pattern.md"
+      "daemon/targeted-delta-filtering-pattern.md",
+      "daemon/multi-backend-mutation-target-pattern.md",
+      "daemon/self-fetch-endpoint-composition.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
-      "daemon/targeted-delta-filtering-pattern.md"
+      "daemon/targeted-delta-filtering-pattern.md",
+      "daemon/self-fetch-endpoint-composition.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -68,7 +70,8 @@
     "tag:anyio": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
     "tag:architecture": [
       "daemon/controller-lifecycle-separation.md",
-      "daemon/shared-serve-refactor.md"
+      "daemon/shared-serve-refactor.md",
+      "daemon/self-fetch-endpoint-composition.md"
     ],
     "tag:askuserquestion": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:async": ["architecture-patterns/sync-to-async-modular-refactoring.md"],
@@ -140,7 +143,8 @@
     "tag:finalize-pattern": ["delegation/delegation-hardening-retro.md"],
     "tag:github": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
-      "integration-issues/github-graphql-pr-draft-status.md"
+      "integration-issues/github-graphql-pr-draft-status.md",
+      "daemon/multi-backend-mutation-target-pattern.md"
     ],
     "tag:graphql": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
@@ -159,7 +163,8 @@
     "tag:lifecycle-separation": ["architecture-patterns/shared-state-file-ownership.md"],
     "tag:linear": [
       "integration-issues/external-repo-pr-auto-transition-gap.md",
-      "integration-issues/linear-mcp-label-resolution.md"
+      "integration-issues/linear-mcp-label-resolution.md",
+      "daemon/multi-backend-mutation-target-pattern.md"
     ],
     "tag:mcp": ["integration-issues/linear-mcp-label-resolution.md"],
     "tag:merge": ["skill-patterns/worker-skill-failure-modes.md"],
@@ -331,6 +336,14 @@
     "tag:state-delta": ["daemon/targeted-delta-filtering-pattern.md"],
     "tag:tracking": ["daemon/targeted-delta-filtering-pattern.md"],
     "tag:notifications": ["daemon/targeted-delta-filtering-pattern.md"],
-    "tag:backward-compatibility": ["daemon/targeted-delta-filtering-pattern.md"]
+    "tag:backward-compatibility": ["daemon/targeted-delta-filtering-pattern.md"],
+    "tag:interface-design": ["daemon/multi-backend-mutation-target-pattern.md"],
+    "tag:multi-backend": ["daemon/multi-backend-mutation-target-pattern.md"],
+    "tag:issue-tracker": ["daemon/multi-backend-mutation-target-pattern.md"],
+    "tag:mutation": ["daemon/multi-backend-mutation-target-pattern.md"],
+    "tag:endpoint-composition": ["daemon/self-fetch-endpoint-composition.md"],
+    "tag:http": ["daemon/self-fetch-endpoint-composition.md"],
+    "tag:technical-debt": ["daemon/self-fetch-endpoint-composition.md"],
+    "tag:server": ["daemon/self-fetch-endpoint-composition.md"]
   }
 }
