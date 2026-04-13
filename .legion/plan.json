@@ -1,28 +1,35 @@
 {
-  "taskCount": 5,
-  "independentTasks": 1,
+  "taskCount": 10,
+  "independentTasks": 3,
   "routingHints": {
-    "complexity": "small",
+    "complexity": "medium",
     "estimatedImplementers": 1,
     "skipRetro": false,
-    "skipArchitect": false
+    "skipArchitect": true
   },
   "concerns": [
-    "Reservation pattern must be atomic — check+increment synchronously before any await to prevent race window",
-    "Concurrent spawn race at limit boundary — two simultaneous spawns must not both succeed",
-    "Rollback on session creation failure — descendant counter must be decremented if session.create() throws",
-    "Config test file path is .opencode/opencode-legion.json (not .opencode.json) — verified against loadPluginConfig implementation"
+    "POST /workers handler is ~330 lines inline in Bun.serve closure — needs refactoring to extract shared handleWorkerCreate() for advance to reuse",
+    "GitHub issueId format is ambiguous for repos with hyphens — advance handler should use cachedState.source (canonical owner/repo/number) not issueId parsing",
+    "Linear backend cannot do mutations via daemon CLI (needs MCP) — stubs throw explicitly, advance only fully works with GitHub backend initially",
+    "ServerOptions currently lacks issueBackend field — must be added and wired through from DaemonConfig",
+    "Envoy fast path for auto-progression is best-effort — daemon may not have established Envoy connection patterns yet, health tick fallback is primary mechanism"
   ],
   "learningsInjected": [
-    "docs/solutions/delegation/hardening-patterns.md",
-    "docs/solutions/delegation/delegation-hardening-retro.md"
+    "docs/solutions/daemon/controller-lifecycle-separation.md",
+    "docs/solutions/controller/skill-vs-state-machine-policy-boundary.md",
+    "docs/solutions/integration-patterns/controller-worker-protocol.md",
+    "docs/solutions/daemon/controller-observability.md",
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md",
+    "docs/solutions/integration-issues/linear-mcp-label-resolution.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/delegation/delegation-hardening-retro.md"
+    "docs/solutions/daemon/controller-lifecycle-separation.md",
+    "docs/solutions/controller/skill-vs-state-machine-policy-boundary.md",
+    "docs/solutions/integration-patterns/controller-worker-protocol.md",
+    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md"
   ],
-  "workflowRecommendation": "Standard pipeline — all phases needed",
-  "requiredSkills": {},
+  "workflowRecommendation": "Standard pipeline — all phases needed. Medium complexity, single implementer. POST /workers refactoring is the highest-risk step.",
   "schemaVersion": 1,
   "phase": "plan",
-  "completed": "2026-04-12T23:27:31.232Z"
+  "completed": "2026-04-13T05:30:48.456Z"
 }
