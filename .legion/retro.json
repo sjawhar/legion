@@ -1,10 +1,9 @@
 {
   "skipped": false,
   "docsCreated": [
-    "docs/solutions/daemon/multi-backend-mutation-target-pattern.md",
-    "docs/solutions/daemon/self-fetch-endpoint-composition.md"
+    "docs/solutions/testing/intentionally-failing-contract-tests.md"
   ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-13T07:08:22.727Z"
+  "completed": "2026-04-13T15:06:20.510Z"
 }
