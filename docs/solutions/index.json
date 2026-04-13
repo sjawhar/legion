@@ -24,13 +24,13 @@
       "daemon/worker-directory-resolution.md",
       "daemon/workspace-validation-retro.md",
       "daemon/controller-observability.md",
-      "delegation/hardening-patterns.md",
-      "integration-patterns/controller-worker-protocol.md",
       "daemon/session-liveness-detection-pattern.md",
       "daemon/optional-dep-fallback-and-early-return-guard.md",
       "daemon/targeted-delta-filtering-pattern.md",
       "daemon/multi-backend-mutation-target-pattern.md",
-      "daemon/self-fetch-endpoint-composition.md"
+      "daemon/self-fetch-endpoint-composition.md",
+      "daemon/pre-cleanup-branch-push-verification.md",
+      "best-practices/jj-bookmark-template-syntax-gotchas.md"
     ],
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
@@ -95,7 +95,8 @@
     "tag:cleanup": [
       "daemon/deferred-review-comments-pattern.md",
       "daemon/graceful-worker-shutdown.md",
-      "daemon/optional-dep-fallback-and-early-return-guard.md"
+      "daemon/optional-dep-fallback-and-early-return-guard.md",
+      "daemon/pre-cleanup-branch-push-verification.md"
     ],
     "tag:cli-interaction": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:code-review": ["daemon/deferred-review-comments-pattern.md"],
@@ -125,7 +126,8 @@
       "daemon/shared-serve-refactor.md",
       "daemon/shared-serve-retro.md",
       "daemon/session-liveness-detection-pattern.md",
-      "daemon/optional-dep-fallback-and-early-return-guard.md"
+      "daemon/optional-dep-fallback-and-early-return-guard.md",
+      "daemon/pre-cleanup-branch-push-verification.md"
     ],
     "tag:directory-resolution": ["daemon/worker-directory-fix.md"],
     "tag:dispatch": ["integration-patterns/controller-worker-protocol.md"],
@@ -155,7 +157,9 @@
     "tag:jj-workspaces": [
       "daemon/worker-directory-fix.md",
       "daemon/worker-directory-resolution.md",
-      "best-practices/git-stash-jj-working-copy-interference.md"
+      "best-practices/git-stash-jj-working-copy-interference.md",
+      "daemon/pre-cleanup-branch-push-verification.md",
+      "best-practices/jj-bookmark-template-syntax-gotchas.md"
     ],
     "tag:keyboard-navigation": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:labels": ["integration-issues/linear-mcp-label-resolution.md"],
@@ -305,9 +309,15 @@
     "tag:health-tick": ["daemon/session-liveness-detection-pattern.md"],
     "tag:liveness": ["daemon/session-liveness-detection-pattern.md"],
     "tag:dead-worker": ["daemon/session-liveness-detection-pattern.md"],
-    "tag:jj": ["best-practices/git-stash-jj-working-copy-interference.md"],
+    "tag:jj": [
+      "best-practices/git-stash-jj-working-copy-interference.md",
+      "best-practices/jj-bookmark-template-syntax-gotchas.md"
+    ],
     "tag:footgun": ["best-practices/git-stash-jj-working-copy-interference.md"],
-    "tag:version-control": ["best-practices/git-stash-jj-working-copy-interference.md"],
+    "tag:version-control": [
+      "best-practices/git-stash-jj-working-copy-interference.md",
+      "best-practices/jj-bookmark-template-syntax-gotchas.md"
+    ],
     "tag:policy": ["controller/skill-vs-state-machine-policy-boundary.md"],
     "tag:decision-engine": ["controller/skill-vs-state-machine-policy-boundary.md"],
     "packages/aws-infra": [
@@ -349,6 +359,11 @@
     ".github/workflows": ["testing/intentionally-failing-contract-tests.md"],
     "tag:contract-tests": ["testing/intentionally-failing-contract-tests.md"],
     "tag:omo-replacement": ["testing/intentionally-failing-contract-tests.md"],
-    "tag:path-ignore-patterns": ["testing/intentionally-failing-contract-tests.md"]
+    "tag:path-ignore-patterns": ["testing/intentionally-failing-contract-tests.md"],
+    "tag:data-safety": ["daemon/pre-cleanup-branch-push-verification.md"],
+    "tag:fail-safe": ["daemon/pre-cleanup-branch-push-verification.md"],
+    "tag:destructive-operations": ["daemon/pre-cleanup-branch-push-verification.md"],
+    "tag:bookmark-parsing": ["best-practices/jj-bookmark-template-syntax-gotchas.md"],
+    "tag:template-syntax": ["best-practices/jj-bookmark-template-syntax-gotchas.md"]
   }
 }

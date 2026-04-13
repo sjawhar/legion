@@ -1,18 +1,18 @@
 {
   "filesChanged": [
-    "packages/opencode-plugin/src/__tests__/omo-replacement-matrix.test.ts",
-    ".github/workflows/pr-and-main.yaml"
+    "packages/daemon/src/daemon/repo-manager.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/__tests__/repo-manager.test.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts"
   ],
   "trickyParts": [
-    "Contract tests designed to FAIL conflict with CI requiring green tests. Resolved by adding --path-ignore-patterns to CI workflow to exclude contract tests from default bun test, while keeping them runnable explicitly via direct path."
+    "jj bookmark list template syntax required careful testing — tracking_ahead_count is a SizeHint type, not Boolean, so if() guards needed .lower() conversion",
+    "Directory scan fallback has no repo info for off-board workspaces — derived clone path from existing workers as best-effort"
   ],
-  "deviations": [
-    "Converted it.todo() back to it() with active assertions per tester feedback — spec requires non-zero exit with >= 15 failures, not skipped todos",
-    "Modified .github/workflows/pr-and-main.yaml to exclude contract tests from CI — necessary to satisfy both spec (tests must fail) and CI (must be green)"
-  ],
+  "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T14:42:11.826Z"
+  "completed": "2026-04-13T15:33:38.242Z"
 }
