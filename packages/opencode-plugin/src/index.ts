@@ -21,6 +21,10 @@ import { subagentQuestionBlockerHook } from "./hooks/subagent-question-blocker";
 import { thinkingBlockValidatorHook } from "./hooks/thinking-block-validator";
 import { createTodoContinuationEnforcerHook } from "./hooks/todo-continuation-enforcer";
 import { isRecord, resolveSessionID } from "./hooks/utils";
+import {
+  createReadFileRegistry,
+  createWriteExistingFileGuard,
+} from "./hooks/write-existing-file-guard";
 import { getModelOverlay } from "./overlays";
 import { createSessionTools } from "./tools";
 import { createContextSearchTool } from "./tools/context-search";
@@ -95,6 +99,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
   const circuitBreakerHook = createCircuitBreakerHook(pluginConfig.circuitBreaker ?? {});
   const stopContinuationGuardHook = createStopContinuationGuardHook();
   const compactionTodoPreserver = createCompactionTodoPreserverHook(ctx);
+  const writeExistingFileGuard = createWriteExistingFileGuard();
   const todoContinuationEnforcer = createTodoContinuationEnforcerHook(ctx, {
     isContinuationStopped: (sessionID) => stopContinuationGuardHook.isStopped(sessionID),
     isBackgroundSession: (sessionID) => manager.isBackgroundSession(sessionID),
@@ -155,6 +160,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       await compactionTodoPreserver.event(input as GenericEventInput);
       await outputCompressionHook.event(input as GenericEventInput);
       await todoContinuationEnforcer.event(input as GenericEventInput);
+      await writeExistingFileGuard.event(input as GenericEventInput);
 
       const { event } = input;
 
@@ -197,6 +203,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       jsonErrorRecoveryHook(input, output);
       circuitBreakerHook["tool.execute.before"](input, output);
       subagentQuestionBlockerHook(input, output);
+      writeExistingFileGuard["tool.execute.before"](input, output);
       const toolInput = isRecord(input) ? (input as ToolExecuteInput) : undefined;
       const toolName = typeof toolInput?.tool === "string" ? toolInput.tool : undefined;
       const sessionID = typeof toolInput?.sessionID === "string" ? toolInput.sessionID : undefined;
@@ -212,6 +219,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       }
     },
     "tool.execute.after": async (input, output) => {
+      writeExistingFileGuard["tool.execute.after"](input, output);
       await outputCompressionHook["tool.execute.after"]?.(input, output);
       await preemptiveCompactionHook["tool.execute.after"]?.(input, output);
     },
@@ -242,4 +250,5 @@ const OpenCodeLegion: Plugin = async (ctx) => {
   };
 };
 
+export { createReadFileRegistry, createWriteExistingFileGuard };
 export default OpenCodeLegion;
