@@ -271,7 +271,10 @@
       "testing/call-site-audit-for-test-isolation.md"
     ],
     "tag:mock-server": ["testing/mock-envoy-server-pattern.md"],
-    "tag:envoy": ["testing/mock-envoy-server-pattern.md"],
+    "tag:envoy": [
+      "testing/mock-envoy-server-pattern.md",
+      "envoy/tailscale-oauth-tsnet-auth-patterns.md"
+    ],
     "tag:audit-pattern": ["testing/call-site-audit-for-test-isolation.md"],
     "tag:testing": [
       "best-practices/prefer-autospec-over-asyncmock-pytest-20260202.md",
@@ -354,7 +357,8 @@
     ],
     "tag:pulumi": [
       "infra/pulumi-aws-identity-center-patterns.md",
-      "infra/pulumi-cross-account-brownfield-adoption.md"
+      "infra/pulumi-cross-account-brownfield-adoption.md",
+      "envoy/tailscale-oauth-tsnet-auth-patterns.md"
     ],
     "tag:aws": [
       "infra/pulumi-aws-identity-center-patterns.md",
@@ -373,7 +377,10 @@
     "tag:state-delta": ["daemon/targeted-delta-filtering-pattern.md"],
     "tag:tracking": ["daemon/targeted-delta-filtering-pattern.md"],
     "tag:notifications": ["daemon/targeted-delta-filtering-pattern.md"],
-    "tag:backward-compatibility": ["daemon/targeted-delta-filtering-pattern.md"],
+    "tag:backward-compatibility": [
+      "daemon/targeted-delta-filtering-pattern.md",
+      "envoy/tailscale-oauth-tsnet-auth-patterns.md"
+    ],
     "tag:interface-design": ["daemon/multi-backend-mutation-target-pattern.md"],
     "tag:multi-backend": ["daemon/multi-backend-mutation-target-pattern.md"],
     "tag:issue-tracker": ["daemon/multi-backend-mutation-target-pattern.md"],
@@ -394,6 +401,17 @@
     "tag:template-syntax": ["best-practices/jj-bookmark-template-syntax-gotchas.md"],
     "tag:two-pass-pattern": ["daemon/dead-worker-workspace-reclamation.md"],
     "tag:failure-isolation": ["daemon/dead-worker-workspace-reclamation.md"],
-    "tag:workspace-management": ["daemon/dead-worker-workspace-reclamation.md"]
+    "tag:workspace-management": ["daemon/dead-worker-workspace-reclamation.md"],
+    "packages/envoy/internal/tsnet": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"],
+    "packages/envoy/infra": [
+      "envoy/tailscale-oauth-tsnet-auth-patterns.md",
+      "envoy/pulumi-remote-docker-patterns.md"
+    ],
+    "packages/envoy/deploy": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"],
+    "tag:tailscale": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"],
+    "tag:tsnet": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"],
+    "tag:oauth": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"],
+    "tag:config-resolution": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"],
+    "tag:infrastructure": ["envoy/tailscale-oauth-tsnet-auth-patterns.md"]
   }
 }

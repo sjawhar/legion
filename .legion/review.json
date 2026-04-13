@@ -1,18 +1,28 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 1,
+  "minor": 3,
   "verdict": "approved",
   "keyFindings": [
     {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/__tests__/mock-envoy-server.ts",
-      "description": "MockEnvoyServer.subscribeError is declared in the interface, initialized in state, and reset in reset(), but the subscribe handler never checks it. Dead code — no test uses it."
+      "file": "packages/envoy/infra/README.md",
+      "description": "Stale tsnetAuthKey reference at line 86 — should document tsnetOAuthClientId and tsnetOAuthClientSecret instead"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/envoy/internal/tsnet/config.go",
+      "description": "tags query parameter on OAuth secret works in practice but is not explicitly documented by Tailscale for the URL-parameter syntax — consider adding a comment noting this is an implementation-level convention"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/envoy/infra/__tests__/services.test.ts",
+      "description": "OAuth test assertions use array length instead of content verification due to Pulumi Output constraint — acceptable but fragile"
     }
   ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T17:16:56.752Z"
+  "completed": "2026-04-13T20:15:42.792Z"
 }
