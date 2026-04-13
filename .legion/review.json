@@ -1,52 +1,42 @@
 {
-  "outcome": "approved",
-  "prNumber": 479,
-  "prUrl": "https://github.com/sjawhar/legion/pull/479",
-  "issueNumber": 466,
-  "summary": "All requirements verified. rebase_pr removed from ActionType, ACTION_TO_MODE, and SKILL.md. CONFLICTING mergeability now routes to resume_implementer_for_changes in both decision.ts branches. 88/88 decision tests pass. 1289/1291 total pass (2 pre-existing @pulumi/docker failures). Biome clean. TypeScript clean.",
+  "outcome": "changes_requested",
+  "prNumber": 485,
+  "prUrl": "https://github.com/sjawhar/legion/pull/485",
+  "issueNumber": 469,
+  "summary": "CRITICAL: Implementation is missing. PR 485 contains only documentation changes. The branch is 1 commit ahead of main with zero implementation code. state-delta.ts has no trackedIssueIds param, server.ts has no tracking endpoints, cmdPoll still calls fetch-and-collect. Implement worker crashed twice. Implementation must be written from scratch per docs/plans/2026-04-12-tracked-issue-notifications.md.",
   "criteriaResults": [
     {
-      "criterion": "CONFLICTING + not approved → resume_implementer_for_changes (not rebase_pr)",
-      "result": "pass",
-      "evidence": "decision.ts lines 115-116 and 129-130"
+      "criterion": "computeStateDelta has optional trackedIssueIds param",
+      "result": "fail",
+      "evidence": "state-delta.ts on branch identical to main"
     },
     {
-      "criterion": "Controller NEVER rebases directly",
-      "result": "pass",
-      "evidence": "rebase_pr removed from ActionType, ACTION_TO_MODE, SKILL.md handler updated"
+      "criterion": "server.ts tracking endpoints GET/POST/DELETE /state/track",
+      "result": "fail",
+      "evidence": "no tracking endpoints in server.ts on branch"
     },
     {
-      "criterion": "No rebase_pr references remain in state module",
-      "result": "pass",
-      "evidence": "Zero occurrences in types.ts, decision.ts, decision.test.ts"
+      "criterion": "Auto-track/untrack on worker dispatch/cleanup",
+      "result": "fail",
+      "evidence": "no auto-track logic in server.ts"
     },
     {
-      "criterion": "ACTION_TO_MODE mapping corrected",
-      "result": "pass",
-      "evidence": "resume_implementer_for_changes → IMPLEMENT (was rebase_pr → REVIEW)"
+      "criterion": "GET /state/materialized endpoint",
+      "result": "fail",
+      "evidence": "no materialized endpoint in server.ts"
     },
     {
-      "criterion": "SKILL.md routing table updated",
-      "result": "pass",
-      "evidence": "rebase_ prefix row removed; condition 7 table updated"
+      "criterion": "cmdPoll calls GET /state/materialized",
+      "result": "fail",
+      "evidence": "cli/index.ts still calls fetch-and-collect"
     },
     {
-      "criterion": "Unit tests pass",
-      "result": "pass",
-      "evidence": "88/88 decision tests; 1289/1291 total"
-    },
-    {
-      "criterion": "TypeScript type check clean",
-      "result": "pass",
-      "evidence": "No errors in state module"
-    },
-    {
-      "criterion": "Biome lint clean",
-      "result": "pass",
-      "evidence": "99 files, no fixes applied"
+      "criterion": "Tests for all new functionality",
+      "result": "fail",
+      "evidence": "test files identical to main"
     }
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-12T23:20:45.904Z"
+  "completed": "2026-04-13T00:43:26.561Z"
 }
