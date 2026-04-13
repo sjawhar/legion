@@ -1,29 +1,49 @@
 {
   "critical": 1,
-  "important": 0,
-  "minor": 2,
+  "important": 3,
+  "minor": 3,
   "verdict": "changes_requested",
   "keyFindings": [
     {
       "severity": "P1",
-      "file": ".legion/implement.json",
-      "description": "PR has merge conflicts with main — implementer must rebase before merge"
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "Health poll at line 27 has no timeout — infinite loop if serve fails to start"
+    },
+    {
+      "severity": "P2",
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "Name mismatch: test.md and plan.md reference 'smoke-testing' but file is named 'smoke-test.md'"
+    },
+    {
+      "severity": "P2",
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "No pass/fail criteria in Step 3 — tester has no way to assess smoke test outcome"
+    },
+    {
+      "severity": "P2",
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "Missing session continuity pattern (resume existing session for retries) — required by issue spec"
     },
     {
       "severity": "P3",
-      "file": "packages/opencode-plugin/src/overlays/index.ts",
-      "description": "getModelOverlay 3rd param _fallbackChain is unused dead code (acceptable as forward-compatible stub for OMO contract test)"
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "Cleanup should suppress tmux kill-session errors"
     },
     {
       "severity": "P3",
-      "file": "packages/opencode-plugin/src/delegation/__tests__/retry-with-fallback.test.ts",
-      "description": "504 Gateway Timeout lacks dedicated test case in isTransientError tests (implicit coverage via TRANSIENT_STATUS_CODES set)"
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "sleep 30 is a magic number with no sizing guidance"
+    },
+    {
+      "severity": "P3",
+      "file": ".opencode/skills/legion-worker/workflows/smoke-test.md",
+      "description": "Hardcoded binary path could be extracted to a variable"
     }
   ],
   "learningsInjected": ["docs/solutions/delegation/bun-node-timer-type-portability.md"],
   "learningsHelpful": [],
-  "note": "Re-review after implementer addressed prior feedback. All 3 prior findings (P1 merge conflict, P3 sessionID type, P3 multi-arg test) resolved. All acceptance criteria verified. CI green.",
+  "note": "Review found 1 P1, 3 P2, and 3 P3 issues in the smoke testing skill.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T18:02:15.709Z"
+  "completed": "2026-04-13T20:24:25.806Z"
 }
