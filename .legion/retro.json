@@ -1,11 +1,9 @@
 {
   "skipped": false,
   "docs": [
-    "docs/solutions/infra/pulumi-aws-identity-center-patterns.md",
-    "docs/solutions/infra/mixed-runtime-type-boundaries.md"
+    "docs/solutions/architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
   ],
-  "summary": "Documented Pulumi AWS Identity Center resource patterns (async data source wrapping, Output unwrapping, stable GroupMembership naming, SCIM vs Pulumi groups, optional config). Updated mixed-runtime-type-boundaries.md with Bun workspace exclusion pattern (explicit list vs packages/*).",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-13T01:20:01.519Z"
+  "completed": "2026-04-13T05:52:32.529Z"
 }
