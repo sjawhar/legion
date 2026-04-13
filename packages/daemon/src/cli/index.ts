@@ -1335,14 +1335,10 @@ export async function cmdPoll(team: string, opts: { json: boolean }): Promise<vo
 
   let response: Response;
   try {
-    response = await fetch(`${baseUrl}/state/fetch-and-collect`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ backend: "github" }),
-    });
+    response = await fetch(`${baseUrl}/state/materialized`);
   } catch (_error) {
     throw new CliError(
-      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/state/fetch-and-collect`
+      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/state/materialized`
     );
   }
 
@@ -1354,6 +1350,7 @@ export async function cmdPoll(team: string, opts: { json: boolean }): Promise<vo
   const data = (await response.json()) as {
     issues: Record<string, import("../state/types").IssueStateDict>;
     titles?: Record<string, string>;
+    newIssues?: Array<{ issueId: string; state: import("../state/types").IssueStateDict }>;
   };
 
   if (opts.json) {

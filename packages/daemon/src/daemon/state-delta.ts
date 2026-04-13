@@ -37,8 +37,10 @@ export type StateDelta = {
 
 export function computeStateDelta(
   previous: Record<string, IssueStateDict>,
-  current: Record<string, IssueStateDict>
+  current: Record<string, IssueStateDict>,
+  trackedIssueIds?: Set<string>
 ): StateDelta | null {
+  // New issues always flow regardless of tracked set
   const newIssues = Object.keys(current)
     .filter((issueId) => !(issueId in previous))
     .sort()
@@ -47,12 +49,20 @@ export function computeStateDelta(
       state: current[issueId],
     }));
 
-  const removed = Object.keys(previous)
-    .filter((issueId) => !(issueId in current))
-    .sort();
+  // Removed and changed are filtered to tracked set when provided
+  const removedCandidates = Object.keys(previous).filter((issueId) => !(issueId in current));
+  const removed = (
+    trackedIssueIds !== undefined
+      ? removedCandidates.filter((issueId) => trackedIssueIds.has(issueId))
+      : removedCandidates
+  ).sort();
 
-  const changed = Object.keys(current)
-    .filter((issueId) => issueId in previous)
+  const changedCandidates = Object.keys(current).filter((issueId) => issueId in previous);
+  const changed = (
+    trackedIssueIds !== undefined
+      ? changedCandidates.filter((issueId) => trackedIssueIds.has(issueId))
+      : changedCandidates
+  )
     .sort()
     .reduce<ChangedIssueDelta[]>((deltas, issueId) => {
       const changedFields = TRACKED_FIELDS.filter((field) => {

@@ -1285,6 +1285,13 @@ describe("daemon server", () => {
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
 
+      // Track the issue so changed entries are included in delta
+      const trackResponse = await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-42" }),
+      });
+      expect(trackResponse.status).toBe(200);
+
       const firstResponse = await requestJson("/state/collect", {
         method: "POST",
         body: JSON.stringify({
@@ -1360,6 +1367,13 @@ describe("daemon server", () => {
       await startTestServer({
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
       });
+
+      // Track the issue so changed entries are included in delta
+      const trackResponse = await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-42" }),
+      });
+      expect(trackResponse.status).toBe(200);
 
       const firstResponse = await requestJson("/state/collect", {
         method: "POST",
@@ -1532,6 +1546,13 @@ describe("daemon server", () => {
         getControllerState: () => ({ sessionId: "ses_ctrl" }),
         fetchProjectItems: async () => [createGitHubProjectItem({ status: fetchStatus })],
       });
+
+      // Track the issue so changed entries are included in delta
+      const trackResponse = await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-42" }),
+      });
+      expect(trackResponse.status).toBe(200);
 
       // First fetch-and-collect establishes baseline
       const firstResponse = await requestJson("/state/fetch-and-collect", {
@@ -4709,6 +4730,276 @@ describe("daemon server", () => {
       };
       expect(body.summary.totalWorkers).toBe(1);
       expect(body.groups["acme/widgets"]["20"].workers[0].id).toBe("acme-widgets-20-implement");
+    });
+  });
+
+  describe("GET /state/track", () => {
+    it("returns empty list when no issues tracked", async () => {
+      await startTestServer({});
+      const response = await requestJson("/state/track");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { trackedIssues: string[] };
+      expect(body.trackedIssues).toEqual([]);
+    });
+
+    it("returns sorted list of tracked issues", async () => {
+      await startTestServer({});
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "issue-b" }),
+      });
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "issue-a" }),
+      });
+      const response = await requestJson("/state/track");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { trackedIssues: string[] };
+      expect(body.trackedIssues).toEqual(["issue-a", "issue-b"]);
+    });
+  });
+
+  describe("POST /state/track", () => {
+    it("tracks an issue and returns tracked: true", async () => {
+      await startTestServer({});
+      const response = await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "my-issue-1" }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { tracked: boolean };
+      expect(body.tracked).toBe(true);
+    });
+
+    it("normalizes issueId to lowercase", async () => {
+      await startTestServer({});
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "MY-ISSUE-1" }),
+      });
+      const listResponse = await requestJson("/state/track");
+      const body = (await listResponse.json()) as { trackedIssues: string[] };
+      expect(body.trackedIssues).toContain("my-issue-1");
+    });
+
+    it("is idempotent — tracking same issue twice does not duplicate", async () => {
+      await startTestServer({});
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "issue-1" }),
+      });
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "issue-1" }),
+      });
+      const listResponse = await requestJson("/state/track");
+      const body = (await listResponse.json()) as { trackedIssues: string[] };
+      expect(body.trackedIssues.filter((id) => id === "issue-1")).toHaveLength(1);
+    });
+
+    it("returns 400 when issueId is missing", async () => {
+      await startTestServer({});
+      const response = await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      expect(response.status).toBe(400);
+    });
+
+    it("returns 400 when issueId is not a string", async () => {
+      await startTestServer({});
+      const response = await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: 42 }),
+      });
+      expect(response.status).toBe(400);
+    });
+  });
+
+  describe("DELETE /state/track/:issueId", () => {
+    it("untracks an issue and returns untracked: true", async () => {
+      await startTestServer({});
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "issue-1" }),
+      });
+      const response = await requestJson("/state/track/issue-1", { method: "DELETE" });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { untracked: boolean };
+      expect(body.untracked).toBe(true);
+
+      const listResponse = await requestJson("/state/track");
+      const listBody = (await listResponse.json()) as { trackedIssues: string[] };
+      expect(listBody.trackedIssues).not.toContain("issue-1");
+    });
+
+    it("is idempotent — untracking a non-tracked issue returns untracked: true", async () => {
+      await startTestServer({});
+      const response = await requestJson("/state/track/nonexistent-issue", { method: "DELETE" });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { untracked: boolean };
+      expect(body.untracked).toBe(true);
+    });
+
+    it("normalizes issueId to lowercase", async () => {
+      await startTestServer({});
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "issue-1" }),
+      });
+      const response = await requestJson("/state/track/ISSUE-1", { method: "DELETE" });
+      expect(response.status).toBe(200);
+      const listResponse = await requestJson("/state/track");
+      const body = (await listResponse.json()) as { trackedIssues: string[] };
+      expect(body.trackedIssues).not.toContain("issue-1");
+    });
+  });
+
+  describe("auto-track on POST /workers", () => {
+    it("auto-tracks issue when worker is dispatched", async () => {
+      await startTestServer({});
+      await requestJson("/workers", {
+        method: "POST",
+        body: JSON.stringify({
+          issueId: "ENG-42",
+          mode: "implement",
+          workspace: "/tmp/workspace",
+        }),
+      });
+      const response = await requestJson("/state/track");
+      const body = (await response.json()) as { trackedIssues: string[] };
+      expect(body.trackedIssues).toContain("eng-42");
+    });
+  });
+
+  describe("auto-untrack on cleanupDoneIssueWorkers", () => {
+    it("auto-untracks issue when it is cleaned up as Done", async () => {
+      await startTestServer({});
+
+      // Track the issue
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-42" }),
+      });
+
+      // Verify it's tracked
+      const beforeResponse = await requestJson("/state/track");
+      const beforeBody = (await beforeResponse.json()) as { trackedIssues: string[] };
+      expect(beforeBody.trackedIssues).toContain("acme-widgets-42");
+
+      // Collect state with issue as Done — triggers cleanup + untrack
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Done" })],
+        }),
+      });
+      await Bun.sleep(100);
+
+      const afterResponse = await requestJson("/state/track");
+      const afterBody = (await afterResponse.json()) as { trackedIssues: string[] };
+      expect(afterBody.trackedIssues).not.toContain("acme-widgets-42");
+    });
+  });
+
+  describe("GET /state/materialized", () => {
+    it("returns empty issues and titles when nothing tracked", async () => {
+      await startTestServer({});
+      const response = await requestJson("/state/materialized");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        issues: Record<string, unknown>;
+        titles: Record<string, string>;
+        newIssues: unknown[];
+      };
+      expect(body.issues).toEqual({});
+      expect(body.titles).toEqual({});
+      expect(body.newIssues).toEqual([]);
+    });
+
+    it("returns tracked issues from cache", async () => {
+      await startTestServer({});
+
+      // Track and collect state
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-42" }),
+      });
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "In Progress" })],
+        }),
+      });
+
+      const response = await requestJson("/state/materialized");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        issues: Record<string, { status: string }>;
+        titles: Record<string, string>;
+        newIssues: unknown[];
+      };
+      expect(body.issues["acme-widgets-42"]).toBeDefined();
+      expect(body.issues["acme-widgets-42"].status).toBe("In Progress");
+    });
+
+    it("does not return untracked issues", async () => {
+      await startTestServer({});
+
+      // Collect state without tracking
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "In Progress" })],
+        }),
+      });
+
+      const response = await requestJson("/state/materialized");
+      const body = (await response.json()) as { issues: Record<string, unknown> };
+      expect(Object.keys(body.issues)).toHaveLength(0);
+    });
+
+    it("drains newIssues accumulator on read", async () => {
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      // First collect establishes baseline
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ number: 10, status: "Todo" })],
+        }),
+      });
+
+      // Second collect adds a new issue
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            createGitHubProjectItem({ number: 10, status: "Todo" }),
+            createGitHubProjectItem({ number: 11, status: "Todo" }),
+          ],
+        }),
+      });
+      await Bun.sleep(50);
+
+      // First read should have the new issue
+      const firstRead = await requestJson("/state/materialized");
+      const firstBody = (await firstRead.json()) as {
+        newIssues: Array<{ issueId: string }>;
+      };
+      expect(firstBody.newIssues.some((e) => e.issueId === "acme-widgets-11")).toBe(true);
+
+      // Second read should have empty newIssues (drained)
+      const secondRead = await requestJson("/state/materialized");
+      const secondBody = (await secondRead.json()) as { newIssues: unknown[] };
+      expect(secondBody.newIssues).toHaveLength(0);
     });
   });
 });

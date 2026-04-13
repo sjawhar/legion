@@ -298,6 +298,11 @@ export function startServer(opts: ServerOptions): {
   const issueTitleCache = new Map<string, string>();
   const recentEvents: DashboardRecentEvent[] = [];
 
+  // Tracked issue set — in-memory only, re-populated on dispatch
+  const trackedIssueIds = new Set<string>();
+  // Accumulates new issues since last GET /state/materialized; drains on read
+  const newIssuesSinceLastPoll: Array<{ issueId: string; state: IssueStateDict }> = [];
+
   function recordRecentEvent(evt: DashboardRecentEvent): void {
     recentEvents.push(evt);
     if (recentEvents.length > MAX_RECENT_EVENTS) {
@@ -403,9 +408,15 @@ export function startServer(opts: ServerOptions): {
       }
 
       if (previousIssueState !== null) {
-        const delta = computeStateDelta(previousIssueState, currentDict);
-        if (delta && opts.getControllerState?.()?.sessionId) {
-          publishStateDelta(delta, envoyUrl);
+        const delta = computeStateDelta(previousIssueState, currentDict, trackedIssueIds);
+        if (delta) {
+          // Accumulate new issues for GET /state/materialized
+          for (const entry of delta.changes.new) {
+            newIssuesSinceLastPoll.push(entry);
+          }
+          if (opts.getControllerState?.()?.sessionId) {
+            publishStateDelta(delta, envoyUrl);
+          }
         }
       }
 
@@ -488,6 +499,11 @@ export function startServer(opts: ServerOptions): {
 
     for (const issueId of cleanedIssueIds) {
       issueStateCache.delete(issueId);
+    }
+
+    // Auto-untrack all Done issues (regardless of whether they had workers)
+    for (const issueId of doneIssueIds) {
+      trackedIssueIds.delete(issueId);
     }
 
     if (cleanedWorkers > 0) {
@@ -1024,6 +1040,9 @@ export function startServer(opts: ServerOptions): {
                 promptDelivered = false;
               }
             }
+            // Auto-track the issue when a worker is dispatched
+            trackedIssueIds.add(normalizedIssueId);
+
             opts.feedbackLogger?.log({
               event: "worker.dispatched",
               issueId: normalizedIssueId,
@@ -1600,6 +1619,57 @@ export function startServer(opts: ServerOptions): {
             console.error(`[fetch-and-collect] backend=${backend} error=${message}`);
             return serverError(`fetch_and_collect_failed: ${message}`);
           }
+        }
+
+        // GET /state/track — list tracked issue IDs
+        if (method === "GET" && url.pathname === "/state/track") {
+          return jsonResponse({ trackedIssues: [...trackedIssueIds].sort() });
+        }
+
+        // POST /state/track — manually track an issue
+        if (method === "POST" && url.pathname === "/state/track") {
+          const payload = await request.json().catch(() => null);
+          if (!payload || typeof payload !== "object" || typeof payload.issueId !== "string") {
+            return badRequest("issueId is required");
+          }
+          const issueId = (payload.issueId as string).toLowerCase();
+          if (!issueId) {
+            return badRequest("issueId must be non-empty");
+          }
+          trackedIssueIds.add(issueId);
+          return jsonResponse({ tracked: true });
+        }
+
+        // DELETE /state/track/:issueId — manually untrack an issue
+        if (method === "DELETE" && url.pathname.startsWith("/state/track/")) {
+          const issueId = url.pathname.slice("/state/track/".length).toLowerCase();
+          if (!issueId) {
+            return badRequest("issueId is required");
+          }
+          trackedIssueIds.delete(issueId);
+          return jsonResponse({ untracked: true });
+        }
+
+        // GET /state/materialized — tracked issues from cache + new-issues accumulator (drains on read)
+        if (method === "GET" && url.pathname === "/state/materialized") {
+          const issues: Record<string, IssueStateDict> = {};
+          const titles: Record<string, string> = {};
+
+          for (const issueId of trackedIssueIds) {
+            const issueState = issueStateCache.get(issueId);
+            if (issueState) {
+              issues[issueId] = IssueState.toDict(issueState);
+            }
+            const title = issueTitleCache.get(issueId);
+            if (title) {
+              titles[issueId] = title;
+            }
+          }
+
+          // Drain the new-issues accumulator
+          const newIssues = newIssuesSinceLastPoll.splice(0);
+
+          return jsonResponse({ issues, titles, newIssues });
         }
 
         if (method === "POST" && url.pathname === "/shutdown") {
