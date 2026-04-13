@@ -21,9 +21,7 @@
       "task-index-patterns.md"
     ],
     "packages/daemon/src/daemon": [
-      "daemon/worker-directory-resolution.md",
       "daemon/workspace-validation-retro.md",
-      "daemon/controller-observability.md",
       "daemon/session-liveness-detection-pattern.md",
       "daemon/optional-dep-fallback-and-early-return-guard.md",
       "daemon/targeted-delta-filtering-pattern.md",
@@ -31,7 +29,8 @@
       "daemon/self-fetch-endpoint-composition.md",
       "daemon/pre-cleanup-branch-push-verification.md",
       "best-practices/jj-bookmark-template-syntax-gotchas.md",
-      "daemon/dead-worker-workspace-reclamation.md"
+      "daemon/dead-worker-workspace-reclamation.md",
+      "daemon/inline-html-dashboard-pattern.md"
     ],
     "packages/daemon/src/__tests__": [
       "testing/mock-envoy-server-pattern.md",
@@ -400,6 +399,11 @@
     "tag:text-parsing": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
     "packages/opencode-plugin/src": [
       "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
-    ]
+    ],
+    "tag:dashboard": ["daemon/inline-html-dashboard-pattern.md"],
+    "tag:html": ["daemon/inline-html-dashboard-pattern.md"],
+    "tag:template-literal": ["daemon/inline-html-dashboard-pattern.md"],
+    "tag:zero-dependency": ["daemon/inline-html-dashboard-pattern.md"],
+    "tag:mvp": ["daemon/inline-html-dashboard-pattern.md"]
   }
 }
