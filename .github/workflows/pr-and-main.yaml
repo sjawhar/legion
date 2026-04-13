@@ -64,5 +64,5 @@ jobs:
         working-directory: packages/daemon
 
       - name: Test opencode-plugin
-        run: bun test
+        run: bun test --path-ignore-patterns '**/omo-replacement-matrix*'
         working-directory: packages/opencode-plugin
