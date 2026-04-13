@@ -448,7 +448,8 @@
     ],
     "packages/opencode-plugin/src/delegation": [
       "delegation/subagent-timeout-stall-prevention.md",
-      "delegation/bun-node-timer-type-portability.md"
+      "delegation/bun-node-timer-type-portability.md",
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
     ],
     ".opencode/skills/legion-retro": [
       "delegation/subagent-timeout-stall-prevention.md"
@@ -521,6 +522,27 @@
     ],
     "tag:mixed-runtime": [
       "infra/mixed-runtime-type-boundaries.md"
+    ],
+    "packages/opencode-plugin/src/hooks": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ],
+    "packages/opencode-plugin/src/config": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ],
+    "tag:opencode-plugin": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ],
+    "tag:hooks": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ],
+    "tag:tool-execute-before": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ],
+    "tag:arg-hashing": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+    ],
+    "tag:plugin-config": [
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
     ]
   }
 }

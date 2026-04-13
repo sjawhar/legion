@@ -1,27 +1,45 @@
 {
-  "verdict": "pass",
-  "summary": "Both P1 and P2 issues from previous test run are resolved. TypeScript type error fixed (dot notation on Record<string,unknown>). Integration test added for untracked issue state change producing no Envoy publish.",
-  "checks": {
-    "typescript": "pass — only pre-existing baseUrl deprecation warning",
-    "biome": "pass — clean, no errors",
-    "server_tests": "167 pass, 0 fail",
-    "state_delta_tests": "26 pass, 0 fail",
-    "full_suite": "1315 pass, 2 fail (pre-existing: ledger.test.ts, serve-manager.test.ts — unrelated to this PR)"
-  },
-  "acceptance_criteria": {
-    "tracking_api": "all 9 criteria covered by integration tests",
-    "delta_filtering": "all 5 criteria covered — including new integration test for untracked issue no-publish",
-    "legion_poll_change": "all 4 criteria covered",
-    "testing_infrastructure": "all 4 criteria covered"
-  },
-  "fixes_applied": [
-    "P1: Cast payload to Record<string,unknown> before accessing .issueId — TS error resolved",
-    "P2: Added 2 integration tests: untracked issue no-publish + mixed tracked/untracked delta filtering",
-    "Style: Use dot notation for Record<string,unknown> access per Biome suggestion"
+  "passed": true,
+  "summary": "All 6 acceptance criteria verified. 15/15 circuit-breaker tests pass. 41/41 hook tests pass. Lint clean. TypeScript errors are pre-existing (missing @types/node, bun:test module) and not introduced by this PR.",
+  "criteria": [
+    {
+      "criterion": "TDD: failing test first, then implementation",
+      "result": "pass",
+      "evidence": "Test file exists with 274 lines, 15 tests. PR body confirms TDD approach."
+    },
+    {
+      "criterion": "5 identical tool calls triggers the breaker",
+      "result": "pass",
+      "evidence": "Test: triggers on 5th identical call. Default threshold test uses read tool."
+    },
+    {
+      "criterion": "Warning/abort behavior is configurable via plugin config",
+      "result": "pass",
+      "evidence": "CircuitBreakerConfig in config/index.ts. Tests verify both behaviors."
+    },
+    {
+      "criterion": "Per-session tracking — different sessions have independent counters",
+      "result": "pass",
+      "evidence": "Test: 5 calls across 2 sessions does not trigger either."
+    },
+    {
+      "criterion": "Tracking cleaned up on session.deleted event",
+      "result": "pass",
+      "evidence": "Tests: clears tracking on session.deleted, does not clear other sessions."
+    },
+    {
+      "criterion": "4 identical calls does NOT trigger (below threshold)",
+      "result": "pass",
+      "evidence": "Test: does not trigger on 4 identical calls — explicit test case."
+    }
   ],
-  "pr_number": 492,
-  "issue_number": 469,
+  "testResults": "15/15 circuit-breaker tests pass; 41/41 hook tests pass",
+  "lintResults": "Biome: Checked 4 files in 42ms. No fixes applied.",
+  "typeCheckResults": "Pre-existing errors only — not introduced by this PR",
+  "preExistingFailures": [
+    "bunx tsc --noEmit: TS2591/TS2307 errors for node: builtins and bun:test — pre-existing, tsconfig unchanged"
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-13T02:19:37.717Z"
+  "completed": "2026-04-13T01:47:32.001Z"
 }
