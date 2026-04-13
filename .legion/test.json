@@ -1,32 +1,43 @@
 {
   "result": "pass",
-  "summary": "All acceptance criteria verified. Controller skill updated: retro is MANDATORY, no skip conditions, no direct merge. 1287/1289 tests pass (2 pre-existing failures). TypeScript clean. Biome clean.",
+  "summary": "All acceptance criteria verified. 22/22 new spawn-limits tests pass. 1311/1313 total tests pass (2 pre-existing @pulumi/docker failures). TypeScript clean. Biome clean. Implementation note: 3 TDD test cases had off-by-one errors in maxDepth values — corrected to match spec semantics (depth >= maxDepth rejects).",
   "criteriaResults": [
     {
-      "criterion": "After review completes (approved), controller MUST dispatch retro worker — no exceptions",
+      "criterion": "TDD: failing test written first, then implementation",
       "result": "pass",
-      "evidence": "Verified by code inspection: SKILL.md lines 749-753 — retro section now reads: The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions. Always dispatch retro after review approval. Do not check routing hints, skipRetro flags, or any other conditions."
+      "evidence": "Verified by git log: commit nrnluuzt (test(delegation): add failing spawn limits tests (TDD)) precedes implementation commit sywzynoo."
     },
     {
-      "criterion": "Remove language allowing skipping retro",
+      "criterion": "Spawning at depth=4 (default max=5) succeeds; spawning at depth=5 returns clear rejection error",
       "result": "pass",
-      "evidence": "Verified by diff: 57 lines deleted from SKILL.md including entire skipRetro bash block. grep for skipRetro/skip_retro/SKIP_RETRO in SKILL.md returns 0 code-path matches."
+      "evidence": "Tests pass: spawning at depth=4 succeeds; spawning at depth=5 throws Spawn rejected: max depth 5 reached (current depth: 5)"
     },
     {
-      "criterion": "Add explicit enforcement: retro is MANDATORY",
+      "criterion": "20th descendant of a root succeeds; 21st returns clear rejection error",
       "result": "pass",
-      "evidence": "Verified by code inspection: SKILL.md line 431 (MUST NOT skip list), line 749 (Retro section), line 753 (unconditional dispatch), line 769 (ADAPTIVE ROUTING GUARDRAILS), line 939 (anti-pattern table)."
+      "evidence": "Tests pass: 20th descendant succeeds; 21st throws Spawn rejected: max descendants 20 reached for root session ..."
     },
     {
-      "criterion": "worker-done on review should NOT trigger merge until retro completes",
+      "criterion": "Config overrides work (custom depth/descendant limits via plugin config)",
       "result": "pass",
-      "evidence": "Verified by code inspection: decision.ts lines 140-142 — IssueStatus.RETRO + hasWorkerDone → dispatch_merger. Pre-merge gate condition 5 requires retro handoff."
+      "evidence": "Tests pass: custom maxDepth=4 rejects at depth=4; custom maxDescendants=10 rejects at 11th descendant. Config wired in index.ts line 78."
+    },
+    {
+      "criterion": "Existing delegation tests still pass",
+      "result": "pass",
+      "evidence": "1311/1313 total tests pass. 2 failures are pre-existing @pulumi/docker module errors — confirmed pre-existing by running tests on parent commit."
+    },
+    {
+      "criterion": "Resource accounting state is asserted after every rejection path",
+      "result": "pass",
+      "evidence": "Tests verify counter state after rejection: depth counters unchanged after rejection; descendant counter not corrupted by first rejection."
     }
   ],
-  "testCritique": "No new unit tests — change is purely to a skill markdown file. Existing decision.ts tests cover retro→merge transitions. CI: lint/test/typecheck all pass.",
-  "ciStatus": "pass",
-  "ciUrl": "https://github.com/sjawhar/legion/actions/runs/24317292849",
+  "testCritique": "22 new tests covering depth tracking, depth boundary, descendant boundary, concurrent spawns, error message format, rootSessionID tracking. 3 TDD tests had off-by-one errors in maxDepth values corrected to match spec semantics.",
+  "ciStatus": "pending",
+  "prNumber": 490,
+  "prUrl": "https://github.com/sjawhar/legion/pull/490",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-12T22:08:26.000Z"
+  "completed": "2026-04-13T00:59:17.029Z"
 }
