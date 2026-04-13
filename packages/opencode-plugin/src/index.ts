@@ -7,6 +7,7 @@ import { loadPluginConfig, mergePermissionConfig } from "./config";
 import { BackgroundTaskManager, createDelegationTools } from "./delegation";
 import { anthropicEffortHook } from "./hooks/anthropic-effort";
 import { createBackgroundNotificationHook } from "./hooks/background-notification";
+import { createCircuitBreakerHook } from "./hooks/circuit-breaker";
 import { COMPACTION_CONTEXT_TEMPLATE } from "./hooks/compaction-context-injector";
 import { createCompactionTodoPreserverHook } from "./hooks/compaction-todo-preserver";
 import { createGitHubAppCredentialsHook } from "./hooks/github-app-credentials";
@@ -90,6 +91,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
   const githubAppCredentialsHook = createGitHubAppCredentialsHook();
   const contextSearchTool = createContextSearchTool(outputCompressionHook.getStore);
   const sessionRecoveryHook = createSessionRecoveryHook(ctx);
+  const circuitBreakerHook = createCircuitBreakerHook(pluginConfig.circuitBreaker ?? {});
   const stopContinuationGuardHook = createStopContinuationGuardHook();
   const compactionTodoPreserver = createCompactionTodoPreserverHook(ctx);
   const todoContinuationEnforcer = createTodoContinuationEnforcerHook(ctx, {
@@ -161,6 +163,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
         if (sessionID) {
           await manager.cleanup(sessionID);
         }
+        await circuitBreakerHook.event({ event });
       }
 
       if (event.type === "session.error") {
@@ -190,6 +193,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       anthropicEffortHook(input, output);
     },
     "tool.execute.before": async (input, output) => {
+      circuitBreakerHook["tool.execute.before"](input, output);
       subagentQuestionBlockerHook(input, output);
       const toolInput = isRecord(input) ? (input as ToolExecuteInput) : undefined;
       const toolName = typeof toolInput?.tool === "string" ? toolInput.tool : undefined;
