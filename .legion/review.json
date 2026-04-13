@@ -1,42 +1,36 @@
 {
-  "outcome": "changes_requested",
-  "prNumber": 485,
-  "prUrl": "https://github.com/sjawhar/legion/pull/485",
-  "issueNumber": 469,
-  "summary": "CRITICAL: Implementation is missing. PR 485 contains only documentation changes. The branch is 1 commit ahead of main with zero implementation code. state-delta.ts has no trackedIssueIds param, server.ts has no tracking endpoints, cmdPoll still calls fetch-and-collect. Implement worker crashed twice. Implementation must be written from scratch per docs/plans/2026-04-12-tracked-issue-notifications.md.",
-  "criteriaResults": [
+  "critical": 1,
+  "important": 1,
+  "minor": 2,
+  "verdict": "changes_requested",
+  "keyFindings": [
     {
-      "criterion": "computeStateDelta has optional trackedIssueIds param",
-      "result": "fail",
-      "evidence": "state-delta.ts on branch identical to main"
+      "severity": "P1",
+      "file": ".legion/",
+      "description": "PR has merge conflicts with main — .legion/implement.json and .legion/review.json conflict with IAM commit a0a083e. Implementer must rebase."
     },
     {
-      "criterion": "server.ts tracking endpoints GET/POST/DELETE /state/track",
-      "result": "fail",
-      "evidence": "no tracking endpoints in server.ts on branch"
+      "severity": "P2",
+      "file": "packages/daemon/src/cli/index.ts",
+      "description": "newIssues from /state/materialized silently dropped in human-readable legion poll output — formatPollOutput only receives data.issues, not data.newIssues. New issues won't appear in non-JSON output."
     },
     {
-      "criterion": "Auto-track/untrack on worker dispatch/cleanup",
-      "result": "fail",
-      "evidence": "no auto-track logic in server.ts"
+      "severity": "P3",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "newIssuesSinceLastPoll has no deduplication — same issue can appear multiple times if it cycles on/off board between polls."
     },
     {
-      "criterion": "GET /state/materialized endpoint",
-      "result": "fail",
-      "evidence": "no materialized endpoint in server.ts"
-    },
-    {
-      "criterion": "cmdPoll calls GET /state/materialized",
-      "result": "fail",
-      "evidence": "cli/index.ts still calls fetch-and-collect"
-    },
-    {
-      "criterion": "Tests for all new functionality",
-      "result": "fail",
-      "evidence": "test files identical to main"
+      "severity": "P3",
+      "file": ".legion/tasks/",
+      "description": "Handoff/task artifacts (.legion/tasks/bg_*.json, test handoff commits) included in PR diff — internal worker artifacts, add noise."
     }
+  ],
+  "prNumber": 492,
+  "issueNumber": 469,
+  "learningsHelpful": [
+    "daemon/optional-dep-fallback-and-early-return-guard.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T00:43:26.561Z"
+  "completed": "2026-04-13T02:31:38.008Z"
 }
