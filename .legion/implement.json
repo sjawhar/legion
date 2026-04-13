@@ -1,14 +1,18 @@
 {
-  "filesChanged": [".opencode/skills/legion-worker/workflows/smoke-test.md", ".changelog/516.md"],
-  "trickyParts": [
-    "No code changes — this is a documentation-only skill file capturing hard-won integration test patterns from 5 failed smoke test attempts"
+  "filesChanged": [
+    ".opencode/skills/legion-worker/workflows/smoke-testing.md",
+    ".changelog/516.md"
   ],
-  "deviations": ["Created .changelog/ directory since no changelog convention existed in the repo"],
+  "trickyParts": [
+    "Resolved rebase conflicts in .legion/implement.json and .legion/review.json caused by concurrent merges to main",
+    "Renamed smoke-test.md to smoke-testing.md to match existing references in test.md and plan.md"
+  ],
+  "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T19:38:04.523Z"
+  "completed": "2026-04-13T21:07:45.345Z"
 }
