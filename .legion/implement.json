@@ -1,16 +1,19 @@
 {
   "filesChanged": [
-    ".opencode/skills/legion-worker/SKILL.md",
-    ".opencode/skills/legion-worker/workflows/implement.md",
-    ".opencode/skills/legion-worker/workflows/test.md"
+    "packages/opencode-plugin/src/delegation/__tests__/retry-with-fallback.test.ts",
+    ".legion/implement.json",
+    ".legion/review.json"
   ],
   "trickyParts": [
-    "Issue referenced smoke-test.md but the actual file is test.md — used test.md as the target"
+    "Merge conflicts in .legion/implement.json and .legion/review.json required careful resolution — the files contained data from other issues that had been merged to main. Resolved by keeping issue 276 version.",
+    "504 Gateway Timeout was in TRANSIENT_STATUS_CODES but lacked a dedicated test — added to make the contract explicit."
   ],
   "deviations": ["None — followed the issue directive exactly"],
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "learningsInjected": [],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T20:00:40.537Z"
+  "completed": "2026-04-13T18:10:22.056Z"
 }
