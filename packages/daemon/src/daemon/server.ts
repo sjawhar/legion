@@ -1796,6 +1796,24 @@ export function startServer(opts: ServerOptions): {
               : undefined;
             const backendName = opts.issueBackend ?? "github";
             const repoSuffix = repo ? ` (${backendName} backend, repo: ${repo})` : "";
+
+            // Remove stale worker-active label before redispatch
+            if (action === "remove_worker_active_and_redispatch") {
+              try {
+                const tracker = getBackend(backendName as BackendName);
+                if (tracker.removeLabel) {
+                  await tracker.removeLabel(
+                    { issueId, source: cachedState.source },
+                    "worker-active"
+                  );
+                }
+              } catch (err) {
+                console.error(
+                  `[advance] Failed to remove worker-active label for ${issueId}: ${err instanceof Error ? err.message : String(err)}`
+                );
+              }
+            }
+
             let prompt: string;
 
             switch (action) {
@@ -1811,6 +1829,9 @@ export function startServer(opts: ServerOptions): {
                 break;
               case "resume_implementer_for_test_failure":
                 prompt = `Invoke the /legion-worker skill for implement mode. The tester found issues — check the test feedback and fix${repoSuffix}.`;
+                break;
+              case "relay_user_feedback":
+                prompt = `Invoke the /legion-worker skill for implement mode. The user has responded to your escalation — check the latest issue comments for their feedback and continue${repoSuffix}.`;
                 break;
               default:
                 prompt = `Invoke the /legion-worker skill for ${mode} mode for ${issueId}${repoSuffix}. Before starting, check for project-specific skills that may be relevant to this work.`;
@@ -1868,12 +1889,13 @@ export function startServer(opts: ServerOptions): {
 
             const backendName = (opts.issueBackend ?? "github") as BackendName;
             const tracker = getBackend(backendName);
+            const mutationTarget = { issueId, source: cachedState.source };
             try {
               if (tracker.transitionIssue) {
-                await tracker.transitionIssue(issueId, targetStatus);
+                await tracker.transitionIssue(mutationTarget, targetStatus);
               }
               if (tracker.removeLabel) {
-                await tracker.removeLabel(issueId, "worker-done");
+                await tracker.removeLabel(mutationTarget, "worker-done");
               }
             } catch (err) {
               return jsonResponse(
@@ -1916,6 +1938,7 @@ export function startServer(opts: ServerOptions): {
             "transition_to_testing",
             "transition_to_needs_review",
             "transition_to_retro",
+            "transition_to_done",
           ]);
 
           const advanced: Array<{

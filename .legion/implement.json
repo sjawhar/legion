@@ -3,41 +3,19 @@
     "packages/daemon/src/state/backends/issue-tracker.ts",
     "packages/daemon/src/state/backends/github.ts",
     "packages/daemon/src/state/backends/linear.ts",
-    "packages/daemon/src/daemon/config.ts",
     "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/index.ts",
-    "packages/daemon/src/cli/index.ts",
-    ".opencode/skills/legion-controller/SKILL.md",
-    "packages/daemon/src/daemon/__tests__/advance.test.ts",
     "packages/daemon/src/state/backends/__tests__/mutations.test.ts"
   ],
   "trickyParts": [
-    "The advance endpoint dispatches workers by making internal HTTP calls to POST /workers on the same server, avoiding a risky refactor of the 330-line inline handler into a shared function",
-    "GitHub issueId format is ambiguous for repos with hyphens — parseIssueIdParts uses last-numeric-segment convention, but advance handler uses cachedState.source for canonical owner/repo/number",
-    "Linear backend mutations are stubs that throw explicitly — Linear mutations require MCP which is only available in agent sessions, not daemon CLI",
-    "CI typecheck caught missing LegionInstancePaths fields (legionStateDir, feedbackFile) and RepoManagerDeps fields (rmDir, symlink) in test mocks — fixed in second push"
+    "Threading IssueSource through the IssueTracker interface required updating the interface, both implementations (GitHub + Linear), all callers in server.ts, and the mutation tests — a wider surface area than the other fixes",
+    "The remove_worker_active_and_redispatch fix needed to be non-blocking (try/catch) to avoid label removal failures preventing the redispatch"
   ],
   "deviations": [
-    "Plan suggested extracting POST /workers handler into a shared handleWorkerCreate() function — instead used internal HTTP fetch to POST /workers to reuse existing logic without risky refactoring",
-    "Plan suggested separate test files for each task — consolidated into two test files (advance.test.ts for endpoint+config tests, mutations.test.ts for backend mutation tests)",
-    "Plan suggested Envoy fast path subscription in daemon/index.ts — deferred to health tick fallback only since daemon Envoy subscription patterns are not yet established"
+    "Envoy fast-path for auto-progression (P2 #6) not implemented — this was already a documented deliberate deferral from the original implementation. The daemon has no established Envoy consumer pattern; the 60s health tick fallback provides the same functionality with higher latency."
   ],
-  "openQuestions": [
-    "Envoy fast-path for auto-progression (daemon subscribing to worker-done events) deferred to health tick fallback — the daemon does not have an established Envoy consumer pattern yet",
-    "GitHub transitionIssue uses Projects V2 GraphQL which requires project field/option IDs fetched dynamically — this could be slow for high-volume auto-progression"
-  ],
+  "openQuestions": [],
   "subPlanningNeeded": false,
-  "learningsInjected": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/controller/skill-vs-state-machine-policy-boundary.md",
-    "docs/solutions/integration-patterns/controller-worker-protocol.md",
-    "docs/solutions/integration-issues/github-graphql-pr-draft-status.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/daemon/controller-lifecycle-separation.md",
-    "docs/solutions/integration-patterns/controller-worker-protocol.md"
-  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T05:52:57.474Z"
+  "completed": "2026-04-13T06:43:08.023Z"
 }

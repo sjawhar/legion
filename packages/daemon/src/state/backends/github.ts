@@ -7,7 +7,7 @@ import {
   type IssueStatusLiteral,
   type ParsedIssue,
 } from "../types";
-import type { IssueTracker } from "./issue-tracker";
+import type { IssueMutationTarget, IssueTracker } from "./issue-tracker";
 
 interface GitHubProjectItem {
   id?: string;
@@ -90,10 +90,20 @@ export function parseIssueIdParts(issueId: string): {
 
 async function runGhCommand(args: string[]): Promise<string> {
   const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
+  const killTimeout = setTimeout(() => {
+    try {
+      proc.kill();
+    } catch {
+      // Process may have already exited
+    }
+  }, 30_000);
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   const exitCode = await proc.exited;
-  const stdout = await new Response(proc.stdout).text();
+  clearTimeout(killTimeout);
   if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
     throw new Error(`gh ${args[0]} failed (exit ${exitCode}): ${stderr.trim()}`);
   }
   return stdout;
@@ -188,8 +198,27 @@ export class GitHubTracker implements IssueTracker {
     return parsed;
   }
 
-  async removeLabel(issueId: string, label: string): Promise<void> {
-    const { owner, repo, number } = parseIssueIdParts(issueId);
+  /**
+   * Resolve owner/repo/number from an IssueMutationTarget.
+   * Prefers source (canonical) over issueId parsing (lossy for hyphenated owners).
+   */
+  private resolveTarget(target: IssueMutationTarget): {
+    owner: string;
+    repo: string;
+    number: string;
+  } {
+    if (target.source) {
+      return {
+        owner: target.source.owner,
+        repo: target.source.repo,
+        number: String(target.source.number),
+      };
+    }
+    return parseIssueIdParts(target.issueId);
+  }
+
+  async removeLabel(target: IssueMutationTarget, label: string): Promise<void> {
+    const { owner, repo, number } = this.resolveTarget(target);
     await runGhCommand([
       "issue",
       "edit",
@@ -201,8 +230,8 @@ export class GitHubTracker implements IssueTracker {
     ]);
   }
 
-  async transitionIssue(issueId: string, newStatus: IssueStatusLiteral): Promise<void> {
-    const { owner, repo, number } = parseIssueIdParts(issueId);
+  async transitionIssue(target: IssueMutationTarget, newStatus: IssueStatusLiteral): Promise<void> {
+    const { owner, repo, number } = this.resolveTarget(target);
     const issueNum = Number(number);
 
     // Step 1: Query the project item ID, project ID, Status field ID, and option IDs
@@ -234,7 +263,7 @@ export class GitHubTracker implements IssueTracker {
     const nodes = projectItems?.nodes as Array<Record<string, unknown>> | undefined;
 
     if (!nodes || nodes.length === 0) {
-      throw new Error(`transitionIssue: ${issueId} has no project items`);
+      throw new Error(`transitionIssue: ${target.issueId} has no project items`);
     }
 
     // Use the first project item that has a Status field
@@ -243,7 +272,7 @@ export class GitHubTracker implements IssueTracker {
       return project?.field != null;
     });
     if (!item) {
-      throw new Error(`transitionIssue: ${issueId} has no project with Status field`);
+      throw new Error(`transitionIssue: ${target.issueId} has no project with Status field`);
     }
 
     const project = item.project as Record<string, unknown>;
@@ -255,7 +284,7 @@ export class GitHubTracker implements IssueTracker {
     if (!targetOption) {
       const available = options.map((o) => o.name).join(", ");
       throw new Error(
-        `transitionIssue: status option "${newStatus}" not found for ${issueId}. Available: ${available}`
+        `transitionIssue: status option "${newStatus}" not found for ${target.issueId}. Available: ${available}`
       );
     }
 

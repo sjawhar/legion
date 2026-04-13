@@ -31,7 +31,7 @@ describe("parseIssueIdParts", () => {
 describe("LinearTracker.transitionIssue", () => {
   it("throws not-implemented error", async () => {
     const tracker = new LinearTracker();
-    await expect(tracker.transitionIssue("ENG-42", "In Progress")).rejects.toThrow(
+    await expect(tracker.transitionIssue({ issueId: "ENG-42" }, "In Progress")).rejects.toThrow(
       "not implemented"
     );
   });
@@ -40,6 +40,8 @@ describe("LinearTracker.transitionIssue", () => {
 describe("LinearTracker.removeLabel", () => {
   it("throws not-implemented error", async () => {
     const tracker = new LinearTracker();
-    await expect(tracker.removeLabel("ENG-42", "worker-done")).rejects.toThrow("not implemented");
+    await expect(tracker.removeLabel({ issueId: "ENG-42" }, "worker-done")).rejects.toThrow(
+      "not implemented"
+    );
   });
 });
