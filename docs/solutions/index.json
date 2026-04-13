@@ -20,7 +20,6 @@
       "task-index-patterns.md"
     ],
     "packages/daemon/src/daemon": [
-      "daemon/worker-directory-fix.md",
       "daemon/worker-directory-resolution.md",
       "daemon/workspace-validation-retro.md",
       "daemon/controller-observability.md",
@@ -29,10 +28,12 @@
       "architecture-patterns/task-index-retro.md",
       "task-index-patterns.md",
       "daemon/session-liveness-detection-pattern.md",
-      "daemon/optional-dep-fallback-and-early-return-guard.md"
+      "daemon/optional-dep-fallback-and-early-return-guard.md",
+      "daemon/targeted-delta-filtering-pattern.md"
     ],
     "packages/daemon/src/cli": [
-      "daemon/controller-lifecycle-separation.md"
+      "daemon/controller-lifecycle-separation.md",
+      "daemon/targeted-delta-filtering-pattern.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -461,11 +462,13 @@
       "daemon/session-liveness-detection-pattern.md"
     ],
     "tag:typescript": [
-      "delegation/bun-node-timer-type-portability.md"
+      "delegation/bun-node-timer-type-portability.md",
+      "daemon/targeted-delta-filtering-pattern.md"
     ],
     "tag:bun": [
       "delegation/bun-node-timer-type-portability.md",
-      "infra/mixed-runtime-type-boundaries.md"
+      "infra/mixed-runtime-type-boundaries.md",
+      "daemon/targeted-delta-filtering-pattern.md"
     ],
     "tag:timer": [
       "delegation/bun-node-timer-type-portability.md"
@@ -521,6 +524,21 @@
     ],
     "tag:mixed-runtime": [
       "infra/mixed-runtime-type-boundaries.md"
+    ],
+    "packages/daemon/src/daemon/state-delta": [
+      "daemon/targeted-delta-filtering-pattern.md"
+    ],
+    "tag:state-delta": [
+      "daemon/targeted-delta-filtering-pattern.md"
+    ],
+    "tag:tracking": [
+      "daemon/targeted-delta-filtering-pattern.md"
+    ],
+    "tag:notifications": [
+      "daemon/targeted-delta-filtering-pattern.md"
+    ],
+    "tag:backward-compatibility": [
+      "daemon/targeted-delta-filtering-pattern.md"
     ]
   }
 }
