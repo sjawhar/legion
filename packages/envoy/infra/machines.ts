@@ -9,6 +9,8 @@ export interface TsnetConfig {
   hostname: string;
   /** Persistent state directory — must be unique per service to avoid identity collisions. */
   stateDir: string;
+  /** Comma-separated Tailscale tags for the node (e.g., "tag:envoy"). Required when using OAuth credentials. */
+  tags?: string;
 }
 
 export interface ListenerConfig {

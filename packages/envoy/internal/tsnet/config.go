@@ -25,9 +25,9 @@ type Config struct {
 	// Required when Enabled is true.
 	StateDir string
 
-	// AuthKey is the Tailscale auth key for headless registration. Only
-	// needed for initial node registration; not required on every restart
-	// if state is persisted.
+	// AuthKey is a computed auth key derived from OAuth credentials or a
+	// legacy TS_AUTHKEY. Empty when no credentials are configured (state
+	// directory provides identity on restart).
 	AuthKey string
 }
 
@@ -36,7 +36,15 @@ type Config struct {
 //   - ENVOY_TSNET_ENABLED (bool, default "false")
 //   - ENVOY_TSNET_HOSTNAME (string, required when enabled)
 //   - ENVOY_TSNET_STATE_DIR (string, required when enabled)
-//   - ENVOY_TSNET_AUTH_KEY (string, optional)
+//   - ENVOY_TSNET_OAUTH_CLIENT_ID (string, optional — OAuth client ID)
+//   - ENVOY_TSNET_OAUTH_CLIENT_SECRET (string, optional — OAuth client secret)
+//   - ENVOY_TSNET_TAGS (string, optional — comma-separated tags, required with OAuth)
+//   - ENVOY_TSNET_AUTH_KEY (string, optional — legacy auth key, mutually exclusive with OAuth)
+//
+// OAuth credentials take precedence over a legacy auth key. When OAuth
+// credentials are provided, the client secret is used directly as the tsnet
+// auth key with tag and ephemeral parameters appended (Tailscale's OAuth
+// secret-as-authkey convention). Tags are required when using OAuth.
 func LoadConfig() (Config, error) {
 	enabled := strings.TrimSpace(os.Getenv("ENVOY_TSNET_ENABLED"))
 	if enabled == "" || enabled == "false" || enabled == "0" {
@@ -56,7 +64,10 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("ENVOY_TSNET_STATE_DIR is required when ENVOY_TSNET_ENABLED=true")
 	}
 
-	authKey := strings.TrimSpace(os.Getenv("ENVOY_TSNET_AUTH_KEY"))
+	authKey, err := resolveAuthKey()
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		Enabled:  true,
@@ -64,4 +75,41 @@ func LoadConfig() (Config, error) {
 		StateDir: stateDir,
 		AuthKey:  authKey,
 	}, nil
+}
+
+// resolveAuthKey derives the tsnet auth key from environment variables.
+// OAuth credentials (client secret + tags) take precedence over a legacy
+// ENVOY_TSNET_AUTH_KEY. Both being set is an error to prevent confusion.
+func resolveAuthKey() (string, error) {
+	oauthID := strings.TrimSpace(os.Getenv("ENVOY_TSNET_OAUTH_CLIENT_ID"))
+	oauthSecret := strings.TrimSpace(os.Getenv("ENVOY_TSNET_OAUTH_CLIENT_SECRET"))
+	tags := strings.TrimSpace(os.Getenv("ENVOY_TSNET_TAGS"))
+	legacyKey := strings.TrimSpace(os.Getenv("ENVOY_TSNET_AUTH_KEY"))
+
+	hasOAuth := oauthID != "" || oauthSecret != ""
+	hasLegacy := legacyKey != ""
+
+	if hasOAuth && hasLegacy {
+		return "", fmt.Errorf("ENVOY_TSNET_AUTH_KEY and ENVOY_TSNET_OAUTH_CLIENT_SECRET are mutually exclusive; use one or the other")
+	}
+
+	if !hasOAuth {
+		return legacyKey, nil
+	}
+
+	// OAuth path: both ID and secret are required together.
+	if oauthID == "" {
+		return "", fmt.Errorf("ENVOY_TSNET_OAUTH_CLIENT_ID is required when ENVOY_TSNET_OAUTH_CLIENT_SECRET is set")
+	}
+	if oauthSecret == "" {
+		return "", fmt.Errorf("ENVOY_TSNET_OAUTH_CLIENT_SECRET is required when ENVOY_TSNET_OAUTH_CLIENT_ID is set")
+	}
+	if tags == "" {
+		return "", fmt.Errorf("ENVOY_TSNET_TAGS is required when using OAuth credentials (e.g. 'tag:envoy')")
+	}
+
+	// Tailscale convention: an OAuth client secret can be passed directly as
+	// an auth key with URL-style parameters. The node registers as non-
+	// ephemeral and preauthorized, tagged with the specified tags.
+	return oauthSecret + "?ephemeral=false&preauthorized=true&tags=" + tags, nil
 }

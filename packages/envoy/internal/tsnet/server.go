@@ -17,7 +17,9 @@ type Server struct {
 }
 
 // New creates a tsnet Server from the given Config. The caller must call
-// Close when finished.
+// Close when finished. The AuthKey field may contain either a legacy
+// Tailscale auth key or an OAuth client secret with URL-style parameters
+// (constructed by LoadConfig from OAuth env vars).
 func New(cfg Config) *Server {
 	ts := &tsnet.Server{
 		Hostname: cfg.Hostname,

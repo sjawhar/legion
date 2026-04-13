@@ -21,6 +21,11 @@ services:
       ENVOY_TSNET_ENABLED: ${ENVOY_TSNET_ENABLED:-false}
       ENVOY_TSNET_HOSTNAME: ${ENVOY_TSNET_HOSTNAME:-}
       ENVOY_TSNET_STATE_DIR: ${ENVOY_TSNET_STATE_DIR:-/var/lib/envoy-tsnet/listener}
+      # OAuth credentials (preferred — create in Tailscale admin console)
+      ENVOY_TSNET_OAUTH_CLIENT_ID: ${ENVOY_TSNET_OAUTH_CLIENT_ID:-}
+      ENVOY_TSNET_OAUTH_CLIENT_SECRET: ${ENVOY_TSNET_OAUTH_CLIENT_SECRET:-}
+      ENVOY_TSNET_TAGS: ${ENVOY_TSNET_TAGS:-}
+      # Legacy auth key (mutually exclusive with OAuth)
       ENVOY_TSNET_AUTH_KEY: ${ENVOY_TSNET_AUTH_KEY:-}
       ENVOY_WEBHOOKS: ${ENVOY_WEBHOOKS:-}
       ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET:-}

@@ -35,7 +35,8 @@ interface ServiceSecrets {
   githubWebhookSecret?: pulumi.Output<string>;
   slackSigningSecret?: pulumi.Output<string>;
   ghostWisprSigningSecret?: pulumi.Output<string>;
-  tsnetAuthKey?: pulumi.Output<string>;
+  tsnetOAuthClientId?: pulumi.Output<string>;
+  tsnetOAuthClientSecret?: pulumi.Output<string>;
 }
 
 function getNatsUrls(machine: MachineConfig, allMachines: MachineConfig[]): string {
@@ -57,6 +58,10 @@ function countNatsPeers(allMachines: MachineConfig[]): number {
 /**
  * Compute tsnet environment variables for a listener container.
  * Returns empty array when tsnet is not configured.
+ *
+ * OAuth credentials (client ID + secret) are preferred over a legacy auth key.
+ * Tags from the machine config are passed when OAuth is configured. The Go
+ * listener constructs the final auth key string from these components.
  */
 export function computeTsnetEnvs(
   machine: MachineConfig,
@@ -70,8 +75,12 @@ export function computeTsnetEnvs(
     "ENVOY_TSNET_ENABLED=true",
     `ENVOY_TSNET_HOSTNAME=${tsnet.hostname}`,
     `ENVOY_TSNET_STATE_DIR=${tsnet.stateDir}`,
-    ...(secrets.tsnetAuthKey
-      ? [pulumi.interpolate`ENVOY_TSNET_AUTH_KEY=${secrets.tsnetAuthKey}`]
+    ...(tsnet.tags ? [`ENVOY_TSNET_TAGS=${tsnet.tags}`] : []),
+    ...(secrets.tsnetOAuthClientId
+      ? [pulumi.interpolate`ENVOY_TSNET_OAUTH_CLIENT_ID=${secrets.tsnetOAuthClientId}`]
+      : []),
+    ...(secrets.tsnetOAuthClientSecret
+      ? [pulumi.interpolate`ENVOY_TSNET_OAUTH_CLIENT_SECRET=${secrets.tsnetOAuthClientSecret}`]
       : []),
   ];
 }

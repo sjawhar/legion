@@ -1,14 +1,30 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/envoy/internal/tsnet/config.go",
+    "packages/envoy/internal/tsnet/config_test.go",
+    "packages/envoy/internal/tsnet/server.go",
+    "packages/envoy/infra/machines.ts",
+    "packages/envoy/infra/services.ts",
+    "packages/envoy/infra/index.ts",
+    "packages/envoy/infra/__tests__/services.test.ts",
+    "packages/envoy/infra/Pulumi.prod.yaml",
+    "packages/envoy/deploy/compose/listener.compose.yml",
+    "packages/envoy/README.md"
   ],
   "trickyParts": [
-    "6 direct startServer() calls in server.test.ts bypassed the startTestServer() helper and were missing envoyUrl: '' — these were in the dead worker cleanup and shutdown sections, not caught in earlier review rounds because the audit focused on startTestServer() rather than all startServer() calls"
+    "Tailscale OAuth client secrets can be used directly as auth keys via URL-style parameters (?ephemeral=false&preauthorized=true&tags=...) — this is documented in Tailscale's OAuth docs but not obvious. The Go config constructs this composite auth key from separate env vars.",
+    "OAuth client ID is read but not directly used in the auth key construction — Tailscale's convention only needs the secret. The ID is required by the config for validation and future API token generation use cases.",
+    "Mutual exclusion between OAuth and legacy auth key prevents accidental double-configuration that could cause confusing auth behavior."
   ],
-  "deviations": [],
-  "openQuestions": [],
+  "deviations": [
+    "No plan was filed for this issue — implemented directly from the issue description. The issue had clear requirements and a well-defined scope."
+  ],
+  "openQuestions": [
+    "The OAuth client ID is validated but not used in the auth key — if future features need to generate API tokens (e.g., for DNS or device management), the ID will be needed for the token endpoint call.",
+    "Production deployment requires manually creating an OAuth client in the Tailscale admin console and setting the Pulumi secrets — this is a one-time manual step documented in the PR."
+  ],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T16:44:04.524Z"
+  "completed": "2026-04-13T19:42:44.852Z"
 }

@@ -40,6 +40,9 @@ Current secret names:
 
 - `ENVOY_SLACK_SIGNING_SECRET`
 - `ENVOY_GITHUB_WEBHOOK_SECRET`
+- `ENVOY_TSNET_OAUTH_CLIENT_ID` — Tailscale OAuth client ID (preferred for tsnet auth)
+- `ENVOY_TSNET_OAUTH_CLIENT_SECRET` — Tailscale OAuth client secret (preferred for tsnet auth)
+- `ENVOY_TSNET_AUTH_KEY` — legacy Tailscale auth key (mutually exclusive with OAuth)
 
 ## Layout
 
