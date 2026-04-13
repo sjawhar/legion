@@ -1,27 +1,43 @@
 {
-  "verdict": "pass",
-  "summary": "Both P1 and P2 issues from previous test run are resolved. TypeScript type error fixed (dot notation on Record<string,unknown>). Integration test added for untracked issue state change producing no Envoy publish.",
-  "checks": {
-    "typescript": "pass — only pre-existing baseUrl deprecation warning",
-    "biome": "pass — clean, no errors",
-    "server_tests": "167 pass, 0 fail",
-    "state_delta_tests": "26 pass, 0 fail",
-    "full_suite": "1315 pass, 2 fail (pre-existing: ledger.test.ts, serve-manager.test.ts — unrelated to this PR)"
-  },
-  "acceptance_criteria": {
-    "tracking_api": "all 9 criteria covered by integration tests",
-    "delta_filtering": "all 5 criteria covered — including new integration test for untracked issue no-publish",
-    "legion_poll_change": "all 4 criteria covered",
-    "testing_infrastructure": "all 4 criteria covered"
-  },
-  "fixes_applied": [
-    "P1: Cast payload to Record<string,unknown> before accessing .issueId — TS error resolved",
-    "P2: Added 2 integration tests: untracked issue no-publish + mixed tracked/untracked delta filtering",
-    "Style: Use dot notation for Record<string,unknown> access per Biome suggestion"
+  "result": "pass",
+  "summary": "All acceptance criteria verified. 22/22 new spawn-limits tests pass. 1311/1313 total tests pass (2 pre-existing @pulumi/docker failures). TypeScript clean. Biome clean. Implementation note: 3 TDD test cases had off-by-one errors in maxDepth values — corrected to match spec semantics (depth >= maxDepth rejects).",
+  "criteriaResults": [
+    {
+      "criterion": "TDD: failing test written first, then implementation",
+      "result": "pass",
+      "evidence": "Verified by git log: commit nrnluuzt (test(delegation): add failing spawn limits tests (TDD)) precedes implementation commit sywzynoo."
+    },
+    {
+      "criterion": "Spawning at depth=4 (default max=5) succeeds; spawning at depth=5 returns clear rejection error",
+      "result": "pass",
+      "evidence": "Tests pass: spawning at depth=4 succeeds; spawning at depth=5 throws Spawn rejected: max depth 5 reached (current depth: 5)"
+    },
+    {
+      "criterion": "20th descendant of a root succeeds; 21st returns clear rejection error",
+      "result": "pass",
+      "evidence": "Tests pass: 20th descendant succeeds; 21st throws Spawn rejected: max descendants 20 reached for root session ..."
+    },
+    {
+      "criterion": "Config overrides work (custom depth/descendant limits via plugin config)",
+      "result": "pass",
+      "evidence": "Tests pass: custom maxDepth=4 rejects at depth=4; custom maxDescendants=10 rejects at 11th descendant. Config wired in index.ts line 78."
+    },
+    {
+      "criterion": "Existing delegation tests still pass",
+      "result": "pass",
+      "evidence": "1311/1313 total tests pass. 2 failures are pre-existing @pulumi/docker module errors — confirmed pre-existing by running tests on parent commit."
+    },
+    {
+      "criterion": "Resource accounting state is asserted after every rejection path",
+      "result": "pass",
+      "evidence": "Tests verify counter state after rejection: depth counters unchanged after rejection; descendant counter not corrupted by first rejection."
+    }
   ],
-  "pr_number": 492,
-  "issue_number": 469,
+  "testCritique": "22 new tests covering depth tracking, depth boundary, descendant boundary, concurrent spawns, error message format, rootSessionID tracking. 3 TDD tests had off-by-one errors in maxDepth values corrected to match spec semantics.",
+  "ciStatus": "pending",
+  "prNumber": 490,
+  "prUrl": "https://github.com/sjawhar/legion/pull/490",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-04-13T02:19:37.717Z"
+  "completed": "2026-04-13T00:59:17.029Z"
 }
