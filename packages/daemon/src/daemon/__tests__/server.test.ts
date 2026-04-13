@@ -1432,6 +1432,87 @@ describe("daemon server", () => {
       expect(publishCalls.length).toBe(0);
     });
 
+    it("does not publish changed entries for untracked issues", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      // Establish baseline — issue NOT tracked
+      const firstResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "Todo" })],
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // Issue changes status — but is not tracked, so no changed entry should be published
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [createGitHubProjectItem({ status: "In Progress" })],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      // No publish because changed entries are filtered to tracked set
+      expect(publishCalls.length).toBe(0);
+    });
+
+    it("publishes changed entries only for tracked issues when mixed", async () => {
+      const publishCalls: CapturedPublish[] = [];
+      mockFetchForPublish(publishCalls);
+      await startTestServer({
+        getControllerState: () => ({ sessionId: "ses_ctrl" }),
+      });
+
+      // Track issue #42 but not #99
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-42" }),
+      });
+
+      // Establish baseline with both issues
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            createGitHubProjectItem({ number: 42, status: "Todo" }),
+            createGitHubProjectItem({ number: 99, status: "Todo" }),
+          ],
+        }),
+      });
+      await Bun.sleep(50);
+
+      // Both issues change — only tracked #42 should appear in delta
+      const secondResponse = await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            createGitHubProjectItem({ number: 42, status: "In Progress" }),
+            createGitHubProjectItem({ number: 99, status: "In Progress" }),
+          ],
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      await Bun.sleep(50);
+
+      expect(publishCalls.length).toBe(1);
+      const delta = JSON.parse(
+        (publishCalls[0]?.body as { topic: string; message: string }).message
+      ) as { changes: { changed: Array<{ issueId: string }> } };
+      expect(delta.changes.changed).toHaveLength(1);
+      expect(delta.changes.changed[0]?.issueId).toBe("acme-widgets-42");
+    });
+
     it("health tick interleaving does not produce false deltas", async () => {
       const publishCalls: CapturedPublish[] = [];
       mockFetchForPublish(publishCalls);

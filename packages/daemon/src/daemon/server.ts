@@ -1629,10 +1629,12 @@ export function startServer(opts: ServerOptions): {
         // POST /state/track — manually track an issue
         if (method === "POST" && url.pathname === "/state/track") {
           const payload = await request.json().catch(() => null);
-          if (!payload || typeof payload !== "object" || typeof payload.issueId !== "string") {
+          const payloadObj =
+            payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+          if (!payloadObj || typeof payloadObj["issueId"] !== "string") {
             return badRequest("issueId is required");
           }
-          const issueId = (payload.issueId as string).toLowerCase();
+          const issueId = payloadObj["issueId"].toLowerCase();
           if (!issueId) {
             return badRequest("issueId must be non-empty");
           }
