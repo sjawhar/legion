@@ -307,13 +307,25 @@
     "tag:decision-engine": ["controller/skill-vs-state-machine-policy-boundary.md"],
     "packages/aws-infra": [
       "infra/pulumi-aws-identity-center-patterns.md",
-      "infra/mixed-runtime-type-boundaries.md"
+      "infra/mixed-runtime-type-boundaries.md",
+      "infra/pulumi-cross-account-brownfield-adoption.md"
     ],
-    "tag:pulumi": ["infra/pulumi-aws-identity-center-patterns.md"],
-    "tag:aws": ["infra/pulumi-aws-identity-center-patterns.md"],
+    "tag:pulumi": [
+      "infra/pulumi-aws-identity-center-patterns.md",
+      "infra/pulumi-cross-account-brownfield-adoption.md"
+    ],
+    "tag:aws": [
+      "infra/pulumi-aws-identity-center-patterns.md",
+      "infra/pulumi-cross-account-brownfield-adoption.md"
+    ],
     "tag:identity-center": ["infra/pulumi-aws-identity-center-patterns.md"],
     "tag:sso": ["infra/pulumi-aws-identity-center-patterns.md"],
     "tag:scim": ["infra/pulumi-aws-identity-center-patterns.md"],
+    "tag:cross-account": ["infra/pulumi-cross-account-brownfield-adoption.md"],
+    "tag:security-group": ["infra/pulumi-cross-account-brownfield-adoption.md"],
+    "tag:brownfield": ["infra/pulumi-cross-account-brownfield-adoption.md"],
+    "tag:import": ["infra/pulumi-cross-account-brownfield-adoption.md"],
+    "tag:multi-account": ["infra/pulumi-cross-account-brownfield-adoption.md"],
     "tag:mixed-runtime": ["infra/mixed-runtime-type-boundaries.md"],
     "packages/daemon/src/daemon/state-delta": ["daemon/targeted-delta-filtering-pattern.md"],
     "tag:state-delta": ["daemon/targeted-delta-filtering-pattern.md"],

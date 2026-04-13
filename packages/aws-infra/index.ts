@@ -204,6 +204,67 @@ new aws.ssoadmin.AccountAssignment("engineers-prod-readOnly", {
 });
 
 // ---------------------------------------------------------------------------
+// Dev Box Security Group (cross-account — lives in dev account)
+// ---------------------------------------------------------------------------
+// The dev box security group is an existing resource adopted via `pulumi import`.
+// It blocks all inbound traffic (no SSH from internet) and allows all outbound
+// (required for SSM agent to reach AWS endpoints).
+//
+// Before first `pulumi up`, the operator must:
+// 1. Set devBoxSecurityGroupId in Pulumi config to the existing SG ID
+// 2. Set devAccountRoleArn to an IAM role in the dev account that can be assumed
+// 3. Import: pulumi import aws:ec2/securityGroup:SecurityGroup dev-box-sg <sg-id> --provider dev-account -s prod
+// ---------------------------------------------------------------------------
+
+const devBoxSecurityGroupId = cfg.get("devBoxSecurityGroupId");
+const devAccountRoleArn = cfg.get("devAccountRoleArn");
+
+let devBoxSgId: pulumi.Output<string> | undefined;
+
+if (devBoxSecurityGroupId) {
+  // Explicit provider for dev account resources — assumes a role in the dev
+  // account so this management-account stack can manage cross-account resources.
+  // If devAccountRoleArn is not set, falls back to ambient credentials (useful
+  // when running with dev-account credentials directly).
+  const devAccountProvider = new aws.Provider("dev-account", {
+    region: "us-west-1",
+    ...(devAccountRoleArn ? { assumeRole: { roleArn: devAccountRoleArn } } : {}),
+  });
+
+  const devBoxSg = new aws.ec2.SecurityGroup(
+    "dev-box-sg",
+    {
+      description: "Dev box security group — SSM-only access, no public SSH",
+      // No ingress rules — blocks all inbound including SSH (port 22)
+      ingress: [],
+      // Allow all outbound — required for SSM agent to reach AWS endpoints
+      egress: [
+        {
+          protocol: "-1",
+          fromPort: 0,
+          toPort: 0,
+          cidrBlocks: ["0.0.0.0/0"],
+          description: "Allow all outbound (SSM agent, package updates, etc.)",
+        },
+      ],
+      tags: {
+        Name: "dev-box-sg",
+        ManagedBy: "pulumi",
+        Purpose: "SSM-only access — no public SSH",
+      },
+    },
+    {
+      provider: devAccountProvider,
+      import: devBoxSecurityGroupId,
+      // Protect against accidental deletion — this is a brownfield resource
+      protect: true,
+    }
+  );
+
+  devBoxSgId = devBoxSg.id;
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -212,3 +273,4 @@ export const developerPermissionSetArn = developerPermissionSet.arn;
 export const readOnlyPermissionSetArn = readOnlyPermissionSet.arn;
 export const adminsGroupId = adminsGroup.groupId;
 export const engineersGroupId = engineersGroup.groupId;
+export { devBoxSgId as devBoxSecurityGroupId };

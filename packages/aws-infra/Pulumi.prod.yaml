@@ -8,3 +8,10 @@ config:
     - "REPLACE_WITH_ADMIN_EMAIL@example.com"
   aws-infra:engineerEmails:
     - "REPLACE_WITH_ENGINEER_EMAIL@example.com"
+  # Dev box security group — set to actual SG ID before first `pulumi up`
+  # Get the ID: aws ec2 describe-instances --instance-ids i-0d1244b687e204a01 \
+  #   --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text --profile dev
+  aws-infra:devBoxSecurityGroupId: "sg-REPLACE_WITH_ACTUAL_SG_ID"
+  # IAM role ARN in the dev account for cross-account access (optional — omit if
+  # running with dev-account credentials directly)
+  # aws-infra:devAccountRoleArn: "arn:aws:iam::REPLACE_WITH_DEV_ACCOUNT_ID:role/PulumiCrossAccountRole"
