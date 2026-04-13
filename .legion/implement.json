@@ -1,28 +1,16 @@
 {
-  "summary": "Implemented tracked issue notifications for targeted controller delta filtering",
+  "pr": "https://github.com/sjawhar/legion/pull/491",
+  "branch": "trajectory-labs-pbc-legion-272",
   "filesChanged": [
-    "packages/daemon/src/daemon/state-delta.ts",
-    "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/daemon/__tests__/state-delta.test.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts"
+    "packages/opencode-plugin/src/hooks/circuit-breaker.ts",
+    "packages/opencode-plugin/src/hooks/__tests__/circuit-breaker.test.ts",
+    "packages/opencode-plugin/src/config/index.ts",
+    "packages/opencode-plugin/src/index.ts",
+    ".sisyphus/evidence/task-3-circuit-breaker.txt"
   ],
+  "testResults": "15 pass, 0 fail (circuit-breaker); 41 pass, 0 fail (all hooks)",
   "concerns": [],
-  "testResults": {
-    "stateDelta": "26 pass (8 new trackedIssueIds tests)",
-    "server": "165 pass (16 new tracking/materialized tests)",
-    "fullSuite": "1313 pass, 2 pre-existing failures in ledger.test.ts and serve-manager.test.ts (unrelated)"
-  },
-  "designDecisions": [
-    "trackedIssueIds undefined = full delta (backward compat)",
-    "new issues always flow regardless of tracked set",
-    "changed/removed filtered to tracked set when provided",
-    "auto-track on POST /workers dispatch",
-    "auto-untrack on cleanupDoneIssueWorkers for all Done issues",
-    "newIssuesSinceLastPoll accumulator drains on GET /state/materialized read",
-    "legion poll now calls GET /state/materialized instead of POST /state/fetch-and-collect"
-  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T01:05:11.122Z"
+  "completed": "2026-04-13T01:02:07.172Z"
 }
