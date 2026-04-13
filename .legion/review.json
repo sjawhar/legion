@@ -1,38 +1,37 @@
 {
   "critical": 1,
-  "important": 0,
-  "minor": 3,
-  "verdict": "changes-requested",
+  "important": 1,
+  "minor": 2,
+  "verdict": "changes_requested",
   "keyFindings": [
     {
       "severity": "P1",
-      "file": "PR",
-      "description": "PR has merge conflicts with main (CONFLICTING). Implementer must rebase before merge."
-    },
-    {
-      "severity": "P3",
-      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
-      "description": "taskDepths and rootDescendantCounts maps never pruned — consistent with existing tasks map behavior but worth noting for long-running processes."
-    },
-    {
-      "severity": "P3",
-      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
-      "description": "No rehydration test for spawn limits — implementation logic is sound but test coverage gap for post-rehydration limit enforcement."
-    },
-    {
-      "severity": "P3",
       "file": ".legion/implement.json",
-      "description": "Stale implement handoff records wrong filesChanged (from different issue). Not a code defect."
+      "description": "PR has merge conflicts with main — both this branch and a parallel PR added .legion/implement.json and .legion/retro.json independently. Code changes in packages/opencode-plugin/ do not conflict. Implementer must rebase."
+    },
+    {
+      "severity": "P2",
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "No test verifying spawn limits are enforced after rehydrate() — rehydration code appears correct but is untested for limit enforcement"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "Misleading rootDescendantCounts.delete(task.sessionID) in error handler — no-op for non-root tasks, only applies to root tasks"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "taskDepths and rootDescendantCounts maps never pruned — pre-existing pattern, not a regression"
     }
   ],
   "learningsInjected": [
-    "docs/solutions/delegation/delegation-hardening-retro.md",
     "docs/solutions/delegation/hardening-patterns.md"
   ],
   "learningsHelpful": [
-    "docs/solutions/delegation/delegation-hardening-retro.md"
+    "docs/solutions/delegation/hardening-patterns.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T01:14:16.708Z"
+  "completed": "2026-04-13T01:23:31.429Z"
 }
