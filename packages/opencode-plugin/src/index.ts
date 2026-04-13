@@ -11,6 +11,7 @@ import { createCircuitBreakerHook } from "./hooks/circuit-breaker";
 import { COMPACTION_CONTEXT_TEMPLATE } from "./hooks/compaction-context-injector";
 import { createCompactionTodoPreserverHook } from "./hooks/compaction-todo-preserver";
 import { createGitHubAppCredentialsHook } from "./hooks/github-app-credentials";
+import { jsonErrorRecoveryHook } from "./hooks/json-error-recovery";
 import { nonInteractiveEnvHook } from "./hooks/non-interactive-env";
 import { createOutputCompressionHook } from "./hooks/output-compression";
 import { createPreemptiveCompactionHook } from "./hooks/preemptive-compaction";
@@ -193,6 +194,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
       anthropicEffortHook(input, output);
     },
     "tool.execute.before": async (input, output) => {
+      jsonErrorRecoveryHook(input, output);
       circuitBreakerHook["tool.execute.before"](input, output);
       subagentQuestionBlockerHook(input, output);
       const toolInput = isRecord(input) ? (input as ToolExecuteInput) : undefined;
