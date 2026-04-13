@@ -1,28 +1,33 @@
 {
   "critical": 1,
-  "important": 0,
+  "important": 1,
   "minor": 2,
   "verdict": "changes_requested",
   "keyFindings": [
     {
+      "severity": "P1",
+      "file": ".legion/implement.json",
+      "description": "PR has merge conflicts with main — both this branch and a parallel PR added .legion/implement.json and .legion/retro.json independently. Code changes in packages/opencode-plugin/ do not conflict. Implementer must rebase."
+    },
+    {
       "severity": "P2",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "New-issue titles missing in /state/materialized response — titles map only includes tracked issues, but new issues are not yet tracked. Poll NEW section will always show blank titles even though issueTitleCache has the data. Fix: populate titles for newIssues entries from issueTitleCache after draining accumulator."
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "No test verifying spawn limits are enforced after rehydrate() — rehydration code appears correct but is untested for limit enforcement"
     },
     {
       "severity": "P3",
-      "file": "packages/daemon/src/daemon/server.ts",
-      "description": "newIssuesSinceLastPoll has no deduplication — same issue can appear multiple times if it cycles on/off board between polls."
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "Misleading rootDescendantCounts.delete(task.sessionID) in error handler — no-op for non-root tasks, only applies to root tasks"
     },
     {
       "severity": "P3",
-      "file": ".legion/tasks/",
-      "description": "Internal worker task artifacts (.legion/tasks/bg_*.json) included in PR diff — noise, not part of deliverable."
+      "file": "packages/opencode-plugin/src/delegation/background-manager.ts",
+      "description": "taskDepths and rootDescendantCounts maps never pruned — pre-existing pattern, not a regression"
     }
   ],
-  "prNumber": 492,
-  "issueNumber": 469,
+  "learningsInjected": ["docs/solutions/delegation/hardening-patterns.md"],
+  "learningsHelpful": ["docs/solutions/delegation/hardening-patterns.md"],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T02:49:35.352Z"
+  "completed": "2026-04-13T01:23:31.429Z"
 }

@@ -75,7 +75,7 @@ interface SessionCompactingOutput {
 
 const OpenCodeLegion: Plugin = async (ctx) => {
   const pluginConfig = await loadPluginConfig(ctx.directory);
-  const manager = new BackgroundTaskManager(ctx);
+  const manager = new BackgroundTaskManager(ctx, pluginConfig.spawnLimits);
   await manager.rehydrate({ taskRetentionMs: pluginConfig.taskRetentionMs });
   const delegationTools = createDelegationTools(manager, pluginConfig);
   const sessionTools = createSessionTools(ctx.client, ctx.directory);
