@@ -1,18 +1,13 @@
 {
   "critical": 1,
-  "important": 1,
+  "important": 0,
   "minor": 2,
   "verdict": "changes_requested",
   "keyFindings": [
     {
-      "severity": "P1",
-      "file": ".legion/",
-      "description": "PR has merge conflicts with main — .legion/implement.json and .legion/review.json conflict with IAM commit a0a083e. Implementer must rebase."
-    },
-    {
       "severity": "P2",
-      "file": "packages/daemon/src/cli/index.ts",
-      "description": "newIssues from /state/materialized silently dropped in human-readable legion poll output — formatPollOutput only receives data.issues, not data.newIssues. New issues won't appear in non-JSON output."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "New-issue titles missing in /state/materialized response — titles map only includes tracked issues, but new issues are not yet tracked. Poll NEW section will always show blank titles even though issueTitleCache has the data. Fix: populate titles for newIssues entries from issueTitleCache after draining accumulator."
     },
     {
       "severity": "P3",
@@ -22,15 +17,12 @@
     {
       "severity": "P3",
       "file": ".legion/tasks/",
-      "description": "Handoff/task artifacts (.legion/tasks/bg_*.json, test handoff commits) included in PR diff — internal worker artifacts, add noise."
+      "description": "Internal worker task artifacts (.legion/tasks/bg_*.json) included in PR diff — noise, not part of deliverable."
     }
   ],
   "prNumber": 492,
   "issueNumber": 469,
-  "learningsHelpful": [
-    "daemon/optional-dep-fallback-and-early-return-guard.md"
-  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T02:31:38.008Z"
+  "completed": "2026-04-13T02:49:35.352Z"
 }
