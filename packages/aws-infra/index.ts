@@ -204,6 +204,78 @@ new aws.ssoadmin.AccountAssignment("engineers-prod-readOnly", {
 });
 
 // ---------------------------------------------------------------------------
+// Cross-Account Provider (dev account)
+// ---------------------------------------------------------------------------
+// Explicit provider for dev account resources — assumes a role in the dev
+// account so this management-account stack can manage cross-account resources.
+// If devAccountRoleArn is not set, falls back to ambient credentials (useful
+// when running with dev-account credentials directly).
+// ---------------------------------------------------------------------------
+
+const devAccountRoleArn = cfg.get("devAccountRoleArn");
+
+const devAccountProvider = new aws.Provider("dev-account", {
+  region: aws.config.region ?? "us-west-1",
+  ...(devAccountRoleArn ? { assumeRole: { roleArn: devAccountRoleArn } } : {}),
+});
+
+// ---------------------------------------------------------------------------
+// Dev Box SSM Instance Profile (cross-account — lives in dev account)
+// ---------------------------------------------------------------------------
+// IAM role + instance profile for SSM Session Manager access to the dev box.
+// The role has the AmazonSSMManagedInstanceCore managed policy which covers
+// SSM agent communication (ssmmessages, ssm:UpdateInstanceInformation, etc.).
+//
+// After `pulumi up`, the operator must attach the instance profile to the
+// dev box instance. See docs/ssm-setup-runbook.md for the full procedure.
+// ---------------------------------------------------------------------------
+
+const ec2SsmRole = new aws.iam.Role(
+  "ec2-ssm-role",
+  {
+    name: "EC2SSMRole",
+    description: "Allows EC2 instances to communicate with SSM for Session Manager access",
+    assumeRolePolicy: JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Principal: { Service: "ec2.amazonaws.com" },
+          Action: "sts:AssumeRole",
+        },
+      ],
+    }),
+    tags: {
+      ManagedBy: "pulumi",
+      Purpose: "SSM Session Manager access for EC2 instances",
+    },
+  },
+  { provider: devAccountProvider }
+);
+
+new aws.iam.RolePolicyAttachment(
+  "ec2-ssm-core-policy",
+  {
+    role: ec2SsmRole.name,
+    policyArn: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+  },
+  { provider: devAccountProvider }
+);
+
+const ec2SsmInstanceProfile = new aws.iam.InstanceProfile(
+  "ec2-ssm-instance-profile",
+  {
+    name: "EC2SSMInstanceProfile",
+    role: ec2SsmRole.name,
+    tags: {
+      ManagedBy: "pulumi",
+      Purpose: "SSM Session Manager access for EC2 instances",
+    },
+  },
+  { provider: devAccountProvider }
+);
+
+// ---------------------------------------------------------------------------
 // Dev Box Security Group (cross-account — lives in dev account)
 // ---------------------------------------------------------------------------
 // The dev box security group is an existing resource adopted via `pulumi import`.
@@ -217,20 +289,10 @@ new aws.ssoadmin.AccountAssignment("engineers-prod-readOnly", {
 // ---------------------------------------------------------------------------
 
 const devBoxSecurityGroupId = cfg.get("devBoxSecurityGroupId");
-const devAccountRoleArn = cfg.get("devAccountRoleArn");
 
 let devBoxSgId: pulumi.Output<string> | undefined;
 
 if (devBoxSecurityGroupId) {
-  // Explicit provider for dev account resources — assumes a role in the dev
-  // account so this management-account stack can manage cross-account resources.
-  // If devAccountRoleArn is not set, falls back to ambient credentials (useful
-  // when running with dev-account credentials directly).
-  const devAccountProvider = new aws.Provider("dev-account", {
-    region: "us-west-1",
-    ...(devAccountRoleArn ? { assumeRole: { roleArn: devAccountRoleArn } } : {}),
-  });
-
   const devBoxSg = new aws.ec2.SecurityGroup(
     "dev-box-sg",
     {
@@ -274,3 +336,6 @@ export const readOnlyPermissionSetArn = readOnlyPermissionSet.arn;
 export const adminsGroupId = adminsGroup.groupId;
 export const engineersGroupId = engineersGroup.groupId;
 export { devBoxSgId as devBoxSecurityGroupId };
+export const ec2SsmRoleArn = ec2SsmRole.arn;
+export const ec2SsmInstanceProfileArn = ec2SsmInstanceProfile.arn;
+export const ec2SsmInstanceProfileName = ec2SsmInstanceProfile.name;
