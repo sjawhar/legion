@@ -37,6 +37,16 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
 5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
 6. **Notify the controller via Envoy** — after adding `worker-done`, send exactly one completion notification so the controller doesn't have to wait for its next polling cycle. Use `envoy_publish(topic="notifications.role.legion-controller", message="Worker done: <issue> <mode> <outcome>")`. If `envoy_publish` fails, that's fine — the label is the source of truth.
 7. **Never stall on subagents** — when spawning background tasks (cross-family review, Oracle, spec compliance, etc.), always set `timeout_seconds` (typically 180s). If the subagent times out or fails, skip that step and continue with the workflow. Your primary obligation is to complete the workflow and signal `worker-done`. Subagent steps are quality improvements, not hard prerequisites — the downstream human/bot review is the authoritative quality gate.
+8. **Never block bash with long-running commands** — any command expected to take >60 seconds (builds, deploys, serves, eval runs, smoke tests) MUST run in a tmux session. Workers that block their bash session get killed by tool timeouts.
+   ```bash
+   # Run long command in background tmux session
+   tmux new-session -d -s <name> '<command>'
+   # Monitor progress
+   tmux capture-pane -t <name> -p | tail -20
+   # Check if still running
+   tmux has-session -t <name> 2>/dev/null && echo "running" || echo "done"
+   ```
+   Never run `bun run serve`, `pulumi up`, long test suites, or similar commands directly in bash.
 
 ## Skill Discipline
 

@@ -206,9 +206,19 @@ for i in $(seq 1 30); do
 done
 ```
 
-**Long-running commands:** Some verification commands (eval runs, build pipelines, integration suites) exceed the bash tool's default timeout (~120s). If a command is killed by timeout:
-- Re-run with a longer `timeout` parameter if supported by your tool
-- Or run in tmux: `tmux new-session -d -s test '<command>'`, then poll with `tmux capture-pane -t test -p | tail -5`
+**Long-running commands (MANDATORY tmux rule):** Any command expected to take >60 seconds (serve commands, eval runs, build pipelines, integration suites) MUST run in a tmux session. Never block your bash session — tool timeouts will kill it and waste the attempt.
+
+```bash
+# Run long-running command in tmux (REQUIRED for >60s commands)
+tmux new-session -d -s test '<command>'
+# Monitor progress
+tmux capture-pane -t test -p | tail -20
+# Check if still running
+tmux has-session -t test 2>/dev/null && echo "running" || echo "done"
+```
+
+This is not optional. 5 consecutive smoke test failures were caused by workers running serve commands directly in bash. Use tmux for the serve, normal bash for test commands (curl, CLI invocations, etc.).
+
 - Do NOT treat a timeout as a test failure — it means the command didn't finish, not that it failed
 
 ### 5. Execute Acceptance Criteria (This Is the Actual Test)

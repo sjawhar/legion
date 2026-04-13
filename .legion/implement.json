@@ -1,20 +1,16 @@
 {
   "filesChanged": [
-    "packages/opencode-plugin/src/hooks/json-error-recovery.ts",
-    "packages/opencode-plugin/src/hooks/__tests__/json-error-recovery.test.ts",
-    "packages/opencode-plugin/src/index.ts",
-    ".legion/implement.json"
+    ".opencode/skills/legion-worker/SKILL.md",
+    ".opencode/skills/legion-worker/workflows/implement.md",
+    ".opencode/skills/legion-worker/workflows/test.md"
   ],
   "trickyParts": [
-    "Single-quote replacement required a character-by-character parser to handle escaped quotes and mixed quote types correctly — regex-only approach would break on edge cases like double quotes inside single-quoted strings",
-    "Unquoted key regex must only match keys (after { or ,) not values — using lookbehind-like pattern with capture groups",
-    "Hook runs before circuit-breaker so that circuit-breaker hashes repaired (canonical) args, not malformed originals",
-    "Address-comments round: resolved .legion/implement.json merge conflict from rebase, aligned sessionID type signature with sibling hook, added multi-arg repair test"
+    "Issue referenced smoke-test.md but the actual file is test.md — used test.md as the target"
   ],
-  "deviations": [],
+  "deviations": ["None — followed the issue directive exactly"],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T18:08:59.812Z"
+  "completed": "2026-04-13T20:00:40.537Z"
 }

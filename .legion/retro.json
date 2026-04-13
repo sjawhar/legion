@@ -1,10 +1,7 @@
 {
-  "skipped": false,
-  "docsCreated": [
-    "docs/solutions/testing/mock-envoy-server-pattern.md",
-    "docs/solutions/testing/call-site-audit-for-test-isolation.md"
-  ],
+  "skipped": true,
+  "reason": "no significant learnings — documentation-only change with self-documenting patterns",
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-13T17:29:20.204Z"
+  "completed": "2026-04-13T20:19:04.007Z"
 }
