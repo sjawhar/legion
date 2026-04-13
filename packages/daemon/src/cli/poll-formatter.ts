@@ -71,7 +71,7 @@ function issueDisplayId(issueId: string, source: IssueSource | null): string {
 }
 
 /**
- * Format the fetch-and-collect response into a compact, controller-friendly summary.
+ * Format the /state/materialized response into a compact, controller-friendly summary.
  *
  * Output sections (empty sections are omitted):
  * - ACTIONABLE: issues grouped by suggestedAction

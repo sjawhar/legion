@@ -1,62 +1,28 @@
 {
-  "outcome": "approved",
-  "prNumber": 463,
-  "prUrl": "https://github.com/sjawhar/legion/pull/463",
-  "issueNumber": 451,
-  "summary": "All requirements verified. Merge conflict resolved — PR is now CLEAN/MERGEABLE. 7/7 code-verifiable acceptance criteria pass. 1289/1291 tests pass (2 pre-existing @pulumi/docker failures). Biome clean. TypeScript clean.",
-  "criteriaResults": [
+  "critical": 1,
+  "important": 0,
+  "minor": 2,
+  "verdict": "changes_requested",
+  "keyFindings": [
     {
-      "criterion": "3 permission sets: Administrator, Developer, ReadOnly",
-      "result": "pass",
-      "evidence": "index.ts lines 30, 44, 75"
+      "severity": "P2",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "New-issue titles missing in /state/materialized response — titles map only includes tracked issues, but new issues are not yet tracked. Poll NEW section will always show blank titles even though issueTitleCache has the data. Fix: populate titles for newIssues entries from issueTitleCache after draining accumulator."
     },
     {
-      "criterion": "Administrator has AdministratorAccess managed policy",
-      "result": "pass",
-      "evidence": "index.ts line 40"
+      "severity": "P3",
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "newIssuesSinceLastPoll has no deduplication — same issue can appear multiple times if it cycles on/off board between polls."
     },
     {
-      "criterion": "Developer has PowerUserAccess + SSM inline policy (StartSession, TerminateSession, ResumeSession)",
-      "result": "pass",
-      "evidence": "index.ts lines 54, 67"
-    },
-    {
-      "criterion": "ReadOnly has ReadOnlyAccess managed policy",
-      "result": "pass",
-      "evidence": "index.ts line 85"
-    },
-    {
-      "criterion": "2 groups: Admins, Engineers",
-      "result": "pass",
-      "evidence": "index.ts lines 92, 98"
-    },
-    {
-      "criterion": "At least one user added to each group via GroupMembership",
-      "result": "pass",
-      "evidence": "index.ts lines 113-158"
-    },
-    {
-      "criterion": "Account assignments link groups to accounts with correct permission sets",
-      "result": "pass",
-      "evidence": "index.ts lines 165-204"
-    },
-    {
-      "criterion": "pulumi up -s prod succeeds",
-      "result": "skip",
-      "evidence": "Cannot verify in CI"
-    },
-    {
-      "criterion": "aws sso login --profile dev works",
-      "result": "skip",
-      "evidence": "Cannot verify in CI"
-    },
-    {
-      "criterion": "aws sts get-caller-identity --profile dev returns expected ARN",
-      "result": "skip",
-      "evidence": "Cannot verify in CI"
+      "severity": "P3",
+      "file": ".legion/tasks/",
+      "description": "Internal worker task artifacts (.legion/tasks/bg_*.json) included in PR diff — noise, not part of deliverable."
     }
   ],
+  "prNumber": 492,
+  "issueNumber": 469,
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T01:11:42.762Z"
+  "completed": "2026-04-13T02:49:35.352Z"
 }

@@ -363,3 +363,118 @@ describe("computeStateDelta", () => {
     ]);
   });
 });
+
+describe("computeStateDelta with trackedIssueIds", () => {
+  it("undefined trackedIssueIds returns full delta (backward compat)", () => {
+    const previous = {
+      "issue-1": createIssueState({ status: "Todo" }),
+    };
+    const current = {
+      "issue-1": createIssueState({ status: "In Progress" }),
+      "issue-2": createIssueState(),
+    };
+
+    const delta = computeStateDelta(previous, current, undefined);
+    expect(delta?.changes.new).toHaveLength(1);
+    expect(delta?.changes.changed).toHaveLength(1);
+  });
+
+  it("empty trackedIssueIds: new issues still flow, changed/removed are empty", () => {
+    const previous = {
+      "issue-1": createIssueState({ status: "Todo" }),
+      "issue-2": createIssueState(),
+    };
+    const current = {
+      "issue-1": createIssueState({ status: "In Progress" }),
+      "issue-3": createIssueState(),
+    };
+
+    const delta = computeStateDelta(previous, current, new Set());
+    // issue-3 is new — always flows
+    expect(delta?.changes.new).toEqual([{ issueId: "issue-3", state: current["issue-3"] }]);
+    // issue-2 removed but not tracked — filtered out
+    expect(delta?.changes.removed).toEqual([]);
+    // issue-1 changed but not tracked — filtered out
+    expect(delta?.changes.changed).toEqual([]);
+  });
+
+  it("populated trackedIssueIds: filters changed to tracked set only", () => {
+    const previous = {
+      "issue-1": createIssueState({ status: "Todo" }),
+      "issue-2": createIssueState({ status: "Todo" }),
+    };
+    const current = {
+      "issue-1": createIssueState({ status: "In Progress" }),
+      "issue-2": createIssueState({ status: "In Progress" }),
+    };
+
+    const delta = computeStateDelta(previous, current, new Set(["issue-1"]));
+    expect(delta?.changes.changed).toHaveLength(1);
+    expect(delta?.changes.changed[0].issueId).toBe("issue-1");
+  });
+
+  it("populated trackedIssueIds: filters removed to tracked set only", () => {
+    const previous = {
+      "issue-1": createIssueState(),
+      "issue-2": createIssueState(),
+    };
+    const current = {};
+
+    const delta = computeStateDelta(previous, current, new Set(["issue-1"]));
+    expect(delta?.changes.removed).toEqual(["issue-1"]);
+    // issue-2 removed but not tracked
+    expect(delta?.changes.removed).not.toContain("issue-2");
+  });
+
+  it("new issues always flow regardless of trackedIssueIds", () => {
+    const previous = {};
+    const current = {
+      "issue-1": createIssueState(),
+      "issue-2": createIssueState(),
+    };
+
+    // Neither issue is tracked
+    const delta = computeStateDelta(previous, current, new Set(["issue-99"]));
+    expect(delta?.changes.new).toHaveLength(2);
+    expect(delta?.changes.new.map((d) => d.issueId).sort()).toEqual(["issue-1", "issue-2"]);
+  });
+
+  it("returns null when tracked set filters out all changes", () => {
+    const previous = {
+      "issue-1": createIssueState({ status: "Todo" }),
+    };
+    const current = {
+      "issue-1": createIssueState({ status: "In Progress" }),
+    };
+
+    // issue-1 changed but not tracked, no new issues
+    const delta = computeStateDelta(previous, current, new Set(["issue-99"]));
+    expect(delta).toBeNull();
+  });
+
+  it("tracked issue with no changes produces no changed entry", () => {
+    const state = createIssueState({ status: "Todo" });
+    const previous = { "issue-1": state };
+    const current = { "issue-1": { ...state } };
+
+    const delta = computeStateDelta(previous, current, new Set(["issue-1"]));
+    expect(delta).toBeNull();
+  });
+
+  it("mixed: new flows, tracked changed included, untracked changed excluded", () => {
+    const previous = {
+      "issue-1": createIssueState({ status: "Todo" }),
+      "issue-2": createIssueState({ status: "Todo" }),
+    };
+    const current = {
+      "issue-1": createIssueState({ status: "In Progress" }),
+      "issue-2": createIssueState({ status: "In Progress" }),
+      "issue-3": createIssueState(),
+    };
+
+    const delta = computeStateDelta(previous, current, new Set(["issue-1"]));
+    expect(delta?.changes.new).toEqual([{ issueId: "issue-3", state: current["issue-3"] }]);
+    expect(delta?.changes.changed).toHaveLength(1);
+    expect(delta?.changes.changed[0].issueId).toBe("issue-1");
+  });
+});
