@@ -185,6 +185,21 @@ Invoke `/analyze` to run cleanup agents.
 
 **If `/analyze` fails or times out (>3 min):** Skip and proceed to Pre-Ship Verification. The pre-ship checks will catch anything critical. Note "Analyze skipped (timeout)" in the handoff.
 
+### 3.5. Long-Running Commands
+
+Any command expected to take >60 seconds (builds, deploys, eval pipelines, serve commands) MUST run in a tmux session. Never block your bash session with long-running commands — tool timeouts will kill them.
+
+```bash
+# Run in background tmux session
+tmux new-session -d -s build '<command>'
+# Monitor progress
+tmux capture-pane -t build -p | tail -20
+# Check if still running
+tmux has-session -t build 2>/dev/null && echo "running" || echo "done"
+```
+
+This applies throughout implementation — builds, deploys, `pulumi up`, long test suites, `bun run serve`, etc. Short commands (<60s) like `bun test`, `bunx tsc --noEmit`, and `bunx biome check` can run directly.
+
 ### 4. Pre-Ship Verification
 
 All checks must pass before creating PR:
