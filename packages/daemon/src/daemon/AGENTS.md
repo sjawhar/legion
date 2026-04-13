@@ -16,6 +16,10 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `POST` | `/workers/prune` | Bulk-remove workers + crash history by issue ID — `{issueIds: string[]}` → `{pruned, crashHistoryPruned}` |
 | `POST` | `/shutdown` | Graceful shutdown — stop shared serve, persist state |
 | `GET` | `/dashboard` | Aggregated worker summary grouped by repo+issue, with activity, stats, and recent events |
+| `GET`    | `/state/track`          | List tracked issue IDs — `{trackedIssues: string[]}` |
+| `POST`   | `/state/track`          | Manually track an issue — `{issueId}` → `{tracked: true}` |
+| `DELETE` | `/state/track/:issueId` | Manually untrack an issue → `{untracked: true}` |
+| `GET`    | `/state/materialized`   | Tracked issues from cache + new-issues accumulator (resets on read) — `{issues, titles, newIssues}` |
 
 **Worker ID format:** `{issueId}-{mode}` lowercase (e.g., `eng-21-implement`)
 
