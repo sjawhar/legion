@@ -17,6 +17,7 @@ import {
   WorkerMode,
   type WorkerModeLiteral,
 } from "../state/types";
+import { getDashboardHtml } from "./dashboard-ui";
 import type { FeedbackLogger } from "./feedback";
 import type { TokenManager } from "./github-apps";
 import { modeToRole } from "./github-apps";
@@ -745,6 +746,13 @@ export function startServer(opts: ServerOptions): {
             },
             groups,
             recentEvents: recentEvents.slice().reverse(),
+          });
+        }
+
+        if (method === "GET" && url.pathname === "/dashboard/ui") {
+          return new Response(getDashboardHtml(), {
+            status: 200,
+            headers: { "content-type": "text/html; charset=utf-8" },
           });
         }
 

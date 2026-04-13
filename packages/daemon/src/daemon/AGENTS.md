@@ -16,6 +16,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `POST` | `/workers/prune` | Bulk-remove workers + crash history by issue ID — `{issueIds: string[]}` → `{pruned, crashHistoryPruned}` |
 | `POST` | `/shutdown` | Graceful shutdown — stop shared serve, persist state |
 | `GET` | `/dashboard` | Aggregated worker summary grouped by repo+issue, with activity, stats, and recent events |
+| `GET` | `/dashboard/ui` | Single-page HTML dashboard — fetches `/dashboard` JSON, auto-refreshes 30s, responsive |
 | `GET`    | `/state/track`          | List tracked issue IDs — `{trackedIssues: string[]}` |
 | `POST`   | `/state/track`          | Manually track an issue — `{issueId}` → `{tracked: true}` |
 | `DELETE` | `/state/track/:issueId` | Manually untrack an issue → `{untracked: true}` |
@@ -31,6 +32,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 |------|---------------|
 | `index.ts` | Daemon lifecycle: `startDaemon()`, shared serve startup, health tick loop, signal handlers. Controller creates a session on shared serve. Uses DI via `DaemonDependencies` interface for testability. |
 | `server.ts` | HTTP routing, request validation, in-memory worker map. `POST /workers` creates session on shared serve (instant). `DELETE /workers` removes tracking only. |
+| `dashboard-ui.ts` | `getDashboardHtml()` — single-page HTML/CSS/JS dashboard served at `/dashboard/ui`. No framework; inline styles and vanilla JS. |
 | `serve-manager.ts` | `spawnSharedServe()` — runs one `opencode serve`. `waitForHealthy()` — polls readiness. `createSession()` — creates session on shared serve. `stopServe()` — graceful shutdown. `healthCheck()` — `/global/health`. |
 | `config.ts` | `DaemonConfig` interface, `loadConfig()` reads env vars. Defaults: daemon port 13370, shared serve port 13381 (`baseWorkerPort`), check interval 60s. **Controller mode:** `LEGION_CONTROLLER_SESSION_ID` env var (optional, must start with `ses_` if set, hard fails on invalid format). |
 | `state-file.ts` | `readStateFile()` / `writeStateFile()` — atomic JSON persistence to `~/.legion/{legionId}/workers.json`. Includes `controller?: ControllerState` field for controller lifecycle. Legacy `controller-controller` worker entries are stripped on read. |
