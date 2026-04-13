@@ -52,6 +52,10 @@ describe("isTransientError", () => {
     expect(isTransientError(makeApiError(503))).toBe(true);
   });
 
+  it("classifies 504 gateway timeout as transient", () => {
+    expect(isTransientError(makeApiError(504))).toBe(true);
+  });
+
   it("classifies 529 overloaded as transient", () => {
     expect(isTransientError(makeApiError(529))).toBe(true);
   });

@@ -1,15 +1,12 @@
 {
   "filesChanged": [
-    "packages/opencode-plugin/src/delegation/retry-with-fallback.ts",
-    "packages/opencode-plugin/src/delegation/index.ts",
     "packages/opencode-plugin/src/delegation/__tests__/retry-with-fallback.test.ts",
-    "packages/opencode-plugin/src/overlays/fallback-chain.ts",
-    "packages/opencode-plugin/src/overlays/index.ts",
-    "packages/opencode-plugin/src/overlays/__tests__/fallback-chain.test.ts"
+    ".legion/implement.json",
+    ".legion/review.json"
   ],
   "trickyParts": [
-    "isTransientError must handle multiple error shapes: status codes on error objects, error names (TimeoutError, TypeError), and message patterns (overloaded, rate limit). API providers use different conventions.",
-    "The fallback chain integration with retry: retries happen BEFORE fallback, and non-transient errors skip both retry and fallback (thrown immediately). Only transient errors after retry exhaustion trigger fallback."
+    "Merge conflicts in .legion/implement.json and .legion/review.json required careful resolution — the files contained data from other issues that had been merged to main. Resolved by keeping issue 276 version.",
+    "504 Gateway Timeout was in TRANSIENT_STATUS_CODES but lacked a dedicated test — added to make the contract explicit."
   ],
   "deviations": ["None — followed the issue directive exactly"],
   "openQuestions": [],
@@ -18,5 +15,5 @@
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T16:57:21.513Z"
+  "completed": "2026-04-13T18:10:22.056Z"
 }

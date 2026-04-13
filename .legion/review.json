@@ -1,19 +1,29 @@
 {
-  "critical": 0,
+  "critical": 1,
   "important": 0,
-  "minor": 0,
-  "verdict": "approved",
+  "minor": 2,
+  "verdict": "changes_requested",
   "keyFindings": [
     {
+      "severity": "P1",
+      "file": ".legion/implement.json",
+      "description": "PR has merge conflicts with main — implementer must rebase before merge"
+    },
+    {
       "severity": "P3",
-      "file": ".opencode/skills/legion-worker/workflows/implement.md",
-      "description": "Section 3.5 placement between Analyze and Pre-Ship Verification is slightly late for a rule that applies 'throughout implementation', but mitigated by Essential Rule #8 in SKILL.md"
+      "file": "packages/opencode-plugin/src/overlays/index.ts",
+      "description": "getModelOverlay 3rd param _fallbackChain is unused dead code (acceptable as forward-compatible stub for OMO contract test)"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/opencode-plugin/src/delegation/__tests__/retry-with-fallback.test.ts",
+      "description": "504 Gateway Timeout lacks dedicated test case in isTransientError tests (implicit coverage via TRANSIENT_STATUS_CODES set)"
     }
   ],
-  "learningsInjected": [],
+  "learningsInjected": ["docs/solutions/delegation/bun-node-timer-type-portability.md"],
   "learningsHelpful": [],
   "note": "Re-review after implementer addressed prior feedback. All 3 prior findings (P1 merge conflict, P3 sessionID type, P3 multi-arg test) resolved. All acceptance criteria verified. CI green.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-13T20:12:03.343Z"
+  "completed": "2026-04-13T18:02:15.709Z"
 }
