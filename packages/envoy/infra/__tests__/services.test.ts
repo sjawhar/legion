@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { computeNatsUrls, computeTsnetEnvs } from "../services";
 import type { MachineConfig } from "../machines";
+import { computeNatsUrls, computeTsnetEnvs } from "../services";
 
 describe("computeNatsUrls", () => {
   const machines = [
@@ -38,6 +38,17 @@ describe("computeTsnetEnvs", () => {
     },
   };
 
+  const tsnetMachineWithTags: MachineConfig = {
+    ...baseMachine,
+    listener: {
+      tsnet: {
+        hostname: "envoy-listener-test",
+        stateDir: "/var/lib/envoy-tsnet/listener-test",
+        tags: "tag:envoy",
+      },
+    },
+  };
+
   const emptySecrets = {
     githubWebhookSecret: {} as any,
     slackSigningSecret: {} as any,
@@ -52,24 +63,53 @@ describe("computeTsnetEnvs", () => {
     const envs = computeTsnetEnvs(tsnetMachine, emptySecrets);
     expect(envs).toContain("ENVOY_TSNET_ENABLED=true");
     expect(envs).toContain("ENVOY_TSNET_HOSTNAME=envoy-listener-test");
-    expect(envs).toContain(
-      "ENVOY_TSNET_STATE_DIR=/var/lib/envoy-tsnet/listener-test",
-    );
+    expect(envs).toContain("ENVOY_TSNET_STATE_DIR=/var/lib/envoy-tsnet/listener-test");
   });
 
-  test("includes auth key when secret provided", () => {
+  test("includes tags when configured", () => {
+    const envs = computeTsnetEnvs(tsnetMachineWithTags, emptySecrets);
+    expect(envs).toContain("ENVOY_TSNET_TAGS=tag:envoy");
+  });
+
+  test("omits tags when not configured", () => {
+    const envs = computeTsnetEnvs(tsnetMachine, emptySecrets);
+    const tagsEnv = envs.find((e) => typeof e === "string" && e.startsWith("ENVOY_TSNET_TAGS="));
+    expect(tagsEnv).toBeUndefined();
+  });
+
+  test("includes OAuth client ID when secret provided", () => {
     const secrets = {
       ...emptySecrets,
-      tsnetAuthKey: {} as any,
+      tsnetOAuthClientId: {} as any,
     };
-    const envs = computeTsnetEnvs(tsnetMachine, secrets);
-    // Auth key is a pulumi.interpolate output — verify it's in the array
-    // (exact value is a Pulumi Output, not a plain string)
-    expect(envs.length).toBe(4); // enabled + hostname + stateDir + authKey
+    const envs = computeTsnetEnvs(tsnetMachineWithTags, secrets);
+    // OAuth client ID is a pulumi.interpolate output — verify count
+    expect(envs.length).toBe(5); // enabled + hostname + stateDir + tags + clientId
   });
 
-  test("omits auth key when not provided", () => {
-    const envs = computeTsnetEnvs(tsnetMachine, emptySecrets);
-    expect(envs.length).toBe(3); // enabled + hostname + stateDir
+  test("includes OAuth client secret when secret provided", () => {
+    const secrets = {
+      ...emptySecrets,
+      tsnetOAuthClientSecret: {} as any,
+    };
+    const envs = computeTsnetEnvs(tsnetMachineWithTags, secrets);
+    expect(envs.length).toBe(5); // enabled + hostname + stateDir + tags + clientSecret
+  });
+
+  test("includes both OAuth credentials when both provided", () => {
+    const secrets = {
+      ...emptySecrets,
+      tsnetOAuthClientId: {} as any,
+      tsnetOAuthClientSecret: {} as any,
+    };
+    const envs = computeTsnetEnvs(tsnetMachineWithTags, secrets);
+    // enabled + hostname + stateDir + tags + clientId + clientSecret
+    expect(envs.length).toBe(6);
+  });
+
+  test("omits OAuth credentials when not provided", () => {
+    const envs = computeTsnetEnvs(tsnetMachineWithTags, emptySecrets);
+    // enabled + hostname + stateDir + tags (no OAuth)
+    expect(envs.length).toBe(4);
   });
 });

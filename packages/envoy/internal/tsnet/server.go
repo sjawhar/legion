@@ -16,8 +16,9 @@ type Server struct {
 	ts *tsnet.Server
 }
 
-// New creates a tsnet Server from the given Config. The caller must call
-// Close when finished.
+// New creates a tsnet Server from the given Config. AuthKey may be a
+// direct Tailscale auth key or an OAuth-derived key (see resolveAuthKey).
+// The caller must call Close when finished.
 func New(cfg Config) *Server {
 	ts := &tsnet.Server{
 		Hostname: cfg.Hostname,
