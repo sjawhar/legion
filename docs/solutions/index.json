@@ -344,6 +344,11 @@
     "tag:endpoint-composition": ["daemon/self-fetch-endpoint-composition.md"],
     "tag:http": ["daemon/self-fetch-endpoint-composition.md"],
     "tag:technical-debt": ["daemon/self-fetch-endpoint-composition.md"],
-    "tag:server": ["daemon/self-fetch-endpoint-composition.md"]
+    "tag:server": ["daemon/self-fetch-endpoint-composition.md"],
+    "packages/opencode-plugin/src/__tests__": ["testing/intentionally-failing-contract-tests.md"],
+    ".github/workflows": ["testing/intentionally-failing-contract-tests.md"],
+    "tag:contract-tests": ["testing/intentionally-failing-contract-tests.md"],
+    "tag:omo-replacement": ["testing/intentionally-failing-contract-tests.md"],
+    "tag:path-ignore-patterns": ["testing/intentionally-failing-contract-tests.md"]
   }
 }
