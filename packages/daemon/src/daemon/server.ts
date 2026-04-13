@@ -1631,10 +1631,10 @@ export function startServer(opts: ServerOptions): {
           const payload = await request.json().catch(() => null);
           const payloadObj =
             payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-          if (!payloadObj || typeof payloadObj["issueId"] !== "string") {
+          if (!payloadObj || typeof payloadObj.issueId !== "string") {
             return badRequest("issueId is required");
           }
-          const issueId = payloadObj["issueId"].toLowerCase();
+          const issueId = payloadObj.issueId.toLowerCase();
           if (!issueId) {
             return badRequest("issueId must be non-empty");
           }
