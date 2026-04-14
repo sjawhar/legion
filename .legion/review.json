@@ -1,35 +1,15 @@
 {
   "critical": 0,
   "important": 0,
-  "minor": 2,
+  "minor": 0,
   "verdict": "approved",
-  "keyFindings": [
-    {
-      "severity": "P3",
-      "file": "packages/opencode-plugin/src/delegation/retry-with-fallback.ts",
-      "description": "executeWithModelFallback accepts Iterable<string> but all call sites pass readonly string[] — API slightly more general than needed"
-    },
-    {
-      "severity": "P3",
-      "file": ".legion/implement.json",
-      "description": "Missing trailing newline in implement.json"
-    }
-  ],
+  "keyFindings": [],
   "priorFindingsResolved": [
-    "P1-1: Naming collision resolved — renamed to executeWithModelFallback",
-    "P1-2: Watchman cookies removed and gitignored",
-    "P2-1: Unused _fallbackChain parameter removed from getModelOverlay",
-    "P2-2: N/A — superseded by ModelFallbackChain from #276",
-    "P3-1: N/A — manual iterator no longer exists post-rebase"
-  ],
-  "learningsInjected": [
-    "docs/solutions/delegation/model-fallback-implementation-patterns.md",
-    "docs/solutions/testing/async-fire-and-forget-polling-pattern.md"
-  ],
-  "learningsHelpful": [
-    "docs/solutions/delegation/model-fallback-implementation-patterns.md"
+    "P1-1: Plan context emphasis added to implement.md (CRITICAL callout + staleness warning)",
+    "P1-2: .legion/ cleanup moved from post-merge (no-op) to pre-push step 3.5 in merge.md",
+    "P3-1: Extra blank line removed from implement.md"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-14T02:41:25.411Z"
+  "completed": "2026-04-14T04:23:22.629Z"
 }
