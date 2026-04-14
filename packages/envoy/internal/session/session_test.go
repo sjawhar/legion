@@ -2,7 +2,6 @@ package session
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -317,41 +316,50 @@ func TestDeliver_NilSessionsReturnsError(t *testing.T) {
 	}
 }
 
-func TestDeliver_WrongMachineReturnsError(t *testing.T) {
+func TestDeliver_CrossMachineUsesRemoteHost(t *testing.T) {
 	var deliveryCount atomic.Int32
+	var capturedHost string
 
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Set up a test server that will receive the remote delivery
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deliveryCount.Add(1)
+		capturedHost = r.Host
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer mock.Close()
+	defer remote.Close()
 
-	port := mockPort(mock.URL)
+	remotePort := mockPort(remote.URL)
+	// Use localhost as the "remote" machine hostname
+	remoteHost := "localhost"
 
 	client := setupNATS(t)
 	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
-	// Register session on machine-B
-	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
+	// Register session on remote machine with localhost hostname
+	sessions.Put("ses_target", SessionEntry{Port: remotePort, MachineID: remoteHost, Dir: "/test"})
 
-	// Deliverer is on machine-A
+	// Deliverer is on local machine
 	deliverer := Deliverer{
-		MachineID:    "machine-A",
+		MachineID:    "local-machine",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
 		Sessions:     sessions,
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
-	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "machine-A"}
+	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"}
 
 	err = deliverer.Deliver(item, interest)
-	if !errors.Is(err, ErrWrongMachine) {
-		t.Fatalf("expected ErrWrongMachine, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected successful remote delivery, got: %v", err)
 	}
-	if count := deliveryCount.Load(); count != 0 {
-		t.Fatalf("expected 0 deliveries (wrong machine), got %d", count)
+	if count := deliveryCount.Load(); count != 1 {
+		t.Fatalf("expected 1 delivery to remote host, got %d", count)
+	}
+	// Verify the request went to the remote machine hostname (localhost)
+	if !strings.Contains(capturedHost, remoteHost) {
+		t.Fatalf("expected request to remote host %s, got %s", remoteHost, capturedHost)
 	}
 }
 

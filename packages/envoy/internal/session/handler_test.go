@@ -103,7 +103,9 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 }
 
 // TestHandleAgentMessage_WrongMachine tests that when the interest exists but
-// for a different machine, the handler falls through to registry lookup.
+// for a different machine, the handler falls through to registry lookup (since
+// interest.MachineID != current machineID). The session is found on the current
+// machine and delivery succeeds.
 func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -131,8 +133,10 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 		"ses_target", "test-machine", interest, &deliverer,
 	)
 
-	if result.Err != nil {
-		t.Fatalf("expected success via registry lookup, got: %v", result.Err)
+	// Interest is for different machine, so handler falls through to registry lookup.
+	// Registry finds session on current machine, delivery succeeds.
+	if !result.Delivered {
+		t.Fatalf("expected delivery via registry lookup, got Delivered=%v, NAK=%v", result.Delivered, result.ShouldNAK)
 	}
 	if count := deliveryCount.Load(); count != 1 {
 		t.Fatalf("expected 1 delivery via registry lookup, got %d", count)
@@ -140,8 +144,9 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 }
 
 // TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session
-// registry says a session is on another machine, the handler returns no-delivery
-// (ACK) rather than NAK.
+// registry says a session is on another machine, the handler attempts remote
+// delivery. Since the remote machine is unreachable, delivery fails and the
+// handler ACKs (doesn't NAK) because another listener may own this session.
 func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -158,7 +163,7 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
-	// KV says session is on machine-B
+	// KV says session is on unreachable machine-B
 	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
 
 	deliverer := Deliverer{
@@ -168,27 +173,29 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 		Sessions:     sessions,
 	}
 
-	// No interest or wrong-machine interest — handler falls to registry lookup path
+	// No interest — handler falls to registry lookup path
 	result := HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "machine-A", nil, &deliverer,
 	)
 
-	// Should ACK (not NAK) — another listener owns this session
+	// Remote delivery fails (machine-B unreachable), but handler ACKs
+	// because another listener may own this session.
+	if result.ShouldNAK {
+		t.Fatal("expected ACK (not NAK) when remote delivery fails")
+	}
 	if result.Delivered {
 		t.Fatal("expected no delivery (session on different machine)")
-	}
-	if result.ShouldNAK {
-		t.Fatal("wrong machine should ACK, not NAK")
 	}
 	if count := deliveryCount.Load(); count != 0 {
 		t.Fatalf("expected 0 deliveries, got %d", count)
 	}
 }
 
-// TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that even when
-// the interest path matches this machine, if the KV session registry says the
-// session moved to another machine, the handler returns no-delivery (ACK).
+// TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that when
+// the interest path matches this machine, but the KV session registry says the
+// session moved to another machine, the handler attempts remote delivery.
+// Since the remote machine is unreachable, delivery fails and NAKs for retry.
 func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 	var deliveryCount atomic.Int32
 
@@ -205,7 +212,7 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
-	// KV says session moved to machine-B
+	// KV says session moved to unreachable machine-B
 	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
 
 	deliverer := Deliverer{
@@ -227,11 +234,13 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", interest, &deliverer,
 	)
 
+	// Interest path matches, but KV says session moved to unreachable machine-B.
+	// Handler attempts remote delivery, which fails, so NAK for retry.
+	if !result.ShouldNAK {
+		t.Fatalf("expected NAK when remote delivery fails, got NAK=%v, Delivered=%v", result.ShouldNAK, result.Delivered)
+	}
 	if result.Delivered {
 		t.Fatal("expected no delivery (KV says session moved to machine-B)")
-	}
-	if result.ShouldNAK {
-		t.Fatal("wrong machine should ACK, not NAK")
 	}
 	if count := deliveryCount.Load(); count != 0 {
 		t.Fatalf("expected 0 deliveries, got %d", count)
