@@ -67,7 +67,19 @@ If rebase produces conflicts:
   If `envoy_publish` fails, continue — the label is the source of truth.
 - Exit
 
-**Handoff data cleanup:** The `.legion/` directory contains handoff data from pipeline phases. During rebase/conflict resolution, PRESERVE these files — they may be needed if merge fails and requires rework. Cleanup happens AFTER successful merge (step 7.5).
+**Handoff data cleanup:** The `.legion/` directory contains handoff data from pipeline phases. During rebase/conflict resolution, PRESERVE these files — they may be needed if merge fails and requires rework. Cleanup happens in step 3.5 (after conflicts are resolved, before push).
+
+### 3.5. Remove Handoff Data
+
+Remove `.legion/` files BEFORE pushing so they are excluded from the squash merge onto main.
+Handoff data is preserved in branch history (jj/git) but must not land on main.
+
+```bash
+if [ -d .legion ]; then
+  rm -rf .legion/
+  # Changes are auto-tracked by jj — no need to commit separately
+fi
+```
 
 ### 4. Push
 
@@ -185,18 +197,10 @@ Then remove `worker-active` if present:
 
 ### 7.5. Cleanup Workspace
 
-After the issue is closed and Done, clean up handoff data, workspace, and worker entries.
+After the issue is closed and Done, clean up workspace and worker entries.
 Best-effort — do not fail the merge workflow if cleanup errors occur, but only prune worker state
 after workspace deletion succeeds (preserves retry handle for the daemon/controller backup layers).
 
-**0. Remove handoff data from the working tree:**
-```bash
-# Handoff data is preserved in branch history (jj/git) but must not persist on main
-# or in the workspace for the next issue. Remove it before workspace cleanup.
-rm -rf .legion/
-jj describe -m "cleanup: remove .legion/ handoff data after merge"
-jj new
-```
 **1. Remove the filesystem workspace:**
 ```bash
 CLEANUP_OK=false

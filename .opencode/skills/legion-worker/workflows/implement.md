@@ -62,7 +62,11 @@ Implement-mode keys:
 
 ### 1. Load Plan
 
-Fetch issue and comments. The plan is in comments:
+> **CRITICAL: The plan is in the issue COMMENTS, not the issue body.** The issue body contains the
+> original spec/request. The plan was posted as a comment by the plan worker. When fetching the
+> issue, read ALL comments to find the plan — do not rely solely on the body.
+
+Fetch issue and comments:
 
 - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
@@ -85,6 +89,8 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
 If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
+
+**WARNING: Handoff data may be stale** — `.legion/` files persist across workspace reuse and may be from a different issue that previously used this workspace. Verify the handoff content references YOUR issue before trusting it. If it references a different issue, IGNORE it and rely on the issue comments and PR.
 
 **Skill loading from plan handoff:** If the plan handoff includes a `requiredSkills.implement` array, invoke each listed skill before proceeding to step 2. This front-loads skills the planner identified as relevant, and replaces the independent skill discovery in step 1.5 for this run.
 
@@ -128,7 +134,6 @@ Output the injected learnings visibly in the session before proceeding to coding
 - If tests fail, verify they pass on a clean checkout of main before investigating further — test failures in your workspace are your responsibility, not "pre-existing"
 
 **Don't build binaries in the package directory** — use `go build -o /tmp/<name>` to avoid accidentally committing binaries.
-
 
 ### 2. Invoke Skills (in order)
 
