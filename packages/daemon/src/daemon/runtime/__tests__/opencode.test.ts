@@ -335,15 +335,19 @@ describe("OpenCodeAdapter", () => {
     });
   });
   describe("listActiveSessions", () => {
-    it("returns all sessions including idle ones (not just busy)", async () => {
+    it("returns all sessions including idle ones via session/status?includeIdle=true", async () => {
       const adapter = new OpenCodeAdapter(13381);
       const originalFetch = globalThis.fetch;
       try {
         globalThis.fetch = (async (url: string | URL | Request) => {
           const urlStr = String(url);
-          if (urlStr.includes("/session") && !urlStr.includes("/session/")) {
+          if (urlStr.includes("/session/status") && urlStr.includes("includeIdle=true")) {
             return new Response(
-              JSON.stringify([{ id: "ses_busy_1" }, { id: "ses_idle_2" }, { id: "ses_idle_3" }]),
+              JSON.stringify({
+                ses_busy_1: { type: "busy" },
+                ses_idle_2: { type: "idle" },
+                ses_idle_3: { type: "idle" },
+              }),
               { status: 200 }
             );
           }
