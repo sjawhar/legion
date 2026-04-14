@@ -1032,6 +1032,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "This worker is dead — 0 messages" | STOP. Verify session ID from `GET /workers` first. You may be checking the wrong session. |
 | "Worker is stuck — flat message count" | Read the transcript. Flat can mean done, slow, or wrong session ID. Check last assistant message content. |
 | "I'll nudge the busy worker" | STOP. `prompt_async` to busy sessions is silently dropped. Wait for idle or abort/redispatch. |
+| "This worker looks stuck, I'll abort and redispatch" | STOP. Message the worker on Envoy first. Check message count. Only abort after confirmed stuck or timeout. |
 | "Let me run tl run / Docker / tests myself" | STOP. You're doing worker work. Dispatch the appropriate worker. |
 
 ## Common Mistakes
