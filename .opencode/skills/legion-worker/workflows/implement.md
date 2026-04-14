@@ -405,7 +405,19 @@ If bot comments exist:
 3. **If fixes were made**, re-run Pre-Ship Verification (step 4), push, and wait for CI again.
 4. **Reply to addressed comments** acknowledging the fix or explaining why dismissed.
 
-If no bot comments exist, skip to step 7.5.
+If no bot comments exist, skip to step 7.2.
+
+### 7.2. Pre-Ship Anti-Pattern Check
+
+Before writing handoff, verify you haven't fallen into these documented anti-patterns (each was observed 3+ times across worker sessions in transcript analysis):
+
+**DO NOT:**
+1. **Use `git` commands in a jj workspace** — corrupts working copy state. Use `jj` equivalents exclusively.
+2. **Use prefix/startsWith matching for issue or change IDs** — causes false positives. Use exact ID matching.
+3. **Use the `write` tool on existing files** — causes "file already exists" errors. Use `edit` for existing files, `write` only for new files.
+4. **Assume a feature is missing without checking main** — run `jj diff --from trunk()` or read the code on main before reimplementing something that may already exist.
+5. **Delay PR creation until after exhaustive verification** — you may run out of session. Create the PR early (even as draft), verify, then mark ready.
+6. **Over-scope beyond the plan** — if the planner narrowed the scope, follow it. Don't rebuild features the plan said were already done.
 
 ### 7.5. Write Handoff Data
 
@@ -577,6 +589,18 @@ gh pr checks "$LEGION_ISSUE_ID" --watch
 
 **If CI fails:** Read the failure logs, fix the issues, push again, and re-check.
 Do NOT reply to comments or exit with failing CI.
+
+### 4.8. Pre-Ship Anti-Pattern Check
+
+Before replying to comments or writing handoff, verify you haven't fallen into these documented anti-patterns (each was observed 3+ times across worker sessions in transcript analysis):
+
+**DO NOT:**
+1. **Use `git` commands in a jj workspace** — corrupts working copy state. Use `jj` equivalents exclusively.
+2. **Use prefix/startsWith matching for issue or change IDs** — causes false positives. Use exact ID matching.
+3. **Use the `write` tool on existing files** — causes "file already exists" errors. Use `edit` for existing files, `write` only for new files.
+4. **Assume a feature is missing without checking main** — run `jj diff --from trunk()` or read the code on main before reimplementing something that may already exist.
+5. **Delay PR creation until after exhaustive verification** — you may run out of session. Create the PR early (even as draft), verify, then mark ready.
+6. **Over-scope beyond the plan** — if the planner narrowed the scope, follow it. Don't rebuild features the plan said were already done.
 
 ### 5. Reply to Comments
 
