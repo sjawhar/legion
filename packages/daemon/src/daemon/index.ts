@@ -739,21 +739,40 @@ export async function startDaemon(
         // Session liveness sweep — detect workers whose serve sessions have died (AC1-AC4)
         // Only runs when serve is healthy and was NOT just restarted (AC3)
         if (serveHealthy && !restartReason) {
-          let activeSessions: Set<string> | null = null;
+          // Collect active sessions from ALL serve ports (multi-serve support)
+          const activeSessionsByPort = new Map<number, Set<string>>();
           try {
-            activeSessions = await resolvedDeps.adapter.listActiveSessions();
+            const primarySessions = await resolvedDeps.adapter.listActiveSessions();
+            activeSessionsByPort.set(resolvedDeps.adapter.getPort(), primarySessions);
           } catch (err) {
             console.warn(
               `[liveness] Failed to fetch active sessions (non-fatal, skipping sweep): ${err}`
             );
           }
 
-          if (activeSessions !== null) {
+          if (activeSessionsByPort.size > 0) {
             try {
               const livenessState = await resolvedDeps.readStateFile(config.stateFilePath);
               for (const worker of Object.values(livenessState.workers)) {
                 if (worker.status !== "running") continue;
-                if (activeSessions.has(worker.sessionId)) continue;
+
+                // Check the worker's specific port for its session
+                const workerPort = worker.port ?? resolvedDeps.adapter.getPort();
+                let sessionsOnPort = activeSessionsByPort.get(workerPort);
+                if (!sessionsOnPort) {
+                  // Fetch sessions from this port (different serve)
+                  try {
+                    const res = await resolvedDeps.fetch(`http://127.0.0.1:${workerPort}/session`);
+                    if (res.ok) {
+                      const sessions = (await res.json()) as Array<{ id: string }>;
+                      sessionsOnPort = new Set(sessions.map((s) => s.id));
+                      activeSessionsByPort.set(workerPort, sessionsOnPort);
+                    }
+                  } catch {
+                    // Port not reachable — worker's serve is down
+                  }
+                }
+                if (sessionsOnPort?.has(worker.sessionId)) continue;
 
                 // Grace period — don't reap workers dispatched in the last 60s
                 // Prevents race where session isn't on serve yet during workspace setup
