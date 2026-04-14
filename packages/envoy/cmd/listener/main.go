@@ -486,9 +486,14 @@ func main() {
 		tsMux := http.NewServeMux()
 		tsMux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 		if _, err := tsServer.Serve(tsMux, fatal); err != nil {
-			log.Fatal(err)
+			log.Printf("WARNING: tsnet failed to start (non-fatal, continuing without Tailscale): %v", err)
+			tsServer.Close()
+			tsServer = nil
+			// Fall back: serve /v1/* on the legacy port since tsnet is unavailable
+			mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+		} else {
+			log.Printf("envoy-listener tsnet serving /v1/* on %s:443", tsServer.Hostname())
 		}
-		log.Printf("envoy-listener tsnet serving /v1/* on %s:443", tsServer.Hostname())
 	}
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
 	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
