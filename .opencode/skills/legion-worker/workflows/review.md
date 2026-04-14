@@ -139,6 +139,25 @@ The `.legion/` directory contains **structured handoff data** committed intentio
 
 **Do NOT flag `.legion/` files for removal or suggest gitignoring them.** They are part of the PR deliverable.
 
+### 1.9. Artifact Check
+
+Before running the review, check for unintended files in the PR that should not be merged:
+
+```bash
+# List all files changed in the PR relative to main
+jj diff --stat --from main
+```
+
+Flag as **P1 (must fix before merge)** if any of these appear in the diff:
+- Compiled binaries (`*.exe`, `*.bin`, Go binaries in package directories)
+- `.opencode/` or `.claude/` session/config directories
+- `node_modules/`, `vendor/`, or other dependency directories
+- Changelog fragments or release notes not part of the issue scope
+- Unrelated files modified by accident (e.g., from a dirty rebase)
+
+**Exception:** `.legion/` files are intentional handoff data — see section 1.5 above. Do NOT flag these.
+
+
 ### 2. Run Review
 
 Invoke `/ce:review` with the branch name.
