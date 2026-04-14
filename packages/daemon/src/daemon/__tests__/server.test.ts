@@ -336,7 +336,7 @@ describe("daemon server", () => {
     expect(body.error).toBe("invalid_session_id");
   });
 
-  it("returns 409 session_already_adopted when sessionId is tracked by live worker", async () => {
+  it("returns 409 session_already_enlisted when sessionId is tracked by live worker", async () => {
     await startTestServer();
     const first = await requestJson("/workers", {
       method: "POST",
@@ -360,11 +360,11 @@ describe("daemon server", () => {
     });
     expect(response.status).toBe(409);
     const body = (await response.json()) as Record<string, unknown>;
-    expect(body.error).toBe("session_already_adopted");
+    expect(body.error).toBe("session_already_enlisted");
     expect(body.id).toBe("eng-42-implement");
   });
 
-  it("allows adoption when existing worker with same sessionId is dead", async () => {
+  it("allows enlistment when existing worker with same sessionId is dead", async () => {
     await startTestServer();
     const first = await requestJson("/workers", {
       method: "POST",

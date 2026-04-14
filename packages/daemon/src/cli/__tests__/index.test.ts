@@ -28,16 +28,16 @@ mock.module("node:child_process", () => ({
 
 import { resolveLegionPaths } from "../../daemon/paths";
 import {
-  adoptCommand,
   attachCommand,
   CliError,
-  cmdAdopt,
   cmdDispatch,
+  cmdEnlist,
   cmdPrompt,
   cmdResetCrashes,
   cmdStart,
   discoverConfigPath,
   dispatchCommand,
+  enlistCommand,
   getDaemonPort,
   legionsCommand,
   loadLegionsCache,
@@ -556,32 +556,32 @@ describe("cmdStart config wiring", () => {
   });
 });
 
-describe("adoptCommand", () => {
+describe("enlistCommand", () => {
   it("has correct meta", async () => {
-    const meta = await Promise.resolve(adoptCommand.meta);
-    expect(meta?.name).toBe("adopt");
+    const meta = await Promise.resolve(enlistCommand.meta);
+    expect(meta?.name).toBe("enlist");
   });
 
   it("requires team and session as positional args", async () => {
-    const args = await resolveArgs(adoptCommand);
+    const args = await resolveArgs(enlistCommand);
     expect(args.team).toEqual(expect.objectContaining({ type: "positional", required: true }));
     expect(args.session).toEqual(expect.objectContaining({ type: "positional", required: true }));
   });
 
   it("requires --mode and --issue flags", async () => {
-    const args = await resolveArgs(adoptCommand);
+    const args = await resolveArgs(enlistCommand);
     expect(args.mode).toEqual(expect.objectContaining({ type: "string", required: true }));
     expect(args.issue).toEqual(expect.objectContaining({ type: "string", required: true }));
   });
 
   it("has optional --workspace flag", async () => {
-    const args = await resolveArgs(adoptCommand);
+    const args = await resolveArgs(enlistCommand);
     expect(args.workspace).toEqual(expect.objectContaining({ type: "string" }));
     expect((args.workspace as StringArg).required).toBeFalsy();
   });
 });
 
-describe("cmdAdopt behavior", () => {
+describe("cmdEnlist behavior", () => {
   const originalFetch = globalThis.fetch;
   let capturedCalls: Array<{ url: string; body: Record<string, unknown> }>;
 
@@ -618,7 +618,7 @@ describe("cmdAdopt behavior", () => {
 
   it("sends sessionId, force=true, and prompt in POST body", async () => {
     const testSession = "ses_31617365bffeUEa4wPBVIL2LBI";
-    await cmdAdopt("sjawhar/5", testSession, {
+    await cmdEnlist("sjawhar/5", testSession, {
       mode: "implement",
       issue: "eng-42",
       workspace: "/tmp/test-workspace",
@@ -638,7 +638,7 @@ describe("cmdAdopt behavior", () => {
     );
   });
 
-  it("throws CliError for session_already_adopted 409", () => {
+  it("throws CliError for session_already_enlisted 409", () => {
     const mock409 = async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.includes("/health")) {
@@ -646,7 +646,7 @@ describe("cmdAdopt behavior", () => {
       }
       if (url.includes("/workers") && init?.method === "POST") {
         return new Response(
-          JSON.stringify({ error: "session_already_adopted", id: "eng-42-implement" }),
+          JSON.stringify({ error: "session_already_enlisted", id: "eng-42-implement" }),
           { status: 409 }
         );
       }
@@ -657,7 +657,7 @@ describe("cmdAdopt behavior", () => {
     });
 
     return expect(
-      cmdAdopt("sjawhar/5", "ses_31617365bffeUEa4wPBVIL2LBI", {
+      cmdEnlist("sjawhar/5", "ses_31617365bffeUEa4wPBVIL2LBI", {
         mode: "implement",
         issue: "eng-42",
         workspace: "/tmp/work",
@@ -668,7 +668,7 @@ describe("cmdAdopt behavior", () => {
 
   it("throws CliError for invalid session ID format", () => {
     return expect(
-      cmdAdopt("sjawhar/5", "not-a-session-id", {
+      cmdEnlist("sjawhar/5", "not-a-session-id", {
         mode: "implement",
         issue: "eng-42",
         workspace: "/tmp/work",

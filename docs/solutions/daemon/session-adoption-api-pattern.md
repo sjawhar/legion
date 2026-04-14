@@ -1,29 +1,30 @@
 ---
-title: "Session Adoption API Pattern"
+title: "Session Enlistment API Pattern"
 category: daemon
 tags:
   - session-management
   - api-extension
   - guard-pattern
   - external-registry
-  - cli-adoption
+  - cli-enlistment
 date: 2026-04-11
 status: active
 module: daemon
 related_issues:
   - "#98"
+  - "#522"
 symptoms:
   - "How to add optional fields to POST /workers"
-  - "How to prevent duplicate session adoption"
+  - "How to prevent duplicate session enlistment"
   - "How to scan OC registry for session info"
-  - "session_already_adopted 409 error"
+  - "session_already_enlisted 409 error"
 ---
 
-# Session Adoption API Pattern
+# Session Enlistment API Pattern
 
 ## Problem
 
-Standalone OpenCode sessions need to be adopted as Legion workers without restarting them.
+Standalone OpenCode sessions need to be enlisted as Legion workers without restarting them.
 This requires extending `POST /workers` with an optional `sessionId` field while preserving
 all existing behavior when the field is absent.
 
@@ -63,7 +64,7 @@ immediately before `workers.set()` — not at the top of the handler.
 if (typeof providedSessionId === "string") {
   for (const [, existingEntry] of workers) {
     if (existingEntry.status !== "dead" && existingEntry.sessionId === providedSessionId) {
-      return jsonResponse({ error: "session_already_adopted", id: existingEntry.id }, 409);
+      return jsonResponse({ error: "session_already_enlisted", id: existingEntry.id }, 409);
     }
   }
 }
@@ -76,7 +77,7 @@ right before `set()` minimizes the window where a concurrent request could slip 
 In single-threaded Bun this is mostly academic, but the pattern is correct for any runtime.
 
 **Why only non-dead workers:** Dead workers are tombstones — their session IDs should be
-recyclable for new adoption.
+recyclable for new enlistment.
 
 ### 3. Conditional Override for Computed Values
 
@@ -90,9 +91,9 @@ const sessionId =
 This preserves the existing deterministic computation when `sessionId` is absent.
 The `typeof` check doubles as a null guard — no need for a separate `if`.
 
-## Pattern: CLI Adoption via Existing Endpoint
+## Pattern: CLI Enlistment via Existing Endpoint
 
-Adoption reuses `POST /workers` with `force: true` rather than a new endpoint:
+Enlistment reuses `POST /workers` with `force: true` rather than a new endpoint:
 
 ```typescript
 const body = {
@@ -105,7 +106,7 @@ const body = {
 };
 ```
 
-**Why `force: true`:** Adopted sessions weren't started by Legion, so phase gates
+**Why `force: true`:** Enlisted sessions weren't started by Legion, so phase gates
 don't apply. The session may be mid-task — we just want to register it.
 
 **Why include `prompt`:** Even though the session is already running, the prompt tells
@@ -146,10 +147,10 @@ for (const file of files) {
 - **`normalizedIssueId` is declared downstream** — when inserting validation blocks
   in `POST /workers`, check you're not accidentally referencing a variable that hasn't
   been declared yet. See `server-side-dispatch-validation.md`.
-- **`createSession()` 409 is idempotent** — when an adopted session already exists in
+- **`createSession()` 409 is idempotent** — when an enlisted session already exists in
   SQLite, `createSession()` returns 409 `DuplicateIDError`, which `serve-manager.ts`
   treats as success. No special handling needed for this case.
-- **SIGHUP PID is transient** — the PID from the OC registry is used once at adopt-time
+- **SIGHUP PID is transient** — the PID from the OC registry is used once at enlist-time
   to send SIGHUP. Do NOT persist it in `WorkerEntry` or `workers.json`.
 - **`SESSION_ID_PATTERN` lives in `types.ts`** — it's shared between daemon (server.ts)
   and CLI (cli/index.ts), so it belongs in the shared types module, not in either consumer.

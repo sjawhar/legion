@@ -1027,7 +1027,7 @@ export function startServer(opts: ServerOptions): {
                 ) {
                   return jsonResponse(
                     {
-                      error: "session_already_adopted",
+                      error: "session_already_enlisted",
                       id: existingEntry.id,
                       sessionId: providedSessionId,
                     },

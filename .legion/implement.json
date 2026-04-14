@@ -1,21 +1,20 @@
 {
   "filesChanged": [
-    "packages/daemon/src/daemon/dashboard-ui.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/cli/__tests__/index.test.ts",
     "packages/daemon/src/daemon/server.ts",
     "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "packages/daemon/src/daemon/AGENTS.md"
+    "docs/solutions/daemon/session-adoption-api-pattern.md"
   ],
   "trickyParts": [
-    "Keeping the HTML/CSS/JS self-contained in a single TypeScript string template while maintaining readability and proper escaping"
+    "Distinguishing legion-specific 'adopt' references from generic English uses of 'adopt' in docs and Pulumi comments"
   ],
   "deviations": [
-    "No plan phase existed for this issue — implemented directly from issue spec and dispatch prompt. The issue mentioned broader features (reports, visual artifacts, feedback) but dispatch scoped to MVP: single HTML page with worker status, pipeline, tokens, auto-refresh."
+    "No plan phase existed — implemented directly from issue spec. Historical plan docs (docs/plans/) left unchanged since they describe what the code looked like at plan time."
   ],
-  "openQuestions": [
-    "Future iterations could add: interactive feedback (approve/reject plans), report viewing, visual artifact rendering, WebSocket for real-time updates instead of polling"
-  ],
+  "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-13T22:33:20.858Z"
+  "completed": "2026-04-14T00:33:00.284Z"
 }
