@@ -713,14 +713,14 @@ export async function scanOcRegistry(
   return null;
 }
 
-interface AdoptOptions {
+interface EnlistOptions {
   mode: string;
   issue: string;
   workspace?: string;
   daemonPort?: number;
 }
 
-export async function cmdAdopt(team: string, session: string, opts: AdoptOptions): Promise<void> {
+export async function cmdEnlist(team: string, session: string, opts: EnlistOptions): Promise<void> {
   if (!SESSION_ID_PATTERN.test(session)) {
     throw new CliError(
       `Invalid session ID format: ${session}\nExpected: ses_ + 12 hex + 14 Base62`
@@ -792,7 +792,7 @@ export async function cmdAdopt(team: string, session: string, opts: AdoptOptions
   }
 
   if (response.status === 409) {
-    if (responseBody.error === "session_already_adopted") {
+    if (responseBody.error === "session_already_enlisted") {
       throw new CliError(`Session ${session} is already tracked by worker ${responseBody.id}`);
     }
     console.log(`Worker already running: ${responseBody.id}`);
@@ -806,21 +806,21 @@ export async function cmdAdopt(team: string, session: string, opts: AdoptOptions
   }
 
   if (!response.ok) {
-    throw new CliError(`Failed to adopt: ${JSON.stringify(responseBody)}`);
+    throw new CliError(`Failed to enlist: ${JSON.stringify(responseBody)}`);
   }
 
   const workerId = responseBody.id as string;
   const workerPort = responseBody.port as number;
-  const adoptedSessionId = responseBody.sessionId as string;
+  const enlistedSessionId = responseBody.sessionId as string;
 
-  console.log(`Session adopted: ${workerId}`);
+  console.log(`Session enlisted: ${workerId}`);
   console.log(`  port: ${workerPort}`);
-  console.log(`  session: ${adoptedSessionId}`);
+  console.log(`  session: ${enlistedSessionId}`);
 
   if (responseBody.promptDelivered === true) {
     console.log(`Prompt sent: /legion-worker ${opts.mode} mode for ${opts.issue}`);
   } else if (responseBody.promptDelivered === false) {
-    console.warn("Session adopted but prompt delivery failed. Send manually:");
+    console.warn("Session enlisted but prompt delivery failed. Send manually:");
     console.warn(
       `  legion prompt ${opts.issue} "/legion-worker ${opts.mode} mode for ${opts.issue}"`
     );
@@ -1120,10 +1120,10 @@ export const attachCommand = defineCommand({
   },
 });
 
-export const adoptCommand = defineCommand({
+export const enlistCommand = defineCommand({
   meta: {
-    name: "adopt",
-    description: "Adopt an existing OpenCode session as a Legion worker",
+    name: "enlist",
+    description: "Enlist an existing OpenCode session as a Legion worker",
   },
   args: {
     team: {
@@ -1156,7 +1156,7 @@ export const adoptCommand = defineCommand({
   },
   async run({ args }) {
     try {
-      await cmdAdopt(args.team, args.session, {
+      await cmdEnlist(args.team, args.session, {
         mode: args.mode as string,
         issue: args.issue as string,
         workspace: args.workspace as string | undefined,
@@ -1703,7 +1703,7 @@ export const mainCommand = defineCommand({
     stop: stopCommand,
     status: statusCommand,
     attach: attachCommand,
-    adopt: adoptCommand,
+    enlist: enlistCommand,
     advance: advanceCommand,
     dispatch: dispatchCommand,
     prompt: promptCommand,
