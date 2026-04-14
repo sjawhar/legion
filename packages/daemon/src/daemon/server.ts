@@ -28,6 +28,7 @@ import {
   ensureWorkspace,
   parseIssueRepo,
   type RepoManagerDeps,
+  type RepoRef,
   removeDir,
   startBackgroundFetch,
   verifyBranchPushed,
@@ -451,6 +452,7 @@ export function startServer(opts: ServerOptions): {
     const cleanedIssueIds = new Set<string>();
     const failedWorkspaceIssueIds = new Set<string>();
     const cleanedWorkspaceIssueIds = new Set<string>();
+    const cleanedRepoRefs = new Map<string, RepoRef>();
     let cleanedWorkers = 0;
 
     // First pass: attempt workspace cleanup (once per issue)
@@ -474,6 +476,8 @@ export function startServer(opts: ServerOptions): {
               opts.repoManagerDeps
             );
             cleanedWorkspaceIssueIds.add(issueId);
+            const repoKey = `${repoRef.host}/${repoRef.owner}/${repoRef.repo}`;
+            cleanedRepoRefs.set(repoKey, repoRef);
           } catch (error) {
             console.warn(
               `[auto-cleanup] workspace cleanup failed for ${issueId}: ${error instanceof Error ? error.message : String(error)}`
@@ -525,6 +529,18 @@ export function startServer(opts: ServerOptions): {
       console.log(
         `[auto-cleanup] Cleaned ${cleanedWorkers} workers for ${cleanedIssueIds.size} Done issues`
       );
+    }
+
+    // Fetch repo clones for Done issues — the merge just landed, so bring the
+    // default clone up to date for future dispatches. Non-blocking, best-effort.
+    if (opts.paths && cleanedRepoRefs.size > 0) {
+      for (const [repoKey, repoRef] of cleanedRepoRefs) {
+        startBackgroundFetch(opts.paths, repoRef, opts.repoManagerDeps).catch((err) => {
+          console.warn(
+            `[auto-cleanup] Post-close fetch failed for ${repoKey}: ${err instanceof Error ? err.message : String(err)}`
+          );
+        });
+      }
     }
 
     // Directory scan fallback: remove workspaces for issues no longer on the board
@@ -909,6 +925,18 @@ export function startServer(opts: ServerOptions): {
               if (!repoRef) {
                 return badRequest("invalid_repo: expected owner/repo");
               }
+              // For implement mode: blocking fetch BEFORE workspace creation so the
+              // workspace is created from a fresh clone. For other modes: non-blocking
+              // fetch after workspace creation (existing behavior).
+              if (mode === WorkerMode.IMPLEMENT) {
+                try {
+                  await startBackgroundFetch(opts.paths, repoRef, opts.repoManagerDeps);
+                } catch (err) {
+                  console.warn(
+                    `[dispatch] Pre-dispatch fetch failed for ${repoRef.owner}/${repoRef.repo}: ${err instanceof Error ? err.message : String(err)} — proceeding with potentially stale clone`
+                  );
+                }
+              }
               try {
                 resolvedWorkspace = await ensureWorkspace(
                   opts.paths,
@@ -920,13 +948,15 @@ export function startServer(opts: ServerOptions): {
               } catch (error) {
                 return serverError(`Failed to resolve workspace: ${(error as Error).message}`);
               }
-              // Fire background fetch (non-blocking) — pre-warms the clone for the
-              // worker's own `jj git fetch` during startup.
-              startBackgroundFetch(opts.paths, repoRef, opts.repoManagerDeps).catch((err) => {
-                console.error(
-                  `[dispatch] Background fetch failed for ${repoRef.owner}/${repoRef.repo}: ${err instanceof Error ? err.message : String(err)}`
-                );
-              });
+              if (mode !== WorkerMode.IMPLEMENT) {
+                // Non-implement modes: fire background fetch (non-blocking) — pre-warms
+                // the clone for the worker's own `jj git fetch` during startup.
+                startBackgroundFetch(opts.paths, repoRef, opts.repoManagerDeps).catch((err) => {
+                  console.error(
+                    `[dispatch] Background fetch failed for ${repoRef.owner}/${repoRef.repo}: ${err instanceof Error ? err.message : String(err)}`
+                  );
+                });
+              }
             } else if (typeof workspace === "string") {
               if (!isAbsolute(workspace)) {
                 return badRequest("workspace must be an absolute path");

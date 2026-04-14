@@ -37,6 +37,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `config.ts` | `DaemonConfig` interface, `loadConfig()` reads env vars. Defaults: daemon port 13370, shared serve port 13381 (`baseWorkerPort`), check interval 60s. **Controller mode:** `LEGION_CONTROLLER_SESSION_ID` env var (optional, must start with `ses_` if set, hard fails on invalid format). |
 | `state-file.ts` | `readStateFile()` / `writeStateFile()` — atomic JSON persistence to `~/.legion/{legionId}/workers.json`. Includes `controller?: ControllerState` field for controller lifecycle. Legacy `controller-controller` worker entries are stripped on read. |
 | `ports.ts` | `isPortFree()` utility only. `PortAllocator` removed — all workers share one port. |
+| `repo-manager.ts` | Repo clone management: `ensureRepoClone()`, `ensureWorkspace()`, `startBackgroundFetch()`, `fetchAllTrackedRepos()`, `cleanupWorkspace()`, `verifyBranchPushed()`. |
 
 ## Key Patterns
 
@@ -46,3 +47,4 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 - **State persistence** — worker map persisted to disk, sessions re-created on daemon restart using deterministic IDs.
 - **Session IDs** — deterministic UUIDv5 from `computeSessionId(legionId, issueId, mode)`, enables idempotent session creation.
 - **Controller lifecycle** — runs as session on shared serve. For external mode, daemon stores session ID without spawning.
+- **Repo clone freshness** — implement dispatches do a blocking `jj git fetch` before workspace creation. Other modes fetch non-blocking after workspace creation. Done issue cleanup triggers a background fetch. Daemon startup warms all tracked clones via `fetchAllTrackedRepos()`.

@@ -1,20 +1,20 @@
 {
   "filesChanged": [
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/cli/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/repo-manager.ts",
     "packages/daemon/src/daemon/server.ts",
-    "packages/daemon/src/daemon/__tests__/server.test.ts",
-    "docs/solutions/daemon/session-adoption-api-pattern.md"
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/repo-manager.test.ts",
+    "packages/daemon/src/daemon/__tests__/server.test.ts"
   ],
   "trickyParts": [
-    "Distinguishing legion-specific 'adopt' references from generic English uses of 'adopt' in docs and Pulumi comments"
+    "Blocking fetch for implement mode runs before ensureWorkspace — if the clone doesn't exist yet (fresh first dispatch), the fetch fails gracefully and clone proceeds normally",
+    "Post-close fetch collects unique RepoRefs during the first cleanup pass to avoid duplicate fetches for repos with multiple workers"
   ],
-  "deviations": [
-    "No plan phase existed — implemented directly from issue spec. Historical plan docs (docs/plans/) left unchanged since they describe what the code looked like at plan time."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-14T00:33:00.284Z"
+  "completed": "2026-04-14T00:40:29.806Z"
 }

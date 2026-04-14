@@ -6,13 +6,18 @@
   "keyFindings": [
     {
       "severity": "P3",
-      "file": "docs/solutions/daemon/session-adoption-api-pattern.md",
-      "description": "Filename still says 'adoption' while content was updated to 'enlistment'. Consider renaming to session-enlistment-api-pattern.md for consistency."
+      "file": "packages/daemon/src/daemon/server.ts",
+      "description": "startBackgroundFetch name misleading when used with await for blocking pre-dispatch path — cosmetic only"
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/daemon/repo-manager.ts",
+      "description": "fetchAllTrackedRepos uses sequential fetching — reasonable design choice for jj safety but could be parallelized for large repo counts"
     }
   ],
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-14T00:43:23.710Z"
+  "completed": "2026-04-14T00:50:37.612Z"
 }
