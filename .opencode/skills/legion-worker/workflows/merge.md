@@ -151,6 +151,22 @@ Retry up to **2 times** (track your retry count):
   If `envoy_publish` fails, continue — the label is the source of truth.
 - Exit
 
+**If merge fails due to branch protection rules** (e.g., "required status check", "review required", "restricted to certain users"):
+
+**NEVER use `gh pr merge --admin` or any admin override to bypass branch protection.** This is a security/governance rule — only Sami may authorize admin merges. Instead:
+- Post a comment explaining the branch protection failure:
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge blocked by branch protection: [exact error]. Escalating — only Sami can authorize an admin merge override." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge blocked by branch protection: [exact error]. Escalating to Sami.")`
+- Add `user-input-needed` label:
+  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
+- Notify controller (best-effort):
+  ```
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge blocked by branch protection — needs Sami approval for admin override")
+  ```
+  If `envoy_publish` fails, continue — the label is the source of truth.
+- Exit
+
 **If merge fails for any other reason** (permission error, unknown error — inspect the error output to determine the cause):
 - Post a comment describing the failure and what you observed:
   - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge failed: [describe the error — permission denied, unexpected API error, etc.]. Manual intervention needed." -R $OWNER/$REPO`

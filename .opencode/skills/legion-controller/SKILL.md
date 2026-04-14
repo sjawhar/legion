@@ -444,6 +444,7 @@ The controller MUST NOT:
 - Run `jj` commands (version control is worker work)
 - Edit files or write code
 - Run `gh pr merge` directly — **EVER**. Always dispatch a merge worker. This is non-negotiable.
+- Use `--admin` to bypass branch protection — **EVER**. If a merge is blocked by branch protection rules, escalate to Sami. Only Sami may authorize admin merge overrides. This is a security/governance rule.
 - Run `jj git push` directly (dispatch a worker)
 - Run tests (dispatch a tester)
 
