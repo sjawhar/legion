@@ -755,6 +755,12 @@ export async function startDaemon(
                 if (worker.status !== "running") continue;
                 if (activeSessions.has(worker.sessionId)) continue;
 
+                // Grace period — don't reap workers dispatched in the last 60s
+                // Prevents race where session isn't on serve yet during workspace setup
+                const LIVENESS_GRACE_PERIOD_MS = 60_000;
+                const startedAtMs = new Date(worker.startedAt).getTime();
+                if (Date.now() - startedAtMs < LIVENESS_GRACE_PERIOD_MS) continue;
+
                 const workerMode = worker.id.split("-").pop() ?? "unknown";
                 const now = new Date().toISOString();
                 try {

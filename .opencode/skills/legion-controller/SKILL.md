@@ -825,6 +825,51 @@ curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/status | jq '.'
 ```
 
 The state machine reports `hasLiveWorker`, `workerMode`, and `workerStatus` for each issue.
+
+### Session ID Source of Truth
+
+**`GET /workers` is the ONLY reliable source for session IDs.** Never parse session IDs
+from dispatch output, truncated logs, or cached values. The dispatch response may be
+truncated or ambiguous — always verify against the daemon's worker list.
+
+```bash
+# CORRECT: Get exact session ID from daemon
+SESSION_ID=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq -r '.[] | select(.id == "'$WORKER_ID'") | .sessionId')
+
+# WRONG: Parse from dispatch output (may be truncated)
+# SESSION_ID=$(echo "$DISPATCH_OUTPUT" | grep -o 'ses_[a-zA-Z0-9]*')
+```
+
+**After every dispatch, verify the session ID from `GET /workers` before monitoring.**
+Monitoring the wrong session ID leads to false "dead worker" reports — the worker may
+be alive and productive while you abort and redispatch based on a non-existent session.
+
+### Worker Health Assessment
+
+To determine if a worker is healthy, stuck, or dead:
+
+1. **Get exact session ID** from `GET /workers` (not from dispatch output)
+2. **Read the transcript** — check the last assistant message content, not just message count
+3. **Check last assistant output type**:
+   - Has text or tool calls → alive (may be slow)
+   - EMPTY (0-length response) → dead session (serve bug). Abort and redispatch.
+   - NO_ASST (no assistant messages at all) → session never started. Abort and redispatch.
+4. **"Flat message count" is ambiguous** — it can mean:
+   - Worker is DONE and idle (check transcript for "idle" / "complete" text)
+   - Worker is in a long tool call (check last tool state)
+   - Worker is dead (check for EMPTY last response)
+   - You are monitoring the WRONG session ID
+
+**Never assume a worker is stuck based on message count alone.** Always read the transcript.
+
+### Prompt Delivery to Busy Sessions
+
+`prompt_async` to a busy session is **silently dropped** (OpenCode Runner bug). The prompt
+is queued as a user message but the model loop never processes it. This means:
+
+- **Never nudge busy workers** — the nudge won't be seen
+- **Wait for idle, then prompt** — or abort and redispatch
+- **+1 message after nudge does NOT mean the worker responded** — it's just your queued prompt
 Use these signals — don't independently verify worker liveness.
 
 ### Session Versioning (Escape Hatch Only)
@@ -982,6 +1027,10 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | "I'll rebase and push this fix" | STOP. Dispatch an implementer. |
 | "I'll run the tests myself" | STOP. Dispatch a tester. |
 | "Let me quickly edit this file" | STOP. You're doing worker work. Dispatch the appropriate worker. |
+| "This worker is dead — 0 messages" | STOP. Verify session ID from `GET /workers` first. You may be checking the wrong session. |
+| "Worker is stuck — flat message count" | Read the transcript. Flat can mean done, slow, or wrong session ID. Check last assistant message content. |
+| "I'll nudge the busy worker" | STOP. `prompt_async` to busy sessions is silently dropped. Wait for idle or abort/redispatch. |
+| "Let me run tl run / Docker / tests myself" | STOP. You're doing worker work. Dispatch the appropriate worker. |
 
 ## Common Mistakes
 
@@ -1000,6 +1049,10 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Increment `--version` on every dispatch | **Never increment version during normal pipeline operation.** Each increment creates a fresh session with zero context. A context-less worker is dangerous — it can push to wrong branches, overwrite work, or break the repo. Only use `--version` when a session is truly unrecoverable (serve crash, corrupted session). |
 | Running `jj`, `gh pr merge`, or editing files | Controllers dispatch workers. Never touch code/branches/PRs directly. |
 | Skipping phases because "it's simple" | Every phase runs. Simple issues just go through faster. |
+| Checking wrong session ID (truncated from output) | **Always get session IDs from `GET /workers`**, never from dispatch output. Truncated IDs cause false "dead worker" reports. |
+| Nudging busy workers via `prompt_async` | Prompts to busy sessions are silently dropped. Wait for idle or abort/redispatch. |
+| Aborting workers without reading transcript | Read the last assistant message first. "Flat" can mean done, slow, or wrong session ID — not just stuck. |
+| Running sandboxes, Docker, tests, or `tl run` | Controller dispatches workers. Never run evaluation tools directly. |
 
 ## Status Flow
 

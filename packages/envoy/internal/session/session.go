@@ -34,11 +34,8 @@ func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) err
 	if err != nil {
 		return fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
-	if d.MachineID != "" && entryVal.MachineID != "" && entryVal.MachineID != d.MachineID {
-		return ErrWrongMachine
-	}
 	if entryVal.Port > 0 {
-		return d.prompt(entryVal.Port, interest.SessionID, text)
+		return d.prompt(entryVal.Port, entryVal.MachineID, interest.SessionID, text)
 	}
 	return fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
@@ -59,7 +56,7 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	return text
 }
 
-func (d Deliverer) prompt(port int, sessionID string, text string) error {
+func (d Deliverer) prompt(port int, machineID string, sessionID string, text string) error {
 	type promptBody struct {
 		Parts []map[string]string `json:"parts"`
 	}
@@ -70,7 +67,7 @@ func (d Deliverer) prompt(port int, sessionID string, text string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s:%d/session/%s/prompt_async", d.host(), port, sessionID), bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s:%d/session/%s/prompt_async", d.hostFor(machineID), port, sessionID), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -91,11 +88,16 @@ func (d Deliverer) prompt(port int, sessionID string, text string) error {
 // resume was removed — cold-starting host processes from inside a container
 // runs as root and is a security risk. Messages stay in JetStream for retry.
 
-func (d Deliverer) host() string {
-	if d.HostBridge != "" {
-		return d.HostBridge
+func (d Deliverer) hostFor(machineID string) string {
+	// Local session — use the host bridge (localhost or docker internal)
+	if machineID == "" || machineID == d.MachineID {
+		if d.HostBridge != "" {
+			return d.HostBridge
+		}
+		return "host.docker.internal"
 	}
-	return "host.docker.internal"
+	// Remote session — use the machine's hostname (resolved via Tailscale MagicDNS)
+	return machineID
 }
 
 func (d Deliverer) timeout() time.Duration {
