@@ -447,6 +447,8 @@ The controller MUST NOT:
 - Use `--admin` to bypass branch protection — **EVER**. If a merge is blocked by branch protection rules, escalate to Sami. Only Sami may authorize admin merge overrides. This is a security/governance rule.
 - Run `jj git push` directly (dispatch a worker)
 - Run tests (dispatch a tester)
+- Abort or kill a worker without first messaging it on Envoy and confirming it is stuck. You MUST NOT assume a worker is stuck based on title, token count, or time elapsed alone — ASK the worker via `envoy_send` and wait for a response (or 2-minute timeout) before taking action.
+- Redispatch a worker for the same issue/mode without confirming the existing worker is dead or unresponsive.
 
 The controller dispatches workers. Workers do the work. If you are about to touch code, branches, or PRs directly — stop and dispatch the appropriate worker instead.
 
