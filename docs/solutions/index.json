@@ -48,6 +48,7 @@
     ],
     ".opencode/skills/legion-worker": [
       "skill-patterns/worker-skill-failure-modes.md",
+      "skill-patterns/workflow-ordering-and-stale-workspace-data.md",
       "daemon/deferred-review-comments-pattern.md",
       "integration-patterns/controller-worker-protocol.md",
       "delegation/subagent-timeout-stall-prevention.md"

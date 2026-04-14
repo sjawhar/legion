@@ -62,7 +62,11 @@ Implement-mode keys:
 
 ### 1. Load Plan
 
-Fetch issue and comments. The plan is in comments:
+> **CRITICAL: The plan is in the issue COMMENTS, not the issue body.** The issue body contains the
+> original spec/request. The plan was posted as a comment by the plan worker. When fetching the
+> issue, read ALL comments to find the plan — do not rely solely on the body.
+
+Fetch issue and comments:
 
 - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
 - **Linear:** `linear_linear(action="get", id=$LEGION_ISSUE_ID)`
@@ -85,6 +89,8 @@ legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
 If architect or plan handoffs are present, note any concerns, routing hints, or learnings used. This is informational only — proceed regardless of whether these files exist.
+
+**WARNING: Handoff data may be stale** — `.legion/` files persist across workspace reuse and may be from a different issue that previously used this workspace. Verify the handoff content references YOUR issue before trusting it. If it references a different issue, IGNORE it and rely on the issue comments and PR.
 
 **Skill loading from plan handoff:** If the plan handoff includes a `requiredSkills.implement` array, invoke each listed skill before proceeding to step 2. This front-loads skills the planner identified as relevant, and replaces the independent skill discovery in step 1.5 for this run.
 
@@ -113,6 +119,21 @@ Extract keywords from all available sources above. Match against `docs/solutions
 Output the injected learnings visibly in the session before proceeding to coding. If no relevant learnings are found, output "No relevant learnings found." and continue.
 
 **Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
+
+### 1.8. Implementation Principles
+
+**Fail fast, fail loud.** When writing code:
+- Do NOT swallow errors with `2>/dev/null || true`, empty catch blocks, or silent fallbacks
+- Do NOT use `try { ... } catch(e) {}` patterns that hide failures
+- Prefer crashing on unknown state over continuing in ambiguous state
+- Programs should operate RELIABLY, which includes crashing when in an unknown state and recovering by restarting
+- If an operation can fail, handle the failure explicitly (log it, propagate it, or retry with backoff) — never swallow it
+
+**Test from the package, not the monorepo root:**
+- Run `bun test` from the package directory (e.g., `packages/daemon`), not the monorepo root
+- If tests fail, verify they pass on a clean checkout of main before investigating further — test failures in your workspace are your responsibility, not "pre-existing"
+
+**Don't build binaries in the package directory** — use `go build -o /tmp/<name>` to avoid accidentally committing binaries.
 
 ### 2. Invoke Skills (in order)
 

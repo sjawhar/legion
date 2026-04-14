@@ -105,6 +105,8 @@ Also read all prior handoffs for full context chain:
 legion handoff read --workspace . 2>/dev/null || echo '{}'
 ```
 
+**WARNING: Handoff data may be stale** — from a different issue that previously used this workspace. Verify the handoff's issue ID matches YOUR issue before trusting it. If it references a different issue, IGNORE it and rely on the issue comments and PR.
+
 Use this precedence order when handoff/context sources overlap:
 1. Issue body acceptance criteria (primary)
 2. Issue comments testing plan (`## Testing Plan`) (primary)

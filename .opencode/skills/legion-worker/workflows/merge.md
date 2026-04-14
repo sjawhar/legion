@@ -67,7 +67,19 @@ If rebase produces conflicts:
   If `envoy_publish` fails, continue — the label is the source of truth.
 - Exit
 
-**Protected files:** The `.legion/` directory contains handoff data between pipeline phases. These files are intentional and must be preserved during merge — do not remove them or add `.legion/` to `.gitignore`.
+**Handoff data cleanup:** The `.legion/` directory contains handoff data from pipeline phases. During rebase/conflict resolution, PRESERVE these files — they may be needed if merge fails and requires rework. Cleanup happens in step 3.5 (after conflicts are resolved, before push).
+
+### 3.5. Remove Handoff Data
+
+Remove `.legion/` files BEFORE pushing so they are excluded from the squash merge onto main.
+Handoff data is preserved in branch history (jj/git) but must not land on main.
+
+```bash
+if [ -d .legion ]; then
+  rm -rf .legion/
+  # Changes are auto-tracked by jj — no need to commit separately
+fi
+```
 
 ### 4. Push
 
@@ -185,7 +197,7 @@ Then remove `worker-active` if present:
 
 ### 7.5. Cleanup Workspace
 
-After the issue is closed and Done, clean up the workspace and worker entries to prevent disk exhaustion.
+After the issue is closed and Done, clean up workspace and worker entries.
 Best-effort — do not fail the merge workflow if cleanup errors occur, but only prune worker state
 after workspace deletion succeeds (preserves retry handle for the daemon/controller backup layers).
 
