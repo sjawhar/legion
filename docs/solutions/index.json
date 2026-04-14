@@ -305,11 +305,14 @@
       "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
     ],
     "packages/opencode-plugin/src/config": [
-      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
+      "architecture-patterns/opencode-plugin-hook-authoring-patterns.md",
+      "delegation/model-fallback-implementation-patterns.md"
     ],
     "packages/opencode-plugin/src/delegation": [
       "delegation/subagent-timeout-stall-prevention.md",
-      "delegation/bun-node-timer-type-portability.md"
+      "delegation/bun-node-timer-type-portability.md",
+      "delegation/model-fallback-implementation-patterns.md",
+      "testing/async-fire-and-forget-polling-pattern.md"
     ],
     ".opencode/skills/legion-retro": ["delegation/subagent-timeout-stall-prevention.md"],
     "tag:timeout": ["delegation/subagent-timeout-stall-prevention.md"],
@@ -384,7 +387,11 @@
     "tag:http": ["daemon/self-fetch-endpoint-composition.md"],
     "tag:technical-debt": ["daemon/self-fetch-endpoint-composition.md"],
     "tag:server": ["daemon/self-fetch-endpoint-composition.md"],
-    "packages/opencode-plugin/src/__tests__": ["testing/intentionally-failing-contract-tests.md"],
+    "packages/opencode-plugin/src/__tests__": [
+      "testing/intentionally-failing-contract-tests.md",
+      "delegation/model-fallback-implementation-patterns.md",
+      "testing/async-fire-and-forget-polling-pattern.md"
+    ],
     ".github/workflows": ["testing/intentionally-failing-contract-tests.md"],
     "tag:contract-tests": ["testing/intentionally-failing-contract-tests.md"],
     "tag:omo-replacement": ["testing/intentionally-failing-contract-tests.md"],
@@ -409,6 +416,9 @@
     "tag:zero-dependency": ["daemon/inline-html-dashboard-pattern.md"],
     "tag:mvp": ["daemon/inline-html-dashboard-pattern.md"],
     "tag:repo-management": ["daemon/graduated-fetch-urgency-pattern.md"],
-    "tag:blocking-vs-nonblocking": ["daemon/graduated-fetch-urgency-pattern.md"]
+    "tag:blocking-vs-nonblocking": ["daemon/graduated-fetch-urgency-pattern.md"],
+    "packages/opencode-plugin/src/overlays": [
+      "delegation/model-fallback-implementation-patterns.md"
+    ]
   }
 }

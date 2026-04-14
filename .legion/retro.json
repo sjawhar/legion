@@ -1,7 +1,10 @@
 {
   "skipped": false,
-  "docsCreated": ["docs/solutions/daemon/graduated-fetch-urgency-pattern.md"],
+  "docsCreated": [
+    "docs/solutions/testing/async-fire-and-forget-polling-pattern.md",
+    "docs/solutions/delegation/model-fallback-implementation-patterns.md"
+  ],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-14T00:57:49.335Z"
+  "completed": "2026-04-13T20:35:29.848Z"
 }

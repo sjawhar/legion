@@ -120,25 +120,13 @@ describe("createModelFallbackChain", () => {
   });
 });
 
-describe("getModelOverlay with fallback chain config", () => {
-  it("accepts a third parameter for fallback chain configuration", () => {
-    // The contract test requires getModelOverlay.length >= 3
-    expect(getModelOverlay.length).toBeGreaterThanOrEqual(3);
+describe("getModelOverlay", () => {
+  it("accepts exactly two parameters (providerID, modelID)", () => {
+    expect(getModelOverlay.length).toBe(2);
   });
 
-  it("returns overlay for primary model when no fallback config", () => {
+  it("returns overlay for primary model", () => {
     const overlay = getModelOverlay("anthropic", "claude-sonnet-4-20250514");
-    // Should still work as before with 2 args
-    expect(overlay).toBeDefined();
-    expect(overlay?.provider).toBe("anthropic");
-  });
-
-  it("returns overlay for primary model when fallback config provided", () => {
-    const chain = createModelFallbackChain([
-      "anthropic/claude-sonnet-4-20250514",
-      "openai/gpt-5.3-codex",
-    ]);
-    const overlay = getModelOverlay("anthropic", "claude-sonnet-4-20250514", chain);
     expect(overlay).toBeDefined();
     expect(overlay?.provider).toBe("anthropic");
   });

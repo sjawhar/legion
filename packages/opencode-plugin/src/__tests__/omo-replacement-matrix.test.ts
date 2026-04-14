@@ -167,13 +167,16 @@ describe("Area 6: Model fallback", () => {
     expect(asRecord(overlaysIndex).createModelFallbackChain).toBeDefined();
   });
 
-  // Currently: getModelOverlay(providerID, modelID) -> 2 params. Needs fallbacks? param.
-  it("getModelOverlay supports fallback chain configuration", () => {
-    expect(overlaysIndex.getModelOverlay.length).toBeGreaterThanOrEqual(3);
+  it("getModelOverlay accepts exactly 2 parameters (no fallback chain param)", () => {
+    expect(overlaysIndex.getModelOverlay.length).toBe(2);
   });
 
-  it("exports createRetryWithFallback from delegation index", () => {
-    expect(asRecord(delegationIndex).createRetryWithFallback).toBeDefined();
+  it("exports executeWithModelFallback from delegation index", () => {
+    expect(asRecord(delegationIndex).executeWithModelFallback).toBeDefined();
+  });
+
+  it("exports AllModelsFailed from delegation index", () => {
+    expect(asRecord(delegationIndex).AllModelsFailed).toBeDefined();
   });
 });
 

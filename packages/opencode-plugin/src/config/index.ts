@@ -30,6 +30,7 @@ const AgentOverrideSchema = z
     model: z.string().optional(),
     temperature: z.number().optional(),
     permission: PermissionConfigSchema.optional(),
+    fallbackModels: z.array(z.string()).optional(),
   })
   .passthrough();
 
@@ -53,6 +54,7 @@ const RetryConfigSchema = z
     maxRetries: z.number().optional(),
     delayMs: z.number().optional(),
     fallbackModel: z.string().optional(),
+    fallbackModels: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -101,6 +103,7 @@ export interface AgentOverrideConfig {
   model?: string;
   temperature?: number;
   permission?: PermissionConfig;
+  fallbackModels?: string[];
 }
 
 export interface ConcurrencyConfig {
@@ -112,6 +115,7 @@ export interface RetryConfig {
   maxRetries?: number;
   delayMs?: number;
   fallbackModel?: string;
+  fallbackModels?: string[];
 }
 
 export interface OutputCompressionConfig {
@@ -233,7 +237,11 @@ function mergeConcurrency(
 function mergeRetry(base?: RetryConfig, override?: RetryConfig): RetryConfig | undefined {
   if (!base) return override;
   if (!override) return base;
-  return { ...base, ...override };
+  return {
+    ...base,
+    ...override,
+    fallbackModels: override.fallbackModels ?? base.fallbackModels,
+  };
 }
 
 function mergeOutputCompression(
@@ -297,6 +305,7 @@ function applyDefaults(config: PluginConfig): PluginConfig {
       maxRetries: config.retry?.maxRetries ?? DEFAULT_CONFIG.retry?.maxRetries,
       delayMs: config.retry?.delayMs ?? DEFAULT_CONFIG.retry?.delayMs,
       fallbackModel: config.retry?.fallbackModel ?? DEFAULT_CONFIG.retry?.fallbackModel,
+      fallbackModels: config.retry?.fallbackModels,
     },
     taskRetentionMs: config.taskRetentionMs ?? DEFAULT_CONFIG.taskRetentionMs,
     spawnLimits: {
