@@ -71,6 +71,11 @@ jj rebase -d main
 jj new  # Fresh commit for this session
 ```
 
+Orient yourself in the workspace:
+```bash
+jj-agent-status  # Shows branches, bookmark state, other agents, needs-attention items
+```
+
 Load repo-specific config from workspace root (if present):
 
 ```bash

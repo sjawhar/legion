@@ -115,7 +115,7 @@ Wait for the result via background_output.
 
 **Verify mode activation:** The response must begin with `## Mode: Pre-Planning Analysis`. If it echoes a different mode, retry once with the correct MODE header.
 
-**If Metis fails or times out (>3 min):** Proceed to step 2 without pre-analysis. Note the missing analysis in the planner context.
+**If Metis fails or times out (>7 min):** Proceed to step 2 without pre-analysis. Note the missing analysis in the planner context.
 
 **If Metis flags critical ambiguities requiring human input** — specifically, ambiguities where the effort delta exceeds ~1 hour or where a user choice is required (not planner judgment) — treat as unclear and exit via the existing escalation protocol (add `user-input-needed`, post comment, exit).
 

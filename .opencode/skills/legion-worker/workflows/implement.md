@@ -114,6 +114,22 @@ Output the injected learnings visibly in the session before proceeding to coding
 
 **Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
 
+### 1.8. Implementation Principles
+
+**Fail fast, fail loud.** When writing code:
+- Do NOT swallow errors with `2>/dev/null || true`, empty catch blocks, or silent fallbacks
+- Do NOT use `try { ... } catch(e) {}` patterns that hide failures
+- Prefer crashing on unknown state over continuing in ambiguous state
+- Programs should operate RELIABLY, which includes crashing when in an unknown state and recovering by restarting
+- If an operation can fail, handle the failure explicitly (log it, propagate it, or retry with backoff) — never swallow it
+
+**Test from the package, not the monorepo root:**
+- Run `bun test` from the package directory (e.g., `packages/daemon`), not the monorepo root
+- If tests fail, verify they pass on a clean checkout of main before investigating further — test failures in your workspace are your responsibility, not "pre-existing"
+
+**Don't build binaries in the package directory** — use `go build -o /tmp/<name>` to avoid accidentally committing binaries.
+
+
 ### 2. Invoke Skills (in order)
 
 1. `/superpowers/executing-plans` - Load and structure the plan
