@@ -196,7 +196,7 @@ function buildServeEnv(config: DaemonConfig): Record<string, string> {
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
-      plugin: ["@sjawhar/opencode-legion@latest"],
+      plugin: [`file://${path.resolve(process.cwd(), "../opencode-plugin/dist/index.js")}`],
     }),
   };
   if (config.envoyUrl) {
