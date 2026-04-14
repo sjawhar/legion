@@ -47,6 +47,7 @@ Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands
    tmux has-session -t <name> 2>/dev/null && echo "running" || echo "done"
    ```
    Never run `bun run serve`, `pulumi up`, long test suites, or similar commands directly in bash.
+9. **Circuit breaker on repetitive tool calls** — if you've called the same tool more than 10 times consecutively with similar input, STOP and reassess your approach. You are likely in a loop. Steps: (a) describe what you're trying to achieve, (b) identify why the repeated calls aren't working, (c) try a fundamentally different approach. Transcript analysis found 3 catastrophic loop incidents (4,490 wasted tool calls) where workers repeated the same failing action hundreds of times.
 
 ## Skill Discipline
 
