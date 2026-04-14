@@ -178,6 +178,58 @@ export async function startBackgroundFetch(
 }
 
 /**
+ * Fetch all tracked repo clones under `paths.reposDir`.
+ *
+ * Walks the directory tree `reposDir/{host}/{owner}/{repo}` and fires
+ * `jj git fetch` on each clone. Failures are collected but do not abort the
+ * overall run — callers get a summary of successes and errors.
+ */
+export async function fetchAllTrackedRepos(
+  paths: LegionPaths,
+  deps: RepoManagerDeps = defaultDeps
+): Promise<{ fetched: string[]; errors: Array<{ repo: string; error: string }> }> {
+  const listDir = deps.listDir ?? defaultDeps.listDir;
+  if (!listDir) {
+    return { fetched: [], errors: [] };
+  }
+
+  const fetched: string[] = [];
+  const errors: Array<{ repo: string; error: string }> = [];
+
+  const hosts = await listDir(paths.reposDir);
+  for (const host of hosts) {
+    const hostPath = path.join(paths.reposDir, host);
+    const owners = await listDir(hostPath);
+    for (const owner of owners) {
+      const ownerPath = path.join(hostPath, owner);
+      const repos = await listDir(ownerPath);
+      for (const repo of repos) {
+        const clonePath = path.join(ownerPath, repo);
+        if (!(await deps.exists(clonePath))) {
+          continue;
+        }
+        const label = `${host}/${owner}/${repo}`;
+        try {
+          const result = await deps.runJj(["git", "fetch", "-R", clonePath]);
+          if (result.exitCode !== 0) {
+            errors.push({ repo: label, error: result.stderr });
+          } else {
+            fetched.push(label);
+          }
+        } catch (err) {
+          errors.push({
+            repo: label,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+
+  return { fetched, errors };
+}
+
+/**
  * Check whether a bookmark (branch) for the given issue has been pushed to origin.
  *
  * Returns `{ safe: true }` when either:

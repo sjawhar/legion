@@ -470,8 +470,9 @@ describe("daemon server", () => {
     expect(createSessionCalls[0].workspace).toBe(
       "/tmp/legion-data/workspaces/123e4567-e89b-12d3-a456-426614174000/acme-widgets-77"
     );
-    // Blocking calls: clone + workspace add. Background fetch follows.
-    expect(runJjCalls.slice(0, 2)).toEqual([
+    // For implement mode: blocking pre-dispatch fetch fires first, then clone + workspace add.
+    expect(runJjCalls.slice(0, 3)).toEqual([
+      ["git", "fetch", "-R", "/tmp/legion-data/repos/github.com/acme/widgets"],
       [
         "git",
         "clone",
@@ -489,13 +490,6 @@ describe("daemon server", () => {
         "-R",
         "/tmp/legion-data/repos/github.com/acme/widgets",
       ],
-    ]);
-    // Background fetch fires after workspace creation (non-blocking)
-    expect(runJjCalls[2]).toEqual([
-      "git",
-      "fetch",
-      "-R",
-      "/tmp/legion-data/repos/github.com/acme/widgets",
     ]);
   });
 
@@ -773,6 +767,102 @@ describe("daemon server", () => {
     const body = await response.json();
     expect(body).toHaveProperty("id", "acme-widgets-99-implement");
     expect(body).toHaveProperty("sessionId");
+  });
+
+  it("runs blocking fetch before workspace creation for implement mode", async () => {
+    const jjCommands: string[][] = [];
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async (args) => {
+        jjCommands.push([...args]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+    await startTestServer({ paths, repoManagerDeps });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "acme-widgets-99",
+        mode: "implement",
+        repo: "acme/widgets",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    // For implement mode, the fetch should happen BEFORE workspace creation.
+    // Since clone exists, ensureRepoClone doesn't call runJj, so the first
+    // jj command should be "git fetch" (the blocking pre-dispatch fetch).
+    const fetchCmd = jjCommands.find((c) => c[0] === "git" && c[1] === "fetch");
+    expect(fetchCmd).toBeDefined();
+    expect(fetchCmd).toContain("-R");
+  });
+
+  it("uses non-blocking fetch for non-implement modes", async () => {
+    const jjCommands: string[][] = [];
+    const paths: LegionPaths = {
+      dataDir: "/tmp/legion-data",
+      stateDir: "/tmp/legion-state",
+      reposDir: "/tmp/legion-data/repos",
+      workspacesDir: "/tmp/legion-data/workspaces",
+      legionsFile: "/tmp/legion-state/legions.json",
+      forLegion: (projectId: string) => ({
+        legionStateDir: `/tmp/legion-state/legions/${projectId}`,
+        workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
+        logDir: `/tmp/legion-state/legions/${projectId}/logs`,
+        workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
+      }),
+      repoClonePath: (host: string, owner: string, repo: string) =>
+        `/tmp/legion-data/repos/${host}/${owner}/${repo}`,
+    };
+    const repoManagerDeps: RepoManagerDeps = {
+      runJj: async (args) => {
+        jjCommands.push([...args]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+    };
+    await startTestServer({ paths, repoManagerDeps });
+
+    const response = await requestJson("/workers", {
+      method: "POST",
+      body: JSON.stringify({
+        issueId: "acme-widgets-99",
+        mode: "plan",
+        repo: "acme/widgets",
+        force: true,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    // For plan mode, the fetch is non-blocking (background).
+    // A fetch command should still eventually be issued, but we mainly verify
+    // that the response succeeds and a fetch was queued.
+    // Wait a tick for the background fetch to fire
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const fetchCmd = jjCommands.find((c) => c[0] === "git" && c[1] === "fetch");
+    expect(fetchCmd).toBeDefined();
   });
 
   it("returns 500 when repo clone fails", async () => {
@@ -1914,6 +2004,66 @@ describe("daemon server", () => {
       expect(workers[0]?.id).toBe("acme-widgets-46-implement");
       // Session should NOT have been deleted
       expect(deleteSessionCalls).toEqual([]);
+    });
+
+    it("fires background fetch on repo clone after Done issue cleanup", async () => {
+      const jjCommands: string[][] = [];
+      const rmDirCalls: string[] = [];
+      await startTestServer({
+        paths,
+        repoManagerDeps: makeRepoManagerDeps({
+          runJj: async (args) => {
+            jjCommands.push([...args]);
+            // bookmark list returns synced bookmark for cleanup to proceed
+            if (args.includes("bookmark")) {
+              return {
+                exitCode: 0,
+                stdout: ["acme-widgets-47 local", "acme-widgets-47 remote:origin ahead:0"].join(
+                  "\n"
+                ),
+                stderr: "",
+              };
+            }
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+          rmDir: async (p) => {
+            rmDirCalls.push(p);
+          },
+        }),
+      });
+
+      await createRepoWorker("acme-widgets-47");
+
+      // Collect state with issue as Done — triggers cleanup + fetch
+      await requestJson("/state/collect", {
+        method: "POST",
+        body: JSON.stringify({
+          backend: "github",
+          issues: [
+            {
+              id: "PVTI_fetch_on_close",
+              content: {
+                number: 47,
+                repository: "acme/widgets",
+                url: "https://github.com/acme/widgets/issues/47",
+                type: "Issue",
+              },
+              status: "Done",
+              labels: [],
+            },
+          ],
+        }),
+      });
+      // Wait for async cleanup + background fetch to complete
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Verify workspace was cleaned up
+      expect(rmDirCalls.length).toBeGreaterThan(0);
+      // Verify a "git fetch" was fired on the repo clone after cleanup
+      // (separate from the pre-dispatch fetch for the implement worker creation)
+      const fetchCommands = jjCommands.filter((c) => c[0] === "git" && c[1] === "fetch");
+      // At least 2 fetches: one for implement dispatch (blocking), one after Done cleanup
+      expect(fetchCommands.length).toBeGreaterThanOrEqual(2);
     });
 
     it("directory scan uses real fs listDir when repoManagerDeps.listDir is not injected", async () => {

@@ -18,6 +18,7 @@ import {
   writeLegionEntry,
 } from "./legions-registry";
 import { isPortFree } from "./ports";
+import { fetchAllTrackedRepos } from "./repo-manager";
 import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter, RuntimeStartOptions } from "./runtime/types";
@@ -400,6 +401,24 @@ export async function startDaemon(
       );
     }
   }
+
+  // Warm up all tracked repo clones — non-blocking, best-effort.
+  // Runs in the background so it doesn't delay daemon startup.
+  fetchAllTrackedRepos(config.paths).then(
+    ({ fetched, errors }) => {
+      if (fetched.length > 0) {
+        console.log(`[startup] Fetched ${fetched.length} repo clone(s): ${fetched.join(", ")}`);
+      }
+      for (const { repo, error } of errors) {
+        console.warn(`[startup] Repo fetch failed for ${repo}: ${error}`);
+      }
+    },
+    (err) => {
+      console.warn(
+        `[startup] fetchAllTrackedRepos failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  );
 
   if (hasIndexRoot) {
     const startedIndexBuildAt = Date.now();

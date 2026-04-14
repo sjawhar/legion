@@ -4,6 +4,7 @@ import {
   cleanupWorkspace,
   ensureRepoClone,
   ensureWorkspace,
+  fetchAllTrackedRepos,
   parseIssueRepo,
   type RepoManagerDeps,
   resolveWorkspacePath,
@@ -591,5 +592,124 @@ describe("startBackgroundFetch", () => {
     await expect(
       startBackgroundFetch(paths, { host: "github.com", owner: "acme", repo: "widgets" }, deps)
     ).rejects.toThrow("Permission denied");
+  });
+});
+
+describe("fetchAllTrackedRepos", () => {
+  it("fetches all repos found under reposDir", async () => {
+    const commands: string[][] = [];
+    const dirTree: Record<string, string[]> = {
+      // reposDir
+      "/home/test/.local/share/legion/repos": ["github.com"],
+      "/home/test/.local/share/legion/repos/github.com": ["acme", "other"],
+      "/home/test/.local/share/legion/repos/github.com/acme": ["widgets"],
+      "/home/test/.local/share/legion/repos/github.com/other": ["app"],
+    };
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        commands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+      listDir: async (p) => dirTree[p] ?? [],
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    const result = await fetchAllTrackedRepos(paths, deps);
+
+    expect(result.fetched).toEqual(["github.com/acme/widgets", "github.com/other/app"]);
+    expect(result.errors).toEqual([]);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toContain("git");
+    expect(commands[0]).toContain("fetch");
+    expect(commands[0]).toContain("-R");
+    expect(commands[0]).toContain("/home/test/.local/share/legion/repos/github.com/acme/widgets");
+    expect(commands[1]).toContain("/home/test/.local/share/legion/repos/github.com/other/app");
+  });
+
+  it("collects errors without aborting", async () => {
+    const dirTree: Record<string, string[]> = {
+      "/home/test/.local/share/legion/repos": ["github.com"],
+      "/home/test/.local/share/legion/repos/github.com": ["acme"],
+      "/home/test/.local/share/legion/repos/github.com/acme": ["widgets", "other"],
+    };
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        if (args.some((a) => a.includes("widgets"))) {
+          return { exitCode: 1, stdout: "", stderr: "auth failed" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+      listDir: async (p) => dirTree[p] ?? [],
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    const result = await fetchAllTrackedRepos(paths, deps);
+
+    expect(result.fetched).toEqual(["github.com/acme/other"]);
+    expect(result.errors).toEqual([{ repo: "github.com/acme/widgets", error: "auth failed" }]);
+  });
+
+  it("returns empty results when reposDir has no hosts", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+      listDir: async () => [],
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    const result = await fetchAllTrackedRepos(paths, deps);
+
+    expect(result.fetched).toEqual([]);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("returns empty results when listDir is not provided", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+      // listDir intentionally omitted
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    const result = await fetchAllTrackedRepos(paths, deps);
+
+    expect(result.fetched).toEqual([]);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("skips repos where clone path does not exist", async () => {
+    const commands: string[][] = [];
+    const dirTree: Record<string, string[]> = {
+      "/home/test/.local/share/legion/repos": ["github.com"],
+      "/home/test/.local/share/legion/repos/github.com": ["acme"],
+      "/home/test/.local/share/legion/repos/github.com/acme": ["widgets"],
+    };
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        commands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => false,
+      rmDir: async () => {},
+      symlink: async () => {},
+      listDir: async (p) => dirTree[p] ?? [],
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+
+    const result = await fetchAllTrackedRepos(paths, deps);
+
+    expect(result.fetched).toEqual([]);
+    expect(result.errors).toEqual([]);
+    expect(commands).toEqual([]);
   });
 });

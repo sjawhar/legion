@@ -1,7 +1,7 @@
 {
-  "skipped": true,
-  "reason": "no significant learnings",
+  "skipped": false,
+  "docsCreated": ["docs/solutions/daemon/graduated-fetch-urgency-pattern.md"],
   "schemaVersion": 1,
   "phase": "retro",
-  "completed": "2026-04-14T00:48:22.492Z"
+  "completed": "2026-04-14T00:57:49.335Z"
 }
