@@ -316,6 +316,23 @@ export async function cleanupWorkspace(
 
   await deps.runJj(["workspace", "forget", issueId.toLowerCase(), "-R", clonePath]);
 
+  // Prune stale git worktree registrations — handles cases where workers were
+  // reaped before cleanup ran and directories were deleted without git knowing
+  const gitDir = `${clonePath}/.jj/repo/store/git`;
+  try {
+    const pruneResult = Bun.spawnSync(["git", `--git-dir=${gitDir}`, "worktree", "prune"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10_000,
+    });
+    if (pruneResult.exitCode !== 0) {
+      console.warn(
+        `[cleanup] git worktree prune failed (non-fatal): ${pruneResult.stderr.toString()}`
+      );
+    }
+  } catch {
+    // Non-fatal — git worktree prune may fail if git dir doesn't exist
+  }
+
   await deps.rmDir(workspacePath);
 }
 
