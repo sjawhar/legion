@@ -1,0 +1,18 @@
+{
+  "filesChanged": [
+    ".github/workflows/release-opencode-plugin.yaml"
+  ],
+  "trickyParts": [
+    "Followed the envoy plugin job pattern exactly from release-envoy-and-plugin.yaml. Version bumping queries npm registry for latest version and auto-increments patch. OIDC provenance handled by id-token:write permission + actions/setup-node registry-url config."
+  ],
+  "deviations": [
+    "None — followed the template exactly as specified in the issue"
+  ],
+  "openQuestions": [
+    "NPM_TOKEN or NODE_AUTH_TOKEN must be available as a repository secret for npm publish to authenticate. The template workflow doesn't set it explicitly either, so it's presumably already configured. If the first publish fails, check that an npm token is set as a repo secret named NODE_AUTH_TOKEN."
+  ],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-14T04:56:28.397Z"
+}
