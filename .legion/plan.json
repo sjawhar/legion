@@ -1,0 +1,17 @@
+{
+  "taskCount": 1,
+  "independentTasks": 1,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1,
+    "skipRetro": true,
+    "skipArchitect": true
+  },
+  "concerns": [
+    "Line numbers in SKILL.md may shift if other PRs merge first — implementer should use text anchors as fallback"
+  ],
+  "workflowRecommendation": "Simple skill-only change — skip retro, single implementer",
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-04-15T05:09:55.643Z"
+}
