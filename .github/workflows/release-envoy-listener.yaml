@@ -1,4 +1,4 @@
-name: Release Legion Envoy and Plugin
+name: Release Envoy Listener
 
 on:
   push:
@@ -6,7 +6,6 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      - "packages/envoy-plugin/**"
 
 permissions:
   contents: write
@@ -14,7 +13,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-envoy-listener
   cancel-in-progress: false
 
 jobs:
@@ -32,12 +31,10 @@ jobs:
       - name: Determine version bump
         id: bump
         run: |
-          # Find the latest envoy release tag
           LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
 
           if [ -z "$LATEST_TAG" ]; then
-            # No tags yet — first release uses current envoy-plugin package.json version
-            VERSION=$(jq -r .version packages/envoy-plugin/package.json)
+            VERSION="0.1.0"
             TAG="legion-envoy-v${VERSION}"
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -46,22 +43,20 @@ jobs:
             exit 0
           fi
 
-          # Get commits since last tag
-          COMMITS=$(git log "${LATEST_TAG}..HEAD" --format='%s')
+          # Only consider commits that touch envoy or contracts
+          COMMITS=$(git log "${LATEST_TAG}..HEAD" --format='%s' -- packages/envoy/ packages/contracts/)
 
           if [ -z "$COMMITS" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "No commits since $LATEST_TAG"
+            echo "No envoy/contracts commits since $LATEST_TAG"
             exit 0
           fi
 
-          # Classify conventional commits
           MAJOR=false
           MINOR=false
           PATCH=false
 
           while IFS= read -r msg; do
-            # BREAKING: feat!:, fix(scope)!:, or body contains BREAKING CHANGE
             if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
               MAJOR=true
             elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
@@ -77,9 +72,8 @@ jobs:
             exit 0
           fi
 
-          # Parse version from last tag (strip "legion-envoy-v" prefix and any -<sha> suffix)
           CURRENT="${LATEST_TAG#legion-envoy-v}"
-          CURRENT="${CURRENT%%-*}"  # strip -<sha> suffix from old-format tags
+          CURRENT="${CURRENT%%-*}"
           IFS='.' read -r major minor patch <<< "$CURRENT"
 
           if $MAJOR; then
@@ -97,60 +91,7 @@ jobs:
           echo "should_release=true" >> "$GITHUB_OUTPUT"
           echo "Bumping $CURRENT → $VERSION"
 
-  plugin:
-    needs: version
-    if: needs.version.outputs.should_release == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Set release version
-        id: plugin_version
-        run: |
-          PREV=$(curl -s https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/latest | jq -r '.version // "0.0.0"')
-          BASE="${PREV%%-*}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          PLUGIN_VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
-          echo "version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Bumping npm $PREV → $PLUGIN_VERSION"
-          jq --arg v "$PLUGIN_VERSION" '.version = $v' \
-            packages/envoy-plugin/package.json > tmp.json \
-            && mv tmp.json packages/envoy-plugin/package.json
-      - name: Build plugin
-        run: bun run build
-        working-directory: packages/envoy-plugin
-      - name: Check if already published
-        id: check
-        env:
-          VERSION: ${{ steps.plugin_version.outputs.version }}
-        run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/${VERSION}")
-          if [ "$STATUS" = "200" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "✓ @sjawhar/opencode-legion-envoy@${VERSION} already published"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm
-        if: steps.check.outputs.skip != 'true'
-        run: npm publish --access public --provenance
-        working-directory: packages/envoy-plugin
-      - name: Pack plugin
-        run: bun pm pack
-        working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opencode-legion-envoy-plugin
-          path: packages/envoy-plugin/*.tgz
-
-  envoy:
+  build:
     needs: version
     runs-on: ubuntu-24.04
     strategy:
@@ -160,15 +101,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Generate Go contracts from shared schema
+      - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
-      - name: Build envoy binaries
+      - name: Build envoy binary
         run: |
           mkdir -p out
           GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-listener ./cmd/listener
@@ -180,7 +120,7 @@ jobs:
           path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
 
   docker:
-    needs: [version, envoy]
+    needs: [version, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -190,8 +130,7 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
       - uses: oven-sh/setup-bun@v2
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
@@ -209,12 +148,14 @@ jobs:
           file: packages/envoy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
             ghcr.io/sjawhar/legion/envoy:latest
 
   release:
-    needs: [version, plugin, envoy]
+    needs: [version, build, docker]
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     steps:
@@ -223,25 +164,17 @@ jobs:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
-      - name: Bump version in repo
-        run: |
-          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' \
-            packages/envoy-plugin/package.json > tmp.json \
-            && mv tmp.json packages/envoy-plugin/package.json
-
-      - name: Commit and tag
+      - name: Tag release
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/envoy-plugin/package.json
-          git diff --staged --quiet || git commit -m "chore: release envoy-plugin v${{ needs.version.outputs.version }} [skip ci]"
           git tag "${{ needs.version.outputs.tag }}"
-          git push origin main --tags
+          git push origin --tags
 
       - uses: actions/download-artifact@v4
       - name: Generate checksums
         run: |
-          for dir in legion-envoy-amd64 legion-envoy-arm64 opencode-legion-envoy-plugin; do
+          for dir in legion-envoy-amd64 legion-envoy-arm64; do
             (cd "$dir" && sha256sum * >> ../SHA256SUMS)
           done
       - name: Create GitHub release
@@ -250,8 +183,7 @@ jobs:
         run: |
           gh release create "${{ needs.version.outputs.tag }}" \
             --title "${{ needs.version.outputs.tag }}" \
-            --notes "Automated Legion Envoy/plugin release from the Legion monorepo." \
+            --notes "Envoy listener release — Go binary + Docker image." \
             legion-envoy-amd64/* \
             legion-envoy-arm64/* \
-            opencode-legion-envoy-plugin/* \
             SHA256SUMS

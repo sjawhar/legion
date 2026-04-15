@@ -1,0 +1,103 @@
+name: Release Envoy Plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/envoy-plugin/**"
+      - "packages/contracts/**"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: release-envoy-plugin
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      should_publish: ${{ steps.bump.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Determine if plugin changed
+        id: bump
+        run: |
+          # Get latest published version from npm
+          PREV=$(curl -s https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/latest | jq -r '.version // "0.0.0"')
+          BASE="${PREV%%-*}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+          VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
+
+          # Check if there are actual plugin/contracts changes since last release
+          LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
+          if [ -n "$LATEST_TAG" ]; then
+            COMMITS=$(git log "${LATEST_TAG}..HEAD" --format='%s' -- packages/envoy-plugin/ packages/contracts/)
+            if [ -z "$COMMITS" ]; then
+              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              echo "No plugin/contracts commits since $LATEST_TAG"
+              exit 0
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          echo "Bumping npm $PREV → $VERSION"
+
+  publish:
+    needs: version
+    if: needs.version.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - run: bun install --frozen-lockfile
+
+      - name: Set version
+        run: |
+          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' \
+            packages/envoy-plugin/package.json > tmp.json \
+            && mv tmp.json packages/envoy-plugin/package.json
+
+      - name: Build plugin
+        run: bun run build
+        working-directory: packages/envoy-plugin
+
+      - name: Check if already published
+        id: check
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/${VERSION}")
+          if [ "$STATUS" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Already published"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.skip != 'true'
+        run: npm publish --access public --provenance
+        working-directory: packages/envoy-plugin
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack plugin
+        run: bun pm pack
+        working-directory: packages/envoy-plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-legion-envoy-plugin
+          path: packages/envoy-plugin/*.tgz

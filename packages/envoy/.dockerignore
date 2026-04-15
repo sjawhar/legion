@@ -11,3 +11,14 @@ coverage
 .idea
 docker-data
 tmp
+
+# Test files — not needed in production image
+**/*_test.go
+internal/integration/
+internal/smoke/
+
+# Build/deploy tooling
+scripts/
+deploy/
+infra/
+docker/base/
