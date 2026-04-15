@@ -244,7 +244,7 @@ func (env *testEnv) startConsumer(machineID string) {
 
 // --- TESTS ---
 
-func TestE2E_AgentMessageDeliveredExactlyOnce(t *testing.T) {
+func TestDelivery_AgentMessageDeliveredExactlyOnce(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_target", port, nil)
@@ -259,7 +259,7 @@ func TestE2E_AgentMessageDeliveredExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestE2E_DuplicateEnvelopeDeduped(t *testing.T) {
+func TestDelivery_DuplicateEnvelopeDeduped(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_target", port, nil)
@@ -277,7 +277,7 @@ func TestE2E_DuplicateEnvelopeDeduped(t *testing.T) {
 	}
 }
 
-func TestE2E_BroadcastDeliveredToAllSubscribers(t *testing.T) {
+func TestDelivery_BroadcastDeliveredToAllSubscribers(t *testing.T) {
 	env := setupTestEnv(t)
 
 	port1, deliveries1, _, _ := mockSession(t)
@@ -298,7 +298,7 @@ func TestE2E_BroadcastDeliveredToAllSubscribers(t *testing.T) {
 	}
 }
 
-func TestE2E_BroadcastSkipsSender(t *testing.T) {
+func TestDelivery_BroadcastSkipsSender(t *testing.T) {
 	env := setupTestEnv(t)
 
 	portSender, deliveriesSender, _, _ := mockSession(t)
@@ -322,7 +322,7 @@ func TestE2E_BroadcastSkipsSender(t *testing.T) {
 	}
 }
 
-func TestE2E_BroadcastEmptySourceSessionDeliveredToAll(t *testing.T) {
+func TestDelivery_BroadcastEmptySourceSessionDeliveredToAll(t *testing.T) {
 	env := setupTestEnv(t)
 
 	port1, deliveries1, _, _ := mockSession(t)
@@ -346,7 +346,7 @@ func TestE2E_BroadcastEmptySourceSessionDeliveredToAll(t *testing.T) {
 	}
 }
 
-func TestE2E_DeliveryFailureRetries(t *testing.T) {
+func TestDelivery_DeliveryFailureRetries(t *testing.T) {
 	env := setupTestEnv(t)
 
 	// Start with a dead port (no mock server)
@@ -368,7 +368,7 @@ func TestE2E_DeliveryFailureRetries(t *testing.T) {
 	}
 }
 
-func TestE2E_NoRegistryEntryNoDelivery(t *testing.T) {
+func TestDelivery_NoRegistryEntryNoDelivery(t *testing.T) {
 	env := setupTestEnv(t)
 
 	env.registry.Upsert(store.Interest{
@@ -389,7 +389,7 @@ func TestE2E_NoRegistryEntryNoDelivery(t *testing.T) {
 	}
 }
 
-func TestE2E_PromptAsyncBodyContainsNotification(t *testing.T) {
+func TestDelivery_PromptAsyncBodyContainsNotification(t *testing.T) {
 	env := setupTestEnv(t)
 	port, _, bodies, _ := mockSession(t)
 	env.registerSession("ses_target", port, nil)
@@ -478,7 +478,7 @@ func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 	t.Fatalf("timed out waiting for role transfer: A=%v B=%v matches=%v", a.Topics, b.Topics, matches)
 }
 
-func TestE2E_WildcardTopicMatching(t *testing.T) {
+func TestDelivery_WildcardTopicMatching(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_wildcard", port, []string{"notifications.slack.*.*.mention"})
@@ -492,7 +492,7 @@ func TestE2E_WildcardTopicMatching(t *testing.T) {
 	}
 }
 
-func TestE2E_UnsubscribeStopsDelivery(t *testing.T) {
+func TestDelivery_UnsubscribeStopsDelivery(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	broadcastTopic := "notifications.slack.T999.C999.mention"
@@ -520,7 +520,7 @@ func TestE2E_UnsubscribeStopsDelivery(t *testing.T) {
 	}
 }
 
-func TestE2E_ReplyToInBody(t *testing.T) {
+func TestDelivery_ReplyToInBody(t *testing.T) {
 	env := setupTestEnv(t)
 	port, _, bodies, _ := mockSession(t)
 	env.registerSession("ses_reply", port, nil)
@@ -553,7 +553,7 @@ func TestE2E_ReplyToInBody(t *testing.T) {
 	}
 }
 
-func TestE2E_SessionReRegistration(t *testing.T) {
+func TestDelivery_SessionReRegistration(t *testing.T) {
 	env := setupTestEnv(t)
 
 	portA, deliveriesA, _, _ := mockSession(t)
@@ -586,7 +586,7 @@ func TestE2E_SessionReRegistration(t *testing.T) {
 	}
 }
 
-func TestE2E_DedupeWindowExpiry(t *testing.T) {
+func TestDelivery_DedupeWindowExpiry(t *testing.T) {
 	env := setupTestEnv(t)
 	env.dedupe = dedupe.New(500 * time.Millisecond)
 
@@ -606,7 +606,7 @@ func TestE2E_DedupeWindowExpiry(t *testing.T) {
 	}
 }
 
-func TestE2E_MalformedEnvelope(t *testing.T) {
+func TestDelivery_MalformedEnvelope(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_healthy", port, []string{"notifications.test.*"})
@@ -636,7 +636,7 @@ func TestE2E_MalformedEnvelope(t *testing.T) {
 	}
 }
 
-func TestE2E_ConcurrentPublish(t *testing.T) {
+func TestDelivery_ConcurrentPublish(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	env.registerSession("ses_concurrent", port, []string{"notifications.slack.*.*.concurrent"})
@@ -658,7 +658,7 @@ func TestE2E_ConcurrentPublish(t *testing.T) {
 	}
 }
 
-func TestE2E_MaxDeliverExhaustion(t *testing.T) {
+func TestDelivery_MaxDeliverExhaustion(t *testing.T) {
 	env := setupTestEnv(t)
 
 	env.registry.Upsert(store.Interest{
@@ -706,7 +706,7 @@ func TestE2E_MaxDeliverExhaustion(t *testing.T) {
 
 // --- REGRESSION TESTS ---
 
-func TestE2E_NoAgentFieldInPromptAsync(t *testing.T) {
+func TestDelivery_NoAgentFieldInPromptAsync(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, bodies, _ := mockSession(t)
 	env.registerSession("ses_noagent", port, nil)
@@ -747,7 +747,7 @@ func TestE2E_NoAgentFieldInPromptAsync(t *testing.T) {
 	}
 }
 
-func TestE2E_SessionWithKVAndInterestDeliveredOnce(t *testing.T) {
+func TestDelivery_SessionWithKVAndInterestDeliveredOnce(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 
@@ -763,7 +763,7 @@ func TestE2E_SessionWithKVAndInterestDeliveredOnce(t *testing.T) {
 	}
 }
 
-func TestE2E_UnsubscribeEmptyTopicsDeletesAll(t *testing.T) {
+func TestDelivery_UnsubscribeEmptyTopicsDeletesAll(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 	broadcastTopic := "notifications.slack.T888.C888.mention"
@@ -797,7 +797,7 @@ func TestE2E_UnsubscribeEmptyTopicsDeletesAll(t *testing.T) {
 	}
 }
 
-func TestE2E_StaleSubDedupeProtectsLiveSession(t *testing.T) {
+func TestDelivery_StaleSubDedupeProtectsLiveSession(t *testing.T) {
 	env := setupTestEnv(t)
 	broadcastTopic := "notifications.slack.*.*.mention"
 	concreteTopic := "notifications.slack.T777.C777.mention"
@@ -822,7 +822,7 @@ func TestE2E_StaleSubDedupeProtectsLiveSession(t *testing.T) {
 	}
 }
 
-func TestE2E_KVFirstDeliverySkipsFile(t *testing.T) {
+func TestDelivery_KVFirstDeliverySkipsFile(t *testing.T) {
 	env := setupTestEnv(t)
 
 	port, deliveries, _, _ := mockSession(t)
@@ -838,7 +838,7 @@ func TestE2E_KVFirstDeliverySkipsFile(t *testing.T) {
 	}
 }
 
-func TestE2E_BroadcastUsesKVPort(t *testing.T) {
+func TestDelivery_BroadcastUsesKVPort(t *testing.T) {
 	env := setupTestEnv(t)
 
 	port, deliveries, _, _ := mockSession(t)
@@ -854,7 +854,7 @@ func TestE2E_BroadcastUsesKVPort(t *testing.T) {
 	}
 }
 
-func TestE2E_KVEntryExpiresButInterestPersists(t *testing.T) {
+func TestDelivery_KVEntryExpiresButInterestPersists(t *testing.T) {
 	env := setupTestEnv(t, withSessionTTL(2*time.Second))
 
 	port, _, _, _ := mockSession(t)
@@ -882,7 +882,7 @@ func TestE2E_KVEntryExpiresButInterestPersists(t *testing.T) {
 	t.Fatal("KV entry did not expire within 5s (TTL was 2s)")
 }
 
-func TestE2E_ResumeDeliveryAfterReRegistration(t *testing.T) {
+func TestDelivery_ResumeDeliveryAfterReRegistration(t *testing.T) {
 	env := setupTestEnv(t, withSessionTTL(2*time.Second))
 
 	portA, deliveriesA, _, _ := mockSession(t)
@@ -917,7 +917,7 @@ func TestE2E_ResumeDeliveryAfterReRegistration(t *testing.T) {
 // TestE2E_CrossMachineAgentMessageACKsWithoutDelivery verifies that when an agent
 // message targets a session on machine-B, machine-A's listener ACKs (does not deliver
 // or NAK). This prevents wasting MaxDeliver budget on wrong-machine retries.
-func TestE2E_CrossMachineAgentMessageACKsWithoutDelivery(t *testing.T) {
+func TestDelivery_CrossMachineAgentMessageACKsWithoutDelivery(t *testing.T) {
 	env := setupTestEnv(t)
 	// Override deliverer machine ID to match the consumer's machine-A
 	env.deliverer.MachineID = "machine-A"
@@ -956,7 +956,7 @@ func TestE2E_CrossMachineAgentMessageACKsWithoutDelivery(t *testing.T) {
 
 // TestE2E_CrossMachineBroadcastFilteredByMatch verifies that broadcast messages
 // are only delivered to sessions on the local machine (registry.Match filters by machine_id).
-func TestE2E_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
+func TestDelivery_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
 	env := setupTestEnv(t)
 	// Override deliverer machine ID to match the consumer's machine-A
 	env.deliverer.MachineID = "machine-A"
@@ -1008,7 +1008,7 @@ func TestE2E_CrossMachineBroadcastFilteredByMatch(t *testing.T) {
 	}
 }
 
-func TestE2E_RegistryListReturnsSortedInterests(t *testing.T) {
+func TestDelivery_RegistryListReturnsSortedInterests(t *testing.T) {
 	env := setupTestEnv(t)
 
 	env.registerInterest("ses_charlie", []string{"notifications.test.>"})
@@ -1035,7 +1035,7 @@ func TestE2E_RegistryListReturnsSortedInterests(t *testing.T) {
 
 // --- WHATSAPP MCP BRIDGE INTEGRATION ---
 
-func TestE2E_WhatsappTopicRouting(t *testing.T) {
+func TestDelivery_WhatsappTopicRouting(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, bodies, _ := mockSession(t)
 
@@ -1065,7 +1065,7 @@ func TestE2E_WhatsappTopicRouting(t *testing.T) {
 	}
 }
 
-func TestE2E_WhatsappDifferentPhoneNotDelivered(t *testing.T) {
+func TestDelivery_WhatsappDifferentPhoneNotDelivered(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
 
@@ -1083,7 +1083,7 @@ func TestE2E_WhatsappDifferentPhoneNotDelivered(t *testing.T) {
 	}
 }
 
-func TestE2E_WhatsappMultipleSubscribers(t *testing.T) {
+func TestDelivery_WhatsappMultipleSubscribers(t *testing.T) {
 	env := setupTestEnv(t)
 
 	port1, deliveries1, _, _ := mockSession(t)

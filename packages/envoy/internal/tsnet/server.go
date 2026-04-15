@@ -21,9 +21,10 @@ type Server struct {
 // The caller must call Close when finished.
 func New(cfg Config) *Server {
 	ts := &tsnet.Server{
-		Hostname: cfg.Hostname,
-		Dir:      cfg.StateDir,
-		AuthKey:  cfg.AuthKey,
+		Hostname:      cfg.Hostname,
+		Dir:           cfg.StateDir,
+		AuthKey:       cfg.AuthKey,
+		AdvertiseTags: cfg.Tags,
 		// Silence verbose internal logs (WireGuard, LocalBackend).
 		// Only user-visible logs (auth URL, status) go to the app logger.
 		Logf:     func(string, ...any) {},
@@ -83,4 +84,9 @@ func (s *Server) Close() error {
 // Hostname returns the configured Tailscale hostname.
 func (s *Server) Hostname() string {
 	return s.ts.Hostname
+}
+
+// HTTPClient returns an HTTP client configured to dial over tsnet.
+func (s *Server) HTTPClient() *http.Client {
+	return s.ts.HTTPClient()
 }

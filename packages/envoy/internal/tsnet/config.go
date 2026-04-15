@@ -34,6 +34,10 @@ type Config struct {
 	// constructed from OAuth client credentials (preferred). See
 	// resolveAuthKey for details.
 	AuthKey string
+
+	// Tags are the ACL tags to advertise (e.g. []string{"tag:envoy"}).
+	// Required when using OAuth client credentials.
+	Tags []string
 }
 
 // resolveAuthKey determines the auth key from environment variables.
@@ -78,18 +82,8 @@ func resolveAuthKey() (string, error) {
 		params := url.Values{}
 		params.Set("ephemeral", "false")
 		params.Set("preauthorized", "true")
-
-		// Normalize tags: split, trim, rejoin without spaces.
-		rawTags := strings.Split(tags, ",")
-		cleaned := make([]string, 0, len(rawTags))
-		for _, t := range rawTags {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				cleaned = append(cleaned, t)
-			}
-		}
-		params.Set("tags", strings.Join(cleaned, ","))
-
+		// Tags are passed via tsnet.Server.AdvertiseTags, NOT in the auth key URL.
+		// tsnet rejects unknown query params like "tags=".
 		return oauthSecret + "?" + params.Encode(), nil
 	}
 
@@ -129,10 +123,20 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	var parsedTags []string
+	if rawTags := strings.TrimSpace(os.Getenv("ENVOY_TSNET_TAGS")); rawTags != "" {
+		for _, t := range strings.Split(rawTags, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				parsedTags = append(parsedTags, t)
+			}
+		}
+	}
+
 	return Config{
 		Enabled:  true,
 		Hostname: hostname,
 		StateDir: stateDir,
 		AuthKey:  authKey,
+		Tags:     parsedTags,
 	}, nil
 }

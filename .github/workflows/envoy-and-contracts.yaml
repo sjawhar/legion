@@ -84,6 +84,9 @@ jobs:
       - name: Build envoy services
         run: go build ./cmd/listener
         working-directory: packages/envoy
+      - name: Container smoke test (testcontainers)
+        run: go test -tags smoke -v -timeout 5m ./internal/smoke/
+        working-directory: packages/envoy
       - name: Pack envoy binaries
         run: |
           mkdir -p ../../out/pr-artifacts/envoy-amd64

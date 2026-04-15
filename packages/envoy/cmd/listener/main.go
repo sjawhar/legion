@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/sjawhar/envoy/internal/logging"
+	"log/slog"
 	"encoding/json"
 	"errors"
 	"log"
@@ -21,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/metrics"
 	envoytsnet "github.com/sjawhar/envoy/internal/tsnet"
 	"github.com/sjawhar/envoy/internal/webhook"
 )
@@ -40,6 +43,33 @@ var rolePattern = regexp.MustCompile(rolePatternString)
 
 func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
+}
+
+// startListenerSubscription preserves the durable consumer so restarts resume
+// from the last ACKed message instead of skipping pending work.
+func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
+	return client.Subscribe(
+		"notifications.>",
+		handler,
+		nats.Durable(consumer),
+		nats.AckExplicit(),
+		nats.ManualAck(),
+		nats.AckWait(60*time.Second),
+		nats.MaxAckPending(256),
+		nats.MaxDeliver(20),
+	)
+}
+
+func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
+	_, err := sessions.Get(sessionID)
+	return err == nil
+}
+
+func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string, err error) bool {
+	if err == nil {
+		return false
+	}
+	return isSessionLive(sessions, sessionID)
 }
 
 // readinessGate returns 503 until ready returns true, providing a single
@@ -63,10 +93,11 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		var body struct {
-			Source        string `json:"source"`
-			SourceSession string `json:"source_session"`
-			Topic         string `json:"topic"`
-			Message       string `json:"message"`
+			Source         string `json:"source"`
+			SourceSession  string `json:"source_session"`
+			Topic          string `json:"topic"`
+			Message        string `json:"message"`
+			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
@@ -83,13 +114,17 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if body.Source == "" {
 			body.Source = "agent"
 		}
+		dedupeKey := "publish." + id.New()
+		if body.IdempotencyKey != "" {
+			dedupeKey = "publish." + body.IdempotencyKey
+		}
 		item := contracts.Envelope{
 			EventID:        id.New(),
 			Source:         body.Source,
 			SourceSession:  body.SourceSession,
 			SourceEventID:  id.New(),
 			Topic:          body.Topic,
-			DedupeKey:      "publish." + id.New(),
+			DedupeKey:      dedupeKey,
 			IssuedAt:       contracts.NowMillis(),
 			PayloadSummary: body.Message,
 			TraceID:        id.New(),
@@ -247,6 +282,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	logger := logging.New(cfg.MachineID)
 
 	// Load tsnet config (fast — env var reads only).
 	tsCfg, err := envoytsnet.LoadConfig()
@@ -272,32 +308,74 @@ func main() {
 	// Shared state: nil until NATS initialization completes.
 	var deps atomic.Pointer[listenerDeps]
 
+	// Metrics registry — /metrics available during startup (like /healthz).
+	met := metrics.New()
+	messagesReceived := met.NewCounter("envoy_messages_received_total", "Total messages received by the listener")
+	messagesDelivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
+	messagesNAKed := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
+	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
+	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
+		d := deps.Load()
+		if d == nil || d.sessions == nil {
+			return 0
+		}
+		entries, err := d.sessions.List()
+		if err != nil {
+			return 0
+		}
+		return int64(len(entries))
+	})
+	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
+		d := deps.Load()
+		if d == nil || d.registry == nil {
+			return 0
+		}
+		return int64(len(d.registry.List()))
+	})
+
 	// Phase 3: Build HTTP mux.
 	mux := http.NewServeMux()
 
+	// /metrics is always reachable — NOT gated by readiness.
+	mux.Handle("/metrics", met.Handler())
+
+	var healthzConsumer string
 	// /healthz is always reachable — returns 200 "starting" before NATS init,
 	// 200 "healthy" after init with live NATS, 503 "unhealthy" if NATS drops.
+	// Consumer lag metrics are included when available (after subscription setup).
+	// 200 "healthy" after init with live NATS, 503 "unhealthy" if NATS drops.
+	// Consumer lag metrics are included when available (after subscription setup).
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		d := deps.Load()
 		if d == nil {
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
 			return
 		}
 		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "nats unavailable"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
 			return
 		}
 		if !d.client.SubOK() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "error": "subscription inactive"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
 			return
 		}
+		response := map[string]interface{}{"status": "healthy"}
+		if healthzConsumer != "" {
+			consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, healthzConsumer)
+			if err == nil && consumerInfo != nil {
+				response["num_pending"] = consumerInfo.NumPending
+				response["num_ack_pending"] = consumerInfo.NumAckPending
+			}
+		}
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+		_ = json.NewEncoder(w).Encode(response)
 	})
+
+	// GaugeFunc for consumer pending — queries NATS at scrape time
 
 	// Webhook routes — on public mux, gated by readiness.
 	// Publisher delegates to deps.client behind readinessGate.
@@ -342,7 +420,7 @@ func main() {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		log.Printf("listener subscribe session=%s topics=%v port=%d dir=%s", body.SessionID, body.Topics, body.Port, body.Dir)
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.String("dir", body.Dir))
 		d := deps.Load()
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
@@ -360,7 +438,7 @@ func main() {
 				Dir:       body.Dir,
 				Title:     body.Title,
 			}); err != nil {
-				log.Printf("listener session registry put failed session=%s: %v", body.SessionID, err)
+				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -379,7 +457,7 @@ func main() {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		log.Printf("listener unsubscribe session=%s topics=%v", body.SessionID, body.Topics)
+		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
 		d := deps.Load()
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -419,13 +497,18 @@ func main() {
 			return
 		}
 		var body struct {
-			SourceSession string `json:"source_session"`
-			TargetSession string `json:"target_session"`
-			Message       string `json:"message"`
+			SourceSession  string `json:"source_session"`
+			TargetSession  string `json:"target_session"`
+			Message        string `json:"message"`
+			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
+		}
+		dedupeKey := "agent." + body.TargetSession + "." + id.New()
+		if body.IdempotencyKey != "" {
+			dedupeKey = "agent." + body.TargetSession + "." + body.IdempotencyKey
 		}
 		item := contracts.Envelope{
 			EventID:        id.New(),
@@ -433,7 +516,7 @@ func main() {
 			SourceSession:  body.SourceSession,
 			SourceEventID:  id.New(),
 			Topic:          contracts.AgentSubject(body.TargetSession),
-			DedupeKey:      "agent." + body.TargetSession + "." + id.New(),
+			DedupeKey:      dedupeKey,
 			IssuedAt:       contracts.NowMillis(),
 			PayloadSummary: body.Message,
 			TraceID:        id.New(),
@@ -452,12 +535,9 @@ func main() {
 	})
 	v1.HandleFunc("/v1/messages/publish", publishHandler(&deps))
 
-	// When tsnet is disabled, serve /v1/* on the legacy port (existing behavior).
-	// When tsnet is enabled, /v1/* is served exclusively on the tsnet TLS listener
-	// and the legacy port only has /healthz (security boundary).
-	if !tsCfg.Enabled {
-		mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
-	}
+	// Always serve /v1/* on the legacy port for local plugin registration.
+	// The tsnet TLS listener (if enabled) also serves /v1/* on :443 for cross-machine access.
+	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 
 	// Phase 4: Start HTTP server (port already bound via net.Listen).
 	server := &http.Server{
@@ -473,7 +553,7 @@ func main() {
 			fatal <- err
 		}
 	}()
-	log.Printf("envoy-listener listening on %s", addr)
+	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
 	// Phase 4.5: Start tsnet server (if enabled). The tsnet node connects
 	// to the Tailscale network, which is a slow operation like NATS connect.
@@ -486,13 +566,11 @@ func main() {
 		tsMux := http.NewServeMux()
 		tsMux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 		if _, err := tsServer.Serve(tsMux, fatal); err != nil {
-			log.Printf("WARNING: tsnet failed to start (non-fatal, continuing without Tailscale): %v", err)
+			logger.Warn("tsnet failed to start (non-fatal, continuing without Tailscale)", slog.String("error", err.Error()))
 			tsServer.Close()
 			tsServer = nil
-			// Fall back: serve /v1/* on the legacy port since tsnet is unavailable
-			mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 		} else {
-			log.Printf("envoy-listener tsnet serving /v1/* on %s:443", tsServer.Hostname())
+			logger.Info("envoy-listener tsnet serving /v1/* on :443", slog.String("hostname", tsServer.Hostname()))
 		}
 	}
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
@@ -521,6 +599,9 @@ func main() {
 		RequestLimit: 30 * time.Second,
 		Sessions:     sessions,
 	}
+	if tsServer != nil {
+		deliver.HTTPClient = tsServer.HTTPClient()
+	}
 
 	dedupeCache := dedupe.New(10 * time.Minute)
 
@@ -534,29 +615,35 @@ func main() {
 	attemptCache := dedupe.New(5 * time.Minute)
 
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	_, err = client.Subscribe("notifications.>", func(msg *nats.Msg) {
+	healthzConsumer = consumer
+
+	// /healthz handler was registered early (before NATS) — no re-registration needed.
+
+	_, err = startListenerSubscription(client, consumer, func(msg *nats.Msg) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			log.Printf("listener decode failed: %v", err)
+			logger.Error("listener decode failed", slog.String("error", err.Error()))
 			_ = msg.Ack()
 			return
 		}
 		if err := item.Validate(); err != nil {
-			log.Printf("listener invalid envelope: %v", err)
+			logger.Error("listener invalid envelope", slog.String("error", err.Error()))
 			_ = msg.Ack()
 			return
 		}
-		log.Printf("listener received machine=%s source=%s source_session=%s topic=%s event_id=%s payload=%.80s", cfg.MachineID, item.Source, item.SourceSession, item.Topic, item.EventID, item.PayloadSummary)
+		messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
+		logger.Info("listener received", slog.String("source", item.Source), slog.String("source_session", item.SourceSession), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("payload_summary", item.PayloadSummary))
 		if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
 			sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 			if dedupeCache.Seen(item.DedupeKey, sessionID) {
-				log.Printf("listener dedupe skip session=%s dedupe_key=%s", sessionID, item.DedupeKey)
+				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
 				_ = msg.Ack()
 				return
 			}
 			if attemptCache.Seen(item.DedupeKey, sessionID) {
-				log.Printf("listener attempt-dedupe skip session=%s dedupe_key=%s", sessionID, item.DedupeKey)
+				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", sessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
 				_ = msg.Ack()
 				return
 			}
@@ -566,17 +653,26 @@ func main() {
 				interestPtr = &interest
 			}
 			attemptCache.Record(item.DedupeKey, sessionID)
+			deliveryTimer := metrics.NewTimer()
 			result := session.HandleAgentMessage(item, sessionID, cfg.MachineID, interestPtr, &deliver)
 			if result.Err != nil {
-				log.Printf("listener agent delivery failed session=%s: %v", sessionID, result.Err)
+				logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
+			}
+			if !result.Delivered && result.Err != nil {
+				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "failed"})
+				messagesDelivered.Inc([2]string{"delivery_status", "failed"})
 			}
 			if result.Delivered {
+				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "delivered"})
+				messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
 				dedupeCache.Record(item.DedupeKey, sessionID)
-				log.Printf("listener agent delivered session=%s event_id=%s", sessionID, item.EventID)
+				logger.DeliveryLog(slog.LevelInfo, "listener agent delivered", sessionID, item.Topic, item.EventID, "delivered")
 			} else if result.Err == nil {
-				log.Printf("listener agent session not found anywhere session=%s", sessionID)
+				messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+				logger.DeliveryLog(slog.LevelWarn, "listener agent session not found anywhere", sessionID, item.Topic, item.EventID, "skipped")
 			}
 			if result.ShouldNAK {
+				messagesNAKed.Inc()
 				_ = msg.NakWithDelay(30 * time.Second)
 			} else {
 				_ = msg.Ack()
@@ -585,38 +681,55 @@ func main() {
 		}
 		items := registry.Match(cfg.MachineID, item.Topic)
 		if len(items) == 0 {
-			log.Printf("listener no matching interests for topic=%s", item.Topic)
+			logger.Info("listener no matching interests", slog.String("topic", item.Topic))
 			_ = msg.Ack()
 			return
 		}
 		var failed bool
+		var deadDeliveries int
 		for _, interest := range items {
 			if dedupeCache.Seen(item.DedupeKey, interest.SessionID) {
-				log.Printf("listener dedupe skip session=%s dedupe_key=%s", interest.SessionID, item.DedupeKey)
+				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", interest.SessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
 				continue
 			}
 			if attemptCache.Seen(item.DedupeKey, interest.SessionID) {
-				log.Printf("listener attempt-dedupe skip session=%s dedupe_key=%s", interest.SessionID, item.DedupeKey)
+				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", interest.SessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
 				continue
 			}
 			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
-				log.Printf("listener skip echo session=%s topic=%s", interest.SessionID, item.Topic)
+				messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+				logger.DeliveryLog(slog.LevelInfo, "listener skip echo", interest.SessionID, item.Topic, item.EventID, "skipped")
 				continue
 			}
 			attemptCache.Record(item.DedupeKey, interest.SessionID)
+			deliveryTimer := metrics.NewTimer()
 			if err := deliver.Deliver(item, interest); err != nil {
-				log.Printf("listener delivery failed session=%s: %v", interest.SessionID, err)
-				failed = true
+				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "failed"})
+				messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+				if shouldNAKFanoutDelivery(sessions, interest.SessionID, err) {
+					failed = true
+				} else {
+					deadDeliveries++
+				}
 			} else {
+				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "delivered"})
+				messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
 				dedupeCache.Record(item.DedupeKey, interest.SessionID)
 			}
 		}
+		if deadDeliveries > 0 {
+			logger.Info("listener skipped dead session deliveries", slog.String("topic", item.Topic), slog.Int("count", deadDeliveries))
+		}
 		if failed {
+			messagesNAKed.Inc()
 			_ = msg.NakWithDelay(30 * time.Second)
 		} else {
 			_ = msg.Ack()
 		}
-	}, nats.Durable(consumer), nats.DeliverNew(), nats.AckExplicit(), nats.ManualAck(), nats.AckWait(60*time.Second), nats.MaxAckPending(256), nats.MaxDeliver(20))
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -627,7 +740,12 @@ func main() {
 		registry: registry,
 		sessions: sessions,
 	})
-	log.Printf("envoy-listener ready (NATS connected)")
+	logger.Info("envoy-listener ready (NATS connected)")
+
+	// Phase 6b: Start interest reaper for stale KV cleanup.
+	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
+	// to prune orphaned interests from dead sessions.
+	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 
 	// Phase 7: Block until fatal error from HTTP server.
 	log.Fatal(<-fatal)

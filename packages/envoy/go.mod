@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/nats-io/nats.go v1.50.0
+	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/nats v0.41.0
 	tailscale.com v1.96.5
 )
@@ -93,7 +94,6 @@ require (
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976 // indirect
 	github.com/tailscale/wireguard-go v0.0.0-20250716170648-1d0488a3d7da // indirect
-	github.com/testcontainers/testcontainers-go v0.41.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

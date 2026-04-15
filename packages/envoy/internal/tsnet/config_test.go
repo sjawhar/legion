@@ -191,8 +191,11 @@ func TestLoadConfig_OAuth_HappyPath(t *testing.T) {
 	if !strings.Contains(cfg.AuthKey, "preauthorized=true") {
 		t.Fatalf("expected preauthorized=true in auth key, got %q", cfg.AuthKey)
 	}
-	if !strings.Contains(cfg.AuthKey, "tags=tag%3Aenvoy") {
-		t.Fatalf("expected tags=tag%%3Aenvoy in auth key, got %q", cfg.AuthKey)
+	if strings.Contains(cfg.AuthKey, "tags=") {
+		t.Fatalf("tags should not be in auth key URL, got %q", cfg.AuthKey)
+	}
+	if len(cfg.Tags) != 1 || cfg.Tags[0] != "tag:envoy" {
+		t.Fatalf("expected Tags=[tag:envoy], got %v", cfg.Tags)
 	}
 }
 
@@ -203,8 +206,8 @@ func TestLoadConfig_OAuth_MultipleTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(cfg.AuthKey, "tag%3Aenvoy%2Ctag%3Alegion") {
-		t.Fatalf("expected both tags in auth key, got %q", cfg.AuthKey)
+	if len(cfg.Tags) != 2 || cfg.Tags[0] != "tag:envoy" || cfg.Tags[1] != "tag:legion" {
+		t.Fatalf("expected Tags=[tag:envoy, tag:legion], got %v", cfg.Tags)
 	}
 }
 
@@ -215,9 +218,8 @@ func TestLoadConfig_OAuth_TagsWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Tags should be trimmed and joined without extra spaces
-	if !strings.Contains(cfg.AuthKey, "tag%3Aenvoy%2Ctag%3Alegion") {
-		t.Fatalf("expected trimmed tags in auth key, got %q", cfg.AuthKey)
+	if len(cfg.Tags) != 2 || cfg.Tags[0] != "tag:envoy" || cfg.Tags[1] != "tag:legion" {
+		t.Fatalf("expected trimmed Tags=[tag:envoy, tag:legion], got %v", cfg.Tags)
 	}
 }
 

@@ -26,3 +26,5 @@ COPY --from=build /out/envoy-listener /usr/local/bin/envoy-listener
 # (WireGuard) and outbound TCP 443 (control plane).
 
 USER envoy
+
+ENTRYPOINT ["envoy-listener"]
