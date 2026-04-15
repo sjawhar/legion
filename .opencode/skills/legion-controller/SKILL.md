@@ -85,6 +85,17 @@ The controller MUST NOT ask "should I continue?" for routine operations. Act on 
 2. There is genuine stakeholder disagreement
 3. The situation is not covered by existing rules
 
+### Domain Authority Discovery
+
+At the start of each loop iteration, check if a `legion-po` role holder exists by calling
+`envoy_sessions` and scanning the result for a session whose `topics` array contains the
+exact string `"notifications.role.legion-po"`. Store the result as a boolean (`HAS_PO`)
+for the iteration.
+
+If `envoy_sessions` fails or no session has the `legion-po` role topic, set `HAS_PO` to
+false and skip all PO notifications for this iteration. Domain authority is advisory, never
+blocking — the controller's existing logic is always the fallback.
+
 ## Envoy Notifications
 
 The daemon automatically subscribes the controller to `notifications.agent.<session_id>` at startup. Workers send completion notifications directly to the controller session via `envoy_send` (the controller session ID is included in the dispatch prompt's ENVOY section). This gives you instant notification instead of waiting for the next polling cycle. The `worker-done` label remains the source of truth — Envoy is a speed optimization.
@@ -570,6 +581,17 @@ The skip-architect rule only applies when ALL conditions are met: `bug` label pr
 description contains clear reproduction steps, and the change is scoped to a single
 component. When in doubt, route to Backlog.
 
+**PO notification:** If `HAS_PO` is true, after making the triage routing decision, notify:
+
+```
+envoy_publish(topic="notifications.role.legion-po", message="Triage: routing $ISSUE_IDENTIFIER to [Icebox|Backlog|Todo]. Override via issue comment.")
+```
+
+Replace `[Icebox|Backlog|Todo]` with the actual routing decision. Proceed immediately — do not
+wait for a response. If `envoy_publish` fails, continue immediately — Envoy is advisory and the
+controller's normal flow remains the source of truth. If the PO disagrees, they comment on the
+issue, which the controller picks up via feedback relay (Step 2) on the next iteration.
+
 ### 5. Pull from Icebox
 
 **If active workers < 10:**
@@ -698,6 +720,15 @@ or pass credentials manually.
 **Always use skill invocation (`/skill-name`), not file paths.** Workers load skills via the
 skill system. Pointing them at file paths bypasses skill loading and risks the worker not
 getting the full skill content.
+
+**PO notification:** If `HAS_PO` is true, notify before dispatching:
+
+```
+envoy_publish(topic="notifications.role.legion-po", message="Dispatching $MODE worker for $ISSUE_IDENTIFIER in $ISSUE_REPO. Override via issue comment.")
+```
+
+Dispatch proceeds immediately — do not wait for a response. If `envoy_publish` fails, continue
+immediately — Envoy is advisory and the controller's normal flow remains the source of truth.
 
 ```bash
 # GitHub example:

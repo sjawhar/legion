@@ -1,0 +1,18 @@
+{
+  "prNumber": 566,
+  "prUrl": "https://github.com/sjawhar/legion/pull/566",
+  "filesChanged": [
+    ".opencode/skills/legion-controller/SKILL.md"
+  ],
+  "trickyParts": [
+    "Line numbers from plan matched exactly — no text-anchor fallback needed"
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-15T05:34:38.339Z"
+}
