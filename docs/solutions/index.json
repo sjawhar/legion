@@ -39,7 +39,8 @@
     "packages/daemon/src/cli": [
       "daemon/controller-lifecycle-separation.md",
       "daemon/targeted-delta-filtering-pattern.md",
-      "daemon/self-fetch-endpoint-composition.md"
+      "daemon/self-fetch-endpoint-composition.md",
+      "daemon/process-daemonization-pattern.md"
     ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
@@ -114,6 +115,7 @@
       "delegation/hardening-patterns.md",
       "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
     ],
+    "tag:cli": ["daemon/process-daemonization-pattern.md"],
     "tag:config": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
     "tag:controller": [
       "daemon/controller-observability.md",
@@ -217,7 +219,8 @@
     "tag:process-management": [
       "daemon/graceful-worker-shutdown.md",
       "daemon/opencode-serve-lifecycle.md",
-      "daemon/shared-serve-refactor.md"
+      "daemon/shared-serve-refactor.md",
+      "daemon/process-daemonization-pattern.md"
     ],
     "tag:protocol": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
@@ -328,7 +331,8 @@
     "tag:bun": [
       "delegation/bun-node-timer-type-portability.md",
       "infra/mixed-runtime-type-boundaries.md",
-      "daemon/targeted-delta-filtering-pattern.md"
+      "daemon/targeted-delta-filtering-pattern.md",
+      "daemon/process-daemonization-pattern.md"
     ],
     "tag:timer": ["delegation/bun-node-timer-type-portability.md"],
     "tag:portability": ["delegation/bun-node-timer-type-portability.md"],
@@ -411,6 +415,7 @@
     "packages/opencode-plugin/src": [
       "architecture-patterns/opencode-plugin-hook-authoring-patterns.md"
     ],
+    "tag:daemonization": ["daemon/process-daemonization-pattern.md"],
     "tag:dashboard": ["daemon/inline-html-dashboard-pattern.md"],
     "tag:html": ["daemon/inline-html-dashboard-pattern.md"],
     "tag:template-literal": ["daemon/inline-html-dashboard-pattern.md"],
