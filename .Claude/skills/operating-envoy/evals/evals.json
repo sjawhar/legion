@@ -1,0 +1,23 @@
+{
+  "skill_name": "operating-envoy",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The Fargate envoy-listener keeps crashing with 'consumer is already bound to a subscription'. The on-prem listener on sami-agents-mx is running fine. Both have unique ENVOY_MACHINE_IDs. How do I fix this?",
+      "expected_output": "Should identify the consumer conflict, provide the `nats consumer rm` command with the correct stream and consumer name, explain that the listener recreates it on startup, and mention the retry loop for rolling deploys.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I deployed the new envoy-listener image to Fargate with a fresh EFS volume. tsnet logs show 'Authkey is set; but state is NoState. Ignoring authkey. Re-run with TSNET_FORCE_LOGIN=1 to force use of authkey.' The OAuth credentials are set. What's wrong?",
+      "expected_output": "Should explain the tsnet NoState vs NeedsLogin distinction, recommend setting TSNET_FORCE_LOGIN=1 in the container environment, and explain this is a one-time bootstrap issue.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Envoy messaging is completely down from the users' perspective. The Fargate listener shows webhooks arriving but logs 'no matching interests' for every event. curl to the Fargate listener's /v1/sessions returns an empty array. What's happening and how do I fix it?",
+      "expected_output": "Should explain the listener-per-machine architecture (Fargate = webhook ingress only, empty sessions/interests is CORRECT for Fargate), identify that on-prem listeners are the delivery path, and guide checking on-prem listener health and session registration.",
+      "files": []
+    }
+  ]
+}
