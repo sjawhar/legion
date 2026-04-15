@@ -5508,6 +5508,12 @@ describe("daemon server", () => {
         }),
       });
 
+      // Track issue 11 so it flows through the trackedIssueIds filter
+      await requestJson("/state/track", {
+        method: "POST",
+        body: JSON.stringify({ issueId: "acme-widgets-11" }),
+      });
+
       // Second collect adds a new issue
       await requestJson("/state/collect", {
         method: "POST",

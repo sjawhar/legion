@@ -379,7 +379,7 @@ describe("computeStateDelta with trackedIssueIds", () => {
     expect(delta?.changes.changed).toHaveLength(1);
   });
 
-  it("empty trackedIssueIds: new issues still flow, changed/removed are empty", () => {
+  it("empty trackedIssueIds: all changes filtered out", () => {
     const previous = {
       "issue-1": createIssueState({ status: "Todo" }),
       "issue-2": createIssueState(),
@@ -390,12 +390,7 @@ describe("computeStateDelta with trackedIssueIds", () => {
     };
 
     const delta = computeStateDelta(previous, current, new Set());
-    // issue-3 is new — always flows
-    expect(delta?.changes.new).toEqual([{ issueId: "issue-3", state: current["issue-3"] }]);
-    // issue-2 removed but not tracked — filtered out
-    expect(delta?.changes.removed).toEqual([]);
-    // issue-1 changed but not tracked — filtered out
-    expect(delta?.changes.changed).toEqual([]);
+    expect(delta).toBeNull();
   });
 
   it("populated trackedIssueIds: filters changed to tracked set only", () => {
@@ -426,17 +421,19 @@ describe("computeStateDelta with trackedIssueIds", () => {
     expect(delta?.changes.removed).not.toContain("issue-2");
   });
 
-  it("new issues always flow regardless of trackedIssueIds", () => {
+  it("new issues filtered by trackedIssueIds", () => {
     const previous = {};
     const current = {
       "issue-1": createIssueState(),
       "issue-2": createIssueState(),
     };
 
-    // Neither issue is tracked
     const delta = computeStateDelta(previous, current, new Set(["issue-99"]));
-    expect(delta?.changes.new).toHaveLength(2);
-    expect(delta?.changes.new.map((d) => d.issueId).sort()).toEqual(["issue-1", "issue-2"]);
+    expect(delta).toBeNull();
+
+    const delta2 = computeStateDelta(previous, current, new Set(["issue-1"]));
+    expect(delta2?.changes.new).toHaveLength(1);
+    expect(delta2?.changes.new[0].issueId).toBe("issue-1");
   });
 
   it("returns null when tracked set filters out all changes", () => {
@@ -461,7 +458,7 @@ describe("computeStateDelta with trackedIssueIds", () => {
     expect(delta).toBeNull();
   });
 
-  it("mixed: new flows, tracked changed included, untracked changed excluded", () => {
+  it("mixed: tracked new and changed included, untracked excluded", () => {
     const previous = {
       "issue-1": createIssueState({ status: "Todo" }),
       "issue-2": createIssueState({ status: "Todo" }),
@@ -472,7 +469,7 @@ describe("computeStateDelta with trackedIssueIds", () => {
       "issue-3": createIssueState(),
     };
 
-    const delta = computeStateDelta(previous, current, new Set(["issue-1"]));
+    const delta = computeStateDelta(previous, current, new Set(["issue-1", "issue-3"]));
     expect(delta?.changes.new).toEqual([{ issueId: "issue-3", state: current["issue-3"] }]);
     expect(delta?.changes.changed).toHaveLength(1);
     expect(delta?.changes.changed[0].issueId).toBe("issue-1");
