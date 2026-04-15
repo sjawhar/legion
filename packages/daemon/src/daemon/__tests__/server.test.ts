@@ -71,7 +71,7 @@ describe("daemon server", () => {
       deleteSession: async (sessionId: string) => {
         deleteSessionCalls.push(sessionId);
       },
-      listActiveSessions: async () => new Set<string>(),
+      sessionExists: async () => false,
     };
   }
 
@@ -2209,9 +2209,8 @@ describe("daemon server", () => {
       return (await response.json()) as { id: string; sessionId: string };
     }
 
-    it("cleans up workspaces for dead workers via cleanupDeadWorkers", async () => {
+    it("removes dead worker state without touching workspaces", async () => {
       const rmDirCalls: string[] = [];
-      const jjCalls: string[][] = [];
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
@@ -2220,10 +2219,6 @@ describe("daemon server", () => {
         paths,
         adapter: makeAdapter(),
         repoManagerDeps: makeRepoManagerDeps({
-          runJj: async (args) => {
-            jjCalls.push(args);
-            return { exitCode: 0, stdout: "", stderr: "" };
-          },
           rmDir: async (workspacePath: string) => {
             rmDirCalls.push(workspacePath);
           },
@@ -2258,13 +2253,75 @@ describe("daemon server", () => {
         // Run cleanup
         await cleanupDeadWorkers();
 
-        // Verify workspace was cleaned: jj workspace forget + rmDir
-        const forgetCall = jjCalls.find((args) => args[0] === "workspace" && args[1] === "forget");
-        expect(forgetCall).toBeDefined();
-        expect(forgetCall).toContain("acme-widgets-60");
-        expect(rmDirCalls).toEqual([`/tmp/legion-data/workspaces/${legionId}/acme-widgets-60`]);
+        // Workspace should NOT be deleted (dead workers keep workspaces)
+        expect(rmDirCalls).toHaveLength(0);
 
-        // Verify worker was removed from the map
+        // But worker should be removed from the map
+        const workersRes = await originalFetch(`${localBaseUrl}/workers`);
+        const workers = (await workersRes.json()) as WorkerEntry[];
+        expect(workers).toEqual([]);
+      } finally {
+        stop();
+      }
+    });
+
+    it("cleanupDeadWorkers does NOT delete workspaces (state cleanup only)", async () => {
+      const rmDirCalls: string[] = [];
+      const jjCalls: string[][] = [];
+      const { server, stop, cleanupDeadWorkers } = startServer({
+        port: 0,
+        hostname: "127.0.0.1",
+        envoyUrl: mockEnvoy.url,
+        legionId,
+        paths,
+        adapter: makeAdapter(),
+        repoManagerDeps: makeRepoManagerDeps({
+          runJj: async (args) => {
+            jjCalls.push(args);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+          rmDir: async (workspacePath: string) => {
+            rmDirCalls.push(workspacePath);
+          },
+        }),
+        stateFilePath: path.join(
+          await mkdtemp(path.join(os.tmpdir(), "legion-dead-")),
+          "workers.json"
+        ),
+      });
+      const localBaseUrl = `http://127.0.0.1:${server.port}`;
+      try {
+        // Create a worker, then mark it dead
+        const createRes = await originalFetch(`${localBaseUrl}/workers`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            issueId: "acme-widgets-99",
+            mode: "implement",
+            repo: "acme/widgets",
+          }),
+        });
+        expect(createRes.status).toBe(200);
+        const created = (await createRes.json()) as { id: string; sessionId: string };
+
+        const patchRes = await originalFetch(`${localBaseUrl}/workers/${created.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "dead" }),
+        });
+        expect(patchRes.status).toBe(200);
+
+        // Run cleanup
+        await cleanupDeadWorkers();
+
+        // Workspace should NOT be deleted — dead workers keep their workspaces
+        expect(rmDirCalls).toHaveLength(0);
+        const forgetCalls = jjCalls.filter(
+          (args) => args[0] === "workspace" && args[1] === "forget"
+        );
+        expect(forgetCalls).toHaveLength(0);
+
+        // But worker should still be removed from the map (state cleaned)
         const workersRes = await originalFetch(`${localBaseUrl}/workers`);
         const workers = (await workersRes.json()) as WorkerEntry[];
         expect(workers).toEqual([]);
@@ -2295,7 +2352,7 @@ describe("daemon server", () => {
       expect(rmDirCalls).toEqual([]);
     });
 
-    it("preserves dead worker state when workspace cleanup fails", async () => {
+    it("still removes dead worker state even when jj is broken (no workspace cleanup)", async () => {
       const { server, stop, cleanupDeadWorkers } = startServer({
         port: 0,
         hostname: "127.0.0.1",
@@ -2334,17 +2391,14 @@ describe("daemon server", () => {
           body: JSON.stringify({ status: "dead" }),
         });
 
-        // Suppress console.warn for expected error log
-        console.warn = () => {};
-
-        // Run cleanup — should fail workspace cleanup but not crash
+        // Run cleanup — no workspace cleanup happens (workers keep workspaces on death),
+        // so the failing jj mock is irrelevant. Worker should still be removed.
         await cleanupDeadWorkers();
 
-        // Worker should still exist because workspace cleanup failed
+        // Worker removed (no workspace cleanup to fail)
         const workersRes = await originalFetch(`${localBaseUrl}/workers`);
         const workers = (await workersRes.json()) as WorkerEntry[];
-        expect(workers).toHaveLength(1);
-        expect(workers[0]?.status).toBe("dead");
+        expect(workers).toHaveLength(0);
       } finally {
         stop();
       }
@@ -2389,13 +2443,14 @@ describe("daemon server", () => {
           body: JSON.stringify({ status: "dead" }),
         });
 
-        // First cleanup removes the worker
+        // First cleanup removes the worker (no workspace deletion)
         await cleanupDeadWorkers();
-        expect(rmDirCalls).toHaveLength(1);
 
         // Second cleanup is a no-op
         await cleanupDeadWorkers();
-        expect(rmDirCalls).toHaveLength(1);
+
+        // No workspace deletion happened
+        expect(rmDirCalls).toHaveLength(0);
       } finally {
         stop();
       }
@@ -2445,9 +2500,8 @@ describe("daemon server", () => {
 
         await cleanupDeadWorkers();
 
-        // Workspace cleanup should happen once (deduplicated by issue ID)
-        expect(rmDirCalls).toHaveLength(1);
-        expect(rmDirCalls[0]).toContain("acme-widgets-64");
+        // No workspace deletion (dead workers keep workspaces)
+        expect(rmDirCalls).toHaveLength(0);
 
         // Both workers should be removed
         const workersRes = await originalFetch(`${localBaseUrl}/workers`);

@@ -39,7 +39,7 @@ async function withTestServer(run: (ctx: TestServerContext) => Promise<void>): P
       data: undefined,
     }),
     deleteSession: async () => {},
-    listActiveSessions: async (): Promise<Set<string>> => new Set<string>(),
+    sessionExists: async (): Promise<boolean> => false,
   };
   const mockEnvoy = createMockEnvoyServer();
   const { server, stop } = startServer({

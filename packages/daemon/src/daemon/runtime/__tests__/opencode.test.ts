@@ -334,45 +334,38 @@ describe("OpenCodeAdapter", () => {
       expect(data.tokensUsed).toBe(1500); // only from second message
     });
   });
-  describe("listActiveSessions", () => {
-    it("returns all sessions including idle ones via session/status?includeIdle=true", async () => {
+  describe("sessionExists", () => {
+    it("returns true when session exists (200 response)", async () => {
       const adapter = new OpenCodeAdapter(13381);
       const originalFetch = globalThis.fetch;
       try {
         globalThis.fetch = (async (url: string | URL | Request) => {
           const urlStr = String(url);
-          if (urlStr.includes("/session/status") && urlStr.includes("includeIdle=true")) {
-            return new Response(
-              JSON.stringify({
-                ses_busy_1: { type: "busy" },
-                ses_idle_2: { type: "idle" },
-                ses_idle_3: { type: "idle" },
-              }),
-              { status: 200 }
-            );
+          if (urlStr.includes("/session/ses_exists")) {
+            return new Response(JSON.stringify({ id: "ses_exists" }), { status: 200 });
           }
-          return originalFetch(url);
+          return new Response("not found", { status: 404 });
         }) as typeof fetch;
 
-        const sessions = await adapter.listActiveSessions();
-        expect(sessions.size).toBe(3);
-        expect(sessions.has("ses_busy_1")).toBe(true);
-        expect(sessions.has("ses_idle_2")).toBe(true);
-        expect(sessions.has("ses_idle_3")).toBe(true);
+        expect(await adapter.sessionExists("ses_exists")).toBe(true);
+        expect(await adapter.sessionExists("ses_missing")).toBe(false);
       } finally {
         globalThis.fetch = originalFetch;
       }
     });
 
-    it("throws on non-200 response", async () => {
+    it("returns false on network error", async () => {
       const adapter = new OpenCodeAdapter(13381);
       const originalFetch = globalThis.fetch;
       try {
-        globalThis.fetch = Object.assign(async () => new Response("error", { status: 500 }), {
-          preconnect: originalFetch.preconnect,
-        }) as typeof fetch;
+        globalThis.fetch = Object.assign(
+          async () => {
+            throw new Error("connection refused");
+          },
+          { preconnect: originalFetch.preconnect }
+        ) as typeof fetch;
 
-        await expect(adapter.listActiveSessions()).rejects.toThrow("HTTP 500");
+        expect(await adapter.sessionExists("ses_any")).toBe(false);
       } finally {
         globalThis.fetch = originalFetch;
       }

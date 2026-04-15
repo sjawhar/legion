@@ -38,7 +38,7 @@ describe("POST /state/advance", () => {
       deleteSession: async (sessionId: string) => {
         deleteSessionCalls.push(sessionId);
       },
-      listActiveSessions: async () => new Set<string>(),
+      sessionExists: async () => false,
     };
   }
 
@@ -310,7 +310,7 @@ describe("POST /state/auto-advance", () => {
       sendPrompt: async () => {},
       getSessionStatus: async () => ({ data: undefined }),
       deleteSession: async () => {},
-      listActiveSessions: async () => new Set<string>(),
+      sessionExists: async () => false,
     };
   }
 
