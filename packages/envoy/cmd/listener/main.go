@@ -742,7 +742,21 @@ func main() {
 			break
 		}
 		if attempt == 10 {
-			log.Fatalf("subscribe failed after %d attempts: %v", attempt, err)
+			logger.Error("subscribe failed after max attempts, shutting down",
+				slog.String("error", err.Error()),
+				slog.Int("attempts", attempt),
+			)
+			// Close NATS before exiting — releases the consumer binding so the
+			// next container can claim it. log.Fatal/os.Exit skips cleanup.
+			client.Conn.Close()
+			os.Exit(1)
+		}
+		// Check if auto-resubscribe (bus.Client.onReconnect) already succeeded
+		// while we were sleeping. If so, the consumer is bound by our own client
+		// and retrying would hit "consumer is already bound" from ourselves.
+		if client.SubOK() {
+			logger.Info("subscribe succeeded via auto-resubscribe during retry backoff")
+			break
 		}
 		backoff := time.Duration(attempt) * 3 * time.Second
 		logger.Warn("subscribe failed, retrying",
