@@ -1,8 +1,8 @@
 //go:build smoke
 
 // Package smoke contains container-level smoke tests for the Envoy listener.
-// These tests build the Docker image from the local Dockerfile and verify
-// critical endpoints work end-to-end with a real NATS server via testcontainers.
+// Builds the Docker image from the local Dockerfile and verifies critical
+// endpoints work end-to-end with a real NATS server via testcontainers.
 //
 // Run: go test -tags smoke -v -timeout 5m ./internal/smoke/
 package smoke
@@ -26,12 +26,14 @@ import (
 func TestSmoke(t *testing.T) {
 	ctx := context.Background()
 
+	// Shared Docker network for container-to-container communication.
 	net, err := network.New(ctx)
 	if err != nil {
 		t.Fatalf("create network: %v", err)
 	}
 	t.Cleanup(func() { net.Remove(ctx) })
 
+	// Start NATS using the same module the rest of the project uses.
 	natsC, err := tcnats.Run(ctx, "nats:2.10",
 		network.WithNetwork([]string{"nats"}, net),
 	)

@@ -1,5 +1,5 @@
 # Go version must match go.mod (tsnet requires >= 1.26.1).
-FROM golang:1.26-bookworm AS build
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 
@@ -12,6 +12,8 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
     go build -o /out/envoy-listener ./cmd/listener
 
+# Minimal runtime — static binary, no shell needed.
+# curl is included for HEALTHCHECK and operational debugging.
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
@@ -26,5 +28,10 @@ COPY --from=build /out/envoy-listener /usr/local/bin/envoy-listener
 # (WireGuard) and outbound TCP 443 (control plane).
 
 USER envoy
+
+EXPOSE 9020
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:9020/healthz || exit 1
 
 ENTRYPOINT ["envoy-listener"]

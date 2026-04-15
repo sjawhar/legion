@@ -14,14 +14,36 @@ on:
       - "packages/envoy-plugin/**"
 
 jobs:
+  # Detect which packages actually changed to skip unnecessary jobs.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      contracts: ${{ steps.filter.outputs.contracts }}
+      envoy: ${{ steps.filter.outputs.envoy }}
+      plugin: ${{ steps.filter.outputs.plugin }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            contracts:
+              - 'packages/contracts/**'
+            envoy:
+              - 'packages/envoy/**'
+              - 'packages/contracts/**'
+            plugin:
+              - 'packages/envoy-plugin/**'
+              - 'packages/contracts/**'
+
   contracts:
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
       - name: Lint contracts
         run: bun run lint
         working-directory: packages/contracts
@@ -36,13 +58,13 @@ jobs:
         working-directory: packages/contracts
 
   envoy-plugin:
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
       - name: Lint envoy plugin
         run: bun run lint
         working-directory: packages/envoy-plugin
@@ -61,15 +83,14 @@ jobs:
           path: out/pr-artifacts/*.tgz
 
   envoy-go:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@v5
         with:
           go-version-file: packages/envoy/go.mod
       - name: Generate Go contracts from shared schema
