@@ -738,3 +738,76 @@ func TestSetRole_OldHolderMissing(t *testing.T) {
 		t.Fatalf("expected role holder ses_fresh, got %q", string(entry.Value()))
 	}
 }
+
+// --- Reaper Tests (cross-reference sessions for stale interest cleanup) ---
+
+func TestInterestReaper(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+
+	// Create interests for alive and dead sessions (both updated 10 min ago)
+	now := time.Now().UnixMilli()
+	putInterest(t, kv, Interest{SessionID: "ses_alive", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 600_000})
+	putInterest(t, kv, Interest{SessionID: "ses_dead", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 600_000})
+
+	// Warm cache via Get (coldRegistry has no watch())
+	if _, err := reg.Get("ses_alive"); err != nil {
+		t.Fatalf("Get ses_alive failed: %v", err)
+	}
+	if _, err := reg.Get("ses_dead"); err != nil {
+		t.Fatalf("Get ses_dead failed: %v", err)
+	}
+
+	// Reap with 0 grace window — all dead sessions should be reaped
+	count, err := reg.Reap(func(sessionID string) bool {
+		return sessionID == "ses_alive"
+	}, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reaped, got %d", count)
+	}
+
+	// ses_alive should still exist in KV
+	if _, err := kv.Get("ses_alive"); err != nil {
+		t.Fatalf("ses_alive should still exist: %v", err)
+	}
+
+	// ses_dead should be deleted from KV
+	if _, err := kv.Get("ses_dead"); err != natsgo.ErrKeyNotFound {
+		t.Fatalf("ses_dead should be deleted, got err: %v", err)
+	}
+}
+
+func TestReaperGraceWindow(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+
+	// Create interest updated 2 min ago — session is dead but within 10 min grace window
+	now := time.Now().UnixMilli()
+	putInterest(t, kv, Interest{SessionID: "ses_recent", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 120_000})
+
+	// Warm cache
+	if _, err := reg.Get("ses_recent"); err != nil {
+		t.Fatalf("Get ses_recent failed: %v", err)
+	}
+
+	// Reap with 10 min grace window — ses_recent updated only 2 min ago, should survive
+	count, err := reg.Reap(func(string) bool { return false }, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reaped (within grace window), got %d", count)
+	}
+
+	// ses_recent should still exist in KV
+	if _, err := kv.Get("ses_recent"); err != nil {
+		t.Fatalf("ses_recent should still exist within grace window: %v", err)
+	}
+}

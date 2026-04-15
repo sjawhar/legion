@@ -3,7 +3,7 @@ package bus
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,29 +64,29 @@ func options(urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.
 		ReconnectWait: 2 * nats.DefaultReconnectWait,
 		DisconnectedErrCB: func(_ *nats.Conn, err error) {
 			if err != nil {
-				log.Printf("envoy nats disconnected: %v", err)
+			slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
 				return
 			}
-			log.Printf("envoy nats disconnected")
+			slog.Info("envoy nats disconnected")
 		},
 		ReconnectedCB: func(nc *nats.Conn) {
-			log.Printf("envoy nats reconnected: %s", nc.ConnectedUrl())
+			slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
 			if reconnectCB != nil {
 				reconnectCB(nc)
 			}
 		},
 		ClosedCB: func(_ *nats.Conn) {
-			log.Printf("envoy nats connection closed")
+			slog.Info("envoy nats connection closed")
 			if closedCB != nil {
 				closedCB()
 			}
 		},
 		AsyncErrorCB: func(_ *nats.Conn, sub *nats.Subscription, err error) {
 			if sub != nil {
-				log.Printf("envoy nats async error subject=%s: %v", sub.Subject, err)
+				slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
 				return
 			}
-			log.Printf("envoy nats async error: %v", err)
+				slog.Error("envoy nats async error", slog.String("error", err.Error()))
 		},
 	}
 }
@@ -159,7 +159,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		c.mu.Unlock()
-		log.Printf("envoy nats resubscribe failed (jetstream): %v", err)
+		slog.Error("envoy nats resubscribe failed (jetstream)", slog.String("error", err.Error()))
 		go c.recover()
 		return
 	}
@@ -171,15 +171,15 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	if c.subSubject == "" || c.subHandler == nil {
 		return
 	}
-	log.Printf("envoy nats resubscribing to %s", c.subSubject)
+		slog.Info("envoy nats resubscribing", slog.String("subject", c.subSubject))
 	sub, err := c.js.Subscribe(c.subSubject, c.subHandler, c.subOpts...)
 	if err != nil {
-		log.Printf("envoy nats resubscribe failed: %v", err)
+		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
 		go c.recover()
 		return
 	}
 	c.subActive = sub
-	log.Printf("envoy nats resubscribed to %s", c.subSubject)
+		slog.Info("envoy nats resubscribed", slog.String("subject", c.subSubject))
 }
 
 // Subscribe creates a JetStream subscription that auto-resubscribes on reconnect.
@@ -238,7 +238,7 @@ func (c *Client) recover() {
 	for attempt := 1; ; attempt++ {
 		select {
 		case <-c.stopCh:
-			log.Printf("envoy nats recovery cancelled")
+			slog.Info("envoy nats recovery cancelled")
 			return
 		default:
 		}
@@ -252,15 +252,15 @@ func (c *Client) recover() {
 		needsSub := c.subSubject != "" && c.subHandler != nil
 		c.subMu.Unlock()
 		if connOK && (!needsSub || subOK) {
-			log.Printf("envoy nats recovery: already healthy")
+			slog.Info("envoy nats recovery: already healthy")
 			return
 		}
 
-		log.Printf("envoy nats recovery attempt %d", attempt)
+		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
 
 		// Step 1: Ensure connection.
 		if err := c.ensureConn(); err != nil {
-			log.Printf("envoy nats recovery reconnect failed (attempt %d): %v", attempt, err)
+			slog.Error("envoy nats recovery reconnect failed", slog.Int("attempt", attempt), slog.String("error", err.Error()))
 			select {
 			case <-c.stopCh:
 				return
@@ -274,7 +274,7 @@ func (c *Client) recover() {
 		c.subMu.Lock()
 		if c.subSubject == "" || c.subHandler == nil {
 			c.subMu.Unlock()
-			log.Printf("envoy nats recovery: connection restored, no subscription to restore")
+			slog.Info("envoy nats recovery: connection restored, no subscription to restore")
 			return
 		}
 
@@ -284,11 +284,11 @@ func (c *Client) recover() {
 			c.subActive = nil
 		}
 
-		log.Printf("envoy nats recovery resubscribing to %s (attempt %d)", c.subSubject, attempt)
+		slog.Info("envoy nats recovery resubscribing", slog.String("subject", c.subSubject), slog.Int("attempt", attempt))
 		sub, err := c.js.Subscribe(c.subSubject, c.subHandler, c.subOpts...)
 		if err != nil {
 			c.subMu.Unlock()
-			log.Printf("envoy nats recovery resubscribe failed (attempt %d): %v", attempt, err)
+			slog.Error("envoy nats recovery resubscribe failed", slog.Int("attempt", attempt), slog.String("error", err.Error()))
 			select {
 			case <-c.stopCh:
 				return
@@ -299,7 +299,7 @@ func (c *Client) recover() {
 		}
 		c.subActive = sub
 		c.subMu.Unlock()
-		log.Printf("envoy nats recovery successful (attempt %d)", attempt)
+		slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
 		return
 	}
 }

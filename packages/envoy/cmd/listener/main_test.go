@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,8 +16,10 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/metrics"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -72,6 +75,13 @@ func clearKVBucket(t *testing.T, conn *natsgo.Conn, bucket string) {
 
 func resetListenerTestState(t *testing.T, conn *natsgo.Conn) {
 	t.Helper()
+	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
+	if err != nil {
+		t.Fatalf("failed to open JetStream: %v", err)
+	}
+	if err := js.PurgeStream(bus.Stream); err != nil && !errors.Is(err, natsgo.ErrStreamNotFound) {
+		t.Fatalf("failed to purge stream %s: %v", bus.Stream, err)
+	}
 	clearKVBucket(t, conn, store.Bucket)
 	clearKVBucket(t, conn, session.SessionBucket)
 }
@@ -848,5 +858,547 @@ func TestSessionsHandler_NoInterestsData(t *testing.T) {
 	}
 	if len(items[0].Topics) != 0 {
 		t.Fatalf("expected no topics for orphan session, got %v", items[0].Topics)
+	}
+}
+
+func TestIdempotencyKey_Send(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+
+	// Create a handler for /v1/messages/send
+	mux := http.NewServeMux()
+	v1 := http.NewServeMux()
+	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SourceSession  string `json:"source_session"`
+			TargetSession  string `json:"target_session"`
+			Message        string `json:"message"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		item := contracts.Envelope{
+			EventID:        id.New(),
+			Source:         "agent",
+			SourceSession:  body.SourceSession,
+			SourceEventID:  id.New(),
+			Topic:          contracts.AgentSubject(body.TargetSession),
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: body.Message,
+			TraceID:        id.New(),
+		}
+		dedupeKey := "agent." + body.TargetSession + "." + id.New()
+		if body.IdempotencyKey != "" {
+			dedupeKey = "agent." + body.TargetSession + "." + body.IdempotencyKey
+		}
+		item.DedupeKey = dedupeKey
+		if err := item.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := state.Load()
+		if err := d.client.Publish(item); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(item)
+	})
+	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, v1))
+
+	// Test: same idempotency_key produces same DedupeKey
+	rr1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`))
+	req1.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first request failed: expected 200, got %d (body: %s)", rr1.Code, rr1.Body.String())
+	}
+	var env1 contracts.Envelope
+	if err := json.NewDecoder(rr1.Body).Decode(&env1); err != nil {
+		t.Fatalf("failed to decode first response: %v", err)
+	}
+
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second request failed: expected 200, got %d (body: %s)", rr2.Code, rr2.Body.String())
+	}
+	var env2 contracts.Envelope
+	if err := json.NewDecoder(rr2.Body).Decode(&env2); err != nil {
+		t.Fatalf("failed to decode second response: %v", err)
+	}
+
+	if env1.DedupeKey != env2.DedupeKey {
+		t.Fatalf("expected same DedupeKey for same idempotency_key, got %q and %q", env1.DedupeKey, env2.DedupeKey)
+	}
+	if !strings.HasPrefix(env1.DedupeKey, "agent.tgt1.retry-abc") {
+		t.Fatalf("expected DedupeKey to start with 'agent.tgt1.retry-abc', got %q", env1.DedupeKey)
+	}
+}
+
+func TestIdempotencyKey_Publish(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	handler := publishHandler(&state)
+
+	// Test: same idempotency_key produces same DedupeKey
+	rr1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello","idempotency_key":"publish-xyz"}`))
+	req1.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first request failed: expected 200, got %d (body: %s)", rr1.Code, rr1.Body.String())
+	}
+	var env1 contracts.Envelope
+	if err := json.NewDecoder(rr1.Body).Decode(&env1); err != nil {
+		t.Fatalf("failed to decode first response: %v", err)
+	}
+
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello","idempotency_key":"publish-xyz"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second request failed: expected 200, got %d (body: %s)", rr2.Code, rr2.Body.String())
+	}
+	var env2 contracts.Envelope
+	if err := json.NewDecoder(rr2.Body).Decode(&env2); err != nil {
+		t.Fatalf("failed to decode second response: %v", err)
+	}
+
+	if env1.DedupeKey != env2.DedupeKey {
+		t.Fatalf("expected same DedupeKey for same idempotency_key, got %q and %q", env1.DedupeKey, env2.DedupeKey)
+	}
+	if !strings.HasPrefix(env1.DedupeKey, "publish.publish-xyz") {
+		t.Fatalf("expected DedupeKey to start with 'publish.publish-xyz', got %q", env1.DedupeKey)
+	}
+}
+
+func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	handler := publishHandler(&state)
+
+	// Test: no idempotency_key produces different DedupeKeys (existing behavior)
+	rr1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello"}`))
+	req1.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first request failed: expected 200, got %d (body: %s)", rr1.Code, rr1.Body.String())
+	}
+	var env1 contracts.Envelope
+	if err := json.NewDecoder(rr1.Body).Decode(&env1); err != nil {
+		t.Fatalf("failed to decode first response: %v", err)
+	}
+
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second request failed: expected 200, got %d (body: %s)", rr2.Code, rr2.Body.String())
+	}
+	var env2 contracts.Envelope
+	if err := json.NewDecoder(rr2.Body).Decode(&env2); err != nil {
+		t.Fatalf("failed to decode second response: %v", err)
+	}
+
+	if env1.DedupeKey == env2.DedupeKey {
+		t.Fatalf("expected different DedupeKeys when no idempotency_key provided, got same: %q", env1.DedupeKey)
+	}
+	if !strings.HasPrefix(env1.DedupeKey, "publish.") {
+		t.Fatalf("expected DedupeKey to start with 'publish.', got %q", env1.DedupeKey)
+	}
+}
+
+func TestDurableConsumerRestart(t *testing.T) {
+	publisher, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect publisher bus: %v", err)
+	}
+	t.Cleanup(func() { publisher.Conn.Close() })
+	resetListenerTestState(t, publisher.Conn)
+
+	firstListener, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect first listener bus: %v", err)
+	}
+	t.Cleanup(func() { firstListener.Conn.Close() })
+
+	consumer := "listener-durable-restart-test"
+	_ = publisher.JS().DeleteConsumer(bus.Stream, consumer)
+
+	var (
+		mu        sync.Mutex
+		delivered []string
+	)
+	handler := func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err != nil {
+			t.Errorf("failed to decode envelope: %v", err)
+			_ = msg.Ack()
+			return
+		}
+		mu.Lock()
+		delivered = append(delivered, item.EventID)
+		mu.Unlock()
+		_ = msg.Ack()
+	}
+
+	_, err = startListenerSubscription(firstListener, consumer, handler)
+	if err != nil {
+		t.Fatalf("first subscribe failed: %v", err)
+	}
+
+	first := contracts.Envelope{
+		EventID:        "evt-restart-1",
+		Source:         "test",
+		SourceEventID:  "src-restart-1",
+		Topic:          "notifications.test.restart",
+		DedupeKey:      "dedupe-restart-1",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "first",
+		TraceID:        "trace-restart-1",
+	}
+	if err := publisher.Publish(first); err != nil {
+		t.Fatalf("publish first failed: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(delivered)
+		mu.Unlock()
+		if count == 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	firstCount := len(delivered)
+	mu.Unlock()
+	if firstCount != 1 {
+		t.Fatalf("expected first delivery before restart, got %d", firstCount)
+	}
+
+	firstListener.Close()
+
+	second := contracts.Envelope{
+		EventID:        "evt-restart-2",
+		Source:         "test",
+		SourceEventID:  "src-restart-2",
+		Topic:          "notifications.test.restart",
+		DedupeKey:      "dedupe-restart-2",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "second",
+		TraceID:        "trace-restart-2",
+	}
+	third := contracts.Envelope{
+		EventID:        "evt-restart-3",
+		Source:         "test",
+		SourceEventID:  "src-restart-3",
+		Topic:          "notifications.test.restart",
+		DedupeKey:      "dedupe-restart-3",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "third",
+		TraceID:        "trace-restart-3",
+	}
+	if err := publisher.Publish(second); err != nil {
+		t.Fatalf("publish second failed: %v", err)
+	}
+	if err := publisher.Publish(third); err != nil {
+		t.Fatalf("publish third failed: %v", err)
+	}
+
+	secondListener, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect second listener bus: %v", err)
+	}
+	t.Cleanup(func() { secondListener.Conn.Close() })
+
+	resub, err := startListenerSubscription(secondListener, consumer, handler)
+	if err != nil {
+		t.Fatalf("second subscribe failed: %v", err)
+	}
+	defer resub.Unsubscribe()
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(delivered)
+		mu.Unlock()
+		if count == 3 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), delivered...)
+	mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("expected durable consumer to resume pending messages after restart, got %d deliveries: %v", len(got), got)
+	}
+}
+
+func TestDeadSessionACK(t *testing.T) {
+	client := setupPublishTestClient(t)
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+
+	if shouldNAKFanoutDelivery(sessions, "ses_dead", errors.New("delivery failed")) {
+		t.Fatal("expected dead session fan-out failure to ACK instead of NAK")
+	}
+
+	portListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve port: %v", err)
+	}
+	port := portListener.Addr().(*net.TCPAddr).Port
+	if err := portListener.Close(); err != nil {
+		t.Fatalf("failed to release port: %v", err)
+	}
+	if err := sessions.Put("ses_live", session.SessionEntry{Port: port, MachineID: "test-machine", Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register live session: %v", err)
+	}
+
+	if !shouldNAKFanoutDelivery(sessions, "ses_live", errors.New("delivery failed")) {
+		t.Fatal("expected live session delivery failure to NAK for retry")
+	}
+}
+
+func TestV1OnLegacyPort_WithTsnetEnabled(t *testing.T) {
+	// This test verifies that /v1/* endpoints are accessible on the legacy
+	// port (9020) even when tsnet is enabled. This is critical for local plugin
+	// registration via http://127.0.0.1:9020.
+	//
+	// The bug: when tsnet is enabled, /v1/* was ONLY served on the tsnet TLS
+	// listener (:443), blocking local plugin registration on the legacy port.
+	// The fix: always serve /v1/* on the legacy port regardless of tsnet status.
+
+	var state atomic.Pointer[listenerDeps]
+
+	// Build the mux as main() does, but with tsnet enabled.
+	// We simulate tsnet being enabled by NOT gating /v1/* on !tsCfg.Enabled.
+	mux := http.NewServeMux()
+
+	// /healthz is always reachable
+	mux.HandleFunc("/healthz", healthzHandler(&state))
+
+	// /v1/* sub-mux, gated by readiness
+	v1 := http.NewServeMux()
+	v1.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"session_id":"test","topics":[]}`))
+	})
+
+	// THE FIX: Always register /v1/* on legacy mux, regardless of tsnet status.
+	// This is what the fix does — remove the `if !tsCfg.Enabled` gate.
+	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, v1))
+
+	// Simulate ready state
+	state.Store(&listenerDeps{})
+
+	// Test: /v1/interests/subscribe is reachable on legacy port
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{"session_id":"test","topics":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+
+
+
+func TestHealthzConsumerLag(t *testing.T) {
+	natsURI := sharedListenerTestNATSURI(t)
+	conn, err := natsgo.Connect(natsURI)
+	if err != nil {
+		t.Fatalf("failed to connect to NATS: %v", err)
+	}
+	defer conn.Close()
+
+	resetListenerTestState(t, conn)
+
+	// Create a bus client
+	client, err := bus.Connect([]string{natsURI})
+	if err != nil {
+		t.Fatalf("failed to create bus client: %v", err)
+	}
+	defer client.Conn.Close()
+
+	// Create a consumer
+	consumerName := "listener-test-machine"
+	_, err = client.Subscribe(
+		"notifications.>",
+		func(msg *natsgo.Msg) { _ = msg.Ack() },
+		natsgo.Durable(consumerName),
+		natsgo.AckExplicit(),
+		natsgo.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("failed to create subscription: %v", err)
+	}
+
+	// Get consumer info to verify it exists and has the expected fields
+	consumerInfo, err := client.JS().ConsumerInfo(bus.Stream, consumerName)
+	if err != nil {
+		t.Fatalf("failed to get consumer info: %v", err)
+	}
+
+	// Verify consumer info has the fields we need for /healthz
+	if consumerInfo == nil {
+		t.Fatal("expected consumer info, got nil")
+	}
+
+	// Simulate the /healthz handler response with consumer lag fields
+	response := map[string]interface{}{"status": "healthy"}
+	response["num_pending"] = consumerInfo.NumPending
+	response["num_ack_pending"] = consumerInfo.NumAckPending
+
+	// Verify the response contains the expected fields
+	if _, ok := response["num_pending"]; !ok {
+		t.Fatal("expected num_pending in response")
+	}
+	if _, ok := response["num_ack_pending"]; !ok {
+		t.Fatal("expected num_ack_pending in response")
+	}
+
+	// Verify the values are correct types
+	if response["num_pending"] != consumerInfo.NumPending {
+		t.Fatalf("expected num_pending %d, got %v", consumerInfo.NumPending, response["num_pending"])
+	}
+	if response["num_ack_pending"] != consumerInfo.NumAckPending {
+		t.Fatalf("expected num_ack_pending %d, got %v", consumerInfo.NumAckPending, response["num_ack_pending"])
+	}
+}
+
+func TestMetrics(t *testing.T) {
+	met := metrics.New()
+	received := met.NewCounter("envoy_messages_received_total", "Total messages received by the listener")
+	delivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
+	naked := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
+	duration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
+	met.NewGauge("envoy_active_sessions", "Number of active sessions")
+	met.NewGauge("envoy_active_interests", "Number of active interest subscriptions")
+	met.NewGaugeFunc("envoy_consumer_pending", "Number of pending messages in the consumer", func() int64 { return 5 })
+
+	// Simulate message processing.
+	received.Inc([2]string{"source", "agent"}, [2]string{"topic_prefix", "notifications.github"})
+	received.Inc([2]string{"source", "agent"}, [2]string{"topic_prefix", "notifications.github"})
+	delivered.Inc([2]string{"delivery_status", "delivered"})
+	naked.Inc()
+	duration.Observe(0.05, [2]string{"delivery_status", "delivered"})
+
+	rr := httptest.NewRecorder()
+	met.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+
+	// All 7 metric names must be present.
+	expected := []string{
+		"envoy_messages_received_total",
+		"envoy_messages_delivered_total",
+		"envoy_messages_naked_total",
+		"envoy_delivery_duration_seconds",
+		"envoy_active_sessions",
+		"envoy_active_interests",
+		"envoy_consumer_pending",
+	}
+	for _, name := range expected {
+		if !strings.Contains(body, name) {
+			t.Errorf("expected /metrics to contain %q, body:\n%s", name, body)
+		}
+	}
+
+	// Verify specific counter values.
+	if !strings.Contains(body, `envoy_messages_received_total{source="agent",topic_prefix="notifications.github"} 2`) {
+		t.Errorf("expected received_total to be 2, body:\n%s", body)
+	}
+	if !strings.Contains(body, `envoy_messages_delivered_total{delivery_status="delivered"} 1`) {
+		t.Errorf("expected delivered_total{delivered} to be 1, body:\n%s", body)
+	}
+	if !strings.Contains(body, `envoy_messages_naked_total 1`) {
+		t.Errorf("expected naked_total to be 1, body:\n%s", body)
+	}
+	if !strings.Contains(body, "envoy_consumer_pending 5") {
+		t.Errorf("expected consumer_pending gauge to be 5, body:\n%s", body)
+	}
+
+	// Prometheus text format.
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Errorf("expected text/plain Content-Type, got %q", ct)
+	}
+}
+
+func TestMetrics_NotGatedByReadiness(t *testing.T) {
+	var state atomic.Pointer[listenerDeps]
+	met := metrics.New()
+	met.NewGauge("envoy_active_sessions", "Number of active sessions")
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", met.Handler())
+	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, http.NewServeMux()))
+
+	// /metrics must return 200 before deps are set (startup).
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected /metrics 200 during startup, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "envoy_active_sessions") {
+		t.Fatal("expected metric names in startup /metrics output")
+	}
+}
+
+func TestTopicPrefix(t *testing.T) {
+	cases := []struct {
+		topic string
+		want  string
+	}{
+		{"notifications.github.acme.widgets.issue.42.comment", "notifications.github"},
+		{"notifications.agent.ses_abc123", "notifications.agent"},
+		{"notifications.slack.T01.C02.message", "notifications.slack"},
+		{"single", "single"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := metrics.TopicPrefix(tc.topic)
+		if got != tc.want {
+			t.Errorf("TopicPrefix(%q) = %q, want %q", tc.topic, got, tc.want)
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package session
+package session_test
 
 import (
 	"net/http"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	session "github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
 
@@ -23,7 +24,7 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 
 	port := mockPort(mock.URL)
 	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
 
@@ -37,7 +38,7 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 
-	result := HandleAgentMessage(item, "ses_target", "test-machine", interest, &deliverer)
+	result := session.HandleAgentMessage(item, "ses_target", "test-machine", interest, &deliverer)
 
 	if result.Err != nil {
 		t.Fatalf("expected success, got error: %v", result.Err)
@@ -63,12 +64,12 @@ func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 
 	port := mockPort(mock.URL)
 	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
 
 	// No interest entry — handler should fall through to registry lookup
-	result := HandleAgentMessage(
+	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "test-machine", nil, &deliverer,
 	)
@@ -89,7 +90,7 @@ func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 	_, deliverer := newKVDeliverer(t)
 
-	result := HandleAgentMessage(
+	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_unknown", "test"),
 		"ses_unknown", "test-machine", nil, &deliverer,
 	)
@@ -117,7 +118,7 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 
 	port := mockPort(mock.URL)
 	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", SessionEntry{Port: port, Dir: "/test"}); err != nil {
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
 
@@ -128,7 +129,7 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 		MachineID: "other-machine",
 	}
 
-	result := HandleAgentMessage(
+	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "test-machine", interest, &deliverer,
 	)
@@ -159,14 +160,14 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	port := mockPort(mock.URL)
 
 	client := setupNATS(t)
-	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
 	// KV says session is on unreachable machine-B
-	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
+	sessions.Put("ses_target", session.SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
 
-	deliverer := Deliverer{
+	deliverer := session.Deliverer{
 		MachineID:    "machine-A",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
@@ -174,7 +175,7 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	}
 
 	// No interest — handler falls to registry lookup path
-	result := HandleAgentMessage(
+	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "machine-A", nil, &deliverer,
 	)
@@ -208,14 +209,14 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 	port := mockPort(mock.URL)
 
 	client := setupNATS(t)
-	sessions, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
 	// KV says session moved to unreachable machine-B
-	sessions.Put("ses_target", SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
+	sessions.Put("ses_target", session.SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
 
-	deliverer := Deliverer{
+	deliverer := session.Deliverer{
 		MachineID:    "machine-A",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
@@ -229,7 +230,7 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		MachineID: "machine-A",
 	}
 
-	result := HandleAgentMessage(
+	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
 		"ses_target", "machine-A", interest, &deliverer,
 	)

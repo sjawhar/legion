@@ -3,7 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -68,7 +68,7 @@ func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.Key
 func (r *Registry) watch() {
 	w, err := r.kv.WatchAll()
 	if err != nil {
-		log.Printf("registry watch failed: %v", err)
+		slog.Error("registry watch failed", slog.String("error", err.Error()))
 		return
 	}
 	for entry := range w.Updates() {
@@ -218,4 +218,49 @@ func first(value string, fallback string) string {
 
 func curValue(value string) string {
 	return value
+}
+
+// Reap cross-references the interest cache with a session liveness check and
+// deletes interests whose sessions are dead AND whose UpdatedAt exceeds the
+// grace window. The isAlive function should return true when the session exists.
+// Returns the number of reaped interests.
+func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
+	now := time.Now().UnixMilli()
+	graceMs := graceWindow.Milliseconds()
+
+	r.mu.RLock()
+	var stale []string
+	for sid, item := range r.cache {
+		if isAlive(sid) {
+			continue // session still alive
+		}
+		if now-item.UpdatedAt <= graceMs {
+			continue // within grace window
+		}
+		stale = append(stale, sid)
+	}
+	r.mu.RUnlock()
+
+	for _, sid := range stale {
+		if err := r.kv.Delete(sid); err != nil {
+			return 0, err
+		}
+	}
+	return len(stale), nil
+}
+
+// StartReaper runs Reap in a background goroutine at the given interval.
+func (r *Registry) StartReaper(isAlive func(string) bool, interval, graceWindow time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			count, err := r.Reap(isAlive, graceWindow)
+			if err != nil {
+				slog.Error("reaper cycle failed", slog.String("error", err.Error()))
+				continue
+			}
+			slog.Info("reaper cycle", slog.Int("reaped", count))
+		}
+	}()
 }

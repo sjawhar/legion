@@ -21,6 +21,7 @@ type Deliverer struct {
 	MachineID    string
 	HostBridge   string
 	RequestLimit time.Duration
+	HTTPClient   *http.Client
 	Sessions     SessionLookup
 }
 
@@ -72,7 +73,7 @@ func (d Deliverer) prompt(port int, machineID string, sessionID string, text str
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := http.Client{Timeout: d.timeout()}
+	client := d.httpClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -105,4 +106,11 @@ func (d Deliverer) timeout() time.Duration {
 		return d.RequestLimit
 	}
 	return 30 * time.Second
+}
+
+func (d Deliverer) httpClient() *http.Client {
+	if d.HTTPClient != nil {
+		return d.HTTPClient
+	}
+	return &http.Client{Timeout: d.timeout()}
 }
