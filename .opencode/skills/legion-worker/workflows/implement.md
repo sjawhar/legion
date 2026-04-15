@@ -519,10 +519,13 @@ If the PR was converted to draft but has no review comments in either location, 
 
 Otherwise, invoke `/superpowers/receiving-code-review` to evaluate and prioritize feedback.
 
-**Include automated bot comments** in your review feedback processing. The API calls above
-return comments from all authors including bots (Claude, GitHub Copilot, Codex). Treat
-bot-identified issues the same as human review feedback — fix legitimate bugs, dismiss style
-suggestions that conflict with project conventions.
+**You MUST address ALL review comments, including bot comments.** The API calls above
+return comments from all authors including bots (Claude, GitHub Copilot, Codex). Do NOT
+dismiss or ignore bot comments just because they're automated. Bot reviewers catch real
+issues — type errors, missing imports, security concerns, logic bugs. For each comment:
+- Fix the issue if it's valid
+- Explain why it doesn't apply if you disagree (with evidence, not assertion)
+- Never silently skip a comment
 
 ### 1.5. Read Prior Handoffs (Advisory)
 

@@ -688,6 +688,10 @@ export async function startDaemon(
             for (const entry of liveWorkers) {
               const actualSessionId = recreatedSessions.get(entry.id);
               if (actualSessionId && entry.envoyTopics?.length) {
+                console.log("re-subscribing worker to envoy", {
+                  workerId: entry.id,
+                  topics: entry.envoyTopics,
+                });
                 subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics, config.envoyUrl);
               }
             }
