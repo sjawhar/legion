@@ -4,7 +4,8 @@ import { pullImages } from "./images";
 import type { MachineConfig } from "./machines";
 import { createProvider } from "./machines";
 import { createNatsPeer } from "./nats";
-import { createListener } from "./services";
+import { computeNatsUrls, createListener } from "./services";
+import { deployWatchdog } from "./watchdog";
 
 const cfg = new pulumi.Config("envoy");
 
@@ -48,5 +49,18 @@ for (const machine of machines) {
   }
 
   // Listener — on ALL machines
-  createListener(provider, machine, machines, images.envoy, secrets, natsDependency);
+  const listener = createListener(provider, machine, machines, images.envoy, secrets, natsDependency);
+
+  // Watchdog — on-prem machines only (machines with SSH access).
+  // Detects container removal and recreates via systemd timer.
+  if (machine.sshHost) {
+    const envs = [
+      "PORT=9020",
+      `ENVOY_MACHINE_ID=${machine.machineId}`,
+      `NATS_URLS=${computeNatsUrls(machine.name, !!machine.nats, machines.map(m => ({ name: m.name, nats: !!m.nats })))}`,
+      "ENVOY_HOST_BRIDGE=127.0.0.1",
+      `ENVOY_KV_REPLICAS=${machines.filter(m => !!m.nats).length}`,
+    ];
+    deployWatchdog(machine, envs, `${registry}/envoy:${imageTag}`, [listener]);
+  }
 }
