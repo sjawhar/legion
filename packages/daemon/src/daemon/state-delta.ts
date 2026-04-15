@@ -40,9 +40,10 @@ export function computeStateDelta(
   current: Record<string, IssueStateDict>,
   trackedIssueIds?: Set<string>
 ): StateDelta | null {
-  // New issues always flow regardless of tracked set
+  // New issues filtered to tracked set (same as removed/changed)
   const newIssues = Object.keys(current)
     .filter((issueId) => !(issueId in previous))
+    .filter((issueId) => trackedIssueIds === undefined || trackedIssueIds.has(issueId))
     .sort()
     .map((issueId) => ({
       issueId,
