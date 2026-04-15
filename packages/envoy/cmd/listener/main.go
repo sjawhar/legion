@@ -4,12 +4,15 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"log/slog"
 	"encoding/json"
+	"context"
 	"errors"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"regexp"
+	"os/signal"
+	"syscall"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -559,10 +562,11 @@ func main() {
 	// to the Tailscale network, which is a slow operation like NATS connect.
 	// /v1/* routes on the tsnet listener are gated by readiness (deps nil
 	// until NATS init completes).
+	// NOTE: No defer Close() here — tsnet shutdown is handled explicitly in
+	// the signal handler below to ensure ordered deregistration before NATS drain.
 	var tsServer *envoytsnet.Server
 	if tsCfg.Enabled {
 		tsServer = envoytsnet.New(tsCfg)
-		defer tsServer.Close()
 		tsMux := http.NewServeMux()
 		tsMux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 		if _, err := tsServer.Serve(tsMux, fatal); err != nil {
@@ -747,6 +751,42 @@ func main() {
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 
-	// Phase 7: Block until fatal error from HTTP server.
-	log.Fatal(<-fatal)
+	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
+	// Ordered shutdown ensures tsnet deregisters its node key before the
+	// process exits — critical for ECS rolling deployments where old and new
+	// tasks briefly overlap on the same EFS-backed tsnet state directory.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+
+	select {
+	case err := <-fatal:
+		logger.Error("fatal error", slog.String("error", err.Error()))
+	case s := <-sig:
+		logger.Info("received signal, shutting down", slog.String("signal", s.String()))
+	}
+
+	// Ordered shutdown:
+	// 1. tsnet first — deregisters node key from Tailscale coordination server.
+	//    This must happen before the new container starts and claims the same key.
+	if tsServer != nil {
+		logger.Info("closing tsnet")
+		if err := tsServer.Close(); err != nil {
+			logger.Warn("tsnet close error", slog.String("error", err.Error()))
+		}
+	}
+
+	// 2. HTTP server — stop accepting new requests, drain in-flight.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("http shutdown error", slog.String("error", err.Error()))
+	}
+
+	// 3. NATS — drain subscription (finishes in-flight deliveries), then close.
+	if err := client.Conn.Drain(); err != nil {
+		logger.Warn("nats drain error", slog.String("error", err.Error()))
+	}
+	client.Conn.Close()
+
+	logger.Info("envoy-listener shutdown complete")
 }
