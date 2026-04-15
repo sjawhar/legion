@@ -588,6 +588,11 @@ export async function startDaemon(
     }
   }
 
+  // Track consecutive liveness misses per worker for failure threshold.
+  // Workers are only reaped after LIVENESS_FAILURE_THRESHOLD consecutive misses.
+  // Resets when a worker's session is found alive.
+  const consecutiveLivenessMisses = new Map<string, number>();
+
   const scheduleHealthTick = () => {
     healthTickTimeout = resolvedDeps.setTimeout(async () => {
       try {
@@ -739,88 +744,90 @@ export async function startDaemon(
         // Session liveness sweep — detect workers whose serve sessions have died (AC1-AC4)
         // Only runs when serve is healthy and was NOT just restarted (AC3)
         if (serveHealthy && !restartReason) {
-          // Collect active sessions from ALL serve ports (multi-serve support)
-          const activeSessionsByPort = new Map<number, Set<string>>();
           try {
-            const primarySessions = await resolvedDeps.adapter.listActiveSessions();
-            activeSessionsByPort.set(resolvedDeps.adapter.getPort(), primarySessions);
-          } catch (err) {
-            console.warn(
-              `[liveness] Failed to fetch active sessions (non-fatal, skipping sweep): ${err}`
-            );
-          }
+            const livenessState = await resolvedDeps.readStateFile(config.stateFilePath);
+            for (const worker of Object.values(livenessState.workers)) {
+              if (worker.status !== "running") continue;
 
-          if (activeSessionsByPort.size > 0) {
-            try {
-              const livenessState = await resolvedDeps.readStateFile(config.stateFilePath);
-              for (const worker of Object.values(livenessState.workers)) {
-                if (worker.status !== "running") continue;
-
-                // Check the worker's specific port for its session
-                const workerPort = worker.port ?? resolvedDeps.adapter.getPort();
-                let sessionsOnPort = activeSessionsByPort.get(workerPort);
-                if (!sessionsOnPort) {
-                  // Fetch sessions from this port (different serve)
-                  try {
-                    const res = await resolvedDeps.fetch(`http://127.0.0.1:${workerPort}/session`);
-                    if (res.ok) {
-                      const sessions = (await res.json()) as Array<{ id: string }>;
-                      sessionsOnPort = new Set(sessions.map((s) => s.id));
-                      activeSessionsByPort.set(workerPort, sessionsOnPort);
-                    }
-                  } catch {
-                    // Port not reachable — worker's serve is down
-                  }
-                }
-                if (sessionsOnPort?.has(worker.sessionId)) continue;
-
-                // Grace period — don't reap workers dispatched in the last 60s
-                // Prevents race where session isn't on serve yet during workspace setup
-                const LIVENESS_GRACE_PERIOD_MS = 60_000;
-                const startedAtMs = new Date(worker.startedAt).getTime();
-                if (Date.now() - startedAtMs < LIVENESS_GRACE_PERIOD_MS) continue;
-
-                const workerMode = worker.id.split("-").pop() ?? "unknown";
-                const now = new Date().toISOString();
+              // Per-worker session existence check — O(workers) not O(total sessions).
+              // Uses GET /session/{id} which is a single-row lookup, immune to pagination.
+              const workerPort = worker.port ?? resolvedDeps.adapter.getPort();
+              let sessionAlive: boolean;
+              if (workerPort === resolvedDeps.adapter.getPort()) {
+                sessionAlive = await resolvedDeps.adapter.sessionExists(worker.sessionId);
+              } else {
+                // Different port — check directly via HTTP
                 try {
-                  const patchRes = await resolvedDeps.fetch(
-                    `http://127.0.0.1:${config.daemonPort}/workers/${worker.id}`,
-                    {
-                      method: "PATCH",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        status: "dead",
-                        crashCount: worker.crashCount + 1,
-                        lastCrashAt: now,
-                      }),
-                    }
+                  const res = await resolvedDeps.fetch(
+                    `http://127.0.0.1:${workerPort}/session/${worker.sessionId}`
                   );
-                  if (patchRes.ok) {
-                    feedbackLogger?.log({
-                      event: "daemon.worker_reaped",
-                      workerId: worker.id,
-                      sessionId: worker.sessionId,
-                      mode: workerMode,
-                      serveType: "shared",
-                      reason: "session_missing",
-                    });
-                    console.warn(
-                      `[liveness] Reaped worker ${worker.id}: session ${worker.sessionId} not found in serve`
-                    );
-                  } else {
-                    console.warn(
-                      `[liveness] PATCH to mark worker ${worker.id} dead returned ${patchRes.status}`
-                    );
-                  }
-                } catch (patchErr) {
-                  console.warn(
-                    `[liveness] Failed to mark worker ${worker.id} as dead: ${patchErr}`
-                  );
+                  sessionAlive = res.ok;
+                } catch {
+                  sessionAlive = false;
                 }
               }
-            } catch (livenessErr) {
-              console.warn(`[liveness] Session liveness check failed (non-fatal): ${livenessErr}`);
+
+              if (sessionAlive) {
+                // Session alive — reset consecutive miss counter
+                consecutiveLivenessMisses.delete(worker.id);
+                continue;
+              }
+
+              // Grace period — don't reap workers dispatched in the last 120s
+              // Prevents race where session isn't on serve yet during workspace setup
+              const LIVENESS_GRACE_PERIOD_MS = 120_000;
+              const startedAtMs = new Date(worker.startedAt).getTime();
+              if (Date.now() - startedAtMs < LIVENESS_GRACE_PERIOD_MS) continue;
+
+              // Consecutive failure threshold — require 3 consecutive misses before reaping
+              const LIVENESS_FAILURE_THRESHOLD = 3;
+              const misses = (consecutiveLivenessMisses.get(worker.id) ?? 0) + 1;
+              consecutiveLivenessMisses.set(worker.id, misses);
+              if (misses < LIVENESS_FAILURE_THRESHOLD) {
+                console.warn(
+                  `[liveness] Worker ${worker.id}: session missing (${misses}/${LIVENESS_FAILURE_THRESHOLD} consecutive misses)`
+                );
+                continue;
+              }
+
+              const workerMode = worker.id.split("-").pop() ?? "unknown";
+              const now = new Date().toISOString();
+              try {
+                const patchRes = await resolvedDeps.fetch(
+                  `http://127.0.0.1:${config.daemonPort}/workers/${worker.id}`,
+                  {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      status: "dead",
+                      crashCount: worker.crashCount + 1,
+                      lastCrashAt: now,
+                    }),
+                  }
+                );
+                if (patchRes.ok) {
+                  feedbackLogger?.log({
+                    event: "daemon.worker_reaped",
+                    workerId: worker.id,
+                    sessionId: worker.sessionId,
+                    mode: workerMode,
+                    serveType: "shared",
+                    reason: "session_missing",
+                  });
+                  console.warn(
+                    `[liveness] Reaped worker ${worker.id}: session ${worker.sessionId} not found in serve`
+                  );
+                } else {
+                  console.warn(
+                    `[liveness] PATCH to mark worker ${worker.id} dead returned ${patchRes.status}`
+                  );
+                }
+              } catch (patchErr) {
+                console.warn(`[liveness] Failed to mark worker ${worker.id} as dead: ${patchErr}`);
+              }
             }
+          } catch (livenessErr) {
+            console.warn(`[liveness] Session liveness check failed (non-fatal): ${livenessErr}`);
           }
         }
 

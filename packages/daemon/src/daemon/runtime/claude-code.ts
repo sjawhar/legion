@@ -154,7 +154,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return "none";
   }
 
-  async listActiveSessions(): Promise<Set<string>> {
+  async sessionExists(sessionId: string): Promise<boolean> {
     const result = this.spawn([
       "tmux",
       "list-windows",
@@ -164,9 +164,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       "#{window_name}",
     ]);
     if (result.exitCode !== 0) {
-      throw new Error(`Failed to list tmux windows for session ${this.sessionName}`);
+      return false;
     }
     const windowNames = (result.stdout ?? "").split("\n").filter(Boolean);
-    return new Set(windowNames);
+    return windowNames.includes(sessionId);
   }
 }

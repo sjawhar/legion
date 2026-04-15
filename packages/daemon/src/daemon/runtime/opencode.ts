@@ -147,21 +147,10 @@ export class OpenCodeAdapter implements RuntimeAdapter {
     }
   }
 
-  async listActiveSessions(): Promise<Set<string>> {
-    // Use session/status?includeIdle=true which returns all sessions prompted in this
-    // serve process (busy + idle). Lightweight runtime check, no SQLite query,
-    // no pagination issues.
-    const res = await fetch(`http://127.0.0.1:${this.port}/session/status?includeIdle=true`);
-    if (!res.ok) {
-      throw new Error(`Failed to get session status: HTTP ${res.status}`);
-    }
-    const status = (await res.json()) as Record<string, unknown>;
-    return new Set(Object.keys(status));
-  }
-
   async sessionExists(sessionId: string): Promise<boolean> {
-    // Lightweight check: GET /session/{id} returns 200 if exists, 404 if gone.
-    // Much cheaper than listing all 1868+ sessions.
+    // Per-session lookup via GET /session/{id} — O(1) regardless of total session count.
+    // Previous implementations (GET /session list, session/status?includeIdle) both had
+    // pagination or timing issues with 1800+ sessions. Direct lookup is immune to both.
     try {
       const res = await fetch(`http://127.0.0.1:${this.port}/session/${sessionId}`);
       return res.ok;

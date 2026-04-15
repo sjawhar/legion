@@ -2092,55 +2092,15 @@ export function startServer(opts: ServerOptions): {
       return;
     }
 
-    const failedWorkspaceIssueIds = new Set<string>();
-    const cleanedWorkspaceIssueIds = new Set<string>();
     let cleanedWorkers = 0;
 
-    // First pass: attempt workspace cleanup (once per issue)
+    // Remove worker state — session, Envoy, in-memory maps.
+    // Workspaces are NOT deleted here; they are only cleaned when the issue
+    // moves to Done (via cleanupDoneIssueWorkers). This prevents data loss
+    // when a worker is reaped due to transient liveness failures.
     for (const workerId of deadWorkerIds) {
       const entry = workers.get(workerId);
       if (!entry) continue;
-
-      const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
-      if (!issueId) continue;
-
-      if (cleanedWorkspaceIssueIds.has(issueId) || failedWorkspaceIssueIds.has(issueId)) {
-        continue;
-      }
-
-      if (opts.paths && typeof entry.repo === "string") {
-        const repoRef = parseIssueRepo(entry.repo);
-        if (repoRef) {
-          try {
-            await cleanupWorkspace(
-              opts.paths,
-              opts.legionId,
-              issueId,
-              repoRef,
-              opts.repoManagerDeps
-            );
-            cleanedWorkspaceIssueIds.add(issueId);
-          } catch (error) {
-            console.warn(
-              `[dead-worker-cleanup] workspace cleanup failed for ${issueId}: ${error instanceof Error ? error.message : String(error)}`
-            );
-            failedWorkspaceIssueIds.add(issueId);
-          }
-        }
-      }
-    }
-
-    // Second pass: remove worker state only for issues where workspace was cleaned (or no workspace)
-    for (const workerId of deadWorkerIds) {
-      const entry = workers.get(workerId);
-      if (!entry) continue;
-
-      const issueId = extractIssueIdFromWorkerId(workerId)?.toLowerCase();
-
-      // Skip issues where workspace cleanup failed — preserve state for retry
-      if (issueId && failedWorkspaceIssueIds.has(issueId)) {
-        continue;
-      }
 
       try {
         await opts.adapter.deleteSession(entry.sessionId);

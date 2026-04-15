@@ -109,7 +109,7 @@ function makeAdapter(overrides?: {
   stopServeCalls?: number[];
   createSessionCalls?: Array<{ sessionId: string; workspace: string }>;
   getServePid?: () => number;
-  listActiveSessions?: () => Promise<Set<string>>;
+  sessionExists?: (sessionId: string) => Promise<boolean>;
 }): RuntimeAdapter {
   const createSessionCalls = overrides?.createSessionCalls ?? [];
   const stopServeCalls = overrides?.stopServeCalls ?? [];
@@ -134,7 +134,7 @@ function makeAdapter(overrides?: {
     },
     getSessionStatus: async () => ({ data: undefined }),
     deleteSession: async () => {},
-    listActiveSessions: overrides?.listActiveSessions ?? (async () => new Set<string>()),
+    sessionExists: overrides?.sessionExists ?? (async () => false),
   };
 }
 
@@ -1882,10 +1882,10 @@ describe("daemon entry", () => {
     });
 
     it("marks running worker as dead when session is missing from serve", async () => {
-      let timeoutCallback: TimeoutCallback | null = null;
+      const timeoutCallbacks: TimeoutCallback[] = [];
       const mockSetTimeout: typeof setTimeout = Object.assign(
         ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
-          timeoutCallback = callback as TimeoutCallback;
+          timeoutCallbacks.push(callback);
           return {} as ReturnType<typeof setTimeout>;
         }) as unknown as typeof setTimeout,
         { __promisify__: setTimeout.__promisify__ }
@@ -1917,8 +1917,8 @@ describe("daemon entry", () => {
           }),
           writeStateFile: async () => {},
           adapter: makeAdapter({
-            // Session is NOT in the active set → worker should be reaped
-            listActiveSessions: async () => new Set<string>(["ses_other_session"]),
+            // Session does not match worker → worker should be reaped
+            sessionExists: async () => false,
           }),
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
@@ -1942,8 +1942,11 @@ describe("daemon entry", () => {
         }
       );
 
-      if (!timeoutCallback) throw new Error("Expected health loop callback to be scheduled");
-      await (timeoutCallback as () => Promise<void>)();
+      if (!timeoutCallbacks[0]) throw new Error("Expected health loop callback to be scheduled");
+      // Need 3 consecutive ticks for the failure threshold
+      await (timeoutCallbacks[0] as () => Promise<void>)();
+      await (timeoutCallbacks[1] as () => Promise<void>)();
+      await (timeoutCallbacks[2] as () => Promise<void>)();
 
       expect(patchCalls).toHaveLength(1);
       expect(patchCalls[0].body.status).toBe("dead");
@@ -1983,8 +1986,8 @@ describe("daemon entry", () => {
           }),
           writeStateFile: async () => {},
           adapter: makeAdapter({
-            // Session IS in the active set → worker should NOT be reaped
-            listActiveSessions: async () => new Set<string>([workerSessionId]),
+            // Session IS the worker → worker should NOT be reaped
+            sessionExists: async (id) => id === workerSessionId,
           }),
           startServer: () => ({
             server: { port: 15555 } as ReturnType<typeof Bun.serve>,
@@ -2022,7 +2025,7 @@ describe("daemon entry", () => {
         { __promisify__: setTimeout.__promisify__ }
       );
 
-      const listActiveSessionsCalls: number[] = [];
+      const sessionExistsCalls: number[] = [];
       const workerEntry: WorkerEntry = {
         ...baseEntry,
         status: "running",
@@ -2042,9 +2045,9 @@ describe("daemon entry", () => {
           writeStateFile: async () => {},
           adapter: makeAdapter({
             healthy: async () => false,
-            listActiveSessions: async () => {
-              listActiveSessionsCalls.push(1);
-              return new Set<string>();
+            sessionExists: async () => {
+              sessionExistsCalls.push(1);
+              return false;
             },
           }),
           startServer: () => ({
@@ -2062,7 +2065,7 @@ describe("daemon entry", () => {
       await (timeoutCallback as () => Promise<void>)();
 
       // Liveness sweep must not run when serve is unhealthy (AC3)
-      expect(listActiveSessionsCalls).toHaveLength(0);
+      expect(sessionExistsCalls).toHaveLength(0);
     });
 
     it("skips liveness sweep when serve was just restarted", async () => {
@@ -2075,7 +2078,7 @@ describe("daemon entry", () => {
         { __promisify__: setTimeout.__promisify__ }
       );
 
-      const listActiveSessionsCalls: number[] = [];
+      const sessionExistsCalls: number[] = [];
       // Track whether the health tick has started (vs startup calls)
       let tickStarted = false;
       let tickHealthCallCount = 0;
@@ -2103,9 +2106,9 @@ describe("daemon entry", () => {
               // First tick call: unhealthy (triggers restart)
               return tickHealthCallCount > 1;
             },
-            listActiveSessions: async () => {
-              listActiveSessionsCalls.push(1);
-              return new Set<string>();
+            sessionExists: async () => {
+              sessionExistsCalls.push(1);
+              return false;
             },
           }),
           startServer: () => ({
@@ -2130,10 +2133,10 @@ describe("daemon entry", () => {
       await (timeoutCallback as () => Promise<void>)();
 
       // Liveness sweep must not run when serve was just restarted (AC3)
-      expect(listActiveSessionsCalls).toHaveLength(0);
+      expect(sessionExistsCalls).toHaveLength(0);
     });
 
-    it("skips liveness sweep and marks no workers dead when listActiveSessions throws", async () => {
+    it("skips liveness sweep and marks no workers dead when sessionExists throws", async () => {
       let timeoutCallback: TimeoutCallback | null = null;
       const mockSetTimeout: typeof setTimeout = Object.assign(
         ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
@@ -2162,7 +2165,7 @@ describe("daemon entry", () => {
           }),
           writeStateFile: async () => {},
           adapter: makeAdapter({
-            listActiveSessions: async () => {
+            sessionExists: async () => {
               throw new Error("network error");
             },
           }),
@@ -2190,6 +2193,244 @@ describe("daemon entry", () => {
       await (timeoutCallback as () => Promise<void>)();
 
       // AC4: transient error → no workers marked dead
+      expect(patchCalls).toHaveLength(0);
+    });
+  });
+
+  describe("liveness sweep hardening", () => {
+    it("does not reap workers within 120s startup grace period", async () => {
+      const timeoutCallbacks: TimeoutCallback[] = [];
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallbacks.push(callback);
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const workerId = "test-repo-42-implement";
+      const workerSessionId = "ses_abc123def456ABCDEFGHIJKLMN";
+
+      // Worker started 90s ago — past the current 60s grace but within the desired 120s
+      const workerEntry: WorkerEntry = {
+        ...baseEntry,
+        id: workerId,
+        sessionId: workerSessionId,
+        startedAt: new Date(Date.now() - 90_000).toISOString(),
+        status: "running",
+      };
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [workerId]: workerEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({
+            healthy: async () => true,
+            sessionExists: async () => false,
+          }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+            cleanupDeadWorkers: async () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: Object.assign(
+            async (url: string | URL | Request, init?: RequestInit) => {
+              const urlStr = String(url);
+              if (init?.method === "PATCH" && urlStr.includes("/workers/")) {
+                const body = JSON.parse(init.body as string) as Record<string, unknown>;
+                patchCalls.push({ url: urlStr, body });
+                return new Response(JSON.stringify({ ok: true }), { status: 200 });
+              }
+              return originalFetch(url, init);
+            },
+            { preconnect: originalFetch.preconnect }
+          ),
+        }
+      );
+
+      if (!timeoutCallbacks[0]) throw new Error("Expected health loop callback");
+      await (timeoutCallbacks[0] as () => Promise<void>)();
+
+      // Worker should NOT be reaped — it's within the 120s grace period
+      const deadPatches = patchCalls.filter((c) => c.body.status === "dead");
+      expect(deadPatches).toHaveLength(0);
+    });
+
+    it("only reaps workers after 3 consecutive liveness failures", async () => {
+      const timeoutCallbacks: TimeoutCallback[] = [];
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallbacks.push(callback);
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const workerId = "test-repo-42-implement";
+      const workerSessionId = "ses_abc123def456ABCDEFGHIJKLMN";
+
+      // Worker started 200s ago — well past any grace period
+      const workerEntry: WorkerEntry = {
+        ...baseEntry,
+        id: workerId,
+        sessionId: workerSessionId,
+        startedAt: new Date(Date.now() - 200_000).toISOString(),
+        status: "running",
+      };
+
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [workerId]: workerEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({
+            healthy: async () => true,
+            sessionExists: async () => false,
+          }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+            cleanupDeadWorkers: async () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: Object.assign(
+            async (url: string | URL | Request, init?: RequestInit) => {
+              const urlStr = String(url);
+              if (init?.method === "PATCH" && urlStr.includes("/workers/")) {
+                const body = JSON.parse(init.body as string) as Record<string, unknown>;
+                patchCalls.push({ url: urlStr, body });
+                return new Response(JSON.stringify({ ok: true }), { status: 200 });
+              }
+              return originalFetch(url, init);
+            },
+            { preconnect: originalFetch.preconnect }
+          ),
+        }
+      );
+
+      // First health tick — miss 1, should NOT reap
+      await (timeoutCallbacks[0] as () => Promise<void>)();
+      expect(patchCalls.filter((c) => c.body.status === "dead")).toHaveLength(0);
+
+      // Second health tick — miss 2, should NOT reap
+      await (timeoutCallbacks[1] as () => Promise<void>)();
+      expect(patchCalls.filter((c) => c.body.status === "dead")).toHaveLength(0);
+
+      // Third health tick — miss 3, NOW should reap
+      await (timeoutCallbacks[2] as () => Promise<void>)();
+      expect(patchCalls.filter((c) => c.body.status === "dead")).toHaveLength(1);
+    });
+
+    it("resets consecutive miss counter when worker session reappears", async () => {
+      const timeoutCallbacks: TimeoutCallback[] = [];
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
+          timeoutCallbacks.push(callback);
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      const patchCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const workerId = "test-repo-42-implement";
+      const workerSessionId = "ses_abc123def456ABCDEFGHIJKLMN";
+
+      const workerEntry: WorkerEntry = {
+        ...baseEntry,
+        id: workerId,
+        sessionId: workerSessionId,
+        startedAt: new Date(Date.now() - 200_000).toISOString(),
+        status: "running",
+      };
+
+      let listCallCount = 0;
+      await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          checkIntervalMs: 1000,
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+        },
+        {
+          readStateFile: async () => ({
+            workers: { [workerId]: workerEntry },
+            crashHistory: {},
+          }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({
+            healthy: async () => true,
+            sessionExists: async (id) => {
+              listCallCount++;
+              // Tick 1: missing, Tick 2: missing, Tick 3: present, Tick 4: missing, Tick 5: missing
+              if (listCallCount === 3) return id === workerSessionId;
+              return false;
+            },
+          }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+            cleanupDeadWorkers: async () => {},
+          }),
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: Object.assign(
+            async (url: string | URL | Request, init?: RequestInit) => {
+              const urlStr = String(url);
+              if (init?.method === "PATCH" && urlStr.includes("/workers/")) {
+                const body = JSON.parse(init.body as string) as Record<string, unknown>;
+                patchCalls.push({ url: urlStr, body });
+                return new Response(JSON.stringify({ ok: true }), { status: 200 });
+              }
+              return originalFetch(url, init);
+            },
+            { preconnect: originalFetch.preconnect }
+          ),
+        }
+      );
+
+      // Tick 1: miss 1 — no reap
+      await (timeoutCallbacks[0] as () => Promise<void>)();
+      expect(patchCalls).toHaveLength(0);
+
+      // Tick 2: miss 2 — no reap
+      await (timeoutCallbacks[1] as () => Promise<void>)();
+      expect(patchCalls).toHaveLength(0);
+
+      // Tick 3: session reappears — counter resets
+      await (timeoutCallbacks[2] as () => Promise<void>)();
+      expect(patchCalls).toHaveLength(0);
+
+      // Tick 4: miss 1 again (counter was reset) — no reap
+      await (timeoutCallbacks[3] as () => Promise<void>)();
+      expect(patchCalls).toHaveLength(0);
+
+      // Tick 5: miss 2 — still no reap (need 3 consecutive)
+      await (timeoutCallbacks[4] as () => Promise<void>)();
       expect(patchCalls).toHaveLength(0);
     });
   });
