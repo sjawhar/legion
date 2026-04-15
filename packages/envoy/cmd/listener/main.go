@@ -623,7 +623,11 @@ func main() {
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
-	_, err = startListenerSubscription(client, consumer, func(msg *nats.Msg) {
+	// Subscribe with retry — during rolling deployments, the old container may still
+	// hold the durable consumer binding. Retry with backoff until it releases.
+	var sub *nats.Subscription
+	for attempt := 1; attempt <= 10; attempt++ {
+		sub, err = startListenerSubscription(client, consumer, func(msg *nats.Msg) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
 			logger.Error("listener decode failed", slog.String("error", err.Error()))
@@ -734,9 +738,21 @@ func main() {
 			_ = msg.Ack()
 		}
 	})
-	if err != nil {
-		log.Fatal(err)
+		if err == nil {
+			break
+		}
+		if attempt == 10 {
+			log.Fatalf("subscribe failed after %d attempts: %v", attempt, err)
+		}
+		backoff := time.Duration(attempt) * 3 * time.Second
+		logger.Warn("subscribe failed, retrying",
+			slog.String("error", err.Error()),
+			slog.Int("attempt", attempt),
+			slog.String("retry_in", backoff.String()),
+		)
+		time.Sleep(backoff)
 	}
+	_ = sub // used by NATS internally
 
 	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
 	deps.Store(&listenerDeps{
