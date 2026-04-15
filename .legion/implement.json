@@ -1,18 +1,16 @@
 {
   "filesChanged": [
-    ".github/workflows/release-opencode-plugin.yaml"
+    ".opencode/skills/legion-controller/SKILL.md"
   ],
   "trickyParts": [
-    "Followed the envoy plugin job pattern exactly from release-envoy-and-plugin.yaml. Version bumping queries npm registry for latest version and auto-increments patch. OIDC provenance handled by id-token:write permission + actions/setup-node registry-url config."
+    "The MUST NOT items from the issue were already present in the Role Boundary section (lines 450-451). Only the Red Flags table entry was missing."
   ],
   "deviations": [
-    "None — followed the template exactly as specified in the issue"
+    "Did not add MUST NOT items since they already existed — only added the missing Red Flags table entry"
   ],
-  "openQuestions": [
-    "NPM_TOKEN or NODE_AUTH_TOKEN must be available as a repository secret for npm publish to authenticate. The template workflow doesn't set it explicitly either, so it's presumably already configured. If the first publish fails, check that an npm token is set as a repo secret named NODE_AUTH_TOKEN."
-  ],
+  "openQuestions": [],
   "subPlanningNeeded": false,
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-04-14T04:56:28.397Z"
+  "completed": "2026-04-14T21:56:05.275Z"
 }
