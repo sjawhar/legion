@@ -4,7 +4,8 @@
   "private": true,
   "main": "index.ts",
   "dependencies": {
-    "@pulumi/pulumi": "^3.0.0",
-    "@pulumi/docker": "4.11.0"
+    "@pulumi/command": "^1.2.1",
+    "@pulumi/docker": "4.11.0",
+    "@pulumi/pulumi": "^3.0.0"
   }
 }
