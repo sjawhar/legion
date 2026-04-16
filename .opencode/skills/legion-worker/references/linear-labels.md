@@ -22,18 +22,18 @@ linear_linear(action="update",
 )
 ```
 
-## GitHub PR Draft Status (Not Linear)
+## GitHub PR Review State (Not Linear)
 
-Review outcomes signaled via **PR draft status**, not labels:
+Review outcomes signaled via **native GitHub review API**, not labels:
 
-| Status | Meaning |
-|--------|---------|
-| Ready (not draft) | PR passes review |
-| Draft | PR needs work |
+| Review State | Meaning |
+|-------------|---------|
+| Approved | PR passes review |
+| Changes Requested | PR needs work |
 
 ```bash
-gh pr ready "$LEGION_ISSUE_ID"        # Mark approved
-gh pr ready "$LEGION_ISSUE_ID" --undo # Mark changes requested
+gh pr review "$LEGION_ISSUE_ID" --approve --body "..."           # Mark approved
+gh pr review "$LEGION_ISSUE_ID" --request-changes --body "..."   # Mark changes requested
 ```
 
-**Critical ordering for reviewers:** Set draft status BEFORE `worker-done` on Linear.
+**Critical ordering for reviewers:** Submit review BEFORE `worker-done`.

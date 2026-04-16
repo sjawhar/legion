@@ -17,6 +17,8 @@ import {
   type IssueStatusLiteral,
   MergeableStatus,
   type MergeableStatusLiteral,
+  ReviewState,
+  type ReviewStateLiteral,
   WorkerMode,
   type WorkerModeLiteral,
 } from "./types";
@@ -25,7 +27,7 @@ export function suggestAction(
   status: IssueStatusLiteral | string,
   hasWorkerDone: boolean,
   hasLiveWorker: boolean,
-  prIsDraft: boolean | null,
+  prReviewState: ReviewStateLiteral | null,
   hasPr: boolean,
   hasTestPassed: boolean,
   ciStatus: CiStatusLiteral | null = null,
@@ -101,10 +103,10 @@ export function suggestAction(
         if (!hasPr) {
           return "investigate_no_pr";
         }
-        if (prIsDraft === null) {
+        if (prReviewState === null) {
           return "retry_pr_check";
         }
-        if (prIsDraft) {
+        if (prReviewState === ReviewState.CHANGES_REQUESTED) {
           return "resume_implementer_for_changes";
         }
         // Check merge conflicts before CI status.
@@ -276,7 +278,7 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
       data.status,
       data.labels.includes("worker-done"),
       data.hasLiveWorker,
-      data.prIsDraft,
+      data.prReviewState,
       data.hasPr,
       data.hasTestPassed ?? false,
       data.ciStatus,
@@ -309,7 +311,7 @@ export function buildIssueState(data: FetchedIssueData, legionId: string): Issue
     status: data.status,
     labels: data.labels,
     hasPr: data.hasPr,
-    prIsDraft: data.prIsDraft,
+    prReviewState: data.prReviewState,
     ciStatus: data.ciStatus,
     mergeableStatus: data.mergeableStatus,
     hasLiveWorker: data.hasLiveWorker,

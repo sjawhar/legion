@@ -6,7 +6,6 @@ import {
   generateJwt,
   getGitIdentity,
   modeToRole,
-  setDraftStatus,
   TokenManager,
 } from "../github-apps";
 
@@ -319,79 +318,5 @@ describe("buildRoleEnv", () => {
     // Non-LEGION_GITHUB_APP vars preserved
     expect(result.PATH).toBe("/usr/bin");
     expect(result.LEGION_ID).toBe("team-1");
-  });
-});
-
-describe("setDraftStatus", () => {
-  it("marks a PR as ready using markPullRequestReadyForReview", async () => {
-    const fetchFn = mock(async (_input: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(init?.body as string) as { query: string; variables: { id: string } };
-      expect(body.query).toContain("markPullRequestReadyForReview");
-      expect(body.variables.id).toBe("PR_abc123");
-      const headers = init?.headers as Record<string, string>;
-      expect(headers.Authorization).toBe("Bearer ghs_test");
-
-      return new Response(
-        JSON.stringify({
-          data: {
-            markPullRequestReadyForReview: {
-              pullRequest: { id: "PR_abc123", isDraft: false },
-            },
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    }) as unknown as typeof fetch;
-
-    const result = await setDraftStatus("ghs_test", "PR_abc123", true, fetchFn);
-    expect(result).toEqual({ id: "PR_abc123", isDraft: false });
-  });
-
-  it("converts a PR to draft using convertPullRequestToDraft", async () => {
-    const fetchFn = mock(async (_input: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(init?.body as string) as { query: string; variables: { id: string } };
-      expect(body.query).toContain("convertPullRequestToDraft");
-      expect(body.variables.id).toBe("PR_xyz789");
-
-      return new Response(
-        JSON.stringify({
-          data: {
-            convertPullRequestToDraft: {
-              pullRequest: { id: "PR_xyz789", isDraft: true },
-            },
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    }) as unknown as typeof fetch;
-
-    const result = await setDraftStatus("ghs_test", "PR_xyz789", false, fetchFn);
-    expect(result).toEqual({ id: "PR_xyz789", isDraft: true });
-  });
-
-  it("throws on HTTP error", async () => {
-    const fetchFn = mock(async () => {
-      return new Response("Internal Server Error", { status: 500 });
-    }) as unknown as typeof fetch;
-
-    expect(async () => {
-      await setDraftStatus("ghs_test", "PR_abc", true, fetchFn);
-    }).toThrow("GitHub GraphQL request failed (500)");
-  });
-
-  it("throws on GraphQL errors", async () => {
-    const fetchFn = mock(async () => {
-      return new Response(
-        JSON.stringify({
-          data: { markPullRequestReadyForReview: null },
-          errors: [{ message: "Resource not accessible by integration", type: "FORBIDDEN" }],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    }) as unknown as typeof fetch;
-
-    expect(async () => {
-      await setDraftStatus("ghs_test", "PR_abc", true, fetchFn);
-    }).toThrow("GraphQL error: Resource not accessible by integration");
   });
 });

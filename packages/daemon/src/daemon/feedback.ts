@@ -42,7 +42,7 @@ export const StateCollectedEventSchema = FeedbackEventBase.extend({
   workerMode: z.string().nullable(),
   workerStatus: z.string().nullable(),
   hasPr: z.boolean(),
-  prIsDraft: z.boolean().nullable(),
+  prReviewState: z.string().nullable(),
   ciStatus: z.string().nullable(),
   mergeableStatus: z.string().nullable(),
   labels: z.array(z.string()),

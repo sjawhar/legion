@@ -238,7 +238,7 @@ fi
 
 The state endpoint returns JSON with both `suggestedAction` and raw signals:
 - `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
-- `hasPr`, `prIsDraft` — PR state
+- `hasPr`, `prReviewState` — PR and review state
 - `ciStatus`, `mergeableStatus` — CI and merge conflict state
 - `hasUserFeedback` — user interaction state
 Use `suggestedAction` as the primary guide, but consult raw signals when the suggestion
@@ -249,7 +249,7 @@ about what to do:
 |-----------------|---------|---------------------|
 | `skip` | `hasPr: true`, status: In Progress, `hasLiveWorker: true` | Live implementer still working on PR; wait for it to finish |
 | `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
-| `retry_pr_check` | `prIsDraft: null` | GitHub API flaked; try again next iteration |
+| `retry_pr_check` | `prReviewState: null` | GitHub API flaked; try again next iteration |
 | `resume_implementer_for_changes` (conflict) | `mergeableStatus: "conflicting"` | PR has conflicts; resume implementer to rebase and resolve |
 
 ### Routing by Action Intent
@@ -301,7 +301,7 @@ LEGION_ID-derived repo values for issue-scoped GitHub operations. Use `$ISSUE_RE
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
 
-**`retry_pr_check`:** The GitHub API couldn't determine PR draft status. Do nothing this iteration —
+**`retry_pr_check`:** The GitHub API couldn't determine PR review state. Do nothing this iteration —
 don't dispatch a worker, don't transition status. The next loop iteration will re-run the state script
 which will retry the GitHub API call. If this persists across multiple iterations, investigate the
 GitHub API connectivity.
@@ -314,7 +314,7 @@ The implementer's merge workflow already contains rebase logic for post-approval
 ### Implement → Testing → Review Handoff
 
 The implementer adds `worker-done` when finished:
-1. Implementer opens a **draft PR**, verifies CI passes, adds `worker-done`, and exits
+1. Implementer opens a PR, verifies CI passes, adds `worker-done`, and exits
 2. State machine sees: In Progress + `worker-done` → `transition_to_testing`
 3. Controller transitions issue to Testing status
 4. Controller runs the quality gate (below)
@@ -329,7 +329,7 @@ After the tester runs:
 
 When the reviewer requests changes, the implementer's fixes **must go through testing again**:
 
-1. Reviewer converts PR to draft, adds `worker-done`
+1. Reviewer requests changes via `gh pr review --request-changes`, adds `worker-done`
 2. State machine: `resume_implementer_for_changes`
 3. Controller **transitions issue to In Progress**, removes `worker-done`
 4. Controller resumes the implementer session with "Address PR review comments"
@@ -338,7 +338,7 @@ When the reviewer requests changes, the implementer's fixes **must go through te
 7. Tester verifies the fixes
 8. If tester passes → Needs Review → reviewer runs again
 
-**Critical:** The controller MUST transition to In Progress before resuming the implementer. If the issue stays in Needs Review and the implementer adds `worker-done`, the state machine will see `prIsDraft + worker-done` and suggest `resume_implementer_for_changes` again (infinite loop).
+**Critical:** The controller MUST transition to In Progress before resuming the implementer. If the issue stays in Needs Review and the implementer adds `worker-done`, the state machine will see `changes_requested + worker-done` and suggest `resume_implementer_for_changes` again (infinite loop).
 
 ### Architect-Review Checkpoint (Post-Plan, Opt-In)
 
@@ -526,7 +526,7 @@ Before requesting merge approval, verify ALL conditions:
 |---|-----------|-------------|
 | 1 | PR body includes a closing keyword for dispatched issue | `gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO \| grep -Eq "(Closes\|Fixes\|Resolves) #$ISSUE_NUMBER"` |
 | 2 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID" -R $ISSUE_REPO` — all checks must show ✓ |
-| 3 | PR NOT in draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft -q .isDraft -R $ISSUE_REPO` returns `false` |
+| 3 | PR has an approving review | `gh pr view "$LEGION_ISSUE_ID" --json latestReviews --jq '.latestReviews[0].state' -R $ISSUE_REPO` returns `APPROVED` |
 | 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep test-passed` |
 | 5 | Issue has been through retro | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
 | 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep -v user-input-needed` — must NOT match |
@@ -959,7 +959,7 @@ issue is fully complete and no further prompts will be sent.
 
 ### 1. Trust the state machine
 
-The state machine checks worker liveness, PR status, labels, and draft state. Use
+The state machine checks worker liveness, PR status, labels, and review state. Use
 `fetch-and-collect` (GitHub) or POST issue data to `/state/collect` (Linear) and route
 by `suggestedAction`. Don't independently check PRs, ports, or process status — that's
 the state machine's job.

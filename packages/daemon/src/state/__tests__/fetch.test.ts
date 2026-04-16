@@ -13,7 +13,7 @@ import {
   GitHubAPIError,
   getCiStatusBatch,
   getLiveWorkers,
-  getPrDraftStatusBatch,
+  getPrReviewStateBatch,
   mapMergeableState,
 } from "../fetch";
 import type { LinearIssueRaw } from "../types";
@@ -230,31 +230,31 @@ describe("getLiveWorkers", () => {
 });
 
 // =============================================================================
-// TestGetPrDraftStatusBatch
+// TestGetPrReviewStateBatch
 // =============================================================================
 
-describe("getPrDraftStatusBatch", () => {
-  it("returns draft status for multiple issues", async () => {
+describe("getPrReviewStateBatch", () => {
+  it("returns review state for multiple issues", async () => {
     const runner: CommandRunner = async (_cmd: string[]) => {
       const response = {
         data: {
           repo0: {
-            pr0: { isDraft: true },
-            pr1: { isDraft: false },
+            pr0: { latestReviews: { nodes: [{ state: "CHANGES_REQUESTED" }] } },
+            pr1: { latestReviews: { nodes: [{ state: "APPROVED" }] } },
           },
         },
       };
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       {
         "ENG-21": { owner: "owner", repo: "repo", number: 1 },
         "ENG-22": { owner: "owner", repo: "repo", number: 2 },
       },
       runner
     );
-    expect(result).toEqual({ "ENG-21": true, "ENG-22": false });
+    expect(result).toEqual({ "ENG-21": "changes_requested", "ENG-22": "approved" });
   });
 
   it("returns null for missing PR", async () => {
@@ -269,7 +269,7 @@ describe("getPrDraftStatusBatch", () => {
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       {
         "ENG-21": { owner: "owner", repo: "repo", number: 999 },
       },
@@ -278,25 +278,25 @@ describe("getPrDraftStatusBatch", () => {
     expect(result).toEqual({ "ENG-21": null });
   });
 
-  it("handles null isDraft value", async () => {
+  it("returns null for PR with no reviews", async () => {
     const runner: CommandRunner = async (_cmd: string[]) => {
       const response = {
         data: {
           repo0: {
-            pr0: { isDraft: null },
+            pr0: { latestReviews: { nodes: [] } },
           },
         },
       };
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       {
         "ENG-21": { owner: "owner", repo: "repo", number: 1 },
       },
       runner
     );
-    expect(result).toEqual({ "ENG-21": false });
+    expect(result).toEqual({ "ENG-21": null });
   });
 
   it("throws GitHubAPIError on command failure after retries", async () => {
@@ -308,7 +308,7 @@ describe("getPrDraftStatusBatch", () => {
 
     await Promise.resolve(
       expect(
-        getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
+        getPrReviewStateBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
       ).rejects.toThrow(GitHubAPIError)
     );
 
@@ -324,7 +324,7 @@ describe("getPrDraftStatusBatch", () => {
 
     await Promise.resolve(
       expect(
-        getPrDraftStatusBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
+        getPrReviewStateBatch({ "ENG-21": { owner: "owner", repo: "repo", number: 1 } }, runner)
       ).rejects.toThrow(GitHubAPIError)
     );
 
@@ -338,16 +338,18 @@ describe("getPrDraftStatusBatch", () => {
       if (callCount < 3) {
         return { stdout: "", stderr: "temporary network error", exitCode: 1 };
       }
-      const response = { data: { repo0: { pr0: { isDraft: false } } } };
+      const response = {
+        data: { repo0: { pr0: { latestReviews: { nodes: [{ state: "APPROVED" }] } } } },
+      };
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
 
-    expect(result).toEqual({ "ENG-21": false });
+    expect(result).toEqual({ "ENG-21": "approved" });
     expect(callCount).toBe(3);
   });
 
@@ -357,7 +359,7 @@ describe("getPrDraftStatusBatch", () => {
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
@@ -370,33 +372,7 @@ describe("getPrDraftStatusBatch", () => {
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
-      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
-      runner
-    );
-    expect(result).toEqual({ "ENG-21": null });
-  });
-
-  it("handles non-dict repo in response", async () => {
-    const runner: CommandRunner = async (_cmd: string[]) => {
-      const response = { data: { repo0: "unexpected string" } };
-      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
-    };
-
-    const result = await getPrDraftStatusBatch(
-      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
-      runner
-    );
-    expect(result).toEqual({ "ENG-21": null });
-  });
-
-  it("handles non-dict PR in response", async () => {
-    const runner: CommandRunner = async (_cmd: string[]) => {
-      const response = { data: { repo0: { pr0: "unexpected string" } } };
-      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
-    };
-
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
       runner
     );
@@ -411,14 +387,14 @@ describe("getPrDraftStatusBatch", () => {
 
       const response = {
         data: {
-          repo0: { pr0: { isDraft: true } },
-          repo1: { pr0: { isDraft: false } },
+          repo0: { pr0: { latestReviews: { nodes: [{ state: "CHANGES_REQUESTED" }] } } },
+          repo1: { pr0: { latestReviews: { nodes: [{ state: "APPROVED" }] } } },
         },
       };
       return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch(
+    const result = await getPrReviewStateBatch(
       {
         "ENG-21": { owner: "org", repo: "repo1", number: 1 },
         "ENG-22": { owner: "org", repo: "repo2", number: 2 },
@@ -429,7 +405,7 @@ describe("getPrDraftStatusBatch", () => {
     expect(queriesReceived).toHaveLength(1);
     expect(queriesReceived[0]).toContain("repo1");
     expect(queriesReceived[0]).toContain("repo2");
-    expect(result).toEqual({ "ENG-21": true, "ENG-22": false });
+    expect(result).toEqual({ "ENG-21": "changes_requested", "ENG-22": "approved" });
   });
 
   it("returns empty result for empty pr_refs", async () => {
@@ -439,7 +415,7 @@ describe("getPrDraftStatusBatch", () => {
       return { stdout: "{}", stderr: "", exitCode: 0 };
     };
 
-    const result = await getPrDraftStatusBatch({}, runner);
+    const result = await getPrReviewStateBatch({}, runner);
     expect(result).toEqual({});
     expect(callCount).toBe(0);
   });
@@ -817,7 +793,7 @@ describe("fetchAllIssueData", () => {
     }
   });
 
-  it("GitHub API failure sets prIsDraft to null", async () => {
+  it("GitHub API failure sets prReviewState to null", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(
       async () => new Response(JSON.stringify([]), { status: 200 })
@@ -841,7 +817,7 @@ describe("fetchAllIssueData", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].hasPr).toBe(true);
-      expect(result[0].prIsDraft).toBeNull();
+      expect(result[0].prReviewState).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -884,7 +860,7 @@ describe("enrichParsedIssues", () => {
       expect(result).toHaveLength(1);
       expect(result[0].issueId).toBe("ENG-21");
       expect(result[0].hasLiveWorker).toBe(false);
-      expect(result[0].prIsDraft).toBeNull();
+      expect(result[0].prReviewState).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -901,7 +877,7 @@ describe("enrichParsedIssues", () => {
       const issues = [createParsedIssue("GH-42", "Todo", [], null)];
       const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", mockRunner);
       expect(result).toHaveLength(1);
-      expect(result[0].prIsDraft).toBeNull();
+      expect(result[0].prReviewState).toBeNull();
       expect(result[0].hasPr).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
@@ -917,9 +893,11 @@ describe("enrichParsedIssues", () => {
     try {
       const mockRunner: CommandRunner = async (cmd: string[]) => {
         const queryArg = cmd[cmd.length - 1];
-        if (queryArg.includes("isDraft")) {
+        if (queryArg.includes("latestReviews")) {
           return {
-            stdout: JSON.stringify({ data: { repo0: { pr0: { isDraft: false } } } }),
+            stdout: JSON.stringify({
+              data: { repo0: { pr0: { latestReviews: { nodes: [{ state: "APPROVED" }] } } } },
+            }),
             stderr: "",
             exitCode: 0,
           };
@@ -957,7 +935,7 @@ describe("enrichParsedIssues", () => {
       expect(result).toHaveLength(1);
       expect(result[0].ciStatus).toBe("passing");
       expect(result[0].mergeableStatus).toBe("mergeable");
-      expect(result[0].prIsDraft).toBe(false);
+      expect(result[0].prReviewState).toBe("approved");
     } finally {
       globalThis.fetch = originalFetch;
     }

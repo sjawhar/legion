@@ -8,7 +8,7 @@ function createIssueState(overrides: Partial<IssueStateDict> = {}): IssueStateDi
     status: "Todo",
     labels: [],
     hasPr: false,
-    prIsDraft: null,
+    prReviewState: null,
     ciStatus: null,
     mergeableStatus: null,
     hasLiveWorker: false,
@@ -261,19 +261,19 @@ describe("computeStateDelta", () => {
     ]);
   });
 
-  it("detects prIsDraft changes", () => {
+  it("detects prReviewState changes", () => {
     const previous = {
-      "issue-1": createIssueState({ prIsDraft: true }),
+      "issue-1": createIssueState({ prReviewState: "changes_requested" }),
     };
     const current = {
-      "issue-1": createIssueState({ prIsDraft: false }),
+      "issue-1": createIssueState({ prReviewState: "approved" }),
     };
 
     expect(computeStateDelta(previous, current)?.changes.changed).toEqual([
       {
         issueId: "issue-1",
         state: current["issue-1"],
-        changedFields: ["prIsDraft"],
+        changedFields: ["prReviewState"],
       },
     ]);
   });

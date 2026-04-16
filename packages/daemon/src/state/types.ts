@@ -138,6 +138,19 @@ export const MergeableStatus = {
 } as const;
 
 /**
+ * PR review state from GitHub's native review API.
+ * - "approved": at least one approving review, no outstanding change requests
+ * - "changes_requested": most recent review requests changes
+ * - null: no reviews yet, no PR, or couldn't check
+ */
+export type ReviewStateLiteral = "approved" | "changes_requested";
+
+export const ReviewState = {
+  APPROVED: "approved" as ReviewStateLiteral,
+  CHANGES_REQUESTED: "changes_requested" as ReviewStateLiteral,
+} as const;
+
+/**
  * Canonical issue status values with normalization.
  */
 export const IssueStatus = {
@@ -392,7 +405,7 @@ export interface FetchedIssueData {
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   hasPr: boolean; // True if issue has a linked PR
-  prIsDraft: boolean | null; // null if no PR or couldn't check status
+  prReviewState: ReviewStateLiteral | null; // null if no PR, no reviews, or couldn't check
   ciStatus: CiStatusLiteral | null; // null if no PR, no checks, or couldn't check
   mergeableStatus: MergeableStatusLiteral | null; // null if no PR, no checks, or couldn't check
   hasLiveWorker: boolean;
@@ -416,7 +429,7 @@ export interface IssueStateDict {
   status: IssueStatusLiteral | string;
   labels: string[];
   hasPr: boolean;
-  prIsDraft: boolean | null;
+  prReviewState: ReviewStateLiteral | null;
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
   hasLiveWorker: boolean;
@@ -444,7 +457,7 @@ export interface IssueState {
   status: IssueStatusLiteral | string; // Canonical status or unknown raw value
   labels: string[];
   hasPr: boolean; // Whether issue has a linked PR
-  prIsDraft: boolean | null; // null if couldn't check status, true if draft, false if ready
+  prReviewState: ReviewStateLiteral | null; // null if no PR, no reviews, or couldn't check
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
   hasLiveWorker: boolean;
@@ -467,7 +480,7 @@ export const IssueState = {
       status: state.status,
       labels: state.labels,
       hasPr: state.hasPr,
-      prIsDraft: state.prIsDraft,
+      prReviewState: state.prReviewState,
       ciStatus: state.ciStatus,
       mergeableStatus: state.mergeableStatus,
       hasLiveWorker: state.hasLiveWorker,
