@@ -21,7 +21,7 @@ export interface RuntimeAdapter {
   deleteSession(sessionId: string): Promise<void>;
 
   /** Send a prompt to an existing session */
-  sendPrompt(sessionId: string, text: string): Promise<void>;
+  sendPrompt(sessionId: string, text: string, agentName?: string): Promise<void>;
 
   /** Get the port for direct client connections (0 if not applicable).
    * NOTE: This is an OpenCode-specific concept. ClaudeCode returns 0.
