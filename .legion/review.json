@@ -1,0 +1,28 @@
+{
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "verdict": "approved",
+  "keyFindings": [
+    {
+      "severity": "P2",
+      "file": ".opencode/skills/legion-worker/workflows/implement.md",
+      "description": "Line 518 references stale draft-based review signaling ('If the PR was converted to draft but has no review comments'). Should reference changes_requested review state instead."
+    },
+    {
+      "severity": "P2",
+      "file": "docs/solutions/daemon/cross-role-permission-proxy.md",
+      "description": "Retro doc references non-existent POST /pr/draft-status endpoint and setDraftStatus() function. The approach pivoted to replacing draft signaling entirely, making this doc misleading."
+    },
+    {
+      "severity": "P3",
+      "file": "packages/daemon/src/state/__tests__/decision.test.ts",
+      "description": "No buildIssueState integration test with prReviewState: 'changes_requested'. Minor gap since suggestAction unit test covers it directly."
+    }
+  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-04-16T03:29:59.096Z"
+}

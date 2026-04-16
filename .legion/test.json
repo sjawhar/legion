@@ -1,0 +1,47 @@
+{
+  "result": "pass",
+  "criteriaResults": [
+    {
+      "criterion": "Replace prIsDraft with prReviewState throughout state machine, fetch, workflows",
+      "pass": true,
+      "evidence": "Zero prIsDraft/isDraft references in daemon source. prReviewState used in types.ts, fetch.ts, decision.ts, state-delta.ts, feedback.ts, server.ts"
+    },
+    {
+      "criterion": "Add ReviewState type",
+      "pass": true,
+      "evidence": "types.ts:146-151 — ReviewStateLiteral type + ReviewState const"
+    },
+    {
+      "criterion": "getPrReviewStateBatch fetches latestReviews via GraphQL",
+      "pass": true,
+      "evidence": "fetch.ts:258-259 — latestReviews(first:1) GraphQL query. 47 fetch tests pass."
+    },
+    {
+      "criterion": "decision.ts routes correctly on prReviewState",
+      "pass": true,
+      "evidence": "decision.ts:101-126 — null→retry, changes_requested→resume_implementer, approved→retro. 88 decision tests pass."
+    },
+    {
+      "criterion": "Review workflow removes draft toggling, uses gh pr review",
+      "pass": true,
+      "evidence": "Zero draft/gh-pr-ready references in review.md. Uses gh pr review --approve/--request-changes."
+    },
+    {
+      "criterion": "Controller skill and AGENTS.md updated",
+      "pass": true,
+      "evidence": "state/AGENTS.md references getPrReviewStateBatch. Controller SKILL.md updated."
+    }
+  ],
+  "failures": [],
+  "documentationFeedback": "PR description thorough and accurate. AGENTS.md files correctly updated.",
+  "observations": [
+    "latestReviews(first:1) captures only most recent reviewer — fine for single-reviewer-bot architecture",
+    "Test quality: decision tests strong, fetch tests adequate, integration/delta tests mechanical",
+    "18 pre-existing OMO test failures unrelated to this PR"
+  ],
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-16T03:20:45.714Z"
+}
