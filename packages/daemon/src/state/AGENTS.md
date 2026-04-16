@@ -15,7 +15,7 @@ POST /state/collect {backend, issues} → backend.parseIssues() → enrichParsed
 | File | Responsibility |
 |------|---------------|
 | `types.ts` | All domain types. `IssueStatus` (enum-like with `normalize()`), `WorkerMode`, `ActionType` (21 actions), `ParsedIssue`, `FetchedIssueData`, `IssueState`, `CollectedState`. Also `computeSessionId()` and `computeControllerSessionId()` — shared by daemon. |
-| `fetch.ts` | All I/O. `enrichParsedIssues()` enriches parsed issues with worker status + PR draft status. `fetchAllIssueData()` is the legacy wrapper that parses Linear JSON then enriches. `getLiveWorkers()` (daemon HTTP) + `getPrDraftStatusBatch()` (GitHub GraphQL with 3x retry). Accepts injectable `CommandRunner` for testing. |
+| `fetch.ts` | All I/O. `enrichParsedIssues()` enriches parsed issues with worker status + PR review state. `fetchAllIssueData()` is the legacy wrapper that parses Linear JSON then enriches. `getLiveWorkers()` (daemon HTTP) + `getPrReviewStateBatch()` (GitHub GraphQL with 3x retry). Accepts injectable `CommandRunner` for testing. |
 | `decision.ts` | Pure logic, zero I/O. `suggestAction(status, flags...)` → `ActionType`. `buildIssueState()` and `buildCollectedState()` assemble final output. `ACTION_TO_MODE` maps actions to worker modes. |
 | `cli.ts` | Legacy entry point for pipe invocation: `echo $JSON | bun run packages/daemon/src/state/cli.ts --team-id X --daemon-url Y`. Reads stdin, calls fetch + decision, writes JSON to stdout. Superseded by `POST /state/collect`. |
 | `backends/` | Pluggable issue tracker backends. `issue-tracker.ts` defines the `IssueTracker` interface. `linear.ts` and `github.ts` implement it. `index.ts` has the factory. |
@@ -38,10 +38,10 @@ The core of the controller's decision-making. Key transitions:
 | Testing | yes | — | has PR | test-passed + failing | `resume_implementer_for_ci_failure` |
 | Testing | yes | — | has PR | test-passed + pending | `retry_ci_check` |
 | Testing | yes | — | — | !test-passed | `resume_implementer_for_test_failure` |
-| Needs Review | yes | — | ready | passing/null | `transition_to_retro` |
-| Needs Review | yes | — | ready | failing | `resume_implementer_for_ci_failure` |
-| Needs Review | yes | — | ready | pending | `retry_ci_check` |
-| Needs Review | yes | — | draft | — | `resume_implementer_for_changes` |
+| Needs Review | yes | — | approved | passing/null | `transition_to_retro` |
+| Needs Review | yes | — | approved | failing | `resume_implementer_for_ci_failure` |
+| Needs Review | yes | — | approved | pending | `retry_ci_check` |
+| Needs Review | yes | — | changes_requested | — | `resume_implementer_for_changes` |
 | Needs Review | yes | — | no PR | — | `investigate_no_pr` |
 | Retro | yes | — | — | — | `dispatch_merger` |
 | Retro | no | yes | — | — | `skip` (live worker running) |

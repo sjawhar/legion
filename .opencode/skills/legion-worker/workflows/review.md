@@ -7,8 +7,8 @@ Deep PR review with line-level comments. Code is already local in the workspace.
 ## Identity
 
 When GitHub Apps are configured, you run as `legion-review[bot]` — a separate identity from
-the implementer (`legion-impl[bot]`). This means you CAN use GitHub's native review API.
-If Apps are not configured, fall back to PR draft status signaling (legacy).
+the implementer (`legion-impl[bot]`). Use GitHub's native review API (`gh pr review`) to
+submit approvals or request changes. The controller reads the PR review state to decide next steps.
 
 ## Workflow
 
@@ -189,7 +189,7 @@ MERGEABLE=$(gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R 
 - **CONFLICTING:** P1 issue. Increment CRITICAL_COUNT. Include in review summary: "PR has merge conflicts with main. Implementer must rebase." Elevated CRITICAL_COUNT triggers changes-requested in step 5.
 - **UNKNOWN:** Proceed. Controller's Pre-Merge Gate is the primary gate.
 
-Do NOT rebase or push — review identity lacks Contents write permission.
+Do NOT rebase or push — the review identity lacks Contents write permission.
 
 ### 3. Post Summary Comment
 
@@ -229,7 +229,7 @@ Group related issues when they affect the same area.
 
 ### 4.5. Write Handoff Data
 
-Write handoff data — BEFORE setting PR draft status:
+Write handoff data — BEFORE submitting the review:
 
 First, assess which injected learnings were helpful:
 
@@ -271,44 +271,21 @@ Replace the example counts and findings with actual review results:
 - `learningsInjected`: Canonical `docs/solutions/` file paths of learnings presented to the worker at the start of the phase (omit if none were injected)
 - `learningsHelpful`: Subset of `learningsInjected` that materially helped this phase's output (empty array if none were helpful; omit if no learnings were injected)
 
-You MUST attempt the handoff write before setting PR draft status or signaling completion. The CLI will fail loudly if the write encounters an error. If the write fails, diagnose the issue and note it in your PR comment before continuing.
+You MUST attempt the handoff write before submitting the review or signaling completion. The CLI will fail loudly if the write encounters an error. If the write fails, diagnose the issue and note it in your PR comment before continuing.
 
 
 ### 5. Submit Review
 
 **Order matters:** Submit review BEFORE `worker-done` to avoid race condition with controller.
 
-Every review MUST signal its outcome. Use native GitHub review when running under a separate identity:
+Every review MUST use GitHub's native review API. The controller reads the PR's review state
+to decide whether to advance (approved) or send back for changes (changes requested).
 
 ```bash
-# Check if running as App-based reviewer (LEGION_APP_ROLE set by daemon credential injection)
-if [ "$LEGION_APP_ROLE" = "review" ]; then
-  # Native review — running as legion-review[bot], separate identity from implementer
-  if [[ $CRITICAL_COUNT -gt 0 ]]; then
-    gh pr review "$LEGION_ISSUE_ID" --request-changes --body "Changes requested: $CRITICAL_COUNT critical issue(s) found. See review comments." -R $OWNER/$REPO
-  else
-    gh pr review "$LEGION_ISSUE_ID" --approve --body "Approved. No critical issues found." -R $OWNER/$REPO
-  fi
-
-  # Toggle draft status via daemon (review token lacks contents:write needed for gh pr ready).
-  # The daemon proxies through the implement token which has the required permission.
-  PR_NODE_ID=$(gh pr view "$LEGION_ISSUE_ID" --json id --jq '.id' -R $OWNER/$REPO)
-  if [[ $CRITICAL_COUNT -gt 0 ]]; then
-    curl -sf -X POST "http://127.0.0.1:${LEGION_DAEMON_PORT}/pr/draft-status" \
-      -H 'content-type: application/json' \
-      -d "{\"prNodeId\":\"$PR_NODE_ID\",\"ready\":false,\"owner\":\"$OWNER\"}"
-  else
-    curl -sf -X POST "http://127.0.0.1:${LEGION_DAEMON_PORT}/pr/draft-status" \
-      -H 'content-type: application/json' \
-      -d "{\"prNodeId\":\"$PR_NODE_ID\",\"ready\":true,\"owner\":\"$OWNER\"}"
-  fi
+if [[ $CRITICAL_COUNT -gt 0 ]]; then
+  gh pr review "$LEGION_ISSUE_ID" --request-changes --body "Changes requested: $CRITICAL_COUNT critical issue(s) found. See review comments." -R $OWNER/$REPO
 else
-  # Legacy fallback — same identity as implementer, can't use review API
-  if [[ $CRITICAL_COUNT -gt 0 ]]; then
-    gh pr ready "$LEGION_ISSUE_ID" --undo -R $OWNER/$REPO
-  else
-    gh pr ready "$LEGION_ISSUE_ID" -R $OWNER/$REPO
-  fi
+  gh pr review "$LEGION_ISSUE_ID" --approve --body "Approved. No critical issues found." -R $OWNER/$REPO
 fi
 ```
 
@@ -321,7 +298,7 @@ Before adding labels, verify:
 1. Summary comment posted (step 3)
 2. Line-level comments posted (step 4)
 3. Handoff write attempted (step 4.5)
-4. PR draft status set (step 5)
+4. Review submitted (step 5)
 
 If any were skipped, go back and do them.
 

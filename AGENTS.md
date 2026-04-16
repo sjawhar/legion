@@ -98,7 +98,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 
 **Labels:** `worker-done`, `worker-active`, `user-input-needed`, `user-feedback-given`, `test-passed`, `test-failed`
 
-**Review signaling:** PR draft status (not labels) — draft = changes requested, ready = approved.
+**Review signaling:** Native GitHub review API (not labels) — `gh pr review --approve` = approved, `gh pr review --request-changes` = changes requested.
 
 **Testing gate:** Behavioral testing is mandatory after every implementation phase — both fresh implementation AND review-requested changes go through the tester before reaching the reviewer.
 

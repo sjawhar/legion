@@ -6,7 +6,7 @@ const TRACKED_FIELDS = [
   "labels",
   "hasLiveWorker",
   "ciStatus",
-  "prIsDraft",
+  "prReviewState",
   "hasPr",
   "isBlocked",
 ] as const;

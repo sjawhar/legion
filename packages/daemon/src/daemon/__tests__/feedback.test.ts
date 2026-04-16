@@ -78,7 +78,7 @@ function validEvents(): FeedbackEvent[] {
       workerMode: "implement",
       workerStatus: "running",
       hasPr: true,
-      prIsDraft: false,
+      prReviewState: "approved",
       ciStatus: "success",
       mergeableStatus: "MERGEABLE",
       labels: ["worker-active"],

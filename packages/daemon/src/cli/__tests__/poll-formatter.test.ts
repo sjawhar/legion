@@ -7,7 +7,7 @@ function makeIssue(overrides: Partial<IssueStateDict>): IssueStateDict {
     status: "In Progress",
     labels: [],
     hasPr: false,
-    prIsDraft: null,
+    prReviewState: null,
     ciStatus: null,
     mergeableStatus: null,
     hasLiveWorker: false,

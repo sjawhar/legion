@@ -255,9 +255,9 @@ If `envoy_publish` fails, continue — the label is the source of truth.
 
 ## Review Mode Signaling
 
-Review signals outcome via PR draft status BEFORE `worker-done`:
-- **PR ready** (not draft) - no blocking issues, approved
-- **PR draft** - blocking issues found, changes requested
+Review signals outcome via native GitHub review API BEFORE `worker-done`:
+- **Approved** (`gh pr review --approve`) — no blocking issues
+- **Changes requested** (`gh pr review --request-changes`) — blocking issues found
 
 ## Research Before Escalating
 

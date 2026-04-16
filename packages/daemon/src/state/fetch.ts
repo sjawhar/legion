@@ -4,7 +4,7 @@
  * All I/O operations are async and can be composed with Promise.all.
  * Uses:
  * - fetch() for daemon HTTP API (worker detection)
- * - Bun.spawn for GitHub CLI (PR draft status)
+ * - Bun.spawn for GitHub CLI (PR review state, CI status)
  * - Retry logic with exponential backoff for GitHub API calls
  *
  * Ported from Python: src/legion/state/fetch.py
@@ -20,6 +20,8 @@ import {
   MergeableStatus,
   type MergeableStatusLiteral,
   type ParsedIssue,
+  ReviewState,
+  type ReviewStateLiteral,
 } from "./types";
 
 // =============================================================================
@@ -202,20 +204,25 @@ export function mapMergeableState(state: string | null | undefined): MergeableSt
 }
 
 /**
- * Fetch PR draft status for multiple issues in a single GraphQL query.
+ * Fetch PR review state for multiple issues in a single GraphQL query.
+ *
+ * Queries `latestReviews(first:1)` on each PR to determine whether the most
+ * recent review approved or requested changes. Replaces the previous draft-based
+ * signaling — with separate GitHub Apps for impl and review roles, native
+ * reviews are the canonical signal.
  *
  * Batches all PRs across all repositories into one API call.
  * Retries up to 3 times with exponential backoff on failure.
  *
  * @param prRefs - Dict mapping issue_id to GitHubPRRef
  * @param runner - Command runner for testing
- * @returns Dict mapping issue_id to draft status (true/false/null)
+ * @returns Dict mapping issue_id to review state (approved/changes_requested/null)
  * @throws GitHubAPIError if GraphQL query fails after retries
  */
-export async function getPrDraftStatusBatch(
+export async function getPrReviewStateBatch(
   prRefs: Record<string, GitHubPRRefType>,
   runner: CommandRunner = defaultRunner
-): Promise<Record<string, boolean | null>> {
+): Promise<Record<string, ReviewStateLiteral | null>> {
   if (Object.keys(prRefs).length === 0) {
     return {};
   }
@@ -248,7 +255,9 @@ export async function getPrDraftStatusBatch(
       const [issueId, prNumber] = issuePrs[prIdx];
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
-      prParts.push(`${prAlias}: pullRequest(number: ${prNumber}) { isDraft }`);
+      prParts.push(
+        `${prAlias}: pullRequest(number: ${prNumber}) { latestReviews(first: 1) { nodes { state } } }`
+      );
     }
 
     queryParts.push(
@@ -301,7 +310,7 @@ export async function getPrDraftStatusBatch(
         ? (rawData as Record<string, unknown>)
         : {};
 
-    const result: Record<string, boolean | null> = {};
+    const result: Record<string, ReviewStateLiteral | null> = {};
 
     for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
       const rawRepo = dataObj[repoAlias];
@@ -315,18 +324,16 @@ export async function getPrDraftStatusBatch(
 
       const prAliases = prAliasMap.get(repoAlias) ?? new Map();
       for (const [prAlias, [issueId]] of prAliases) {
-        const rawPr = repoData[prAlias];
-        const prData: { isDraft?: boolean } | null =
-          rawPr !== null &&
-          rawPr !== undefined &&
-          typeof rawPr === "object" &&
-          !Array.isArray(rawPr)
-            ? (rawPr as { isDraft?: boolean })
-            : null;
+        const rawPr = repoData[prAlias] as
+          | { latestReviews?: { nodes?: Array<{ state?: string }> } }
+          | null
+          | undefined;
 
-        if (prData !== null && "isDraft" in prData) {
-          // Convert null to false for safety (null isDraft means not draft)
-          result[issueId] = Boolean(prData.isDraft);
+        const reviewState = rawPr?.latestReviews?.nodes?.[0]?.state ?? null;
+        if (reviewState === "APPROVED") {
+          result[issueId] = ReviewState.APPROVED;
+        } else if (reviewState === "CHANGES_REQUESTED") {
+          result[issueId] = ReviewState.CHANGES_REQUESTED;
         } else {
           result[issueId] = null;
         }
@@ -534,7 +541,7 @@ export async function enrichParsedIssues(
   }
 
   let liveWorkers: Record<string, { mode: string; status: string }> = {};
-  let prDraftMap: Record<string, boolean | null> = {};
+  let prReviewMap: Record<string, ReviewStateLiteral | null> = {};
   let ciAndMergeMap: Record<string, CiAndMergeStatus> = {};
 
   await Promise.all([
@@ -546,10 +553,10 @@ export async function enrichParsedIssues(
         return;
       }
       try {
-        prDraftMap = await getPrDraftStatusBatch(prRefsForStatus, runner);
+        prReviewMap = await getPrReviewStateBatch(prRefsForStatus, runner);
       } catch {
         for (const issueId of Object.keys(prRefsForStatus)) {
-          prDraftMap[issueId] = null;
+          prReviewMap[issueId] = null;
         }
       }
     })(),
@@ -574,7 +581,7 @@ export async function enrichParsedIssues(
       status: issue.status,
       labels: issue.labels,
       hasPr: issue.hasPr,
-      prIsDraft: prDraftMap[issue.issueId] ?? null,
+      prReviewState: prReviewMap[issue.issueId] ?? null,
       ciStatus: ciAndMergeMap[issue.issueId]?.ciStatus ?? null,
       mergeableStatus: ciAndMergeMap[issue.issueId]?.mergeableStatus ?? null,
       hasLiveWorker: workerInfo !== null,
@@ -598,7 +605,7 @@ export async function enrichParsedIssues(
  *
  * All I/O operations run concurrently:
  * - Daemon HTTP API (for live workers)
- * - GitHub PR draft status (fetched via gh api graphql)
+ * - GitHub PR review state (fetched via gh api graphql)
  *
  * @param linearIssues - Raw issue dicts from Linear API (legacy — use enrichParsedIssues for new code)
  * @param daemonUrl - Base URL of daemon HTTP API
