@@ -68,12 +68,21 @@ export const WorkerReapedEventSchema = FeedbackEventBase.extend({
   reason: z.string(),
 });
 
+export const WorkerStallEventSchema = FeedbackEventBase.extend({
+  event: z.literal("daemon.worker_stall"),
+  workerId: z.string(),
+  sessionId: z.string(),
+  messageCount: z.number().int().nonnegative(),
+  stalledForMs: z.number().nonnegative(),
+});
+
 export const FeedbackEventSchema = z.discriminatedUnion("event", [
   WorkerDispatchedEventSchema,
   WorkerStatusChangedEventSchema,
   StateCollectedEventSchema,
   HealthTickEventSchema,
   WorkerReapedEventSchema,
+  WorkerStallEventSchema,
 ]);
 
 type WorkerDispatchedEvent = z.infer<typeof WorkerDispatchedEventSchema>;
@@ -83,13 +92,15 @@ type HealthTickEvent = z.infer<typeof HealthTickEventSchema> & {
   issueId?: undefined;
 };
 type WorkerReapedEvent = z.infer<typeof WorkerReapedEventSchema>;
+type WorkerStallEvent = z.infer<typeof WorkerStallEventSchema>;
 
 export type FeedbackEvent =
   | WorkerDispatchedEvent
   | WorkerStatusChangedEvent
   | StateCollectedEvent
   | HealthTickEvent
-  | WorkerReapedEvent;
+  | WorkerReapedEvent
+  | WorkerStallEvent;
 
 type OmitFeedbackBase<TEvent> = TEvent extends unknown
   ? Omit<TEvent, "schemaVersion" | "timestamp" | "legionId">
