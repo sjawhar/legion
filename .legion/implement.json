@@ -1,0 +1,10 @@
+{
+  "pr_number": 595,
+  "pr_url": "https://github.com/sjawhar/legion/pull/595",
+  "files_changed": 10,
+  "tests_added": 26,
+  "summary": "Added legion promote/demote CLI commands with promoted.json persistence, daemon API routes, and auto-demote on health tick",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-16T13:39:28.964Z"
+}

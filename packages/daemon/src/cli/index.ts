@@ -1699,6 +1699,200 @@ export const pollCommand = defineCommand({
   },
 });
 
+export async function cmdPromote(
+  team: string,
+  session: string,
+  opts: { role: string; repo?: string }
+): Promise<void> {
+  if (!SESSION_ID_PATTERN.test(session)) {
+    throw new CliError(
+      `Invalid session ID format: ${session}\nExpected: ses_ + 12 hex + 14 Base62`
+    );
+  }
+
+  const legionId = await resolveLegionId(team);
+  const daemonPort = await getDaemonPort(legionId);
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  try {
+    const healthResp = await fetch(`${baseUrl}/health`);
+    if (!healthResp.ok) {
+      throw new CliError("Daemon is not healthy. Is it running?");
+    }
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/health`);
+  }
+
+  const body: Record<string, unknown> = {
+    sessionId: session,
+    role: opts.role,
+  };
+  if (opts.repo) {
+    body.repo = opts.repo;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/promoted`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/promoted`);
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new CliError(`Failed to promote session: ${text}`);
+  }
+
+  const result = (await response.json()) as { sessionId: string; role: string; repo?: string };
+  console.log(`Promoted ${result.sessionId} to role "${result.role}"`);
+  if (result.repo) {
+    console.log(`  repo: ${result.repo}`);
+  }
+}
+
+export async function cmdDemote(team: string, session: string): Promise<void> {
+  if (!SESSION_ID_PATTERN.test(session)) {
+    throw new CliError(
+      `Invalid session ID format: ${session}\nExpected: ses_ + 12 hex + 14 Base62`
+    );
+  }
+
+  const legionId = await resolveLegionId(team);
+  const daemonPort = await getDaemonPort(legionId);
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  try {
+    const healthResp = await fetch(`${baseUrl}/health`);
+    if (!healthResp.ok) {
+      throw new CliError("Daemon is not healthy. Is it running?");
+    }
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/health`);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/promoted/${encodeURIComponent(session)}`, {
+      method: "DELETE",
+    });
+  } catch {
+    throw new CliError(
+      `Could not connect to daemon. Is it running?\nTried: ${baseUrl}/promoted/${session}`
+    );
+  }
+
+  if (response.status === 404) {
+    throw new CliError(`Session ${session} is not promoted`);
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new CliError(`Failed to demote session: ${text}`);
+  }
+
+  console.log(`Demoted ${session}`);
+}
+
+export async function cmdPromoteList(team: string): Promise<void> {
+  const legionId = await resolveLegionId(team);
+  const daemonPort = await getDaemonPort(legionId);
+  const baseUrl = `http://127.0.0.1:${daemonPort}`;
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/promoted`);
+  } catch {
+    throw new CliError(`Could not connect to daemon. Is it running?\nTried: ${baseUrl}/promoted`);
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new CliError(`Failed to list promoted sessions: ${text}`);
+  }
+
+  const sessions = (await response.json()) as Array<{
+    sessionId: string;
+    role: string;
+    repo?: string;
+    promotedAt: string;
+  }>;
+
+  if (sessions.length === 0) {
+    console.log("No promoted sessions.");
+    return;
+  }
+
+  for (const s of sessions) {
+    const repoPart = s.repo ? ` (repo: ${s.repo})` : "";
+    console.log(`${s.sessionId}  role="${s.role}"${repoPart}  promoted=${s.promotedAt}`);
+  }
+}
+
+export const promoteCommand = defineCommand({
+  meta: { name: "promote", description: "Promote a session to a named role" },
+  args: {
+    team: { type: "positional", description: "Legion key or UUID", required: true },
+    session: { type: "positional", description: "Session ID (ses_...)", required: false },
+    role: { type: "string", description: "Role name (e.g., legion-po)", required: false },
+    repo: { type: "string", description: "Repo scope (e.g., owner/repo)" },
+    list: {
+      type: "boolean",
+      alias: "l",
+      description: "List promoted sessions",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    try {
+      if (args.list) {
+        await cmdPromoteList(args.team);
+        return;
+      }
+      if (!args.session) {
+        throw new CliError("Session ID is required (or use --list)");
+      }
+      if (!args.role) {
+        throw new CliError("--role is required");
+      }
+      await cmdPromote(args.team, args.session, {
+        role: args.role,
+        repo: args.repo,
+      });
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
+export const demoteCommand = defineCommand({
+  meta: { name: "demote", description: "Remove a session's promoted role" },
+  args: {
+    team: { type: "positional", description: "Legion key or UUID", required: true },
+    session: { type: "positional", description: "Session ID (ses_...)", required: true },
+  },
+  async run({ args }) {
+    try {
+      await cmdDemote(args.team, args.session);
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
 export const handoffCommand = defineCommand({
   meta: { name: "handoff", description: "Read and write local handoff files" },
   subCommands: {
@@ -1871,6 +2065,8 @@ export const mainCommand = defineCommand({
     teams: legionsCommand,
     "collect-state": collectStateCommand,
     poll: pollCommand,
+    promote: promoteCommand,
+    demote: demoteCommand,
     handoff: handoffCommand,
     knowledge: knowledgeCommand,
   },

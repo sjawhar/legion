@@ -18,6 +18,7 @@ import {
   writeLegionEntry,
 } from "./legions-registry";
 import { isPortFree } from "./ports";
+import { demoteSession, readPromotedSessions } from "./promoted-sessions";
 import { fetchAllTrackedRepos } from "./repo-manager";
 import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
@@ -878,6 +879,37 @@ export async function startDaemon(
           } catch (error) {
             console.warn(
               `[health-tick] dead worker cleanup failed: ${error instanceof Error ? error.message : String(error)} (non-fatal)`
+            );
+          }
+        }
+
+        // Promoted session liveness — auto-demote sessions whose serve session is dead.
+        if (serveHealthy && !restartReason) {
+          try {
+            const promotedFile = config.paths.forLegion(legionId).promotedFile;
+            const promotedData = await readPromotedSessions(promotedFile);
+            for (const [sessionId, entry] of Object.entries(promotedData.sessions)) {
+              let alive: boolean;
+              try {
+                alive = await resolvedDeps.adapter.sessionExists(sessionId);
+              } catch {
+                alive = false;
+              }
+              if (!alive) {
+                console.warn(
+                  `[promoted] Auto-demoting ${sessionId} (role="${entry.role}"): session no longer alive`
+                );
+                await demoteSession(promotedFile, sessionId);
+                feedbackLogger?.log({
+                  event: "daemon.promoted_auto_demote",
+                  sessionId,
+                  role: entry.role,
+                });
+              }
+            }
+          } catch (promotedErr) {
+            console.warn(
+              `[promoted] Liveness check failed (non-fatal): ${promotedErr instanceof Error ? promotedErr.message : String(promotedErr)}`
             );
           }
         }

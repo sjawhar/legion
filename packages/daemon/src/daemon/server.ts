@@ -23,6 +23,12 @@ import type { TokenManager } from "./github-apps";
 import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
+  demoteSession,
+  listPromotedSessions,
+  promoteSession,
+  readPromotedSessions,
+} from "./promoted-sessions";
+import {
   cleanupWorkspace,
   defaultDeps as defaultRepoManagerDeps,
   ensureWorkspace,
@@ -2060,6 +2066,55 @@ export function startServer(opts: ServerOptions): {
         if (method === "POST" && url.pathname === "/shutdown") {
           await opts.shutdownFn?.();
           return jsonResponse({ status: "shutting_down" });
+        }
+
+        // --- Promoted sessions ---
+        if (segments.length === 1 && segments[0] === "promoted") {
+          const promotedFile = opts.paths?.forLegion(opts.legionId).promotedFile;
+          if (!promotedFile) {
+            return serverError("paths_not_configured");
+          }
+
+          if (method === "GET") {
+            const data = await readPromotedSessions(promotedFile);
+            return jsonResponse(listPromotedSessions(data));
+          }
+
+          if (method === "POST") {
+            let payload: Record<string, unknown>;
+            try {
+              payload = await parseJson(request);
+            } catch {
+              return badRequest("invalid_json");
+            }
+
+            const sessionId = payload.sessionId;
+            const role = payload.role;
+            if (typeof sessionId !== "string" || !sessionId) {
+              return badRequest("missing_session_id");
+            }
+            if (typeof role !== "string" || !role) {
+              return badRequest("missing_role");
+            }
+            const repo = typeof payload.repo === "string" ? payload.repo : undefined;
+
+            const session = await promoteSession(promotedFile, sessionId, role, repo);
+            return jsonResponse(session, 201);
+          }
+        }
+
+        if (segments.length === 2 && segments[0] === "promoted" && method === "DELETE") {
+          const promotedFile = opts.paths?.forLegion(opts.legionId).promotedFile;
+          if (!promotedFile) {
+            return serverError("paths_not_configured");
+          }
+
+          const sessionId = decodeURIComponent(segments[1]);
+          const removed = await demoteSession(promotedFile, sessionId);
+          if (!removed) {
+            return notFound("session_not_promoted");
+          }
+          return jsonResponse({ demoted: sessionId });
         }
 
         return notFound();

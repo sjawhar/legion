@@ -52,6 +52,7 @@ describe("POST /state/advance", () => {
       forLegion: (id: string) => ({
         legionStateDir: path.join(tmpDir, id),
         workersFile: path.join(tmpDir, id, "workers.json"),
+        promotedFile: path.join(tmpDir, id, "promoted.json"),
         feedbackFile: path.join(tmpDir, id, "feedback.jsonl"),
         logDir: path.join(tmpDir, id, "logs"),
         workspacesDir: path.join(tmpDir, "workspaces", id),
@@ -324,6 +325,7 @@ describe("POST /state/auto-advance", () => {
       forLegion: (id: string) => ({
         legionStateDir: path.join(tmpDir, id),
         workersFile: path.join(tmpDir, id, "workers.json"),
+        promotedFile: path.join(tmpDir, id, "promoted.json"),
         feedbackFile: path.join(tmpDir, id, "feedback.jsonl"),
         logDir: path.join(tmpDir, id, "logs"),
         workspacesDir: path.join(tmpDir, "workspaces", id),

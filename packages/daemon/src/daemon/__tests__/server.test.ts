@@ -437,6 +437,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -520,6 +521,7 @@ describe("daemon server", () => {
         forLegion: (projectId: string) => ({
           legionStateDir: `/tmp/legion-state/legions/${projectId}`,
           workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+          promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
           feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
           logDir: `/tmp/legion-state/legions/${projectId}/logs`,
           workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -593,6 +595,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -737,6 +740,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -780,6 +784,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -827,6 +832,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -875,6 +881,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -1105,6 +1112,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -1731,6 +1739,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -2178,6 +2187,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -3400,6 +3410,7 @@ describe("daemon server", () => {
       forLegion: (projectId: string) => ({
         legionStateDir: `/tmp/legion-state/legions/${projectId}`,
         workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+        promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
         feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
         logDir: `/tmp/legion-state/legions/${projectId}/logs`,
         workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
@@ -4862,6 +4873,7 @@ describe("daemon server", () => {
         forLegion: (projectId: string) => ({
           legionStateDir: `/tmp/legion-state/legions/${projectId}`,
           workersFile: `/tmp/legion-state/legions/${projectId}/workers.json`,
+          promotedFile: `/tmp/legion-state/legions/${projectId}/promoted.json`,
           feedbackFile: `/tmp/legion-state/legions/${projectId}/feedback.jsonl`,
           logDir: `/tmp/legion-state/legions/${projectId}/logs`,
           workspacesDir: `/tmp/legion-data/workspaces/${projectId}`,
