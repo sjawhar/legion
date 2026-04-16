@@ -15,7 +15,7 @@ import {
   validateRuntime,
 } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
-import { findLegionByProjectId } from "../daemon/legions-registry";
+import { findLegionByProjectId, isPidAlive, removeLegionEntry } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
 import {
   readAllHandoffs,
@@ -179,6 +179,7 @@ interface StartOptions {
   backend?: string;
   runtime?: string;
   config?: string;
+  foreground?: boolean;
 }
 
 interface StartDependencies {
@@ -278,6 +279,47 @@ export async function cmdStart(
   console.log(`State directory: ${instancePaths.legionStateDir}`);
 
   fs.mkdirSync(instancePaths.legionStateDir, { recursive: true });
+
+  if (!opts.foreground) {
+    // Daemonize: re-exec with --foreground as a detached child process
+    const logDir = instancePaths.logDir;
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, "daemon.log");
+    const logFile = fs.openSync(logPath, "a");
+
+    const childArgs = buildDaemonArgs(team, opts);
+    const child = spawn(process.execPath, [process.argv[1], "start", ...childArgs], {
+      detached: true,
+      stdio: ["ignore", logFile, logFile],
+      cwd: process.cwd(),
+      env: process.env,
+    });
+
+    child.unref();
+    fs.closeSync(logFile);
+
+    const childPid = child.pid;
+    if (!childPid) {
+      throw new CliError("Failed to spawn daemon process");
+    }
+
+    // Wait briefly for the daemon to register in the legions registry
+    const started = await waitForDaemonStart(config.legionId, config.paths.legionsFile, childPid);
+    if (started) {
+      const entry = await findLegionByProjectId(config.paths.legionsFile, config.legionId);
+      console.log(`Daemon started (PID ${childPid}, port ${entry?.port ?? "unknown"})`);
+    } else {
+      console.log(`Daemon spawned (PID ${childPid}) but not yet responding.`);
+      console.log(`Check logs: ${logPath}`);
+    }
+
+    console.log(`Log file: ${logPath}`);
+    console.log(`\nTo check status: legion status ${team ?? config.legionId}`);
+    console.log(`To stop: legion stop ${team ?? config.legionId}`);
+    return;
+  }
+
+  // Foreground mode: run daemon in-process (blocks forever)
   config.stateFilePath = instancePaths.workersFile;
 
   const handle = await deps.startDaemon(config);
@@ -289,38 +331,141 @@ export async function cmdStart(
   await new Promise(() => {});
 }
 
+/**
+ * Build CLI args for re-execing in foreground mode.
+ * Reconstructs the original flags so the child process resolves the same config.
+ */
+function buildDaemonArgs(team: string | undefined, opts: StartOptions): string[] {
+  const args: string[] = [];
+  if (team) args.push(team);
+  if (opts.workspace) args.push("--workspace", opts.workspace);
+  if (opts.prompt !== undefined) args.push("--prompt", opts.prompt);
+  if (opts.backend) args.push("--backend", opts.backend);
+  if (opts.runtime) args.push("--runtime", opts.runtime);
+  if (opts.config) args.push("--config", opts.config);
+  args.push("--foreground");
+  return args;
+}
+
+/**
+ * Poll the legions registry until the daemon PID appears, or timeout.
+ */
+async function waitForDaemonStart(
+  legionId: string,
+  legionsFile: string,
+  expectedPid: number,
+  timeoutMs = 10_000
+): Promise<boolean> {
+  const start = Date.now();
+  const pollIntervalMs = 250;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const entry = await findLegionByProjectId(legionsFile, legionId);
+      if (entry && entry.pid === expectedPid) {
+        return true;
+      }
+    } catch {
+      // Registry not yet written, keep polling
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  return false;
+}
+
 async function cmdStop(team: string, _stateDir?: string, backend?: string): Promise<void> {
   const legionId = await resolveLegionId(team, { backend });
-  const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
+  const paths = resolveLegionPaths(process.env, os.homedir());
+  const instancePaths = paths.forLegion(legionId);
 
   console.log(`Stopping legion: ${legionId}`);
 
   const stateFilePath = instancePaths.workersFile;
   if (!fs.existsSync(stateFilePath)) {
-    console.log("No state file found — attempting HTTP shutdown anyway.");
+    console.log("No state file found — attempting shutdown anyway.");
   }
 
+  // Try HTTP shutdown first (graceful path)
   const daemonPort = await getDaemonPort(legionId);
+  let httpStopped = false;
   try {
     const response = await fetch(`http://127.0.0.1:${daemonPort}/shutdown`, {
       method: "POST",
     });
     if (response.ok) {
-      console.log("Daemon stopped successfully.");
-    } else {
-      console.log("Failed to stop daemon. It may not be running.");
+      console.log("Daemon stopped successfully via HTTP.");
+      httpStopped = true;
     }
-  } catch (_error) {
-    console.log("Could not connect to daemon. It may not be running.");
+  } catch {
+    // HTTP unreachable — fall through to PID-based kill
   }
+
+  if (!httpStopped) {
+    // Fallback: kill by PID from legions registry
+    const entry = await findLegionByProjectId(paths.legionsFile, legionId);
+    if (entry && isPidAlive(entry.pid)) {
+      console.log(`HTTP shutdown failed. Sending SIGTERM to PID ${entry.pid}...`);
+      try {
+        process.kill(entry.pid, "SIGTERM");
+        // Wait briefly for process to exit
+        const exited = await waitForPidExit(entry.pid);
+        if (exited) {
+          console.log("Daemon stopped successfully via SIGTERM.");
+        } else {
+          console.log(`Daemon PID ${entry.pid} did not exit within timeout. Sending SIGKILL...`);
+          try {
+            process.kill(entry.pid, "SIGKILL");
+          } catch {
+            // Process may have exited between check and kill
+          }
+          console.log("Daemon killed.");
+        }
+      } catch {
+        console.log("Failed to send signal to daemon process. It may have already exited.");
+      }
+      // Clean up the registry entry
+      await removeLegionEntry(paths.legionsFile, legionId);
+    } else if (entry) {
+      // Entry exists but PID is dead — clean up stale entry
+      console.log("Daemon is not running (stale registry entry). Cleaning up.");
+      await removeLegionEntry(paths.legionsFile, legionId);
+    } else {
+      console.log(
+        "Could not connect to daemon and no registry entry found. It may not be running."
+      );
+    }
+  }
+}
+
+/**
+ * Wait for a PID to exit, polling with a timeout.
+ */
+async function waitForPidExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const start = Date.now();
+  const pollIntervalMs = 200;
+  while (Date.now() - start < timeoutMs) {
+    if (!isPidAlive(pid)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+  return false;
 }
 
 async function cmdStatus(team: string, _stateDir?: string, backend?: string): Promise<void> {
   const legionId = await resolveLegionId(team, { backend });
-  const instancePaths = resolveLegionPaths(process.env, os.homedir()).forLegion(legionId);
+  const paths = resolveLegionPaths(process.env, os.homedir());
+  const instancePaths = paths.forLegion(legionId);
 
   console.log(`Legion Status: ${legionId}`);
   console.log("=".repeat(40));
+
+  // Check registry for PID info
+  const entry = await findLegionByProjectId(paths.legionsFile, legionId);
+  if (entry) {
+    const pidAlive = isPidAlive(entry.pid);
+    console.log(`PID: ${entry.pid} (${pidAlive ? "alive" : "dead"})`);
+    console.log(`Started: ${entry.startedAt}`);
+  }
 
   const daemonPort = await getDaemonPort(legionId);
   try {
@@ -339,11 +484,19 @@ async function cmdStatus(team: string, _stateDir?: string, backend?: string): Pr
     console.log("Daemon: NOT RUNNING");
   }
 
+  // Show log file location
+  const logPath = path.join(instancePaths.logDir, "daemon.log");
+  if (fs.existsSync(logPath)) {
+    const stat = fs.statSync(logPath);
+    const age = Math.floor((Date.now() - stat.mtimeMs) / 1000);
+    console.log(`\nLog file: ${logPath} (last updated ${age}s ago)`);
+  }
+
   const stateFilePath = instancePaths.workersFile;
   if (fs.existsSync(stateFilePath)) {
     const stat = fs.statSync(stateFilePath);
     const age = Math.floor((Date.now() - stat.mtimeMs) / 1000);
-    console.log(`\nState file: ${stateFilePath}`);
+    console.log(`State file: ${stateFilePath}`);
     console.log(`Last updated: ${age}s ago`);
   } else {
     console.log(`\nState file: NOT FOUND`);
@@ -1052,6 +1205,12 @@ export const startCommand = defineCommand({
       description: "Agent runtime (opencode or claude-code)",
     },
     config: { type: "string", alias: "c", description: "Config file path" },
+    foreground: {
+      type: "boolean",
+      alias: "f",
+      description: "Run in foreground instead of daemonizing",
+      default: false,
+    },
   },
   async run({ args }) {
     await cmdStart(args.team, {
@@ -1060,6 +1219,7 @@ export const startCommand = defineCommand({
       backend: args.backend,
       runtime: args.runtime,
       config: args.config,
+      foreground: args.foreground,
     });
   },
 });

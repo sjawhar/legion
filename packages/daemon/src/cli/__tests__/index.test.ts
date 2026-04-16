@@ -5,14 +5,17 @@ import os, { tmpdir } from "node:os";
 import path from "node:path";
 
 // Mock child_process spawn to prevent actual process spawning in tests
-const spawnCalls: Array<{ cmd: string; args: string[] }> = [];
+const spawnCalls: Array<{ cmd: string; args: string[]; opts?: unknown }> = [];
 let spawnExitCode = 0;
+let spawnPid = 99999;
 
 mock.module("node:child_process", () => ({
-  spawn: (cmd: string, args: string[], _opts?: unknown) => {
-    spawnCalls.push({ cmd, args });
+  spawn: (cmd: string, args: string[], opts?: unknown) => {
+    spawnCalls.push({ cmd, args, opts });
     const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
     const child = {
+      pid: spawnPid,
+      unref: () => {},
       on: (event: string, handler: (...a: unknown[]) => void) => {
         if (!listeners[event]) listeners[event] = [];
         listeners[event].push(handler);
@@ -334,7 +337,7 @@ describe("cmdStart config wiring", () => {
       try {
         await cmdStart(
           undefined,
-          {},
+          { foreground: true },
           {
             startDaemon: async (config) => {
               startDaemonCalls.push(config as unknown as Record<string, unknown>);
@@ -391,7 +394,7 @@ describe("cmdStart config wiring", () => {
       try {
         await cmdStart(
           undefined,
-          { config: explicitConfigPath },
+          { config: explicitConfigPath, foreground: true },
           {
             startDaemon: async (config) => {
               startDaemonCalls.push(config as unknown as Record<string, unknown>);
@@ -438,7 +441,7 @@ describe("cmdStart config wiring", () => {
       try {
         await cmdStart(
           undefined,
-          { config: configPath },
+          { config: configPath, foreground: true },
           {
             startDaemon: async (config) => {
               startDaemonCalls.push(config as unknown as Record<string, unknown>);
@@ -482,7 +485,7 @@ describe("cmdStart config wiring", () => {
       try {
         await cmdStart(
           "cli-team",
-          { config: configPath },
+          { config: configPath, foreground: true },
           {
             startDaemon: async (config) => {
               startDaemonCalls.push(config as unknown as Record<string, unknown>);
@@ -525,7 +528,7 @@ describe("cmdStart config wiring", () => {
       try {
         await cmdStart(
           undefined,
-          { config: configPath },
+          { config: configPath, foreground: true },
           {
             startDaemon: async (config) => {
               startDaemonCalls.push(config as unknown as Record<string, unknown>);
@@ -553,6 +556,250 @@ describe("cmdStart config wiring", () => {
       }
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("cmdStart daemonization", () => {
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalCwd = process.cwd();
+  const originalHome = process.env.HOME;
+  const originalXdgStateHome = process.env.XDG_STATE_HOME;
+  const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+  let tempDir: string;
+
+  beforeEach(async () => {
+    spawnCalls.length = 0;
+    spawnPid = 99999;
+    tempDir = await mkdtemp(path.join(tmpdir(), "legion-daemonize-"));
+    console.log = mock(() => {}) as typeof console.log;
+    console.error = mock(() => {}) as typeof console.error;
+  });
+
+  afterEach(async () => {
+    console.log = originalLog;
+    console.error = originalError;
+    process.chdir(originalCwd);
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    if (originalXdgStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = originalXdgStateHome;
+    }
+    if (originalXdgConfigHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("spawns detached child process when foreground is not set", async () => {
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg-config");
+    const xdgStateHome = path.join(tempDir, "xdg-state");
+    const configPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+
+    fs.mkdirSync(homeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    await writeFile(configPath, "project: test/team\nworkspace: /tmp/test-workspace\n");
+
+    process.chdir(tempDir);
+    process.env.HOME = homeDir;
+    process.env.XDG_CONFIG_HOME = xdgConfigHome;
+    process.env.XDG_STATE_HOME = xdgStateHome;
+
+    // Write a fake registry entry so waitForDaemonStart finds it
+    const legionsFile = path.join(xdgStateHome, "legion", "legions.json");
+    fs.mkdirSync(path.dirname(legionsFile), { recursive: true });
+    await writeFile(
+      legionsFile,
+      JSON.stringify({
+        "test/team": {
+          port: 13370,
+          servePort: 13381,
+          pid: spawnPid,
+          startedAt: new Date().toISOString(),
+        },
+      })
+    );
+
+    await cmdStart(
+      undefined,
+      {},
+      {
+        startDaemon: async () => {
+          throw new Error("startDaemon should not be called in daemon mode");
+        },
+        resolveLegionId: async (team) => team,
+      }
+    );
+
+    // Should have spawned a child process
+    expect(spawnCalls).toHaveLength(1);
+    const call = spawnCalls[0];
+    expect(call.args).toContain("start");
+    expect(call.args).toContain("--foreground");
+    const opts = call.opts as { detached?: boolean; stdio?: unknown[] };
+    expect(opts.detached).toBe(true);
+
+    // Should NOT have called startDaemon
+    // (if it did, the test would have thrown)
+  });
+
+  it("calls startDaemon directly when foreground is true", async () => {
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg-config");
+    const xdgStateHome = path.join(tempDir, "xdg-state");
+    const configPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+
+    fs.mkdirSync(homeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    await writeFile(configPath, "project: test/team\nworkspace: /tmp/test-workspace\n");
+
+    process.chdir(tempDir);
+    process.env.HOME = homeDir;
+    process.env.XDG_CONFIG_HOME = xdgConfigHome;
+    process.env.XDG_STATE_HOME = xdgStateHome;
+
+    const startDaemonCalls: unknown[] = [];
+    const START_DAEMON_ABORT = "__foreground-abort__";
+
+    try {
+      await cmdStart(
+        undefined,
+        { foreground: true },
+        {
+          startDaemon: async (config) => {
+            startDaemonCalls.push(config);
+            throw new Error(START_DAEMON_ABORT);
+          },
+          resolveLegionId: async (team) => team,
+        }
+      );
+      throw new Error("Expected cmdStart to reject");
+    } catch (error) {
+      expect((error as Error).message).toContain(START_DAEMON_ABORT);
+    }
+
+    // Should have called startDaemon, not spawned a child
+    expect(startDaemonCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("creates log directory and passes log file to child process", async () => {
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg-config");
+    const xdgStateHome = path.join(tempDir, "xdg-state");
+    const configPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+
+    fs.mkdirSync(homeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    await writeFile(configPath, "project: test/team\nworkspace: /tmp/test-workspace\n");
+
+    process.chdir(tempDir);
+    process.env.HOME = homeDir;
+    process.env.XDG_CONFIG_HOME = xdgConfigHome;
+    process.env.XDG_STATE_HOME = xdgStateHome;
+
+    // Write a fake registry entry
+    const legionsFile = path.join(xdgStateHome, "legion", "legions.json");
+    fs.mkdirSync(path.dirname(legionsFile), { recursive: true });
+    await writeFile(
+      legionsFile,
+      JSON.stringify({
+        "test/team": {
+          port: 13370,
+          servePort: 13381,
+          pid: spawnPid,
+          startedAt: new Date().toISOString(),
+        },
+      })
+    );
+
+    await cmdStart(
+      undefined,
+      {},
+      {
+        startDaemon: async () => {
+          throw new Error("should not be called");
+        },
+        resolveLegionId: async (team) => team,
+      }
+    );
+
+    // Log directory should have been created
+    const logDir = path.join(xdgStateHome, "legion", "legions", "test/team", "logs");
+    expect(fs.existsSync(logDir)).toBe(true);
+  });
+
+  it("passes all CLI flags through to child process", async () => {
+    const homeDir = path.join(tempDir, "home");
+    const xdgConfigHome = path.join(tempDir, "xdg-config");
+    const xdgStateHome = path.join(tempDir, "xdg-state");
+    const configPath = path.join(xdgConfigHome, "legion", "legion.yaml");
+
+    fs.mkdirSync(homeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    await writeFile(configPath, "project: test/team\nworkspace: /tmp/test-workspace\n");
+
+    process.chdir(tempDir);
+    process.env.HOME = homeDir;
+    process.env.XDG_CONFIG_HOME = xdgConfigHome;
+    process.env.XDG_STATE_HOME = xdgStateHome;
+
+    // Write a fake registry entry — legionId resolves to "my-team" since resolveLegionId
+    // returns the team as-is, and the CLI override takes precedence over config project
+    const legionsFile = path.join(xdgStateHome, "legion", "legions.json");
+    fs.mkdirSync(path.dirname(legionsFile), { recursive: true });
+    await writeFile(
+      legionsFile,
+      JSON.stringify({
+        "my-team": {
+          port: 13370,
+          servePort: 13381,
+          pid: spawnPid,
+          startedAt: new Date().toISOString(),
+        },
+      })
+    );
+
+    await cmdStart(
+      "my-team",
+      {
+        workspace: "/tmp/ws",
+        prompt: "custom prompt",
+        backend: "github",
+        runtime: "opencode",
+        config: configPath,
+      },
+      {
+        startDaemon: async () => {
+          throw new Error("should not be called");
+        },
+        resolveLegionId: async (team) => team,
+      }
+    );
+
+    expect(spawnCalls).toHaveLength(1);
+    const args = spawnCalls[0].args;
+    expect(args).toContain("start");
+    expect(args).toContain("my-team");
+    expect(args).toContain("--workspace");
+    expect(args).toContain("/tmp/ws");
+    expect(args).toContain("--prompt");
+    expect(args).toContain("custom prompt");
+    expect(args).toContain("--backend");
+    expect(args).toContain("github");
+    expect(args).toContain("--runtime");
+    expect(args).toContain("opencode");
+    expect(args).toContain("--config");
+    expect(args).toContain(configPath);
+    expect(args).toContain("--foreground");
   });
 });
 
@@ -685,6 +932,7 @@ describe("citty command definitions", () => {
     const config = args.config as StringArg;
     const workspace = args.workspace as StringArg;
     const stateDir = args["state-dir"] as StringArg;
+    const foreground = args.foreground as { type: string; alias: string; default: boolean };
     expect(team.type).toBe("positional");
     expect(team.required).toBe(false);
     expect(config).toEqual(expect.objectContaining({ type: "string", alias: "c" }));
@@ -692,6 +940,9 @@ describe("citty command definitions", () => {
     expect(workspace.alias).toBe("w");
     expect(workspace.default).toBeUndefined();
     expect(stateDir.type).toBe("string");
+    expect(foreground).toEqual(
+      expect.objectContaining({ type: "boolean", alias: "f", default: false })
+    );
   });
 
   test("stop command args are defined", async () => {
