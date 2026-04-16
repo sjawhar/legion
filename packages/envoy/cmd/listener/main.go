@@ -566,6 +566,20 @@ func main() {
 	// the signal handler below to ensure ordered deregistration before NATS drain.
 	var tsServer *envoytsnet.Server
 	if tsCfg.Enabled {
+		// On first boot (empty state dir), tsnet sees NoState and ignores the
+		// auth key. Set TSNET_FORCE_LOGIN=1 to force authentication. On subsequent
+		// restarts with existing state, skip it so tsnet reuses the persisted identity.
+		if tsCfg.StateDir != "" {
+			stateFile := tsCfg.StateDir + "/tailscaled.state"
+			if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+				logger.Info("tsnet state dir is empty (first boot), setting TSNET_FORCE_LOGIN=1")
+				os.Setenv("TSNET_FORCE_LOGIN", "1")
+			} else {
+				// Ensure TSNET_FORCE_LOGIN is NOT set for restarts — it forces
+				// re-authentication which creates duplicate Tailscale nodes.
+				os.Unsetenv("TSNET_FORCE_LOGIN")
+			}
+		}
 		tsServer = envoytsnet.New(tsCfg)
 		tsMux := http.NewServeMux()
 		tsMux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
