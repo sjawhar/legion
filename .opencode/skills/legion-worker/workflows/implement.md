@@ -58,6 +58,49 @@ Implement-mode keys:
 
 ---
 
+## ⚠️ When Stuck — Mandatory Oracle Consultation
+
+**This is not optional.** When you hit any of these triggers, STOP what you're doing and consult the oracle subagent before spending another turn on the problem:
+
+### Triggers
+
+1. **3+ turns on the same problem** — if you've attempted the same fix or investigation 3 times without progress, you are looping. Stop.
+2. **Complex debugging** — stack traces spanning multiple packages, race conditions, flaky tests with no obvious cause, or errors that don't reproduce consistently.
+3. **Architectural uncertainty** — unsure whether to refactor vs. patch, which module owns a responsibility, or how a change will interact with other subsystems.
+4. **Unfamiliar domain** — working in code you haven't seen before with non-obvious conventions or implicit contracts.
+
+### How to Invoke
+
+Spawn an oracle subagent via `background_task`:
+
+```
+background_task(
+  description: "Oracle consultation: <1-line summary of what you're stuck on>",
+  subagent_type: "oracle",
+  prompt: """
+  I'm implementing <issue description>.
+
+  **What I'm stuck on:** <specific problem>
+  **What I've tried:** <list of approaches and why they failed>
+  **Key files:** <paths to relevant files>
+
+  Help me debug this / evaluate these approaches / identify what I'm missing.
+  """,
+  timeout_seconds: 180
+)
+```
+
+### Rules
+
+- **Do not skip this.** "I'll try one more thing" after 3 failures is the exact pattern this rule prevents.
+- **Do not wait for oracle to finish before doing other work** — it runs in background. Continue with other tasks if available, then integrate oracle's findings.
+- **If oracle times out (>3 min):** Proceed with your best judgment. Note "Oracle consultation timed out" in the handoff. The oracle is a circuit-breaker, not a gate.
+- **After oracle responds:** Evaluate its suggestions critically. Apply what makes sense, discard what doesn't. You own the final decision.
+
+> **Why this matters:** Worker transcript analysis shows that stuck workers burn 10-15 turns on problems that oracle resolves in one consultation. The cost of invoking oracle is ~30 seconds. The cost of not invoking it is 10+ wasted turns and often a wrong fix.
+
+---
+
 ## Mode 1: Fresh Implementation
 
 ### 1. Load Plan
