@@ -305,6 +305,177 @@ describe("ensureWorkspace", () => {
     const wsPath = await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
     expect(wsPath).toBe("/home/test/.local/share/legion/workspaces/sjawhar/42/acme-widgets-7");
   });
+
+  it("runs git worktree prune before creating workspace", async () => {
+    const gitCommands: string[][] = [];
+    const jjCommands: string[][] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        jjCommands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async (p) => p.includes("repos/"),
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async (args) => {
+        gitCommands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    // git worktree prune should have been called
+    const pruneCmd = gitCommands.find((c) => c.includes("prune"));
+    expect(pruneCmd).toBeDefined();
+    expect(pruneCmd).toContain("worktree");
+    expect(pruneCmd?.[0]).toContain(".jj/repo/store/git");
+
+    // jj workspace add should still be called
+    const wsCmd = jjCommands.find((c) => c.includes("workspace"));
+    expect(wsCmd).toBeDefined();
+    expect(wsCmd).toContain("add");
+  });
+
+  it("does not fail when git worktree prune fails", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async (p) => p.includes("repos/"),
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async () => {
+        throw new Error("git not found");
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    // Should not throw despite prune failure
+    const wsPath = await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+    expect(wsPath).toBe("/home/test/.local/share/legion/workspaces/sjawhar/42/acme-widgets-7");
+  });
+
+  it("retries with force when workspace add fails with 'already registered'", async () => {
+    const gitCommands: string[][] = [];
+    const jjCommands: string[][] = [];
+    let jjCallCount = 0;
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        jjCommands.push(args);
+        if (args.includes("workspace")) {
+          jjCallCount++;
+          if (jjCallCount === 1) {
+            // First attempt fails with "already registered"
+            return {
+              exitCode: 1,
+              stdout: "",
+              stderr: "Error: Path already registered as a git worktree",
+            };
+          }
+          // Retry succeeds
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async (p) => p.includes("repos/"),
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async (args) => {
+        gitCommands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    const wsPath = await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    expect(wsPath).toBe("/home/test/.local/share/legion/workspaces/sjawhar/42/acme-widgets-7");
+    // Should have called jj workspace add twice (initial + retry)
+    const wsCmds = jjCommands.filter((c) => c.includes("workspace"));
+    expect(wsCmds).toHaveLength(2);
+
+    // Should have called git worktree add -f to force-clear the registration
+    const forceAddCmd = gitCommands.find((c) => c.includes("-f") && c.includes("add"));
+    expect(forceAddCmd).toBeDefined();
+
+    // Should have called git worktree remove --force to clean up
+    const removeCmd = gitCommands.find((c) => c.includes("remove") && c.includes("--force"));
+    expect(removeCmd).toBeDefined();
+
+    // Should have called git worktree prune after force cleanup
+    const pruneCmds = gitCommands.filter((c) => c.includes("prune"));
+    expect(pruneCmds.length).toBeGreaterThanOrEqual(2); // initial prune + post-force prune
+  });
+
+  it("throws on non-'already registered' workspace add failure", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        if (args.includes("workspace")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "Error: some other failure",
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async (p) => p.includes("repos/"),
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+
+    await expect(
+      ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps)
+    ).rejects.toThrow("some other failure");
+  });
+
+  it("throws when retry also fails after 'already registered'", async () => {
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        if (args.includes("workspace")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "Error: already registered as a git worktree",
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async (p) => p.includes("repos/"),
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+
+    await expect(
+      ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps)
+    ).rejects.toThrow("Failed to create workspace");
+  });
+
+  it("skips git worktree prune when workspace already exists", async () => {
+    const gitCommands: string[][] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async (args) => {
+        gitCommands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await ensureWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    // No git commands should have been called since workspace already exists
+    expect(gitCommands).toHaveLength(0);
+  });
 });
 
 describe("verifyBranchPushed", () => {
@@ -547,6 +718,33 @@ describe("cleanupWorkspace", () => {
     const forgetCmd = commands.find((c) => c.includes("forget"));
     expect(forgetCmd).toBeDefined();
     expect(removedPaths).toHaveLength(1);
+  });
+
+  it("uses runGit dep for git worktree prune during cleanup", async () => {
+    const gitCommands: string[][] = [];
+    const deps: RepoManagerDeps = {
+      runJj: async (args) => {
+        if (args.includes("bookmark")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      exists: async () => true,
+      rmDir: async () => {},
+      symlink: async () => {},
+      runGit: async (args) => {
+        gitCommands.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const paths = resolveLegionPaths({}, "/home/test");
+    const repo = { host: "github.com", owner: "acme", repo: "widgets" };
+    await cleanupWorkspace(paths, "sjawhar/42", "acme-widgets-7", repo, deps);
+
+    const pruneCmd = gitCommands.find((c) => c.includes("prune"));
+    expect(pruneCmd).toBeDefined();
+    expect(pruneCmd).toContain("worktree");
+    expect(pruneCmd?.[0]).toContain(".jj/repo/store/git");
   });
 });
 

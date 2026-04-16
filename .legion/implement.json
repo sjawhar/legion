@@ -1,0 +1,13 @@
+{
+  "summary": "Added automatic git worktree prune before jj workspace add in ensureWorkspace(). If add still fails with already registered, force-clears the stale git worktree registration and retries. Also refactored cleanupWorkspace() to use the new runGit dep for testability.",
+  "files_changed": [
+    "packages/daemon/src/daemon/repo-manager.ts",
+    "packages/daemon/src/daemon/__tests__/repo-manager.test.ts"
+  ],
+  "tests_added": 7,
+  "tests_passing": true,
+  "approach": "Added optional runGit dep to RepoManagerDeps. ensureWorkspace now: (1) prunes stale git worktree registrations before jj workspace add, (2) on already registered failure, force-adds then removes a git worktree to clear the stale registration, then retries jj workspace add. cleanupWorkspace refactored to use runGit dep instead of direct Bun.spawnSync.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-16T04:19:17.082Z"
+}
