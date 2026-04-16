@@ -371,4 +371,23 @@ describe("OpenCodeAdapter", () => {
       }
     });
   });
+
+  describe("adoptServe", () => {
+    it("sets the PID so getServePid returns it", () => {
+      const adapter = new OpenCodeAdapter(13381);
+      expect(adapter.getServePid()).toBe(0);
+
+      adapter.adoptServe(42424);
+      expect(adapter.getServePid()).toBe(42424);
+    });
+
+    it("allows stop() to target the adopted PID", async () => {
+      const adapter = new OpenCodeAdapter(13381);
+      adapter.adoptServe(999999999);
+
+      // stop() calls stopServe(port, pid) — with a dead PID, it should
+      // complete without error (stopServe handles ESRCH gracefully)
+      await adapter.stop();
+    });
+  });
 });

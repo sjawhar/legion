@@ -2689,6 +2689,40 @@ describe("daemon server", () => {
     expect(shutdownCalls).toBe(1);
   });
 
+  it("restarts on request (keeps serve alive)", async () => {
+    let restartCalls = 0;
+    await startTestServer();
+    stopServer?.();
+    stopServer = null;
+
+    const { server, stop } = startServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      envoyUrl: "",
+      legionId,
+      legionDir: tempDir ?? os.tmpdir(),
+      adapter: makeAdapter(),
+      stateFilePath: path.join(tempDir ?? os.tmpdir(), "workers.json"),
+      restartFn: async () => {
+        restartCalls += 1;
+      },
+    });
+    stopServer = stop;
+    baseUrl = `http://127.0.0.1:${server.port}`;
+
+    const response = await requestJson("/restart", { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "restarting" });
+    expect(restartCalls).toBe(1);
+  });
+
+  it("returns 500 when restart is not supported", async () => {
+    await startTestServer();
+    // Default test server has no restartFn
+    const response = await requestJson("/restart", { method: "POST" });
+    expect(response.status).toBe(500);
+  });
+
   it("returns 404 for unknown routes", async () => {
     await startTestServer();
     const response = await requestJson("/nope");

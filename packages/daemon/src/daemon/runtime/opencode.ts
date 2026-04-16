@@ -30,6 +30,14 @@ export class OpenCodeAdapter implements RuntimeAdapter {
     this.startOpts = opts;
   }
 
+  /**
+   * Adopt an existing serve process (e.g. preserved across daemon restart).
+   * Sets the PID so stop() can manage it, without spawning a new process.
+   */
+  adoptServe(pid: number): void {
+    this.pid = pid;
+  }
+
   async start(opts: RuntimeStartOptions): Promise<void> {
     this.startOpts = opts;
     const serve = await spawnSharedServe({

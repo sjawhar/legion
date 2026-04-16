@@ -251,7 +251,11 @@ export async function startDaemon(
 
   // Clean up stale serve processes from previous daemon runs before allocating ports.
   // This prevents orphaned serves from holding SQLite locks and occupying ports.
-  await cleanupStaleServesFn(config.paths.legionsFile, legionId);
+  // If the serve is still healthy (e.g. after `legion restart`), it's preserved.
+  const { preservedServePid, preservedServePort } = await cleanupStaleServesFn(
+    config.paths.legionsFile,
+    legionId
+  );
 
   const { daemonPort: allocatedDaemonPort, servePort } = allocatePortFn(registry);
 
@@ -267,9 +271,13 @@ export async function startDaemon(
     }
   }
 
-  let actualServePort = servePort;
-  while (!(await isPortFree(actualServePort))) {
-    actualServePort++;
+  // If a healthy serve was preserved from a previous daemon, reuse its port.
+  // Otherwise, allocate a new one.
+  let actualServePort = preservedServePort ?? servePort;
+  if (!preservedServePort) {
+    while (!(await isPortFree(actualServePort))) {
+      actualServePort++;
+    }
   }
 
   config = {
@@ -331,10 +339,20 @@ export async function startDaemon(
     workspace: controllerWorkspace,
     logDir: config.logDir,
   };
-  const adapterConfigure = resolvedDeps.adapter as {
+  const adapterWithExtras = resolvedDeps.adapter as {
     configure?: (opts: RuntimeStartOptions) => void;
+    adoptServe?: (pid: number) => void;
   };
-  adapterConfigure.configure?.(serveStartOpts);
+  adapterWithExtras.configure?.(serveStartOpts);
+
+  // If a healthy serve was preserved from a previous daemon (e.g. `legion restart`),
+  // adopt it so the adapter tracks its PID for health checks and future stop().
+  if (preservedServePid) {
+    adapterWithExtras.adoptServe?.(preservedServePid);
+    console.log(
+      `Adopted preserved serve process (PID ${preservedServePid}, port ${sharedServePort})`
+    );
+  }
 
   let tokenManager: TokenManager | undefined;
   if (config.githubApps) {
@@ -484,7 +502,12 @@ export async function startDaemon(
   let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
   let stopServer: () => void = () => {};
 
-  const shutdown = async (exitAfter = false) => {
+  /**
+   * Shut down the daemon.
+   * @param exitAfter — call process.exit(0) after cleanup
+   * @param keepServe — if true, skip stopping the serve process (for graceful restart)
+   */
+  const shutdown = async (exitAfter = false, keepServe = false) => {
     if (shuttingDown) {
       return;
     }
@@ -503,11 +526,17 @@ export async function startDaemon(
       }
     }
 
-    try {
-      await removeLegionEntryFn(config.paths.legionsFile, legionId);
-    } catch {}
+    if (!keepServe) {
+      try {
+        await removeLegionEntryFn(config.paths.legionsFile, legionId);
+      } catch {}
+    }
 
-    await resolvedDeps.adapter.stop();
+    if (!keepServe) {
+      await resolvedDeps.adapter.stop();
+    } else {
+      console.log("[restart] Keeping serve process alive for daemon restart");
+    }
 
     controllerState = undefined;
     const state = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -560,6 +589,11 @@ export async function startDaemon(
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
+          }, 100);
+        },
+        restartFn: async () => {
+          resolvedDeps.setTimeout(async () => {
+            await shutdown(true, true);
           }, 100);
         },
       });

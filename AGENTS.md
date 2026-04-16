@@ -40,6 +40,7 @@ bun test                      # Test (640 tests)
 legion start <team> [-w path] # Start swarm
 legion status <team>          # Check status
 legion stop <team>            # Stop swarm
+legion restart <team>         # Restart daemon, preserve worker sessions
 legion teams                  # List cached teams
 legion attach <team> <issue>  # Attach to worker
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch

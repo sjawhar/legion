@@ -187,7 +187,7 @@ function startDaemonForTest(
 
   return startDaemon(config, {
     readLegionsRegistry: async () => mockedRegistry,
-    cleanupStaleServes: async () => {},
+    cleanupStaleServes: async () => ({}),
     allocatePort: () => mockedAllocatedPorts,
     writeLegionEntry: async (
       filePath: string,
@@ -508,6 +508,7 @@ describe("daemon entry", () => {
         {
           cleanupStaleServes: async (filePath: string, legionId: string) => {
             cleanupCalls.push({ filePath, legionId });
+            return {};
           },
         }
       );
@@ -1289,6 +1290,118 @@ describe("daemon entry", () => {
     // Controller cleared (daemon-owned)
     expect(state.controller).toBeUndefined();
   });
+  it("does not stop serve when restartFn triggers shutdown with keepServe", async () => {
+    const stopServeCalls: number[] = [];
+    let restartFnCaptured: (() => void | Promise<void>) | undefined;
+    let exitCode: number | null = null;
+
+    process.exit = ((code?: number) => {
+      exitCode = code ?? 0;
+      return undefined as never;
+    }) as typeof process.exit;
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [baseEntry.id]: baseEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter({
+          stopServeCalls,
+          healthy: async () => true,
+        }),
+        startServer: (opts) => {
+          restartFnCaptured = opts.restartFn;
+          return {
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+          };
+        },
+        setTimeout: ((cb: () => void) => {
+          // Execute the callback immediately for testing
+          void Promise.resolve().then(cb);
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    expect(restartFnCaptured).toBeDefined();
+    await restartFnCaptured?.();
+
+    // Wait for the async setTimeout callback to execute
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 50));
+
+    // Serve should NOT have been stopped (keepServe=true)
+    expect(stopServeCalls).toHaveLength(0);
+    // Registry entry should be preserved so cleanupStaleServes can find the serve
+    expect(removeLegionEntryCalls).toHaveLength(0);
+    // But the process should have exited
+    expect(exitCode).not.toBeNull();
+    expect(exitCode as unknown as number).toBe(0);
+  });
+
+  it("adopts preserved serve PID from cleanupStaleServes", async () => {
+    const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+    let adapterStartCalled = false;
+
+    await startDaemonForTest(
+      {
+        stateFilePath: "/tmp/daemon-workers.json",
+        legionId: TEAM_ID,
+        controllerSessionId: "ses_test",
+      },
+      {
+        readStateFile: async () => ({
+          workers: { [baseEntry.id]: baseEntry },
+          crashHistory: {},
+        }),
+        writeStateFile: async () => {},
+        adapter: Object.assign(
+          makeAdapter({
+            createSessionCalls,
+            healthy: async () => true,
+          }),
+          {
+            start: async () => {
+              adapterStartCalled = true;
+            },
+            configure: () => {},
+            adoptServe: (pid: number) => {
+              // Verify adoptServe is called with the preserved PID
+              expect(pid).toBe(42424);
+            },
+          }
+        ) as RuntimeAdapter,
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      },
+      {
+        cleanupStaleServes: async () => ({
+          preservedServePid: 42424,
+          preservedServePort: 13381,
+        }),
+      }
+    );
+
+    // Adapter.start should NOT have been called (serve was already healthy)
+    expect(adapterStartCalled).toBe(false);
+    // Sessions should have been recreated
+    expect(createSessionCalls.length).toBeGreaterThan(0);
+  });
+
   it("passes serve env vars to adapter.start on startup", async () => {
     const startCalls: Array<{ workspace: string; logDir?: string; env?: Record<string, string> }> =
       [];
