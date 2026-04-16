@@ -31,6 +31,7 @@ import {
   formatConsolidationReportHuman,
   formatConsolidationReportJson,
 } from "../knowledge/reporter";
+import { parseIssueIdParts, runGhCommand } from "../state/backends/github";
 import { SESSION_ID_PATTERN } from "../state/types";
 import { resolveLegionId } from "./legion-resolver";
 import { formatPollOutput } from "./poll-formatter";
@@ -1856,6 +1857,342 @@ export const knowledgeCommand = defineCommand({
   },
 });
 
+// =============================================================================
+// Rollback Command
+// =============================================================================
+
+interface RollbackOptions {
+  repo?: string;
+  dryRun?: boolean;
+}
+
+interface MergedPR {
+  number: number;
+  title: string;
+  mergeCommit: { oid: string } | null;
+  headRefName: string;
+}
+
+/**
+ * Find the merged PR for an issue by searching title and branch name.
+ */
+export async function findMergedPR(
+  issue: string,
+  issueNumber: number,
+  repo: string
+): Promise<MergedPR> {
+  // Search by issue number in title
+  const prJson = await runGhCommand([
+    "pr",
+    "list",
+    "--search",
+    `is:merged ${issueNumber} in:title`,
+    "--json",
+    "number,title,mergeCommit,headRefName",
+    "--limit",
+    "5",
+    "-R",
+    repo,
+  ]);
+
+  let prs: MergedPR[];
+  try {
+    prs = JSON.parse(prJson);
+  } catch {
+    throw new CliError("Failed to parse PR list from GitHub");
+  }
+
+  // Also search by branch name pattern
+  if (prs.length === 0) {
+    const branchPrJson = await runGhCommand([
+      "pr",
+      "list",
+      "--search",
+      `is:merged head:${issue}`,
+      "--json",
+      "number,title,mergeCommit,headRefName",
+      "--limit",
+      "5",
+      "-R",
+      repo,
+    ]);
+    try {
+      prs = JSON.parse(branchPrJson);
+    } catch {
+      throw new CliError("Failed to parse PR list from GitHub");
+    }
+  }
+
+  if (prs.length === 0) {
+    throw new CliError(`No merged PR found for issue ${issue} in ${repo}`);
+  }
+
+  return prs[0];
+}
+
+/**
+ * Create a revert commit on a new branch using the GitHub Git Data API.
+ *
+ * Works for both squash merges and regular merge commits:
+ * - Squash merge: single parent (previous main HEAD). parents[0].tree is the
+ *   state before the squash was applied — reverting to it undoes the change.
+ * - Regular merge: two parents (base branch + feature branch). parents[0] is
+ *   the base branch state — reverting to its tree also undoes the change.
+ *
+ * Returns the revert branch name and commit SHA.
+ */
+export async function createRevertCommit(
+  repo: string,
+  pr: MergedPR,
+  issueNumber: number,
+  issue: string
+): Promise<{ revertBranch: string; revertCommitSha: string }> {
+  const mergeCommitSha = pr.mergeCommit?.oid;
+  if (!mergeCommitSha) {
+    throw new CliError(`Merged PR #${pr.number} has no merge commit SHA`);
+  }
+
+  const revertBranch = `revert-${issue}-${Date.now()}`;
+
+  // Get the current main branch SHA
+  const mainSha = (
+    await runGhCommand(["api", `repos/${repo}/git/ref/heads/main`, "--jq", ".object.sha"])
+  ).trim();
+
+  // Create the revert branch pointing at main
+  try {
+    await runGhCommand([
+      "api",
+      `repos/${repo}/git/refs`,
+      "-X",
+      "POST",
+      "-f",
+      `ref=refs/heads/${revertBranch}`,
+      "-f",
+      `sha=${mainSha}`,
+    ]);
+  } catch (error) {
+    throw new CliError(
+      `Failed to create revert branch: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  try {
+    // Get the first parent commit — this is the state before the merge/squash.
+    // NOTE: parents[0].sha works correctly for both merge commits (where parent 0
+    // is the base branch) and squash merges (where the single parent is the previous
+    // main HEAD). It does NOT work for rebased merges where the commit topology differs.
+    const parentSha = (
+      await runGhCommand([
+        "api",
+        `repos/${repo}/commits/${mergeCommitSha}`,
+        "--jq",
+        ".parents[0].sha",
+      ])
+    ).trim();
+
+    // Get the tree of the parent commit (the pre-merge tree)
+    const parentTreeSha = (
+      await runGhCommand(["api", `repos/${repo}/git/commits/${parentSha}`, "--jq", ".tree.sha"])
+    ).trim();
+
+    // Create a new commit on main with the parent's tree (effectively reverting the merge)
+    const revertCommitJson = await runGhCommand([
+      "api",
+      `repos/${repo}/git/commits`,
+      "-X",
+      "POST",
+      "-f",
+      `tree=${parentTreeSha}`,
+      "-f",
+      `parents[]=${mainSha}`,
+      "-f",
+      `message=Revert "${pr.title}" (#${pr.number})\n\nThis reverts commit ${mergeCommitSha}.\n\nRollback of #${pr.number} for issue #${issueNumber}.`,
+    ]);
+    const revertCommit = JSON.parse(revertCommitJson);
+    const revertCommitSha = revertCommit.sha as string;
+
+    // Update the revert branch to point to the new commit
+    await runGhCommand([
+      "api",
+      `repos/${repo}/git/refs/heads/${revertBranch}`,
+      "-X",
+      "PATCH",
+      "-f",
+      `sha=${revertCommitSha}`,
+      "-f",
+      "force=true",
+    ]);
+
+    return { revertBranch, revertCommitSha };
+  } catch (error) {
+    // Clean up the branch on failure
+    try {
+      await runGhCommand(["api", `repos/${repo}/git/refs/heads/${revertBranch}`, "-X", "DELETE"]);
+    } catch {
+      // Ignore cleanup failure
+    }
+    throw new CliError(
+      `Failed to create revert commit: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+/**
+ * Rollback a merged PR: create a revert PR and reopen the issue.
+ *
+ * Steps:
+ * 1. Find the merged PR for the issue
+ * 2. Create a revert of the merge commit via GitHub Git Data API
+ * 3. Create a revert PR from the revert branch
+ * 4. Reopen the original issue
+ * 5. Add `rollback` label to the original issue
+ */
+export async function cmdRollback(issue: string, opts: RollbackOptions): Promise<void> {
+  if (!SAFE_IDENTIFIER_RE.test(issue)) {
+    throw new CliError(`Invalid issue identifier: ${issue} (must match [a-zA-Z0-9_-]+)`);
+  }
+
+  let repo: string;
+  let issueNumber: number;
+  if (opts.repo) {
+    repo = opts.repo;
+    // Still need the issue number from the ID
+    try {
+      const parts = parseIssueIdParts(issue);
+      issueNumber = parseInt(parts.number, 10);
+    } catch {
+      throw new CliError("Could not derive issue number from issue ID.");
+    }
+  } else {
+    try {
+      const parts = parseIssueIdParts(issue);
+      repo = `${parts.owner}/${parts.repo}`;
+      issueNumber = parseInt(parts.number, 10);
+    } catch {
+      throw new CliError(
+        "Could not derive repo from issue ID. Use --repo owner/repo to specify explicitly."
+      );
+    }
+  }
+
+  // Step 1: Find the merged PR
+  console.log(`Looking for merged PR for issue #${issueNumber} in ${repo}...`);
+  const pr = await findMergedPR(issue, issueNumber, repo);
+  const mergeCommitSha = pr.mergeCommit?.oid;
+
+  if (!mergeCommitSha) {
+    throw new CliError(`Merged PR #${pr.number} has no merge commit SHA`);
+  }
+
+  console.log(`Found merged PR #${pr.number}: "${pr.title}"`);
+  console.log(`  Merge commit: ${mergeCommitSha}`);
+
+  if (opts.dryRun) {
+    console.log("\n[dry-run] Would perform:");
+    console.log(`  1. Revert merge commit ${mergeCommitSha} on main`);
+    console.log(`  2. Create revert PR`);
+    console.log(`  3. Reopen issue #${issueNumber}`);
+    console.log(`  4. Add 'rollback' label to issue #${issueNumber}`);
+    return;
+  }
+
+  // Step 2: Create revert commit
+  console.log(`\nReverting merge commit ${mergeCommitSha.slice(0, 8)}...`);
+  const { revertBranch, revertCommitSha } = await createRevertCommit(repo, pr, issueNumber, issue);
+  console.log(`  Created revert commit: ${revertCommitSha.slice(0, 8)}`);
+
+  // Step 3: Create revert PR
+  console.log("Creating revert PR...");
+  const revertPrUrl = await runGhCommand([
+    "pr",
+    "create",
+    "--title",
+    `Revert "${pr.title}" (#${pr.number})`,
+    "--body",
+    `## Rollback\n\nReverts #${pr.number} (merge commit ${mergeCommitSha.slice(0, 8)}).\n\nOriginal issue: #${issueNumber}\n\n**This is an automated rollback.** The original PR's changes are being reverted.`,
+    "--head",
+    revertBranch,
+    "--base",
+    "main",
+    "-R",
+    repo,
+  ]);
+  console.log(`  ${revertPrUrl.trim()}`);
+
+  // Step 4: Reopen the original issue and add rollback label
+  console.log(`Reopening issue #${issueNumber}...`);
+  try {
+    await runGhCommand([
+      "issue",
+      "edit",
+      String(issueNumber),
+      "--add-label",
+      "rollback",
+      "-R",
+      repo,
+    ]);
+  } catch {
+    console.warn("  Warning: Could not add rollback label (label may not exist)");
+  }
+
+  try {
+    await runGhCommand(["issue", "reopen", String(issueNumber), "-R", repo]);
+    console.log("  Issue reopened");
+  } catch (error) {
+    console.warn(
+      `  Warning: Could not reopen issue: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  console.log("\nRollback complete:");
+  console.log(`  Original PR: #${pr.number}`);
+  console.log(`  Revert branch: ${revertBranch}`);
+  console.log(`  Issue #${issueNumber} reopened with 'rollback' label`);
+  console.log("\nNext steps:");
+  console.log("  1. Review and merge the revert PR");
+  console.log("  2. Investigate the original issue");
+  console.log("  3. Re-implement the fix if needed");
+}
+
+export const rollbackCommand = defineCommand({
+  meta: {
+    name: "rollback",
+    description: "Revert a merged PR and reopen the issue",
+  },
+  args: {
+    issue: {
+      type: "positional",
+      description: "Issue identifier (e.g., sjawhar-legion-526)",
+      required: true,
+    },
+    repo: {
+      type: "string",
+      alias: "r",
+      description: "Repository (owner/repo). Auto-derived from issue ID if not specified.",
+    },
+    "dry-run": {
+      type: "boolean",
+      description: "Print what would happen without executing",
+      default: false,
+    },
+  },
+  async run({ args }) {
+    try {
+      await cmdRollback(args.issue, {
+        repo: args.repo,
+        dryRun: Boolean(args["dry-run"]),
+      });
+    } catch (e) {
+      if (e instanceof CliError) {
+        console.error(e.message);
+        process.exit(e.code);
+      }
+      throw e;
+    }
+  },
+});
+
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
   subCommands: {
@@ -1873,6 +2210,7 @@ export const mainCommand = defineCommand({
     poll: pollCommand,
     handoff: handoffCommand,
     knowledge: knowledgeCommand,
+    rollback: rollbackCommand,
   },
 });
 

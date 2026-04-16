@@ -13,6 +13,8 @@ gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO
 - `user-feedback-given` — Human provided feedback
 - `needs-approval` — Plan/architecture needs human approval
 - `human-approved` — Human approved the plan
+- `auto-merged` — PR was auto-merged without human approval (Tier 1)
+- `rollback` — Issue was rolled back after a bad merge
 
 ## Architect-Review Labels (Opt-In)
 - `architect-continuity` — Opt-in: architect reviews plan before implementation (persistent, stays for issue lifetime)

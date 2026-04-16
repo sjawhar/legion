@@ -30,6 +30,7 @@ mock.module("node:child_process", () => ({
 }));
 
 import { resolveLegionPaths } from "../../daemon/paths";
+import { parseIssueIdParts } from "../../state/backends/github";
 import {
   attachCommand,
   CliError,
@@ -37,6 +38,7 @@ import {
   cmdEnlist,
   cmdPrompt,
   cmdResetCrashes,
+  cmdRollback,
   cmdStart,
   discoverConfigPath,
   dispatchCommand,
@@ -47,6 +49,7 @@ import {
   parseEnvJson,
   promptCommand,
   resetCrashesCommand,
+  rollbackCommand,
   scanOcRegistry,
   startCommand,
   statusCommand,
@@ -2154,5 +2157,84 @@ describe("parseEnvJson", () => {
   it("parses valid JSON object", () => {
     const result = parseEnvJson('{"KEY": "VALUE"}');
     expect(result).toEqual({ KEY: "VALUE" });
+  });
+});
+
+// =============================================================================
+// Rollback Command Tests
+// =============================================================================
+
+describe("parseIssueIdParts (used by rollback)", () => {
+  it("parses standard issue ID into owner/repo/number", () => {
+    const parts = parseIssueIdParts("sjawhar-legion-526");
+    expect(parts).toEqual({ owner: "sjawhar", repo: "legion", number: "526" });
+  });
+
+  it("handles multi-segment repo names", () => {
+    const parts = parseIssueIdParts("acme-my-project-42");
+    expect(parts).toEqual({ owner: "acme", repo: "my-project", number: "42" });
+  });
+
+  it("throws for IDs without enough segments", () => {
+    expect(() => parseIssueIdParts("singleword-42")).toThrow("Cannot parse issueId");
+  });
+
+  it("throws for empty string", () => {
+    expect(() => parseIssueIdParts("")).toThrow("Cannot parse issueId");
+  });
+});
+
+describe("rollbackCommand", () => {
+  it("has correct command metadata", async () => {
+    const meta = (await Promise.resolve(rollbackCommand.meta)) as
+      | { name?: string; description?: string }
+      | undefined;
+    expect(meta?.name).toBe("rollback");
+    expect(meta?.description).toBe("Revert a merged PR and reopen the issue");
+  });
+
+  it("has required positional issue arg", async () => {
+    const args = await resolveArgs(rollbackCommand);
+    const issueArg = args.issue as PositionalArg;
+    expect(issueArg.type).toBe("positional");
+    expect(issueArg.required).toBe(true);
+  });
+
+  it("has optional repo flag", async () => {
+    const args = await resolveArgs(rollbackCommand);
+    const repoArg = args.repo as StringArg;
+    expect(repoArg.type).toBe("string");
+    expect(repoArg.alias).toBe("r");
+  });
+
+  it("has dry-run flag defaulting to false", async () => {
+    const args = await resolveArgs(rollbackCommand);
+    const dryRunArg = args["dry-run"] as BooleanArg;
+    expect(dryRunArg.type).toBe("boolean");
+    expect(dryRunArg.default).toBe(false);
+  });
+});
+
+describe("cmdRollback", () => {
+  it("rejects invalid issue identifiers", async () => {
+    await expect(cmdRollback("invalid identifier!", {})).rejects.toThrow(
+      "Invalid issue identifier"
+    );
+  });
+
+  it("rejects issue IDs that cannot derive a repo without --repo", async () => {
+    await expect(cmdRollback("42", {})).rejects.toThrow("Could not derive repo from issue ID");
+  });
+
+  it("rejects issue IDs that cannot derive a number with --repo", async () => {
+    await expect(cmdRollback("no-number", { repo: "owner/repo" })).rejects.toThrow(
+      "Could not derive issue number"
+    );
+  });
+
+  it("rejects two-segment IDs without --repo", async () => {
+    await expect(cmdRollback("singleword-42", {})).rejects.toThrow(
+      "Could not derive repo from issue ID"
+    );
   });
 });

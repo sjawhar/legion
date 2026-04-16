@@ -88,7 +88,7 @@ export function parseIssueIdParts(issueId: string): {
   return { owner, repo, number };
 }
 
-async function runGhCommand(args: string[]): Promise<string> {
+export async function runGhCommand(args: string[]): Promise<string> {
   const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
   const killTimeout = setTimeout(() => {
     try {
