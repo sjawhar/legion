@@ -29,7 +29,45 @@ mock.module("node:child_process", () => ({
   },
 }));
 
+// Mock runGhCommand from the github backend to control gh CLI calls in tests.
+// parseIssueIdParts is re-exported as the real implementation.
+const ghCommandCalls: string[][] = [];
+let ghCommandResponses: Array<string | Error> = [];
+function mockRunGhCommand(args: string[]): Promise<string> {
+  ghCommandCalls.push(args);
+  const response = ghCommandResponses.shift();
+  if (response instanceof Error) {
+    return Promise.reject(response);
+  }
+  return Promise.resolve(response ?? "");
+}
+
+// Keep the real parseIssueIdParts implementation
+const realParseIssueIdParts = (issueId: string) => {
+  const parts = issueId.split("-");
+  let numberIdx = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (/^\d+$/.test(parts[i])) {
+      numberIdx = i;
+      break;
+    }
+  }
+  if (numberIdx < 2) {
+    throw new Error(`Cannot parse issueId "${issueId}" — expected format: owner-repo-number`);
+  }
+  const owner = parts[0];
+  const repo = parts.slice(1, numberIdx).join("-");
+  const number = parts[numberIdx];
+  return { owner, repo, number };
+};
+
+mock.module("../../state/backends/github", () => ({
+  parseIssueIdParts: realParseIssueIdParts,
+  runGhCommand: mockRunGhCommand,
+}));
+
 import { resolveLegionPaths } from "../../daemon/paths";
+import { parseIssueIdParts } from "../../state/backends/github";
 import {
   attachCommand,
   CliError,
@@ -37,16 +75,20 @@ import {
   cmdEnlist,
   cmdPrompt,
   cmdResetCrashes,
+  cmdRollback,
   cmdStart,
+  createRevertCommit,
   discoverConfigPath,
   dispatchCommand,
   enlistCommand,
+  findMergedPR,
   getDaemonPort,
   legionsCommand,
   loadLegionsCache,
   parseEnvJson,
   promptCommand,
   resetCrashesCommand,
+  rollbackCommand,
   scanOcRegistry,
   startCommand,
   statusCommand,
@@ -2154,5 +2196,477 @@ describe("parseEnvJson", () => {
   it("parses valid JSON object", () => {
     const result = parseEnvJson('{"KEY": "VALUE"}');
     expect(result).toEqual({ KEY: "VALUE" });
+  });
+});
+
+// =============================================================================
+// Rollback Command Tests
+// =============================================================================
+
+describe("parseIssueIdParts (used by rollback)", () => {
+  it("parses standard issue ID into owner/repo/number", () => {
+    const parts = parseIssueIdParts("sjawhar-legion-526");
+    expect(parts).toEqual({ owner: "sjawhar", repo: "legion", number: "526" });
+  });
+
+  it("handles multi-segment repo names", () => {
+    const parts = parseIssueIdParts("acme-my-project-42");
+    expect(parts).toEqual({ owner: "acme", repo: "my-project", number: "42" });
+  });
+
+  it("throws for IDs without enough segments", () => {
+    expect(() => parseIssueIdParts("singleword-42")).toThrow("Cannot parse issueId");
+  });
+
+  it("throws for empty string", () => {
+    expect(() => parseIssueIdParts("")).toThrow("Cannot parse issueId");
+  });
+});
+
+describe("rollbackCommand", () => {
+  it("has correct command metadata", async () => {
+    const meta = (await Promise.resolve(rollbackCommand.meta)) as
+      | { name?: string; description?: string }
+      | undefined;
+    expect(meta?.name).toBe("rollback");
+    expect(meta?.description).toBe("Revert a merged PR and reopen the issue");
+  });
+
+  it("has required positional issue arg", async () => {
+    const args = await resolveArgs(rollbackCommand);
+    const issueArg = args.issue as PositionalArg;
+    expect(issueArg.type).toBe("positional");
+    expect(issueArg.required).toBe(true);
+  });
+
+  it("has optional repo flag", async () => {
+    const args = await resolveArgs(rollbackCommand);
+    const repoArg = args.repo as StringArg;
+    expect(repoArg.type).toBe("string");
+    expect(repoArg.alias).toBe("r");
+  });
+
+  it("has dry-run flag defaulting to false", async () => {
+    const args = await resolveArgs(rollbackCommand);
+    const dryRunArg = args["dry-run"] as BooleanArg;
+    expect(dryRunArg.type).toBe("boolean");
+    expect(dryRunArg.default).toBe(false);
+  });
+});
+
+describe("cmdRollback", () => {
+  beforeEach(() => {
+    ghCommandCalls.length = 0;
+    ghCommandResponses = [];
+  });
+
+  it("rejects invalid issue identifiers", async () => {
+    await expect(cmdRollback("invalid identifier!", {})).rejects.toThrow(
+      "Invalid issue identifier"
+    );
+  });
+
+  it("rejects issue IDs that cannot derive a repo without --repo", async () => {
+    await expect(cmdRollback("42", {})).rejects.toThrow("Could not derive repo from issue ID");
+  });
+
+  it("rejects issue IDs that cannot derive a number with --repo", async () => {
+    await expect(cmdRollback("no-number", { repo: "owner/repo" })).rejects.toThrow(
+      "Could not derive issue number"
+    );
+  });
+
+  it("rejects two-segment IDs without --repo", async () => {
+    await expect(cmdRollback("singleword-42", {})).rejects.toThrow(
+      "Could not derive repo from issue ID"
+    );
+  });
+
+  it("happy path: finds PR, creates revert, opens revert PR, reopens issue", async () => {
+    const mergeOid = "abc123def456";
+    const mergedPR = JSON.stringify([
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: mergeOid },
+        headRefName: "sjawhar-legion-42",
+      },
+    ]);
+    ghCommandResponses = [
+      // findMergedPR: pr list --search
+      mergedPR,
+      // createRevertCommit: get main SHA (must match mergeOid for guard)
+      `${mergeOid}\n`,
+      // createRevertCommit: create branch ref
+      "{}",
+      // createRevertCommit: get merge commit parents
+      "parent-sha-111\n",
+      // createRevertCommit: get parent tree SHA
+      "tree-sha-222\n",
+      // createRevertCommit: create revert commit
+      JSON.stringify({ sha: "revert-sha-333" }),
+      // createRevertCommit: update branch ref
+      "{}",
+      // cmdRollback: create revert PR
+      "https://github.com/sjawhar/legion/pull/101\n",
+      // cmdRollback: add rollback label
+      "",
+      // cmdRollback: reopen issue
+      "",
+    ];
+
+    await cmdRollback("sjawhar-legion-42", {});
+
+    // Verify findMergedPR was called with correct search
+    expect(ghCommandCalls[0]).toEqual([
+      "pr",
+      "list",
+      "--search",
+      "is:merged 42 in:title",
+      "--json",
+      "number,title,mergeCommit,headRefName",
+      "--limit",
+      "5",
+      "-R",
+      "sjawhar/legion",
+    ]);
+
+    // Verify revert PR creation
+    const prCreateCall = ghCommandCalls.find((c) => c[0] === "pr" && c[1] === "create");
+    expect(prCreateCall).toBeDefined();
+    expect(prCreateCall).toContain("--head");
+    expect(prCreateCall).toContain("main");
+
+    // Verify issue label and reopen
+    const labelCall = ghCommandCalls.find(
+      (c) => c[0] === "issue" && c[1] === "edit" && c.includes("--add-label")
+    );
+    expect(labelCall).toBeDefined();
+    expect(labelCall).toContain("rollback");
+
+    const reopenCall = ghCommandCalls.find((c) => c[0] === "issue" && c[1] === "reopen");
+    expect(reopenCall).toBeDefined();
+    expect(reopenCall).toContain("42");
+  });
+
+  it("--dry-run finds PR but does not execute mutating commands", async () => {
+    const mergedPR = JSON.stringify([
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: "abc123def456" },
+        headRefName: "sjawhar-legion-42",
+      },
+    ]);
+    ghCommandResponses = [
+      // findMergedPR: pr list --search
+      mergedPR,
+    ];
+
+    await cmdRollback("sjawhar-legion-42", { dryRun: true });
+
+    // Only the findMergedPR call should have been made — no revert, no PR create, no reopen
+    expect(ghCommandCalls).toHaveLength(1);
+    expect(ghCommandCalls[0][0]).toBe("pr");
+    expect(ghCommandCalls[0][1]).toBe("list");
+  });
+
+  it("warns but continues when label addition fails", async () => {
+    const mergeOid = "abc123def456";
+    const mergedPR = JSON.stringify([
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: mergeOid },
+        headRefName: "sjawhar-legion-42",
+      },
+    ]);
+    ghCommandResponses = [
+      mergedPR,
+      `${mergeOid}\n`,
+      "{}",
+      "parent-sha-111\n",
+      "tree-sha-222\n",
+      JSON.stringify({ sha: "revert-sha-333" }),
+      "{}",
+      "https://github.com/sjawhar/legion/pull/101\n",
+      // label addition fails
+      new Error("label not found"),
+      // reopen still succeeds
+      "",
+    ];
+
+    // Should not throw despite label failure
+    await cmdRollback("sjawhar-legion-42", {});
+
+    // Reopen should still have been called
+    const reopenCall = ghCommandCalls.find((c) => c[0] === "issue" && c[1] === "reopen");
+    expect(reopenCall).toBeDefined();
+  });
+
+  it("warns but continues when issue reopen fails", async () => {
+    const mergeOid = "abc123def456";
+    const mergedPR = JSON.stringify([
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: mergeOid },
+        headRefName: "sjawhar-legion-42",
+      },
+    ]);
+    ghCommandResponses = [
+      mergedPR,
+      `${mergeOid}\n`,
+      "{}",
+      "parent-sha-111\n",
+      "tree-sha-222\n",
+      JSON.stringify({ sha: "revert-sha-333" }),
+      "{}",
+      "https://github.com/sjawhar/legion/pull/101\n",
+      // label succeeds
+      "",
+      // reopen fails
+      new Error("issue already open"),
+    ];
+
+    // Should not throw despite reopen failure
+    await cmdRollback("sjawhar-legion-42", {});
+  });
+
+  it("throws when main has advanced past merge commit", async () => {
+    const mergedPR = JSON.stringify([
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: "merge-sha-original" },
+        headRefName: "sjawhar-legion-42",
+      },
+    ]);
+    ghCommandResponses = [
+      // findMergedPR: pr list --search
+      mergedPR,
+      // createRevertCommit: get main SHA (different from merge commit — main advanced)
+      "main-sha-advanced\n",
+    ];
+
+    await expect(cmdRollback("sjawhar-legion-42", {})).rejects.toThrow(
+      "Main has advanced past merge commit"
+    );
+
+    // Should only have made 2 calls: findMergedPR + get main SHA
+    expect(ghCommandCalls).toHaveLength(2);
+  });
+});
+
+describe("findMergedPR", () => {
+  beforeEach(() => {
+    ghCommandCalls.length = 0;
+    ghCommandResponses = [];
+  });
+
+  it("finds PR by title search", async () => {
+    const prs = [
+      {
+        number: 100,
+        title: "feat(cli): issue #42 fix",
+        mergeCommit: { oid: "abc123" },
+        headRefName: "sjawhar-legion-42",
+      },
+    ];
+    ghCommandResponses = [JSON.stringify(prs)];
+
+    const result = await findMergedPR("sjawhar-legion-42", 42, "sjawhar/legion");
+    expect(result.number).toBe(100);
+    expect(result.mergeCommit?.oid).toBe("abc123");
+    expect(ghCommandCalls).toHaveLength(1);
+  });
+
+  it("falls back to branch name search when title search returns empty", async () => {
+    ghCommandResponses = [
+      // Title search returns empty
+      "[]",
+      // Branch search finds it
+      JSON.stringify([
+        {
+          number: 200,
+          title: "some PR",
+          mergeCommit: { oid: "def456" },
+          headRefName: "sjawhar-legion-42",
+        },
+      ]),
+    ];
+
+    const result = await findMergedPR("sjawhar-legion-42", 42, "sjawhar/legion");
+    expect(result.number).toBe(200);
+    expect(ghCommandCalls).toHaveLength(2);
+    // Second call should search by branch name
+    expect(ghCommandCalls[1]).toContain("--search");
+    expect(ghCommandCalls[1]).toContain("is:merged head:sjawhar-legion-42");
+  });
+
+  it("throws when no merged PR found by either search", async () => {
+    ghCommandResponses = [
+      // Title search empty
+      "[]",
+      // Branch search empty
+      "[]",
+    ];
+
+    await expect(findMergedPR("sjawhar-legion-42", 42, "sjawhar/legion")).rejects.toThrow(
+      "No merged PR found"
+    );
+  });
+
+  it("returns first match when multiple PRs found", async () => {
+    const prs = [
+      {
+        number: 100,
+        title: "first PR",
+        mergeCommit: { oid: "first" },
+        headRefName: "branch-1",
+      },
+      {
+        number: 200,
+        title: "second PR",
+        mergeCommit: { oid: "second" },
+        headRefName: "branch-2",
+      },
+    ];
+    ghCommandResponses = [JSON.stringify(prs)];
+
+    const result = await findMergedPR("sjawhar-legion-42", 42, "sjawhar/legion");
+    expect(result.number).toBe(100);
+  });
+
+  it("throws on unparseable JSON response", async () => {
+    ghCommandResponses = ["not valid json"];
+
+    await expect(findMergedPR("sjawhar-legion-42", 42, "sjawhar/legion")).rejects.toThrow(
+      "Failed to parse PR list"
+    );
+  });
+});
+
+describe("createRevertCommit", () => {
+  beforeEach(() => {
+    ghCommandCalls.length = 0;
+    ghCommandResponses = [];
+  });
+
+  it("throws when PR has no merge commit SHA", async () => {
+    await expect(
+      createRevertCommit(
+        "sjawhar/legion",
+        { number: 100, title: "test", mergeCommit: null, headRefName: "branch" },
+        42,
+        "sjawhar-legion-42"
+      )
+    ).rejects.toThrow("has no merge commit SHA");
+  });
+
+  it("creates revert commit with correct API call sequence", async () => {
+    const mergeOid = "merge-sha-abc";
+    ghCommandResponses = [
+      // Get main SHA (must match mergeOid for guard)
+      `${mergeOid}\n`,
+      // Create branch ref
+      "{}",
+      // Get merge commit parents
+      "parent-sha-111\n",
+      // Get parent tree SHA
+      "tree-sha-222\n",
+      // Create revert commit
+      JSON.stringify({ sha: "revert-sha-333" }),
+      // Update branch ref
+      "{}",
+    ];
+
+    const result = await createRevertCommit(
+      "sjawhar/legion",
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: mergeOid },
+        headRefName: "sjawhar-legion-42",
+      },
+      42,
+      "sjawhar-legion-42"
+    );
+
+    expect(result.revertCommitSha).toBe("revert-sha-333");
+    expect(result.revertBranch).toMatch(/^revert-sjawhar-legion-42-\d+$/);
+
+    // Verify API call sequence
+    // 1. Get main SHA
+    expect(ghCommandCalls[0]).toContain("repos/sjawhar/legion/git/ref/heads/main");
+    // 2. Create branch
+    expect(ghCommandCalls[1]).toContain("-X");
+    expect(ghCommandCalls[1]).toContain("POST");
+    // 3. Get parent SHA
+    expect(ghCommandCalls[2]).toContain(`repos/sjawhar/legion/commits/${mergeOid}`);
+    // 4. Get parent tree
+    expect(ghCommandCalls[3]).toContain("repos/sjawhar/legion/git/commits/parent-sha-111");
+    // 5. Create revert commit
+    expect(ghCommandCalls[4]).toContain("repos/sjawhar/legion/git/commits");
+    expect(ghCommandCalls[4]).toContain(`tree=tree-sha-222`);
+    // 6. Update branch ref
+    expect(ghCommandCalls[5]).toContain("PATCH");
+    expect(ghCommandCalls[5]).toContain("sha=revert-sha-333");
+  });
+
+  it("cleans up branch on failure", async () => {
+    const mergeOid = "merge-sha";
+    ghCommandResponses = [
+      // Get main SHA (must match mergeOid for guard)
+      `${mergeOid}\n`,
+      // Create branch ref
+      "{}",
+      // Get merge commit parents — fails
+      new Error("API error"),
+      // Branch cleanup
+      "{}",
+    ];
+
+    await expect(
+      createRevertCommit(
+        "sjawhar/legion",
+        {
+          number: 100,
+          title: "test",
+          mergeCommit: { oid: mergeOid },
+          headRefName: "branch",
+        },
+        42,
+        "sjawhar-legion-42"
+      )
+    ).rejects.toThrow("Failed to create revert commit");
+
+    // Verify cleanup DELETE was called
+    const deleteCall = ghCommandCalls.find((c) => c.includes("-X") && c.includes("DELETE"));
+    expect(deleteCall).toBeDefined();
+  });
+
+  it("throws when main has advanced past merge commit", async () => {
+    ghCommandResponses = [
+      // Get main SHA (different from merge commit)
+      "advanced-main-sha\n",
+    ];
+
+    await expect(
+      createRevertCommit(
+        "sjawhar/legion",
+        {
+          number: 100,
+          title: "test",
+          mergeCommit: { oid: "original-merge-sha" },
+          headRefName: "branch",
+        },
+        42,
+        "sjawhar-legion-42"
+      )
+    ).rejects.toThrow("Main has advanced past merge commit");
+
+    // Should only have made 1 call (get main SHA) — no branch created
+    expect(ghCommandCalls).toHaveLength(1);
   });
 });

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": {
+    "packages/daemon/src/cli": ["github-api/tree-swap-revert-safety.md"],
+    "packages/daemon/src/state/backends": ["github-api/tree-swap-revert-safety.md"],
+    ".opencode/skills/legion-controller": ["github-api/tree-swap-revert-safety.md"],
+    "tag:github-api": ["github-api/tree-swap-revert-safety.md"],
+    "tag:revert": ["github-api/tree-swap-revert-safety.md"],
+    "tag:rollback": ["github-api/tree-swap-revert-safety.md"],
+    "tag:safety": ["github-api/tree-swap-revert-safety.md"]
+  }
+}

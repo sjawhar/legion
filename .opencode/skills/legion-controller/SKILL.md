@@ -76,9 +76,9 @@ This rule is about answering user questions directed AT the controller. It is di
 | Resolve merge conflicts | Yes | Don't block on conflicts |
 | Label changes | Yes | Follow label conventions |
 | Move issues between statuses | Yes | Follow the state machine |
-| Merge PR to main | **NO** | Requires explicit user approval |
+| Merge PR to main | **Conditional** | Auto-merge for Tier 1 PRs when `auto_merge_allowed` config is true; otherwise requires explicit user approval |
 
-**Merge approval flow:** When all Pre-Merge Gate conditions are met, post a readiness comment and add `needs-approval` label. Wait for user approval before dispatching merger.
+**Merge approval flow:** When all Pre-Merge Gate conditions are met, check if the PR qualifies for auto-merge (see "Auto-Merge Gate" below). If it qualifies, dispatch the merger directly and add the `auto-merged` label. If it does not qualify, post a readiness comment and add `needs-approval` label. Wait for user approval before dispatching merger.
 
 The controller MUST NOT ask "should I continue?" for routine operations. Act on everything within your authority. Only escalate when:
 1. The decision is irreversible (merge to main)
@@ -544,7 +544,55 @@ Before requesting merge approval, verify ALL conditions:
 
 If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
 
-**When all conditions pass:** Post a readiness comment to the issue and add the `needs-approval` label. Wait for user approval before dispatching the merger.
+**When all conditions pass:** Check if the PR qualifies for auto-merge (see below). If it qualifies, dispatch the merger directly. Otherwise, post a readiness comment to the issue and add the `needs-approval` label. Wait for user approval before dispatching the merger.
+
+### Auto-Merge Gate (Tier 1)
+
+**Prerequisite:** The repo config must have `merge.auto_merge_allowed: true`. If this config key is absent or false, ALL PRs require human approval (existing behavior).
+
+When all 7 Pre-Merge Gate conditions pass AND `auto_merge_allowed` is true, check if the PR qualifies for autonomous merge. ALL of the following must be true:
+
+| # | Condition | Verification |
+|---|-----------|-------------|
+| 1 | PR is not a draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft --jq '.isDraft' -R $ISSUE_REPO` returns `false` |
+| 2 | No `user-input-needed` label | Already checked in Pre-Merge Gate condition 6 |
+| 3 | Smoke test compliance verified | Test handoff data includes smoke test evidence: `legion handoff read --phase test --workspace "$WORKSPACE_PATH" 2>/dev/null \| jq '.testSuiteResults'` must contain non-empty results beyond just "lint" and "typecheck" |
+| 4 | Change is small | `gh pr view "$LEGION_ISSUE_ID" --json additions,deletions,changedFiles --jq '{additions,deletions,changedFiles}' -R $ISSUE_REPO` — total additions+deletions ≤ 100 AND changedFiles ≤ 2 |
+| 5 | No new dependencies added | `gh pr diff "$LEGION_ISSUE_ID" -R $ISSUE_REPO -- '*/package.json' \| grep -E '^\+\s+".+":\s*"' \| wc -l` returns 0 — no new package entries added within dependency blocks in any package.json file |
+| 6 | No infrastructure changes | Changed files do NOT include: `packages/aws-infra/`, `Dockerfile`, `docker-compose`, `.github/workflows/`, `pulumi/`, terraform files |
+| 7 | Change type is safe | Issue labels include at least one of: `bug`, `fix`, `docs`, `config`, `skill`, `chore`. Does NOT have labels: `feature`, `breaking`, `security`, `infra` |
+
+**When ALL auto-merge conditions pass:**
+
+1. Post a comment to the issue:
+   ```bash
+   gh issue comment $ISSUE_NUMBER --body "🤖 **Auto-merge eligible.** All pre-merge and Tier 1 conditions met. Dispatching merger autonomously.
+
+   **Auto-merge criteria met:**
+   - CI green ✓
+   - Reviewer approved ✓
+   - Smoke test evidence present ✓
+   - Small change (≤100 lines, ≤2 files) ✓
+   - No new dependencies ✓
+   - No infrastructure changes ✓
+   - Safe change type ✓
+
+   Rollback available via: \`legion rollback $LEGION_ISSUE_ID\`" -R $OWNER/$REPO
+   ```
+
+2. Add the `auto-merged` label:
+   ```bash
+   gh issue edit $ISSUE_NUMBER --add-label "auto-merged" -R $OWNER/$REPO
+   ```
+
+3. Dispatch the merger directly (same as when `human-approved` is present):
+   ```bash
+   legion advance $ISSUE_IDENTIFIER --stage merge
+   ```
+
+**When ANY auto-merge condition fails:** Fall back to the standard approval flow — post a readiness comment and add `needs-approval`. Include which auto-merge conditions failed in the comment so the user knows why it wasn't auto-merged.
+
+**Rollback safety net:** If an auto-merged PR causes issues (next worker on the same repo fails within 30 minutes of the auto-merge), the controller should flag the auto-merged PR for human review by posting a warning comment on the original issue.
 
 ### Post-Merge Monitoring
 
