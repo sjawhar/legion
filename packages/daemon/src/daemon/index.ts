@@ -192,6 +192,33 @@ function unsubscribeFromEnvoy(sessionId: string, envoyUrl: string) {
   }).catch(() => {});
 }
 
+export interface WorkerStallEvent {
+  type: "worker_stall";
+  timestamp: number;
+  workerId: string;
+  sessionId: string;
+  messageCount: number;
+  stalledForMs: number;
+}
+
+function publishStallEvent(event: WorkerStallEvent, envoyUrl: string): void {
+  if (!envoyUrl) return;
+  fetch(`${envoyUrl}/v1/messages/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: "notifications.legion.controller",
+      message: JSON.stringify(event),
+    }),
+  })
+    .then((res) => {
+      if (!res.ok) console.warn(`[stall-detect] publish failed: ${res.status} (non-fatal)`);
+    })
+    .catch((err) => {
+      console.warn(`[stall-detect] publish error (non-fatal): ${err}`);
+    });
+}
+
 function buildServeEnv(config: DaemonConfig): Record<string, string> {
   const legionId = config.legionId ?? "";
   const env: Record<string, string> = {
@@ -593,6 +620,13 @@ export async function startDaemon(
   // Resets when a worker's session is found alive.
   const consecutiveLivenessMisses = new Map<string, number>();
 
+  // Track last-known message count per worker for stall detection.
+  // When a busy worker's message count stays flat for > stallThresholdMs, it's stalled.
+  const workerMessageSnapshots = new Map<
+    string,
+    { messageCount: number; firstSeenAt: number; alerted: boolean }
+  >();
+
   const scheduleHealthTick = () => {
     healthTickTimeout = resolvedDeps.setTimeout(async () => {
       try {
@@ -843,6 +877,97 @@ export async function startDaemon(
           } catch (error) {
             console.warn(
               `[health-tick] dead worker cleanup failed: ${error instanceof Error ? error.message : String(error)} (non-fatal)`
+            );
+          }
+        }
+
+        // Stall detection — identify busy workers with flat message counts.
+        // Only runs when serve is healthy and stall detection is enabled.
+        if (serveHealthy && !restartReason && config.stallThresholdMs > 0) {
+          try {
+            const stallState = await resolvedDeps.readStateFile(config.stateFilePath);
+            const now = Date.now();
+            const activeWorkerIds = new Set<string>();
+
+            for (const worker of Object.values(stallState.workers)) {
+              if (worker.status !== "running") continue;
+              activeWorkerIds.add(worker.id);
+
+              // Fetch session status to get messageCount and busy/idle phase
+              let statusData: { messageCount?: number; phase?: string } | undefined;
+              try {
+                const result = await Promise.race([
+                  resolvedDeps.adapter.getSessionStatus(worker.sessionId),
+                  new Promise<{ error: string }>((resolve) =>
+                    // Use globalThis.setTimeout (not resolvedDeps.setTimeout) to avoid
+                    // interfering with the health tick scheduling in tests.
+                    globalThis.setTimeout(() => resolve({ error: "timeout" }), 5000)
+                  ),
+                ]);
+                if ("data" in result && result.data) {
+                  statusData = result.data as { messageCount?: number; phase?: string };
+                }
+              } catch {
+                // Status fetch failed — skip this worker for stall detection
+                continue;
+              }
+
+              if (!statusData || typeof statusData.messageCount !== "number") continue;
+
+              const snapshot = workerMessageSnapshots.get(worker.id);
+              if (!snapshot || snapshot.messageCount !== statusData.messageCount) {
+                // Message count changed (or first observation) — update snapshot
+                workerMessageSnapshots.set(worker.id, {
+                  messageCount: statusData.messageCount,
+                  firstSeenAt:
+                    snapshot?.messageCount !== statusData.messageCount
+                      ? now
+                      : (snapshot?.firstSeenAt ?? now),
+                  alerted: false,
+                });
+              } else if (
+                statusData.phase === "busy" &&
+                !snapshot.alerted &&
+                now - snapshot.firstSeenAt >= config.stallThresholdMs
+              ) {
+                // Busy with flat message count for too long — stalled
+                const stalledForMs = now - snapshot.firstSeenAt;
+                console.warn(
+                  `[stall-detect] Worker ${worker.id} stalled: messageCount=${statusData.messageCount} flat for ${Math.round(stalledForMs / 1000)}s`
+                );
+                publishStallEvent(
+                  {
+                    type: "worker_stall",
+                    timestamp: now,
+                    workerId: worker.id,
+                    sessionId: worker.sessionId,
+                    messageCount: statusData.messageCount,
+                    stalledForMs,
+                  },
+                  config.envoyUrl
+                );
+                feedbackLogger?.log({
+                  event: "daemon.worker_stall",
+                  workerId: worker.id,
+                  sessionId: worker.sessionId,
+                  messageCount: statusData.messageCount,
+                  stalledForMs,
+                });
+                // Mark as alerted so we don't re-fire until message count changes
+                snapshot.alerted = true;
+              }
+              // If phase is not "busy", we still track the snapshot but don't alert
+            }
+
+            // Clean up snapshots for workers that are no longer active
+            for (const id of workerMessageSnapshots.keys()) {
+              if (!activeWorkerIds.has(id)) {
+                workerMessageSnapshots.delete(id);
+              }
+            }
+          } catch (stallErr) {
+            console.warn(
+              `[stall-detect] Stall detection failed (non-fatal): ${stallErr instanceof Error ? stallErr.message : String(stallErr)}`
             );
           }
         }
