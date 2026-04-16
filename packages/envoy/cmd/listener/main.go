@@ -582,8 +582,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Conn.Close()
-
 	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
@@ -624,9 +622,23 @@ func main() {
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
 	// Subscribe with retry — during rolling deployments, the old container may still
-	// hold the durable consumer binding. Retry with backoff until it releases.
+	// hold the durable consumer binding. Before subscribing, check if the consumer
+	// is push-bound by a stale connection and force-delete it if so.
 	var sub *nats.Subscription
 	for attempt := 1; attempt <= 10; attempt++ {
+		// If consumer exists and is push-bound by a dead connection, delete it.
+		info, infoErr := client.JS().ConsumerInfo(bus.Stream, consumer)
+		if infoErr == nil && info.PushBound {
+			logger.Warn("consumer is push-bound by stale connection, deleting",
+				slog.String("consumer", consumer),
+				slog.Int("attempt", attempt),
+			)
+			if delErr := client.JS().DeleteConsumer(bus.Stream, consumer); delErr != nil {
+				logger.Warn("failed to delete stale consumer",
+					slog.String("error", delErr.Error()),
+				)
+			}
+		}
 		sub, err = startListenerSubscription(client, consumer, func(msg *nats.Msg) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
