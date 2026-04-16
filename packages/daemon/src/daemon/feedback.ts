@@ -68,27 +68,17 @@ export const WorkerReapedEventSchema = FeedbackEventBase.extend({
   reason: z.string(),
 });
 
-export const WorkerStallEventSchema = FeedbackEventBase.extend({
-  event: z.literal("daemon.worker_stall"),
-  workerId: z.string(),
-  sessionId: z.string(),
-  messageCount: z.number().int().nonnegative(),
-  stalledForMs: z.number().nonnegative(),
-});
-
 export const PromotedAutoDemoteEventSchema = FeedbackEventBase.extend({
   event: z.literal("daemon.promoted_auto_demote"),
   sessionId: z.string(),
   role: z.string(),
 });
-
 export const FeedbackEventSchema = z.discriminatedUnion("event", [
   WorkerDispatchedEventSchema,
   WorkerStatusChangedEventSchema,
   StateCollectedEventSchema,
   HealthTickEventSchema,
   WorkerReapedEventSchema,
-  WorkerStallEventSchema,
   PromotedAutoDemoteEventSchema,
 ]);
 
@@ -99,7 +89,6 @@ type HealthTickEvent = z.infer<typeof HealthTickEventSchema> & {
   issueId?: undefined;
 };
 type WorkerReapedEvent = z.infer<typeof WorkerReapedEventSchema>;
-type WorkerStallEvent = z.infer<typeof WorkerStallEventSchema>;
 type PromotedAutoDemoteEvent = z.infer<typeof PromotedAutoDemoteEventSchema>;
 
 export type FeedbackEvent =
@@ -108,7 +97,6 @@ export type FeedbackEvent =
   | StateCollectedEvent
   | HealthTickEvent
   | WorkerReapedEvent
-  | WorkerStallEvent
   | PromotedAutoDemoteEvent;
 
 type OmitFeedbackBase<TEvent> = TEvent extends unknown
