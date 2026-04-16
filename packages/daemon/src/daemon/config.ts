@@ -42,6 +42,8 @@ export interface DaemonConfig {
   /** Stall detection threshold in ms. Workers with flat message count while busy
    *  for longer than this are reported as stalled. 0 = disabled. */
   stallThresholdMs: number;
+  /** Maps worker mode to agent type for the initial prompt's AgentPartInput. */
+  modeAgents: Partial<Record<string, string>>;
 }
 
 export interface LoadedConfigFile {
@@ -117,6 +119,9 @@ const CONFIG_SCHEMA: ConfigSchema = {
   },
   auto_advance: null,
   stall_threshold_minutes: null,
+  mode_agents: {
+    [CONFIG_ANY_KEY]: null,
+  },
 };
 
 function parseOptionalNumber(value: string | undefined): number | undefined {
@@ -620,6 +625,28 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
     fields.extraProjects = extraProjects;
   }
 
+  const modeAgents = parsed.mode_agents;
+  if (modeAgents !== undefined && modeAgents !== null) {
+    if (!isRecord(modeAgents)) {
+      throw new Error("mode_agents must be a mapping");
+    }
+    const validModes = new Set(["architect", "plan", "implement", "test", "review", "merge"]);
+    const mapping: Record<string, string> = {};
+    for (const [mode, agent] of Object.entries(modeAgents)) {
+      if (!validModes.has(mode)) {
+        warnings.push(`mode_agents: unknown mode '${mode}' (valid: ${[...validModes].join(", ")})`);
+        continue;
+      }
+      const agentName = readString(agent, `mode_agents.${mode}`);
+      if (agentName !== undefined) {
+        mapping[mode] = agentName;
+      }
+    }
+    if (Object.keys(mapping).length > 0) {
+      fields.modeAgents = mapping;
+    }
+  }
+
   return { fields, warnings };
 }
 
@@ -843,6 +870,7 @@ export function resolveDaemonConfig(
       rssCheckIntervalMs: rssCheckIntervalMs.value,
       autoAdvance: autoAdvance.value,
       stallThresholdMs: stallThresholdMs.value,
+      modeAgents: (configFields.modeAgents as Partial<Record<string, string>> | undefined) ?? {},
     },
     warnings,
   };

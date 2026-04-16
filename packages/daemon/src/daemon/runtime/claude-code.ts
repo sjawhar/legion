@@ -101,7 +101,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return sessionId;
   }
 
-  async sendPrompt(sessionId: string, text: string): Promise<void> {
+  async sendPrompt(sessionId: string, text: string, _agentName?: string): Promise<void> {
     const windowTarget = `${this.sessionName}:${sessionId}`;
     const alive = this.isProcessAlive(sessionId);
 

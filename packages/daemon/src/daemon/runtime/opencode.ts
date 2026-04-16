@@ -77,12 +77,17 @@ export class OpenCodeAdapter implements RuntimeAdapter {
     this.workspaces.delete(sessionId);
   }
 
-  async sendPrompt(sessionId: string, text: string): Promise<void> {
+  async sendPrompt(sessionId: string, text: string, agentName?: string): Promise<void> {
     await this.ensureRunning();
     const client = createWorkerClient(this.port, this.workspaces.get(sessionId) ?? "");
+    const parts: Array<{ type: string; text?: string; name?: string }> = [];
+    if (agentName) {
+      parts.push({ type: "agent", name: agentName });
+    }
+    parts.push({ type: "text", text });
     await client.session.promptAsync({
       sessionID: sessionId,
-      parts: [{ type: "text", text }],
+      parts: parts as Array<{ type: "text"; text: string }>,
     });
   }
 

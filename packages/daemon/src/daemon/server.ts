@@ -80,6 +80,8 @@ export interface ServerOptions {
   issueBackend?: "linear" | "github";
   /** Auto-advance: dispatch next worker when current one finishes */
   autoAdvance?: boolean;
+  /** Maps worker mode to agent type for AgentPartInput on initial prompt. */
+  modeAgents?: Partial<Record<string, string>>;
 }
 
 interface ErrorResponse {
@@ -1105,7 +1107,8 @@ export function startServer(opts: ServerOptions): {
                 let lastError: Error = new Error("All prompt retry attempts failed");
                 for (let attempt = 0; attempt < PROMPT_RETRY_ATTEMPTS; attempt++) {
                   try {
-                    await workerAdapter.sendPrompt(actualSessionId, prompt);
+                    const agentName = opts.modeAgents?.[mode];
+                    await workerAdapter.sendPrompt(actualSessionId, prompt, agentName);
                     promptDelivered = true;
                     break;
                   } catch (error) {

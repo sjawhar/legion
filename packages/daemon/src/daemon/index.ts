@@ -530,6 +530,7 @@ export async function startDaemon(
         envoyUrl: config.envoyUrl,
         issueBackend: config.issueBackend,
         autoAdvance: config.autoAdvance,
+        modeAgents: config.modeAgents,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
             await shutdown(true);
