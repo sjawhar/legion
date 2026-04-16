@@ -27,10 +27,10 @@
       "daemon/multi-backend-mutation-target-pattern.md",
       "daemon/self-fetch-endpoint-composition.md",
       "daemon/pre-cleanup-branch-push-verification.md",
-      "best-practices/jj-bookmark-template-syntax-gotchas.md",
       "daemon/dead-worker-workspace-reclamation.md",
       "daemon/inline-html-dashboard-pattern.md",
-      "daemon/graduated-fetch-urgency-pattern.md"
+      "daemon/graduated-fetch-urgency-pattern.md",
+      "daemon/cross-role-permission-proxy.md"
     ],
     "packages/daemon/src/__tests__": [
       "testing/mock-envoy-server-pattern.md",
@@ -52,7 +52,8 @@
       "skill-patterns/workflow-ordering-and-stale-workspace-data.md",
       "daemon/deferred-review-comments-pattern.md",
       "integration-patterns/controller-worker-protocol.md",
-      "delegation/subagent-timeout-stall-prevention.md"
+      "delegation/subagent-timeout-stall-prevention.md",
+      "daemon/cross-role-permission-proxy.md"
     ],
     ".opencode/skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
@@ -146,7 +147,10 @@
       "daemon/graduated-fetch-urgency-pattern.md"
     ],
     "tag:dispose": ["daemon/opencode-serve-lifecycle.md"],
-    "tag:draft-status": ["integration-issues/github-graphql-pr-draft-status.md"],
+    "tag:draft-status": [
+      "integration-issues/github-graphql-pr-draft-status.md",
+      "daemon/cross-role-permission-proxy.md"
+    ],
     "tag:error-handling": ["integration-issues/linear-mcp-label-resolution.md"],
     "tag:external-repos": ["integration-issues/external-repo-pr-auto-transition-gap.md"],
     "tag:failure-modes": ["skill-patterns/worker-skill-failure-modes.md"],
@@ -165,7 +169,8 @@
     "tag:graphql": [
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "integration-issues/github-graphql-pr-draft-status.md",
-      "integration-issues/linear-mcp-label-resolution.md"
+      "integration-issues/linear-mcp-label-resolution.md",
+      "daemon/cross-role-permission-proxy.md"
     ],
     "tag:implement": ["skill-patterns/worker-skill-failure-modes.md"],
     "tag:jj-workspaces": [
@@ -425,6 +430,12 @@
     "tag:blocking-vs-nonblocking": ["daemon/graduated-fetch-urgency-pattern.md"],
     "packages/opencode-plugin/src/overlays": [
       "delegation/model-fallback-implementation-patterns.md"
-    ]
+    ],
+    "docs/setup": ["daemon/cross-role-permission-proxy.md"],
+    "tag:github-apps": ["daemon/cross-role-permission-proxy.md"],
+    "tag:permissions": ["daemon/cross-role-permission-proxy.md"],
+    "tag:cross-role": ["daemon/cross-role-permission-proxy.md"],
+    "tag:daemon-endpoint": ["daemon/cross-role-permission-proxy.md"],
+    "tag:security": ["daemon/cross-role-permission-proxy.md"]
   }
 }
