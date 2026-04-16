@@ -452,6 +452,53 @@ async function waitForPidExit(pid: number, timeoutMs = 5_000): Promise<boolean> 
   return false;
 }
 
+export async function cmdRestart(
+  team: string,
+  opts: StartOptions,
+  deps: StartDependencies = { startDaemon, resolveLegionId }
+): Promise<void> {
+  const legionId = await deps.resolveLegionId(team, { backend: opts.backend });
+  const paths = resolveLegionPaths(process.env, os.homedir());
+
+  console.log(`Restarting legion: ${legionId}`);
+
+  // Step 1: Send restart signal to the running daemon (keeps serve alive)
+  const daemonPort = await getDaemonPort(legionId);
+  let restarted = false;
+  try {
+    const response = await fetch(`http://127.0.0.1:${daemonPort}/restart`, {
+      method: "POST",
+    });
+    if (response.ok) {
+      console.log("Daemon received restart signal (serve preserved).");
+      restarted = true;
+    } else {
+      const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      console.log(`Restart endpoint returned ${response.status}: ${body.error ?? "unknown"}`);
+    }
+  } catch {
+    console.log("Could not reach daemon — it may not be running.");
+  }
+
+  if (!restarted) {
+    console.log("Falling back to stop + start...");
+    await cmdStop(team, undefined, opts.backend);
+  } else {
+    // Wait for the old daemon process to exit
+    const entry = await findLegionByProjectId(paths.legionsFile, legionId);
+    if (entry) {
+      const exited = await waitForPidExit(entry.pid);
+      if (!exited) {
+        console.warn(`Old daemon PID ${entry.pid} did not exit within timeout.`);
+      }
+    }
+  }
+
+  // Step 2: Start a new daemon process (will adopt the preserved serve)
+  console.log("Starting new daemon process...");
+  await cmdStart(team, opts, deps);
+}
+
 async function cmdStatus(team: string, _stateDir?: string, backend?: string): Promise<void> {
   const legionId = await resolveLegionId(team, { backend });
   const paths = resolveLegionPaths(process.env, os.homedir());
@@ -1238,6 +1285,46 @@ export const stopCommand = defineCommand({
   },
   async run({ args }) {
     await cmdStop(args.team, args["state-dir"], args.backend);
+  },
+});
+
+export const restartCommand = defineCommand({
+  meta: {
+    name: "restart",
+    description: "Restart the daemon without killing worker sessions",
+  },
+  args: {
+    team: { type: "positional", description: "Legion key or UUID", required: true },
+    workspace: {
+      type: "string",
+      alias: "w",
+      description: "Workspace path",
+    },
+    prompt: {
+      type: "string",
+      alias: "p",
+      description: "Custom prompt appended to the controller's initial /legion-controller prompt",
+    },
+    backend: {
+      type: "string",
+      alias: "b",
+      description: "Issue tracker backend (linear or github)",
+    },
+    runtime: {
+      type: "string",
+      alias: "r",
+      description: "Agent runtime (opencode or claude-code)",
+    },
+    config: { type: "string", alias: "c", description: "Config file path" },
+  },
+  async run({ args }) {
+    await cmdRestart(args.team, {
+      workspace: args.workspace,
+      prompt: args.prompt,
+      backend: args.backend,
+      runtime: args.runtime,
+      config: args.config,
+    });
   },
 });
 
@@ -2404,6 +2491,7 @@ export const mainCommand = defineCommand({
   subCommands: {
     start: startCommand,
     stop: stopCommand,
+    restart: restartCommand,
     status: statusCommand,
     attach: attachCommand,
     enlist: enlistCommand,

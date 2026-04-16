@@ -2,7 +2,7 @@ import { closeSync, constants, openSync, readFileSync, writeSync } from "node:fs
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { LegionsRegistrySchema } from "./schemas";
-import { killStaleServe } from "./serve-manager";
+import { healthCheck, killStaleServe } from "./serve-manager";
 
 interface LegionEntry {
   port: number;
@@ -121,26 +121,51 @@ export async function findLegionByProjectId(
  * Clean up stale serve processes from dead daemon entries in the registry.
  * Called on daemon startup before port allocation.
  *
- * For our legionId: if the previous daemon is dead, kill its orphaned serve process.
- * This prevents SQLite lock contention and port conflicts after unclean daemon exits.
+ * For our legionId: if the previous daemon is dead, kill its orphaned serve process
+ * — unless the serve is still healthy (e.g. after a graceful daemon restart).
+ * This prevents SQLite lock contention and port conflicts after unclean daemon exits,
+ * while preserving worker sessions across daemon restarts.
+ *
+ * Returns the serve PID if the serve was preserved (healthy), or undefined if killed/absent.
  */
-export async function cleanupStaleServes(filePath: string, legionId: string): Promise<void> {
+export async function cleanupStaleServes(
+  filePath: string,
+  legionId: string
+): Promise<{ preservedServePid?: number; preservedServePort?: number }> {
   const registry = await readLegionsRegistry(filePath);
   const entry = registry[legionId];
   if (!entry) {
-    return;
+    return {};
   }
 
   // If the previous daemon is still alive, don't touch its serve
   if (isPidAlive(entry.pid)) {
-    return;
+    return {};
   }
 
-  // Previous daemon is dead — its serve may still be running
+  // Previous daemon is dead — check if its serve is still healthy.
+  // A healthy serve means the daemon was restarted gracefully (e.g. `legion restart`).
+  // Preserve it so worker sessions survive the restart.
   console.log(
-    `Previous daemon for ${legionId} (PID ${entry.pid}) is dead, checking for stale serve on port ${entry.servePort}...`
+    `Previous daemon for ${legionId} (PID ${entry.pid}) is dead, checking serve on port ${entry.servePort}...`
   );
 
+  const serveHealthy = await healthCheck(entry.servePort);
+  if (serveHealthy) {
+    console.log(`Serve on port ${entry.servePort} is healthy — preserving for daemon restart`);
+    // Remove the stale daemon entry but keep the serve alive
+    await withRegistryLock(filePath, async () => {
+      const current = await readLegionsRegistry(filePath);
+      if (current[legionId]?.pid === entry.pid) {
+        delete current[legionId];
+        await writeRegistry(filePath, current);
+        console.log(`Removed stale daemon registry entry for ${legionId}`);
+      }
+    });
+    return { preservedServePid: entry.servePid, preservedServePort: entry.servePort };
+  }
+
+  // Serve is not healthy — kill it
   const cleaned = await killStaleServe(entry.servePort, entry.servePid);
   if (cleaned) {
     // Remove the stale entry from the registry
@@ -153,6 +178,7 @@ export async function cleanupStaleServes(filePath: string, legionId: string): Pr
       }
     });
   }
+  return {};
 }
 
 async function writeRegistry(filePath: string, registry: LegionsRegistry): Promise<void> {

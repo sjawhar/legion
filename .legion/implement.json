@@ -1,0 +1,35 @@
+{
+  "status": "completed",
+  "pr": 600,
+  "branch": "sjawhar-legion-598",
+  "summary": "Added legion restart command for hot-reloading daemon without killing worker sessions. Key changes: cleanupStaleServes preserves healthy serves, shutdown accepts keepServe param, OpenCodeAdapter.adoptServe tracks existing serve PID, POST /restart endpoint, legion restart CLI command.",
+  "files_changed": [
+    "packages/daemon/src/daemon/legions-registry.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/server.ts",
+    "packages/daemon/src/daemon/runtime/opencode.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "AGENTS.md"
+  ],
+  "tests_added": [
+    "cleanupStaleServes preserves healthy serve",
+    "cleanupStaleServes returns empty for unhealthy serve",
+    "POST /restart calls restartFn",
+    "POST /restart returns 500 when not supported",
+    "shutdown with keepServe does not stop serve",
+    "adopts preserved serve PID from cleanupStaleServes",
+    "OpenCodeAdapter.adoptServe sets PID",
+    "OpenCodeAdapter.adoptServe allows stop on adopted PID"
+  ],
+  "test_results": {
+    "daemon_index": "48 pass",
+    "server": "181 pass",
+    "legions_registry": "20 pass",
+    "opencode_adapter": "19 pass",
+    "full_suite": "1631 pass, 20 fail (pre-existing)"
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-16T21:03:39.908Z"
+}

@@ -71,6 +71,8 @@ export interface ServerOptions {
   stateFilePath: string;
   logDir?: string;
   shutdownFn?: () => void | Promise<void>;
+  /** Graceful restart: stops daemon but keeps serve alive for session continuity. */
+  restartFn?: () => void | Promise<void>;
   getControllerState?: () => ControllerState | undefined;
   runtime?: string;
   tmuxSession?: string;
@@ -2066,6 +2068,14 @@ export function startServer(opts: ServerOptions): {
         if (method === "POST" && url.pathname === "/shutdown") {
           await opts.shutdownFn?.();
           return jsonResponse({ status: "shutting_down" });
+        }
+
+        if (method === "POST" && url.pathname === "/restart") {
+          if (!opts.restartFn) {
+            return serverError("restart_not_supported");
+          }
+          await opts.restartFn();
+          return jsonResponse({ status: "restarting" });
         }
 
         // --- Promoted sessions ---

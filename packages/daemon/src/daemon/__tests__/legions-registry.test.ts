@@ -302,4 +302,67 @@ describe("cleanupStaleServes", () => {
     const registry = await readLegionsRegistry(filePath);
     expect(registry["my-legion"]).toBeUndefined();
   });
+
+  it("preserves healthy serve and returns its PID/port", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-cleanup-"));
+    const filePath = path.join(tempDir, "legions.json");
+
+    // Start a real HTTP server to simulate a healthy serve
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch() {
+        return Response.json({ healthy: true });
+      },
+    });
+
+    try {
+      const servePort = server.port as number;
+
+      // Write entry with dead daemon PID but serve on a port that responds healthy
+      await writeLegionEntry(filePath, "my-legion", {
+        port: 13370,
+        servePort,
+        pid: 999999999,
+        servePid: 888888888,
+        startedAt: "2026-03-12T00:00:00Z",
+      });
+
+      const result = await cleanupStaleServes(filePath, "my-legion");
+
+      // Should preserve the serve and return its PID/port
+      expect(result.preservedServePid).toBe(888888888);
+      expect(result.preservedServePort).toBe(servePort);
+
+      // Stale daemon entry should be removed from registry
+      const registry = await readLegionsRegistry(filePath);
+      expect(registry["my-legion"]).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("returns empty when serve is not healthy (dead daemon)", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-cleanup-"));
+    const filePath = path.join(tempDir, "legions.json");
+
+    // Write entry with dead daemon PID and a free port (no serve running)
+    await writeLegionEntry(filePath, "my-legion", {
+      port: 13370,
+      servePort: 59995,
+      pid: 999999999,
+      servePid: 888888888,
+      startedAt: "2026-03-12T00:00:00Z",
+    });
+
+    const result = await cleanupStaleServes(filePath, "my-legion");
+
+    // Should not preserve anything
+    expect(result.preservedServePid).toBeUndefined();
+    expect(result.preservedServePort).toBeUndefined();
+
+    // Entry should be cleaned up
+    const registry = await readLegionsRegistry(filePath);
+    expect(registry["my-legion"]).toBeUndefined();
+  });
 });
