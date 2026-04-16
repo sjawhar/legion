@@ -136,9 +136,17 @@ If you previously created a PR, re-subscribe to PR topics: `envoy_subscribe(["no
 
 The signal completion todo ensures you never finish a session without updating labels.
 If you are about to stop or exit for any reason, check whether this todo is still pending — if so, do it now.
+### When Stuck — Try Oracle FIRST
+
+**Before escalating to humans**, always invoke `/legion-oracle [your question]` to search institutional knowledge (`docs/solutions/`, codebase patterns, past issue resolutions). Oracle answers 62% of questions without human help.
+
+Example: `/legion-oracle How does the controller handle cross-mode cleanup for envoyTopics?`
+
+Only proceed to the escalation flow below if oracle cannot answer or the answer is insufficient.
+
 ### Blocking on User Input
 
-When you need human input that the legion-oracle can't answer:
+When you need human input that the oracle can't answer:
 
 1. Push your work: `jj git push`
 2. Post a structured escalation comment to the issue:
@@ -260,10 +268,6 @@ Review signals outcome via native GitHub review API BEFORE `worker-done`:
 - **Changes requested** (`gh pr review --request-changes`) — blocking issues found
 
 ## Research Before Escalating
-
-Before blocking on user input, workers should invoke `/legion-oracle [your question]` to search institutional knowledge (docs/solutions/, codebase patterns). Only escalate to the user (via issue comment + label) if the legion-oracle cannot answer.
-
-**If Oracle times out or fails:** Proceed with your best judgment or escalate to the user directly. Do not stall waiting for Oracle — it is an optimization, not a gate.
 
 ## Reference
 

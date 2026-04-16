@@ -13,7 +13,7 @@ related_issues:
   - "LEG-125"
   - "LEG-128"
   - "LEG-130"
-status: active
+status: needs-review  # 0% helpfulness rate across 7-16 injections
 ---
 
 # Controller Observability: Trust the System, Not Your Assumptions
