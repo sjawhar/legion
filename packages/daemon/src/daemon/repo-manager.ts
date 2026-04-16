@@ -19,6 +19,7 @@ export interface RepoManagerDeps {
   rmDir: (path: string) => Promise<void>;
   symlink: (target: string, linkPath: string) => Promise<void>;
   listDir?: (path: string) => Promise<string[]>;
+  runGit?: (args: string[]) => Promise<JjResult>;
 }
 
 export const defaultDeps: RepoManagerDeps = {
@@ -60,6 +61,22 @@ export const defaultDeps: RepoManagerDeps = {
         return [];
       }
       throw error;
+    }
+  },
+  runGit: async (args) => {
+    const proc = Bun.spawn(["git", ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timeout = setTimeout(() => proc.kill(), 30_000);
+    try {
+      const [exitCode, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { exitCode, stdout, stderr };
+    } finally {
+      clearTimeout(timeout);
     }
   },
 };
@@ -129,7 +146,20 @@ export async function ensureWorkspace(
   const workspacePath = resolveWorkspacePath(paths, projectId, issueId);
 
   if (!(await deps.exists(workspacePath))) {
-    const result = await deps.runJj([
+    // Prune stale git worktree registrations before creating workspace.
+    // This handles cases where workspace directories were deleted (daemon restart,
+    // worker pruning) without cleaning up the git worktree registration.
+    const runGit = deps.runGit ?? defaultDeps.runGit;
+    const gitDir = `${clonePath}/.jj/repo/store/git`;
+    if (runGit) {
+      try {
+        await runGit([`--git-dir=${gitDir}`, "worktree", "prune"]);
+      } catch {
+        // Non-fatal: prune failure shouldn't block workspace creation
+      }
+    }
+
+    const wsArgs = [
       "workspace",
       "add",
       workspacePath,
@@ -139,9 +169,29 @@ export async function ensureWorkspace(
       "main",
       "-R",
       clonePath,
-    ]);
+    ];
+    const result = await deps.runJj(wsArgs);
     if (result.exitCode !== 0) {
-      throw new Error(`Failed to create workspace ${workspacePath}: ${result.stderr}`);
+      // If workspace add failed with "already registered", force-add the git worktree
+      // directly and retry the jj workspace add
+      if (result.stderr.includes("already registered") && runGit) {
+        try {
+          await runGit([`--git-dir=${gitDir}`, "worktree", "add", "-f", workspacePath, "HEAD"]);
+          // Clean up the git worktree we just forced — jj needs to own it
+          await runGit([`--git-dir=${gitDir}`, "worktree", "remove", "--force", workspacePath]);
+          await runGit([`--git-dir=${gitDir}`, "worktree", "prune"]);
+        } catch {
+          // Non-fatal: best-effort to clear the stale registration
+        }
+
+        // Retry jj workspace add after clearing the registration
+        const retry = await deps.runJj(wsArgs);
+        if (retry.exitCode !== 0) {
+          throw new Error(`Failed to create workspace ${workspacePath}: ${retry.stderr}`);
+        }
+      } else {
+        throw new Error(`Failed to create workspace ${workspacePath}: ${result.stderr}`);
+      }
     }
   }
 
@@ -318,19 +368,17 @@ export async function cleanupWorkspace(
 
   // Prune stale git worktree registrations — handles cases where workers were
   // reaped before cleanup ran and directories were deleted without git knowing
+  const runGit = deps.runGit ?? defaultDeps.runGit;
   const gitDir = `${clonePath}/.jj/repo/store/git`;
-  try {
-    const pruneResult = Bun.spawnSync(["git", `--git-dir=${gitDir}`, "worktree", "prune"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 10_000,
-    });
-    if (pruneResult.exitCode !== 0) {
-      console.warn(
-        `[cleanup] git worktree prune failed (non-fatal): ${pruneResult.stderr.toString()}`
-      );
+  if (runGit) {
+    try {
+      const pruneResult = await runGit([`--git-dir=${gitDir}`, "worktree", "prune"]);
+      if (pruneResult.exitCode !== 0) {
+        console.warn(`[cleanup] git worktree prune failed (non-fatal): ${pruneResult.stderr}`);
+      }
+    } catch {
+      // Non-fatal — git worktree prune may fail if git dir doesn't exist
     }
-  } catch {
-    // Non-fatal — git worktree prune may fail if git dir doesn't exist
   }
 
   await deps.rmDir(workspacePath);
