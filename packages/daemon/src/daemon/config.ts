@@ -39,9 +39,6 @@ export interface DaemonConfig {
   rssCheckIntervalMs: number;
   /** When true, daemon auto-dispatches next worker when current finishes. */
   autoAdvance: boolean;
-  /** Stall detection threshold in ms. Workers with flat message count while busy
-   *  for longer than this are reported as stalled. 0 = disabled. */
-  stallThresholdMs: number;
   /** Maps worker mode to agent type for the initial prompt's AgentPartInput. */
   modeAgents: Partial<Record<string, string>>;
 }
@@ -77,7 +74,6 @@ const DEFAULT_MAX_RSS_GB = 20;
 const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 const DEFAULT_FEEDBACK_MAX_BYTES = 50 * 1024 * 1024;
-const DEFAULT_STALL_THRESHOLD_MINUTES = 5;
 const EXTRA_PROJECT_PATTERN = /^[^/]+\/\d+$/;
 const GITHUB_APP_ROLES: GitHubAppRole[] = ["implement", "review"];
 const GITHUB_APP_FIELD_NAMES = ["app_id", "private_key", "installations"] as const;
@@ -118,7 +114,6 @@ const CONFIG_SCHEMA: ConfigSchema = {
     max_bytes: null,
   },
   auto_advance: null,
-  stall_threshold_minutes: null,
   mode_agents: {
     [CONFIG_ANY_KEY]: null,
   },
@@ -346,13 +341,6 @@ function parseRssCheckIntervalMsFromSeconds(seconds: number | undefined): number
     return undefined;
   }
   return seconds * 1000;
-}
-
-function parseStallThresholdMsFromMinutes(minutes: number | undefined): number | undefined {
-  if (minutes === undefined) {
-    return undefined;
-  }
-  return minutes > 0 ? minutes * 60 * 1000 : 0;
 }
 
 function collectUnknownKeys(
@@ -607,15 +595,6 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
     fields.autoAdvance = autoAdvance;
   }
 
-  const stallThresholdMinutes = readNumber(
-    parsed.stall_threshold_minutes,
-    "stall_threshold_minutes"
-  );
-  const stallThresholdMs = parseStallThresholdMsFromMinutes(stallThresholdMinutes);
-  if (stallThresholdMs !== undefined) {
-    fields.stallThresholdMs = stallThresholdMs;
-  }
-
   const extraProjects = parseExtraProjectsArray(parsed.extra_projects);
   const effectiveBackend = (fields.issueBackend as "linear" | "github" | undefined) ?? "linear";
   if (extraProjects !== undefined) {
@@ -677,9 +656,6 @@ export function resolveDaemonConfig(
   const envFeedbackDisabled = parseOptionalBoolean(env.LEGION_FEEDBACK_DISABLED);
   const envFeedbackMaxBytes = parseOptionalNumber(env.LEGION_FEEDBACK_MAX_BYTES);
   const envAutoAdvance = parseOptionalBoolean(env.LEGION_AUTO_ADVANCE);
-  const envStallThresholdMs = parseStallThresholdMsFromMinutes(
-    parseOptionalNumber(env.LEGION_STALL_THRESHOLD_MINUTES)
-  );
 
   const legionId = resolveValue(
     opts.cliOverrides?.legionId,
@@ -771,13 +747,6 @@ export function resolveDaemonConfig(
     envAutoAdvance,
     false
   );
-  const stallThresholdMs = resolveValue(
-    opts.cliOverrides?.stallThresholdMs,
-    maybeReadNumberField(configFields, "stallThresholdMs"),
-    envStallThresholdMs,
-    DEFAULT_STALL_THRESHOLD_MINUTES * 60 * 1000
-  );
-
   if (extraProjects.value !== undefined && issueBackend.value !== "github") {
     throw new Error("extra_projects requires backend: github");
   }
@@ -869,7 +838,6 @@ export function resolveDaemonConfig(
       maxRssBytes: maxRssBytes.value,
       rssCheckIntervalMs: rssCheckIntervalMs.value,
       autoAdvance: autoAdvance.value,
-      stallThresholdMs: stallThresholdMs.value,
       modeAgents: (configFields.modeAgents as Partial<Record<string, string>> | undefined) ?? {},
     },
     warnings,

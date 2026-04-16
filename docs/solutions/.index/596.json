@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "entries": {
+    "packages/daemon/src/daemon": ["daemon/worker-stall-detection-design.md"],
+    "tag:stall-detection": ["daemon/worker-stall-detection-design.md"],
+    "tag:monitoring": ["daemon/worker-stall-detection-design.md"],
+    "tag:health-tick": ["daemon/worker-stall-detection-design.md"],
+    "tag:feature-reversion": ["daemon/worker-stall-detection-design.md"]
+  }
+}
