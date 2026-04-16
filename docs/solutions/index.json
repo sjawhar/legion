@@ -22,7 +22,6 @@
     ],
     "packages/daemon/src/daemon": [
       "daemon/session-liveness-detection-pattern.md",
-      "daemon/optional-dep-fallback-and-early-return-guard.md",
       "daemon/targeted-delta-filtering-pattern.md",
       "daemon/multi-backend-mutation-target-pattern.md",
       "daemon/self-fetch-endpoint-composition.md",
@@ -30,7 +29,8 @@
       "daemon/dead-worker-workspace-reclamation.md",
       "daemon/inline-html-dashboard-pattern.md",
       "daemon/graduated-fetch-urgency-pattern.md",
-      "daemon/cross-role-permission-proxy.md"
+      "daemon/cross-role-permission-proxy.md",
+      "daemon/jj-git-worktree-interop.md"
     ],
     "packages/daemon/src/__tests__": [
       "testing/mock-envoy-server-pattern.md",
@@ -139,7 +139,8 @@
       "daemon/shared-serve-retro.md",
       "daemon/session-liveness-detection-pattern.md",
       "daemon/optional-dep-fallback-and-early-return-guard.md",
-      "daemon/pre-cleanup-branch-push-verification.md"
+      "daemon/pre-cleanup-branch-push-verification.md",
+      "daemon/jj-git-worktree-interop.md"
     ],
     "tag:directory-resolution": ["daemon/worker-directory-fix.md"],
     "tag:dispatch": [
@@ -179,7 +180,8 @@
       "best-practices/git-stash-jj-working-copy-interference.md",
       "daemon/pre-cleanup-branch-push-verification.md",
       "best-practices/jj-bookmark-template-syntax-gotchas.md",
-      "daemon/dead-worker-workspace-reclamation.md"
+      "daemon/dead-worker-workspace-reclamation.md",
+      "daemon/jj-git-worktree-interop.md"
     ],
     "tag:keyboard-navigation": ["integration-patterns/tmux-askuserquestion-navigation.md"],
     "tag:labels": ["integration-issues/linear-mcp-label-resolution.md"],
@@ -413,7 +415,10 @@
     "tag:template-syntax": ["best-practices/jj-bookmark-template-syntax-gotchas.md"],
     "tag:two-pass-pattern": ["daemon/dead-worker-workspace-reclamation.md"],
     "tag:failure-isolation": ["daemon/dead-worker-workspace-reclamation.md"],
-    "tag:workspace-management": ["daemon/dead-worker-workspace-reclamation.md"],
+    "tag:workspace-management": [
+      "daemon/dead-worker-workspace-reclamation.md",
+      "daemon/jj-git-worktree-interop.md"
+    ],
     "tag:hook-ordering": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
     "tag:json-repair": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
     "tag:text-parsing": ["architecture-patterns/opencode-plugin-hook-authoring-patterns.md"],
@@ -436,6 +441,9 @@
     "tag:permissions": ["daemon/cross-role-permission-proxy.md"],
     "tag:cross-role": ["daemon/cross-role-permission-proxy.md"],
     "tag:daemon-endpoint": ["daemon/cross-role-permission-proxy.md"],
-    "tag:security": ["daemon/cross-role-permission-proxy.md"]
+    "tag:security": ["daemon/cross-role-permission-proxy.md"],
+    "tag:git-worktree": ["daemon/jj-git-worktree-interop.md"],
+    "tag:idempotent-operations": ["daemon/jj-git-worktree-interop.md"],
+    "tag:retry-pattern": ["daemon/jj-git-worktree-interop.md"]
   }
 }
