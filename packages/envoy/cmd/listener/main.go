@@ -571,12 +571,18 @@ func main() {
 		// restarts with existing state, skip it so tsnet reuses the persisted identity.
 		if tsCfg.StateDir != "" {
 			stateFile := tsCfg.StateDir + "/tailscaled.state"
-			if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-				logger.Info("tsnet state dir is empty (first boot), setting TSNET_FORCE_LOGIN=1")
+			logger.Info("tsnet first-boot check", slog.String("state_file", stateFile))
+			fi, statErr := os.Stat(stateFile)
+			if statErr != nil && os.IsNotExist(statErr) {
+				logger.Info("tsnet state file missing (first boot), setting TSNET_FORCE_LOGIN=1")
+				os.Setenv("TSNET_FORCE_LOGIN", "1")
+			} else if statErr != nil {
+				logger.Warn("tsnet state file stat error (treating as first boot)",
+					slog.String("error", statErr.Error()))
 				os.Setenv("TSNET_FORCE_LOGIN", "1")
 			} else {
-				// Ensure TSNET_FORCE_LOGIN is NOT set for restarts — it forces
-				// re-authentication which creates duplicate Tailscale nodes.
+				logger.Info("tsnet state file exists, reusing identity",
+					slog.Int64("size", fi.Size()))
 				os.Unsetenv("TSNET_FORCE_LOGIN")
 			}
 		}
