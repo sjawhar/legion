@@ -21,6 +21,7 @@ HTTP server + shared `opencode serve` instance. One long-lived serve process han
 | `POST`   | `/state/track`          | Manually track an issue — `{issueId}` → `{tracked: true}` |
 | `DELETE` | `/state/track/:issueId` | Manually untrack an issue → `{untracked: true}` |
 | `GET`    | `/state/materialized`   | Tracked issues from cache + new-issues accumulator (resets on read) — `{issues, titles, newIssues}` |
+| `POST`   | `/pr/draft-status`      | Toggle PR draft status via implement token — `{prNodeId, ready, owner}` → `{prNodeId, isDraft}`. Used by review workers whose token lacks `contents:write`. |
 
 **Worker ID format:** `{issueId}-{mode}` lowercase (e.g., `eng-21-implement`)
 

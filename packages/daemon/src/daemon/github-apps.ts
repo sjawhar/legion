@@ -253,3 +253,56 @@ export function buildRoleEnv(
 
   return env;
 }
+
+/**
+ * Toggle PR draft status using the GraphQL API.
+ * Requires a token with `contents: write` permission (the `markPullRequestReadyForReview`
+ * and `convertPullRequestToDraft` mutations require this, not just `pull_requests: write`).
+ */
+export async function setDraftStatus(
+  token: string,
+  prNodeId: string,
+  ready: boolean,
+  fetchFn: typeof fetch = globalThis.fetch
+): Promise<{ id: string; isDraft: boolean }> {
+  const mutation = ready
+    ? `mutation($id:ID!) { markPullRequestReadyForReview(input:{pullRequestId:$id}) { pullRequest { id isDraft } } }`
+    : `mutation($id:ID!) { convertPullRequestToDraft(input:{pullRequestId:$id}) { pullRequest { id isDraft } } }`;
+  const operationName = ready ? "markPullRequestReadyForReview" : "convertPullRequestToDraft";
+
+  const res = await fetchFn("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "legion-daemon",
+    },
+    body: JSON.stringify({ query: mutation, variables: { id: prNodeId } }),
+  });
+
+  if (!res.ok) {
+    let body = "";
+    try {
+      body = await res.text();
+    } catch {
+      // ignore
+    }
+    throw new Error(`GitHub GraphQL request failed (${res.status}): ${body}`);
+  }
+
+  const data = (await res.json()) as {
+    data?: Record<string, { pullRequest?: { id: string; isDraft: boolean } } | null>;
+    errors?: Array<{ message: string; type?: string }>;
+  };
+
+  if (data.errors?.length) {
+    throw new Error(`GraphQL error: ${data.errors[0].message}`);
+  }
+
+  const pr = data.data?.[operationName]?.pullRequest;
+  if (!pr) {
+    throw new Error("Unexpected GraphQL response: missing pullRequest");
+  }
+
+  return pr;
+}

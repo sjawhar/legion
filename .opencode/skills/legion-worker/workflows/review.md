@@ -289,6 +289,19 @@ if [ "$LEGION_APP_ROLE" = "review" ]; then
   else
     gh pr review "$LEGION_ISSUE_ID" --approve --body "Approved. No critical issues found." -R $OWNER/$REPO
   fi
+
+  # Toggle draft status via daemon (review token lacks contents:write needed for gh pr ready).
+  # The daemon proxies through the implement token which has the required permission.
+  PR_NODE_ID=$(gh pr view "$LEGION_ISSUE_ID" --json id --jq '.id' -R $OWNER/$REPO)
+  if [[ $CRITICAL_COUNT -gt 0 ]]; then
+    curl -sf -X POST "http://127.0.0.1:${LEGION_DAEMON_PORT}/pr/draft-status" \
+      -H 'content-type: application/json' \
+      -d "{\"prNodeId\":\"$PR_NODE_ID\",\"ready\":false,\"owner\":\"$OWNER\"}"
+  else
+    curl -sf -X POST "http://127.0.0.1:${LEGION_DAEMON_PORT}/pr/draft-status" \
+      -H 'content-type: application/json' \
+      -d "{\"prNodeId\":\"$PR_NODE_ID\",\"ready\":true,\"owner\":\"$OWNER\"}"
+  fi
 else
   # Legacy fallback — same identity as implementer, can't use review API
   if [[ $CRITICAL_COUNT -gt 0 ]]; then

@@ -127,6 +127,26 @@ skips that role.
 - The controller fetches fresh credentials before each worker dispatch
 - The daemon health loop monitors role serves and restarts unhealthy ones with fresh tokens
 
+## Cross-Role Operations
+
+Some GitHub API operations require permissions that only one role has:
+
+| Operation | Required Permission | Available On |
+|-----------|-------------------|--------------|
+| `markPullRequestReadyForReview` | `contents: write` | `legion-impl` only |
+| `convertPullRequestToDraft` | `contents: write` | `legion-impl` only |
+
+The daemon provides a `POST /pr/draft-status` endpoint that proxies these operations
+through the implement token. Review workers call this endpoint instead of `gh pr ready`
+directly, since the review token lacks `contents: write`.
+
+```bash
+# Toggle draft status via daemon (used by review workers)
+curl -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/pr/draft-status \
+  -H 'content-type: application/json' \
+  -d '{"prNodeId":"PR_abc123","ready":true,"owner":"my-org"}'
+# Response: {"prNodeId":"PR_abc123","isDraft":false}
+```
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
