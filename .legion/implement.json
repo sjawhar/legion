@@ -1,0 +1,13 @@
+{
+  "summary": "Added daemon-level worker stall detection. Tracks per-worker message count snapshots in health tick. When a busy worker message count stays flat for >5min (configurable), publishes WorkerStallEvent to controller via Envoy. Includes feedback logging, config option (LEGION_STALL_THRESHOLD_MINUTES), and 5 new tests.",
+  "pr": "https://github.com/sjawhar/legion/pull/585",
+  "files_changed": [
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/feedback.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-04-16T04:42:11.464Z"
+}
