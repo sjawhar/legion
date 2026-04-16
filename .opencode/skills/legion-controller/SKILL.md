@@ -557,8 +557,8 @@ When all 7 Pre-Merge Gate conditions pass AND `auto_merge_allowed` is true, chec
 | 1 | PR is not a draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft --jq '.isDraft' -R $ISSUE_REPO` returns `false` |
 | 2 | No `user-input-needed` label | Already checked in Pre-Merge Gate condition 6 |
 | 3 | Smoke test compliance verified | Test handoff data includes smoke test evidence: `legion handoff read --phase test --workspace "$WORKSPACE_PATH" 2>/dev/null \| jq '.testSuiteResults'` must contain non-empty results beyond just "lint" and "typecheck" |
-| 4 | Change is small | `gh pr view "$LEGION_ISSUE_ID" --json additions,deletions,changedFiles --jq '{additions,deletions,changedFiles}' -R $ISSUE_REPO` — total additions+deletions ≤ 100 AND changedFiles ≤ 5 |
-| 5 | No new dependencies added | `gh pr diff "$LEGION_ISSUE_ID" -R $ISSUE_REPO \| grep -E '^\+.*"(dependencies\|devDependencies)"' \| wc -l` returns 0 — no additions to dependency sections in package.json files |
+| 4 | Change is small | `gh pr view "$LEGION_ISSUE_ID" --json additions,deletions,changedFiles --jq '{additions,deletions,changedFiles}' -R $ISSUE_REPO` — total additions+deletions ≤ 100 AND changedFiles ≤ 2 |
+| 5 | No new dependencies added | `gh pr diff "$LEGION_ISSUE_ID" -R $ISSUE_REPO -- '*/package.json' \| grep -E '^\+\s+".+":\s*"' \| wc -l` returns 0 — no new package entries added within dependency blocks in any package.json file |
 | 6 | No infrastructure changes | Changed files do NOT include: `packages/aws-infra/`, `Dockerfile`, `docker-compose`, `.github/workflows/`, `pulumi/`, terraform files |
 | 7 | Change type is safe | Issue labels include at least one of: `bug`, `fix`, `docs`, `config`, `skill`, `chore`. Does NOT have labels: `feature`, `breaking`, `security`, `infra` |
 
@@ -572,7 +572,7 @@ When all 7 Pre-Merge Gate conditions pass AND `auto_merge_allowed` is true, chec
    - CI green ✓
    - Reviewer approved ✓
    - Smoke test evidence present ✓
-   - Small change (≤100 lines, ≤5 files) ✓
+   - Small change (≤100 lines, ≤2 files) ✓
    - No new dependencies ✓
    - No infrastructure changes ✓
    - Safe change type ✓

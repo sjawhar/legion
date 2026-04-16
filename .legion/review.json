@@ -1,0 +1,36 @@
+{
+  "critical": 1,
+  "important": 4,
+  "minor": 3,
+  "verdict": "changes_requested",
+  "keyFindings": [
+    {
+      "severity": "P1",
+      "file": "packages/daemon/src/cli/index.ts",
+      "description": "createRevertCommit tree-swap is unsafe when main has advanced past the merge commit — replaces entire tree with pre-merge snapshot, wiping subsequent commits"
+    },
+    {
+      "severity": "P2",
+      "file": "packages/daemon/src/cli/index.ts",
+      "description": "findMergedPR can match wrong PR — no base:main constraint, returns prs[0] blindly"
+    },
+    {
+      "severity": "P2",
+      "file": ".opencode/skills/legion-controller/SKILL.md",
+      "description": "Auto-merge 'no new dependencies' check only matches section headers, not individual package additions"
+    },
+    {
+      "severity": "P2",
+      "file": ".opencode/skills/legion-controller/SKILL.md",
+      "description": "Auto-merge file count threshold deviates from spec (≤5 vs 1-2 files)"
+    },
+    {
+      "severity": "P2",
+      "file": "packages/daemon/src/cli/__tests__/index.test.ts",
+      "description": "No behavioral tests for rollback flow — only input validation covered"
+    }
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-04-16T14:12:23.631Z"
+}
