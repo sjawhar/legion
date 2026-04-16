@@ -125,7 +125,7 @@ describe("promoted routes", () => {
       const promotedFile = paths.forLegion(legionId).promotedFile;
       await promoteSession(
         promotedFile,
-        "ses_aabbccddee01ABCDEFghijkl",
+        "ses_aabbccddee01ABCDEFghijklmn",
         "legion-po",
         "sjawhar/legion"
       );
@@ -138,7 +138,7 @@ describe("promoted routes", () => {
         repo?: string;
       }>;
       expect(body).toHaveLength(1);
-      expect(body[0].sessionId).toBe("ses_aabbccddee01ABCDEFghijkl");
+      expect(body[0].sessionId).toBe("ses_aabbccddee01ABCDEFghijklmn");
       expect(body[0].role).toBe("legion-po");
       expect(body[0].repo).toBe("sjawhar/legion");
     });
@@ -150,7 +150,7 @@ describe("promoted routes", () => {
       const response = await requestJson("/promoted", {
         method: "POST",
         body: JSON.stringify({
-          sessionId: "ses_aabbccddee01ABCDEFghijkl",
+          sessionId: "ses_aabbccddee01ABCDEFghijklmn",
           role: "legion-po",
           repo: "sjawhar/legion",
         }),
@@ -162,7 +162,7 @@ describe("promoted routes", () => {
         repo?: string;
         promotedAt: string;
       };
-      expect(body.sessionId).toBe("ses_aabbccddee01ABCDEFghijkl");
+      expect(body.sessionId).toBe("ses_aabbccddee01ABCDEFghijklmn");
       expect(body.role).toBe("legion-po");
       expect(body.repo).toBe("sjawhar/legion");
       expect(body.promotedAt).toBeTruthy();
@@ -178,7 +178,7 @@ describe("promoted routes", () => {
       const response = await requestJson("/promoted", {
         method: "POST",
         body: JSON.stringify({
-          sessionId: "ses_aabbccddee01ABCDEFghijkl",
+          sessionId: "ses_aabbccddee01ABCDEFghijklmn",
           role: "legion-po",
         }),
       });
@@ -200,9 +200,20 @@ describe("promoted routes", () => {
       await startTestServer();
       const response = await requestJson("/promoted", {
         method: "POST",
-        body: JSON.stringify({ sessionId: "ses_aabbccddee01ABCDEFghijkl" }),
+        body: JSON.stringify({ sessionId: "ses_aabbccddee01ABCDEFghijklmn" }),
       });
       expect(response.status).toBe(400);
+    });
+
+    it("rejects invalid session ID format", async () => {
+      await startTestServer();
+      const response = await requestJson("/promoted", {
+        method: "POST",
+        body: JSON.stringify({ sessionId: "bad-id", role: "legion-po" }),
+      });
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("invalid_session_id");
     });
 
     it("rejects invalid JSON", async () => {
@@ -223,18 +234,18 @@ describe("promoted routes", () => {
       await requestJson("/promoted", {
         method: "POST",
         body: JSON.stringify({
-          sessionId: "ses_aabbccddee01ABCDEFghijkl",
+          sessionId: "ses_aabbccddee01ABCDEFghijklmn",
           role: "legion-po",
         }),
       });
 
       // Then demote
-      const response = await requestJson("/promoted/ses_aabbccddee01ABCDEFghijkl", {
+      const response = await requestJson("/promoted/ses_aabbccddee01ABCDEFghijklmn", {
         method: "DELETE",
       });
       expect(response.status).toBe(200);
       const body = (await response.json()) as { demoted: string };
-      expect(body.demoted).toBe("ses_aabbccddee01ABCDEFghijkl");
+      expect(body.demoted).toBe("ses_aabbccddee01ABCDEFghijklmn");
 
       // Verify it's gone
       const listResponse = await requestJson("/promoted");
@@ -244,7 +255,7 @@ describe("promoted routes", () => {
 
     it("returns 404 for non-existent session", async () => {
       await startTestServer();
-      const response = await requestJson("/promoted/ses_aabbccddee01ABCDEFghijkl", {
+      const response = await requestJson("/promoted/ses_aabbccddee01ABCDEFghijklmn", {
         method: "DELETE",
       });
       expect(response.status).toBe(404);

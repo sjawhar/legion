@@ -18,7 +18,7 @@ import {
   writeLegionEntry,
 } from "./legions-registry";
 import { isPortFree } from "./ports";
-import { demoteSession, readPromotedSessions } from "./promoted-sessions";
+import { demoteSession, listPromotedSessions, readPromotedSessions } from "./promoted-sessions";
 import { fetchAllTrackedRepos } from "./repo-manager";
 import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
@@ -426,6 +426,58 @@ export async function startDaemon(
             console.error(`Failed to re-create session for ${entry.id}: ${error}`);
           }
         })
+      );
+    }
+  }
+
+  // Re-claim Envoy roles for promoted sessions that are still alive.
+  // Runs after serve is up so sessionExists() works.
+  if (config.envoyUrl) {
+    try {
+      const promotedFile = config.paths.forLegion(legionId).promotedFile;
+      const promotedData = await readPromotedSessions(promotedFile);
+      const entries = listPromotedSessions(promotedData);
+      for (const entry of entries) {
+        let alive: boolean;
+        try {
+          alive = await resolvedDeps.adapter.sessionExists(entry.sessionId);
+        } catch {
+          alive = false;
+        }
+        if (alive) {
+          try {
+            const roleRes = await fetch(`${config.envoyUrl}/v1/roles/set`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                session_id: entry.sessionId,
+                role: entry.role,
+              }),
+            });
+            if (!roleRes.ok) {
+              console.warn(
+                `[startup] Envoy role reclaim for ${entry.sessionId} (role="${entry.role}") returned ${roleRes.status} (non-fatal)`
+              );
+            } else {
+              console.log(
+                `[startup] Reclaimed Envoy role "${entry.role}" for session ${entry.sessionId}`
+              );
+            }
+          } catch (err) {
+            console.warn(
+              `[startup] Envoy role reclaim failed for ${entry.sessionId}: ${err} (non-fatal)`
+            );
+          }
+        } else {
+          console.warn(
+            `[startup] Promoted session ${entry.sessionId} (role="${entry.role}") no longer alive, auto-demoting`
+          );
+          await demoteSession(promotedFile, entry.sessionId);
+        }
+      }
+    } catch (promotedErr) {
+      console.warn(
+        `[startup] Promoted session role reclaim failed (non-fatal): ${promotedErr instanceof Error ? promotedErr.message : String(promotedErr)}`
       );
     }
   }

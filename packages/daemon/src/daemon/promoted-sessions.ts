@@ -17,6 +17,16 @@ function emptyFile(): PromotedSessionsFile {
   return { sessions: {} };
 }
 
+async function moveCorruptFile(filePath: string): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const corruptPath = `${filePath}.corrupt.${timestamp}`;
+  try {
+    await rename(filePath, corruptPath);
+  } catch (err) {
+    console.warn(`[promoted-sessions] Failed to rename corrupt file ${filePath}:`, err);
+  }
+}
+
 export async function readPromotedSessions(filePath: string): Promise<PromotedSessionsFile> {
   try {
     const raw = await readFile(filePath, "utf-8");
@@ -28,13 +38,15 @@ export async function readPromotedSessions(filePath: string): Promise<PromotedSe
     try {
       parsed = JSON.parse(raw);
     } catch {
-      console.warn(`[promoted-sessions] Corrupt JSON in ${filePath}, returning empty`);
+      console.warn(`[promoted-sessions] Corrupt JSON in ${filePath}, moving aside`);
+      await moveCorruptFile(filePath);
       return emptyFile();
     }
 
     const result = PromotedSessionsFileSchema.safeParse(parsed);
     if (!result.success) {
-      console.warn(`[promoted-sessions] Invalid schema in ${filePath}, returning empty`);
+      console.warn(`[promoted-sessions] Invalid schema in ${filePath}, moving aside`);
+      await moveCorruptFile(filePath);
       return emptyFile();
     }
 

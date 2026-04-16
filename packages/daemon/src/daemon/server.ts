@@ -2093,6 +2093,9 @@ export function startServer(opts: ServerOptions): {
             if (typeof sessionId !== "string" || !sessionId) {
               return badRequest("missing_session_id");
             }
+            if (!SESSION_ID_PATTERN.test(sessionId)) {
+              return badRequest("invalid_session_id");
+            }
             if (typeof role !== "string" || !role) {
               return badRequest("missing_role");
             }
