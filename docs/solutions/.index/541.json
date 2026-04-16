@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "entries": {
+    "packages/daemon/src/daemon": ["daemon/runtime-adapter-extension-pattern.md"],
+    "packages/daemon/src/state": ["daemon/runtime-adapter-extension-pattern.md"],
+    "tag:runtime-adapter": ["daemon/runtime-adapter-extension-pattern.md"],
+    "tag:interface-extension": ["daemon/runtime-adapter-extension-pattern.md"],
+    "tag:type-safety": ["daemon/runtime-adapter-extension-pattern.md"],
+    "tag:cross-runtime": ["daemon/runtime-adapter-extension-pattern.md"]
+  }
+}
