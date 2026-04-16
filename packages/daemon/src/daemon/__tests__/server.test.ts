@@ -5540,4 +5540,85 @@ describe("daemon server", () => {
       expect(secondBody.newIssues).toHaveLength(0);
     });
   });
+
+  describe("POST /pr/draft-status", () => {
+    it("returns 404 when token manager is unavailable", async () => {
+      await startTestServer();
+      const res = await requestJson("/pr/draft-status", {
+        method: "POST",
+        body: JSON.stringify({ prNodeId: "PR_abc", ready: true, owner: "acme" }),
+      });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "token_manager_unavailable" });
+    });
+
+    it("returns 404 when implement role is not configured", async () => {
+      await startTestServer({
+        tokenManager: createTestTokenManager({
+          review: {
+            appId: "app-2",
+            privateKey: "unused",
+            installations: { acme: "222" },
+          },
+        }),
+      });
+      const res = await requestJson("/pr/draft-status", {
+        method: "POST",
+        body: JSON.stringify({ prNodeId: "PR_abc", ready: true, owner: "acme" }),
+      });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "implement_role_not_configured" });
+    });
+
+    it("returns 400 for invalid prNodeId", async () => {
+      await startTestServer({
+        tokenManager: createTestTokenManager({
+          implement: {
+            appId: "app-1",
+            privateKey: "unused",
+            installations: { acme: "111" },
+          },
+        }),
+      });
+      const res = await requestJson("/pr/draft-status", {
+        method: "POST",
+        body: JSON.stringify({ prNodeId: "not-a-pr-id", ready: true, owner: "acme" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 400 for missing ready field", async () => {
+      await startTestServer({
+        tokenManager: createTestTokenManager({
+          implement: {
+            appId: "app-1",
+            privateKey: "unused",
+            installations: { acme: "111" },
+          },
+        }),
+      });
+      const res = await requestJson("/pr/draft-status", {
+        method: "POST",
+        body: JSON.stringify({ prNodeId: "PR_abc", owner: "acme" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 400 for missing owner", async () => {
+      await startTestServer({
+        tokenManager: createTestTokenManager({
+          implement: {
+            appId: "app-1",
+            privateKey: "unused",
+            installations: { acme: "111" },
+          },
+        }),
+      });
+      const res = await requestJson("/pr/draft-status", {
+        method: "POST",
+        body: JSON.stringify({ prNodeId: "PR_abc", ready: true }),
+      });
+      expect(res.status).toBe(400);
+    });
+  });
 });

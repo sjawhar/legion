@@ -20,7 +20,7 @@ import {
 import { getDashboardHtml } from "./dashboard-ui";
 import type { FeedbackLogger } from "./feedback";
 import type { TokenManager } from "./github-apps";
-import { modeToRole } from "./github-apps";
+import { modeToRole, setDraftStatus } from "./github-apps";
 import type { LegionPaths } from "./paths";
 import {
   cleanupWorkspace,
@@ -1527,6 +1527,53 @@ export function startServer(opts: ServerOptions): {
             const message = error instanceof Error ? error.message : String(error);
             if (message.startsWith("role_not_configured:")) {
               return notFound("role_not_configured");
+            }
+            return serverError(message);
+          }
+        }
+
+        // POST /pr/draft-status — Toggle PR draft status using the implement token.
+        // The review token lacks `contents: write`, which GitHub requires for
+        // markPullRequestReadyForReview / convertPullRequestToDraft mutations.
+        if (method === "POST" && url.pathname === "/pr/draft-status") {
+          await stateLoaded;
+          if (!opts.tokenManager) {
+            return notFound("token_manager_unavailable");
+          }
+          if (!opts.tokenManager.isConfigured("implement")) {
+            return notFound("implement_role_not_configured");
+          }
+
+          let payload: Record<string, unknown>;
+          try {
+            payload = await parseJson(request);
+          } catch {
+            return badRequest("invalid_json");
+          }
+
+          const prNodeId = payload.prNodeId;
+          if (typeof prNodeId !== "string" || !prNodeId.startsWith("PR_")) {
+            return badRequest("prNodeId must be a string starting with PR_");
+          }
+
+          const ready = payload.ready;
+          if (typeof ready !== "boolean") {
+            return badRequest("ready must be a boolean");
+          }
+
+          const owner = payload.owner;
+          if (typeof owner !== "string" || !owner) {
+            return badRequest("owner must be a non-empty string");
+          }
+
+          try {
+            const credential = await opts.tokenManager.getToken("implement", owner);
+            const result = await setDraftStatus(credential.token, prNodeId, ready);
+            return jsonResponse({ prNodeId: result.id, isDraft: result.isDraft });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (message.startsWith("installation_not_configured:")) {
+              return notFound("installation_not_configured");
             }
             return serverError(message);
           }
