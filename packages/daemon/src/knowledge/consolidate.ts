@@ -58,7 +58,7 @@ export async function consolidateKnowledge(options: {
   const homeDir = options.homeDir ?? os.homedir();
   const repoRoot = options.repoRoot ?? options.workspaceRoot;
   const docsRoot = path.join(repoRoot, "docs", "solutions");
-  const indexPath = path.join(docsRoot, "index.json");
+  const indexDir = path.join(docsRoot, ".index");
 
   resolveLegionPaths(env, homeDir).forLegion(options.legionId);
   const logPath = getLearningFeedbackLogPath(options.legionId, env, homeDir);
@@ -104,7 +104,7 @@ export async function consolidateKnowledge(options: {
   }
 
   const promotionResult = await applyPromotions(
-    indexPath,
+    indexDir,
     docsRoot,
     aggregates
       .filter((aggregate) => aggregate.disposition === "accepted")
@@ -112,7 +112,8 @@ export async function consolidateKnowledge(options: {
         disposition: aggregate.disposition,
         path: aggregate.path,
         touchedPaths: aggregate.touchedPaths,
-      }))
+      })),
+    options.legionId
   );
   report.indexMutations.push(...promotionResult.mutations);
   warnings.push(...promotionResult.warnings);

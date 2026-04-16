@@ -139,12 +139,12 @@ Before invoking `/ce:plan`, check the learnings index for applicable prior knowl
 | Metis analysis output (from step 1.5) | Issue title + description only |
 | Architect handoff `components[]` (from step 1.8) | Issue title + description only |
 
-Extract keywords from all available sources above. Match against `docs/solutions/index.json` to surface patterns, architectural decisions, and pitfalls relevant to the planning domain.
+Extract keywords from all available sources above. Match against the assembled index from `docs/solutions/.index/` to surface patterns, architectural decisions, and pitfalls relevant to the planning domain.
 
 **Add to `/ce:plan` context** in step 2. Append the output between the Metis pre-analysis and the feature description in the autonomous context template:
 
 ```
-Relevant learnings from prior work (preloaded from docs/solutions/index.json):
+Relevant learnings from prior work (preloaded from docs/solutions/.index/):
 
 1. [docs/solutions/<path>]: [{title} | tags: {tag1}, {tag2}] <prose excerpt> (350 chars max total)
 2. [docs/solutions/<path>]: [{title} | tags: {tag1}, {tag2}] <prose excerpt>
@@ -155,7 +155,7 @@ Review these learnings for patterns and pitfalls relevant to this implementation
 
 **If no matches found:** Skip — do not add an empty "Relevant learnings" section.
 
-**Graceful degradation:** If `docs/solutions/index.json` is missing or invalid, skip silently and proceed to step 1.8.
+**Graceful degradation:** If `docs/solutions/.index/` is missing or empty, skip silently and proceed to step 1.8.
 
 ### 1.8. Read Architect Handoff (if available)
 

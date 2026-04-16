@@ -12,11 +12,18 @@ Before starting main work, each phase checks the learnings index for applicable 
 
 ### 1. Read the Index
 
+Assemble the index by reading all per-entry JSON files in `docs/solutions/.index/`:
+
 ```bash
-cat docs/solutions/index.json
+# Read and merge all entry files in .index/ directory
+for f in docs/solutions/.index/*.json; do
+  [ -f "$f" ] && cat "$f"
+done
 ```
 
-If the file doesn't exist or is invalid JSON, skip injection entirely — proceed to the phase's main work.
+Each file has the format `{ "version": 1, "entries": { "key": ["learning-path", ...] } }`. Merge all `entries` maps together, deduplicating learning paths per key.
+
+If the `.index/` directory doesn't exist or contains no valid JSON files, skip injection entirely — proceed to the phase's main work.
 
 ### 2. Extract Keywords
 

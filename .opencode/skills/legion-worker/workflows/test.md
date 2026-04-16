@@ -139,11 +139,11 @@ Follow the injection algorithm in @references/knowledge-injection.md using these
 | Acceptance criteria from issue body | Issue title only |
 | Implement handoff `filesChanged[]` | Issue title + acceptance criteria only |
 
-Extract keywords from all available sources above. Match against `docs/solutions/index.json` to surface patterns, testing pitfalls, and known issues relevant to the code under test.
+Extract keywords from all available sources above. Match against the assembled index from `docs/solutions/.index/` to surface patterns, testing pitfalls, and known issues relevant to the code under test.
 
 Output the injected learnings visibly in the session before proceeding to spec compliance check. If no relevant learnings are found, output "No relevant learnings found." and continue.
 
-**Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
+**Graceful degradation:** If `docs/solutions/.index/` is missing, empty, or handoff data is unavailable, skip silently and proceed to step 2.
 
 ### 2. Spec Compliance Check
 

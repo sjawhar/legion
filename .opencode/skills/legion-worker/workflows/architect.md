@@ -41,11 +41,11 @@ Follow the injection algorithm in @references/knowledge-injection.md using these
 | Issue title | — (always available) |
 | Issue description | Title only (description rarely missing) |
 
-Extract keywords from the issue title and description. Match against `docs/solutions/index.json` to surface patterns, architectural decisions, and pitfalls relevant to this issue's domain.
+Extract keywords from the issue title and description. Match against the assembled index from `docs/solutions/.index/` to surface patterns, architectural decisions, and pitfalls relevant to this issue's domain.
 
 Output the injected learnings visibly in the session before proceeding to assessment. If no relevant learnings are found, output "No relevant learnings found." and continue.
 
-**Graceful degradation:** If `docs/solutions/index.json` is missing or invalid, skip silently and proceed to step 2.
+**Graceful degradation:** If `docs/solutions/.index/` is missing or empty, skip silently and proceed to step 2.
 
 ### 2. Assess
 

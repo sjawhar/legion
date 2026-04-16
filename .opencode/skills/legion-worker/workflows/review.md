@@ -123,11 +123,11 @@ Follow the injection algorithm in @references/knowledge-injection.md using these
 | Implement handoff `filesChanged[]` | Issue title only |
 | Implement handoff `trickyParts[]` | Issue title only |
 
-Extract keywords from all available sources above. Match against `docs/solutions/index.json` to surface patterns, known pitfalls, and review-relevant institutional knowledge for the code under review.
+Extract keywords from all available sources above. Match against the assembled index from `docs/solutions/.index/` to surface patterns, known pitfalls, and review-relevant institutional knowledge for the code under review.
 
 Output the injected learnings visibly in the session before proceeding to the review. If no relevant learnings are found, output "No relevant learnings found." and continue.
 
-**Graceful degradation:** If `docs/solutions/index.json` is missing, invalid, or handoff data is unavailable, skip silently and proceed to step 2.
+**Graceful degradation:** If `docs/solutions/.index/` is missing, empty, or handoff data is unavailable, skip silently and proceed to step 2.
 
 ### 1.5. Protected Files — Do NOT Flag
 
