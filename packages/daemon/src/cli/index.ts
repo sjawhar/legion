@@ -1933,11 +1933,12 @@ export async function findMergedPR(
 /**
  * Create a revert commit on a new branch using the GitHub Git Data API.
  *
- * Works for both squash merges and regular merge commits:
- * - Squash merge: single parent (previous main HEAD). parents[0].tree is the
- *   state before the squash was applied — reverting to it undoes the change.
- * - Regular merge: two parents (base branch + feature branch). parents[0] is
- *   the base branch state — reverting to its tree also undoes the change.
+ * Uses tree-swap: replaces the merge commit's tree with its first parent's tree.
+ * This is only safe when main HEAD is the merge commit itself (no subsequent
+ * commits). When main has advanced, the tree-swap would clobber all later changes.
+ *
+ * Safety: checks that main HEAD === mergeCommitSha before proceeding. If main
+ * has advanced, throws with instructions for manual revert.
  *
  * Returns the revert branch name and commit SHA.
  */
@@ -1952,12 +1953,24 @@ export async function createRevertCommit(
     throw new CliError(`Merged PR #${pr.number} has no merge commit SHA`);
   }
 
-  const revertBranch = `revert-${issue}-${Date.now()}`;
-
   // Get the current main branch SHA
   const mainSha = (
     await runGhCommand(["api", `repos/${repo}/git/ref/heads/main`, "--jq", ".object.sha"])
   ).trim();
+
+  // Guard: tree-swap is only safe when main hasn't advanced past the merge commit.
+  // If main has moved on, the parent's tree is stale and would clobber later changes.
+  if (mainSha !== mergeCommitSha) {
+    throw new CliError(
+      `Main has advanced past merge commit ${mergeCommitSha.slice(0, 8)}. ` +
+        `Manual revert required — the tree-swap approach would affect ` +
+        `${mainSha.slice(0, 8)} and all commits between.\n` +
+        `To revert manually:\n` +
+        `  git fetch origin && git checkout main && git revert ${mergeCommitSha}`
+    );
+  }
+
+  const revertBranch = `revert-${issue}-${Date.now()}`;
 
   // Create the revert branch pointing at main
   try {
@@ -1979,9 +1992,8 @@ export async function createRevertCommit(
 
   try {
     // Get the first parent commit — this is the state before the merge/squash.
-    // NOTE: parents[0].sha works correctly for both merge commits (where parent 0
-    // is the base branch) and squash merges (where the single parent is the previous
-    // main HEAD). It does NOT work for rebased merges where the commit topology differs.
+    // Safe here because we verified main HEAD === mergeCommitSha above,
+    // so parents[0].tree is exactly one commit behind current main.
     const parentSha = (
       await runGhCommand([
         "api",

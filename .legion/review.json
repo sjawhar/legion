@@ -1,36 +1,26 @@
 {
   "critical": 1,
-  "important": 4,
+  "important": 1,
   "minor": 3,
   "verdict": "changes_requested",
   "keyFindings": [
     {
       "severity": "P1",
       "file": "packages/daemon/src/cli/index.ts",
-      "description": "createRevertCommit tree-swap is unsafe when main has advanced past the merge commit — replaces entire tree with pre-merge snapshot, wiping subsequent commits"
+      "description": "createRevertCommit tree-swap still unsafe when main has advanced — NOT FIXED from round 2. Needs guard: abort if mainSha !== mergeCommitSha"
     },
     {
       "severity": "P2",
       "file": "packages/daemon/src/cli/index.ts",
-      "description": "findMergedPR can match wrong PR — no base:main constraint, returns prs[0] blindly"
-    },
-    {
-      "severity": "P2",
-      "file": ".opencode/skills/legion-controller/SKILL.md",
-      "description": "Auto-merge 'no new dependencies' check only matches section headers, not individual package additions"
-    },
-    {
-      "severity": "P2",
-      "file": ".opencode/skills/legion-controller/SKILL.md",
-      "description": "Auto-merge file count threshold deviates from spec (≤5 vs 1-2 files)"
-    },
-    {
-      "severity": "P2",
-      "file": "packages/daemon/src/cli/__tests__/index.test.ts",
-      "description": "No behavioral tests for rollback flow — only input validation covered"
+      "description": "findMergedPR still has no base:main constraint, returns prs[0] blindly — NOT FIXED from round 2 (lower risk)"
     }
+  ],
+  "fixedFromPriorRound": [
+    "P2: Auto-merge dependency check now checks actual package entries in package.json",
+    "P2: Auto-merge file count threshold corrected to <=2",
+    "P2: Comprehensive behavioral tests added for rollback flow"
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-04-16T14:12:23.631Z"
+  "completed": "2026-04-16T16:36:17.519Z"
 }

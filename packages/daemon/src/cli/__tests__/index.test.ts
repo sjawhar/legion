@@ -2283,19 +2283,20 @@ describe("cmdRollback", () => {
   });
 
   it("happy path: finds PR, creates revert, opens revert PR, reopens issue", async () => {
+    const mergeOid = "abc123def456";
     const mergedPR = JSON.stringify([
       {
         number: 100,
         title: "feat: add widget",
-        mergeCommit: { oid: "abc123def456" },
+        mergeCommit: { oid: mergeOid },
         headRefName: "sjawhar-legion-42",
       },
     ]);
     ghCommandResponses = [
       // findMergedPR: pr list --search
       mergedPR,
-      // createRevertCommit: get main SHA
-      "main-sha-000\n",
+      // createRevertCommit: get main SHA (must match mergeOid for guard)
+      `${mergeOid}\n`,
       // createRevertCommit: create branch ref
       "{}",
       // createRevertCommit: get merge commit parents
@@ -2371,17 +2372,18 @@ describe("cmdRollback", () => {
   });
 
   it("warns but continues when label addition fails", async () => {
+    const mergeOid = "abc123def456";
     const mergedPR = JSON.stringify([
       {
         number: 100,
         title: "feat: add widget",
-        mergeCommit: { oid: "abc123def456" },
+        mergeCommit: { oid: mergeOid },
         headRefName: "sjawhar-legion-42",
       },
     ]);
     ghCommandResponses = [
       mergedPR,
-      "main-sha-000\n",
+      `${mergeOid}\n`,
       "{}",
       "parent-sha-111\n",
       "tree-sha-222\n",
@@ -2403,17 +2405,18 @@ describe("cmdRollback", () => {
   });
 
   it("warns but continues when issue reopen fails", async () => {
+    const mergeOid = "abc123def456";
     const mergedPR = JSON.stringify([
       {
         number: 100,
         title: "feat: add widget",
-        mergeCommit: { oid: "abc123def456" },
+        mergeCommit: { oid: mergeOid },
         headRefName: "sjawhar-legion-42",
       },
     ]);
     ghCommandResponses = [
       mergedPR,
-      "main-sha-000\n",
+      `${mergeOid}\n`,
       "{}",
       "parent-sha-111\n",
       "tree-sha-222\n",
@@ -2428,6 +2431,30 @@ describe("cmdRollback", () => {
 
     // Should not throw despite reopen failure
     await cmdRollback("sjawhar-legion-42", {});
+  });
+
+  it("throws when main has advanced past merge commit", async () => {
+    const mergedPR = JSON.stringify([
+      {
+        number: 100,
+        title: "feat: add widget",
+        mergeCommit: { oid: "merge-sha-original" },
+        headRefName: "sjawhar-legion-42",
+      },
+    ]);
+    ghCommandResponses = [
+      // findMergedPR: pr list --search
+      mergedPR,
+      // createRevertCommit: get main SHA (different from merge commit — main advanced)
+      "main-sha-advanced\n",
+    ];
+
+    await expect(cmdRollback("sjawhar-legion-42", {})).rejects.toThrow(
+      "Main has advanced past merge commit"
+    );
+
+    // Should only have made 2 calls: findMergedPR + get main SHA
+    expect(ghCommandCalls).toHaveLength(2);
   });
 });
 
@@ -2538,9 +2565,10 @@ describe("createRevertCommit", () => {
   });
 
   it("creates revert commit with correct API call sequence", async () => {
+    const mergeOid = "merge-sha-abc";
     ghCommandResponses = [
-      // Get main SHA
-      "main-sha-000\n",
+      // Get main SHA (must match mergeOid for guard)
+      `${mergeOid}\n`,
       // Create branch ref
       "{}",
       // Get merge commit parents
@@ -2558,7 +2586,7 @@ describe("createRevertCommit", () => {
       {
         number: 100,
         title: "feat: add widget",
-        mergeCommit: { oid: "merge-sha-abc" },
+        mergeCommit: { oid: mergeOid },
         headRefName: "sjawhar-legion-42",
       },
       42,
@@ -2575,7 +2603,7 @@ describe("createRevertCommit", () => {
     expect(ghCommandCalls[1]).toContain("-X");
     expect(ghCommandCalls[1]).toContain("POST");
     // 3. Get parent SHA
-    expect(ghCommandCalls[2]).toContain("repos/sjawhar/legion/commits/merge-sha-abc");
+    expect(ghCommandCalls[2]).toContain(`repos/sjawhar/legion/commits/${mergeOid}`);
     // 4. Get parent tree
     expect(ghCommandCalls[3]).toContain("repos/sjawhar/legion/git/commits/parent-sha-111");
     // 5. Create revert commit
@@ -2587,9 +2615,10 @@ describe("createRevertCommit", () => {
   });
 
   it("cleans up branch on failure", async () => {
+    const mergeOid = "merge-sha";
     ghCommandResponses = [
-      // Get main SHA
-      "main-sha-000\n",
+      // Get main SHA (must match mergeOid for guard)
+      `${mergeOid}\n`,
       // Create branch ref
       "{}",
       // Get merge commit parents — fails
@@ -2604,7 +2633,7 @@ describe("createRevertCommit", () => {
         {
           number: 100,
           title: "test",
-          mergeCommit: { oid: "merge-sha" },
+          mergeCommit: { oid: mergeOid },
           headRefName: "branch",
         },
         42,
@@ -2615,5 +2644,29 @@ describe("createRevertCommit", () => {
     // Verify cleanup DELETE was called
     const deleteCall = ghCommandCalls.find((c) => c.includes("-X") && c.includes("DELETE"));
     expect(deleteCall).toBeDefined();
+  });
+
+  it("throws when main has advanced past merge commit", async () => {
+    ghCommandResponses = [
+      // Get main SHA (different from merge commit)
+      "advanced-main-sha\n",
+    ];
+
+    await expect(
+      createRevertCommit(
+        "sjawhar/legion",
+        {
+          number: 100,
+          title: "test",
+          mergeCommit: { oid: "original-merge-sha" },
+          headRefName: "branch",
+        },
+        42,
+        "sjawhar-legion-42"
+      )
+    ).rejects.toThrow("Main has advanced past merge commit");
+
+    // Should only have made 1 call (get main SHA) — no branch created
+    expect(ghCommandCalls).toHaveLength(1);
   });
 });
