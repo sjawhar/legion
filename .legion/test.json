@@ -1,0 +1,41 @@
+{
+  "status": "pass",
+  "summary": "5/5 acceptance criteria pass. The critical registry entry bug from the first test round is fixed — shutdown(keepServe=true) now preserves the registry entry so cleanupStaleServes can discover the healthy serve on the next daemon startup. Verified with targeted reproduction script and full test suite (1067 pass, 0 fail).",
+  "criteriaResults": [
+    {
+      "criterion": "POST /restart triggers graceful shutdown with keepServe=true",
+      "status": "pass",
+      "evidence": "Code: server.ts:2073-2078, index.ts:619-622, index.ts:535-539. Unit test confirms."
+    },
+    {
+      "criterion": "Serve process continues running after daemon restart",
+      "status": "pass",
+      "evidence": "Fix at index.ts:529-533 wraps removeLegionEntryFn in if (!keepServe). Reproduction script confirms cleanupStaleServes returns preserved serve info."
+    },
+    {
+      "criterion": "New daemon reconnects to existing serve",
+      "status": "pass",
+      "evidence": "cleanupStaleServes finds dead daemon + healthy serve, returns PID/port. adoptServe called at index.ts:377-381. Port reused via preservedServePort."
+    },
+    {
+      "criterion": "legion restart CLI command with fallback",
+      "status": "pass",
+      "evidence": "cli/index.ts:455-500. Sends POST /restart, waits for PID exit, starts new daemon. Fallback to stop+start."
+    },
+    {
+      "criterion": "All existing tests pass",
+      "status": "pass",
+      "evidence": "bun test: 1067 pass, 0 fail. Lint clean, typecheck clean. CI green."
+    }
+  ],
+  "failures": [],
+  "documentationFeedback": "AGENTS.md and daemon AGENTS.md correctly document the new command and endpoint. PR description is clear and comprehensive.",
+  "observations": [
+    "Fix is minimal: single if (!keepServe) guard around removeLegionEntryFn",
+    "cleanupStaleServes removes stale entry after extracting serve info — no orphaned entries",
+    "Test added expect(removeLegionEntryCalls).toHaveLength(0) to directly cover the bug"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-04-16T21:38:14.903Z"
+}

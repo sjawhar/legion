@@ -526,9 +526,11 @@ export async function startDaemon(
       }
     }
 
-    try {
-      await removeLegionEntryFn(config.paths.legionsFile, legionId);
-    } catch {}
+    if (!keepServe) {
+      try {
+        await removeLegionEntryFn(config.paths.legionsFile, legionId);
+      } catch {}
+    }
 
     if (!keepServe) {
       await resolvedDeps.adapter.stop();

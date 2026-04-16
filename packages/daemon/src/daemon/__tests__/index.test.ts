@@ -1341,6 +1341,8 @@ describe("daemon entry", () => {
 
     // Serve should NOT have been stopped (keepServe=true)
     expect(stopServeCalls).toHaveLength(0);
+    // Registry entry should be preserved so cleanupStaleServes can find the serve
+    expect(removeLegionEntryCalls).toHaveLength(0);
     // But the process should have exited
     expect(exitCode).not.toBeNull();
     expect(exitCode as unknown as number).toBe(0);
