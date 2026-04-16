@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": {
+    "packages/daemon/src/knowledge": ["architecture-patterns/per-writer-file-partitioning.md"],
+    ".opencode/skills/legion-retro": ["architecture-patterns/per-writer-file-partitioning.md"],
+    ".opencode/skills/legion-worker": ["architecture-patterns/per-writer-file-partitioning.md"],
+    "docs/solutions": ["architecture-patterns/per-writer-file-partitioning.md"],
+    "tag:merge-conflicts": ["architecture-patterns/per-writer-file-partitioning.md"],
+    "tag:concurrent-writes": ["architecture-patterns/per-writer-file-partitioning.md"],
+    "tag:file-partitioning": ["architecture-patterns/per-writer-file-partitioning.md"]
+  }
+}
