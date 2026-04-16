@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { consolidateKnowledge } from "../consolidate";
+import { readAssembledIndex } from "../promoter";
 import { type CollectedIssueFeedback, LearningFeedbackRecordSchema } from "../types";
 
 const tempDirs: string[] = [];
@@ -149,13 +150,13 @@ describe("consolidateKnowledge", () => {
   it("stays idempotent across repeated apply runs when the learning is already indexed", async () => {
     const repoRoot = await makeTempDir();
     await writeLearningFile(repoRoot, "knowledge/promoted.md");
-    const indexPath = path.join(repoRoot, "docs", "solutions", "index.json");
-    await mkdir(path.dirname(indexPath), { recursive: true });
+    const indexDir = path.join(repoRoot, "docs", "solutions", ".index");
+    await mkdir(indexDir, { recursive: true });
     await writeFile(
-      indexPath,
+      path.join(indexDir, "existing.json"),
       JSON.stringify(
         {
-          index: {
+          entries: {
             "packages/daemon/src/state": ["knowledge/promoted.md"],
           },
           version: 1,
@@ -204,18 +205,16 @@ describe("consolidateKnowledge", () => {
     expect(firstReport.indexMutations).toEqual([]);
     expect(secondReport.indexMutations).toEqual([]);
 
-    const savedIndex = JSON.parse(await readFile(indexPath, "utf-8")) as {
-      index: Record<string, string[]>;
-    };
-    expect(savedIndex.index["packages/daemon/src/state"]).toEqual(["knowledge/promoted.md"]);
+    const assembled = await readAssembledIndex(indexDir);
+    expect(assembled.index["packages/daemon/src/state"]).toEqual(["knowledge/promoted.md"]);
   });
 
-  it("warns instead of crashing when the index is malformed", async () => {
+  it("skips malformed entry files without crashing", async () => {
     const repoRoot = await makeTempDir();
     await writeLearningFile(repoRoot, "knowledge/promoted.md");
-    const indexPath = path.join(repoRoot, "docs", "solutions", "index.json");
-    await mkdir(path.dirname(indexPath), { recursive: true });
-    await writeFile(indexPath, '{"version":"oops"}');
+    const indexDir = path.join(repoRoot, "docs", "solutions", ".index");
+    await mkdir(indexDir, { recursive: true });
+    await writeFile(path.join(indexDir, "bad.json"), '{"version":"oops"}');
 
     const report = await consolidateKnowledge({
       legionId: "trajectory-labs/240",
@@ -241,7 +240,13 @@ describe("consolidateKnowledge", () => {
       now: new Date("2026-04-14T00:00:00.000Z"),
     });
 
-    expect(report.indexMutations).toEqual([]);
-    expect(report.warnings).toEqual([expect.stringContaining("index")]);
+    // Malformed entry files are skipped silently — promotions still succeed
+    expect(report.indexMutations).toHaveLength(1);
+    expect(report.indexMutations[0]).toEqual({
+      action: "upsert",
+      key: "packages/daemon/src/state",
+      learningPath: "knowledge/promoted.md",
+    });
+    expect(report.warnings).toEqual([]);
   });
 });

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { z } from "zod";
@@ -13,7 +13,13 @@ const indexSchema = z.object({
   version: z.number(),
 });
 
+const entrySchema = z.object({
+  entries: z.record(z.string(), z.array(z.string())),
+  version: z.number(),
+});
+
 type KnowledgeIndex = z.infer<typeof indexSchema>;
+type IndexEntry = z.infer<typeof entrySchema>;
 
 export interface PromotionIndexMutation {
   action: "upsert";
@@ -40,8 +46,41 @@ function isPromotedDisposition(disposition: string): boolean {
   return disposition === "accepted" || disposition === "promote";
 }
 
-function parseIndex(contents: string): KnowledgeIndex {
-  return indexSchema.parse(JSON.parse(contents));
+function parseEntry(contents: string): IndexEntry {
+  return entrySchema.parse(JSON.parse(contents));
+}
+
+export function sanitizeEntryId(entryId: string): string {
+  return entryId.replaceAll(/[^a-zA-Z0-9_-]/g, "-");
+}
+
+export async function readAssembledIndex(indexDir: string): Promise<KnowledgeIndex> {
+  const assembled: KnowledgeIndex = { index: {}, version: 1 };
+
+  let files: string[];
+  try {
+    files = await readdir(indexDir);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return assembled;
+    }
+    throw error;
+  }
+
+  for (const file of files.filter((f) => f.endsWith(".json")).sort()) {
+    try {
+      const contents = await readFile(path.join(indexDir, file), "utf-8");
+      const entry = parseEntry(contents);
+      for (const [key, paths] of Object.entries(entry.entries)) {
+        const existing = assembled.index[key] ?? [];
+        assembled.index[key] = Array.from(new Set([...existing, ...paths]));
+      }
+    } catch {
+      // Skip malformed entry files — graceful degradation
+    }
+  }
+
+  return assembled;
 }
 
 export function fallbackPrefix(filePath: string): string {
@@ -120,41 +159,35 @@ export async function trimToSoftCap(entries: string[], docsRoot: string): Promis
 }
 
 export async function applyPromotions(
-  indexPath: string,
+  indexDir: string,
   docsRoot: string,
-  promoted: PromotableLearning[]
+  promoted: PromotableLearning[],
+  entryId: string
 ): Promise<PromotionResult> {
-  let indexState: KnowledgeIndex = {
-    index: {},
-    version: 1,
-  };
+  let assembledIndex: KnowledgeIndex;
 
   try {
-    const contents = await readFile(indexPath, "utf-8");
-    indexState = parseIndex(contents);
+    assembledIndex = await readAssembledIndex(indexDir);
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      indexState = { index: {}, version: 1 };
-    } else {
-      return {
-        mutations: [],
-        warnings: [
-          `Failed to read knowledge index at ${indexPath}: ${error instanceof Error ? error.message : String(error)}`,
-        ],
-      };
-    }
+    return {
+      mutations: [],
+      warnings: [
+        `Failed to read knowledge index at ${indexDir}: ${error instanceof Error ? error.message : String(error)}`,
+      ],
+    };
   }
 
   const mutations: PromotionIndexMutation[] = [];
+  const newEntries: Record<string, string[]> = {};
 
   for (const learning of promoted) {
     if (!isPromotedDisposition(learning.disposition)) {
       continue;
     }
 
-    const prefixes = deriveIndexPrefixes(learning.touchedPaths, Object.keys(indexState.index));
+    const prefixes = deriveIndexPrefixes(learning.touchedPaths, Object.keys(assembledIndex.index));
     for (const prefix of prefixes) {
-      const currentEntries = indexState.index[prefix] ?? [];
+      const currentEntries = assembledIndex.index[prefix] ?? [];
       const dedupedEntries = Array.from(new Set([...currentEntries, learning.path]));
 
       if (!currentEntries.includes(learning.path)) {
@@ -165,12 +198,35 @@ export async function applyPromotions(
         });
       }
 
-      indexState.index[prefix] = await trimToSoftCap(dedupedEntries, docsRoot);
+      assembledIndex.index[prefix] = await trimToSoftCap(dedupedEntries, docsRoot);
+
+      // Track entries for this entry's file
+      const entryPaths = newEntries[prefix] ?? [];
+      if (!entryPaths.includes(learning.path)) {
+        newEntries[prefix] = [...entryPaths, learning.path];
+      }
     }
   }
 
-  await mkdir(path.dirname(indexPath), { recursive: true });
-  await writeFile(indexPath, `${JSON.stringify(indexState, null, 2)}\n`);
+  // Read existing entry file to merge with new entries
+  const entryFileName = `${sanitizeEntryId(entryId)}.json`;
+  const entryPath = path.join(indexDir, entryFileName);
+  let existingEntry: IndexEntry = { entries: {}, version: 1 };
+  try {
+    const contents = await readFile(entryPath, "utf-8");
+    existingEntry = parseEntry(contents);
+  } catch {
+    // No existing entry file — start fresh
+  }
+
+  // Merge new entries into existing entry
+  for (const [key, paths] of Object.entries(newEntries)) {
+    const existing = existingEntry.entries[key] ?? [];
+    existingEntry.entries[key] = Array.from(new Set([...existing, ...paths]));
+  }
+
+  await mkdir(indexDir, { recursive: true });
+  await writeFile(entryPath, `${JSON.stringify(existingEntry, null, 2)}\n`);
 
   return {
     mutations: mutations.toSorted(
