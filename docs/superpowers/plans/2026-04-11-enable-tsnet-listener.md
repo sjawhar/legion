@@ -1,3 +1,5 @@
+> **[HISTORICAL]** The Pulumi project this plan modifies (`packages/envoy/infra/`) has been migrated out of this repo to `~/.dotfiles/envoy/`. File-path references below are no longer valid in this repo. Kept for historical reference.
+
 # Enable tsnet for sami-agents-mx Listener — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

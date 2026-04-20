@@ -1,3 +1,0 @@
-name: aws-infra
-runtime: nodejs
-description: AWS IAM Identity Center and infrastructure security — permission sets, groups, account assignments, and dev box security group

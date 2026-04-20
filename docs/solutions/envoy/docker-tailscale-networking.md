@@ -105,8 +105,10 @@ in nats.conf. This tells NATS exactly which addresses to advertise to clients an
 cluster peers, overriding the automatic interface detection. The hostname must be the
 machine's MagicDNS name (= `machine.name` in Pulumi config).
 
-- **Pulumi path:** `renderNatsConf()` in `packages/envoy/infra/nats.ts` includes
-  both `client_advertise` and `cluster.advertise` automatically using `machine.name`.
+- **Pulumi path (historical):** `renderNatsConf()` in `packages/envoy/infra/nats.ts`
+  included both `client_advertise` and `cluster.advertise` automatically using
+  `machine.name`. That Pulumi project has been moved out of this repo, but the
+  pattern is preserved.
 - **Compose path:** `render-nats-peer.sh` requires `NATS_HOSTNAME` env var
   (e.g., `NATS_HOSTNAME=sami-agents-mx`).
 

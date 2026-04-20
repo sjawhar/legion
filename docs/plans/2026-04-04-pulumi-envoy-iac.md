@@ -1,3 +1,5 @@
+> **[HISTORICAL]** The Pulumi project this plan describes (`packages/envoy/infra/`) has been migrated out of this repo to `~/.dotfiles/envoy/` (personal fleet infra). The file paths below no longer exist in `legion`; kept here for historical reference.
+
 # Pulumi IaC for Envoy Deployment — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

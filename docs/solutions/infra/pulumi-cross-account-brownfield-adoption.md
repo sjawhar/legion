@@ -10,8 +10,7 @@ tags:
   - import
   - multi-account
 date: 2026-04-13
-status: active
-module: aws-infra
+status: historical
 related_issues:
   - "453"
 symptoms:

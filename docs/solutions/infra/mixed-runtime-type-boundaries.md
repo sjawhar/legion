@@ -9,8 +9,7 @@ tags:
   - types
   - mixed-runtime
 date: 2026-04-05
-status: active
-module: envoy-infra
+status: historical
 related_issues:
   - "sjawhar-legion-257"
 symptoms:
@@ -24,7 +23,7 @@ symptoms:
 
 ## Context
 
-This monorepo uses Bun as its primary runtime. However, some packages run under Node.js — notably `packages/envoy/infra/` which uses Pulumi (ts-node). When Bun-specific type definitions leak into a Node.js package's TypeScript configuration, the package fails to compile under its intended runtime.
+This monorepo uses Bun as its primary runtime. Historically, some packages ran under Node.js — notably `packages/envoy/infra/` (since migrated out of this repo) which used Pulumi (ts-node). When Bun-specific type definitions leak into a Node.js package's TypeScript configuration, the package fails to compile under its intended runtime.
 
 ## The Problem
 
@@ -76,8 +75,8 @@ typecheck.
     "packages/envoy",
     "packages/envoy-plugin",
     "packages/opencode-plugin"
-    // packages/aws-infra intentionally excluded — Node.js/ts-node runtime
-    // packages/envoy/infra intentionally excluded — Node.js/ts-node runtime
+    // Historically we excluded packages/aws-infra and packages/envoy/infra here —
+    // Node.js/ts-node runtime; both have since been removed from this repo.
   ]
 }
 ```

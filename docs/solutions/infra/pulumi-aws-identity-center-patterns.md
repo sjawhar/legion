@@ -11,8 +11,7 @@ tags:
   - groups
   - scim
 date: 2026-04-13
-status: active
-module: aws-infra
+status: historical
 related_issues:
   - "sjawhar-legion-451"
 symptoms:

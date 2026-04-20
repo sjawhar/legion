@@ -1,3 +1,5 @@
+> **[HISTORICAL]** References to `packages/envoy/infra/` point to code that has been migrated out of this repo to `~/.dotfiles/envoy/`. Kept here for historical reference.
+
 # Implementation Plan: Ghost Wispr Webhook Receiver (#186)
 
 ## Status: Near-Complete
