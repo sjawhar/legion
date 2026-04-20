@@ -32,11 +32,6 @@
     "docs/setup": [
       "daemon/cross-role-permission-proxy.md"
     ],
-    "packages/aws-infra": [
-      "infra/pulumi-aws-identity-center-patterns.md",
-      "infra/mixed-runtime-type-boundaries.md",
-      "infra/pulumi-cross-account-brownfield-adoption.md"
-    ],
     "packages/daemon": [
       "architecture-patterns/plugin-migration-assessment.md",
       "architecture-patterns/sync-to-async-modular-refactoring.md",

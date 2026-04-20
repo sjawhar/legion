@@ -1,3 +1,0 @@
-name: envoy
-runtime: nodejs
-description: Envoy fleet deployment via Docker over Tailscale SSH
