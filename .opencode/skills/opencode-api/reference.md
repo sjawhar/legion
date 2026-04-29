@@ -1,6 +1,6 @@
 # OpenCode Serve API — Complete Endpoint Reference
 
-Base URL: `http://127.0.0.1:13381`
+Base URL: `http://127.0.0.1:$SERVE_PORT`. Each `opencode serve` process listens on its own port — there is no single global serve. Examples below use **13381** as a placeholder (the default for Legion's shared serve, which may differ if multiple daemons coexist). Substitute the actual port for the serve you're targeting; for Legion, discover via the daemon's `/workers` endpoint.
 
 All per-project endpoints accept `?directory=/path` query param or `x-opencode-directory` header.
 
