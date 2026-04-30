@@ -1,12 +1,22 @@
 ---
 name: opencode-api
-description: OpenCode serve HTTP API reference. Use when interacting with sessions, reading messages/todos, aborting workers, managing workspaces, or any direct OpenCode serve API call. The shared serve runs on port 13381 and handles all worker and controller sessions.
+description: OpenCode serve HTTP API reference. Use when interacting with sessions, reading messages/todos, aborting workers, managing workspaces, or any direct OpenCode serve API call. Each `opencode serve` process is independent with its own port; Legion runs one shared serve per daemon (default port 13381, may differ if multiple daemons coexist on the host).
 ---
 
 # OpenCode Serve API
 
-HTTP API for the shared OpenCode serve process. All worker and controller sessions run on a
-single `opencode serve` instance (default port **13381**).
+HTTP API exposed by every `opencode serve` process. Each serve runs as an independent process
+with its own port, its own sessions, and its own state — there is no single global "the serve".
+This skill documents the API contract; the URL you target depends on which serve instance you mean.
+
+**Legion's deployment:** Legion runs **one shared `opencode serve` per daemon** that hosts all
+worker + controller sessions for that team. That shared serve defaults to **port 13381** (the
+daemon's `baseWorkerPort`). If multiple Legion daemons run on the same host (port collision on
+13381), each daemon's serve gets a different auto-incremented port — always discover the actual
+port via the daemon API rather than hardcoding 13381 (see [Port Discovery](#port-discovery)).
+
+Examples below use `13381` as a placeholder for the Legion shared serve port. Substitute the
+actual port for your environment when running commands.
 
 **When to use this skill:**
 - Reading session messages or todos (diagnostics)
@@ -22,7 +32,10 @@ single `opencode serve` instance (default port **13381**).
 - `POST /state/collect` — state machine decisions
 - `GET /health` — daemon health
 
-## Architecture
+## Legion's Architecture
+
+In Legion's deployment, one daemon owns one shared `opencode serve`. The daemon's HTTP API
+proxies a few endpoints to that serve; everything else is reached directly on the serve port.
 
 ```
 Controller ──► Daemon API (port $LEGION_DAEMON_PORT, default 13370)
@@ -33,7 +46,7 @@ Controller ──► Daemon API (port $LEGION_DAEMON_PORT, default 13370)
                   └── POST /state/collect  → state machine
                   │
                   ▼
-              Shared Serve (port 13381)
+              Shared Serve (default 13381 — actual port may differ)
                   │
                   ├── Session 1 (controller)
                   ├── Session 2 (worker: eng-42-implement)
@@ -41,14 +54,22 @@ Controller ──► Daemon API (port $LEGION_DAEMON_PORT, default 13370)
                   └── ...
 ```
 
+A second Legion daemon on the same host would spawn its own daemon (e.g. on 13371) and its own
+shared serve (e.g. on 13382) with an entirely independent set of sessions. Plain `opencode serve`
+processes started outside Legion are also independent — each on whatever port you started it with.
+
 ## Port Discovery
 
-The shared serve port is **13381** by default. To discover it programmatically:
+The Legion shared serve defaults to **13381** but may differ if multiple daemons coexist on the
+host. **Always discover the actual port via the daemon API**, never hardcode it:
 
 ```bash
 # From any worker entry returned by the daemon
 SERVE_PORT=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq '.[0].port')
 ```
+
+Outside Legion (e.g. running `opencode serve` manually), the port is whatever you started the
+serve with — there is no discovery API for arbitrary serves.
 
 ## Request Scoping
 
