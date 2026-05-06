@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# probe-webhook-e2e.sh — On-demand probe for the GitHub webhook → Envoy session
+# delivery path. See packages/envoy/scripts/README.md for usage.
+#
+# Exit codes:
+#   0 — synthetic webhook arrived at a live session via Envoy delivery.
+#   1 — webhook accepted by ALB but did not reach the local listener within timeout.
+#   2 — webhook rejected by ALB (signature, format, or 5xx).
+#   3 — local listener unreachable, subscribe call failed, or required tooling at startup. Cleanup unsubscribe failures are silently tolerated by the cleanup trap and do NOT cause a non-zero exit (use `curl -s http://127.0.0.1:9020/v1/interests/` after a run to verify cleanup).
+#   4 — required tooling missing (curl, openssl, python3, jq, read-secret.sh).
+set -euo pipefail
+
+LISTENER_URL="${LISTENER_URL:-http://127.0.0.1:9020}"
+WEBHOOK_URL="${WEBHOOK_URL:-https://webhooks.trajectorylabs.com/webhook/github}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+READ_SECRET="${SCRIPT_DIR}/../deploy/scripts/read-secret.sh"
+
+# --- preflight: required tooling ---
+for cmd in curl openssl python3 jq; do
+  command -v "$cmd" >/dev/null || { echo "ERR: missing required command: $cmd" >&2; exit 4; }
+done
+[ -x "$READ_SECRET" ] || { echo "ERR: not executable: $READ_SECRET" >&2; exit 4; }
+
+# --- generate a unique trigger so concurrent probes can't collide ---
+TRIGGER="probe-$(date +%s)-$$-$RANDOM"
+PROBE_SESSION="ses_probe_${TRIGGER}"
+PROBE_TOPIC="notifications.github.legion-probe.canary.issue.1.comment"
+DELIVERY_ID="probe-${TRIGGER}"
+
+# --- state filled in by setup steps; cleanup trap consumes these ---
+RECEIVER_PID=""
+RECEIVER_LOG=""
+RECEIVER_PORT_FILE=""
+RECEIVER_PORT=""
+HTTP_BODY=""
+
+cleanup() {
+  local rc=$?
+  set +e
+  if [ -n "${PROBE_SESSION:-}" ]; then
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+      "${LISTENER_URL}/v1/interests/unsubscribe" \
+      -d "$(jq -nc --arg s "$PROBE_SESSION" --arg t "$PROBE_TOPIC" \
+            '{session_id:$s, topics:[$t]}')" \
+      >/dev/null 2>&1 || true
+  fi
+  if [ -n "$RECEIVER_PID" ] && kill -0 "$RECEIVER_PID" 2>/dev/null; then
+    kill "$RECEIVER_PID" 2>/dev/null || true
+    wait "$RECEIVER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$RECEIVER_LOG" ] && [ -f "$RECEIVER_LOG" ]; then
+    rm -f "$RECEIVER_LOG"
+  fi
+  if [ -n "$RECEIVER_PORT_FILE" ] && [ -f "$RECEIVER_PORT_FILE" ]; then
+    rm -f "$RECEIVER_PORT_FILE"
+  fi
+  if [ -n "$HTTP_BODY" ] && [ -f "$HTTP_BODY" ]; then
+    rm -f "$HTTP_BODY"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
+
+echo "probe id: $TRIGGER"
+echo "topic:    $PROBE_TOPIC"
+
+# --- subsequent tasks fill in the rest ---
+echo "ERR: probe not yet implemented past skeleton" >&2
+exit 3
