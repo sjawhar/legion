@@ -124,6 +124,44 @@ if ! curl -fsS -m 5 -X POST -H 'Content-Type: application/json' \
 fi
 echo "subscribed: $PROBE_SESSION → $PROBE_TOPIC"
 
+# --- read webhook secret from SOPS ---
+WEBHOOK_SECRET="$("$READ_SECRET" ENVOY_GITHUB_WEBHOOK_SECRET 2>/dev/null || true)"
+if [ -z "$WEBHOOK_SECRET" ]; then
+  echo "ERR: could not read ENVOY_GITHUB_WEBHOOK_SECRET via $READ_SECRET" >&2
+  exit 3
+fi
+
+# --- build the payload ---
+PAYLOAD=$(jq -nc \
+  --arg trigger "$TRIGGER" \
+  '{
+     action: "created",
+     issue: { number: 1, title: "webhook probe", state: "open" },
+     comment: { id: 1, body: ("probe trigger: " + $trigger) },
+     repository: { name: "canary", owner: { login: "legion-probe" } },
+     sender: { login: "envoy-probe", type: "User" }
+   }')
+
+SIG="sha256=$(printf '%s' "$PAYLOAD" \
+  | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" \
+  | awk '{print $NF}')"
+
+# --- send to the public ALB ---
+HTTP_BODY="$(mktemp /tmp/probe-resp-XXXXXX)"
+HTTP_CODE=$(curl -sS -m 10 -o "$HTTP_BODY" -w '%{http_code}' \
+  -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -H "X-GitHub-Event: issue_comment" \
+  -H "X-GitHub-Delivery: $DELIVERY_ID" \
+  -H "X-Hub-Signature-256: $SIG" \
+  --data-raw "$PAYLOAD" || true)
+echo "ALB POST: http=$HTTP_CODE body=$(tr -d '\n' < "$HTTP_BODY")"
+rm -f "$HTTP_BODY"
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "ERR: ALB rejected webhook (expected 200)" >&2
+  exit 2
+fi
+
 # --- subsequent tasks fill in the rest ---
 echo "ERR: probe not yet implemented past skeleton" >&2
 exit 3
