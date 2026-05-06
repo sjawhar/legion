@@ -162,6 +162,20 @@ if [ "$HTTP_CODE" != "200" ]; then
   exit 2
 fi
 
-# --- subsequent tasks fill in the rest ---
-echo "ERR: probe not yet implemented past skeleton" >&2
-exit 3
+# --- wait for the listener to deliver to our receiver ---
+echo "waiting up to ${TIMEOUT_SECONDS}s for delivery to receiver…"
+deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if [ -s "$RECEIVER_LOG" ] && grep -qF "$TRIGGER" "$RECEIVER_LOG"; then
+    echo "OK: trigger seen in receiver log after $(( $(date +%s) - (deadline - TIMEOUT_SECONDS) ))s"
+    echo "--- receiver log excerpt ---"
+    grep -F "$TRIGGER" "$RECEIVER_LOG" | head -5
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "FAIL: timeout — webhook accepted by ALB (HTTP 200) but trigger string never reached probe receiver." >&2
+echo "      This means the AWS receiver published to its NATS but the on-prem listener did not deliver." >&2
+echo "      Check: docker logs envoy-listener --since 1m | grep $TRIGGER" >&2
+exit 1
