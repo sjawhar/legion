@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TAG="${1:?Usage: build-push-images.sh <git-sha-tag>}"
-REGISTRY="${ENVOY_REGISTRY:-ghcr.io/sjawhar/legion}"
+REGISTRY="${ENVOY_REGISTRY:?ENVOY_REGISTRY is required (e.g. ghcr.io/your-org/your-repo)}"
 
 echo "Building and pushing multi-arch image with tag: $TAG"
 echo "Registry: $REGISTRY"
@@ -21,8 +21,4 @@ echo "=== Pushed ${REGISTRY}/envoy:${TAG} ==="
 
 echo ""
 echo "Image built and pushed with tag: $TAG"
-echo "Next steps:"
-echo "  cd infra"
-echo "  pulumi config set envoy:imageTag $TAG"
-echo "  pulumi preview"
-echo "  pulumi up"
+echo "To deploy, set imageTag=$TAG in your stack config and run pulumi up."

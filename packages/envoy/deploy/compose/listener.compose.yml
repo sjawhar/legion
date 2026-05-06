@@ -17,24 +17,8 @@ services:
       ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID}
       NATS_URLS: ${NATS_URLS}
       ENVOY_HOST_BRIDGE: 127.0.0.1
-      # tsnet config (disabled by default for local dev)
-      ENVOY_TSNET_ENABLED: ${ENVOY_TSNET_ENABLED:-false}
-      ENVOY_TSNET_HOSTNAME: ${ENVOY_TSNET_HOSTNAME:-}
-      ENVOY_TSNET_STATE_DIR: ${ENVOY_TSNET_STATE_DIR:-/var/lib/envoy-tsnet/listener}
-      # OAuth client auth (preferred for production)
-      ENVOY_TSNET_OAUTH_CLIENT_ID: ${ENVOY_TSNET_OAUTH_CLIENT_ID:-}
-      ENVOY_TSNET_OAUTH_CLIENT_SECRET: ${ENVOY_TSNET_OAUTH_CLIENT_SECRET:-}
-      ENVOY_TSNET_TAGS: ${ENVOY_TSNET_TAGS:-}
-      # Legacy auth key (backward compat — mutually exclusive with OAuth)
-      ENVOY_TSNET_AUTH_KEY: ${ENVOY_TSNET_AUTH_KEY:-}
       ENVOY_WEBHOOKS: ${ENVOY_WEBHOOKS:-}
       ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET:-}
       ENVOY_GITHUB_MENTION_TRIGGER: ${ENVOY_GITHUB_MENTION_TRIGGER:-@legion}
       ENVOY_SLACK_SIGNING_SECRET: ${ENVOY_SLACK_SIGNING_SECRET:-}
       ENVOY_GHOSTWISPR_SIGNING_SECRET: ${ENVOY_GHOSTWISPR_SIGNING_SECRET:-}
-    volumes:
-      # tsnet state persistence (only needed when ENVOY_TSNET_ENABLED=true)
-      - envoy-listener-tsnet-state:${ENVOY_TSNET_STATE_DIR:-/var/lib/envoy-tsnet/listener}
-
-volumes:
-  envoy-listener-tsnet-state:

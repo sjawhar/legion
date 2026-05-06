@@ -1,88 +1,59 @@
 # Deploy
 
+Compose definition for the on-prem `envoy-listener` container. The listener is
+a stateless NATS subscriber that connects outbound to a single NATS server
+(typically reached via Tailscale on the host network) and serves
+`127.0.0.1:9020` for local OpenCode session registration and webhook ingress
+when configured.
+
 ## Layout
 
-- `compose/listener.compose.yml` — host-network listener (includes webhook handlers when `ENVOY_WEBHOOKS` is set)
-- `compose/nats/peer.compose.yml` — JetStream peer node (all machines run as peers via Tailscale)
-
-## Secrets
-
-Webhook secrets are passed via environment variables to the listener container.
-Required when the corresponding provider is enabled via `ENVOY_WEBHOOKS`:
-
-## Webhook configuration
-
-The listener handles webhooks when `ENVOY_WEBHOOKS` is set (comma-separated list of enabled providers: `github`, `slack`, `ghostwispr`).
-
-### GitHub mention trigger
-
-The listener can publish a second `.mention` topic when a comment body contains a matching trigger.
-
-- `ENVOY_GITHUB_MENTION_TRIGGER` — optional, defaults to `@legion`
-
-GitHub does not provide a native `app_mention` webhook event like Slack. Mention routing is body-based and additive: matching comments still publish to `.comment`, and also publish to `.mention`.
-
-## Host sync
-
-```bash
-cd ~/legion/default
-./scripts/sync-envoy-host.sh sami@sami
-./scripts/sync-envoy-host.sh claude@sami-claude
-./scripts/sync-envoy-host.sh ghost-wispr@ghost-wispr
-```
-
-## Pi Docker install
-
-```bash
-ssh ghost-wispr@ghost-wispr 'bash -s' < ~/legion/default/packages/envoy/deploy/scripts/install-docker-debian.sh
-```
-
-## NATS peer envs
-
-For each peer host, export:
-
-- `NATS_SERVER_NAME`
-- `NATS_ROUTES`
-
-Peer nodes now store JetStream data in a Docker named volume (`nats_data`) instead of a bind-mounted repo path. This keeps cluster state independent of repo checkouts and survives source tree moves/removal.
-
-If the cluster state is corrupt and you intentionally want a clean reset, run:
-
-```bash
-cd ~/legion/default/packages/envoy/deploy/compose/nats
-docker compose -f peer.compose.yml down -v
-```
-
-Then bring the peer back with `../scripts/up-nats-peer.sh` after regenerating `nats.conf`.
-
-Example:
-
-```bash
-export NATS_SERVER_NAME=sami-agents-mx
-export NATS_ROUTES="nats://sami:6222 nats://sami-claude:6222"
-deploy/scripts/up-nats-peer.sh
-```
+- `compose/listener.compose.yml` — host-network listener container.
+- `scripts/up-listener.sh` — `docker compose up -d --build` for the listener.
+- `scripts/sync-host.sh` — rsync this package to a remote host over SSH.
+- `scripts/install-docker-debian.sh` — Docker install helper for fresh hosts.
+- `scripts/read-secret.sh` — read a secret from local SOPS-encrypted state.
 
 ## Listener envs
 
-- `ENVOY_MACHINE_ID`
-- `NATS_URLS`
-- `ENVOY_HOME`
-- `ENVOY_OPENCODE_BIN`
-- `ENVOY_WEBHOOKS` — comma-separated enabled webhook providers (e.g., `github,slack,ghostwispr`)
-- `ENVOY_GITHUB_WEBHOOK_SECRET` — required when `github` is in `ENVOY_WEBHOOKS`
-- `ENVOY_GITHUB_MENTION_TRIGGER` — optional, default `@legion`
-- `ENVOY_SLACK_SIGNING_SECRET` — required when `slack` is in `ENVOY_WEBHOOKS`
-- `ENVOY_GHOSTWISPR_SIGNING_SECRET` — optional even when `ghostwispr` is in `ENVOY_WEBHOOKS`
+| Var | Required | Notes |
+|---|---|---|
+| `ENVOY_MACHINE_ID` | yes | Logical machine name (used in published metadata) |
+| `NATS_URLS` | yes | Comma-separated NATS URLs (one is fine) |
+| `ENVOY_LISTENER_PORT` | no | Defaults to 9020 |
+| `ENVOY_HOST_BRIDGE` | no | Address used to reach host services from sessions; defaults to `127.0.0.1` |
+| `ENVOY_WEBHOOKS` | no | Comma-separated providers to enable on this listener: `github`, `slack`, `ghostwispr`. Only set when this host is the ingress point for that source. |
+| `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when `github` is in `ENVOY_WEBHOOKS` |
+| `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. Comments containing this trigger publish an extra `.mention` topic. |
+| `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when `slack` is in `ENVOY_WEBHOOKS` |
+| `ENVOY_GHOSTWISPR_SIGNING_SECRET` | optional | When `ghostwispr` is in `ENVOY_WEBHOOKS`; can be empty to skip signature verification |
 
-Example:
+## GitHub mention routing
+
+GitHub does not have a native `app_mention` event like Slack. The listener
+re-publishes any comment whose body contains the mention trigger to a
+`.mention` topic in addition to the original `.comment` topic. Configure via
+`ENVOY_GITHUB_MENTION_TRIGGER` (default `@legion`).
+
+## Example: bring up a listener
 
 ```bash
-export ENVOY_MACHINE_ID=sami-agents-mx
-export NATS_URLS=nats://127.0.0.1:4222,nats://sami:4222,nats://sami-claude:4222
-export ENVOY_HOME=/home/ubuntu
-export ENVOY_WEBHOOKS=github,slack
-export ENVOY_GITHUB_WEBHOOK_SECRET=your-secret
-export ENVOY_SLACK_SIGNING_SECRET=your-secret
+export ENVOY_MACHINE_ID=$(hostname)
+export NATS_URLS=nats://nats.example.local:4222
 deploy/scripts/up-listener.sh
+```
+
+For webhook ingress (only on the host that receives webhooks directly):
+
+```bash
+export ENVOY_WEBHOOKS=github,slack
+export ENVOY_GITHUB_WEBHOOK_SECRET=...
+export ENVOY_SLACK_SIGNING_SECRET=...
+deploy/scripts/up-listener.sh
+```
+
+## Sync to a remote host
+
+```bash
+./packages/envoy/deploy/scripts/sync-host.sh user@hostname
 ```

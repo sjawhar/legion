@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317 # cleanup is invoked indirectly by trap
 # probe-webhook-e2e.sh — On-demand probe for the GitHub webhook → Envoy session
 # delivery path. See packages/envoy/scripts/README.md for usage.
 #
@@ -11,7 +12,7 @@
 set -euo pipefail
 
 LISTENER_URL="${LISTENER_URL:-http://127.0.0.1:9020}"
-WEBHOOK_URL="${WEBHOOK_URL:-https://webhooks.trajectorylabs.com/webhook/github}"
+WEBHOOK_URL="${WEBHOOK_URL:?WEBHOOK_URL is required (e.g. https://your-ingress.example.com/webhook/github)}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 READ_SECRET="${SCRIPT_DIR}/../deploy/scripts/read-secret.sh"
