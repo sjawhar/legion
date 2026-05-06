@@ -41,8 +41,8 @@ cleanup() {
   if [ -n "${PROBE_SESSION:-}" ]; then
     curl -fsS -X POST -H 'Content-Type: application/json' \
       "${LISTENER_URL}/v1/interests/unsubscribe" \
-      -d "$(jq -nc --arg s "$PROBE_SESSION" --arg t "$PROBE_TOPIC" \
-            '{session_id:$s, topics:[$t]}')" \
+      -d "$(jq -nc --arg s "$PROBE_SESSION" \
+            '{session_id:$s, topics:[]}')" \
       >/dev/null 2>&1 || true
   fi
   if [ -n "$RECEIVER_PID" ] && kill -0 "$RECEIVER_PID" 2>/dev/null; then
@@ -107,6 +107,22 @@ if [ -z "$RECEIVER_PORT" ]; then
   exit 3
 fi
 echo "receiver: 127.0.0.1:$RECEIVER_PORT (log: $RECEIVER_LOG)"
+
+# --- register synthetic session with the listener ---
+SUBSCRIBE_BODY=$(jq -nc \
+  --arg s "$PROBE_SESSION" \
+  --arg t "$PROBE_TOPIC" \
+  --arg d "/tmp/probe-${TRIGGER}" \
+  --arg title "webhook-e2e-probe ${TRIGGER}" \
+  --argjson p "$RECEIVER_PORT" \
+  '{session_id:$s, dir:$d, topics:[$t], port:$p, title:$title}')
+
+if ! curl -fsS -m 5 -X POST -H 'Content-Type: application/json' \
+       "${LISTENER_URL}/v1/interests/subscribe" -d "$SUBSCRIBE_BODY" >/dev/null; then
+  echo "ERR: failed to subscribe probe session at ${LISTENER_URL}" >&2
+  exit 3
+fi
+echo "subscribed: $PROBE_SESSION → $PROBE_TOPIC"
 
 # --- subsequent tasks fill in the rest ---
 echo "ERR: probe not yet implemented past skeleton" >&2
