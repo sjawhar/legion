@@ -4,3 +4,6 @@
 /ghostwispr
 deploy/compose/nats/nats.conf
 deploy/compose/nats/nats-*.conf
+
+# Locally-built mcp binary (do not commit — 10MB+)
+mcp

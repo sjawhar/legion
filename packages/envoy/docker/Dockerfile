@@ -1,4 +1,4 @@
-# Go version must match go.mod (tsnet requires >= 1.26.1).
+# Go version must match go.mod.
 FROM golang:1.26-alpine AS build
 
 WORKDIR /src
@@ -23,9 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /out/envoy-listener /usr/local/bin/envoy-listener
 
-# tsnet uses userspace networking (gVisor netstack) by default — no
-# CAP_NET_ADMIN or /dev/net/tun required. Only needs outbound UDP
-# (WireGuard) and outbound TCP 443 (control plane).
 
 USER envoy
 

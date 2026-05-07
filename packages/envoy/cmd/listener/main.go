@@ -27,7 +27,6 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/metrics"
-	envoytsnet "github.com/sjawhar/envoy/internal/tsnet"
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
@@ -287,11 +286,6 @@ func main() {
 	}
 	logger := logging.New(cfg.MachineID)
 
-	// Load tsnet config (fast — env var reads only).
-	tsCfg, err := envoytsnet.LoadConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	// Load webhook config (fast — env var reads only).
 	webhookCfg, err := webhook.LoadWebhookConfig()
@@ -538,8 +532,7 @@ func main() {
 	})
 	v1.HandleFunc("/v1/messages/publish", publishHandler(&deps))
 
-	// Always serve /v1/* on the legacy port for local plugin registration.
-	// The tsnet TLS listener (if enabled) also serves /v1/* on :443 for cross-machine access.
+	// Serve /v1/* on the listener port for local plugin registration.
 	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 
 	// Phase 4: Start HTTP server (port already bound via net.Listen).
@@ -549,8 +542,7 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	// Buffer 2: one for legacy HTTP, one for tsnet HTTP (if enabled).
-	fatal := make(chan error, 2)
+	fatal := make(chan error, 1)
 	go func() {
 		if err := server.Serve(ln); err != http.ErrServerClosed {
 			fatal <- err
@@ -558,45 +550,7 @@ func main() {
 	}()
 	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
-	// Phase 4.5: Start tsnet server (if enabled). The tsnet node connects
-	// to the Tailscale network, which is a slow operation like NATS connect.
-	// /v1/* routes on the tsnet listener are gated by readiness (deps nil
-	// until NATS init completes).
-	// NOTE: No defer Close() here — tsnet shutdown is handled explicitly in
-	// the signal handler below to ensure ordered deregistration before NATS drain.
-	var tsServer *envoytsnet.Server
-	if tsCfg.Enabled {
-		// On first boot (empty state dir), tsnet sees NoState and ignores the
-		// auth key. Set TSNET_FORCE_LOGIN=1 to force authentication. On subsequent
-		// restarts with existing state, skip it so tsnet reuses the persisted identity.
-		if tsCfg.StateDir != "" {
-			stateFile := tsCfg.StateDir + "/tailscaled.state"
-			logger.Info("tsnet first-boot check", slog.String("state_file", stateFile))
-			fi, statErr := os.Stat(stateFile)
-			if statErr != nil && os.IsNotExist(statErr) {
-				logger.Info("tsnet state file missing (first boot), setting TSNET_FORCE_LOGIN=1")
-				os.Setenv("TSNET_FORCE_LOGIN", "1")
-			} else if statErr != nil {
-				logger.Warn("tsnet state file stat error (treating as first boot)",
-					slog.String("error", statErr.Error()))
-				os.Setenv("TSNET_FORCE_LOGIN", "1")
-			} else {
-				logger.Info("tsnet state file exists, reusing identity",
-					slog.Int64("size", fi.Size()))
-				os.Unsetenv("TSNET_FORCE_LOGIN")
-			}
-		}
-		tsServer = envoytsnet.New(tsCfg)
-		tsMux := http.NewServeMux()
-		tsMux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
-		if _, err := tsServer.Serve(tsMux, fatal); err != nil {
-			logger.Warn("tsnet failed to start (non-fatal, continuing without Tailscale)", slog.String("error", err.Error()))
-			tsServer.Close()
-			tsServer = nil
-		} else {
-			logger.Info("envoy-listener tsnet serving /v1/* on :443", slog.String("hostname", tsServer.Hostname()))
-		}
-	}
+
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
 	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
@@ -621,9 +575,7 @@ func main() {
 		RequestLimit: 30 * time.Second,
 		Sessions:     sessions,
 	}
-	if tsServer != nil {
-		deliver.HTTPClient = tsServer.HTTPClient()
-	}
+
 
 	dedupeCache := dedupe.New(10 * time.Minute)
 
@@ -814,9 +766,6 @@ func main() {
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
-	// Ordered shutdown ensures tsnet deregisters its node key before the
-	// process exits — critical for ECS rolling deployments where old and new
-	// tasks briefly overlap on the same EFS-backed tsnet state directory.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 
@@ -828,15 +777,6 @@ func main() {
 	}
 
 	// Ordered shutdown:
-	// 1. tsnet first — deregisters node key from Tailscale coordination server.
-	//    This must happen before the new container starts and claims the same key.
-	if tsServer != nil {
-		logger.Info("closing tsnet")
-		if err := tsServer.Close(); err != nil {
-			logger.Warn("tsnet close error", slog.String("error", err.Error()))
-		}
-	}
-
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

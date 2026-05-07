@@ -1188,53 +1188,6 @@ func TestDeadSessionACK(t *testing.T) {
 	}
 }
 
-func TestV1OnLegacyPort_WithTsnetEnabled(t *testing.T) {
-	// This test verifies that /v1/* endpoints are accessible on the legacy
-	// port (9020) even when tsnet is enabled. This is critical for local plugin
-	// registration via http://127.0.0.1:9020.
-	//
-	// The bug: when tsnet is enabled, /v1/* was ONLY served on the tsnet TLS
-	// listener (:443), blocking local plugin registration on the legacy port.
-	// The fix: always serve /v1/* on the legacy port regardless of tsnet status.
-
-	var state atomic.Pointer[listenerDeps]
-
-	// Build the mux as main() does, but with tsnet enabled.
-	// We simulate tsnet being enabled by NOT gating /v1/* on !tsCfg.Enabled.
-	mux := http.NewServeMux()
-
-	// /healthz is always reachable
-	mux.HandleFunc("/healthz", healthzHandler(&state))
-
-	// /v1/* sub-mux, gated by readiness
-	v1 := http.NewServeMux()
-	v1.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"session_id":"test","topics":[]}`))
-	})
-
-	// THE FIX: Always register /v1/* on legacy mux, regardless of tsnet status.
-	// This is what the fix does — remove the `if !tsCfg.Enabled` gate.
-	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, v1))
-
-	// Simulate ready state
-	state.Store(&listenerDeps{})
-
-	// Test: /v1/interests/subscribe is reachable on legacy port
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{"session_id":"test","topics":[]}`))
-	req.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
-	}
-}
-
 
 
 
