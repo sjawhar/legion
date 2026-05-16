@@ -1112,6 +1112,118 @@ func TestGithubEnvelopesHandlesMalformedCheckRunPullRequests(t *testing.T) {
 	}
 }
 
+func TestGithubEnvelopesPushToBranch(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "push",
+		Delivery: "d-push-1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"ref": "refs/heads/main",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.push.branch.main" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+}
+
+func TestGithubEnvelopesPushToTag(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "push",
+		Delivery: "d-push-2",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"ref": "refs/tags/v1.0.0",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.push.tag.v1_0_0" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+}
+
+func TestGithubEnvelopesPushToDottedBranch(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "push",
+		Delivery: "d-push-3",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"ref": "refs/heads/release.v2",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.push.branch.release_v2" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+}
+
+func TestGithubEnvelopesPushToSlashedBranch(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "push",
+		Delivery: "d-push-4",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"ref": "refs/heads/feat/foo",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.push.branch.feat/foo" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+}
+
+func TestGithubEnvelopesPushToNonHeadsTagsRefDropsEnvelope(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "push",
+		Delivery: "d-push-5",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"ref": "refs/pull/123/merge",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+		},
+	}, "@legion")
+	if len(items) != 0 {
+		t.Fatalf("expected 0 envelopes (non-heads/tags ref), got %d", len(items))
+	}
+}
+
 func TestGhostWisprEnvelopeSessionEnded(t *testing.T) {
 	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
 		EventType: "session_ended",

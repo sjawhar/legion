@@ -32,6 +32,10 @@ func GithubEnvelope(input GithubEnvelopeInput) Envelope {
 
 func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	item := GithubEnvelope(input)
+	if item.Topic == "" {
+		// Event should not be routed (e.g. push to non-heads/tags ref).
+		return nil
+	}
 	out := []Envelope{item}
 	owner, repo := githubRepo(input.Body)
 	if githubCIEvent(input.Event) {
@@ -157,13 +161,23 @@ func SlackEnvelopes(input SlackEnvelopeInput) []Envelope {
 }
 
 // githubTopic builds the full topic path with number hierarchy.
-// PR #7706 opened:       pr.7706
+// PR #7706 opened:        pr.7706
 // Comment on PR #7706:    pr.7706.comment
 // Review on PR #7706:     pr.7706.review
 // Issue #42 opened:       issue.42
 // Comment on issue #42:   issue.42.comment
-// Push event:             push
+// Push to branch main:    push.branch.main
+// Push to tag v1.0.0:     push.tag.v1_0_0 (dots sanitized to underscores)
+// workflow_run:            workflow.<filename>.<action>
+// Returns empty string for events that should not be routed (e.g. push to refs that aren't heads or tags).
 func githubTopic(owner string, repo string, event string, body map[string]any) string {
+	if event == "push" {
+		refType, refName, ok := githubPushRefSegments(body)
+		if !ok {
+			return ""
+		}
+		return GithubPushSubject(owner, repo, refType, refName)
+	}
 	num := githubNumber(event, body)
 	parent := githubParentKind(event, body)
 	kind := githubKind(event)
@@ -175,8 +189,21 @@ func githubTopic(owner string, repo string, event string, body map[string]any) s
 		// e.g., pr.7706, issue.42
 		return GithubSubject(owner, repo, kind+"."+num)
 	}
-	// e.g., push, ci
+	// e.g., ci (un-PR'd; filtered out by GithubEnvelopes)
 	return GithubSubject(owner, repo, kind)
+}
+
+// githubPushRefSegments splits a push event's ref field into (refType, refName).
+// Returns false for refs other than refs/heads/... or refs/tags/...
+func githubPushRefSegments(body map[string]any) (refType, refName string, ok bool) {
+	ref := stringValue(body["ref"])
+	switch {
+	case strings.HasPrefix(ref, "refs/heads/"):
+		return "branch", strings.TrimPrefix(ref, "refs/heads/"), true
+	case strings.HasPrefix(ref, "refs/tags/"):
+		return "tag", strings.TrimPrefix(ref, "refs/tags/"), true
+	}
+	return "", "", false
 }
 
 // githubParentKind returns the entity type that owns the number.
