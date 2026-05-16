@@ -76,6 +76,14 @@ func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + strings.ReplaceAll(threadTs, ".", "_") + "." + kind
 }
 
+func GithubPushSubject(owner, repo, refType, refName string) string {
+	return "notifications.github." + owner + "." + repo + ".push." + refType + "." + strings.ReplaceAll(refName, ".", "_")
+}
+
+func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
+	return "notifications.github." + owner + "." + repo + ".workflow." + strings.ReplaceAll(workflowFilename, ".", "_") + "." + action
+}
+
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
 	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
 }
