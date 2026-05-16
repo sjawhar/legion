@@ -1224,6 +1224,107 @@ func TestGithubEnvelopesPushToNonHeadsTagsRefDropsEnvelope(t *testing.T) {
 	}
 }
 
+func TestGithubEnvelopesWorkflowRunInProgress(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "workflow_run",
+		Delivery: "d-wf-1",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "in_progress",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"workflow_run": map[string]any{
+				"id":          float64(42),
+				"name":        "CI",
+				"path":        ".github/workflows/ci.yml",
+				"head_branch": "main",
+				"status":      "in_progress",
+				"html_url":    "https://github.com/sjawhar/legion/actions/runs/42",
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.workflow.ci_yml.in_progress" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+	summary := decodeSummary(t, items[0].PayloadSummary)
+	if summary["kind"] != "workflow" || summary["action"] != "in_progress" || summary["branch"] != "main" {
+		t.Fatalf("unexpected summary: %v", summary)
+	}
+}
+
+func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "workflow_run",
+		Delivery: "d-wf-2",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"workflow_run": map[string]any{
+				"id":          float64(43),
+				"name":        "Release Prod",
+				"path":        ".github/workflows/release-prod.yaml",
+				"head_branch": "main",
+				"status":      "completed",
+				"conclusion":  "success",
+				"html_url":    "https://github.com/sjawhar/legion/actions/runs/43",
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	if items[0].Topic != "notifications.github.sjawhar.legion.workflow.release-prod_yaml.completed" {
+		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	}
+	if items[0].Payload == "" {
+		t.Fatal("expected non-empty Payload for completed workflow_run")
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
+		t.Fatalf("invalid payload JSON: %v", err)
+	}
+	if payload["conclusion"] != "success" || payload["run_id"] != "43" || payload["branch"] != "main" {
+		t.Fatalf("unexpected payload: %v", payload)
+	}
+}
+
+func TestGithubEnvelopesWorkflowRunMissingPathDropsEnvelope(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "workflow_run",
+		Delivery: "d-wf-3",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"workflow_run": map[string]any{
+				"id":     float64(44),
+				"status": "completed",
+			},
+		},
+	}, "@legion")
+	if len(items) != 0 {
+		t.Fatalf("expected 0 envelopes (missing path), got %d", len(items))
+	}
+}
+
 func TestGhostWisprEnvelopeSessionEnded(t *testing.T) {
 	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
 		EventType: "session_ended",

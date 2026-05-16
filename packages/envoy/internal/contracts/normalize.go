@@ -178,6 +178,14 @@ func githubTopic(owner string, repo string, event string, body map[string]any) s
 		}
 		return GithubPushSubject(owner, repo, refType, refName)
 	}
+	if event == "workflow_run" {
+		filename := githubWorkflowFilename(body)
+		action := stringValue(body["action"])
+		if filename == "" || action == "" {
+			return ""
+		}
+		return GithubWorkflowSubject(owner, repo, filename, action)
+	}
 	num := githubNumber(event, body)
 	parent := githubParentKind(event, body)
 	kind := githubKind(event)
@@ -204,6 +212,28 @@ func githubPushRefSegments(body map[string]any) (refType, refName string, ok boo
 		return "tag", strings.TrimPrefix(ref, "refs/tags/"), true
 	}
 	return "", "", false
+}
+
+// githubWorkflowFilename returns the basename of the workflow_run.path field,
+// e.g. ".github/workflows/ci.yml" -> "ci.yml". Returns "" if the path is missing.
+func githubWorkflowFilename(body map[string]any) string {
+	path := nestedString(body, "workflow_run", "path")
+	if path == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[idx+1:]
+	}
+	return path
+}
+
+// nestedNumberString formats a nested numeric (or any) value as a string, returning "" if missing.
+func nestedNumberString(body map[string]any, keys ...string) string {
+	v := nested(body, keys...)
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // githubParentKind returns the entity type that owns the number.
@@ -233,6 +263,8 @@ func githubKind(event string) string {
 		return "push"
 	case "check_run", "check_suite":
 		return "ci"
+	case "workflow_run":
+		return "workflow"
 	case "issue_comment":
 		return "comment"
 	case "pull_request_review":
@@ -420,6 +452,17 @@ func githubSummary(event string, body map[string]any) string {
 			"status":     nestedString(body, "check_suite", "status"),
 			"conclusion": nestedString(body, "check_suite", "conclusion"),
 		}
+	case "workflow_run":
+		data = map[string]string{
+			"kind":       "workflow",
+			"action":     action,
+			"repo":       repo,
+			"workflow":   nestedString(body, "workflow_run", "name"),
+			"path":       nestedString(body, "workflow_run", "path"),
+			"branch":     nestedString(body, "workflow_run", "head_branch"),
+			"status":     nestedString(body, "workflow_run", "status"),
+			"conclusion": nestedString(body, "workflow_run", "conclusion"),
+		}
 	default:
 		data = map[string]string{
 			"kind":   "unknown",
@@ -497,6 +540,19 @@ func githubPayload(event string, body map[string]any) string {
 			"author": nestedString(body, "issue", "user", "login"),
 			"body":   nestedString(body, "issue", "body"),
 			"url":    nestedString(body, "issue", "html_url"),
+		}
+	case "workflow_run":
+		data = map[string]string{
+			"kind":       "workflow",
+			"action":     action,
+			"repo":       repo,
+			"workflow":   nestedString(body, "workflow_run", "name"),
+			"path":       nestedString(body, "workflow_run", "path"),
+			"branch":     nestedString(body, "workflow_run", "head_branch"),
+			"status":     nestedString(body, "workflow_run", "status"),
+			"conclusion": nestedString(body, "workflow_run", "conclusion"),
+			"run_id":     fmt.Sprintf("%v", nested(body, "workflow_run", "id")),
+			"url":        nestedString(body, "workflow_run", "html_url"),
 		}
 	default:
 		return ""
