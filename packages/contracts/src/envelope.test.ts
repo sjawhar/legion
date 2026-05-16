@@ -4,8 +4,10 @@ import {
   agentSubject,
   GHOSTWISPR_TOPIC_PREFIX,
   ghostWisprSubject,
+  githubPushSubject,
   githubResourceSubject,
   githubSubject,
+  githubWorkflowSubject,
   slackSubject,
   slackThreadSubject,
   whatsappSubject,
@@ -193,5 +195,63 @@ describe("slackThreadSubject", () => {
     const thread = slackThreadSubject("T123", "C456", "1234567890.123456", "message");
     const channel = slackSubject("T123", "C456", "thread");
     expect(thread.startsWith(`${channel}.`)).toBe(true);
+  });
+});
+
+describe("githubPushSubject", () => {
+  test("returns branch push subject", () => {
+    expect(githubPushSubject("acme", "widgets", "branch", "main")).toBe(
+      "notifications.github.acme.widgets.push.branch.main"
+    );
+  });
+
+  test("returns tag push subject and sanitizes dots", () => {
+    expect(githubPushSubject("acme", "widgets", "tag", "v1.0.0")).toBe(
+      "notifications.github.acme.widgets.push.tag.v1_0_0"
+    );
+  });
+
+  test("sanitizes dots in branch names", () => {
+    expect(githubPushSubject("sjawhar", "legion", "branch", "release.v2")).toBe(
+      "notifications.github.sjawhar.legion.push.branch.release_v2"
+    );
+  });
+
+  test("preserves slashes in branch names", () => {
+    expect(githubPushSubject("acme", "widgets", "branch", "feat/foo")).toBe(
+      "notifications.github.acme.widgets.push.branch.feat/foo"
+    );
+  });
+
+  test("is consistent with githubSubject prefix", () => {
+    const push = githubPushSubject("acme", "widgets", "branch", "main");
+    const repoLevel = githubSubject("acme", "widgets", "push");
+    expect(push.startsWith(`${repoLevel}.`)).toBe(true);
+  });
+});
+
+describe("githubWorkflowSubject", () => {
+  test("returns in_progress workflow subject and sanitizes filename dots", () => {
+    expect(githubWorkflowSubject("acme", "widgets", "ci.yml", "in_progress")).toBe(
+      "notifications.github.acme.widgets.workflow.ci_yml.in_progress"
+    );
+  });
+
+  test("returns completed workflow subject for .yaml extension", () => {
+    expect(githubWorkflowSubject("acme", "widgets", "release-prod.yaml", "completed")).toBe(
+      "notifications.github.acme.widgets.workflow.release-prod_yaml.completed"
+    );
+  });
+
+  test("returns requested workflow subject", () => {
+    expect(githubWorkflowSubject("sjawhar", "legion", "ci.yml", "requested")).toBe(
+      "notifications.github.sjawhar.legion.workflow.ci_yml.requested"
+    );
+  });
+
+  test("is consistent with githubSubject prefix", () => {
+    const workflow = githubWorkflowSubject("acme", "widgets", "ci.yml", "completed");
+    const repoLevel = githubSubject("acme", "widgets", "workflow");
+    expect(workflow.startsWith(`${repoLevel}.`)).toBe(true);
   });
 });

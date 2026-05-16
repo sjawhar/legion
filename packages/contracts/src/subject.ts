@@ -91,6 +91,64 @@ export function githubResourceSubject(
   return `notifications.github.${owner}.${repo}.${resourceType}.${resourceNumber}`;
 }
 
+export type GithubPushRefType = "branch" | "tag";
+
+export type GithubPushSubject<
+  Owner extends string = string,
+  Repo extends string = string,
+  RefType extends GithubPushRefType = GithubPushRefType,
+  RefName extends string = string,
+> = `notifications.github.${Owner}.${Repo}.push.${RefType}.${ReplaceDotsWithUnderscores<RefName>}`;
+
+export function githubPushSubject<
+  Owner extends string,
+  Repo extends string,
+  RefType extends GithubPushRefType,
+  RefName extends string,
+>(
+  owner: Owner,
+  repo: Repo,
+  refType: RefType,
+  refName: RefName
+): GithubPushSubject<Owner, Repo, RefType, RefName>;
+export function githubPushSubject(
+  owner: string,
+  repo: string,
+  refType: GithubPushRefType,
+  refName: string
+) {
+  return `notifications.github.${owner}.${repo}.push.${refType}.${refName.replaceAll(".", "_")}`;
+}
+
+export type GithubWorkflowAction = "requested" | "in_progress" | "completed";
+
+export type GithubWorkflowSubject<
+  Owner extends string = string,
+  Repo extends string = string,
+  Workflow extends string = string,
+  Action extends GithubWorkflowAction = GithubWorkflowAction,
+> = `notifications.github.${Owner}.${Repo}.workflow.${ReplaceDotsWithUnderscores<Workflow>}.${Action}`;
+
+export function githubWorkflowSubject<
+  Owner extends string,
+  Repo extends string,
+  Workflow extends string,
+  Action extends GithubWorkflowAction,
+>(
+  owner: Owner,
+  repo: Repo,
+  workflowFilename: Workflow,
+  action: Action
+): GithubWorkflowSubject<Owner, Repo, Workflow, Action>;
+export function githubWorkflowSubject(
+  owner: string,
+  repo: string,
+  workflowFilename: string,
+  action: GithubWorkflowAction
+) {
+  return `notifications.github.${owner}.${repo}.workflow.${workflowFilename.replaceAll(".", "_")}.${action}`;
+}
+
 export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr." as const;
 
 export type GhostWisprSubject<
@@ -125,6 +183,8 @@ export type Subject =
   | AgentSubject
   | GithubSubject
   | GithubResourceSubject
+  | GithubPushSubject
+  | GithubWorkflowSubject
   | SlackSubject
   | SlackThreadSubject
   | GhostWisprSubject
