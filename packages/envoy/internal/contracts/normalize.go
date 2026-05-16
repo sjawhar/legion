@@ -41,7 +41,10 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if githubCIEvent(input.Event) {
 		prs := githubCIPullRequests(input.Event, input.Body)
 		if len(prs) == 0 {
-			return out
+			// check_run/check_suite events not attached to any PR are noisy and have
+			// no active subscribers (auto-subscription removed in #377). Drop them;
+			// the workflow_run topic family covers per-workflow visibility instead.
+			return nil
 		}
 		out = make([]Envelope, 0, len(prs))
 		for _, pr := range prs {

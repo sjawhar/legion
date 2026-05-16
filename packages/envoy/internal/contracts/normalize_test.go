@@ -790,7 +790,7 @@ func TestGithubResourceSubject(t *testing.T) {
 	}
 }
 
-func TestGithubEnvelopesCICheckRunNoPRs(t *testing.T) {
+func TestGithubEnvelopesCICheckRunNoPRsDropsEnvelope(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "check_run",
 		Delivery: "d1",
@@ -811,14 +811,9 @@ func TestGithubEnvelopesCICheckRunNoPRs(t *testing.T) {
 			},
 		},
 	}, "@legion")
-	if len(items) != 1 {
-		t.Fatalf("expected 1 envelope, got %d", len(items))
-	}
-	if items[0].Topic != "notifications.github.sjawhar.legion.ci" {
-		t.Fatalf("unexpected topic: %s", items[0].Topic)
-	}
-	if items[0].DedupeKey != "github.d1" {
-		t.Fatalf("unexpected dedupe key: %s", items[0].DedupeKey)
+	// Un-PR'd check_run events are dropped (no active subscribers per #377).
+	if len(items) != 0 {
+		t.Fatalf("expected 0 envelopes for un-PR'd check_run, got %d", len(items))
 	}
 }
 
@@ -1084,7 +1079,7 @@ func TestSlackEnvelopeHandlesNonObjectEvent(t *testing.T) {
 	}
 }
 
-func TestGithubEnvelopesHandlesMalformedCheckRunPullRequests(t *testing.T) {
+func TestGithubEnvelopesMalformedCheckRunPullRequestsDropsEnvelope(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "check_run",
 		Delivery: "d-ci",
@@ -1104,11 +1099,10 @@ func TestGithubEnvelopesHandlesMalformedCheckRunPullRequests(t *testing.T) {
 			},
 		},
 	}, "@legion")
-	if len(items) != 1 {
-		t.Fatalf("expected only base envelope, got %d", len(items))
-	}
-	if items[0].Topic != "notifications.github.sjawhar.envoy.ci" {
-		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	// Malformed entries that yield no valid PR numbers behave like an empty list:
+	// the envelope is dropped rather than emitted on a repo-wide ci topic.
+	if len(items) != 0 {
+		t.Fatalf("expected 0 envelopes for malformed pull_requests, got %d", len(items))
 	}
 }
 
