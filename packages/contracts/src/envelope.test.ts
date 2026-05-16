@@ -8,6 +8,7 @@ import {
   githubResourceSubject,
   githubSubject,
   githubWorkflowSubject,
+  sanitizeSubjectSegment,
   slackSubject,
   slackThreadSubject,
   whatsappSubject,
@@ -175,6 +176,22 @@ describe("whatsappSubject", () => {
     );
 
     expect(item.source).toBe("whatsapp");
+  });
+});
+
+describe("sanitizeSubjectSegment", () => {
+  test("replaces dots with underscores", () => {
+    expect(sanitizeSubjectSegment("ci.yml")).toBe("ci_yml");
+    expect(sanitizeSubjectSegment("v1.0.0")).toBe("v1_0_0");
+  });
+
+  test("leaves dotless values unchanged", () => {
+    expect(sanitizeSubjectSegment("main")).toBe("main");
+    expect(sanitizeSubjectSegment("")).toBe("");
+  });
+
+  test("preserves slashes", () => {
+    expect(sanitizeSubjectSegment("feat/foo")).toBe("feat/foo");
   });
 });
 

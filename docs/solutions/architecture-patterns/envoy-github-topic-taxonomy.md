@@ -30,9 +30,9 @@ Where:
 
 ## Sanitization rule
 
-`strings.ReplaceAll(value, ".", "_")` — same as the existing `SlackThreadSubject` treatment of thread timestamps. Implemented in two places kept in sync:
-- TS: inline in `githubPushSubject` and `githubWorkflowSubject` in `packages/contracts/src/subject.ts`
-- Go: inline in `GithubPushSubject` and `GithubWorkflowSubject` in `packages/envoy/internal/contracts/generated.go` (generated from TS via `gen-go.ts`)
+Replace `.` with `_` so the segment stays a single NATS token. Extracted as a shared helper:
+- TS: `sanitizeSubjectSegment(value)` in `packages/contracts/src/subject.ts`, used by `slackThreadSubject`, `githubPushSubject`, and `githubWorkflowSubject`.
+- Go: `SanitizeSubjectSegment(value)` in `packages/envoy/internal/contracts/generated.go` (generated from TS via `gen-go.ts`), used by the corresponding Go subject builders.
 
 The transform is lossy — `release_yml` could come from `release.yml` or `release_yml`. Subscribers needing the exact identifier must inspect the envelope payload (which always carries the unsanitized `ref` or `workflow_run.path`).
 

@@ -38,6 +38,17 @@ export function slackSubject(team: string, channel: string, kind: string) {
   return `notifications.slack.${team}.${channel}.${kind}`;
 }
 
+/**
+ * Replaces dots in a NATS subject segment with underscores so the segment
+ * stays a single token. Mirrored on the Go side as `SanitizeSubjectSegment`.
+ *
+ * Note: this is intentionally lossy; subscribers needing the exact identifier
+ * should inspect the envelope payload.
+ */
+export function sanitizeSubjectSegment(value: string): string {
+  return value.replaceAll(".", "_");
+}
+
 type ReplaceDotsWithUnderscores<Value extends string> = Value extends `${infer Head}.${infer Tail}`
   ? `${Head}_${ReplaceDotsWithUnderscores<Tail>}`
   : Value;
@@ -61,7 +72,7 @@ export function slackThreadSubject<
   kind: Kind
 ): SlackThreadSubject<Team, Channel, ThreadTs, Kind>;
 export function slackThreadSubject(team: string, channel: string, threadTs: string, kind: string) {
-  return `notifications.slack.${team}.${channel}.thread.${threadTs.replaceAll(".", "_")}.${kind}`;
+  return `notifications.slack.${team}.${channel}.thread.${sanitizeSubjectSegment(threadTs)}.${kind}`;
 }
 
 export type GithubResourceSubject<
@@ -117,7 +128,7 @@ export function githubPushSubject(
   refType: GithubPushRefType,
   refName: string
 ) {
-  return `notifications.github.${owner}.${repo}.push.${refType}.${refName.replaceAll(".", "_")}`;
+  return `notifications.github.${owner}.${repo}.push.${refType}.${sanitizeSubjectSegment(refName)}`;
 }
 
 export type GithubWorkflowAction = "requested" | "in_progress" | "completed";
@@ -146,7 +157,7 @@ export function githubWorkflowSubject(
   workflowFilename: string,
   action: GithubWorkflowAction
 ) {
-  return `notifications.github.${owner}.${repo}.workflow.${workflowFilename.replaceAll(".", "_")}.${action}`;
+  return `notifications.github.${owner}.${repo}.workflow.${sanitizeSubjectSegment(workflowFilename)}.${action}`;
 }
 
 export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr." as const;
