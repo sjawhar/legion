@@ -107,21 +107,23 @@ The daemon subscribes the controller to these topics:
 - `notifications.role.legion-controller` — role-based route to the active controller session (claimed via `POST /v1/roles/set` on daemon startup)
 - `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
 - `notifications.github.*.*.mention` — @mentions across all GitHub repos
-- `notifications.github.{owner}.{repo}.ci` — CI events for repos with active workers (subscribed on first worker dispatch per repo, reconciled on daemon restart)
+- `notifications.github.<owner>.<repo>.pr.<number>.ci` — CI events scoped to a specific PR (subscribe per-PR when a worker is waiting on CI; un-PR'd `check_run`/`check_suite` events are not routed to avoid noise)
 
-**No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events. Polling handles board-level state adequately on its ~30s cycle. Only CI events (time-sensitive for pipeline progression) get Envoy subscriptions.
+**No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events. Polling handles board-level state adequately on its ~30s cycle. Only CI events scoped to a specific PR (time-sensitive for pipeline progression) get per-PR Envoy subscriptions.
 
 > **Slack topic format:** Slack topics use the real `team_id` (e.g., `T09FRELLTS8`), not the human-readable workspace slug (e.g., `trajectorylabs`). The Slack receiver publishes with the actual team ID from the Slack API. If you manually subscribe to specific Slack channels, use `notifications.slack.<team_id>.<channel_id>.mention` — see the Envoy skill for full topic format reference.
 
 ### CI Event Handling
 
-When a CI event is received (via `notifications.github.{owner}.{repo}.ci`), it indicates a `check_run` or `check_suite` status change on a PR in that repo. The controller should:
+When a CI event is received (via `notifications.github.<owner>.<repo>.pr.<number>.ci`), it indicates a `check_run` or `check_suite` status change on PR #`<number>`. The controller should:
 
-1. **Identify affected issues** — match the CI event's branch/PR to an issue with an active worker in `implement` or `test` mode
+1. **Identify affected issues** — match the PR number from the topic to an issue with an active worker in `implement` or `test` mode
 2. **Trigger an early poll** — run a focused `fetch-and-collect` for the affected repo to pick up the CI status change immediately rather than waiting for the next polling cycle
 3. **Act on results** — if CI passed and a worker is waiting, advance the pipeline (e.g., move from implement to test, or test to review)
 
 **CI events are advisory.** They trigger early polling but do not bypass the normal state machine. The authoritative state comes from the poll results, not the Envoy event payload.
+
+**Per-workflow visibility for non-PR runs:** if you need to react to a workflow that isn't attached to a PR (e.g. a release workflow on a tag push), subscribe to `notifications.github.<owner>.<repo>.workflow.<filename>.<action>` instead. See the [envoy skill](../envoy/SKILL.md) for the full taxonomy.
 
 ## Algorithm
 

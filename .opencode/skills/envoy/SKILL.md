@@ -40,7 +40,7 @@ Examples:
 
 ### GitHub
 
-GitHub topics are **resource-scoped** — every event includes the resource type and number. There are no repo-wide event-type topics (except mentions and push).
+GitHub topics are **resource-scoped** — every event includes the resource type and number (or, for push/workflow events, the ref or workflow filename).
 
 **Topic structure:** `notifications.github.<owner>.<repo>.<resource_type>.<number>.<event_kind>`
 
@@ -61,8 +61,15 @@ GitHub topics are **resource-scoped** — every event includes the resource type
   - `notifications.github.<owner>.<repo>.issue.<number>.mention`
 - Mention events (repo-wide — catches all mentions):
   - `notifications.github.<owner>.<repo>.mention`
-- Push events:
-  - `notifications.github.<owner>.<repo>.push`
+- Push events (per branch/tag):
+  - `notifications.github.<owner>.<repo>.push.branch.<branch>`
+  - `notifications.github.<owner>.<repo>.push.tag.<tag>`
+  Branch and tag names with dots are sanitized to underscores (`v1.0.0` → `v1_0_0`).
+  Push events for refs other than `refs/heads/...` and `refs/tags/...` are not routed.
+- Workflow run events (per workflow file):
+  - `notifications.github.<owner>.<repo>.workflow.<filename>.<action>`
+  Filename is the basename of `workflow_run.path` with dots sanitized (`ci.yml` → `ci_yml`).
+  `action` is one of `requested`, `in_progress`, `completed`.
 
 **Using wildcards to subscribe broadly:**
 - All events in a repo: `notifications.github.<owner>.<repo>.>`
@@ -70,6 +77,13 @@ GitHub topics are **resource-scoped** — every event includes the resource type
 - All events for a specific PR: `notifications.github.<owner>.<repo>.pr.<number>.>`
 - All issue events in a repo: `notifications.github.<owner>.<repo>.issue.>`
 - All events for a specific issue: `notifications.github.<owner>.<repo>.issue.<number>.>`
+- All push events in a repo: `notifications.github.<owner>.<repo>.push.>`
+- Pushes to main only: `notifications.github.<owner>.<repo>.push.branch.main`
+- All branch pushes: `notifications.github.<owner>.<repo>.push.branch.>`
+- All tag pushes: `notifications.github.<owner>.<repo>.push.tag.>`
+- All workflow events: `notifications.github.<owner>.<repo>.workflow.>`
+- All events for a specific workflow: `notifications.github.<owner>.<repo>.workflow.ci_yml.>`
+- Every workflow completion: `notifications.github.<owner>.<repo>.workflow.*.completed`
 
 Examples:
 
@@ -78,6 +92,8 @@ Examples:
 - `notifications.github.trajectory-labs-pbc.agent-c.issue.9909.>` (all events on issue #9909)
 - `notifications.github.sjawhar.legion.pr.>` (all PR events across all PRs)
 - `notifications.github.sjawhar.legion.mention` (all @mentions repo-wide)
+- `notifications.github.sjawhar.legion.push.branch.main` (pushes to main)
+- `notifications.github.sjawhar.legion.workflow.ci_yml.in_progress` (CI workflow starts)
 
 ### Slack
 
