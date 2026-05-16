@@ -82,3 +82,10 @@ Note NATS wildcard semantics: `*` matches exactly one token, `>` matches one or 
 | Drop policy for un-routable events | `packages/envoy/internal/contracts/normalize.go` (`GithubEnvelopes`) |
 | Subscription docs | `.opencode/skills/envoy/SKILL.md` |
 | Controller behavior | `.opencode/skills/legion-controller/SKILL.md` (CI Event Handling section) |
+
+## Verified in production
+
+Branch-tip build was deployed to the Fargate listener on 2026-05-16 (image
+`ghcr.io/sjawhar/legion/envoy@sha256:f6fa1d9c...`, branch-build tag `pr-607-bf0988a`).
+Subscriber sessions on the on-prem fleet receive the new topic shapes from real
+GitHub webhook traffic — no synthetic injection needed.
