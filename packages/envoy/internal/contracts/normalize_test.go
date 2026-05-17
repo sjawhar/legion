@@ -1295,6 +1295,46 @@ func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
 	}
 }
 
+func TestGithubEnvelopesWorkflowRunLargeRunIDNotScientific(t *testing.T) {
+	// Regression: real GitHub run_ids are 11+ digit integers. JSON unmarshals
+	// them as float64, and fmt.Sprintf("%v", ...) used to render them in
+	// scientific notation (e.g. "2.5964358269e+10"). The payload must carry
+	// the integer form so downstream consumers can parse it as an ID.
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event:    "workflow_run",
+		Delivery: "d-wf-bigid",
+		EventID:  "e1",
+		TraceID:  "t1",
+		Body: map[string]any{
+			"action": "completed",
+			"repository": map[string]any{
+				"full_name": "sjawhar/legion",
+				"name":      "legion",
+				"owner":     map[string]any{"login": "sjawhar"},
+			},
+			"workflow_run": map[string]any{
+				"id":          float64(25964358269), // 11-digit integer arriving via JSON
+				"name":        "Legion Envoy and Contracts",
+				"path":        ".github/workflows/envoy-and-contracts.yaml",
+				"head_branch": "main",
+				"status":      "completed",
+				"conclusion":  "success",
+				"html_url":    "https://github.com/sjawhar/legion/actions/runs/25964358269",
+			},
+		},
+	}, "@legion")
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
+		t.Fatalf("invalid payload JSON: %v", err)
+	}
+	if payload["run_id"] != "25964358269" {
+		t.Fatalf("run_id rendered incorrectly: got %q, want %q", payload["run_id"], "25964358269")
+	}
+}
+
 func TestGithubEnvelopesWorkflowRunMissingPathDropsEnvelope(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "workflow_run",

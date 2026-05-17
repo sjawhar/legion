@@ -3,6 +3,8 @@ package contracts
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -230,11 +232,17 @@ func githubWorkflowFilename(body map[string]any) string {
 	return path
 }
 
-// nestedNumberString formats a nested numeric (or any) value as a string, returning "" if missing.
+// nestedNumberString formats a nested numeric (or any) value as a string,
+// returning "" if missing. JSON numbers always unmarshal to float64; whole
+// values are formatted as integers so large IDs (e.g. GitHub run_id) do not
+// render in scientific notation.
 func nestedNumberString(body map[string]any, keys ...string) string {
 	v := nested(body, keys...)
 	if v == nil {
 		return ""
+	}
+	if f, ok := v.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) && f == math.Trunc(f) {
+		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
 	return fmt.Sprintf("%v", v)
 }
@@ -554,7 +562,7 @@ func githubPayload(event string, body map[string]any) string {
 			"branch":     nestedString(body, "workflow_run", "head_branch"),
 			"status":     nestedString(body, "workflow_run", "status"),
 			"conclusion": nestedString(body, "workflow_run", "conclusion"),
-			"run_id":     fmt.Sprintf("%v", nested(body, "workflow_run", "id")),
+			"run_id":     nestedNumberString(body, "workflow_run", "id"),
 			"url":        nestedString(body, "workflow_run", "html_url"),
 		}
 	default:
