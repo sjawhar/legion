@@ -132,6 +132,8 @@ envoy_unsubscribe([])
 
 **Removed in #377.** The daemon previously subscribed the controller to `notifications.github.{owner}.{repo}.ci` on first worker dispatch per repo, tracked via `subscribedCiRepos` Set. This was removed because CI events from unrelated branches (Vercel previews, skipped jobs) flooded the controller with noise. The controller can subscribe manually via `envoy_subscribe` when it specifically needs to watch a CI run.
 
+**Topic itself removed later.** The bare `notifications.github.<owner>.<repo>.ci` topic is no longer emitted at all — Envoy now drops `check_run`/`check_suite` events that aren't attached to a PR. Per-PR CI events (`notifications.github.<o>.<r>.pr.<n>.ci`) continue to route. For visibility into workflows that aren't tied to a PR (e.g. release workflows on tag pushes), subscribe to the per-workflow topic `notifications.github.<o>.<r>.workflow.<filename>.<action>` instead. See [envoy-github-topic-taxonomy](../architecture-patterns/envoy-github-topic-taxonomy.md).
+
 ### Resume Re-Subscription
 
 When a worker is resumed via `POST /workers/:id/prompt`, the daemon re-subscribes the worker to its issue topics using stored `repo` and `issueNumber` from the worker entry. PR topic re-subscription is the worker's responsibility (via `envoy_subscribe` in the skill).

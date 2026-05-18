@@ -3,6 +3,8 @@ package contracts
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -32,12 +34,19 @@ func GithubEnvelope(input GithubEnvelopeInput) Envelope {
 
 func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	item := GithubEnvelope(input)
+	if item.Topic == "" {
+		// Event should not be routed (e.g. push to non-heads/tags ref).
+		return nil
+	}
 	out := []Envelope{item}
 	owner, repo := githubRepo(input.Body)
 	if githubCIEvent(input.Event) {
 		prs := githubCIPullRequests(input.Event, input.Body)
 		if len(prs) == 0 {
-			return out
+			// check_run/check_suite events not attached to any PR are noisy and have
+			// no active subscribers (auto-subscription removed in #377). Drop them;
+			// the workflow_run topic family covers per-workflow visibility instead.
+			return nil
 		}
 		out = make([]Envelope, 0, len(prs))
 		for _, pr := range prs {
@@ -157,13 +166,31 @@ func SlackEnvelopes(input SlackEnvelopeInput) []Envelope {
 }
 
 // githubTopic builds the full topic path with number hierarchy.
-// PR #7706 opened:       pr.7706
+// PR #7706 opened:        pr.7706
 // Comment on PR #7706:    pr.7706.comment
 // Review on PR #7706:     pr.7706.review
 // Issue #42 opened:       issue.42
 // Comment on issue #42:   issue.42.comment
-// Push event:             push
+// Push to branch main:    push.branch.main
+// Push to tag v1.0.0:     push.tag.v1_0_0 (dots sanitized to underscores)
+// workflow_run:            workflow.<filename>.<action>
+// Returns empty string for events that should not be routed (e.g. push to refs that aren't heads or tags).
 func githubTopic(owner string, repo string, event string, body map[string]any) string {
+	if event == "push" {
+		refType, refName, ok := githubPushRefSegments(body)
+		if !ok {
+			return ""
+		}
+		return GithubPushSubject(owner, repo, refType, refName)
+	}
+	if event == "workflow_run" {
+		filename := githubWorkflowFilename(body)
+		action := stringValue(body["action"])
+		if filename == "" || action == "" {
+			return ""
+		}
+		return GithubWorkflowSubject(owner, repo, filename, action)
+	}
 	num := githubNumber(event, body)
 	parent := githubParentKind(event, body)
 	kind := githubKind(event)
@@ -175,8 +202,49 @@ func githubTopic(owner string, repo string, event string, body map[string]any) s
 		// e.g., pr.7706, issue.42
 		return GithubSubject(owner, repo, kind+"."+num)
 	}
-	// e.g., push, ci
+	// e.g., ci (un-PR'd; filtered out by GithubEnvelopes)
 	return GithubSubject(owner, repo, kind)
+}
+
+// githubPushRefSegments splits a push event's ref field into (refType, refName).
+// Returns false for refs other than refs/heads/... or refs/tags/...
+func githubPushRefSegments(body map[string]any) (refType, refName string, ok bool) {
+	ref := stringValue(body["ref"])
+	switch {
+	case strings.HasPrefix(ref, "refs/heads/"):
+		return "branch", strings.TrimPrefix(ref, "refs/heads/"), true
+	case strings.HasPrefix(ref, "refs/tags/"):
+		return "tag", strings.TrimPrefix(ref, "refs/tags/"), true
+	}
+	return "", "", false
+}
+
+// githubWorkflowFilename returns the basename of the workflow_run.path field,
+// e.g. ".github/workflows/ci.yml" -> "ci.yml". Returns "" if the path is missing.
+func githubWorkflowFilename(body map[string]any) string {
+	path := nestedString(body, "workflow_run", "path")
+	if path == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[idx+1:]
+	}
+	return path
+}
+
+// nestedNumberString formats a nested numeric (or any) value as a string,
+// returning "" if missing. JSON numbers always unmarshal to float64; whole
+// values are formatted as integers so large IDs (e.g. GitHub run_id) do not
+// render in scientific notation.
+func nestedNumberString(body map[string]any, keys ...string) string {
+	v := nested(body, keys...)
+	if v == nil {
+		return ""
+	}
+	if f, ok := v.(float64); ok && !math.IsNaN(f) && !math.IsInf(f, 0) && f == math.Trunc(f) {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // githubParentKind returns the entity type that owns the number.
@@ -206,6 +274,8 @@ func githubKind(event string) string {
 		return "push"
 	case "check_run", "check_suite":
 		return "ci"
+	case "workflow_run":
+		return "workflow"
 	case "issue_comment":
 		return "comment"
 	case "pull_request_review":
@@ -393,6 +463,17 @@ func githubSummary(event string, body map[string]any) string {
 			"status":     nestedString(body, "check_suite", "status"),
 			"conclusion": nestedString(body, "check_suite", "conclusion"),
 		}
+	case "workflow_run":
+		data = map[string]string{
+			"kind":       "workflow",
+			"action":     action,
+			"repo":       repo,
+			"workflow":   nestedString(body, "workflow_run", "name"),
+			"path":       nestedString(body, "workflow_run", "path"),
+			"branch":     nestedString(body, "workflow_run", "head_branch"),
+			"status":     nestedString(body, "workflow_run", "status"),
+			"conclusion": nestedString(body, "workflow_run", "conclusion"),
+		}
 	default:
 		data = map[string]string{
 			"kind":   "unknown",
@@ -470,6 +551,19 @@ func githubPayload(event string, body map[string]any) string {
 			"author": nestedString(body, "issue", "user", "login"),
 			"body":   nestedString(body, "issue", "body"),
 			"url":    nestedString(body, "issue", "html_url"),
+		}
+	case "workflow_run":
+		data = map[string]string{
+			"kind":       "workflow",
+			"action":     action,
+			"repo":       repo,
+			"workflow":   nestedString(body, "workflow_run", "name"),
+			"path":       nestedString(body, "workflow_run", "path"),
+			"branch":     nestedString(body, "workflow_run", "head_branch"),
+			"status":     nestedString(body, "workflow_run", "status"),
+			"conclusion": nestedString(body, "workflow_run", "conclusion"),
+			"run_id":     nestedNumberString(body, "workflow_run", "id"),
+			"url":        nestedString(body, "workflow_run", "html_url"),
 		}
 	default:
 		return ""

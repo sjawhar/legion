@@ -38,6 +38,17 @@ export function slackSubject(team: string, channel: string, kind: string) {
   return `notifications.slack.${team}.${channel}.${kind}`;
 }
 
+/**
+ * Replaces dots in a NATS subject segment with underscores so the segment
+ * stays a single token. Mirrored on the Go side as `SanitizeSubjectSegment`.
+ *
+ * Note: this is intentionally lossy; subscribers needing the exact identifier
+ * should inspect the envelope payload.
+ */
+export function sanitizeSubjectSegment(value: string): string {
+  return value.replaceAll(".", "_");
+}
+
 type ReplaceDotsWithUnderscores<Value extends string> = Value extends `${infer Head}.${infer Tail}`
   ? `${Head}_${ReplaceDotsWithUnderscores<Tail>}`
   : Value;
@@ -61,7 +72,7 @@ export function slackThreadSubject<
   kind: Kind
 ): SlackThreadSubject<Team, Channel, ThreadTs, Kind>;
 export function slackThreadSubject(team: string, channel: string, threadTs: string, kind: string) {
-  return `notifications.slack.${team}.${channel}.thread.${threadTs.replaceAll(".", "_")}.${kind}`;
+  return `notifications.slack.${team}.${channel}.thread.${sanitizeSubjectSegment(threadTs)}.${kind}`;
 }
 
 export type GithubResourceSubject<
@@ -89,6 +100,64 @@ export function githubResourceSubject(
   resourceNumber: number | string
 ) {
   return `notifications.github.${owner}.${repo}.${resourceType}.${resourceNumber}`;
+}
+
+export type GithubPushRefType = "branch" | "tag";
+
+export type GithubPushSubject<
+  Owner extends string = string,
+  Repo extends string = string,
+  RefType extends GithubPushRefType = GithubPushRefType,
+  RefName extends string = string,
+> = `notifications.github.${Owner}.${Repo}.push.${RefType}.${ReplaceDotsWithUnderscores<RefName>}`;
+
+export function githubPushSubject<
+  Owner extends string,
+  Repo extends string,
+  RefType extends GithubPushRefType,
+  RefName extends string,
+>(
+  owner: Owner,
+  repo: Repo,
+  refType: RefType,
+  refName: RefName
+): GithubPushSubject<Owner, Repo, RefType, RefName>;
+export function githubPushSubject(
+  owner: string,
+  repo: string,
+  refType: GithubPushRefType,
+  refName: string
+) {
+  return `notifications.github.${owner}.${repo}.push.${refType}.${sanitizeSubjectSegment(refName)}`;
+}
+
+export type GithubWorkflowAction = "requested" | "in_progress" | "completed";
+
+export type GithubWorkflowSubject<
+  Owner extends string = string,
+  Repo extends string = string,
+  Workflow extends string = string,
+  Action extends GithubWorkflowAction = GithubWorkflowAction,
+> = `notifications.github.${Owner}.${Repo}.workflow.${ReplaceDotsWithUnderscores<Workflow>}.${Action}`;
+
+export function githubWorkflowSubject<
+  Owner extends string,
+  Repo extends string,
+  Workflow extends string,
+  Action extends GithubWorkflowAction,
+>(
+  owner: Owner,
+  repo: Repo,
+  workflowFilename: Workflow,
+  action: Action
+): GithubWorkflowSubject<Owner, Repo, Workflow, Action>;
+export function githubWorkflowSubject(
+  owner: string,
+  repo: string,
+  workflowFilename: string,
+  action: GithubWorkflowAction
+) {
+  return `notifications.github.${owner}.${repo}.workflow.${sanitizeSubjectSegment(workflowFilename)}.${action}`;
 }
 
 export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr." as const;
@@ -125,6 +194,8 @@ export type Subject =
   | AgentSubject
   | GithubSubject
   | GithubResourceSubject
+  | GithubPushSubject
+  | GithubWorkflowSubject
   | SlackSubject
   | SlackThreadSubject
   | GhostWisprSubject

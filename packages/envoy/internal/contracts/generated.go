@@ -72,8 +72,22 @@ func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
 
+// SanitizeSubjectSegment replaces dots in a NATS subject segment with underscores so the segment
+// stays a single token. Mirrored on the TS side as `sanitizeSubjectSegment`.
+func SanitizeSubjectSegment(value string) string {
+	return strings.ReplaceAll(value, ".", "_")
+}
+
 func SlackThreadSubject(team, channel, threadTs, kind string) string {
-	return "notifications.slack." + team + "." + channel + ".thread." + strings.ReplaceAll(threadTs, ".", "_") + "." + kind
+	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind
+}
+
+func GithubPushSubject(owner, repo, refType, refName string) string {
+	return "notifications.github." + owner + "." + repo + ".push." + refType + "." + SanitizeSubjectSegment(refName)
+}
+
+func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
+	return "notifications.github." + owner + "." + repo + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
