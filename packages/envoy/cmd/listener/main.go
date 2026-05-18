@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -72,6 +73,63 @@ func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string
 		return false
 	}
 	return isSessionLive(sessions, sessionID)
+}
+
+// runSelfHealthWatchdog periodically pings the KV registries and self-terminates
+// after `threshold` consecutive failures. Designed for the case where the bus
+// recovery path restores the main subject subscription but the KV-bound JetStream
+// context stays broken (observed on sami after a long Tailscale write-timeout).
+//
+// Termination uses SIGTERM so the existing graceful shutdown path runs. Docker
+// `restart: unless-stopped` (on-prem) and ECS task respawn (Fargate) then bring
+// the listener back with a fresh conn.
+func runSelfHealthWatchdog(logger *logging.Logger, registry *store.Registry, sessions *session.SessionRegistry, interval time.Duration, threshold int) {
+	terminate := func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
+	probe := func() error { return checkSelfHealth(registry, sessions) }
+	runSelfHealthLoop(logger, probe, terminate, interval, threshold)
+}
+
+// checkSelfHealth pings both KV-backed registries. Returns the first error
+// encountered, or nil when all are reachable. Extracted from the watchdog loop
+// so callers (and tests) can probe the same view of health that the loop uses.
+func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry) error {
+	if registry != nil {
+		if err := registry.Ping(); err != nil {
+			return fmt.Errorf("interest kv: %w", err)
+		}
+	}
+	if sessions != nil {
+		if err := sessions.Ping(); err != nil {
+			return fmt.Errorf("session kv: %w", err)
+		}
+	}
+	return nil
+}
+
+// runSelfHealthLoop ticks `probe`, tracking consecutive failures. After
+// `threshold` consecutive failures it invokes `terminate` once and returns.
+// Split from runSelfHealthWatchdog so tests can inject a fake terminate.
+func runSelfHealthLoop(logger *logging.Logger, probe func() error, terminate func(), interval time.Duration, threshold int) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	failures := 0
+	for range ticker.C {
+		err := probe()
+		if err == nil {
+			if failures > 0 {
+				logger.Info("self-health recovered", slog.Int("prior_consecutive_failures", failures))
+			}
+			failures = 0
+			continue
+		}
+		failures++
+		logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
+		if failures >= threshold {
+			logger.Error("self-health threshold exceeded — terminating to let restart policy recover", slog.String("error", err.Error()))
+			terminate()
+			return
+		}
+	}
 }
 
 // readinessGate returns 503 until ready returns true, providing a single
@@ -359,6 +417,25 @@ func main() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
 			return
+		}
+		// Ping JetStream KV buckets. The bus recovery path only restores the main
+		// subject subscription on reconnect; the KV-backed registries hold handles
+		// to the original closed *nats.Conn and never get re-opened. Catching this
+		// here lets the self-health watchdog terminate the listener so the restart
+		// policy can bring it back fresh.
+		if d.registry != nil {
+			if err := d.registry.Ping(); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "interest kv unavailable: " + err.Error()})
+				return
+			}
+		}
+		if d.sessions != nil {
+			if err := d.sessions.Ping(); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "session kv unavailable: " + err.Error()})
+				return
+			}
 		}
 		response := map[string]interface{}{"status": "healthy"}
 		if healthzConsumer != "" {
@@ -765,6 +842,19 @@ func main() {
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 
+	// Phase 6c: Self-health watchdog. Periodically pings the JetStream KV
+	// buckets; if they are unreachable for several consecutive checks the
+	// listener self-terminates so the container restart policy (Docker
+	// `restart: unless-stopped` on-prem, ECS task respawn on Fargate) can
+	// bring it back with a fresh NATS conn and registries.
+	//
+	// This is the failure mode observed on the on-prem `sami` listener after a
+	// long Tailscale write-timeout: bus recovery re-established the subject
+	// subscription on a fresh *nats.Conn, but store.Registry and
+	// session.SessionRegistry kept their KV handles bound to the original
+	// closed conn. Restart is cheap and lossless — KV state is durable, NATS
+	// retries undelivered messages, and OpenCode sessions re-register.
+	go runSelfHealthWatchdog(logger, registry, sessions, 30*time.Second, 3)
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)

@@ -190,3 +190,43 @@ func TestSessionRegistry_NilDeleteReturnsErrNoKV(t *testing.T) {
 		t.Fatalf("expected ErrNoKV, got: %v", err)
 	}
 }
+
+
+func TestSessionRegistry_Ping_Healthy(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open: %v", err)
+	}
+	if err := reg.Ping(); err != nil {
+		t.Fatalf("Ping on healthy conn returned error: %v", err)
+	}
+}
+
+func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
+	// Regression for the sami listener stuck-after-recovery scenario — the
+	// session registry's KV handle is bound to the original *nats.Conn. After
+	// bus recovery replaces the conn, this Ping must surface the broken state
+	// so the listener can self-terminate.
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open: %v", err)
+	}
+	if err := reg.Ping(); err != nil {
+		t.Fatalf("sanity: Ping before close: %v", err)
+	}
+
+	client.Conn.Close()
+
+	if err := reg.Ping(); err == nil {
+		t.Fatal("Ping after conn close should return error")
+	}
+}
+
+func TestSessionRegistry_Ping_NilReceiver(t *testing.T) {
+	var reg *SessionRegistry
+	if err := reg.Ping(); err != ErrNoKV {
+		t.Fatalf("expected ErrNoKV, got %v", err)
+	}
+}
