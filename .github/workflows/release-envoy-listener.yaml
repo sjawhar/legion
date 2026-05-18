@@ -172,6 +172,12 @@ jobs:
           git push origin --tags
 
       - uses: actions/download-artifact@v4
+        with:
+          # Skip the *.dockerbuild attestation artifact uploaded automatically
+          # by docker/build-push-action. It's not used by the release and has
+          # been hanging in Azure blob download (failed both #607 and #608
+          # releases). The release only needs the two binary artifacts.
+          pattern: legion-envoy-*
       - name: Generate checksums
         run: |
           for dir in legion-envoy-amd64 legion-envoy-arm64; do
