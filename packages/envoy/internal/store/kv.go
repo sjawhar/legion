@@ -104,21 +104,46 @@ func (r *Registry) watch() {
 }
 
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
-	cur, err := r.Get(item.SessionID)
-	if err == nil {
+	cur, getErr := r.Get(item.SessionID)
+	merged, err := mergeForUpsert(cur, getErr, item, topics, time.Now().UnixMilli())
+	if err != nil {
+		return Interest{}, err
+	}
+	buf, err := json.Marshal(merged)
+	if err != nil {
+		return Interest{}, err
+	}
+	_, err = r.kv.Put(merged.SessionID, buf)
+	return merged, err
+}
+
+// mergeForUpsert computes the Interest to persist by reconciling the requested
+// item/topics with the current cached/durable state returned by r.Get.
+//
+// Critical invariant: a transient KV error (anything other than ErrKeyNotFound)
+// MUST be returned so the caller refuses to overwrite durable state with the
+// partial heartbeat payload. Silently treating transient errors as "no prior
+// state" is what caused Atlas's pr.11416.> subscription to disappear: when r.Get
+// failed transiently during a 2-minute heartbeat, the original implementation
+// merged only the agent topic and Put a truncated state to KV, which then
+// propagated to the in-memory cache via watch() and made all subsequent github
+// events fall through registry.Match with "no matching interests".
+//
+// ErrKeyNotFound is the genuinely-new-session case — proceed with the passed-in
+// item and topics.
+func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
+	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) {
+		return Interest{}, getErr
+	}
+	if getErr == nil {
 		item = cur
 	}
 	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
 	item.Dir = first(item.Dir, curValue(cur.Dir))
-	item.UpdatedAt = time.Now().UnixMilli()
+	item.UpdatedAt = now
 	item = Merge(item, topics)
 	sort.Strings(item.Topics)
-	buf, err := json.Marshal(item)
-	if err != nil {
-		return Interest{}, err
-	}
-	_, err = r.kv.Put(item.SessionID, buf)
-	return item, err
+	return item, nil
 }
 
 func (r *Registry) Remove(sessionID string, topics []string) error {
