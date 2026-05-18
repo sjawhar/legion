@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/logging"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -1354,4 +1355,125 @@ func TestTopicPrefix(t *testing.T) {
 			t.Errorf("TopicPrefix(%q) = %q, want %q", tc.topic, got, tc.want)
 		}
 	}
+}
+
+
+func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
+	client := setupTestNATS(t)
+	defer client.Close()
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(time.Minute))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	if err := checkSelfHealth(registry, sessions); err != nil {
+		t.Fatalf("healthy probe should not error: %v", err)
+	}
+}
+
+func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
+	// Regression for the sami listener after-recovery scenario — the KV
+	// registries hold handles bound to the original *nats.Conn that the bus
+	// recovery path replaced. checkSelfHealth must surface that as an error
+	// so the self-health watchdog can terminate the listener.
+	client := setupTestNATS(t)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(time.Minute))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+
+	client.Conn.Close()
+
+	if err := checkSelfHealth(registry, sessions); err == nil {
+		t.Fatal("probe after conn close should return error")
+	}
+}
+
+func TestRunSelfHealthLoop_TerminatesAfterThreshold(t *testing.T) {
+	logger := logging.New("test")
+	var probeCalls int32
+	probe := func() error {
+		atomic.AddInt32(&probeCalls, 1)
+		return errors.New("always failing for test")
+	}
+	terminated := make(chan struct{}, 1)
+	terminate := func() { terminated <- struct{}{} }
+
+	done := make(chan struct{})
+	go func() {
+		runSelfHealthLoop(logger, probe, terminate, 5*time.Millisecond, 3)
+		close(done)
+	}()
+
+	select {
+	case <-terminated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminate was not invoked within 2s")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("loop did not exit after terminate")
+	}
+	if got := atomic.LoadInt32(&probeCalls); got < 3 {
+		t.Fatalf("expected at least 3 probe calls before terminate, got %d", got)
+	}
+}
+
+func TestRunSelfHealthLoop_RecoveryResetsCounter(t *testing.T) {
+	logger := logging.New("test")
+	var probeCalls int32
+	probe := func() error {
+		calls := atomic.AddInt32(&probeCalls, 1)
+		// Fail, fail, succeed, fail, fail, ... — never 3-in-a-row.
+		if calls%3 == 0 {
+			return nil
+		}
+		return errors.New("intermittent")
+	}
+	terminate := func() { t.Fatal("terminate must not be called when counter resets") }
+
+	done := make(chan struct{})
+	go func() {
+		runSelfHealthLoop(logger, probe, terminate, 5*time.Millisecond, 3)
+		close(done)
+	}()
+
+	// Let the loop run long enough to do ~10 cycles and verify it never terminates.
+	time.Sleep(100 * time.Millisecond)
+	if got := atomic.LoadInt32(&probeCalls); got < 5 {
+		t.Fatalf("expected at least 5 probe calls, got %d", got)
+	}
+	select {
+	case <-done:
+		t.Fatal("loop terminated despite intermittent recoveries")
+	default:
+	}
+}
+
+// setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
+func setupTestNATS(t *testing.T) *bus.Client {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("failed to start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("bus connect: %v", err)
+	}
+	return client
 }

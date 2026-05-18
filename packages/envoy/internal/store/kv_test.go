@@ -811,3 +811,42 @@ func TestReaperGraceWindow(t *testing.T) {
 		t.Fatalf("ses_recent should still exist within grace window: %v", err)
 	}
 }
+
+
+func TestPing_HealthyConnReturnsNil(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	if err := reg.Ping(); err != nil {
+		t.Fatalf("Ping on healthy conn returned error: %v", err)
+	}
+}
+
+func TestPing_ClosedConnReturnsError(t *testing.T) {
+	// Regression for the sami listener stuck-after-recovery scenario: the bus
+	// recovery path replaces *nats.Conn but leaves Registry.kv handles bound to
+	// the original closed conn. Ping must surface that as an error so the
+	// listener can self-terminate and let restart policy recover.
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	if err := reg.Ping(); err != nil {
+		t.Fatalf("sanity: Ping before close returned error: %v", err)
+	}
+
+	conn.Close()
+
+	if err := reg.Ping(); err == nil {
+		t.Fatal("Ping after conn close should return error")
+	}
+}

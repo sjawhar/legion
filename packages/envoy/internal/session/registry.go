@@ -63,6 +63,16 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	return &SessionRegistry{kv: kv}, nil
 }
 
+// Ping verifies the session KV bucket is reachable. Returns nil on success.
+// See store.Registry.Ping for why this exists.
+func (r *SessionRegistry) Ping() error {
+	if r == nil {
+		return ErrNoKV
+	}
+	_, err := r.kv.Status()
+	return err
+}
+
 // ErrNoKV is returned when methods are called on a nil SessionRegistry.
 var ErrNoKV = fmt.Errorf("session registry: KV unavailable")
 

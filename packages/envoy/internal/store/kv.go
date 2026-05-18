@@ -57,6 +57,21 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	return r, nil
 }
 
+// Ping verifies the KV bucket is reachable via the underlying NATS connection.
+// Returns nil on success. Used by /healthz so the listener can self-terminate
+// (and let restart policy bring it back) when the KV-backed JetStream context
+// is broken — e.g. after the NATS connection drops and only the main subject
+// subscription gets re-established by the bus recovery path.
+func (r *Registry) Ping() error {
+	if _, err := r.kv.Status(); err != nil {
+		return err
+	}
+	if _, err := r.roleKV.Status(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.KeyValue, error) {
 	kv, err := js.KeyValue(bucket)
 	if errors.Is(err, nats.ErrBucketNotFound) {
