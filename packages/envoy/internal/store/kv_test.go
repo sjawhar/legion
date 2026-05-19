@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -156,6 +157,119 @@ func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
 		t.Fatalf("expected 0 matches for agent topic, got %d", len(got))
 	}
 }
+
+// --- Unit Tests for mergeForUpsert (pure logic, no NATS) ---
+//
+// Regression coverage for the silent-fallback bug that caused Atlas's pr.11416.>
+// subscription to be silently truncated to [agent-self] across 235 dropped events:
+// when r.kv.Get() returned a transient error, the original Upsert silently
+// treated it the same as ErrKeyNotFound and clobbered durable state with whatever
+// the heartbeat sent (only the agent topic).
+
+func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_x",
+		MachineID: "m1",
+		Dir:       "/workspace",
+		Topics:    []string{"topic.a", "topic.b"},
+	}
+	item := Interest{SessionID: "ses_x", MachineID: "m1", Dir: "/workspace"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"topic.c"}, 42)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	wantTopics := []string{"topic.a", "topic.b", "topic.c"}
+	if len(result.Topics) != len(wantTopics) {
+		t.Fatalf("expected %v topics, got %v", wantTopics, result.Topics)
+	}
+	for i, want := range wantTopics {
+		if result.Topics[i] != want {
+			t.Fatalf("topic[%d]: expected %s, got %s", i, want, result.Topics[i])
+		}
+	}
+	if result.UpdatedAt != 42 {
+		t.Fatalf("expected UpdatedAt=42, got %d", result.UpdatedAt)
+	}
+}
+
+func TestMergeForUpsert_ErrKeyNotFoundCreatesNewEntry(t *testing.T) {
+	item := Interest{
+		SessionID: "ses_new",
+		MachineID: "m1",
+		Dir:       "/workspace",
+	}
+
+	result, err := mergeForUpsert(Interest{}, natsgo.ErrKeyNotFound, item, []string{"topic.fresh"}, 100)
+	if err != nil {
+		t.Fatalf("ErrKeyNotFound must be treated as new entry, not propagated: %v", err)
+	}
+	if result.SessionID != "ses_new" {
+		t.Fatalf("expected SessionID ses_new, got %q", result.SessionID)
+	}
+	if result.MachineID != "m1" {
+		t.Fatalf("expected MachineID m1, got %q", result.MachineID)
+	}
+	if len(result.Topics) != 1 || result.Topics[0] != "topic.fresh" {
+		t.Fatalf("expected [topic.fresh], got %v", result.Topics)
+	}
+}
+
+func TestMergeForUpsert_TransientErrorRefusesToWrite(t *testing.T) {
+	// This is the regression test for the Atlas dropout bug. A transient KV error
+	// (NOT ErrKeyNotFound) MUST propagate up so the caller refuses to silently
+	// overwrite durable state with whatever was passed in.
+	transient := errors.New("nats: connection lost")
+	item := Interest{
+		SessionID: "ses_atlas",
+		MachineID: "m1",
+		Dir:       "/workspace",
+	}
+
+	_, err := mergeForUpsert(Interest{}, transient, item, []string{"topic.heartbeat"}, 99)
+	if err == nil {
+		t.Fatal("transient KV error MUST be returned, not silently swallowed")
+	}
+	if !errors.Is(err, transient) {
+		t.Fatalf("expected returned error to wrap transient (%v), got %v", transient, err)
+	}
+}
+
+func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) {
+	// Heartbeats from the plugin do not send MachineID. The cached state must win.
+	cur := Interest{
+		SessionID: "ses_x",
+		MachineID: "sami-agents-mx",
+		Dir:       "/home/ubuntu/agent-c/rl-eval/default",
+		Topics:    []string{"notifications.agent.ses_x", "notifications.github.foo.bar.>"},
+	}
+	// Simulates the listener's subscribe handler call shape: MachineID is set by
+	// listener config and matches cur, but heartbeat body sends only agent topic.
+	item := Interest{SessionID: "ses_x", MachineID: "sami-agents-mx", Dir: "/home/ubuntu/agent-c/rl-eval/default"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x"}, 200)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.MachineID != "sami-agents-mx" {
+		t.Fatalf("MachineID lost: got %q", result.MachineID)
+	}
+	if result.Dir != "/home/ubuntu/agent-c/rl-eval/default" {
+		t.Fatalf("Dir lost: got %q", result.Dir)
+	}
+	// CRITICAL: the github topic must survive heartbeats that send only agent topic.
+	foundGithub := false
+	for _, topic := range result.Topics {
+		if topic == "notifications.github.foo.bar.>" {
+			foundGithub = true
+			break
+		}
+	}
+	if !foundGithub {
+		t.Fatalf("github topic was lost during heartbeat merge: %v", result.Topics)
+	}
+}
+
 
 // --- Integration Tests (testcontainers NATS) ---
 
@@ -478,6 +592,38 @@ func TestGet_ColdCacheMissReturnsError(t *testing.T) {
 	}
 	if err != natsgo.ErrKeyNotFound {
 		t.Fatalf("expected ErrKeyNotFound, got %v", err)
+	}
+}
+
+func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
+	// Integration regression for the Atlas dropout bug: when r.kv.Get fails
+	// transiently (not ErrKeyNotFound), Upsert MUST return the error rather
+	// than silently writing a truncated state to KV.
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{
+		SessionID: "ses_atlas",
+		MachineID: "m1",
+		Dir:       "/workspace",
+		Topics:    []string{"topic.agent", "topic.github.pr.>"},
+	})
+
+	// Close the NATS connection BEFORE the cache has been warmed for this key.
+	// coldRegistry skips the eager load, so the cache is empty and Upsert will
+	// fall through to r.kv.Get, which now returns a transient error.
+	conn.Close()
+
+	_, err := reg.Upsert(
+		Interest{SessionID: "ses_atlas", MachineID: "m1", Dir: "/workspace"},
+		[]string{"topic.agent"}, // heartbeat-shaped payload
+	)
+	if err == nil {
+		t.Fatal("Upsert must return error when KV is unreachable; silent fallback is the bug")
+	}
+	if errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("transient KV failure must not be conflated with ErrKeyNotFound; got: %v", err)
 	}
 }
 

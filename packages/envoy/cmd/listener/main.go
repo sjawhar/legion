@@ -502,7 +502,15 @@ func main() {
 			Dir:       body.Dir,
 		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			// WARN, not Error: this is a transient condition (typically a NATS/KV
+			// hiccup during heartbeat) and the plugin's next 2-min heartbeat will
+			// retry. Logged at WARN so subscription-drop incidents are greppable
+			// in one shot instead of requiring 2-hour log forensics.
+			logger.Warn("listener upsert failed",
+				slog.String("session_id", body.SessionID),
+				slog.Any("topics", body.Topics),
+				slog.String("error", err.Error()))
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		if body.Port > 0 {
