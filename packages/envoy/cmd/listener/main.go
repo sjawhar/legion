@@ -646,6 +646,23 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Wait for the interest cache to finish its initial scan of existing KV
+	// entries before we start accepting NATS messages. Without this gate, real
+	// events that arrive in the warm-up window get "no matching interests"
+	// even when the durable KV entry has subscribers — the second half of the
+	// Atlas dropout investigation (PR #610 fixed the silent-fallback half).
+	//
+	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
+	// If the watcher fails to start, signalReady() is called from the error
+	// path so we fail open and let the self-health watchdog catch a persistently
+	// broken registry via its KV pings.
+	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
+		logger.Warn("interest cache warm-up timed out; serving with possibly empty cache",
+			slog.String("error", err.Error()))
+	}
+	cacheReadyCancel()
+
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),

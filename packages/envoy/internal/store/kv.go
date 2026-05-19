@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -16,10 +17,17 @@ const Bucket = "envoy_interests"
 const RoleBucket = "envoy_roles"
 
 type Registry struct {
-	kv     nats.KeyValue
-	roleKV nats.KeyValue
-	mu     sync.RWMutex
-	cache  map[string]Interest
+	kv        nats.KeyValue
+	roleKV    nats.KeyValue
+	mu        sync.RWMutex
+	cache     map[string]Interest
+	// readyCh is closed when watch() finishes its initial scan of existing KV
+	// entries (signalled by the nil sentinel WatchAll() emits after delivering
+	// the current value of each existing key). After readyCh is closed, the
+	// cache is consistent with the durable KV state and Match() can answer
+	// every "is this session subscribed?" question without falling through.
+	readyCh   chan struct{}
+	readyOnce sync.Once
 }
 
 // OpenOption configures the registry.
@@ -49,7 +57,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Registry{kv: kv, roleKV: roleKV, cache: map[string]Interest{}}
+	r := &Registry{kv: kv, roleKV: roleKV, cache: map[string]Interest{}, readyCh: make(chan struct{})}
 	// Skip eager load — watch() populates cache asynchronously via KV watcher.
 	// The synchronous load() did N individual kv.Get() calls that block indefinitely
 	// when the KV stream leader is on a remote node.
@@ -84,10 +92,18 @@ func (r *Registry) watch() {
 	w, err := r.kv.WatchAll()
 	if err != nil {
 		slog.Error("registry watch failed", slog.String("error", err.Error()))
+		// Unblock callers of WaitForCacheReady even on watcher failure — they'd
+		// rather see the empty-cache symptom than hang. Self-health watchdog
+		// (added in #608) will catch a persistently broken registry.
+		r.signalReady()
 		return
 	}
 	for entry := range w.Updates() {
 		if entry == nil {
+			// NATS KV WatchAll() emits a nil sentinel after delivering the
+			// current value of each existing key. Treat that as "initial scan
+			// complete" and unblock cache-readiness gates.
+			r.signalReady()
 			continue
 		}
 		r.mu.Lock()
@@ -100,6 +116,38 @@ func (r *Registry) watch() {
 			}
 		}
 		r.mu.Unlock()
+	}
+}
+
+// signalReady closes readyCh exactly once, unblocking any callers of
+// WaitForCacheReady. Safe to call from multiple code paths (success / error).
+func (r *Registry) signalReady() {
+	r.readyOnce.Do(func() {
+		if r.readyCh != nil {
+			close(r.readyCh)
+		}
+	})
+}
+
+// WaitForCacheReady blocks until watch() has finished its initial scan of
+// existing KV entries, or until the context is cancelled. After this returns
+// nil, registry.Match sees every existing subscription in the bucket.
+//
+// Callers should set a bounded timeout: WatchAll() on a healthy NATS cluster
+// completes in milliseconds, but the watcher may legitimately fail to start
+// (e.g., bucket misconfigured). The caller is responsible for deciding what to
+// do with a non-nil error — typically log + proceed (fail open) so the listener
+// can still answer the new-subscription path while the self-health watchdog
+// arranges a restart.
+func (r *Registry) WaitForCacheReady(ctx context.Context) error {
+	if r == nil || r.readyCh == nil {
+		return nil
+	}
+	select {
+	case <-r.readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
