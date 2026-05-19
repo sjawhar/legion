@@ -996,3 +996,101 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 		t.Fatal("Ping after conn close should return error")
 	}
 }
+
+// --- Cache readiness tests ---
+//
+// Follow-up to PR #610. The Upsert silent-fallback fix doesn't address the
+// initial-cache-warmup race: after Open() returns, watch() populates the cache
+// asynchronously, and events arriving in that window get "no matching
+// interests" even when the durable KV entry has subscribers. This was ~36/235
+// of Atlas's observed drops (the 07:39:38 burst right at listener restart).
+
+func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady timed out on a healthy registry: %v", err)
+	}
+}
+
+func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
+	// The whole point of this gate: after WaitForCacheReady returns, every
+	// existing KV entry must be findable via Match without falling through to
+	// "no matching interests".
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	// Pre-populate KV via a temporary registry, then Close conn to release
+	// any watcher state.
+	reg1, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("first Open failed: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg1.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("first WaitForCacheReady: %v", err)
+	}
+	if _, err := reg1.Upsert(Interest{SessionID: "ses_pre", MachineID: "m1"}, []string{"topic.pre"}); err != nil {
+		t.Fatalf("pre-populate Upsert failed: %v", err)
+	}
+
+	// Second registry on the same bucket — simulates listener restart against
+	// existing KV state.
+	reg2, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("second Open failed: %v", err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	if err := reg2.WaitForCacheReady(ctx2); err != nil {
+		t.Fatalf("second WaitForCacheReady: %v", err)
+	}
+
+	// Critical: Match must find the pre-populated entry IMMEDIATELY after
+	// WaitForCacheReady returns (no further sleeps).
+	got := reg2.Match("m1", "topic.pre")
+	if len(got) != 1 || got[0].SessionID != "ses_pre" {
+		t.Fatalf("expected pre-populated entry visible after WaitForCacheReady; got %v", got)
+	}
+}
+
+func TestWaitForCacheReady_RespectsContextCancellation(t *testing.T) {
+	// Build a Registry with NO watch() goroutine running, so readyCh never closes.
+	// WaitForCacheReady must return ctx.Err() instead of hanging.
+	r := &Registry{cache: map[string]Interest{}, readyCh: make(chan struct{})}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := r.WaitForCacheReady(ctx)
+	if err == nil {
+		t.Fatal("WaitForCacheReady must return error when readyCh stays open and ctx expires")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestWaitForCacheReady_IdempotentAfterReady(t *testing.T) {
+	// Calling WaitForCacheReady after the channel has been signaled must
+	// return immediately, not block or panic on double-close.
+	r := &Registry{cache: map[string]Interest{}, readyCh: make(chan struct{})}
+	close(r.readyCh)
+
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		err := r.WaitForCacheReady(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("call %d: expected nil after readyCh closed, got %v", i, err)
+		}
+	}
+}
