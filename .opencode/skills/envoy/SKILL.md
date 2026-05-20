@@ -168,6 +168,17 @@ Examples:
 
 You do NOT need to subscribe in order to send or publish.
 
+### To wait for CI, PR checks, or other async work
+
+**Don't `sleep`-poll. Don't "check back in N minutes."** Subscribe to the event and continue with productive work — the system will wake the session when the event arrives.
+
+1. Identify the relevant topic (e.g., `notifications.github.<owner>.<repo>.pr.<num>.>` for all PR events; `.pr.<num>.check_run` for CI status updates)
+2. Call `envoy_subscribe([...])`
+3. Move on to other work, or end the response and let the watcher wake you
+4. The next response is triggered by the event, with the payload available in your context
+
+If you have nothing else to do, end the response. The user is not your alarm clock; do not loop with `sleep`.
+
 ### Tools
 
 - `envoy_subscribe(topics)` — receive future events on those topics
