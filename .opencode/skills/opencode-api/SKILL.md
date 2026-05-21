@@ -208,6 +208,16 @@ curl -s http://127.0.0.1:13381/global/health
 # {"healthy": true, "version": "..."}
 ```
 
+### Discover Endpoints (OpenAPI Spec)
+
+When this skill's reference might be stale, fetch the running serve's own OpenAPI spec:
+
+```bash
+curl -s http://127.0.0.1:13381/doc | jq -r '.paths | keys[]'
+```
+
+`GET /doc` returns the full OpenAPI 3.1 JSON for the build that's actually running — including sami-fork additions and experimental routes. Use it to confirm a route exists, see request/response schemas, or discover endpoints that haven't made it into reference.md yet (e.g. `part.delete`, `part.update`, `session.revert`).
+
 ### Graceful Shutdown
 
 ```bash

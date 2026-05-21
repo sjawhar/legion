@@ -36,6 +36,21 @@ Update global configuration. Body: partial `Config` object.
 
 Dispose all instances. Releases all resources. Returns `true`.
 
+### GET /doc
+
+OpenAPI 3.1 spec for the running serve, as JSON. Authoritative source of truth for which endpoints this serve actually exposes — it reflects the running build, including sami-fork additions and experimental routes, so consult it when this reference document might be stale.
+
+```bash
+# List every path the serve exposes
+curl -s http://127.0.0.1:13381/doc | jq -r '.paths | keys[]'
+
+# Inspect a specific operation's request schema
+curl -s http://127.0.0.1:13381/doc \
+  | jq '.paths["/session/{sessionID}/revert"].post'
+```
+
+No auth required when the serve runs without `ServerAuth.required`. The HTML UI lives at `/` and `/api/openapi` — the JSON spec is only at `/doc`.
+
 ---
 
 ## Sessions
@@ -153,6 +168,26 @@ Body:
 
 Returns new `Session`.
 
+### POST /session/{sessionID}/revert
+
+Soft-revert the session to a specific message (or a specific part within a message). Sets `session.revert = {messageID, partID?, snapshot, diff}`, takes a worktree snapshot if patches were applied, and hides everything after the revert point from prompt context. Messages/parts are NOT deleted — `unrevert` restores them. Subsequent prompts trigger a `cleanup` step that permanently removes the hidden messages/parts via `message.removed` / `message.part.removed` events.
+
+```json
+Body:
+{
+  "messageID": "msg_target",
+  "partID": "prt_target_optional"
+}
+```
+
+- `messageID` required — the message to revert to (inclusive).
+- `partID` optional — revert to a specific part within that message. If omitted, the entire message is reverted; the actual revert anchor walks back to the last user message before `messageID`. **The TUI revert hotkey only sets `messageID`** — pass `partID` here for finer-grained revert (e.g. roll back one tool call without losing the surrounding text and reasoning parts).
+- Returns the updated `Session` (with `revert` field populated).
+
+### POST /session/{sessionID}/unrevert
+
+Clear the revert state and restore any worktree snapshot it captured. No-op if `session.revert` is already null. Returns the updated `Session`.
+
 ### POST /session/{sessionID}/summarize
 
 Compact session to preserve key information.
@@ -232,6 +267,26 @@ Get specific message with parts.
 ### DELETE /session/{sessionID}/message/{messageID}
 
 Delete a message. Does NOT revert file changes.
+
+### DELETE /session/{sessionID}/message/{messageID}/part/{partID}
+
+Delete a single part from a message. Does NOT revert file changes.
+
+Useful for trimming a session's storage — e.g. when one tool call captured a huge stdout dump (a multi-MB `jj st`, a `find /`, etc.) that bloats the on-disk DB and reload time. The handler is a single SQL `DELETE FROM part WHERE id=? AND session_id=?` and emits a `message.part.removed` event so any connected TUI updates live. Tool parts are atomic — call input, output, and status all live in one row, so deletion can't leave a half-attached tool result for the model to choke on if you resume the session.
+
+```
+Response 200: true
+Response 404: NotFoundError
+```
+
+### PATCH /session/{sessionID}/message/{messageID}/part/{partID}
+
+Replace a part in place. Body is a full `Part` object whose `id`, `messageID`, and `sessionID` must match the path params (mismatch returns a `Part mismatch:` error). Useful for editing tool output, redacting secrets that landed in a part, or fixing a malformed `text` part without rebuilding the surrounding turn.
+
+```
+Response 200: Part (the updated part)
+Response 404: NotFoundError
+```
 
 ---
 
