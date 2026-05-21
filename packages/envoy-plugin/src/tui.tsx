@@ -1,5 +1,11 @@
 /** @jsxImportSource @opentui/solid */
-import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
+import type {
+  TuiPlugin,
+  TuiPluginApi,
+  TuiPluginModule,
+  TuiSlotPlugin,
+} from "@opencode-ai/plugin/tui";
+import { createSignal } from "solid-js";
 import { copyOsc52 } from "./clipboard";
 
 function currentSessionID(api: TuiPluginApi): string | undefined {
@@ -16,7 +22,23 @@ function copyWithToast(api: TuiPluginApi, text: string, successMessage: string) 
   }
 }
 
+function ClickableRow(props: { text: string; onCopy: () => void }) {
+  const [hover, setHover] = createSignal(false);
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI box supports mouse events.
+    // biome-ignore lint/a11y/useKeyWithMouseEvents: This row is mouse-only in the TUI sidebar.
+    <box
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => props.onCopy()}
+    >
+      <text fg={hover() ? undefined : "gray"}>{props.text}</text>
+    </box>
+  );
+}
+
 const tui: TuiPlugin = async (api) => {
+  // Slash command
   api.keymap.registerLayer({
     commands: [
       {
@@ -36,6 +58,25 @@ const tui: TuiPlugin = async (api) => {
       },
     ],
   });
+
+  // Sidebar: clickable session ID row
+  const slot: TuiSlotPlugin = {
+    order: 10,
+    slots: {
+      sidebar_content(_ctx, value) {
+        if (!value.session_id) return null;
+        return (
+          <box flexDirection="column" paddingTop={1}>
+            <ClickableRow
+              text={value.session_id}
+              onCopy={() => copyWithToast(api, value.session_id, "Session ID copied")}
+            />
+          </box>
+        );
+      },
+    },
+  };
+  api.slots.register(slot);
 };
 
 const plugin: TuiPluginModule = {
