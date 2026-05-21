@@ -3,13 +3,23 @@
   "version": "0.19.0",
   "type": "module",
   "main": "dist/server.js",
+  "exports": {
+    "./server": {
+      "import": "./dist/server.js",
+      "types": "./dist/server.d.ts"
+    },
+    "./tui": {
+      "import": "./dist/tui.js",
+      "types": "./dist/tui.d.ts"
+    }
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/sjawhar/legion"
   },
   "types": "dist/server.d.ts",
   "scripts": {
-    "build": "bun build src/server.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/server.ts --outdir dist --target bun --format esm && bun -e 'import { createSolidTransformPlugin } from \"@opentui/solid/bun-plugin\"; const result = await Bun.build({ entrypoints: [\"src/tui.tsx\"], outdir: \"dist\", target: \"bun\", format: \"esm\", external: [\"@opencode-ai/*\", \"solid-js\", \"solid-js/*\", \"@opentui/*\"], plugins: [createSolidTransformPlugin()] }); if (!result.success) { console.error(result.logs); process.exit(1); }'",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"
