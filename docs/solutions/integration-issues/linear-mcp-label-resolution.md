@@ -16,7 +16,7 @@ symptoms:
   - label names not resolved to IDs for Linear API
   - stale cache missing recently created labels
 date: 2026-02-15
-status: active
+status: needs-review
 ---
 
 # Linear MCP Label Resolution with Cache Refresh on Miss

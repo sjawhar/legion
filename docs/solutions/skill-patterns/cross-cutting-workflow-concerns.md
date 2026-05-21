@@ -8,7 +8,7 @@ tags:
   - knowledge-injection
   - cross-cutting
 date: 2026-04-05
-status: active
+status: needs-review
 module: worker
 related_issues:
   - "238"
