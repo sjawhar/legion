@@ -8,7 +8,7 @@ tags:
   - knowledge-injection
   - cross-cutting
 date: 2026-04-05
-status: needs-review  # 0% helpfulness rate across 7-16 injections
+status: needs-review
 module: worker
 related_issues:
   - "238"

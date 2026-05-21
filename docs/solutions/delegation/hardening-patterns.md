@@ -9,7 +9,7 @@ tags:
   - file-based-storage
   - atomic-writes
 date: 2026-02-15
-status: needs-review  # 0% helpfulness rate across 7-16 injections
+status: needs-review
 module: delegation
 related_issues:
   - "LEG-133"
