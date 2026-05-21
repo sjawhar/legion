@@ -2,14 +2,14 @@
   "name": "@sjawhar/opencode-legion-envoy",
   "version": "0.19.0",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/server.js",
   "repository": {
     "type": "git",
     "url": "https://github.com/sjawhar/legion"
   },
-  "types": "dist/index.d.ts",
+  "types": "dist/server.d.ts",
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/server.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"
