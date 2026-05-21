@@ -7,6 +7,7 @@ import type {
 } from "@opencode-ai/plugin/tui";
 import { createSignal } from "solid-js";
 import { copyOsc52 } from "./clipboard";
+import { parsePort } from "./tui-port";
 
 function currentSessionID(api: TuiPluginApi): string | undefined {
   const route = api.route.current;
@@ -65,12 +66,25 @@ const tui: TuiPlugin = async (api) => {
     slots: {
       sidebar_content(_ctx, value) {
         if (!value.session_id) return null;
+        const port = parsePort(
+          (
+            api.client as TuiPluginApi["client"] & {
+              getConfig(): { baseUrl?: string };
+            }
+          ).getConfig().baseUrl
+        );
         return (
           <box flexDirection="column" paddingTop={1}>
             <ClickableRow
               text={value.session_id}
               onCopy={() => copyWithToast(api, value.session_id, "Session ID copied")}
             />
+            {port !== null ? (
+              <ClickableRow
+                text={`port ${port}`}
+                onCopy={() => copyWithToast(api, String(port), "Port copied")}
+              />
+            ) : null}
           </box>
         );
       },
