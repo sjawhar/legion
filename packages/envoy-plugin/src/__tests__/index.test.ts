@@ -89,7 +89,7 @@ describe("envoy_whoami", () => {
         metadata: mock(() => {}),
       } as never);
 
-      const parsed = JSON.parse(result);
+      const parsed = JSON.parse(typeof result === "string" ? result : result.output);
       expect(parsed.session_id).toBe("ses_test_whoami");
       expect(parsed.machine_id).toBe("test-machine");
       expect(parsed.dir).toBe("/tmp/test-workspace");
@@ -124,7 +124,7 @@ describe("envoy_whoami", () => {
         metadata: mock(() => {}),
       } as never);
 
-      const parsed = JSON.parse(result);
+      const parsed = JSON.parse(typeof result === "string" ? result : result.output);
       expect(parsed.machine_id).toBe("unknown");
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
