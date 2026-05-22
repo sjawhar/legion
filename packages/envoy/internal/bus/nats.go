@@ -54,10 +54,10 @@ type Client struct {
 	closeOnce  sync.Once
 }
 
-func options(urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
+func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
 	return nats.Options{
 		Servers:       urls,
-		Name:          "envoy",
+		Name:          name,
 		NoRandomize:   true,
 		Timeout:       5 * time.Second,
 		MaxReconnect:  -1,
@@ -91,11 +91,11 @@ func options(urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.
 	}
 }
 
-func connect(urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+func connect(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
 	var nc *nats.Conn
 	var err error
 	for range 10 {
-		next := options(urls, reconnectCB, closedCB)
+		next := options(name, urls, reconnectCB, closedCB)
 		nc, err = next.Connect()
 		if err == nil {
 			return nc, nil
@@ -105,13 +105,25 @@ func connect(urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nat
 	return nil, err
 }
 
+// Dial opens a tuned core NATS connection using envoy's standard options
+// (5s connect timeout, infinite reconnect, 2× default backoff, retry-loop
+// for the initial 10 attempts). Callers that only need core pub/sub —
+// no JetStream stream creation, no durable consumer — should use this.
+// The NATS Go client auto-resubscribes core subscriptions on reconnect,
+// so no callbacks are needed for plain subscribers.
+//
+// For JetStream-backed durable consumers, use Connect instead.
+func Dial(name string, urls []string) (*nats.Conn, error) {
+	return connect(name, urls, nil, nil)
+}
+
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 	opts := connectOpts{replicas: 1}
 	for _, o := range options {
 		o(&opts)
 	}
 	c := &Client{urls: urls, stopCh: make(chan struct{})}
-	nc, err := connect(urls, c.onReconnect, c.onClosed)
+	nc, err := connect("envoy", urls, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +322,7 @@ func (c *Client) ensureConn() error {
 	if c.Conn != nil && c.Conn.Status() != nats.CLOSED {
 		return nil
 	}
-	nc, err := connect(c.urls, c.onReconnect, c.onClosed)
+	nc, err := connect("envoy", c.urls, c.onReconnect, c.onClosed)
 	if err != nil {
 		return err
 	}

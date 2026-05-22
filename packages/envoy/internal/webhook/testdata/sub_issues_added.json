@@ -1,0 +1,108 @@
+{
+  "action": "sub_issue_added",
+  "parent_issue_id": 3216548790,
+  "parent_issue": {
+    "url": "https://api.github.com/repos/sjawhar/legion/issues/641",
+    "repository_url": "https://api.github.com/repos/sjawhar/legion",
+    "labels_url": "https://api.github.com/repos/sjawhar/legion/issues/641/labels{/name}",
+    "comments_url": "https://api.github.com/repos/sjawhar/legion/issues/641/comments",
+    "events_url": "https://api.github.com/repos/sjawhar/legion/issues/641/events",
+    "html_url": "https://github.com/sjawhar/legion/issues/641",
+    "id": 3216548790,
+    "node_id": "I_kwDORFy7ds7H0aE2",
+    "number": 641,
+    "title": "[DISPATCH-PROTOTYPE] Test parent issue for Dispatch UI dogfooding",
+    "user": {
+      "login": "sjawhar",
+      "id": 5074378,
+      "node_id": "MDQ6VXNlcjUwNzQzNzg=",
+      "type": "User"
+    },
+    "labels": [
+      {"id": 9876543210, "node_id": "LA_kwDORFy7ds8AAAAClskbqg", "name": "dispatch-spike", "color": "ededed", "default": false}
+    ],
+    "state": "open",
+    "locked": false,
+    "assignee": null,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2026-05-22T14:00:00Z",
+    "updated_at": "2026-05-22T14:00:00Z",
+    "closed_at": null,
+    "author_association": "OWNER",
+    "active_lock_reason": null,
+    "body": "Parent work issue for Dispatch prototype threads.",
+    "reactions": {"url": "https://api.github.com/repos/sjawhar/legion/issues/641/reactions", "total_count": 0},
+    "timeline_url": "https://api.github.com/repos/sjawhar/legion/issues/641/timeline",
+    "performed_via_github_app": null,
+    "state_reason": null
+  },
+  "sub_issue_id": 3216548890,
+  "sub_issue": {
+    "url": "https://api.github.com/repos/sjawhar/legion/issues/999",
+    "repository_url": "https://api.github.com/repos/sjawhar/legion",
+    "labels_url": "https://api.github.com/repos/sjawhar/legion/issues/999/labels{/name}",
+    "comments_url": "https://api.github.com/repos/sjawhar/legion/issues/999/comments",
+    "events_url": "https://api.github.com/repos/sjawhar/legion/issues/999/events",
+    "html_url": "https://github.com/sjawhar/legion/issues/999",
+    "id": 3216548890,
+    "node_id": "I_kwDORFy7ds7H0aGa",
+    "number": 999,
+    "title": "Dispatch: decide on canary rollout percentage",
+    "user": {
+      "login": "legion-implementer[bot]",
+      "id": 12345678,
+      "node_id": "MDQ6VXNlcjEyMzQ1Njc4",
+      "type": "Bot"
+    },
+    "labels": [
+      {"id": 9876543211, "node_id": "LA_kwDORFy7ds8AAAAClskbqq", "name": "dispatch-thread", "color": "00aaff", "default": false}
+    ],
+    "state": "open",
+    "locked": false,
+    "assignee": null,
+    "assignees": [],
+    "milestone": null,
+    "comments": 0,
+    "created_at": "2026-05-22T14:30:00Z",
+    "updated_at": "2026-05-22T14:30:00Z",
+    "closed_at": null,
+    "author_association": "NONE",
+    "active_lock_reason": null,
+    "body": "<!-- dispatch:meta urgency=med request_id=abcd1234 -->\n\n**Canary?**\n\nNeed to decide rollout percentage.",
+    "reactions": {"url": "https://api.github.com/repos/sjawhar/legion/issues/999/reactions", "total_count": 0},
+    "timeline_url": "https://api.github.com/repos/sjawhar/legion/issues/999/timeline",
+    "performed_via_github_app": null,
+    "state_reason": null
+  },
+  "sender": {
+    "login": "sjawhar",
+    "id": 5074378,
+    "node_id": "MDQ6VXNlcjUwNzQzNzg=",
+    "type": "User",
+    "site_admin": false
+  },
+  "repository": {
+    "id": 1146927990,
+    "node_id": "R_kgDORFy7dg",
+    "name": "legion",
+    "full_name": "sjawhar/legion",
+    "private": false,
+    "owner": {
+      "login": "sjawhar",
+      "id": 5074378,
+      "node_id": "MDQ6VXNlcjUwNzQzNzg=",
+      "type": "User",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/sjawhar/legion",
+    "description": "Autonomous development swarm using OpenCode agents",
+    "fork": false,
+    "default_branch": "main"
+  },
+  "installation": {
+    "id": 99999999,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uOTk5OTk5OTk="
+  }
+}

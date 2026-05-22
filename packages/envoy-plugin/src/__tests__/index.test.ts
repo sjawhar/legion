@@ -597,3 +597,61 @@ describe("invalid ENVOY_HEARTBEAT_MS falls back to the default (fix 6)", () => {
     }
   });
 });
+
+describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#4)", () => {
+  async function runHook(tool: string, output: string): Promise<string[][]> {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    const subscribed: string[][] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string) as { session_id: string; topics: string[] };
+        subscribed.push([body.session_id, ...body.topics]);
+        return new Response(JSON.stringify({ topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      const after = hooks["tool.execute.after"];
+      expect(after).toBeDefined();
+      await after?.(
+        { tool, sessionID: "ses_dispatch", callID: "call_1", args: {} },
+        { title: "Dispatch", output, metadata: {} }
+      );
+      return subscribed;
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  }
+
+  it("subscribes the calling session to the new thread's GitHub topic", async () => {
+    const output = JSON.stringify({
+      thread: 742,
+      url: "https://github.com/sjawhar/legion/issues/742",
+    });
+    const subscribed = await runHook("envoy_dispatch", output);
+    expect(subscribed).toContainEqual([
+      "ses_dispatch",
+      "notifications.github.sjawhar.legion.issue.742.>",
+    ]);
+  });
+
+  it("does not subscribe for unrelated tools", async () => {
+    const output = JSON.stringify({
+      url: "https://github.com/sjawhar/legion/issues/9",
+    });
+    const subscribed = await runHook("envoy_subscribe", output);
+    expect(subscribed.length).toBe(0);
+  });
+});

@@ -1,4 +1,8 @@
 import { tool } from "@opencode-ai/plugin/tool";
+import { loadEnvoyConfig } from "./config";
+import { buildDispatchMcpEntry, injectEnvoyMcp } from "./dispatch-mcp";
+import { dispatchSubscriptionTopic } from "./dispatch-subscribe";
+import { logger } from "./log";
 import { resolvePort } from "./port";
 
 const root = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
@@ -17,6 +21,8 @@ async function call(path: string, init?: RequestInit) {
 }
 
 export default async (input: { serverUrl: URL }) => {
+  const cwd = process.cwd();
+  const config = await loadEnvoyConfig(cwd);
   let activeSessionID: string | null = null;
   let activeSessionTitle: string | null = null;
   // All sessions that have become busy in this serve instance. The heartbeat
@@ -26,7 +32,6 @@ export default async (input: { serverUrl: URL }) => {
   const trackedSessions = new Map<string, { title: string | null }>();
   // Guard so sibling re-adoption (after a serve restart) runs at most once.
   let readoptDone = false;
-  const cwd = process.cwd();
   /** Cached port — resolved asynchronously, null until first successful resolution. */
   let resolvedPort: number | null = null;
 
@@ -35,7 +40,7 @@ export default async (input: { serverUrl: URL }) => {
     const port = await resolvePort(input.serverUrl);
     if (!port && !portWarningLogged) {
       portWarningLogged = true;
-      console.error(
+      logger.error(
         `[envoy-plugin] Could not resolve serve port: serverUrl=${input.serverUrl.href}, pid=${process.pid}`
       );
     }
@@ -150,6 +155,22 @@ export default async (input: { serverUrl: URL }) => {
   });
 
   return {
+    config: (cfg: { mcp?: Record<string, unknown> } & Record<string, unknown>) => {
+      // Inject the envoy MCP entry into the OpenCode config when
+      // dispatch is enabled. Centralizing this in the plugin (instead of
+      // each user's opencode.json) means:
+      //   1. Registration is gated by `dispatch.enabled`
+      //   2. The bearer token is sourced per-CWD via the user's gh shim
+      //      (no env coordination needed)
+      //   3. Token rotation happens transparently inside the shim
+      //      subprocess — OpenCode never sees an expired token
+      const entry = buildDispatchMcpEntry({
+        dispatch: config.dispatch,
+      });
+      if (!entry) return;
+      const { warning } = injectEnvoyMcp(cfg, entry);
+      if (warning) logger.warn(warning);
+    },
     event: async ({
       event,
     }: {
@@ -220,6 +241,34 @@ export default async (input: { serverUrl: URL }) => {
             body: JSON.stringify({ session_id: deletedID, topics: [] }),
           }).catch(() => {});
         }
+      }
+    },
+    "tool.execute.after": async (
+      input: { tool: string; sessionID: string; callID: string; args: unknown },
+      output: { title: string; output: string; metadata: unknown }
+    ) => {
+      // Dispatch AC#4: when this session opens a Dispatch thread via the
+      // envoy_dispatch MCP tool, auto-subscribe it to the thread's GitHub topic
+      // so the human's reply is delivered back through Envoy. Best-effort — a
+      // subscribe failure must never surface to the model or fail the tool call.
+      const topic = dispatchSubscriptionTopic(input.tool, output.output);
+      if (!topic) return;
+      try {
+        await call("/v1/interests/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: input.sessionID,
+            dir: cwd,
+            topics: [topic],
+            port: currentPort() ?? 0,
+            title: activeSessionTitle ?? "",
+          }),
+        });
+      } catch (err) {
+        logger.warn(
+          `[envoy-plugin] dispatch auto-subscribe failed: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
     },
     // Cleanup hook (used by tests; production relies on process 'exit').
