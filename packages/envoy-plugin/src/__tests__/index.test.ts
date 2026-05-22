@@ -16,7 +16,7 @@ describe("envoy plugin init", () => {
     process.env.ENVOY_URL = "http://127.0.0.1:59999"; // Non-existent
 
     try {
-      const pluginModule = await import("../index");
+      const pluginModule = await import("../server");
       const initPlugin = pluginModule.default;
 
       const start = performance.now();
@@ -45,7 +45,7 @@ describe("envoy plugin init", () => {
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
 
     try {
-      const pluginModule = await import("../index");
+      const pluginModule = await import("../server");
       const initPlugin = pluginModule.default;
       const hooks = await initPlugin({ serverUrl: new URL("http://127.0.0.1:13381") } as never);
 
@@ -77,7 +77,7 @@ describe("envoy_whoami", () => {
     process.env.HOSTNAME = "test-machine";
 
     try {
-      const pluginModule = await import("../index");
+      const pluginModule = await import("../server");
       const initPlugin = pluginModule.default;
       const hooks = await initPlugin({
         serverUrl: new URL("http://127.0.0.1:13381"),
@@ -89,7 +89,7 @@ describe("envoy_whoami", () => {
         metadata: mock(() => {}),
       } as never);
 
-      const parsed = JSON.parse(result);
+      const parsed = JSON.parse(typeof result === "string" ? result : result.output);
       expect(parsed.session_id).toBe("ses_test_whoami");
       expect(parsed.machine_id).toBe("test-machine");
       expect(parsed.dir).toBe("/tmp/test-workspace");
@@ -112,7 +112,7 @@ describe("envoy_whoami", () => {
     delete process.env.HOSTNAME;
 
     try {
-      const pluginModule = await import("../index");
+      const pluginModule = await import("../server");
       const initPlugin = pluginModule.default;
       const hooks = await initPlugin({
         serverUrl: new URL("http://127.0.0.1:13381"),
@@ -124,7 +124,7 @@ describe("envoy_whoami", () => {
         metadata: mock(() => {}),
       } as never);
 
-      const parsed = JSON.parse(result);
+      const parsed = JSON.parse(typeof result === "string" ? result : result.output);
       expect(parsed.machine_id).toBe("unknown");
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
@@ -143,7 +143,7 @@ describe("envoy_sessions", () => {
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
 
     try {
-      const pluginModule = await import("../index");
+      const pluginModule = await import("../server");
       const initPlugin = pluginModule.default;
       const hooks = await initPlugin({
         serverUrl: new URL("http://127.0.0.1:13381"),
@@ -198,7 +198,7 @@ describe("session title", () => {
     }) as typeof fetch;
 
     try {
-      const pluginModule = await import("../index");
+      const pluginModule = await import("../server");
       const hooks = await pluginModule.default({
         serverUrl: new URL("http://127.0.0.1:13381/"),
       } as never);

@@ -4,7 +4,7 @@ set -euo pipefail
 host="${1:?usage: sync-host.sh user@host}"
 
 PLUGIN_DIR="legion/default/packages/envoy-plugin"
-PLUGIN_REF="file://{env:HOME}/${PLUGIN_DIR}/dist/index.js"
+PLUGIN_REF="file://{env:HOME}/${PLUGIN_DIR}"
 REPO="sjawhar/legion"
 
 # Find latest envoy release tag
@@ -50,6 +50,23 @@ ssh "$host" "
     echo \"Updated opencode.json: \$CONFIG\"
   else
     echo \"WARNING: opencode.json not found at \$CONFIG — add plugin manually: $PLUGIN_REF\"
+  fi
+"
+
+# Update tui.json: ensure file:// ref is present in the TUI plugin list.
+# tui.json is a separate config file from opencode.json; opencode loads TUI
+# plugins (slash commands, sidebar slots) only from here.
+ssh "$host" "
+  TUI_CONFIG=\$(readlink -f \$HOME/.config/opencode/tui.json 2>/dev/null || echo \$HOME/.config/opencode/tui.json)
+  if [ -f \"\$TUI_CONFIG\" ]; then
+    jq --arg ref '$PLUGIN_REF' \\
+      '(.plugin // []) |= ((map(if (test(\"opencode-legion-envoy\") and (test(\"^file://\") | not)) then \$ref else . end)) | if any(. == \$ref) then . else . + [\$ref] end)' \\
+      \"\$TUI_CONFIG\" > /tmp/tui.json.tmp && mv /tmp/tui.json.tmp \"\$TUI_CONFIG\"
+    echo \"Updated tui.json: \$TUI_CONFIG\"
+  else
+    mkdir -p \$(dirname \"\$TUI_CONFIG\")
+    jq -n --arg ref '$PLUGIN_REF' '{\"\\\$schema\":\"https://opencode.ai/tui.json\",\"plugin\":[\$ref]}' > \"\$TUI_CONFIG\"
+    echo \"Created tui.json: \$TUI_CONFIG\"
   fi
 "
 
