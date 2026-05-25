@@ -36,6 +36,10 @@ import { SESSION_ID_PATTERN } from "../state/types";
 import { resolveLegionId } from "./legion-resolver";
 import { formatPollOutput } from "./poll-formatter";
 
+declare const LEGION_VERSION: string | undefined;
+
+const cliVersion = typeof LEGION_VERSION === "string" ? LEGION_VERSION : "0.0.0-dev";
+
 export class CliError extends Error {
   constructor(
     message: string,
@@ -2487,7 +2491,7 @@ export const rollbackCommand = defineCommand({
 });
 
 export const mainCommand = defineCommand({
-  meta: { name: "legion", description: "Autonomous development swarm", version: "0.1.0" },
+  meta: { name: "legion", description: "Autonomous development swarm", version: cliVersion },
   subCommands: {
     start: startCommand,
     stop: stopCommand,
