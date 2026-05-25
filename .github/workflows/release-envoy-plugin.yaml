@@ -6,98 +6,119 @@ on:
     paths:
       - "packages/envoy-plugin/**"
       - "packages/contracts/**"
+  workflow_dispatch:
 
 permissions:
   contents: write
-  packages: write
   id-token: write
 
 concurrency:
-  group: release-envoy-plugin
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  version:
+  publish:
     runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.bump.outputs.version }}
-      should_publish: ${{ steps.bump.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v5
         with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
-      - name: Determine if plugin changed
-        id: bump
-        run: |
-          # Get latest published version from npm
-          PREV=$(curl -s https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/latest | jq -r '.version // "0.0.0"')
-          BASE="${PREV%%-*}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
-
-          # Check if there are actual plugin/contracts changes since last release
-          LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
-          if [ -n "$LATEST_TAG" ]; then
-            COMMITS=$(git log "${LATEST_TAG}..HEAD" --format='%s' -- packages/envoy-plugin/ packages/contracts/)
-            if [ -z "$COMMITS" ]; then
-              echo "should_publish=false" >> "$GITHUB_OUTPUT"
-              echo "No plugin/contracts commits since $LATEST_TAG"
-              exit 0
-            fi
-          fi
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "should_publish=true" >> "$GITHUB_OUTPUT"
-          echo "Bumping npm $PREV → $VERSION"
-
-  publish:
-    needs: version
-    if: needs.version.outputs.should_publish == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - run: bun install --frozen-lockfile
 
-      - name: Set version
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine next version
+        id: version
         run: |
-          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' \
+          PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            PREV_VERSION="0.0.0"
+            COMMITS=$(git log HEAD --format='%s' -- packages/envoy-plugin/ packages/contracts/)
+          else
+            PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --format='%s' -- packages/envoy-plugin/ packages/contracts/)
+          fi
+
+          if [ -z "$COMMITS" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No commits in tracked paths since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+
+          MAJOR=false; MINOR=false; PATCH=false
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
+              MAJOR=true
+            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+              MINOR=true
+            elif echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
+              PATCH=true
+            fi
+          done <<< "$COMMITS"
+
+          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No version-bumping commits since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+
+          IFS='.' read -r MAJ MIN PAT <<< "$PREV_VERSION"
+          if $MAJOR; then MAJ=$((MAJ+1)); MIN=0; PAT=0
+          elif $MINOR; then MIN=$((MIN+1)); PAT=0
+          else PAT=$((PAT+1)); fi
+
+          VERSION="${MAJ}.${MIN}.${PAT}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping opencode-legion-envoy-v${PREV_VERSION} -> opencode-legion-envoy-v${VERSION}"
+
+      - name: Set release version
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
             packages/envoy-plugin/package.json > tmp.json \
             && mv tmp.json packages/envoy-plugin/package.json
 
       - name: Build plugin
+        if: steps.version.outputs.skip != 'true'
         run: bun run build
         working-directory: packages/envoy-plugin
 
-      - name: Check if already published
-        id: check
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion-envoy/${VERSION}")
-          if [ "$STATUS" = "200" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "✓ Already published"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm
-        if: steps.check.outputs.skip != 'true'
-        run: npm publish --access public --provenance
-        working-directory: packages/envoy-plugin
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Pack plugin
+        if: steps.version.outputs.skip != 'true'
         run: bun pm pack
         working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opencode-legion-envoy-plugin
-          path: packages/envoy-plugin/*.tgz
+
+      - name: Publish to npm
+        if: steps.version.outputs.skip != 'true'
+        run: npm publish --access public --provenance
+        working-directory: packages/envoy-plugin
+
+      - name: Commit, tag, and push
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/envoy-plugin/package.json
+          git diff --staged --quiet || git commit -m "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]"
+          git tag "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+          git push origin main --tags
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "opencode-legion-envoy-v${{ steps.version.outputs.version }}" \
+            packages/envoy-plugin/*.tgz \
+            --repo "${{ github.repository }}" \
+            --title "Envoy Plugin v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --verify-tag
