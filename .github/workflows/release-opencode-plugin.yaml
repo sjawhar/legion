@@ -12,7 +12,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -33,47 +33,75 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Determine version
+      - name: Determine next version
         id: version
         run: |
-          PREV=$(curl -s https://registry.npmjs.org/@sjawhar%2Fopencode-legion/latest | jq -r '.version // "0.0.0"')
-          BASE="${PREV%%-*}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
+          PREV_TAG=$(git tag -l 'opencode-legion-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            PREV_VERSION="0.0.0"
+            COMMITS=$(git log HEAD --format='%s' -- packages/opencode-plugin/)
+          else
+            PREV_VERSION="${PREV_TAG#opencode-legion-v}"
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --format='%s' -- packages/opencode-plugin/)
+          fi
+
+          if [ -z "$COMMITS" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No commits in packages/opencode-plugin/ since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+
+          MAJOR=false; MINOR=false; PATCH=false
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
+              MAJOR=true
+            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+              MINOR=true
+            elif echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
+              PATCH=true
+            fi
+          done <<< "$COMMITS"
+
+          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No version-bumping commits since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+
+          IFS='.' read -r MAJ MIN PAT <<< "$PREV_VERSION"
+          if $MAJOR; then MAJ=$((MAJ+1)); MIN=0; PAT=0
+          elif $MINOR; then MIN=$((MIN+1)); PAT=0
+          else PAT=$((PAT+1)); fi
+
+          VERSION="${MAJ}.${MIN}.${PAT}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
-          echo "Bumping npm $PREV -> $VERSION"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping opencode-legion-v${PREV_VERSION} -> opencode-legion-v${VERSION}"
 
       - name: Set release version
+        if: steps.version.outputs.skip != 'true'
         run: |
           jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
             packages/opencode-plugin/package.json > tmp.json \
             && mv tmp.json packages/opencode-plugin/package.json
 
       - name: Build plugin
+        if: steps.version.outputs.skip != 'true'
         run: bun run build
         working-directory: packages/opencode-plugin
 
-      - name: Check if already published
-        id: check
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@sjawhar%2Fopencode-legion/${VERSION}")
-          if [ "$STATUS" = "200" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Already published @sjawhar/opencode-legion@${VERSION}"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Pack plugin
+        if: steps.version.outputs.skip != 'true'
+        run: bun pm pack
+        working-directory: packages/opencode-plugin
 
       - name: Publish to npm
-        if: steps.check.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true'
         run: npm publish --access public --provenance
         working-directory: packages/opencode-plugin
 
-      - name: Commit version bump
-        if: steps.check.outputs.skip != 'true'
+      - name: Commit, tag, and push
+        if: steps.version.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -81,3 +109,15 @@ jobs:
           git diff --staged --quiet || git commit -m "chore: release opencode-plugin v${{ steps.version.outputs.version }} [skip ci]"
           git tag "opencode-legion-v${{ steps.version.outputs.version }}"
           git push origin main --tags
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "opencode-legion-v${{ steps.version.outputs.version }}" \
+            packages/opencode-plugin/*.tgz \
+            --repo "${{ github.repository }}" \
+            --title "OpenCode Plugin v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --verify-tag

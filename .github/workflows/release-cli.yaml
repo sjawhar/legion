@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -22,32 +22,52 @@ jobs:
       skip: ${{ steps.version.outputs.skip }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Determine next version
         id: version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PREV=$(gh release list --repo "${{ github.repository }}" --limit 1000 --json tagName \
-            --jq '
-              [
-                .[] | .tagName
-                | select(test("^cli-v[0-9]+\\.[0-9]+\\.[0-9]+$"))
-                | sub("^cli-v"; "") | split(".") | map(tonumber)
-              ]
-              | sort | last
-              | if . == null then "cli-v0.0.0" else "cli-v\(.[0]).\(.[1]).\(.[2])" end
-            ')
-          BASE="${PREV#cli-v}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if gh release view "cli-v$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "cli-v$VERSION already released"
+          PREV_TAG=$(git tag -l 'cli-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            PREV_VERSION="0.0.0"
+            COMMITS=$(git log HEAD --format='%s' -- packages/daemon/)
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Bumping cli $PREV -> cli-v$VERSION"
+            PREV_VERSION="${PREV_TAG#cli-v}"
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --format='%s' -- packages/daemon/)
           fi
+
+          if [ -z "$COMMITS" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No commits in packages/daemon/ since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+
+          MAJOR=false; MINOR=false; PATCH=false
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
+              MAJOR=true
+            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+              MINOR=true
+            elif echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
+              PATCH=true
+            fi
+          done <<< "$COMMITS"
+
+          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No version-bumping commits since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+
+          IFS='.' read -r MAJ MIN PAT <<< "$PREV_VERSION"
+          if $MAJOR; then MAJ=$((MAJ+1)); MIN=0; PAT=0
+          elif $MINOR; then MIN=$((MIN+1)); PAT=0
+          else PAT=$((PAT+1)); fi
+
+          VERSION="${MAJ}.${MIN}.${PAT}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping cli-v${PREV_VERSION} -> cli-v${VERSION}"
 
   build:
     needs: version
