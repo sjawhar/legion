@@ -19,6 +19,14 @@ async function call(path: string, init?: RequestInit) {
 export default async (input: { serverUrl: URL }) => {
   let activeSessionID: string | null = null;
   let activeSessionTitle: string | null = null;
+  // All sessions that have become busy in this serve instance. The heartbeat
+  // refreshes the envoy_sessions TTL for ALL of them — a single serve hosts many
+  // sessions, so tracking only the most-recently-active one lets idle siblings
+  // expire out of the registry and become undeliverable.
+  const trackedSessions = new Map<string, { title: string | null }>();
+  // Guard so sibling re-adoption (after a serve restart) runs at most once.
+  let readoptDone = false;
+  const cwd = process.cwd();
   /** Cached port — resolved asynchronously, null until first successful resolution. */
   let resolvedPort: number | null = null;
 
@@ -71,26 +79,70 @@ export default async (input: { serverUrl: URL }) => {
   // Fire an immediate async attempt (non-blocking)
   syncPort().catch(() => {});
 
-  // Heartbeat: re-subscribe every 2 minutes to refresh envoy_sessions TTL (5-min)
-  const heartbeatInterval = setInterval(
-    () => {
-      if (!activeSessionID) return;
-      const port = currentPort();
-      if (!port) return;
-      call("/v1/interests/subscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: activeSessionID,
-          dir: process.cwd(),
-          topics: [`notifications.agent.${activeSessionID}`],
-          port,
-          title: activeSessionTitle ?? "",
-        }),
-      }).catch(() => {});
-    },
-    2 * 60 * 1000
-  );
+  const subscribeSession = (sessionID: string, title: string | null, port: number) =>
+    call("/v1/interests/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionID,
+        dir: cwd,
+        topics: [`notifications.agent.${sessionID}`],
+        port,
+        title: title ?? "",
+      }),
+    }).catch(() => {});
+
+  // After a serve restart, sessions that were live in the previous serve instance
+  // do NOT re-register on their own (registration is gated on a session going
+  // busy), so an idle session waiting to RECEIVE a message silently falls out of
+  // the registry. Recover them once, on first activity: read the live registry and
+  // re-subscribe siblings that share this serve's machine + dir at the new port.
+  const readoptSiblings = async (selfSessionID: string) => {
+    if (readoptDone) return;
+    const port = currentPort();
+    if (!port) return;
+    try {
+      const res = await call("/v1/sessions");
+      const sessions = JSON.parse(res) as Array<{
+        session_id: string;
+        machine_id: string;
+        dir: string;
+        title?: string;
+      }>;
+      // Authoritative machine id for this serve = the listener-stamped machine of
+      // our own active session. Only adopt siblings that match it (and our dir) to
+      // avoid hijacking a same-path session that lives on another machine.
+      const self = sessions.find((s) => s.session_id === selfSessionID);
+      if (!self) return;
+      readoptDone = true;
+      for (const s of sessions) {
+        if (s.machine_id !== self.machine_id) continue;
+        if (s.dir !== cwd) continue;
+        if (trackedSessions.has(s.session_id)) continue;
+        trackedSessions.set(s.session_id, { title: s.title ?? null });
+        subscribeSession(s.session_id, s.title ?? null, port);
+      }
+    } catch {}
+  };
+
+  // Heartbeat: re-subscribe every tracked session to refresh the envoy_sessions
+  // TTL (5-min). Refreshes ALL sessions that have been busy in this serve, not
+  // just the most recently active one. Interval is env-tunable for tests/tuning.
+  const rawHeartbeatMs = Number(process.env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs =
+    Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
+      ? Math.max(rawHeartbeatMs, 25)
+      : 2 * 60 * 1000;
+  const heartbeatInterval = setInterval(() => {
+    const port = currentPort();
+    if (!port) return;
+    for (const [sessionID, info] of trackedSessions) {
+      subscribeSession(sessionID, info.title, port);
+    }
+    // Retry sibling re-adoption until the registry shows our own session.
+    if (!readoptDone && activeSessionID) readoptSiblings(activeSessionID).catch(() => {});
+  }, heartbeatMs);
+  heartbeatInterval.unref?.();
 
   process.on("exit", () => {
     clearInterval(timer);
@@ -113,6 +165,9 @@ export default async (input: { serverUrl: URL }) => {
         if (sessionID && sessionID !== activeSessionID) {
           activeSessionID = sessionID;
           activeSessionTitle = null;
+          if (!trackedSessions.has(sessionID)) {
+            trackedSessions.set(sessionID, { title: null });
+          }
           await syncPort();
           const port = currentPort();
           // Fetch title — best-effort, non-blocking for initial subscribe
@@ -122,36 +177,55 @@ export default async (input: { serverUrl: URL }) => {
             return t;
           });
           if (port) {
-            call("/v1/interests/subscribe", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                session_id: sessionID,
-                dir: process.cwd(),
-                topics: [`notifications.agent.${sessionID}`],
-                port,
-                title: activeSessionTitle ?? "",
-              }),
-            }).catch(() => {});
-            // After title arrives, send one follow-up subscribe with title populated
+            // Await so our own session is persisted in the registry before
+            // readoptSiblings reads it back (otherwise self may be absent and
+            // re-adoption would be skipped).
+            await subscribeSession(sessionID, activeSessionTitle, port);
+            // After the title arrives, send one follow-up subscribe with it.
             titlePromise.then((title) => {
-              if (title && activeSessionID === sessionID) {
-                call("/v1/interests/subscribe", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    session_id: sessionID,
-                    dir: process.cwd(),
-                    topics: [`notifications.agent.${sessionID}`],
-                    port: currentPort() ?? 0,
-                    title,
-                  }),
-                }).catch(() => {});
+              if (!title) return;
+              // Update tracked metadata even if this session is no longer the
+              // active one (another session may have become busy meanwhile).
+              if (trackedSessions.has(sessionID)) {
+                trackedSessions.set(sessionID, { title });
+                subscribeSession(sessionID, title, currentPort() ?? 0);
               }
+              if (activeSessionID === sessionID) activeSessionTitle = title;
             });
+            // Recover idle siblings orphaned by a serve restart (retries from the
+            // heartbeat until the registry shows our own session).
+            readoptSiblings(sessionID).catch(() => {});
           }
         }
       }
+
+      if (event.type === "session.deleted") {
+        const props = event.properties ?? {};
+        const deletedID =
+          (props.sessionID as string | undefined) ??
+          (props.info as { id?: string } | undefined)?.id;
+        if (deletedID) {
+          // Stop heartbeating a session that no longer exists, so its 5-min
+          // envoy_sessions entry expires instead of being kept alive (which would
+          // cause delivery attempts to a dead session id on the current port).
+          trackedSessions.delete(deletedID);
+          if (activeSessionID === deletedID) {
+            activeSessionID = null;
+            activeSessionTitle = null;
+          }
+          // Best-effort: drop the deleted session's interests so routing stops.
+          call("/v1/interests/unsubscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: deletedID, topics: [] }),
+          }).catch(() => {});
+        }
+      }
+    },
+    // Cleanup hook (used by tests; production relies on process 'exit').
+    dispose: () => {
+      clearInterval(timer);
+      clearInterval(heartbeatInterval);
     },
     tool: {
       envoy_subscribe: tool({
