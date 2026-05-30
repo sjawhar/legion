@@ -230,3 +230,370 @@ describe("session title", () => {
     }
   });
 });
+
+describe("heartbeat refreshes all busy sessions (fix 1a)", () => {
+  it("re-subscribes every session that has been busy, not just the most recent", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    const originalHb = process.env.ENVOY_HEARTBEAT_MS;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    process.env.ENVOY_HEARTBEAT_MS = "40";
+
+    const subs: { id: string; t: number }[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subs.push({ id: body.session_id, t: Date.now() });
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      // Serve title lookups -> 404 (no title, avoids follow-up subscribe noise)
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+
+      const busy = (id: string) =>
+        hooks.event({
+          event: {
+            type: "session.status",
+            properties: { sessionID: id, status: { type: "busy" } },
+          },
+        });
+      await busy("ses_A");
+      await busy("ses_B");
+
+      // Settle (< one heartbeat tick): capture ses_A's count before heartbeats run
+      await new Promise((r) => setTimeout(r, 30));
+      const aStart = subs.filter((s) => s.id === "ses_A").length;
+
+      // ~4 heartbeat ticks at 40ms
+      await new Promise((r) => setTimeout(r, 180));
+      const aEnd = subs.filter((s) => s.id === "ses_A").length;
+      const bEnd = subs.filter((s) => s.id === "ses_B").length;
+
+      // ses_A is now idle (ses_B is the most-recently-busy). The heartbeat must
+      // keep refreshing ses_A's registration, not only ses_B's.
+      expect(aEnd).toBeGreaterThan(aStart);
+      expect(bEnd).toBeGreaterThan(1);
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+      if (originalHb === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHb;
+    }
+  });
+});
+
+describe("re-adopts sibling sessions after serve restart (fix 1b)", () => {
+  it("registers idle same-dir+machine siblings on first activity, ignoring other machines/dirs", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    const cwd = process.cwd();
+
+    const subscribed: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subscribed.push(body.session_id);
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        return new Response(
+          JSON.stringify([
+            {
+              session_id: "ses_active",
+              machine_id: "M",
+              dir: cwd,
+              port: 13381,
+              title: "",
+              topics: [],
+              updated_at: Date.now(),
+            },
+            {
+              session_id: "ses_idle",
+              machine_id: "M",
+              dir: cwd,
+              port: 9,
+              title: "Idle",
+              topics: [],
+              updated_at: Date.now(),
+            },
+            {
+              session_id: "ses_foreign",
+              machine_id: "OTHER",
+              dir: cwd,
+              port: 7,
+              title: "",
+              topics: [],
+              updated_at: Date.now(),
+            },
+            {
+              session_id: "ses_otherdir",
+              machine_id: "M",
+              dir: "/somewhere/else",
+              port: 8,
+              title: "",
+              topics: [],
+              updated_at: Date.now(),
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_active", status: { type: "busy" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(subscribed).toContain("ses_active");
+      expect(subscribed).toContain("ses_idle");
+      expect(subscribed).not.toContain("ses_foreign");
+      expect(subscribed).not.toContain("ses_otherdir");
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+});
+
+describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
+  it("stops re-subscribing a session after session.deleted", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    const originalHb = process.env.ENVOY_HEARTBEAT_MS;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    process.env.ENVOY_HEARTBEAT_MS = "40";
+
+    const subs: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subs.push(body.session_id);
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/interests/unsubscribe") || url.includes("/v1/sessions")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+      const busy = (id: string) =>
+        hooks.event({
+          event: {
+            type: "session.status",
+            properties: { sessionID: id, status: { type: "busy" } },
+          },
+        });
+      await busy("ses_A");
+      await busy("ses_B");
+
+      await hooks.event({ event: { type: "session.deleted", properties: { sessionID: "ses_A" } } });
+      // Let any in-flight heartbeat settle, then mark counts.
+      await new Promise((r) => setTimeout(r, 60));
+      const aMark = subs.filter((s) => s === "ses_A").length;
+      const bMark = subs.filter((s) => s === "ses_B").length;
+
+      await new Promise((r) => setTimeout(r, 160));
+      const aEnd = subs.filter((s) => s === "ses_A").length;
+      const bEnd = subs.filter((s) => s === "ses_B").length;
+
+      // ses_A was deleted -> heartbeat must stop refreshing it.
+      expect(aEnd).toBe(aMark);
+      // ses_B is still alive -> heartbeat keeps refreshing it.
+      expect(bEnd).toBeGreaterThan(bMark);
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+      if (originalHb === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHb;
+    }
+  });
+});
+
+describe("re-adoption retries until the registry shows our own session (fix 3)", () => {
+  it("adopts an idle sibling once /v1/sessions includes self on a later poll", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    const originalHb = process.env.ENVOY_HEARTBEAT_MS;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    process.env.ENVOY_HEARTBEAT_MS = "40";
+    const cwd = process.cwd();
+
+    let sessionsCalls = 0;
+    const subscribed: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subscribed.push(body.session_id);
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        sessionsCalls += 1;
+        // First poll: self not persisted yet. Later polls: self + idle sibling present.
+        const body =
+          sessionsCalls <= 1
+            ? []
+            : [
+                {
+                  session_id: "ses_active",
+                  machine_id: "M",
+                  dir: cwd,
+                  port: 13381,
+                  title: "",
+                  topics: [],
+                  updated_at: Date.now(),
+                },
+                {
+                  session_id: "ses_idle",
+                  machine_id: "M",
+                  dir: cwd,
+                  port: 9,
+                  title: "Idle",
+                  topics: [],
+                  updated_at: Date.now(),
+                },
+              ];
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_active", status: { type: "busy" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+
+      expect(subscribed).toContain("ses_idle");
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+      if (originalHb === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHb;
+    }
+  });
+});
+
+describe("invalid ENVOY_HEARTBEAT_MS falls back to the default (fix 6)", () => {
+  it("does not hammer subscribe when the env value is negative", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    const originalHb = process.env.ENVOY_HEARTBEAT_MS;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    process.env.ENVOY_HEARTBEAT_MS = "-5";
+
+    const subs: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subs.push(body.session_id);
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_A", status: { type: "busy" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+
+      // A negative interval must NOT be honored (would hammer); only the initial
+      // subscribe should have happened within this window.
+      expect(subs.filter((s) => s === "ses_A").length).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+      if (originalHb === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHb;
+    }
+  });
+});
