@@ -397,6 +397,39 @@ func TestIsValidRole(t *testing.T) {
 	}
 }
 
+func TestSessionHealthFields_NilReturnsNil(t *testing.T) {
+	if sessionHealthFields(nil) != nil {
+		t.Fatal("expected nil fields for nil session registry")
+	}
+}
+
+func TestSessionHealthFields_PopulatedAfterReady(t *testing.T) {
+	client := setupPublishTestClient(t)
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(time.Minute))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+	if err := sessions.Put("ses_health", session.SessionEntry{Port: 1, MachineID: "m1"}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	fields := sessionHealthFields(sessions)
+	if ready, _ := fields["session_cache_ready"].(bool); !ready {
+		t.Fatalf("expected session_cache_ready true, got %v", fields["session_cache_ready"])
+	}
+	if size, _ := fields["session_cache_size"].(int); size != 1 {
+		t.Fatalf("expected session_cache_size 1, got %v", fields["session_cache_size"])
+	}
+	if we, _ := fields["session_watch_error"].(string); we != "" {
+		t.Fatalf("expected empty session_watch_error, got %q", we)
+	}
+}
+
 func TestRoleSetHandler_Validation(t *testing.T) {
 	registry := setupAdminTestRegistry(t, nil)
 	var state atomic.Pointer[listenerDeps]
