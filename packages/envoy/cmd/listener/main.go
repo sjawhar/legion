@@ -106,6 +106,20 @@ func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry
 	return nil
 }
 
+// sessionHealthFields returns observability fields about the session cache for
+// /healthz. Kept separate from the handler so it stays cheap (no Keys()/List(),
+// just in-memory reads) and unit-testable. Returns nil when sessions is nil.
+func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface{} {
+	if sessions == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"session_cache_ready": sessions.CacheReady(),
+		"session_cache_size":  sessions.CacheSize(),
+		"session_watch_error": sessions.WatchError(),
+	}
+}
+
 // runSelfHealthLoop ticks `probe`, tracking consecutive failures. After
 // `threshold` consecutive failures it invokes `terminate` once and returns.
 // Split from runSelfHealthWatchdog so tests can inject a fake terminate.
@@ -438,6 +452,9 @@ func main() {
 			}
 		}
 		response := map[string]interface{}{"status": "healthy"}
+		for k, v := range sessionHealthFields(d.sessions) {
+			response[k] = v
+		}
 		if healthzConsumer != "" {
 			consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, healthzConsumer)
 			if err == nil && consumerInfo != nil {
@@ -670,6 +687,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Wait for the session cache to finish its initial scan before we accept
+	// traffic, mirroring the interest-cache gate above. Bounded at 30s: a healthy
+	// cluster completes in milliseconds. On timeout we fail open — Put
+	// write-through keeps locally-registered sessions visible, and the self-health
+	// watchdog catches a persistently broken registry via its KV pings.
+	sessionCacheReadyCtx, sessionCacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := sessions.WaitForCacheReady(sessionCacheReadyCtx); err != nil {
+		logger.Warn("session cache warm-up timed out; serving with possibly empty cache",
+			slog.String("error", err.Error()))
+	}
+	sessionCacheReadyCancel()
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
