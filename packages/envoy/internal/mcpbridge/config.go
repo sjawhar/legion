@@ -20,6 +20,12 @@ type ServerConfig struct {
 	Source        string            `json:"source"`
 	TopicTemplate string            `json:"topic_template"`
 	URIPattern    string            `json:"uri_pattern"`
+	// PayloadRouting enables extracting topic variables from JSON payload
+	// fields instead of the URI. When set, the bridge parses each resource
+	// content as a JSON array and publishes one envelope per item.
+	// Keys are topic template placeholders, values are JSON field names.
+	// Example: {"phone": "chat", "jid": "chat_jid"}
+	PayloadRouting map[string]string `json:"payload_routing,omitempty"`
 	compiled *regexp.Regexp
 }
 
@@ -91,27 +97,38 @@ func (s *ServerConfig) validate() error {
 	if strings.TrimSpace(s.TopicTemplate) == "" {
 		return fmt.Errorf("topic_template is required")
 	}
-	if strings.TrimSpace(s.URIPattern) == "" {
-		return fmt.Errorf("uri_pattern is required")
-	}
-	re, err := regexp.Compile(s.URIPattern)
-	if err != nil {
-		return fmt.Errorf("uri_pattern: %w", err)
-	}
-	s.compiled = re
-	groups := make(map[string]bool)
-	for _, name := range re.SubexpNames() {
-		if name != "" {
-			groups[name] = true
+	// When payload_routing is set, URI pattern is optional — the URI is just
+	// a notification trigger, and topic variables come from the JSON payload.
+	if len(s.PayloadRouting) > 0 {
+		placeholders := extractPlaceholders(s.TopicTemplate)
+		for _, ph := range placeholders {
+			if _, ok := s.PayloadRouting[ph]; !ok {
+				return fmt.Errorf("topic_template placeholder {%s} has no matching payload_routing key", ph)
+			}
 		}
-	}
-	placeholders := extractPlaceholders(s.TopicTemplate)
-	if len(placeholders) == 0 {
-		return fmt.Errorf("topic_template has no {placeholder} variables")
-	}
-	for _, ph := range placeholders {
-		if !groups[ph] {
-			return fmt.Errorf("topic_template placeholder {%s} has no matching named capture group in uri_pattern", ph)
+	} else {
+		if strings.TrimSpace(s.URIPattern) == "" {
+			return fmt.Errorf("uri_pattern is required (or set payload_routing)")
+		}
+		re, err := regexp.Compile(s.URIPattern)
+		if err != nil {
+			return fmt.Errorf("uri_pattern: %w", err)
+		}
+		s.compiled = re
+		groups := make(map[string]bool)
+		for _, name := range re.SubexpNames() {
+			if name != "" {
+				groups[name] = true
+			}
+		}
+		placeholders := extractPlaceholders(s.TopicTemplate)
+		if len(placeholders) == 0 {
+			return fmt.Errorf("topic_template has no {placeholder} variables")
+		}
+		for _, ph := range placeholders {
+			if !groups[ph] {
+				return fmt.Errorf("topic_template placeholder {%s} has no matching named capture group in uri_pattern", ph)
+			}
 		}
 	}
 	if s.Transport == "stdio" {
@@ -152,6 +169,20 @@ func (s *ServerConfig) RenderTopic(uri string) (string, error) {
 		if name != "" && i < len(match) {
 			result = strings.ReplaceAll(result, "{"+name+"}", match[i])
 		}
+	}
+	return result, nil
+}
+
+// RenderTopicFromPayload builds a topic string by extracting values from a
+// JSON payload map using the PayloadRouting field mapping.
+func (s *ServerConfig) RenderTopicFromPayload(payload map[string]interface{}) (string, error) {
+	result := s.TopicTemplate
+	for placeholder, jsonField := range s.PayloadRouting {
+		val, ok := payload[jsonField]
+		if !ok {
+			return "", fmt.Errorf("payload missing field %q for placeholder {%s}", jsonField, placeholder)
+		}
+		result = strings.ReplaceAll(result, "{"+placeholder+"}", fmt.Sprint(val))
 	}
 	return result, nil
 }
