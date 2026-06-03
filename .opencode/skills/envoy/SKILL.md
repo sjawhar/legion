@@ -56,6 +56,7 @@ GitHub topics are **resource-scoped** — every event includes the resource type
   - `notifications.github.<owner>.<repo>.pr.<number>.review`
 - CI/check events (per-PR):
   - `notifications.github.<owner>.<repo>.pr.<number>.ci`
+  - Only `check_run`/`check_suite` events **attached to a PR** route here (one envelope per associated PR). Checks not tied to a PR are dropped — there is no repo-wide CI topic. For non-PR visibility, use the `workflow.<filename>.<action>` family instead. Individual GitHub Actions *jobs* (`workflow_job` webhooks) are not routed — only whole workflow runs.
 - Mention events (per-resource):
   - `notifications.github.<owner>.<repo>.pr.<number>.mention`
   - `notifications.github.<owner>.<repo>.issue.<number>.mention`
@@ -172,7 +173,7 @@ You do NOT need to subscribe in order to send or publish.
 
 **Don't `sleep`-poll. Don't "check back in N minutes."** Subscribe to the event and continue with productive work — the system will wake the session when the event arrives.
 
-1. Identify the relevant topic (e.g., `notifications.github.<owner>.<repo>.pr.<num>.>` for all PR events; `.pr.<num>.check_run` for CI status updates)
+1. Identify the relevant topic (e.g., `notifications.github.<owner>.<repo>.pr.<num>.>` for all PR events; `.pr.<num>.ci` for per-PR check/CI status updates; `.workflow.<filename>.completed` for a workflow run finishing)
 2. Call `envoy_subscribe([...])`
 3. Move on to other work, or end the response and let the watcher wake you
 4. The next response is triggered by the event, with the payload available in your context
