@@ -6,7 +6,7 @@ import type {
   TuiSlotPlugin,
 } from "@opencode-ai/plugin/tui";
 import { createSignal } from "solid-js";
-import { copyOsc52 } from "./clipboard";
+import { copyToClipboard } from "./clipboard";
 import { resolveTuiPort } from "./tui-port";
 
 function currentSessionID(api: TuiPluginApi): string | undefined {
@@ -16,7 +16,7 @@ function currentSessionID(api: TuiPluginApi): string | undefined {
 }
 
 function copyWithToast(api: TuiPluginApi, text: string, successMessage: string) {
-  if (copyOsc52(text)) {
+  if (copyToClipboard(text, api.renderer)) {
     api.ui.toast({ message: successMessage, variant: "success" });
   } else {
     api.ui.toast({ message: `Failed: ${successMessage}`, variant: "error" });
