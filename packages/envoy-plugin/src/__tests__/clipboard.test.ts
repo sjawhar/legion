@@ -1,47 +1,56 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { copyOsc52 } from "../clipboard";
+import { describe, expect, it, mock } from "bun:test";
+import { copyNative, copyToClipboard } from "../clipboard";
 
-describe("copyOsc52", () => {
-  let writes: string[];
-  let originalWrite: typeof process.stdout.write;
-
-  beforeEach(() => {
-    writes = [];
-    originalWrite = process.stdout.write;
-    process.stdout.write = mock((chunk: string | Uint8Array) => {
-      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8"));
-      return true;
-    }) as typeof process.stdout.write;
-  });
-
-  afterEach(() => {
-    process.stdout.write = originalWrite;
-  });
-
-  it("writes the expected OSC 52 escape sequence for ASCII", () => {
-    const ok = copyOsc52("ses_abc");
+describe("copyToClipboard", () => {
+  it("copies via the renderer OSC 52 writer and does not fall back when it succeeds", () => {
+    const copyToClipboardOSC52 = mock((_text: string) => true);
+    const ok = copyToClipboard("ses_abc", { copyToClipboardOSC52 });
     expect(ok).toBe(true);
-    expect(writes).toEqual(["\x1b]52;c;c2VzX2FiYw==\x07"]);
+    expect(copyToClipboardOSC52).toHaveBeenCalledWith("ses_abc");
   });
+});
 
-  it("writes the empty payload escape for an empty string", () => {
-    const ok = copyOsc52("");
+describe("copyNative", () => {
+  it("uses wl-copy on Linux/Wayland when available", () => {
+    const run = mock((_cmd: string, _args: string[], _text: string) => true);
+    const ok = copyNative("ses_abc", {
+      os: "linux",
+      env: { WAYLAND_DISPLAY: "wayland-0" },
+      which: (cmd) => cmd === "wl-copy",
+      run,
+    });
     expect(ok).toBe(true);
-    expect(writes).toEqual(["\x1b]52;c;\x07"]);
+    expect(run).toHaveBeenCalledWith("wl-copy", [], "ses_abc");
   });
 
-  it("base64-encodes UTF-8 bytes, not Latin-1 / not JS code units", () => {
-    const ok = copyOsc52("café");
+  it("falls back to xclip on Linux/X11", () => {
+    const run = mock((_cmd: string, _args: string[], _text: string) => true);
+    const ok = copyNative("ses_abc", {
+      os: "linux",
+      env: {},
+      which: (cmd) => cmd === "xclip",
+      run,
+    });
     expect(ok).toBe(true);
-    // UTF-8 bytes for "café" = 63 61 66 c3 a9 → base64 "Y2Fmw6k="
-    expect(writes).toEqual(["\x1b]52;c;Y2Fmw6k=\x07"]);
+    expect(run).toHaveBeenCalledWith("xclip", ["-selection", "clipboard"], "ses_abc");
   });
 
-  it("returns false when process.stdout.write throws", () => {
-    process.stdout.write = mock(() => {
-      throw new Error("stdout closed");
-    }) as typeof process.stdout.write;
-    const ok = copyOsc52("anything");
+  it("falls back to xsel when xclip is missing", () => {
+    const run = mock((_cmd: string, _args: string[], _text: string) => true);
+    copyNative("x", { os: "linux", env: {}, which: (cmd) => cmd === "xsel", run });
+    expect(run).toHaveBeenCalledWith("xsel", ["--clipboard", "--input"], "x");
+  });
+
+  it("uses osascript on macOS with escaped quotes", () => {
+    const run = mock((_cmd: string, _args: string[], _text: string) => true);
+    copyNative('a"b\\c', { os: "darwin", which: () => true, run });
+    expect(run).toHaveBeenCalledWith("osascript", ["-e", 'set the clipboard to "a\\"b\\\\c"'], "");
+  });
+
+  it("returns false on Linux when no clipboard tool is installed", () => {
+    const run = mock(() => true);
+    const ok = copyNative("x", { os: "linux", env: {}, which: () => false, run });
     expect(ok).toBe(false);
+    expect(run).not.toHaveBeenCalled();
   });
 });
