@@ -105,6 +105,12 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         run: npm publish --access public --provenance
         working-directory: packages/envoy-plugin
+        env:
+          # Restored: #699 dropped this, switching to OIDC trusted publishing
+          # that was never configured for this package, so the registry PUT 404s
+          # ("no permission"). The token published 0.1.0-0.1.10 and still auths
+          # the publish; --provenance continues to sign via OIDC (id-token: write).
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Commit, tag, and push
         if: steps.version.outputs.skip != 'true'
