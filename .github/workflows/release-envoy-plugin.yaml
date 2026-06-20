@@ -39,7 +39,12 @@ jobs:
         run: |
           PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
-            PREV_VERSION="0.0.0"
+            # No git tag yet: the tag prefix changed in #699 and the tag-creation
+            # step is gated behind publish (which had been failing), so the seed
+            # tag was never created. Seed from the published npm version so we
+            # never recompute an already-published version (e.g. 0.1.0). Once a
+            # publish succeeds, the tag is created and this branch stops running.
+            PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
             COMMITS=$(git log HEAD --format='%s' -- packages/envoy-plugin/ packages/contracts/)
           else
             PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
