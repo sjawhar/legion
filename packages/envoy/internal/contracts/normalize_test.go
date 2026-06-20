@@ -374,6 +374,50 @@ func TestGithubEnvelopesIssueCommentNumber(t *testing.T) {
 	}
 }
 
+func TestGithubEnvelopesSubIssuesTopic(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     string
+		senderType string
+	}{
+		{name: "sub_issue_added from user", action: "sub_issue_added", senderType: "User"},
+		{name: "sub_issue_removed from user", action: "sub_issue_removed", senderType: "User"},
+		{name: "sub_issue_added from bot", action: "sub_issue_added", senderType: "Bot"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items := GithubEnvelopes(GithubEnvelopeInput{
+				Event:    "sub_issues",
+				Delivery: "d1",
+				EventID:  "e1",
+				TraceID:  "t1",
+				Body: map[string]any{
+					"action":       tt.action,
+					"parent_issue": map[string]any{"number": 42},
+					"sub_issue":    map[string]any{"number": 99},
+					"repository": map[string]any{
+						"name": "legion",
+						"owner": map[string]any{
+							"login": "sjawhar",
+						},
+					},
+					"sender": map[string]any{"login": "someone", "type": tt.senderType},
+				},
+			}, "@legion")
+			if len(items) != 1 {
+				t.Fatalf("expected 1 envelope, got %d", len(items))
+			}
+			if items[0].Topic != "notifications.github.sjawhar.legion.issue.42.sub_issue" {
+				t.Fatalf("unexpected topic: %s", items[0].Topic)
+			}
+			payload := decodeSummary(t, items[0].PayloadSummary)
+			if payload["action"] != tt.action {
+				t.Fatalf("unexpected action in payload summary: %s", payload["action"])
+			}
+		})
+	}
+}
+
 func TestGithubEnvelopesMentionWithNumber(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "issue_comment",
@@ -1623,9 +1667,9 @@ func TestGithubPayloadNotTruncated(t *testing.T) {
 
 func TestGithubPayloadAllEventTypes(t *testing.T) {
 	tests := []struct {
-		name      string
-		event     string
-		body      map[string]any
+		name       string
+		event      string
+		body       map[string]any
 		hasPayload bool
 	}{
 		{

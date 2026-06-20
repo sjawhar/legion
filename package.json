@@ -8,6 +8,7 @@
     "packages/contracts",
     "packages/daemon",
     "packages/envoy-plugin",
+    "packages/dispatch",
     "packages/opencode-plugin"
   ]
 }

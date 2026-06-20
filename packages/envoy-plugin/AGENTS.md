@@ -16,6 +16,7 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 | Packaging metadata  | `package.json`         | npm identity, build scripts                                        |
 | Distribution output | `dist/server.js`       | built plugin consumed by OpenCode                                  |
 | Host rollout helper | `scripts/sync-host.sh` | sync dist + shim to remote host                                    |
+| Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `src/dispatch-subscribe.ts` | injects the dispatch MCP server (shim); `tool.execute.after` auto-subscribes the caller to the new thread's topic so answers route back (Dispatch AC#4) |
 
 ## Critical conventions
 

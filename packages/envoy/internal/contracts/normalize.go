@@ -255,6 +255,8 @@ func githubParentKind(event string, body map[string]any) string {
 		return "pr"
 	case "issues":
 		return "issue"
+	case "sub_issues":
+		return "issue"
 	case "issue_comment":
 		if nested(body, "issue", "pull_request") != nil {
 			return "pr"
@@ -270,6 +272,8 @@ func githubKind(event string) string {
 		return "pr"
 	case "issues":
 		return "issue"
+	case "sub_issues":
+		return "sub_issue"
 	case "push":
 		return "push"
 	case "check_run", "check_suite":
@@ -296,6 +300,11 @@ func githubNumber(event string, body map[string]any) string {
 		}
 	case "issues":
 		n := nested(body, "issue", "number")
+		if n != nil {
+			return fmt.Sprintf("%v", n)
+		}
+	case "sub_issues":
+		n := nested(body, "parent_issue", "number")
 		if n != nil {
 			return fmt.Sprintf("%v", n)
 		}

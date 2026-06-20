@@ -260,3 +260,6 @@ $RECYCLE.BIN/
 !.sisyphus/rules/
 # .legion/ handoff data must be committed — do not ignore the directory
 # (see implement.md step 6 note)
+
+# Playwright MCP transient snapshots
+.playwright-mcp/
