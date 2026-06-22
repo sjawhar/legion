@@ -71,9 +71,6 @@ jobs:
       - name: Typecheck envoy plugin
         run: bun run typecheck
         working-directory: packages/envoy-plugin
-      - name: Build envoy plugin
-        run: bun run build
-        working-directory: packages/envoy-plugin
       - name: Pack envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/envoy-plugin

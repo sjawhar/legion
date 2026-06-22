@@ -13,9 +13,9 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 | Task                | Location               | Notes                                                              |
 | ------------------- | ---------------------- | ------------------------------------------------------------------ |
 | Tool definitions    | `src/server.ts`        | `envoy_subscribe`, `envoy_unsubscribe`, `envoy_list`, `envoy_send`, `envoy_publish`, `envoy_role_set`, `envoy_whoami`, `envoy_sessions` |
-| Packaging metadata  | `package.json`         | npm identity, build scripts                                        |
-| Distribution output | `dist/server.js`       | built plugin consumed by OpenCode                                  |
-| Host rollout helper | `scripts/sync-host.sh` | sync dist + shim to remote host                                    |
+| Packaging metadata  | `package.json`         | npm identity, `exports` map, scripts                               |
+| TUI: `/whoami` + sidebar | `src/tui.tsx`     | slash command + session-id/port sidebar; loaded via the `./tui` export. OpenCode applies the Solid transform at load — ships as source, no build/`dist` |
+| Host rollout helper | `scripts/sync-host.sh` | sync packed release tarball + shim to remote host                  |
 | Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `src/dispatch-subscribe.ts` | injects the dispatch MCP server (shim); `tool.execute.after` auto-subscribes the caller to the new thread's topic so answers route back (Dispatch AC#4) |
 
 ## Critical conventions
