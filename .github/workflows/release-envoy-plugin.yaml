@@ -91,11 +91,6 @@ jobs:
             packages/envoy-plugin/package.json > tmp.json \
             && mv tmp.json packages/envoy-plugin/package.json
 
-      - name: Build plugin
-        if: steps.version.outputs.skip != 'true'
-        run: bun run build
-        working-directory: packages/envoy-plugin
-
       - name: Pack plugin
         if: steps.version.outputs.skip != 'true'
         run: bun pm pack

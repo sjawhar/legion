@@ -8,8 +8,7 @@
       "import": "./src/server.ts"
     },
     "./tui": {
-      "import": "./dist/tui.js",
-      "types": "./dist/tui.d.ts"
+      "import": "./src/tui.tsx"
     }
   },
   "repository": {
@@ -18,7 +17,6 @@
   },
   "types": "src/server.ts",
   "scripts": {
-    "build": "bun -e 'import { createSolidTransformPlugin } from \"@opentui/solid/bun-plugin\"; const result = await Bun.build({ entrypoints: [\"src/tui.tsx\"], outdir: \"dist\", target: \"bun\", format: \"esm\", external: [\"@opencode-ai/*\", \"solid-js\", \"solid-js/*\", \"@opentui/*\"], plugins: [createSolidTransformPlugin()] }); if (!result.success) { console.error(result.logs); process.exit(1); }'",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"
