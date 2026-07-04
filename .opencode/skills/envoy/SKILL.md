@@ -54,9 +54,11 @@ GitHub topics are **resource-scoped** — every event includes the resource type
   - `notifications.github.<owner>.<repo>.issue.<number>.comment`
 - PR review submitted:
   - `notifications.github.<owner>.<repo>.pr.<number>.review`
-- CI/check events (per-PR):
+- CI/check summary (per-PR, per-commit, debounced):
   - `notifications.github.<owner>.<repo>.pr.<number>.ci`
-  - Only `check_run`/`check_suite` events **attached to a PR** route here (one envelope per associated PR). Checks not tied to a PR are dropped — there is no repo-wide CI topic. For non-PR visibility, use the `workflow.<filename>.<action>` family instead. Individual GitHub Actions *jobs* (`workflow_job` webhooks) are not routed — only whole workflow runs.
+  - **Not** a per-check-event firehose. `check_run` webhooks attached to a PR are aggregated ingest-side into per-commit state (JetStream KV bucket `envoy_ci_state`) and re-emitted as **one debounced JSON summary** once the commit's checks have been quiet for the debounce window (`ENVOY_CI_DEBOUNCE`, default `5s`). A subscriber sees the checks "build up" instead of every transition. A new summary is emitted only when the check set actually changes (new push → fresh tally; a re-run flips a check back to running and re-emits).
+  - Payload: `PayloadSummary` is a compact JSON object (`Payload` unused): `{"kind":"ci_summary","repo":"<o>/<r>","number":"<n>","sha":"<sha>","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}`. Each status is `{count, checks}` with the full sorted name list (nothing collapsed); every status is always present (`{"count":0,"checks":[]}` when empty).
+  - `check_suite` is ignored (per-app rollup, no per-check name). Checks not tied to a PR are dropped — there is no repo-wide CI topic. For non-PR visibility, use the `workflow.<filename>.<action>` family instead. Individual GitHub Actions *jobs* (`workflow_job` webhooks) are not routed — only whole workflow runs.
 - Mention events (per-resource):
   - `notifications.github.<owner>.<repo>.pr.<number>.mention`
   - `notifications.github.<owner>.<repo>.issue.<number>.mention`

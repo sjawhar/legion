@@ -107,7 +107,7 @@ The daemon subscribes the controller to these topics:
 - `notifications.role.legion-controller` — role-based route to the active controller session (claimed via `POST /v1/roles/set` on daemon startup)
 - `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
 - `notifications.github.*.*.mention` — @mentions across all GitHub repos
-- `notifications.github.<owner>.<repo>.pr.<number>.ci` — CI events scoped to a specific PR (subscribe per-PR when a worker is waiting on CI; un-PR'd `check_run`/`check_suite` events are not routed to avoid noise)
+- `notifications.github.<owner>.<repo>.pr.<number>.ci` — a **debounced, per-commit CI summary** scoped to a specific PR (subscribe per-PR when a worker is waiting on CI). One settled summary per quiet burst of check activity, not a per-`check_run` firehose; `check_suite` and un-PR'd checks are not routed.
 
 **No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events. Polling handles board-level state adequately on its ~30s cycle. Only CI events scoped to a specific PR (time-sensitive for pipeline progression) get per-PR Envoy subscriptions.
 
@@ -115,13 +115,13 @@ The daemon subscribes the controller to these topics:
 
 ### CI Event Handling
 
-When a CI event is received (via `notifications.github.<owner>.<repo>.pr.<number>.ci`), it indicates a `check_run` or `check_suite` status change on PR #`<number>`. The controller should:
+When a CI summary is received (via `notifications.github.<owner>.<repo>.pr.<number>.ci`), it is **one settled, per-commit summary** for PR #`<number>` — emitted after that commit's checks have been quiet for the debounce window (~5s), not a signal per individual `check_run` transition. The `PayloadSummary` is a compact JSON object `{"kind":"ci_summary","repo","number","sha","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}` — each status carries its count + full check-name list. The controller should:
 
 1. **Identify affected issues** — match the PR number from the topic to an issue with an active worker in `implement` or `test` mode
 2. **Trigger an early poll** — run a focused `fetch-and-collect` for the affected repo to pick up the CI status change immediately rather than waiting for the next polling cycle
 3. **Act on results** — if CI passed and a worker is waiting, advance the pipeline (e.g., move from implement to test, or test to review)
 
-**CI events are advisory.** They trigger early polling but do not bypass the normal state machine. The authoritative state comes from the poll results, not the Envoy event payload.
+**CI summaries are advisory.** Because they are debounced, a summary already reflects a burst of settled checks rather than a single transition — but they still only trigger early polling and never bypass the normal state machine. The authoritative state comes from the poll results, not the Envoy event payload. A commit re-emits a summary only when its check set changes, so an unchanged pipeline stays quiet.
 
 **Per-workflow visibility for non-PR runs:** if you need to react to a workflow that isn't attached to a PR (e.g. a release workflow on a tag push), subscribe to `notifications.github.<owner>.<repo>.workflow.<filename>.<action>` instead. See the [envoy skill](../envoy/SKILL.md) for the full taxonomy.
 

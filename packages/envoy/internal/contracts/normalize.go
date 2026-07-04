@@ -41,21 +41,11 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	out := []Envelope{item}
 	owner, repo := githubRepo(input.Body)
 	if githubCIEvent(input.Event) {
-		prs := githubCIPullRequests(input.Event, input.Body)
-		if len(prs) == 0 {
-			// check_run/check_suite events not attached to any PR are noisy and have
-			// no active subscribers (auto-subscription removed in #377). Drop them;
-			// the workflow_run topic family covers per-workflow visibility instead.
-			return nil
-		}
-		out = make([]Envelope, 0, len(prs))
-		for _, pr := range prs {
-			ci := item
-			ci.Topic = GithubSubject(owner, repo, "pr."+pr+".ci")
-			ci.DedupeKey = "github." + input.Delivery + ".pr." + pr
-			out = append(out, ci)
-		}
-		return out
+		// CI events (check_run/check_suite) are no longer published raw. They fold
+		// into envoy_ci_state via the webhook handler's CIRecorder (see
+		// GithubCIObservations) and are re-emitted as a debounced per-commit summary
+		// on pr.<n>.ci by the listener's summary loop. See internal/cistore.
+		return nil
 	}
 	if !githubCommentEvent(input.Event) {
 		return out
@@ -77,6 +67,57 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	mention := item
 	mention.Topic = GithubSubject(owner, repo, "mention")
 	out = append(out, mention)
+	return out
+}
+
+// CIObservation is the per-(PR, check) fact the CI summary aggregator needs,
+// extracted from a check_run webhook.
+type CIObservation struct {
+	Owner      string
+	Repo       string
+	Number     string
+	SHA        string
+	CheckName  string
+	Status     string
+	Conclusion string
+}
+
+// GithubCIObservations extracts one CIObservation per associated PR from a
+// check_run webhook. It returns nil when the event is not a check_run, has no
+// associated PR, or lacks the head SHA / check name needed to summarize.
+//
+// check_suite is intentionally ignored: it is a per-app rollup with no
+// per-check name, so it would add a redundant row next to the check_runs it
+// aggregates. The per-check view is built from check_run only. GitHub Actions
+// emits per-job check_runs, so nothing is lost for the current CI.
+func GithubCIObservations(event string, body map[string]any) []CIObservation {
+	if event != "check_run" {
+		return nil
+	}
+	prs := githubCIPullRequests(event, body)
+	if len(prs) == 0 {
+		return nil
+	}
+	sha := nestedString(body, "check_run", "head_sha")
+	name := nestedString(body, "check_run", "name")
+	if sha == "" || name == "" {
+		return nil
+	}
+	owner, repo := githubRepo(body)
+	status := nestedString(body, "check_run", "status")
+	conclusion := nestedString(body, "check_run", "conclusion")
+	out := make([]CIObservation, 0, len(prs))
+	for _, pr := range prs {
+		out = append(out, CIObservation{
+			Owner:      owner,
+			Repo:       repo,
+			Number:     pr,
+			SHA:        sha,
+			CheckName:  name,
+			Status:     status,
+			Conclusion: conclusion,
+		})
+	}
 	return out
 }
 

@@ -1402,7 +1402,7 @@ func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	if err := checkSelfHealth(registry, sessions); err != nil {
+	if err := checkSelfHealth(registry, sessions, nil); err != nil {
 		t.Fatalf("healthy probe should not error: %v", err)
 	}
 }
@@ -1424,7 +1424,7 @@ func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
 
 	client.Conn.Close()
 
-	if err := checkSelfHealth(registry, sessions); err == nil {
+	if err := checkSelfHealth(registry, sessions, nil); err == nil {
 		t.Fatal("probe after conn close should return error")
 	}
 }

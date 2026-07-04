@@ -45,8 +45,15 @@ func githubSenderField(payload map[string]any, field string) string {
 	return s
 }
 
+// CIRecorder folds a single check_run observation into the per-commit CI state.
+// The listener's cistore.Store satisfies this interface; the debounced summary
+// is emitted separately by the summary loop, so the handler never publishes CI.
+type CIRecorder interface {
+	Record(owner, repo, number, sha, checkName, status, conclusion string) error
+}
+
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
-func GitHubHandler(secret, mentionTrigger string, publisher Publisher) http.HandlerFunc {
+func GitHubHandler(secret, mentionTrigger string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -86,6 +93,21 @@ func GitHubHandler(secret, mentionTrigger string, publisher Publisher) http.Hand
 			}
 		}
 		if githubSkip(event) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		// CI events fold into per-commit state instead of being published raw.
+		// A check_run associated with multiple PRs records once per PR. check_suite
+		// yields no observations (ignored — see contracts.GithubCIObservations).
+		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
+			for _, o := range obs {
+				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.Status, o.Conclusion); err != nil {
+					log.Printf("github ci record failed: %v", err)
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
 			return
