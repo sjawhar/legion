@@ -21,6 +21,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
@@ -38,6 +39,7 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	ciStore  *cistore.Store
 }
 
 const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
@@ -83,16 +85,16 @@ func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string
 // Termination uses SIGTERM so the existing graceful shutdown path runs. Docker
 // `restart: unless-stopped` (on-prem) and ECS task respawn (Fargate) then bring
 // the listener back with a fresh conn.
-func runSelfHealthWatchdog(logger *logging.Logger, registry *store.Registry, sessions *session.SessionRegistry, interval time.Duration, threshold int) {
+func runSelfHealthWatchdog(logger *logging.Logger, registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, interval time.Duration, threshold int) {
 	terminate := func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
-	probe := func() error { return checkSelfHealth(registry, sessions) }
+	probe := func() error { return checkSelfHealth(registry, sessions, ci) }
 	runSelfHealthLoop(logger, probe, terminate, interval, threshold)
 }
 
 // checkSelfHealth pings both KV-backed registries. Returns the first error
 // encountered, or nil when all are reachable. Extracted from the watchdog loop
 // so callers (and tests) can probe the same view of health that the loop uses.
-func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry) error {
+func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store) error {
 	if registry != nil {
 		if err := registry.Ping(); err != nil {
 			return fmt.Errorf("interest kv: %w", err)
@@ -101,6 +103,11 @@ func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry
 	if sessions != nil {
 		if err := sessions.Ping(); err != nil {
 			return fmt.Errorf("session kv: %w", err)
+		}
+	}
+	if ci != nil {
+		if err := ci.Ping(); err != nil {
+			return fmt.Errorf("ci kv: %w", err)
 		}
 	}
 	return nil
@@ -451,6 +458,13 @@ func main() {
 				return
 			}
 		}
+		if d.ciStore != nil {
+			if err := d.ciStore.Ping(); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "ci kv unavailable: " + err.Error()})
+				return
+			}
+		}
 		response := map[string]interface{}{"status": "healthy"}
 		for k, v := range sessionHealthFields(d.sessions) {
 			response[k] = v
@@ -473,10 +487,15 @@ func main() {
 	webhookPublisher := webhook.PublisherFunc(func(item contracts.Envelope) error {
 		return deps.Load().client.Publish(item)
 	})
+	// CI recorder folds check_run events into cistore behind the same readiness
+	// gate (deps is non-nil once init completes, so ciStore is set).
+	ciRecorder := webhook.CIRecorderFunc(func(owner, repo, number, sha, checkName, status, conclusion string) error {
+		return deps.Load().ciStore.Record(owner, repo, number, sha, checkName, status, conclusion)
+	})
 	if webhookCfg.GitHub != nil {
 		mux.Handle("/webhook/github", readinessGate(
 			func() bool { return deps.Load() != nil },
-			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookPublisher),
+			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookPublisher, ciRecorder),
 		))
 	}
 	if webhookCfg.Slack != nil {
@@ -700,6 +719,13 @@ func main() {
 	}
 	sessionCacheReadyCancel()
 
+	// CI-summary aggregation state. Its WatchAll cache warms asynchronously like
+	// the registries above; the summary loop tolerates an empty cache until it fills.
+	ciStore, err := cistore.Open(client.Conn, cistore.WithReplicas(cfg.NATSReplicas), cistore.WithTTL(7*24*time.Hour))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
 		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
@@ -888,6 +914,7 @@ func main() {
 		client:   client,
 		registry: registry,
 		sessions: sessions,
+		ciStore:  ciStore,
 	})
 	logger.Info("envoy-listener ready (NATS connected)")
 
@@ -895,6 +922,20 @@ func main() {
 	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
+
+	// Phase 6b2: Start the CI summary loop. It emits one debounced, per-commit CI
+	// summary to pr.<n>.ci once a commit's checks have been quiet for the debounce
+	// window (ENVOY_CI_DEBOUNCE, default 5s). Emit-once is guarded by a KV CAS.
+	ciDebounce := 5 * time.Second
+	if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil {
+			ciDebounce = d
+		} else {
+			logger.Warn("invalid ENVOY_CI_DEBOUNCE; using default", slog.String("value", v), slog.String("error", perr.Error()))
+		}
+	}
+	summaryCtx, summaryCancel := context.WithCancel(context.Background())
+	cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, logger)
 
 	// Phase 6c: Self-health watchdog. Periodically pings the JetStream KV
 	// buckets; if they are unreachable for several consecutive checks the
@@ -908,7 +949,7 @@ func main() {
 	// session.SessionRegistry kept their KV handles bound to the original
 	// closed conn. Restart is cheap and lossless — KV state is durable, NATS
 	// retries undelivered messages, and OpenCode sessions re-register.
-	go runSelfHealthWatchdog(logger, registry, sessions, 30*time.Second, 3)
+	go runSelfHealthWatchdog(logger, registry, sessions, ciStore, 30*time.Second, 3)
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -919,6 +960,9 @@ func main() {
 	case s := <-sig:
 		logger.Info("received signal, shutting down", slog.String("signal", s.String()))
 	}
+
+	// Stop the CI summary loop first so it doesn't hit the KV on a draining conn.
+	summaryCancel()
 
 	// Ordered shutdown:
 	// 2. HTTP server — stop accepting new requests, drain in-flight.

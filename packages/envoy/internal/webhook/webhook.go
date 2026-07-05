@@ -16,3 +16,10 @@ type PublisherFunc func(contracts.Envelope) error
 func (f PublisherFunc) Publish(item contracts.Envelope) error {
 	return f(item)
 }
+
+// CIRecorderFunc adapts a plain function to the CIRecorder interface.
+type CIRecorderFunc func(owner, repo, number, sha, checkName, status, conclusion string) error
+
+func (f CIRecorderFunc) Record(owner, repo, number, sha, checkName, status, conclusion string) error {
+	return f(owner, repo, number, sha, checkName, status, conclusion)
+}
