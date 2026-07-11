@@ -24,11 +24,12 @@
   "dependencies": {
     "@opencode-ai/plugin": "~1.14.46"
   },
+  "peerDependencies": {
+    "@opentui/core": ">=0.1.92",
+    "@opentui/solid": ">=0.1.92"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
-    "@opentui/core": "^0.2.6",
-    "@opentui/keymap": "^0.2.6",
-    "@opentui/solid": "^0.2.6",
     "@types/bun": "latest",
     "solid-js": "^1.9.0",
     "typescript": "^5.3.0"

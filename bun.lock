@@ -53,18 +53,19 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "0.19.0",
+      "version": "0.2.1",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
-        "@opentui/core": "^0.2.6",
-        "@opentui/keymap": "^0.2.6",
-        "@opentui/solid": "^0.2.6",
         "@types/bun": "latest",
         "solid-js": "^1.9.0",
         "typescript": "^5.3.0",
+      },
+      "peerDependencies": {
+        "@opentui/core": ">=0.1.92",
+        "@opentui/solid": ">=0.1.92",
       },
     },
     "packages/opencode-plugin": {
