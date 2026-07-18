@@ -86,8 +86,6 @@ export interface ServerOptions {
   fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
   /** Issue tracker backend name (needed for advance endpoint mutations) */
   issueBackend?: "linear" | "github";
-  /** Auto-advance: dispatch next worker when current one finishes */
-  autoAdvance?: boolean;
   /** Maps worker mode to agent type for AgentPartInput on initial prompt. */
   modeAgents?: Partial<Record<string, string>>;
 }
@@ -2009,62 +2007,6 @@ export function startServer(opts: ServerOptions): {
           });
         }
 
-        // POST /state/auto-advance — advance all ready issues (internal + testing)
-        if (method === "POST" && url.pathname === "/state/auto-advance") {
-          await stateLoaded;
-          if (!opts.autoAdvance) {
-            return jsonResponse({ advanced: [], reason: "auto_advance_disabled" });
-          }
-
-          const AUTO_ADVANCE_ACTIONS: ReadonlySet<string> = new Set([
-            "dispatch_architect",
-            "dispatch_planner",
-            "dispatch_implementer",
-            "dispatch_implementer_for_retro",
-            "dispatch_tester",
-            "dispatch_reviewer",
-            "dispatch_merger",
-            "transition_to_todo",
-            "transition_to_in_progress",
-            "transition_to_testing",
-            "transition_to_needs_review",
-            "transition_to_retro",
-            "transition_to_done",
-          ]);
-
-          const advanced: Array<{
-            issueId: string;
-            action: string;
-            result: string;
-          }> = [];
-
-          for (const [id, state] of issueStateCache) {
-            if (!AUTO_ADVANCE_ACTIONS.has(state.suggestedAction)) continue;
-            if (state.hasLiveWorker) continue;
-
-            try {
-              if (!server) continue;
-              const advanceResponse = await fetch(`http://127.0.0.1:${server.port}/state/advance`, {
-                method: "POST",
-                headers: JSON_HEADERS,
-                body: JSON.stringify({ issueId: id }),
-              });
-              const result = (await advanceResponse.json()) as Record<string, unknown>;
-              advanced.push({
-                issueId: id,
-                action: state.suggestedAction,
-                result: (result.executed as string) ?? "unknown",
-              });
-            } catch (err) {
-              console.error(
-                `[auto-advance] ${id}: ${err instanceof Error ? err.message : String(err)}`
-              );
-            }
-          }
-
-          return jsonResponse({ advanced });
-        }
-
         if (method === "POST" && url.pathname === "/shutdown") {
           await opts.shutdownFn?.();
           return jsonResponse({ status: "shutting_down" });
@@ -2216,28 +2158,6 @@ export function startServer(opts: ServerOptions): {
     cleanupDoneIssueWorkers(state).catch((err) =>
       console.error("[auto-cleanup] failed:", err instanceof Error ? err.message : String(err))
     );
-
-    // Auto-advance after state refresh (fire-and-forget)
-    if (opts.autoAdvance && server) {
-      fetch(`http://127.0.0.1:${server.port}/state/auto-advance`, {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: "{}",
-      })
-        .then(async (res) => {
-          if (res.ok) {
-            const body = (await res.json()) as { advanced?: unknown[] };
-            if (body.advanced && (body.advanced as unknown[]).length > 0) {
-              console.log(`[auto-advance] Advanced ${(body.advanced as unknown[]).length} issues`);
-            }
-          }
-        })
-        .catch((err) => {
-          console.error(
-            `[auto-advance] Error: ${err instanceof Error ? err.message : String(err)}`
-          );
-        });
-    }
   };
 
   return {

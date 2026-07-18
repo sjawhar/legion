@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/routing"
 )
 
@@ -17,10 +18,10 @@ const Bucket = "envoy_interests"
 const RoleBucket = "envoy_roles"
 
 type Registry struct {
-	kv        nats.KeyValue
-	roleKV    nats.KeyValue
-	mu        sync.RWMutex
-	cache     map[string]Interest
+	kv     nats.KeyValue
+	roleKV nats.KeyValue
+	mu     sync.RWMutex
+	cache  map[string]Interest
 	// readyCh is closed when watch() finishes its initial scan of existing KV
 	// entries (signalled by the nil sentinel WatchAll() emits after delivering
 	// the current value of each existing key). After readyCh is closed, the
@@ -217,7 +218,7 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 }
 
 func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) {
-	roleTopic := "notifications.role." + role
+	roleTopic := contracts.RoleTopicPrefix + role
 	entry, err := r.roleKV.Get(role)
 	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 		return Interest{}, err

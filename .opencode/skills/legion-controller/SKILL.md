@@ -608,7 +608,7 @@ If the PR is merged but the issue isn't closed, close it explicitly:
 gh issue close $ISSUE_NUMBER -R $ISSUE_REPO
 ```
 
-This handles edge cases where the merge workflow's explicit close failed or where GitHub auto-close didn't trigger. The `transition_to_done` action type exists in the state machine for this purpose.
+This handles edge cases where GitHub's auto-close on merge didn't fire or the issue isn't linked to the PR. The `transition_to_done` action type exists in the state machine for this purpose.
 
 ### 4. Route Triage
 
@@ -653,9 +653,8 @@ issue, which the controller picks up via feedback relay (Step 2) on the next ite
 ### 6. Cleanup Done (MUST run every iteration)
 
 **This step MUST execute on every loop iteration.** Iterate over ALL Done issues from the collected
-state that still have worker entries in the daemon. The daemon also auto-cleans Done issues during
-state collection (Layer 1), and the merge worker cleans up at merge time (Layer 2). This controller
-sweep is the **backup safety net** that catches stragglers — issues where the merge worker or daemon
+state that still have worker entries in the daemon. The daemon auto-cleans Done issues during
+state collection (Layer 1), and this controller sweep is the **backup safety net** (Layer 2) that catches stragglers — issues where the daemon
 auto-cleanup didn't fire (e.g., issue was closed manually, daemon restarted between collect cycles).
 
 For each Done issue that has worker entries (check the `/workers` response):
@@ -847,24 +846,6 @@ legion advance "$ISSUE_IDENTIFIER" --dry-run
 **When to use `advance` vs manual `dispatch`:**
 - Use `advance` for normal lifecycle progression (it handles the full action mapping)
 - Use `dispatch` directly when you need custom prompts, env vars, or workspace overrides
-
-#### Auto-Progression
-
-When `LEGION_AUTO_ADVANCE=true` is set (in `legion.yaml` as `auto_advance: true`):
-- The daemon automatically dispatches the next worker when the current one finishes
-- After each state collection (60s health tick), ready issues are auto-advanced
-- The controller's role shifts to exception handling, triage, and priority management
-- Check `LEGION_AUTO_ADVANCE` env var before manual dispatch — skip if auto-advance handles it
-
-```bash
-# In the loop body, check auto-advance before manual dispatch:
-if [ "$LEGION_AUTO_ADVANCE" = "true" ]; then
-  # Only handle exceptions — auto-advance handles normal flow
-else
-  # Use legion advance for each actionable issue
-  legion advance "$ISSUE_IDENTIFIER"
-fi
-```
 
 ### Retro
 

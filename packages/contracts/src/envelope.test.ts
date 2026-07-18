@@ -85,6 +85,19 @@ describe("EnvelopeSchema", () => {
     });
   });
 
+  test("accepts envoy source for delivery exceptions", () => {
+    const item = EnvelopeSchema.parse(
+      buildEnvelope({
+        source: "envoy",
+        source_event_id: "evt-original",
+        topic: "notifications.envoy.exceptions.notifications.role.legion-controller",
+        dedupe_key: "envoy.exception.evt-1",
+      })
+    );
+
+    expect(item.source).toBe("envoy");
+  });
+
   test("rejects unknown source with a source validation issue", () => {
     expectInvalidFields({ source: "unknown" }, ["source"]);
   });

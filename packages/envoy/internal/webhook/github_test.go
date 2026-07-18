@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -141,13 +142,14 @@ func TestGitHubHandler(t *testing.T) {
 			wantPublished: 3,
 		},
 		{
-			name:       "bot sender on comment event — skipped",
-			method:     "POST",
-			body:       botComment,
-			delivery:   "d-3",
-			event:      "issue_comment",
-			secret:     "s",
-			wantStatus: 200,
+			name:          "bot sender on comment event — publishes 1 envelope",
+			method:        "POST",
+			body:          botComment,
+			delivery:      "d-3",
+			event:         "issue_comment",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
 		},
 		{
 			name:          "sub_issues user sender — publishes 1 envelope",
@@ -212,7 +214,7 @@ func TestGitHubHandler(t *testing.T) {
 			if trigger == "" {
 				trigger = "@legion"
 			}
-			handler := GitHubHandler(tc.secret, trigger, pub, &mockRecorder{})
+			handler := GitHubHandler(tc.secret, trigger, "", pub, &mockRecorder{})
 
 			body := []byte(tc.body)
 			req := httptest.NewRequest(tc.method, "/webhook/github", strings.NewReader(tc.body))
@@ -270,7 +272,7 @@ func TestGitHubHandlerSubIssuesFixture(t *testing.T) {
 	}
 
 	pub := &mockPublisher{}
-	handler := GitHubHandler("s", "@legion", pub, &mockRecorder{})
+	handler := GitHubHandler("s", "@legion", "", pub, &mockRecorder{})
 
 	req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(string(body)))
 	req.Header.Set("X-GitHub-Delivery", "d-fixture-sub-issues")
@@ -312,7 +314,7 @@ func TestGitHubHandlerCIRecordsNotPublishes(t *testing.T) {
 	t.Run("check_run records per PR, publishes nothing", func(t *testing.T) {
 		pub := &mockPublisher{}
 		rec := &mockRecorder{}
-		handler := GitHubHandler("s", "@legion", pub, rec)
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
 		body := []byte(checkRun)
 		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(checkRun))
 		req.Header.Set("X-GitHub-Delivery", "d-ci-1")
@@ -341,7 +343,7 @@ func TestGitHubHandlerCIRecordsNotPublishes(t *testing.T) {
 	t.Run("recorder error returns 503", func(t *testing.T) {
 		pub := &mockPublisher{}
 		rec := &mockRecorder{err: fmt.Errorf("kv down")}
-		handler := GitHubHandler("s", "@legion", pub, rec)
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
 		body := []byte(checkRun)
 		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(checkRun))
 		req.Header.Set("X-GitHub-Delivery", "d-ci-2")
@@ -358,7 +360,7 @@ func TestGitHubHandlerCIRecordsNotPublishes(t *testing.T) {
 		push := `{"ref": "refs/heads/main", "sender": {"login": "octocat", "type": "User"}, "repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}}`
 		pub := &mockPublisher{}
 		rec := &mockRecorder{}
-		handler := GitHubHandler("s", "@legion", pub, rec)
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
 		body := []byte(push)
 		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(push))
 		req.Header.Set("X-GitHub-Delivery", "d-push-1")
@@ -374,6 +376,92 @@ func TestGitHubHandlerCIRecordsNotPublishes(t *testing.T) {
 		}
 		if len(rec.calls) != 0 {
 			t.Fatalf("recorder calls = %d, want 0 for non-CI event", len(rec.calls))
+		}
+	})
+}
+
+func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
+	const (
+		secret        = "s"
+		reviewerAppID = "12345"
+	)
+	checkRun := func(name, appID string) string {
+		return fmt.Sprintf(`{
+			"action": "completed",
+			"check_run": {
+				"name": %q,
+				"status": "completed",
+				"conclusion": "success",
+				"head_sha": "deadbeef",
+				"app": {"id": %s},
+				"pull_requests": [{"number": 42}]
+			},
+			"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+		}`, name, appID)
+	}
+	post := func(t *testing.T, handler http.HandlerFunc, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", "d-reviewer-verdict")
+		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		return rr
+	}
+
+	for _, name := range []string{"tester", "architect"} {
+		t.Run("right-App "+name+" verdict is recorded", func(t *testing.T) {
+			pub := &mockPublisher{}
+			rec := &mockRecorder{}
+			handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
+			post(t, handler, checkRun(name, reviewerAppID))
+
+			if len(pub.published) != 0 {
+				t.Fatalf("published = %d, want 0", len(pub.published))
+			}
+			if len(rec.calls) != 1 {
+				t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+			}
+			if got := rec.calls[0]; got.checkName != name || got.conclusion != "success" {
+				t.Fatalf("unexpected recorded verdict: %+v", got)
+			}
+		})
+	}
+
+	t.Run("wrong-App tester verdict is dropped", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
+		post(t, handler, checkRun("tester", "98765"))
+		if len(rec.calls) != 0 {
+			t.Fatalf("recorder calls = %d, want 0 for wrong-App tester", len(rec.calls))
+		}
+	})
+
+	t.Run("missing reviewer App ID drops bare verdict", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", "", pub, rec)
+		post(t, handler, checkRun("tester", reviewerAppID))
+		if len(rec.calls) != 0 {
+			t.Fatalf("recorder calls = %d, want 0 without a reviewer App ID", len(rec.calls))
+		}
+	})
+
+	t.Run("ordinary CI check is recorded from another App", func(t *testing.T) {
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
+		post(t, handler, checkRun("unit-tests", "98765"))
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+		}
+		if got := rec.calls[0].checkName; got != "unit-tests" {
+			t.Fatalf("recorded check name = %q, want unit-tests", got)
 		}
 	})
 }

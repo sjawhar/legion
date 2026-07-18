@@ -72,10 +72,7 @@ describe("POST /state/advance", () => {
     };
   }
 
-  async function startTestServer(options?: {
-    issueBackend?: "linear" | "github";
-    autoAdvance?: boolean;
-  }) {
+  async function startTestServer(options?: { issueBackend?: "linear" | "github" }) {
     createSessionCalls = [];
     deleteSessionCalls = [];
     const adapter = makeAdapter();
@@ -92,7 +89,6 @@ describe("POST /state/advance", () => {
       repoManagerDeps: makeRepoManagerDeps(tempDir),
       stateFilePath,
       issueBackend: options?.issueBackend ?? "github",
-      autoAdvance: options?.autoAdvance ?? false,
     });
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
@@ -169,6 +165,14 @@ describe("POST /state/advance", () => {
     expect(response.status).toBe(412);
     const body = (await response.json()) as { error: string };
     expect(body.error).toBe("issue_not_in_cache");
+  });
+
+  it("does not dispatch without explicit /workers or /state/advance", async () => {
+    await startTestServer();
+
+    await seedIssueInCache("acme", "backend", 42, "Todo");
+
+    expect(createSessionCalls).toHaveLength(0);
   });
 
   it("returns skipped for skip action (Triage status)", async () => {
@@ -286,189 +290,11 @@ describe("POST /state/advance", () => {
     // the worker was dispatched), the advance will try POST /workers which returns 409.
     expect(second.status).toBe(409);
   });
-});
-
-describe("POST /state/auto-advance", () => {
-  let tempDir: string | null = null;
-  let stopServer: (() => void) | null = null;
-  let baseUrl = "";
-  const originalFetch = globalThis.fetch;
-  const legionId = "test-org/1";
-  let mockEnvoy: MockEnvoyServer;
-
-  beforeEach(() => {
-    mockEnvoy = createMockEnvoyServer();
-  });
-
-  function makeAdapter(): RuntimeAdapter {
-    return {
-      start: async () => {},
-      stop: async () => {},
-      healthy: async () => true,
-      getPort: () => sharedServePort,
-      getServePid: () => 0,
-      createSession: async (sessionId: string) => sessionId,
-      sendPrompt: async () => {},
-      getSessionStatus: async () => ({ data: undefined }),
-      deleteSession: async () => {},
-      sessionExists: async () => false,
-    };
-  }
-
-  function makePaths(tmpDir: string) {
-    return {
-      dataDir: tmpDir,
-      stateDir: tmpDir,
-      reposDir: path.join(tmpDir, "repos"),
-      workspacesDir: path.join(tmpDir, "workspaces"),
-      legionsFile: path.join(tmpDir, "legions.json"),
-      forLegion: (id: string) => ({
-        legionStateDir: path.join(tmpDir, id),
-        workersFile: path.join(tmpDir, id, "workers.json"),
-        promotedFile: path.join(tmpDir, id, "promoted.json"),
-        feedbackFile: path.join(tmpDir, id, "feedback.jsonl"),
-        logDir: path.join(tmpDir, id, "logs"),
-        workspacesDir: path.join(tmpDir, "workspaces", id),
-      }),
-      repoClonePath: (host: string, owner: string, repo: string) =>
-        path.join(tmpDir, "repos", host, `${owner}-${repo}`),
-    };
-  }
-
-  function makeRepoManagerDeps(_tmpDir: string) {
-    return {
-      exists: async () => true,
-      runJj: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-      rmDir: async () => {},
-      symlink: async () => {},
-      listDir: async () => [] as string[],
-    };
-  }
-
-  async function startTestServer(autoAdvance: boolean) {
-    const adapter = makeAdapter();
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-auto-advance-"));
-    const stateFilePath = path.join(tempDir, "workers.json");
-    const { server, stop } = startServer({
-      port: 0,
-      hostname: "127.0.0.1",
-      envoyUrl: mockEnvoy.url,
-      legionId,
-      legionDir: tempDir,
-      paths: makePaths(tempDir),
-      adapter,
-      repoManagerDeps: makeRepoManagerDeps(tempDir),
-      stateFilePath,
-      issueBackend: "github",
-      autoAdvance,
-    });
-    stopServer = stop;
-    baseUrl = `http://127.0.0.1:${server.port}`;
-  }
-
-  async function requestJson(pathname: string, init?: RequestInit) {
-    return originalFetch(`${baseUrl}${pathname}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...(init?.headers ?? {}),
-      },
-    });
-  }
-
-  async function seedIssueInCache(
-    owner: string,
-    repo: string,
-    issueNumber: number,
-    status: string,
-    labels: string[] = []
-  ) {
-    const item = {
-      content: {
-        number: issueNumber,
-        repository: `${owner}/${repo}`,
-        url: `https://github.com/${owner}/${repo}/issues/${issueNumber}`,
-        type: "Issue",
-      },
-      status,
-      labels,
-    };
-    const response = await requestJson("/state/collect", {
-      method: "POST",
-      body: JSON.stringify({ backend: "github", issues: [item] }),
-    });
-    expect(response.status).toBe(200);
-  }
-
-  afterEach(async () => {
-    stopServer?.();
-    stopServer = null;
-    if (tempDir) {
-      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
-      tempDir = null;
-    }
-    mockEnvoy.stop();
-  });
-
-  it("does nothing when autoAdvance is disabled", async () => {
-    await startTestServer(false);
-    await seedIssueInCache("acme", "backend", 42, "Todo");
+  it("POST /state/auto-advance returns 404", async () => {
+    await startTestServer();
 
     const response = await requestJson("/state/auto-advance", { method: "POST" });
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { advanced: unknown[]; reason?: string };
-    expect(body.advanced).toHaveLength(0);
-    expect(body.reason).toBe("auto_advance_disabled");
-  });
 
-  it("auto-advances dispatch-ready issues when enabled", async () => {
-    await startTestServer(true);
-    // Seed a dispatch-ready issue (Todo → dispatch_planner)
-    await seedIssueInCache("acme", "backend", 42, "Todo");
-    // Seed a skip issue (Triage → skip)
-    await seedIssueInCache("acme", "backend", 43, "Triage");
-
-    const response = await requestJson("/state/auto-advance", { method: "POST" });
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      advanced: Array<{ issueId: string; action: string; result: string }>;
-    };
-    // Only the Todo issue should be advanced
-    expect(body.advanced.length).toBeGreaterThanOrEqual(1);
-    const todoAdvance = body.advanced.find((a) => a.issueId === "acme-backend-42");
-    expect(todoAdvance).toBeDefined();
-    expect(todoAdvance?.action).toBe("dispatch_planner");
-    expect(todoAdvance?.result).toBe("dispatched");
-
-    // Triage issue should not be advanced
-    const triageAdvance = body.advanced.find((a) => a.issueId === "acme-backend-43");
-    expect(triageAdvance).toBeUndefined();
-  });
-});
-
-describe("config autoAdvance", () => {
-  it("reads LEGION_AUTO_ADVANCE from env", async () => {
-    const { resolveDaemonConfig } = await import("../config");
-    const { config } = resolveDaemonConfig({
-      env: {
-        LEGION_ID: "test/1",
-        LEGION_AUTO_ADVANCE: "true",
-      },
-    });
-    expect(config.autoAdvance).toBe(true);
-  });
-
-  it("defaults autoAdvance to false", async () => {
-    const { resolveDaemonConfig } = await import("../config");
-    const { config } = resolveDaemonConfig({
-      env: { LEGION_ID: "test/1" },
-    });
-    expect(config.autoAdvance).toBe(false);
-  });
-
-  it("reads autoAdvance from yaml config", async () => {
-    const { loadConfigFromFile } = await import("../config");
-    const result = loadConfigFromFile("auto_advance: true\n", "/tmp");
-    expect(result.fields.autoAdvance).toBe(true);
+    expect(response.status).toBe(404);
   });
 });

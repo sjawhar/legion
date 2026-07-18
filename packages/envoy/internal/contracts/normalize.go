@@ -77,6 +77,7 @@ type CIObservation struct {
 	Repo       string
 	Number     string
 	SHA        string
+	AppID      string
 	CheckName  string
 	Status     string
 	Conclusion string
@@ -104,6 +105,7 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		return nil
 	}
 	owner, repo := githubRepo(body)
+	appID := nestedNumberString(body, "check_run", "app", "id")
 	status := nestedString(body, "check_run", "status")
 	conclusion := nestedString(body, "check_run", "conclusion")
 	out := make([]CIObservation, 0, len(prs))
@@ -113,6 +115,7 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 			Repo:       repo,
 			Number:     pr,
 			SHA:        sha,
+			AppID:      appID,
 			CheckName:  name,
 			Status:     status,
 			Conclusion: conclusion,

@@ -1443,7 +1443,7 @@ describe("daemon entry", () => {
     expect(opts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(Number(opts.env?.LEGION_DAEMON_PORT)).toBeGreaterThanOrEqual(13370);
     expect(JSON.parse(opts.env?.OPENCODE_CONFIG_CONTENT ?? "null")).toEqual({
-      plugin: ["@sjawhar/opencode-legion@latest"],
+      plugin: ["@sjawhar/opencode-legion@latest", "@sjawhar/opencode-legion-envoy@latest"],
     });
   });
 
@@ -1523,7 +1523,7 @@ describe("daemon entry", () => {
     expect(restartOpts.env?.LEGION_SHORT_ID).toBe(TEAM_ID.slice(0, 8));
     expect(Number(restartOpts.env?.LEGION_DAEMON_PORT)).toBeGreaterThanOrEqual(13370);
     expect(JSON.parse(restartOpts.env?.OPENCODE_CONFIG_CONTENT ?? "null")).toEqual({
-      plugin: ["@sjawhar/opencode-legion@latest"],
+      plugin: ["@sjawhar/opencode-legion@latest", "@sjawhar/opencode-legion-envoy@latest"],
     });
   });
 

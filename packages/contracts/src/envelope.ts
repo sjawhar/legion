@@ -5,7 +5,7 @@ const isSubject = (value: unknown): value is string =>
 
 export const EnvelopeSchema = z.object({
   event_id: z.string().min(1),
-  source: z.enum(["agent", "github", "slack", "whatsapp", "ghostwispr"]),
+  source: z.enum(["agent", "envoy", "github", "slack", "whatsapp", "ghostwispr"]),
   source_event_id: z.string().min(1),
   source_session: z.string().optional(),
   topic: z.custom<string>(isSubject, { message: "topic must be a non-empty subject" }),

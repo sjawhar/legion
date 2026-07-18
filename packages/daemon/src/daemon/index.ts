@@ -201,7 +201,7 @@ function buildServeEnv(config: DaemonConfig): Record<string, string> {
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
-      plugin: ["@sjawhar/opencode-legion@latest"],
+      plugin: ["@sjawhar/opencode-legion@latest", "@sjawhar/opencode-legion-envoy@latest"],
     }),
   };
   if (config.envoyUrl) {
@@ -584,7 +584,6 @@ export async function startDaemon(
         feedbackLogger,
         envoyUrl: config.envoyUrl,
         issueBackend: config.issueBackend,
-        autoAdvance: config.autoAdvance,
         modeAgents: config.modeAgents,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {

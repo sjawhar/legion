@@ -333,7 +333,7 @@ Drift / additions the implementer must apply:
 
 ## Task 8 — U10 (Merge: adopt native auto-merge) [Wave 2, group H]
 
-**Why (D25):** GitHub auto-merges the instant required checks + review are green; the merge worker shrinks to enabling auto-merge + handling the blocked/base-changed cases. Retro dispatch is unchanged (post-merge, merged event).
+**Why (D25):** GitHub auto-merges the instant required checks + review are green; the merge worker shrinks to enabling auto-merge + handling the blocked/base-changed cases. Retro dispatch is unchanged (post-merge, the controller/state machine observes the merged PR state).
 
 **Files:** `.opencode/skills/legion-worker/workflows/merge.md` (the direct-merge path is around **line 124**: `gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch`, under the `### 6. Merge (with conflict retry)` heading at ~119). `docs/` merge runbook note. **No daemon merge code exists** — this is a skill/doc-only change.
 
@@ -342,7 +342,7 @@ Drift / additions the implementer must apply:
 - [ ] If not: record in the commit message: *"Deploy-time: verify `gh pr merge --auto --squash` enablement under the implementer-App installation token on a scratch PR."*
 
 **Implementation:**
-- [ ] `merge.md`: replace the direct merge at **~124** (`gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch`) with the auto-merge happy path `gh pr merge "$LEGION_ISSUE_ID" --auto --squash --delete-branch`. Remaining worker duties: handle **auto-merge-blocked** and **base-changed** cases (keep the existing classify-on-failure block at ~129-133); **no-op if already merged**. Keep the retro dispatch trigger on the merged event unchanged.
+- [ ] `merge.md`: replace the direct merge at **~124** (`gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch`) with the auto-merge happy path `gh pr merge "$LEGION_ISSUE_ID" --auto --squash --delete-branch`. Remaining worker duties: handle **auto-merge-blocked** and **base-changed** cases (keep the existing classify-on-failure block at ~129-133); **no-op if already merged**. Keep the retro dispatch trigger on the merged PR state unchanged (the controller/state machine observes the merged PR state).
 - [ ] Remove any bespoke merge-execution steps the native auto-merge replaces (boy-scout cleanup of the now-dead conflict-retry loop in the skill).
 
 **Verification:**

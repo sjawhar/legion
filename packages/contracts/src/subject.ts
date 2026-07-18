@@ -1,4 +1,5 @@
 export const AGENT_TOPIC_PREFIX = "notifications.agent." as const;
+export const ROLE_TOPIC_PREFIX = "notifications.role." as const;
 
 export type AgentSubject<Session extends string = string> =
   `${typeof AGENT_TOPIC_PREFIX}${Session}`;

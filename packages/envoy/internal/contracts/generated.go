@@ -47,14 +47,15 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("trace_id is required")
 	}
 	switch e.Source {
-	case "agent", "github", "slack", "whatsapp", "ghostwispr":
+	case "agent", "envoy", "github", "slack", "whatsapp", "ghostwispr":
 	default:
-		return fmt.Errorf("source must be one of: agent, github, slack, whatsapp, ghostwispr")
+		return fmt.Errorf("source must be one of: agent, envoy, github, slack, whatsapp, ghostwispr")
 	}
 	return nil
 }
 
 const AgentTopicPrefix = "notifications.agent."
+const RoleTopicPrefix = "notifications.role."
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

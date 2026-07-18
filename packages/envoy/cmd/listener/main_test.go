@@ -13,14 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/logging"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
-	"github.com/sjawhar/envoy/internal/metrics"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -1222,8 +1223,363 @@ func TestDeadSessionACK(t *testing.T) {
 	}
 }
 
+func TestIsControlTopic(t *testing.T) {
+	cases := []struct {
+		topic string
+		want  bool
+	}{
+		{topic: "notifications.role.legion-controller", want: true},
+		{topic: contracts.AgentSubject("ses_control"), want: true},
+		{topic: "notifications.envoy.exceptions.notifications.role.legion-controller", want: false},
+		{topic: "notifications.github.sjawhar.legion.issue.42.comment", want: false},
+	}
 
+	for _, tc := range cases {
+		if got := isControlTopic(tc.topic); got != tc.want {
+			t.Errorf("isControlTopic(%q) = %t, want %t", tc.topic, got, tc.want)
+		}
+	}
+}
 
+func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
+	cases := []struct {
+		name  string
+		topic string
+	}{
+		{name: "role", topic: contracts.RoleTopicPrefix + "unheld"},
+		{name: "agent", topic: contracts.AgentSubject("ses_unheld")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given
+			harness := newListenerDeliveryHarness(t, nil)
+			item := listenerTestEnvelope(tc.topic, "dedupe-no-holder-"+tc.name)
+			exceptionTopic := "notifications.envoy.exceptions." + tc.topic
+			probe, err := harness.client.Conn.SubscribeSync(exceptionTopic)
+			if err != nil {
+				t.Fatalf("subscribe exception probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			consumer := "listener-no-holder-" + id.New()
+			sub, err := startListenerSubscription(harness.client, consumer, harness.handler)
+			if err != nil {
+				t.Fatalf("start listener subscription: %v", err)
+			}
+			t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+			// When
+			if err := harness.client.Publish(item); err != nil {
+				t.Fatalf("publish control topic: %v", err)
+			}
+
+			// Then
+			assertDeliveryException(t, probe, item, "no_holder")
+		})
+	}
+}
+
+func TestListenerDeliveryHandler_SkipsDuplicateWhileDeliveryInFlight(t *testing.T) {
+	// Given
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	item := listenerTestEnvelope(contracts.AgentSubject("ses_in_flight"), "dedupe-in-flight")
+	harness.registerTarget(t, "ses_in_flight", item.Topic)
+	data := marshalListenerEnvelope(t, item)
+	firstDone := make(chan struct{})
+	go func() {
+		harness.handler(&natsgo.Msg{Data: data})
+		close(firstDone)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first delivery did not start")
+	}
+
+	// When
+	harness.handler(&natsgo.Msg{Data: data})
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first delivery did not finish")
+	}
+
+	// Then
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("delivery attempts = %d, want 1 while duplicate is in flight", got)
+	}
+}
+
+func TestListenerDeliveryHandler_RetriesFailedDelivery(t *testing.T) {
+	// Given
+	var calls atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("prompt_async unavailable")
+	}))
+	item := listenerTestEnvelope(contracts.AgentSubject("ses_retry"), "dedupe-retry")
+	harness.registerTarget(t, "ses_retry", item.Topic)
+	data := marshalListenerEnvelope(t, item)
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+
+	// When
+	harness.handler(&natsgo.Msg{Data: data})
+	assertDeliveryException(t, probe, item, "delivery_failed")
+	harness.handler(&natsgo.Msg{Data: data})
+
+	// Then
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("delivery attempts = %d, want 2 after retryable failure", got)
+	}
+}
+
+func TestListenerDeliveryHandler_DedupesSuccessfulDelivery(t *testing.T) {
+	// Given
+	var calls atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	item := listenerTestEnvelope(contracts.AgentSubject("ses_success"), "dedupe-success")
+	harness.registerTarget(t, "ses_success", item.Topic)
+	data := marshalListenerEnvelope(t, item)
+
+	// When
+	harness.handler(&natsgo.Msg{Data: data})
+	harness.handler(&natsgo.Msg{Data: data})
+
+	// Then
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("delivery attempts = %d, want 1 after successful dedupe", got)
+	}
+}
+
+func TestListenerDeliveryHandler_FailedDeliveryOnNonControlTopic_NoException(t *testing.T) {
+	// Given: a non-control topic (e.g. notifications.github.x.y.issue.1)
+	// When: delivery fails
+	// Then: NO exception should be published (only control topics get exceptions)
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("delivery failed")
+	}))
+	// Use a non-control topic (not notifications.role.* or notifications.agent.*)
+	item := listenerTestEnvelope("notifications.github.owner.repo.issue.1", "dedupe-non-control")
+	// Register a subscriber for this topic
+	if _, err := harness.registry.Upsert(store.Interest{
+		SessionID: "ses_subscriber",
+		MachineID: "test-machine",
+	}, []string{item.Topic}); err != nil {
+		t.Fatalf("register interest: %v", err)
+	}
+	if err := harness.sessions.Put("ses_subscriber", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+	data := marshalListenerEnvelope(t, item)
+	// Subscribe to the exception topic to verify NO exception is published
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+
+	// When: handler processes the failed delivery
+	harness.handler(&natsgo.Msg{Data: data})
+
+	// Then: verify NO exception was published (timeout waiting for message)
+	_, err = probe.NextMsg(500 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected no exception for non-control topic, but exception was published")
+	}
+	if !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("unexpected error waiting for exception: %v", err)
+	}
+}
+
+func TestListenerDeliveryHandler_FailedDeliveryOnExceptionTopic_NoException(t *testing.T) {
+	// Given: a message on notifications.envoy.exceptions.* topic
+	// When: delivery fails
+	// Then: NO exception should be published (prevent recursion)
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("delivery failed")
+	}))
+	// Use an exceptions topic (notifications.envoy.exceptions.*)
+	item := listenerTestEnvelope("notifications.envoy.exceptions.notifications.role.some-role", "dedupe-exception-topic")
+	// Register a subscriber for this exceptions topic
+	if _, err := harness.registry.Upsert(store.Interest{
+		SessionID: "ses_subscriber",
+		MachineID: "test-machine",
+	}, []string{item.Topic}); err != nil {
+		t.Fatalf("register interest: %v", err)
+	}
+	if err := harness.sessions.Put("ses_subscriber", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+	data := marshalListenerEnvelope(t, item)
+	// Subscribe to the exception topic to verify NO exception is published
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+
+	// When: handler processes the failed delivery
+	harness.handler(&natsgo.Msg{Data: data})
+
+	// Then: verify NO exception was published (timeout waiting for message)
+	_, err = probe.NextMsg(500 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected no exception for exceptions topic, but exception was published")
+	}
+	if !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("unexpected error waiting for exception: %v", err)
+	}
+}
+
+type listenerDeliveryHarness struct {
+	client   *bus.Client
+	registry *store.Registry
+	sessions *session.SessionRegistry
+	handler  natsgo.MsgHandler
+}
+
+func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
+	t.Helper()
+	client := setupPublishTestClient(t)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open interest registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	dedupeCache := dedupe.New(10 * time.Minute)
+	attemptCache := dedupe.New(5 * time.Minute)
+	t.Cleanup(dedupeCache.Stop)
+	t.Cleanup(attemptCache.Stop)
+	deliverer := session.Deliverer{
+		MachineID:    "test-machine",
+		RequestLimit: 5 * time.Second,
+		Sessions:     sessions,
+	}
+	if transport != nil {
+		deliverer.HTTPClient = &http.Client{Transport: transport}
+	}
+	met := metrics.New()
+	return listenerDeliveryHarness{
+		client:   client,
+		registry: registry,
+		sessions: sessions,
+		handler: listenerDeliveryHandler(listenerDeliveryHandlerConfig{
+			client:            client,
+			registry:          registry,
+			sessions:          sessions,
+			machineID:         "test-machine",
+			deliverer:         &deliverer,
+			dedupeCache:       dedupeCache,
+			attemptCache:      attemptCache,
+			logger:            logging.New("test"),
+			messagesReceived:  met.NewCounter("test_messages_received", "test"),
+			messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
+			messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
+			deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
+		}),
+	}
+}
+
+func (h listenerDeliveryHarness) registerTarget(t *testing.T, sessionID, topic string) {
+	t.Helper()
+	if _, err := h.registry.Upsert(store.Interest{
+		SessionID: sessionID,
+		MachineID: "test-machine",
+	}, []string{topic}); err != nil {
+		t.Fatalf("register interest: %v", err)
+	}
+	if err := h.sessions.Put(sessionID, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+}
+
+type listenerTransport func(*http.Request) (*http.Response, error)
+
+func (f listenerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func listenerDeliveryResponse(status int) *http.Response {
+	return &http.Response{StatusCode: status, Body: http.NoBody, Header: make(http.Header)}
+}
+
+func listenerTestEnvelope(topic, dedupeKey string) contracts.Envelope {
+	return contracts.Envelope{
+		EventID:        id.New(),
+		Source:         "agent",
+		SourceEventID:  "source-event",
+		Topic:          topic,
+		DedupeKey:      dedupeKey,
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "listener test notification",
+		TraceID:        id.New(),
+	}
+}
+
+func marshalListenerEnvelope(t *testing.T, item contracts.Envelope) []byte {
+	t.Helper()
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	return data
+}
+
+func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original contracts.Envelope, reason string) {
+	t.Helper()
+	message, err := probe.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read delivery exception: %v", err)
+	}
+	var exception contracts.Envelope
+	if err := json.Unmarshal(message.Data, &exception); err != nil {
+		t.Fatalf("decode delivery exception: %v", err)
+	}
+	if err := exception.Validate(); err != nil {
+		t.Fatalf("exception envelope validation: %v", err)
+	}
+	if exception.Source != "envoy" {
+		t.Fatalf("exception source = %q, want envoy", exception.Source)
+	}
+	if exception.SourceEventID != original.EventID {
+		t.Fatalf("exception source event = %q, want %q", exception.SourceEventID, original.EventID)
+	}
+	if exception.Topic != "notifications.envoy.exceptions."+original.Topic {
+		t.Fatalf("exception topic = %q", exception.Topic)
+	}
+	var payload struct {
+		OriginalTopic  string `json:"original_topic"`
+		EventID        string `json:"event_id"`
+		Reason         string `json:"reason"`
+		PayloadSummary string `json:"payload_summary"`
+	}
+	if err := json.Unmarshal([]byte(exception.Payload), &payload); err != nil {
+		t.Fatalf("decode exception payload: %v", err)
+	}
+	if payload.OriginalTopic != original.Topic || payload.EventID != original.EventID || payload.Reason != reason || payload.PayloadSummary != original.PayloadSummary {
+		t.Fatalf("unexpected exception payload: %+v", payload)
+	}
+}
 
 func TestHealthzConsumerLag(t *testing.T) {
 	natsURI := sharedListenerTestNATSURI(t)
@@ -1389,7 +1745,6 @@ func TestTopicPrefix(t *testing.T) {
 		}
 	}
 }
-
 
 func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
 	client := setupTestNATS(t)
