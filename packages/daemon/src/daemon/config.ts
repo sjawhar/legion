@@ -21,6 +21,7 @@ export interface DaemonConfig {
   legionDir?: string;
   paths: LegionPaths;
   checkIntervalMs: number;
+  resyncIntervalMs: number;
   baseWorkerPort: number;
   stateFilePath: string;
   logDir: string;
@@ -33,6 +34,8 @@ export interface DaemonConfig {
   envoyUrl: string;
   feedbackDisabled: boolean;
   feedbackMaxBytes: number;
+  reviewerAppId?: number;
+  reviewerAppLogin?: string;
   /** RSS threshold in bytes; serve restarts when exceeded. 0 = disabled. */
   maxRssBytes: number;
   /** Minimum interval between RSS checks in ms. */
@@ -67,6 +70,7 @@ type ValueSource = "cli" | "config" | "env" | "default";
 
 const BASE_DAEMON_PORT = 13370;
 const DEFAULT_CHECK_INTERVAL_MS = 60_000;
+const DEFAULT_RESYNC_INTERVAL_SECONDS = 600;
 const DEFAULT_BASE_WORKER_PORT = 13381;
 const DEFAULT_MAX_RSS_GB = 20;
 const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
@@ -82,6 +86,9 @@ const CONFIG_SCHEMA: ConfigSchema = {
   runtime: null,
   workspace: null,
   port: null,
+  resync_interval_seconds: null,
+  reviewer_app_id: null,
+  reviewer_app_login: null,
   controller: {
     session_id: null,
     prompt: null,
@@ -511,6 +518,30 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
     fields.daemonPort = port;
   }
 
+  const resyncIntervalSeconds = readNumber(
+    parsed.resync_interval_seconds,
+    "resync_interval_seconds"
+  );
+  if (resyncIntervalSeconds !== undefined) {
+    if (resyncIntervalSeconds <= 0) {
+      throw new Error("resync_interval_seconds must be greater than zero");
+    }
+    fields.resyncIntervalMs = resyncIntervalSeconds * 1000;
+  }
+
+  const reviewerAppId = readNumber(parsed.reviewer_app_id, "reviewer_app_id");
+  if (reviewerAppId !== undefined) {
+    if (!Number.isInteger(reviewerAppId) || reviewerAppId <= 0) {
+      throw new Error("reviewer_app_id must be a positive integer");
+    }
+    fields.reviewerAppId = reviewerAppId;
+  }
+
+  const reviewerAppLogin = readString(parsed.reviewer_app_login, "reviewer_app_login");
+  if (reviewerAppLogin !== undefined) {
+    fields.reviewerAppLogin = reviewerAppLogin;
+  }
+
   const backend = validateBackend(readString(parsed.backend, "backend"), "backend");
   if (backend !== undefined) {
     fields.issueBackend = backend;
@@ -631,6 +662,20 @@ export function resolveDaemonConfig(
   const envLegionId = env.LEGION_ID || undefined;
   const envLegionDir = env.LEGION_DIR || undefined;
   const envDaemonPort = parseOptionalNumber(env.LEGION_DAEMON_PORT);
+  const envResyncIntervalSeconds = parseOptionalNumber(env.LEGION_RESYNC_INTERVAL_SECONDS);
+  if (envResyncIntervalSeconds !== undefined && envResyncIntervalSeconds <= 0) {
+    throw new Error("LEGION_RESYNC_INTERVAL_SECONDS must be greater than zero");
+  }
+  const envResyncIntervalMs =
+    envResyncIntervalSeconds === undefined ? undefined : envResyncIntervalSeconds * 1000;
+  const envReviewerAppId = parseOptionalNumber(env.LEGION_REVIEWER_APP_ID);
+  if (
+    envReviewerAppId !== undefined &&
+    (!Number.isInteger(envReviewerAppId) || envReviewerAppId <= 0)
+  ) {
+    throw new Error("LEGION_REVIEWER_APP_ID must be a positive integer");
+  }
+  const envReviewerAppLogin = env.LEGION_REVIEWER_APP_LOGIN || undefined;
   const envControllerSessionId = validateControllerSessionId(
     env.LEGION_CONTROLLER_SESSION_ID || undefined,
     "LEGION_CONTROLLER_SESSION_ID"
@@ -664,6 +709,24 @@ export function resolveDaemonConfig(
     maybeReadNumberField(configFields, "daemonPort"),
     envDaemonPort,
     BASE_DAEMON_PORT
+  );
+  const resyncIntervalMs = resolveValue(
+    opts.cliOverrides?.resyncIntervalMs,
+    maybeReadNumberField(configFields, "resyncIntervalMs"),
+    envResyncIntervalMs,
+    DEFAULT_RESYNC_INTERVAL_SECONDS * 1000
+  );
+  const reviewerAppId = resolveValue(
+    opts.cliOverrides?.reviewerAppId,
+    maybeReadNumberField(configFields, "reviewerAppId"),
+    envReviewerAppId,
+    undefined
+  );
+  const reviewerAppLogin = resolveValue(
+    opts.cliOverrides?.reviewerAppLogin,
+    maybeReadStringField(configFields, "reviewerAppLogin"),
+    envReviewerAppLogin,
+    undefined
   );
   const controllerSessionId = resolveValue(
     opts.cliOverrides?.controllerSessionId,
@@ -757,6 +820,27 @@ export function resolveDaemonConfig(
   pushEnvDeprecationWarning(warnings, daemonPort.source, env, "LEGION_DAEMON_PORT", "port");
   pushEnvDeprecationWarning(
     warnings,
+    resyncIntervalMs.source,
+    env,
+    "LEGION_RESYNC_INTERVAL_SECONDS",
+    "resync_interval_seconds"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
+    reviewerAppId.source,
+    env,
+    "LEGION_REVIEWER_APP_ID",
+    "reviewer_app_id"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
+    reviewerAppLogin.source,
+    env,
+    "LEGION_REVIEWER_APP_LOGIN",
+    "reviewer_app_login"
+  );
+  pushEnvDeprecationWarning(
+    warnings,
     controllerSessionId.source,
     env,
     "LEGION_CONTROLLER_SESSION_ID",
@@ -807,6 +891,7 @@ export function resolveDaemonConfig(
       legionDir: legionDir.value,
       paths,
       checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
+      resyncIntervalMs: resyncIntervalMs.value,
       baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
       stateFilePath,
       logDir,
@@ -819,6 +904,8 @@ export function resolveDaemonConfig(
       envoyUrl: envoyUrl.value,
       feedbackDisabled: feedbackDisabled.value,
       feedbackMaxBytes: feedbackMaxBytes.value,
+      reviewerAppId: reviewerAppId.value,
+      reviewerAppLogin: reviewerAppLogin.value,
       maxRssBytes: maxRssBytes.value,
       rssCheckIntervalMs: rssCheckIntervalMs.value,
       modeAgents: (configFields.modeAgents as Partial<Record<string, string>> | undefined) ?? {},

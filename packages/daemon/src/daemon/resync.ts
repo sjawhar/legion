@@ -1,4 +1,5 @@
 import { IssueStatus, WorkerMode, type WorkerModeLiteral } from "../state/types";
+import { computeIdleAdvisories, type IdleAdvisory } from "./idle-advisory";
 import {
   type IssueRef,
   noPrPhaseArtifacts,
@@ -7,17 +8,26 @@ import {
   unresolvablePhaseArtifacts,
 } from "./phase-artifacts";
 
-export interface Recommendation {
-  readonly issueId: string;
-  readonly mode: WorkerModeLiteral;
-  readonly reason: "artifact_no_live_owner";
-}
+export type Recommendation =
+  | {
+      readonly issueId: string;
+      readonly mode: WorkerModeLiteral;
+      readonly reason: "artifact_no_live_owner";
+    }
+  | {
+      readonly issueId: string;
+      readonly mode: null;
+      readonly reason: "architect_veto";
+    }
+  | IdleAdvisory;
 
 export interface LiveWorker {
   readonly sessionId?: string;
   readonly mode?: WorkerModeLiteral;
   readonly status?: string;
 }
+
+export type LiveWorkers = Record<string, readonly LiveWorker[]>;
 
 export interface SessionStatusObservation {
   readonly data?: unknown;
@@ -33,20 +43,26 @@ export interface ResyncPassResult {
   readonly errors: readonly ResyncError[];
 }
 
+export interface ResyncControllerEvent {
+  readonly type: "legion.resync";
+  readonly recommendations: readonly Recommendation[];
+  readonly errors: readonly ResyncError[];
+}
+
 export interface RunResyncDeps {
   readonly listNonTerminalIssues: () => IssueRef[];
   readonly fetchPhaseArtifactsBatch: (refs: readonly IssueRef[]) => Promise<PhaseArtifactBatch>;
-  readonly getLiveWorkers: () => Promise<Record<string, LiveWorker>>;
+  readonly getLiveWorkers: () => Promise<LiveWorkers>;
   // reserved for the idle-worker advisory (U9)
   readonly getSessionStatus: (sessionId: string) => Promise<SessionStatusObservation>;
-  readonly emitToController: (items: readonly Recommendation[]) => void | Promise<void>;
+  readonly emitToController: (event: ResyncControllerEvent) => void | Promise<void>;
 }
 
 export interface ResyncInput {
   readonly issueId: string;
   readonly status: string;
   readonly artifacts: PhaseArtifacts;
-  readonly hasLiveWorker: boolean;
+  readonly liveWorkerModes: readonly WorkerModeLiteral[];
 }
 
 function statusFallback(status: string): WorkerModeLiteral | null {
@@ -69,7 +85,9 @@ function statusFallback(status: string): WorkerModeLiteral | null {
   }
 }
 
-function ownerFromArtifacts(artifacts: PhaseArtifacts): WorkerModeLiteral | null | undefined {
+function ownerFromArtifacts(
+  artifacts: PhaseArtifacts
+): WorkerModeLiteral | "architect_veto" | null | undefined {
   if (artifacts.resolved.merged === "resolved" && artifacts.merged) return WorkerMode.IMPLEMENT;
   if (artifacts.resolved.hasNonDraftPr !== "resolved") return null;
   if (!artifacts.hasNonDraftPr) return undefined;
@@ -81,22 +99,32 @@ function ownerFromArtifacts(artifacts: PhaseArtifacts): WorkerModeLiteral | null
   if (artifacts.nativeReviewOnHead === "changes_requested") return WorkerMode.IMPLEMENT;
   if (artifacts.resolved.architectCheckOnHead !== "resolved") return null;
   if (artifacts.architectCheckOnHead === null) return WorkerMode.ARCHITECT;
-  if (artifacts.architectCheckOnHead === "failure") return null;
+  if (artifacts.architectCheckOnHead === "failure") return "architect_veto";
   if (artifacts.resolved.autoMergeEnabledOrMerged !== "resolved") return null;
   return artifacts.autoMergeEnabledOrMerged ? null : WorkerMode.MERGE;
 }
 
-function expectedOwner(input: ResyncInput): WorkerModeLiteral | null {
+function expectedOwner(input: ResyncInput): WorkerModeLiteral | "architect_veto" | null {
   if (input.status === IssueStatus.DONE) return null;
   const artifactOwner = ownerFromArtifacts(input.artifacts);
   return artifactOwner === undefined ? statusFallback(input.status) : artifactOwner;
+}
+
+function sessionStatusType(observation: SessionStatusObservation): string {
+  const data = observation.data;
+  if (typeof data !== "object" || data === null || !("type" in data)) return "unresolvable";
+  return typeof data.type === "string" ? data.type : "unresolvable";
 }
 
 export function computeResyncRecommendations(inputs: readonly ResyncInput[]): Recommendation[] {
   const recommendations: Recommendation[] = [];
   for (const input of inputs) {
     const mode = expectedOwner(input);
-    if (mode && !input.hasLiveWorker) {
+    if (mode === "architect_veto") {
+      recommendations.push({ issueId: input.issueId, mode: null, reason: "architect_veto" });
+      continue;
+    }
+    if (mode && !input.liveWorkerModes.includes(mode)) {
       recommendations.push({ issueId: input.issueId, mode, reason: "artifact_no_live_owner" });
     }
   }
@@ -150,14 +178,41 @@ export async function runResyncPass(deps: RunResyncDeps): Promise<ResyncPassResu
     resolveArtifactBatch(refs, deps),
     deps.getLiveWorkers(),
   ]);
-  const recommendations = computeResyncRecommendations(
+  const artifactRecommendations = computeResyncRecommendations(
     refs.map((ref) => ({
       issueId: ref.issueId,
       status: ref.status,
       artifacts: artifactBatch.artifacts[ref.issueId] ?? unresolvablePhaseArtifacts(),
-      hasLiveWorker: liveWorkers[ref.issueId] !== undefined,
+      liveWorkerModes: (liveWorkers[ref.issueId] ?? []).flatMap((worker) =>
+        worker.mode ? [worker.mode] : []
+      ),
     }))
   );
-  await deps.emitToController(recommendations);
+  const idleAdvisoryInputs = await Promise.all(
+    refs.flatMap((ref) =>
+      (liveWorkers[ref.issueId] ?? []).map(async (worker) => {
+        if (!worker.sessionId || !worker.mode) return null;
+
+        const observation = await deps.getSessionStatus(worker.sessionId);
+        return {
+          issueId: ref.issueId,
+          mode: worker.mode,
+          sessionStatusType: sessionStatusType(observation),
+          artifacts: artifactBatch.artifacts[ref.issueId] ?? unresolvablePhaseArtifacts(),
+        };
+      })
+    )
+  );
+  const idleAdvisories = computeIdleAdvisories(
+    idleAdvisoryInputs.flatMap((input) => (input ? [input] : []))
+  );
+  const recommendations = [...artifactRecommendations, ...idleAdvisories];
+  if (recommendations.length > 0 || artifactBatch.errors.length > 0) {
+    await deps.emitToController({
+      type: "legion.resync",
+      recommendations,
+      errors: artifactBatch.errors,
+    });
+  }
   return { recommendations, errors: artifactBatch.errors };
 }

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun
 import { createServer } from "node:net";
 import { type DaemonConfig, resolveDaemonConfig } from "../config";
 import { resolveLegionPaths } from "../paths";
+import type { ResyncPassResult } from "../resync";
 import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import type { ServerOptions } from "../server";
@@ -43,6 +44,9 @@ let mockedAllocatedPorts = { daemonPort: 13370, servePort: 13381 };
 import { startDaemon } from "../index";
 
 type TimeoutCallback = (...args: unknown[]) => Promise<void> | void;
+
+// Mirrors DEFAULT_RESYNC_INTERVAL_SECONDS * 1000 from config.ts (600s = 600_000ms)
+const RESYNC_INTERVAL_MS = 600 * 1000;
 
 afterAll(() => {
   mock.restore();
@@ -178,12 +182,31 @@ function startDaemonForTest(
   const config: DaemonConfig = {
     ...baseConfig,
     envoyUrl: overrides.envoyUrl ?? currentMockEnvoy?.url ?? "",
+    reviewerAppId: 12345,
+    reviewerAppLogin: "legion-reviewer[bot]",
     paths: TEST_PATHS,
     legionId,
     logDir: instancePaths.logDir,
     stateFilePath: overrides.stateFilePath ?? instancePaths.workersFile,
     ...overrides,
   };
+
+  const testDeps: DaemonDepsOverride = {
+    runResyncPass: async (): Promise<ResyncPassResult> => ({
+      recommendations: [],
+      errors: [],
+    }),
+    ...deps,
+  };
+  if (deps?.startServer) {
+    const startServer = deps.startServer;
+    testDeps.startServer = (...args) => ({
+      refreshResyncIssueRefs: async () => {},
+      listNonTerminalIssues: () => [],
+      getLiveWorkers: async () => ({}),
+      ...startServer(...args),
+    });
+  }
 
   return startDaemon(config, {
     readLegionsRegistry: async () => mockedRegistry,
@@ -206,7 +229,7 @@ function startDaemonForTest(
       removeLegionEntryCalls.push({ filePath, projectId });
     },
     ...startOpts,
-    deps,
+    deps: testDeps,
   });
 }
 
@@ -235,6 +258,305 @@ describe("daemon entry", () => {
     startServerCalls.length = 0;
     mockEnvoy.stop();
     currentMockEnvoy = null;
+  });
+
+  describe("resync lifecycle", () => {
+    it("runs once at startup and once for each configured timer tick without dispatching", async () => {
+      const resyncIntervalMs = 2_000;
+      const scheduledCallbacks: Array<{ callback: TimeoutCallback; delay: number }> = [];
+      const createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
+      const resyncPass = mock(
+        async (): Promise<ResyncPassResult> => ({
+          recommendations: [],
+          errors: [],
+        })
+      );
+      const refreshResyncIssueRefs = mock(async () => {});
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, delay?: number) => {
+          scheduledCallbacks.push({ callback, delay: delay ?? 0 });
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          issueBackend: "github",
+          resyncIntervalMs,
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter({ createSessionCalls }),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+            refreshResyncIssueRefs,
+          }),
+          runResyncPass: resyncPass,
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch: originalFetch,
+        }
+      );
+
+      expect(resyncPass).toHaveBeenCalledTimes(1);
+      expect(refreshResyncIssueRefs).toHaveBeenCalledTimes(1);
+      expect(createSessionCalls).toHaveLength(0);
+
+      const resyncTimer = scheduledCallbacks.find(({ delay }) => delay === resyncIntervalMs);
+      if (!resyncTimer) {
+        throw new Error("Expected resync timer to be scheduled");
+      }
+      await resyncTimer.callback();
+
+      expect(resyncPass).toHaveBeenCalledTimes(2);
+      expect(refreshResyncIssueRefs).toHaveBeenCalledTimes(2);
+      expect(createSessionCalls).toHaveLength(0);
+      await handle.stop();
+    });
+
+    it("disables resync scheduling and startup execution for a Linear daemon", async () => {
+      // Given a Linear-backed daemon with observable timers, startup output, and resync collaborators.
+      const resyncIntervalMs = 2_000;
+      const scheduledCallbacks: Array<{ callback: TimeoutCallback; delay: number }> = [];
+      const logCalls: string[] = [];
+      const originalLog = console.log;
+      const resyncPass = mock(
+        async (): Promise<ResyncPassResult> => ({ recommendations: [], errors: [] })
+      );
+      const refreshResyncIssueRefs = mock(async () => {});
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, delay?: number) => {
+          scheduledCallbacks.push({ callback, delay: delay ?? 0 });
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+
+      console.log = (...args: unknown[]) => {
+        logCalls.push(args.map((arg) => String(arg)).join(" "));
+      };
+
+      try {
+        // When the daemon starts.
+        const handle = await startDaemonForTest(
+          {
+            stateFilePath: "/tmp/daemon-workers.json",
+            legionId: TEAM_ID,
+            controllerSessionId: "ses_test",
+            issueBackend: "linear",
+            resyncIntervalMs,
+          },
+          {
+            readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+            writeStateFile: async () => {},
+            adapter: makeAdapter(),
+            startServer: () => ({
+              server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+              fetchAndProcessState: async () => {},
+              refreshResyncIssueRefs,
+            }),
+            runResyncPass: resyncPass,
+            setTimeout: mockSetTimeout,
+            clearTimeout: () => {},
+            fetch: originalFetch,
+          }
+        );
+
+        // Then neither startup nor recurring resync runs, and the reason is logged once.
+        expect(resyncPass).not.toHaveBeenCalled();
+        expect(refreshResyncIssueRefs).not.toHaveBeenCalled();
+        expect(scheduledCallbacks.some(({ delay }) => delay === resyncIntervalMs)).toBe(false);
+        expect(
+          logCalls.filter(
+            (message) => message === "[resync] disabled: requires github issue backend"
+          )
+        ).toEqual(["[resync] disabled: requires github issue backend"]);
+        await handle.stop();
+      } finally {
+        console.log = originalLog;
+      }
+    });
+
+    it("logs errors returned by a completed resync pass", async () => {
+      const originalError = console.error;
+      const errorCalls: unknown[][] = [];
+      console.error = (...args: unknown[]) => {
+        errorCalls.push(args);
+      };
+
+      try {
+        const handle = await startDaemonForTest(
+          {
+            stateFilePath: "/tmp/daemon-workers.json",
+            legionId: TEAM_ID,
+            controllerSessionId: "ses_test",
+            issueBackend: "github",
+          },
+          {
+            readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+            writeStateFile: async () => {},
+            adapter: makeAdapter(),
+            startServer: () => ({
+              server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+              fetchAndProcessState: async () => {},
+            }),
+            runResyncPass: async (): Promise<ResyncPassResult> => ({
+              recommendations: [],
+              errors: [{ issueId: "acme-api-42", message: "GitHub unavailable" }],
+            }),
+            setTimeout: silentSetTimeout,
+            clearTimeout: noopClearTimeout,
+            fetch: originalFetch,
+          }
+        );
+
+        await Promise.resolve();
+
+        expect(errorCalls.flat().join(" ")).toContain("GitHub unavailable");
+        await handle.stop();
+      } finally {
+        console.error = originalError;
+      }
+    });
+
+    it("logs a configuration error when the reviewer app identity is missing", async () => {
+      const originalError = console.error;
+      const errorCalls: unknown[][] = [];
+      console.error = (...args: unknown[]) => {
+        errorCalls.push(args);
+      };
+
+      try {
+        const handle = await startDaemonForTest(
+          {
+            stateFilePath: "/tmp/daemon-workers.json",
+            legionId: TEAM_ID,
+            controllerSessionId: "ses_test",
+            reviewerAppId: undefined,
+            reviewerAppLogin: undefined,
+            issueBackend: "github",
+          },
+          {
+            readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+            writeStateFile: async () => {},
+            adapter: makeAdapter(),
+            startServer: () => ({
+              server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+              stop: () => {},
+              fetchAndProcessState: async () => {},
+            }),
+            setTimeout: silentSetTimeout,
+            clearTimeout: noopClearTimeout,
+            fetch: originalFetch,
+          }
+        );
+
+        await Promise.resolve();
+
+        expect(errorCalls.flat().join(" ")).toContain("reviewerAppId");
+        await handle.stop();
+      } finally {
+        console.error = originalError;
+      }
+    });
+
+    it("publishes resync recommendations to the controller topic", async () => {
+      const published: Array<{ topic: string; message: string }> = [];
+      let resolveResyncStarted: () => void = () => {};
+      const resyncStarted = new Promise<void>((resolve) => {
+        resolveResyncStarted = resolve;
+      });
+      const recommendation = {
+        issueId: "acme-api-42",
+        mode: "test" as const,
+        reason: "artifact_no_live_owner" as const,
+      };
+      const fetch = Object.assign(
+        async (url: string | URL | Request, init?: RequestInit) => {
+          if (new URL(String(url)).pathname === "/v1/messages/publish") {
+            const body = JSON.parse(String(init?.body)) as { topic: string; message: string };
+            published.push(body);
+            return Response.json({ event_id: "test" });
+          }
+          return originalFetch(url, init);
+        },
+        { preconnect: originalFetch.preconnect }
+      );
+
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          issueBackend: "github",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+          }),
+          runResyncPass: async (deps): Promise<ResyncPassResult> => {
+            await deps.emitToController({
+              type: "legion.resync",
+              recommendations: [recommendation],
+              errors: [],
+            });
+            resolveResyncStarted();
+            return { recommendations: [recommendation], errors: [] };
+          },
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch,
+        }
+      );
+
+      await resyncStarted;
+
+      expect(published).toEqual([
+        {
+          topic: "notifications.legion.controller",
+          message: JSON.stringify({
+            type: "legion.resync",
+            recommendations: [recommendation],
+            errors: [],
+          }),
+        },
+      ]);
+      await handle.stop();
+    });
+
+    it("uses LEGION_RESYNC_INTERVAL_SECONDS for the resync schedule", () => {
+      const { config } = resolveDaemonConfig({
+        env: { LEGION_RESYNC_INTERVAL_SECONDS: "25" },
+      });
+
+      expect(config.resyncIntervalMs).toBe(25_000);
+    });
+
+    it("reads the reviewer identity from Legion environment variables", () => {
+      const { config } = resolveDaemonConfig({
+        env: {
+          LEGION_REVIEWER_APP_ID: "12345",
+          LEGION_REVIEWER_APP_LOGIN: "legion-reviewer[bot]",
+        },
+      });
+
+      expect(config.reviewerAppId).toBe(12345);
+      expect(config.reviewerAppLogin).toBe("legion-reviewer[bot]");
+    });
   });
 
   describe("port allocation", () => {
@@ -1177,6 +1499,7 @@ describe("daemon entry", () => {
         stateFilePath: "/tmp/daemon-workers.json",
         legionId: TEAM_ID,
         controllerSessionId: "ses_test",
+        issueBackend: "github",
       },
       {
         readStateFile: async () => ({
@@ -1222,7 +1545,7 @@ describe("daemon entry", () => {
 
     expect(stopServeCalls).toHaveLength(1);
     expect(stopCalls).toBe(1);
-    expect(clearedTimeout).toBe(1);
+    expect(clearedTimeout).toBe(2);
     if (!finalState) {
       throw new Error("Expected final state to be written");
     }
@@ -1998,8 +2321,10 @@ describe("daemon entry", () => {
     it("marks running worker as dead when session is missing from serve", async () => {
       const timeoutCallbacks: TimeoutCallback[] = [];
       const mockSetTimeout: typeof setTimeout = Object.assign(
-        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
-          timeoutCallbacks.push(callback);
+        ((callback: TimeoutCallback, delay?: number, ..._args: unknown[]) => {
+          if (delay !== RESYNC_INTERVAL_MS) {
+            timeoutCallbacks.push(callback);
+          }
           return {} as ReturnType<typeof setTimeout>;
         }) as unknown as typeof setTimeout,
         { __promisify__: setTimeout.__promisify__ }
@@ -2315,8 +2640,10 @@ describe("daemon entry", () => {
     it("does not reap workers within 120s startup grace period", async () => {
       const timeoutCallbacks: TimeoutCallback[] = [];
       const mockSetTimeout: typeof setTimeout = Object.assign(
-        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
-          timeoutCallbacks.push(callback);
+        ((callback: TimeoutCallback, delay?: number, ..._args: unknown[]) => {
+          if (delay !== RESYNC_INTERVAL_MS) {
+            timeoutCallbacks.push(callback);
+          }
           return {} as ReturnType<typeof setTimeout>;
         }) as unknown as typeof setTimeout,
         { __promisify__: setTimeout.__promisify__ }
@@ -2386,8 +2713,10 @@ describe("daemon entry", () => {
     it("only reaps workers after 3 consecutive liveness failures", async () => {
       const timeoutCallbacks: TimeoutCallback[] = [];
       const mockSetTimeout: typeof setTimeout = Object.assign(
-        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
-          timeoutCallbacks.push(callback);
+        ((callback: TimeoutCallback, delay?: number, ..._args: unknown[]) => {
+          if (delay !== RESYNC_INTERVAL_MS) {
+            timeoutCallbacks.push(callback);
+          }
           return {} as ReturnType<typeof setTimeout>;
         }) as unknown as typeof setTimeout,
         { __promisify__: setTimeout.__promisify__ }
@@ -2462,8 +2791,10 @@ describe("daemon entry", () => {
     it("resets consecutive miss counter when worker session reappears", async () => {
       const timeoutCallbacks: TimeoutCallback[] = [];
       const mockSetTimeout: typeof setTimeout = Object.assign(
-        ((callback: TimeoutCallback, _delay?: number, ..._args: unknown[]) => {
-          timeoutCallbacks.push(callback);
+        ((callback: TimeoutCallback, delay?: number, ..._args: unknown[]) => {
+          if (delay !== RESYNC_INTERVAL_MS) {
+            timeoutCallbacks.push(callback);
+          }
           return {} as ReturnType<typeof setTimeout>;
         }) as unknown as typeof setTimeout,
         { __promisify__: setTimeout.__promisify__ }

@@ -123,6 +123,17 @@ function numberAt(value: unknown, key: string): number | null {
   return isRecord(value) && typeof value[key] === "number" ? value[key] : null;
 }
 
+function graphQlErrorForAlias(response: unknown, alias: QueryAlias): string | null {
+  const errors = isRecord(response) && Array.isArray(response.errors) ? response.errors : [];
+  for (const error of errors) {
+    const path = isRecord(error) && Array.isArray(error.path) ? error.path : null;
+    if (path?.[0] === alias.repoAlias && path[1] === alias.prAlias) {
+      return stringAt(error, "message");
+    }
+  }
+  return null;
+}
+
 function queryFor(refs: readonly IssueRef[]): {
   readonly query: string;
   readonly aliases: QueryAlias[];
@@ -273,13 +284,12 @@ export async function fetchPhaseArtifactsBatch(
       error instanceof Error ? error.message : "GitHub phase-artifact query failed"
     );
   }
-  if (result.exitCode !== 0)
-    return failedBatch(refs, `GitHub phase-artifact query failed: ${result.stderr}`);
-
   let response: unknown;
   try {
     response = JSON.parse(result.stdout);
   } catch (error) {
+    if (result.exitCode !== 0)
+      return failedBatch(refs, `GitHub phase-artifact query failed: ${result.stderr}`);
     return failedBatch(
       refs,
       error instanceof Error
@@ -288,6 +298,8 @@ export async function fetchPhaseArtifactsBatch(
     );
   }
   const data = recordAt(response, "data");
+  if (result.exitCode !== 0 && !data)
+    return failedBatch(refs, `GitHub phase-artifact query failed: ${result.stderr}`);
   if (!data) return failedBatch(refs, "GitHub phase-artifact query returned no data");
 
   const artifacts: Record<string, PhaseArtifacts> = {};
@@ -301,7 +313,11 @@ export async function fetchPhaseArtifactsBatch(
       artifacts[alias.ref.issueId] = unresolvablePhaseArtifacts();
       errors.push({
         issueId: alias.ref.issueId,
-        message: "GitHub phase-artifact query omitted PR data",
+        message:
+          result.exitCode !== 0
+            ? (graphQlErrorForAlias(response, alias) ??
+              "GitHub phase-artifact query omitted PR data")
+            : "GitHub phase-artifact query omitted PR data",
       });
       continue;
     }

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+
+// allow: SIZE_OK — independently executable cases cover one GraphQL artifact boundary.
 import type { CommandRunner } from "../../state/fetch";
 import {
   fetchPhaseArtifacts,
@@ -20,6 +22,17 @@ function runnerFor(pullRequest: unknown): CommandRunner {
     stderr: "",
     exitCode: 0,
   });
+}
+
+function pullRequestWithHead(headSha: string) {
+  return {
+    isDraft: false,
+    headRefOid: headSha,
+    merged: false,
+    autoMergeRequest: null,
+    latestReviews: { nodes: [] },
+    commits: { nodes: [] },
+  };
 }
 
 describe("fetchPhaseArtifacts", () => {
@@ -74,6 +87,77 @@ describe("fetchPhaseArtifacts", () => {
     expect(queryArgument).toContain("author { login }");
     expect(result.artifacts[issueRef.issueId]?.headSha).toBe("first-head");
     expect(result.artifacts[secondRef.issueId]?.headSha).toBe("second-head");
+    expect(result.errors).toEqual([]);
+  });
+
+  it("preserves resolved PR aliases when a nonzero GraphQL response contains partial data", async () => {
+    const secondRef: IssueRef = {
+      ...issueRef,
+      issueId: "acme-api-43",
+      prRef: { owner: "acme", repo: "api", number: 102 },
+    };
+    const failedRef: IssueRef = {
+      ...issueRef,
+      issueId: "acme-api-44",
+      prRef: { owner: "acme", repo: "api", number: 103 },
+    };
+
+    const result = await fetchPhaseArtifactsBatch([issueRef, secondRef, failedRef], {
+      reviewerAppId: 42,
+      reviewerAppLogin: "legion-reviewer[bot]",
+      runner: async () => ({
+        stdout: JSON.stringify({
+          data: {
+            repo0: {
+              pr0: pullRequestWithHead("first-head"),
+              pr1: pullRequestWithHead("second-head"),
+              pr2: null,
+            },
+          },
+          errors: [{ message: "Pull request 103 was not found", path: ["repo0", "pr2"] }],
+        }),
+        stderr: "GraphQL: Pull request 103 was not found",
+        exitCode: 1,
+      }),
+    });
+
+    expect(result.artifacts[issueRef.issueId]?.headSha).toBe("first-head");
+    expect(result.artifacts[secondRef.issueId]?.headSha).toBe("second-head");
+    expect(result.artifacts[failedRef.issueId]?.resolved.headSha).toBe("unresolvable");
+    expect(result.errors).toEqual([
+      { issueId: failedRef.issueId, message: "Pull request 103 was not found" },
+    ]);
+  });
+
+  it("marks the whole batch unresolvable when a nonzero GraphQL response has no parseable data", async () => {
+    const secondRef: IssueRef = {
+      ...issueRef,
+      issueId: "acme-api-43",
+      prRef: { owner: "acme", repo: "api", number: 102 },
+    };
+
+    const result = await fetchPhaseArtifactsBatch([issueRef, secondRef], {
+      reviewerAppId: 42,
+      reviewerAppLogin: "legion-reviewer[bot]",
+      runner: async () => ({
+        stdout: "not json",
+        stderr: "GraphQL request failed",
+        exitCode: 1,
+      }),
+    });
+
+    expect(result.artifacts[issueRef.issueId]?.resolved.headSha).toBe("unresolvable");
+    expect(result.artifacts[secondRef.issueId]?.resolved.headSha).toBe("unresolvable");
+    expect(result.errors).toEqual([
+      {
+        issueId: issueRef.issueId,
+        message: "GitHub phase-artifact query failed: GraphQL request failed",
+      },
+      {
+        issueId: secondRef.issueId,
+        message: "GitHub phase-artifact query failed: GraphQL request failed",
+      },
+    ]);
   });
 
   it("derives head-bound checks, review, and merge facts from a non-draft PR", async () => {

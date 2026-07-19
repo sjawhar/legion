@@ -22,6 +22,7 @@ import type { FeedbackLogger } from "./feedback";
 import type { TokenManager } from "./github-apps";
 import { modeToRole } from "./github-apps";
 import type { LegionPaths } from "./paths";
+import type { IssueRef } from "./phase-artifacts";
 import {
   demoteSession,
   listPromotedSessions,
@@ -39,6 +40,7 @@ import {
   startBackgroundFetch,
   verifyBranchPushed,
 } from "./repo-manager";
+import type { LiveWorkers } from "./resync";
 import type { RuntimeAdapter } from "./runtime/types";
 import type { WorkerEntry as BaseWorkerEntry } from "./serve-manager";
 import { computeStateDelta, type StateDelta } from "./state-delta";
@@ -267,22 +269,30 @@ function detachWorkerFromEnvoy(
     });
 }
 
-function publishStateDelta(delta: StateDelta, envoyUrl = "http://127.0.0.1:9020"): void {
+export function publishToController(
+  message: string,
+  envoyUrl = "http://127.0.0.1:9020",
+  fetchFn: typeof fetch = fetch
+): void {
   if (!envoyUrl) return;
-  fetch(`${envoyUrl}/v1/messages/publish`, {
+  fetchFn(`${envoyUrl}/v1/messages/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       topic: "notifications.legion.controller",
-      message: JSON.stringify(delta),
+      message,
     }),
   })
     .then((res) => {
-      if (!res.ok) console.warn(`[state-delta] publish failed: ${res.status} (non-fatal)`);
+      if (!res.ok) console.warn(`[controller-publish] publish failed: ${res.status} (non-fatal)`);
     })
     .catch((err) => {
-      console.warn(`[state-delta] publish error (non-fatal): ${err}`);
+      console.warn(`[controller-publish] publish error (non-fatal): ${err}`);
     });
+}
+
+function publishStateDelta(delta: StateDelta, envoyUrl = "http://127.0.0.1:9020"): void {
+  publishToController(JSON.stringify(delta), envoyUrl);
 }
 
 function unsubscribeAllWorkerTopics(sessionId: string, envoyUrl = "http://127.0.0.1:9020"): void {
@@ -309,6 +319,9 @@ export function startServer(opts: ServerOptions): {
   stop: () => void;
   fetchAndProcessState: () => Promise<void>;
   cleanupDeadWorkers: () => Promise<void>;
+  refreshResyncIssueRefs: () => Promise<void>;
+  listNonTerminalIssues: () => IssueRef[];
+  getLiveWorkers: () => Promise<LiveWorkers>;
 } {
   const hostname = opts.hostname ?? "127.0.0.1";
   const port = opts.port ?? 13370;
@@ -317,6 +330,7 @@ export function startServer(opts: ServerOptions): {
   const workers = new Map<string, WorkerEntry>();
   const crashHistory = new Map<string, CrashHistoryEntry>();
   const issueStateCache = new Map<string, IssueState>();
+  const resyncIssueRefs = new Map<string, IssueRef>();
   let previousIssueState: Record<string, IssueStateDict> | null = null;
   const issueTitleCache = new Map<string, string>();
   const recentEvents: DashboardRecentEvent[] = [];
@@ -448,6 +462,57 @@ export function startServer(opts: ServerOptions): {
   }
 
   const stateLoaded = loadState();
+
+  const refreshResyncIssueRefs = async (): Promise<void> => {
+    const refs = new Map<string, IssueRef>();
+    const boardIds = [opts.legionId, ...(opts.extraProjects ?? [])];
+    const tracker = getBackend("github");
+    const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
+
+    for (const boardId of boardIds) {
+      const parts = boardId.split("/");
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        throw new Error("invalid_team_id: expected owner/project-number");
+      }
+      const projectNumber = Number(parts[1]);
+      if (!Number.isFinite(projectNumber)) {
+        throw new Error("invalid_team_id: project number not a number");
+      }
+
+      const rawIssues = await fetchFn(parts[0], projectNumber);
+      for (const issue of tracker.parseIssues(rawIssues)) {
+        if (!issue.source || issue.status === IssueStatus.DONE) {
+          continue;
+        }
+        const sourceKey =
+          `${issue.source.owner}/${issue.source.repo}#${issue.source.number}`.toLowerCase();
+        if (refs.has(sourceKey)) {
+          continue;
+        }
+        refs.set(sourceKey, {
+          issueId: issue.issueId,
+          status: issue.status,
+          source: {
+            owner: issue.source.owner,
+            repo: issue.source.repo,
+            number: issue.source.number,
+          },
+          prRef: issue.prRef
+            ? {
+                owner: issue.prRef.owner,
+                repo: issue.prRef.repo,
+                number: issue.prRef.number,
+              }
+            : null,
+        });
+      }
+    }
+
+    resyncIssueRefs.clear();
+    for (const ref of refs.values()) {
+      resyncIssueRefs.set(ref.issueId.toLowerCase(), ref);
+    }
+  };
 
   const cleanupDoneIssueWorkers = async (collectedState: CollectedState): Promise<void> => {
     await stateLoaded;
@@ -2168,5 +2233,34 @@ export function startServer(opts: ServerOptions): {
     },
     fetchAndProcessState,
     cleanupDeadWorkers,
+    refreshResyncIssueRefs,
+    listNonTerminalIssues: () => [...resyncIssueRefs.values()],
+    getLiveWorkers: async () => {
+      await stateLoaded;
+      const liveWorkers: LiveWorkers = {};
+      for (const entry of workers.values()) {
+        if (entry.status === "dead" || entry.status === "stopped") {
+          continue;
+        }
+        const workerIssueId = extractIssueIdFromWorkerId(entry.id);
+        if (!workerIssueId) {
+          continue;
+        }
+        const issueRef = resyncIssueRefs.get(workerIssueId.toLowerCase());
+        if (!issueRef) {
+          continue;
+        }
+        const mode = extractModeFromWorkerId(entry.id);
+        liveWorkers[issueRef.issueId] = [
+          ...(liveWorkers[issueRef.issueId] ?? []),
+          {
+            sessionId: entry.sessionId,
+            status: entry.status,
+            ...(mode ? { mode } : {}),
+          },
+        ];
+      }
+      return liveWorkers;
+    },
   };
 }

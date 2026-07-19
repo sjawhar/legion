@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { computeSessionId } from "../../state/types";
+import { computeSessionId, IssueStatus } from "../../state/types";
 import type { GitHubAppsConfig } from "../config";
 import { type FeedbackEvent, FeedbackLogger, type FeedbackWriter } from "../feedback";
 import { TokenManager } from "../github-apps";
@@ -21,6 +21,10 @@ describe("daemon server", () => {
   let stopServer: (() => void) | null = null;
   let baseUrl = "";
   let serverFetchAndProcessState: (() => Promise<void>) | null = null;
+  let serverRefreshResyncIssueRefs: (() => Promise<void>) | null = null;
+  let serverListNonTerminalIssues: ReturnType<typeof startServer>["listNonTerminalIssues"] | null =
+    null;
+  let serverGetLiveWorkers: ReturnType<typeof startServer>["getLiveWorkers"] | null = null;
   let createSessionCalls: Array<{ sessionId: string; workspace: string }> = [];
   let deleteSessionCalls: string[] = [];
   let sessionStatusHandler:
@@ -101,7 +105,14 @@ describe("daemon server", () => {
     if (options?.state) {
       await writeStateFile(stateFilePath, options.state);
     }
-    const { server, stop, fetchAndProcessState } = startServer({
+    const {
+      server,
+      stop,
+      fetchAndProcessState,
+      refreshResyncIssueRefs,
+      listNonTerminalIssues,
+      getLiveWorkers,
+    } = startServer({
       port: 0,
       hostname: "127.0.0.1",
       envoyUrl: options?.envoyUrl ?? mockEnvoy.url,
@@ -120,6 +131,9 @@ describe("daemon server", () => {
       fetchProjectItems: options?.fetchProjectItems,
     });
     serverFetchAndProcessState = fetchAndProcessState;
+    serverRefreshResyncIssueRefs = refreshResyncIssueRefs;
+    serverListNonTerminalIssues = listNonTerminalIssues;
+    serverGetLiveWorkers = getLiveWorkers;
     stopServer = stop;
     baseUrl = `http://127.0.0.1:${server.port}`;
   }
@@ -186,6 +200,9 @@ describe("daemon server", () => {
     console.warn = originalConsoleWarn;
     sessionStatusHandler = null;
     serverFetchAndProcessState = null;
+    serverRefreshResyncIssueRefs = null;
+    serverListNonTerminalIssues = null;
+    serverGetLiveWorkers = null;
     if (stopServer) {
       stopServer();
       stopServer = null;
@@ -1482,7 +1499,7 @@ describe("daemon server", () => {
       expect(publishAttempts.length).toBe(1);
       expect(warnCalls.length).toBe(1);
       expect(
-        String(warnCalls[0]?.[0] ?? "").includes("[state-delta] publish error (non-fatal)")
+        String(warnCalls[0]?.[0] ?? "").includes("[controller-publish] publish error (non-fatal)")
       ).toBe(true);
     });
 
@@ -2974,6 +2991,127 @@ describe("daemon server", () => {
         const body = (await response.json()) as { error: string };
         expect(body.error).toContain("fetch_and_collect_failed");
       });
+    });
+  });
+
+  describe("resync accessors", () => {
+    it("maps active workers to canonical refreshed issues", async () => {
+      // Given refreshed GitHub issue refs and workers spanning live, terminal, and untracked states.
+      await startTestServer({
+        legionId: "acme/123",
+        state: {
+          workers: {
+            "ACME-WIDGETS-42-implement": {
+              id: "ACME-WIDGETS-42-implement",
+              port: sharedServePort,
+              sessionId: "ses-implement",
+              workspace: "/tmp/implement",
+              startedAt: "2026-02-01T00:00:00.000Z",
+              status: "running",
+              crashCount: 0,
+              lastCrashAt: null,
+            },
+            "acme-widgets-42-test": {
+              id: "acme-widgets-42-test",
+              port: sharedServePort,
+              sessionId: "ses-test",
+              workspace: "/tmp/test",
+              startedAt: "2026-02-01T00:00:00.000Z",
+              status: "starting",
+              crashCount: 0,
+              lastCrashAt: null,
+            },
+            "acme-widgets-42-plan": {
+              id: "acme-widgets-42-plan",
+              port: sharedServePort,
+              sessionId: "ses-dead",
+              workspace: "/tmp/dead",
+              startedAt: "2026-02-01T00:00:00.000Z",
+              status: "dead",
+              crashCount: 0,
+              lastCrashAt: null,
+            },
+            "acme-widgets-42-architect": {
+              id: "acme-widgets-42-architect",
+              port: sharedServePort,
+              sessionId: "ses-stopped",
+              workspace: "/tmp/stopped",
+              startedAt: "2026-02-01T00:00:00.000Z",
+              status: "stopped",
+              crashCount: 0,
+              lastCrashAt: null,
+            },
+            "acme-widgets-99-review": {
+              id: "acme-widgets-99-review",
+              port: sharedServePort,
+              sessionId: "ses-untracked",
+              workspace: "/tmp/untracked",
+              startedAt: "2026-02-01T00:00:00.000Z",
+              status: "running",
+              crashCount: 0,
+              lastCrashAt: null,
+            },
+          },
+          crashHistory: {},
+        },
+        fetchProjectItems: async () => [createGitHubProjectItem({ number: 42 })],
+      });
+      if (!serverRefreshResyncIssueRefs || !serverGetLiveWorkers) {
+        throw new Error("Expected resync accessors");
+      }
+
+      // When the refs are refreshed and live workers are read.
+      await serverRefreshResyncIssueRefs();
+      const liveWorkers = await serverGetLiveWorkers();
+
+      // Then the canonical issue key retains each active mode and filters the rest.
+      expect(liveWorkers).toEqual({
+        "acme-widgets-42": [
+          { sessionId: "ses-implement", status: "running", mode: "implement" },
+          { sessionId: "ses-test", status: "starting", mode: "test" },
+        ],
+      });
+    });
+
+    it("refreshes non-terminal refs and preserves them when fetching fails", async () => {
+      // Given fetched project items with a live issue, terminal issue, source-less item, and linked PR.
+      let fetchFails = false;
+      await startTestServer({
+        legionId: "acme/123",
+        fetchProjectItems: async () => {
+          if (fetchFails) {
+            throw new Error("GitHub unavailable");
+          }
+          return [
+            {
+              ...createGitHubProjectItem({ number: 42, status: "Todo" }),
+              "linked pull requests": ["https://github.com/acme/widgets/pull/101"],
+            },
+            createGitHubProjectItem({ number: 43, status: "Done" }),
+            { content: { number: 44, type: "Issue" }, status: "Todo", labels: [] },
+          ];
+        },
+      });
+      if (!serverRefreshResyncIssueRefs || !serverListNonTerminalIssues) {
+        throw new Error("Expected resync issue accessors");
+      }
+
+      // When the initial refresh succeeds and the next one fails.
+      await serverRefreshResyncIssueRefs();
+      const expectedRefs = [
+        {
+          issueId: "acme-widgets-42",
+          status: IssueStatus.TODO,
+          source: { owner: "acme", repo: "widgets", number: 42 },
+          prRef: { owner: "acme", repo: "widgets", number: 101 },
+        },
+      ];
+      expect(serverListNonTerminalIssues()).toEqual(expectedRefs);
+      fetchFails = true;
+
+      // Then the failed refresh leaves the already-refreshed refs available to resync.
+      await expect(serverRefreshResyncIssueRefs()).rejects.toThrow("GitHub unavailable");
+      expect(serverListNonTerminalIssues()).toEqual(expectedRefs);
     });
   });
 
