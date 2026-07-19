@@ -303,7 +303,7 @@ describe("daemon entry", () => {
     }
   });
 
-  it("subscribes the external controller to the resync, mention, and envoy-exception topics", async () => {
+  it("subscribes the external controller to legion-scoped topics only (no global exception wildcard)", async () => {
     const handle = await startDaemonForTest(
       {
         controllerSessionId: "ses_test",
@@ -333,7 +333,9 @@ describe("daemon entry", () => {
     expect(controllerSubscriptions).toHaveLength(1);
     expect(controllerSubscriptions[0].topics).toEqual([
       "notifications.legion.controller",
-      "notifications.envoy.exceptions.>",
+      "notifications.envoy.exceptions.notifications.legion.>",
+      "notifications.envoy.exceptions.notifications.role.legion-controller",
+      "notifications.envoy.exceptions.notifications.agent.ses_test",
       "notifications.slack.*.*.mention",
       "notifications.github.*.*.mention",
     ]);

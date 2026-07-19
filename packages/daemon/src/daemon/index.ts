@@ -184,7 +184,12 @@ async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
       session_id: sessionId,
       topics: [
         "notifications.legion.controller",
-        "notifications.envoy.exceptions.>",
+        // Exception lane, scoped to legion control traffic only. A global
+        // "notifications.envoy.exceptions.>" wildcard would make the controller the
+        // dead-letter consumer for every workstream on the broker.
+        "notifications.envoy.exceptions.notifications.legion.>",
+        "notifications.envoy.exceptions.notifications.role.legion-controller",
+        `notifications.envoy.exceptions.notifications.agent.${sessionId}`,
         "notifications.slack.*.*.mention",
         "notifications.github.*.*.mention",
       ],
