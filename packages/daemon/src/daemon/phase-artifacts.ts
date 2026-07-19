@@ -179,7 +179,7 @@ function checkConclusion(
     contexts.find(
       (context) =>
         stringAt(context, "name") === name &&
-        numberAt(recordAt(context, "app"), "databaseId") === reviewerAppId
+        numberAt(recordAt(recordAt(context, "checkSuite"), "app"), "databaseId") === reviewerAppId
     ),
     "conclusion"
   );
