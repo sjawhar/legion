@@ -86,6 +86,11 @@ describe("fetchPhaseArtifacts", () => {
     expect(queryArgument).toContain("pr0: pullRequest(number: 101)");
     expect(queryArgument).toContain("pr1: pullRequest(number: 102)");
     expect(queryArgument).toContain("author { login }");
+    // GitHub's schema exposes the publishing App on the check SUITE, not the run.
+    // A bare `... on CheckRun { ... app { ... } }` is rejected by live GitHub even
+    // though mocked-response tests pass — lock the outbound query shape here.
+    expect(queryArgument).toContain("checkSuite { app { databaseId } }");
+    expect(queryArgument).not.toMatch(/conclusion app \{/);
     expect(result.artifacts[issueRef.issueId]?.headSha).toBe("first-head");
     expect(result.artifacts[secondRef.issueId]?.headSha).toBe("second-head");
     expect(result.errors).toEqual([]);

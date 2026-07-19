@@ -114,6 +114,53 @@ async function runGraphQL(query: string): Promise<Record<string, unknown>> {
   return JSON.parse(stdout);
 }
 
+/** Exported for GraphQL schema validation tests. */
+export function buildProjectStatusFieldQuery(
+  owner: string,
+  repo: string,
+  issueNum: number
+): string {
+  return `{
+      repository(owner: "${owner}", name: "${repo}") {
+        issue(number: ${issueNum}) {
+          projectItems(first: 10) {
+            nodes {
+              id
+              project {
+                id
+                field(name: "Status") {
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    options { id name }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`;
+}
+
+/** Exported for GraphQL schema validation tests. */
+export function buildStatusMutation(
+  projectId: string,
+  itemId: string,
+  fieldId: string,
+  optionId: string
+): string {
+  return `mutation {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: "${projectId}"
+        itemId: "${itemId}"
+        fieldId: "${fieldId}"
+        value: { singleSelectOptionId: "${optionId}" }
+      }) {
+        projectV2Item { id }
+      }
+    }`;
+}
+
 export class GitHubTracker implements IssueTracker {
   parseIssues(raw: unknown): ParsedIssue[] {
     const items = extractItems(raw);
@@ -235,26 +282,7 @@ export class GitHubTracker implements IssueTracker {
     const issueNum = Number(number);
 
     // Step 1: Query the project item ID, project ID, Status field ID, and option IDs
-    const queryResult = await runGraphQL(`{
-      repository(owner: "${owner}", name: "${repo}") {
-        issue(number: ${issueNum}) {
-          projectItems(first: 10) {
-            nodes {
-              id
-              project {
-                id
-                field(name: "Status") {
-                  ... on ProjectV2SingleSelectField {
-                    id
-                    options { id name }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }`);
+    const queryResult = await runGraphQL(buildProjectStatusFieldQuery(owner, repo, issueNum));
 
     const data = queryResult?.data as Record<string, unknown> | undefined;
     const repository = data?.repository as Record<string, unknown> | undefined;
@@ -289,15 +317,6 @@ export class GitHubTracker implements IssueTracker {
     }
 
     // Step 2: Mutation to update the status
-    await runGraphQL(`mutation {
-      updateProjectV2ItemFieldValue(input: {
-        projectId: "${projectId}"
-        itemId: "${item.id}"
-        fieldId: "${fieldId}"
-        value: { singleSelectOptionId: "${targetOption.id}" }
-      }) {
-        projectV2Item { id }
-      }
-    }`);
+    await runGraphQL(buildStatusMutation(projectId, item.id as string, fieldId, targetOption.id));
   }
 }

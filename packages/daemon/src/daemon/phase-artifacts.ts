@@ -162,7 +162,7 @@ function queryFor(refs: readonly IssueRef[]): {
     const pullRequests = group.refs.map((ref, prIndex) => {
       const prAlias = `pr${prIndex}`;
       aliases.push({ ref, repoAlias: `repo${repoIndex}`, prAlias });
-      return `${prAlias}: pullRequest(number: ${ref.prRef?.number}) { isDraft headRefOid merged autoMergeRequest { enabledAt } latestReviews(first: 100) { nodes { state commit { oid } author { login } } } commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { name conclusion app { databaseId } } } } } } } } }`;
+      return `${prAlias}: pullRequest(number: ${ref.prRef?.number}) { isDraft headRefOid merged autoMergeRequest { enabledAt } latestReviews(first: 100) { nodes { state commit { oid } author { login } } } commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { name conclusion checkSuite { app { databaseId } } } } } } } } } }`;
     });
     return `repo${repoIndex}: repository(owner: ${JSON.stringify(group.owner)}, name: ${JSON.stringify(group.repo)}) { ${pullRequests.join(" ")} }`;
   });
