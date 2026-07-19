@@ -52,8 +52,12 @@ type CIRecorder interface {
 	Record(owner, repo, number, sha, checkName, status, conclusion string) error
 }
 
+func reviewerVerdict(name string) bool {
+	return name == "tester" || name == "architect"
+}
+
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
-func GitHubHandler(secret, mentionTrigger string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
+func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -85,12 +89,6 @@ func GitHubHandler(secret, mentionTrigger string, publisher Publisher, ci CIReco
 				githubSenderField(payload, "login"),
 				githubSenderField(payload, "type"),
 				delivery, event)
-			if contracts.GithubIsBotSender(payload) {
-				log.Printf("github skipped bot sender delivery=%s event=%s", delivery, event)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("ok"))
-				return
-			}
 		}
 		if githubSkip(event) {
 			w.WriteHeader(http.StatusOK)
@@ -102,6 +100,16 @@ func GitHubHandler(secret, mentionTrigger string, publisher Publisher, ci CIReco
 		// yields no observations (ignored — see contracts.GithubCIObservations).
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
+				if reviewerVerdict(o.CheckName) {
+					if reviewerAppID == "" {
+						log.Printf("WARN github ci verdict dropped: ENVOY_REVIEWER_APP_ID is not configured check=%q app_id=%q pr=%s", o.CheckName, o.AppID, o.Number)
+						continue
+					}
+					if o.AppID != reviewerAppID {
+						log.Printf("WARN github ci verdict ignored: untrusted publisher check=%q app_id=%q expected_app_id=%q pr=%s", o.CheckName, o.AppID, reviewerAppID, o.Number)
+						continue
+					}
+				}
 				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.Status, o.Conclusion); err != nil {
 					log.Printf("github ci record failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)

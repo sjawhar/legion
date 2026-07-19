@@ -1,22 +1,22 @@
 package main
 
 import (
-	"github.com/sjawhar/envoy/internal/logging"
-	"log/slog"
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sjawhar/envoy/internal/logging"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"os/signal"
-	"syscall"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -26,9 +26,9 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
-	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
@@ -75,6 +75,213 @@ func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string
 		return false
 	}
 	return isSessionLive(sessions, sessionID)
+}
+
+type listenerDeliveryHandlerConfig struct {
+	client            *bus.Client
+	registry          *store.Registry
+	sessions          *session.SessionRegistry
+	machineID         string
+	deliverer         *session.Deliverer
+	dedupeCache       *dedupe.Cache
+	attemptCache      *dedupe.Cache
+	logger            *logging.Logger
+	messagesReceived  *metrics.Counter
+	messagesDelivered *metrics.Counter
+	messagesNAKed     *metrics.Counter
+	deliveryDuration  *metrics.Histogram
+}
+
+type deliveryExceptionPayload struct {
+	OriginalTopic  string `json:"original_topic"`
+	EventID        string `json:"event_id"`
+	Reason         string `json:"reason"`
+	PayloadSummary string `json:"payload_summary"`
+}
+
+func isControlTopic(topic string) bool {
+	return strings.HasPrefix(topic, contracts.RoleTopicPrefix) || strings.HasPrefix(topic, contracts.AgentTopicPrefix)
+}
+
+func isExceptionsTopic(topic string) bool {
+	return strings.HasPrefix(topic, "notifications.envoy.exceptions.")
+}
+
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason string) error {
+	payload, err := json.Marshal(deliveryExceptionPayload{
+		OriginalTopic:  item.Topic,
+		EventID:        item.EventID,
+		Reason:         reason,
+		PayloadSummary: item.PayloadSummary,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal delivery exception: %w", err)
+	}
+	exceptionID := id.New()
+	exception := contracts.Envelope{
+		EventID:        exceptionID,
+		Source:         "envoy",
+		SourceEventID:  item.EventID,
+		Topic:          "notifications.envoy.exceptions." + item.Topic,
+		DedupeKey:      "envoy.exception." + exceptionID,
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "delivery exception: " + reason,
+		Payload:        string(payload),
+		TraceID:        id.New(),
+	}
+	if err := exception.Validate(); err != nil {
+		return fmt.Errorf("validate delivery exception: %w", err)
+	}
+	if err := client.Publish(exception); err != nil {
+		return fmt.Errorf("publish delivery exception: %w", err)
+	}
+	return nil
+}
+
+func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+	return func(msg *nats.Msg) {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err != nil {
+			cfg.logger.Error("listener decode failed", slog.String("error", err.Error()))
+			_ = msg.Ack()
+			return
+		}
+		if err := item.Validate(); err != nil {
+			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
+			_ = msg.Ack()
+			return
+		}
+		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
+		cfg.logger.Info("listener received", slog.String("source", item.Source), slog.String("source_session", item.SourceSession), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("payload_summary", item.PayloadSummary))
+		if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
+			sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
+			if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
+				_ = msg.Ack()
+				return
+			}
+			if cfg.attemptCache.Seen(item.DedupeKey, sessionID) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", sessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
+				_ = msg.Ack()
+				return
+			}
+			interest, err := cfg.registry.Get(sessionID)
+			var interestPtr *store.Interest
+			if err == nil {
+				interestPtr = &interest
+			}
+			cfg.attemptCache.Record(item.DedupeKey, sessionID)
+			deliveryTimer := metrics.NewTimer()
+			result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
+			if result.Err != nil {
+				cfg.logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
+				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "failed"})
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				if result.ShouldNAK {
+					cfg.attemptCache.Clear(item.DedupeKey, sessionID)
+				}
+				if isControlTopic(item.Topic) && !isExceptionsTopic(item.Topic) {
+					if err := publishDeliveryException(cfg.client, item, "delivery_failed"); err != nil {
+						cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+					}
+				}
+			}
+			if result.Delivered {
+				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "delivered"})
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
+				cfg.dedupeCache.Record(item.DedupeKey, sessionID)
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener agent delivered", sessionID, item.Topic, item.EventID, "delivered")
+			} else if result.Err == nil {
+				if isControlTopic(item.Topic) && !isExceptionsTopic(item.Topic) {
+					if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
+						cfg.attemptCache.Clear(item.DedupeKey, sessionID)
+						cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+						cfg.messagesNAKed.Inc()
+						_ = msg.NakWithDelay(30 * time.Second)
+						return
+					}
+				}
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+				cfg.logger.DeliveryLog(slog.LevelWarn, "listener agent session not found anywhere", sessionID, item.Topic, item.EventID, "skipped")
+			}
+			if result.ShouldNAK {
+				cfg.messagesNAKed.Inc()
+				_ = msg.NakWithDelay(30 * time.Second)
+			} else {
+				_ = msg.Ack()
+			}
+			return
+		}
+		items := cfg.registry.Match(cfg.machineID, item.Topic)
+		if len(items) == 0 {
+			if isControlTopic(item.Topic) && !isExceptionsTopic(item.Topic) {
+				if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
+					cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+					cfg.messagesNAKed.Inc()
+					_ = msg.NakWithDelay(30 * time.Second)
+					return
+				}
+			}
+			cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))
+			_ = msg.Ack()
+			return
+		}
+		var failed bool
+		var deadDeliveries int
+		for _, interest := range items {
+			if cfg.dedupeCache.Seen(item.DedupeKey, interest.SessionID) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", interest.SessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
+				continue
+			}
+			if cfg.attemptCache.Seen(item.DedupeKey, interest.SessionID) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", interest.SessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
+				continue
+			}
+			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener skip echo", interest.SessionID, item.Topic, item.EventID, "skipped")
+				continue
+			}
+			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
+			deliveryTimer := metrics.NewTimer()
+			if err := cfg.deliverer.Deliver(item, interest); err != nil {
+				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "failed"})
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				cfg.logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+				retryable := shouldNAKFanoutDelivery(cfg.sessions, interest.SessionID, err)
+				if retryable {
+					cfg.attemptCache.Clear(item.DedupeKey, interest.SessionID)
+					failed = true
+				} else {
+					deadDeliveries++
+				}
+				if isControlTopic(item.Topic) && !isExceptionsTopic(item.Topic) {
+					if err := publishDeliveryException(cfg.client, item, "delivery_failed"); err != nil {
+						cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+						cfg.attemptCache.Clear(item.DedupeKey, interest.SessionID)
+						failed = true
+					}
+				}
+			} else {
+				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "delivered"})
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
+				cfg.dedupeCache.Record(item.DedupeKey, interest.SessionID)
+			}
+		}
+		if deadDeliveries > 0 {
+			cfg.logger.Info("listener skipped dead session deliveries", slog.String("topic", item.Topic), slog.Int("count", deadDeliveries))
+		}
+		if failed {
+			cfg.messagesNAKed.Inc()
+			_ = msg.NakWithDelay(30 * time.Second)
+		} else {
+			_ = msg.Ack()
+		}
+	}
 }
 
 // runSelfHealthWatchdog periodically pings the KV registries and self-terminates
@@ -365,7 +572,6 @@ func main() {
 	}
 	logger := logging.New(cfg.MachineID)
 
-
 	// Load webhook config (fast — env var reads only).
 	webhookCfg, err := webhook.LoadWebhookConfig()
 	if err != nil {
@@ -495,7 +701,7 @@ func main() {
 	if webhookCfg.GitHub != nil {
 		mux.Handle("/webhook/github", readinessGate(
 			func() bool { return deps.Load() != nil },
-			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookPublisher, ciRecorder),
+			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookCfg.GitHub.ReviewerAppID, webhookPublisher, ciRecorder),
 		))
 	}
 	if webhookCfg.Slack != nil {
@@ -671,7 +877,6 @@ func main() {
 	}()
 	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
-
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
 	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
@@ -733,7 +938,6 @@ func main() {
 		Sessions:     sessions,
 	}
 
-
 	dedupeCache := dedupe.New(10 * time.Minute)
 
 	// attemptCache tracks (dedupe_key, session_id) pairs BEFORE delivery to
@@ -768,117 +972,20 @@ func main() {
 				)
 			}
 		}
-		sub, err = startListenerSubscription(client, consumer, func(msg *nats.Msg) {
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			logger.Error("listener decode failed", slog.String("error", err.Error()))
-			_ = msg.Ack()
-			return
-		}
-		if err := item.Validate(); err != nil {
-			logger.Error("listener invalid envelope", slog.String("error", err.Error()))
-			_ = msg.Ack()
-			return
-		}
-		messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
-		logger.Info("listener received", slog.String("source", item.Source), slog.String("source_session", item.SourceSession), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("payload_summary", item.PayloadSummary))
-		if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
-			sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
-			if dedupeCache.Seen(item.DedupeKey, sessionID) {
-				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
-				logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-				_ = msg.Ack()
-				return
-			}
-			if attemptCache.Seen(item.DedupeKey, sessionID) {
-				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
-				logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", sessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
-				_ = msg.Ack()
-				return
-			}
-			interest, err := registry.Get(sessionID)
-			var interestPtr *store.Interest
-			if err == nil {
-				interestPtr = &interest
-			}
-			attemptCache.Record(item.DedupeKey, sessionID)
-			deliveryTimer := metrics.NewTimer()
-			result := session.HandleAgentMessage(item, sessionID, cfg.MachineID, interestPtr, &deliver)
-			if result.Err != nil {
-				logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
-			}
-			if !result.Delivered && result.Err != nil {
-				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "failed"})
-				messagesDelivered.Inc([2]string{"delivery_status", "failed"})
-			}
-			if result.Delivered {
-				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "delivered"})
-				messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
-				dedupeCache.Record(item.DedupeKey, sessionID)
-				logger.DeliveryLog(slog.LevelInfo, "listener agent delivered", sessionID, item.Topic, item.EventID, "delivered")
-			} else if result.Err == nil {
-				messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
-				logger.DeliveryLog(slog.LevelWarn, "listener agent session not found anywhere", sessionID, item.Topic, item.EventID, "skipped")
-			}
-			if result.ShouldNAK {
-				messagesNAKed.Inc()
-				_ = msg.NakWithDelay(30 * time.Second)
-			} else {
-				_ = msg.Ack()
-			}
-			return
-		}
-		items := registry.Match(cfg.MachineID, item.Topic)
-		if len(items) == 0 {
-			logger.Info("listener no matching interests", slog.String("topic", item.Topic))
-			_ = msg.Ack()
-			return
-		}
-		var failed bool
-		var deadDeliveries int
-		for _, interest := range items {
-			if dedupeCache.Seen(item.DedupeKey, interest.SessionID) {
-				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
-				logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", interest.SessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-				continue
-			}
-			if attemptCache.Seen(item.DedupeKey, interest.SessionID) {
-				messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
-				logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", interest.SessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
-				continue
-			}
-			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
-				messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
-				logger.DeliveryLog(slog.LevelInfo, "listener skip echo", interest.SessionID, item.Topic, item.EventID, "skipped")
-				continue
-			}
-			attemptCache.Record(item.DedupeKey, interest.SessionID)
-			deliveryTimer := metrics.NewTimer()
-			if err := deliver.Deliver(item, interest); err != nil {
-				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "failed"})
-				messagesDelivered.Inc([2]string{"delivery_status", "failed"})
-				logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-				if shouldNAKFanoutDelivery(sessions, interest.SessionID, err) {
-					failed = true
-				} else {
-					deadDeliveries++
-				}
-			} else {
-				deliveryTimer.ObserveDuration(deliveryDuration, [2]string{"delivery_status", "delivered"})
-				messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
-				dedupeCache.Record(item.DedupeKey, interest.SessionID)
-			}
-		}
-		if deadDeliveries > 0 {
-			logger.Info("listener skipped dead session deliveries", slog.String("topic", item.Topic), slog.Int("count", deadDeliveries))
-		}
-		if failed {
-			messagesNAKed.Inc()
-			_ = msg.NakWithDelay(30 * time.Second)
-		} else {
-			_ = msg.Ack()
-		}
-	})
+		sub, err = startListenerSubscription(client, consumer, listenerDeliveryHandler(listenerDeliveryHandlerConfig{
+			client:            client,
+			registry:          registry,
+			sessions:          sessions,
+			machineID:         cfg.MachineID,
+			deliverer:         &deliver,
+			dedupeCache:       dedupeCache,
+			attemptCache:      attemptCache,
+			logger:            logger,
+			messagesReceived:  messagesReceived,
+			messagesDelivered: messagesDelivered,
+			messagesNAKed:     messagesNAKed,
+			deliveryDuration:  deliveryDuration,
+		}))
 		if err == nil {
 			break
 		}

@@ -62,6 +62,13 @@ func (c *Cache) Record(dedupeKey, sessionID string) {
 	c.entries[Key{DedupeKey: dedupeKey, SessionID: sessionID}] = c.clock()
 }
 
+// Clear removes a recorded delivery so a retry can run after a failed attempt.
+func (c *Cache) Clear(dedupeKey, sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, Key{DedupeKey: dedupeKey, SessionID: sessionID})
+}
+
 // Len returns the number of entries currently in the cache.
 func (c *Cache) Len() int {
 	c.mu.RLock()

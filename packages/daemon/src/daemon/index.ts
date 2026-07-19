@@ -17,13 +17,19 @@ import {
   removeLegionEntry,
   writeLegionEntry,
 } from "./legions-registry";
+import { fetchPhaseArtifactsBatch, type IssueRef } from "./phase-artifacts";
 import { isPortFree } from "./ports";
 import { demoteSession, listPromotedSessions, readPromotedSessions } from "./promoted-sessions";
 import { fetchAllTrackedRepos } from "./repo-manager";
+import {
+  runResyncPass as defaultRunResyncPass,
+  type LiveWorkers,
+  type RunResyncDeps,
+} from "./resync";
 import { readProcessRssBytes } from "./rss-monitor";
 import { createAdapter } from "./runtime";
 import type { RuntimeAdapter, RuntimeStartOptions } from "./runtime/types";
-import { startServer, subscribeWorkerToEnvoy } from "./server";
+import { publishToController, startServer, subscribeWorkerToEnvoy } from "./server";
 import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
 import {
   registerGauges,
@@ -36,7 +42,16 @@ type ServerHandle = ReturnType<typeof startServer>;
 type StartServerDependency = (
   ...args: Parameters<typeof startServer>
 ) => Pick<ServerHandle, "server" | "stop"> &
-  Partial<Pick<ServerHandle, "fetchAndProcessState" | "cleanupDeadWorkers">>;
+  Partial<
+    Pick<
+      ServerHandle,
+      | "fetchAndProcessState"
+      | "cleanupDeadWorkers"
+      | "refreshResyncIssueRefs"
+      | "listNonTerminalIssues"
+      | "getLiveWorkers"
+    >
+  >;
 
 interface DaemonDependencies {
   adapter: RuntimeAdapter;
@@ -46,6 +61,7 @@ interface DaemonDependencies {
   fetch: typeof fetch;
   setTimeout: typeof setTimeout;
   clearTimeout: typeof clearTimeout;
+  runResyncPass: typeof defaultRunResyncPass;
 }
 
 interface DaemonStartOptions {
@@ -117,6 +133,7 @@ function resolveDependencies(
     fetch: overrides?.fetch ?? globalThis.fetch,
     setTimeout: overrides?.setTimeout ?? setTimeout,
     clearTimeout: overrides?.clearTimeout ?? clearTimeout,
+    runResyncPass: overrides?.runResyncPass ?? defaultRunResyncPass,
   };
 }
 
@@ -201,7 +218,7 @@ function buildServeEnv(config: DaemonConfig): Record<string, string> {
     LEGION_SHORT_ID: legionId.slice(0, 8),
     LEGION_DAEMON_PORT: String(config.daemonPort),
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
-      plugin: ["@sjawhar/opencode-legion@latest"],
+      plugin: ["@sjawhar/opencode-legion@latest", "@sjawhar/opencode-legion-envoy@latest"],
     }),
   };
   if (config.envoyUrl) {
@@ -500,6 +517,7 @@ export async function startDaemon(
 
   let shuttingDown = false;
   let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
+  let resyncPassTimeout: ReturnType<typeof setTimeout> | null = null;
   let stopServer: () => void = () => {};
 
   /**
@@ -516,6 +534,10 @@ export async function startDaemon(
     if (healthTickTimeout) {
       resolvedDeps.clearTimeout(healthTickTimeout);
       healthTickTimeout = null;
+    }
+    if (resyncPassTimeout) {
+      resolvedDeps.clearTimeout(resyncPassTimeout);
+      resyncPassTimeout = null;
     }
 
     if (feedbackLogger) {
@@ -558,6 +580,9 @@ export async function startDaemon(
   let stop: ServerHandle["stop"];
   let fetchAndProcessState: ServerHandle["fetchAndProcessState"];
   let cleanupDeadWorkers: ServerHandle["cleanupDeadWorkers"];
+  let refreshResyncIssueRefs: (() => Promise<void>) | undefined;
+  let listNonTerminalIssues: (() => IssueRef[]) | undefined;
+  let getLiveWorkers: (() => Promise<LiveWorkers>) | undefined;
   let bindAttempts = 0;
 
   while (true) {
@@ -584,7 +609,6 @@ export async function startDaemon(
         feedbackLogger,
         envoyUrl: config.envoyUrl,
         issueBackend: config.issueBackend,
-        autoAdvance: config.autoAdvance,
         modeAgents: config.modeAgents,
         shutdownFn: async () => {
           resolvedDeps.setTimeout(async () => {
@@ -601,6 +625,9 @@ export async function startDaemon(
       stop = serverHandle.stop;
       fetchAndProcessState = serverHandle.fetchAndProcessState ?? (async () => {});
       cleanupDeadWorkers = serverHandle.cleanupDeadWorkers ?? (async () => {});
+      refreshResyncIssueRefs = serverHandle.refreshResyncIssueRefs;
+      listNonTerminalIssues = serverHandle.listNonTerminalIssues;
+      getLiveWorkers = serverHandle.getLiveWorkers;
       break;
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
@@ -991,10 +1018,73 @@ export async function startDaemon(
       }
     }, config.checkIntervalMs);
   };
+
+  const buildResyncDeps = (): RunResyncDeps => {
+    const reviewerAppId = config.reviewerAppId;
+    const reviewerAppLogin = config.reviewerAppLogin;
+    if (reviewerAppId === undefined || !reviewerAppLogin) {
+      throw new Error("Resync pass requires reviewerAppId and reviewerAppLogin configuration");
+    }
+    if (!listNonTerminalIssues || !getLiveWorkers) {
+      throw new Error("Resync pass requires server issue and worker registry accessors");
+    }
+    return {
+      listNonTerminalIssues,
+      fetchPhaseArtifactsBatch: (refs) =>
+        fetchPhaseArtifactsBatch(refs, {
+          reviewerAppId,
+          reviewerAppLogin,
+        }),
+      getLiveWorkers,
+      getSessionStatus: (sessionId) => resolvedDeps.adapter.getSessionStatus(sessionId),
+      emitToController: (event) => {
+        // The type marker distinguishes resync events from state-delta objects on the shared topic.
+        publishToController(JSON.stringify(event), config.envoyUrl, resolvedDeps.fetch);
+      },
+    };
+  };
+
+  const runScheduledResyncPass = async (): Promise<void> => {
+    const resyncDeps = buildResyncDeps();
+    if (!refreshResyncIssueRefs) {
+      throw new Error("Resync pass requires a server issue refresh accessor");
+    }
+    await refreshResyncIssueRefs();
+    const result = await resolvedDeps.runResyncPass(resyncDeps);
+    for (const error of result.errors) {
+      console.error(`[resync] issue=${error.issueId} error=${error.message}`);
+    }
+  };
+
+  const scheduleResyncPass = () => {
+    resyncPassTimeout = resolvedDeps.setTimeout(async () => {
+      try {
+        await runScheduledResyncPass();
+      } catch (error) {
+        console.error(
+          `[resync] pass failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        if (!shuttingDown) {
+          scheduleResyncPass();
+        }
+      }
+    }, config.resyncIntervalMs);
+  };
   // Keepalive: prevent Bun's event loop from draining when the shared serve child exits.
   // Bun.spawn links child lifecycle to parent — without this, the daemon exits when the serve does.
   const keepalive = setInterval(() => {}, 2_147_483_647); // max 32-bit int
 
+  if (config.issueBackend === "github") {
+    scheduleResyncPass();
+    void runScheduledResyncPass().catch((error) => {
+      console.error(
+        `[resync] pass failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+  } else {
+    console.log("[resync] disabled: requires github issue backend");
+  }
   scheduleHealthTick();
 
   const handleSignal = async () => {

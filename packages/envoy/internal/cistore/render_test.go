@@ -93,6 +93,19 @@ func TestRenderSummaryEmptyGroupsArePresent(t *testing.T) {
 	}
 }
 
+func TestRenderSummaryIncludesReviewerVerdicts(t *testing.T) {
+	_, sum := renderOrFail(t, State{
+		Owner: "sjawhar", Repo: "legion", Number: "42", SHA: "deadbeef",
+		Checks: mkChecks(map[string][2]string{
+			"tester":     {"completed", "success"},
+			"architect":  {"completed", "failure"},
+			"unit-tests": {"completed", "success"},
+		}),
+	})
+	assertGroup(t, "passed", sum.Passed, []string{"tester", "unit-tests"})
+	assertGroup(t, "failed", sum.Failed, []string{"architect"})
+}
+
 func TestClassify(t *testing.T) {
 	cases := []struct {
 		status, conclusion string

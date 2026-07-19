@@ -18,6 +18,7 @@ type WebhookConfig struct {
 type GitHubWebhook struct {
 	Secret         string
 	MentionTrigger string
+	ReviewerAppID  string
 }
 
 // SlackWebhook holds Slack-specific webhook configuration.
@@ -53,7 +54,15 @@ func LoadWebhookConfig() (*WebhookConfig, error) {
 			if trigger == "" {
 				trigger = "@legion"
 			}
-			cfg.GitHub = &GitHubWebhook{Secret: secret, MentionTrigger: trigger}
+			reviewerAppID := strings.TrimSpace(os.Getenv("ENVOY_REVIEWER_APP_ID"))
+			if reviewerAppID == "" {
+				return nil, fmt.Errorf("ENVOY_REVIEWER_APP_ID required when github enabled")
+			}
+			cfg.GitHub = &GitHubWebhook{
+				Secret:         secret,
+				MentionTrigger: trigger,
+				ReviewerAppID:  reviewerAppID,
+			}
 		case "slack":
 			secret := strings.TrimSpace(os.Getenv("ENVOY_SLACK_SIGNING_SECRET"))
 			if secret == "" {

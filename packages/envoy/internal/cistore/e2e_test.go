@@ -57,7 +57,7 @@ func TestEndToEndCheckRunToSummary(t *testing.T) {
 
 	const secret = "s"
 	ci := webhook.CIRecorderFunc(store.Record)
-	handler := webhook.GitHubHandler(secret, "@legion", client, ci)
+	handler := webhook.GitHubHandler(secret, "@legion", "", client, ci)
 
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()

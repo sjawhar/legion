@@ -25,6 +25,7 @@ const map = {
 } satisfies Record<Kind, string>;
 
 const keep = `const AgentTopicPrefix = "notifications.agent."
+const RoleTopicPrefix = "notifications.role."
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

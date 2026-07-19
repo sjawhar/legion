@@ -16,7 +16,7 @@
     "event_id": { "type": "string", "minLength": 1 },
     "source": {
       "type": "string",
-      "enum": ["agent", "github", "slack", "whatsapp", "ghostwispr"]
+      "enum": ["agent", "envoy", "github", "slack", "whatsapp", "ghostwispr"]
     },
     "source_event_id": { "type": "string", "minLength": 1 },
     "source_session": { "type": "string" },

@@ -1,12 +1,12 @@
 ---
-title: "Merge retry pattern for race-condition conflicts"
+title: "Native auto-merge pattern for base changes"
 category: skill-patterns
 tags:
   - merge
-  - retry
+  - auto-merge
   - race-condition
   - github-api
-  - conflict-resolution
+  - branch-protection
 date: 2026-04-11
 status: active
 module: legion-worker
@@ -14,15 +14,26 @@ related_issues:
   - "411"
 ---
 
-# Merge Retry Pattern for Race-Condition Conflicts
+# Native Auto-Merge Pattern for Base Changes
 
 ## Problem
 
-When a merge worker runs `gh pr merge --squash`, the merge can fail because `main` moved since the last rebase. This is a race condition — another PR was merged between the worker's rebase and merge attempt. The `gh pr merge` command doesn't distinguish "you lost a race" from "you don't have permission" in its error output.
+When a merge worker directly runs `gh pr merge --squash`, it becomes responsible for waiting on
+requirements and retrying when `main` moves. GitHub can own both decisions: native auto-merge waits for
+required checks and review, then merges when they are satisfied.
 
-## Solution: PR State Inspection + Bounded Retry
+## Solution: Enable Native Auto-Merge + Inspect State on Failure
 
-After a merge failure, inspect the PR state to classify the failure before deciding what to do:
+After rebase and push, enable GitHub auto-merge:
+
+```bash
+gh pr merge "$LEGION_ISSUE_ID" --auto --squash --delete-branch
+```
+
+Do not wait for checks or dispatch retro from the worker. The state machine handles the downstream
+transition and retro dispatch after the PR merges.
+
+If auto-merge cannot be enabled, inspect the PR state to classify the failure before deciding what to do:
 
 ```bash
 gh pr view "$LEGION_ISSUE_ID" --json state,mergeable,mergeStateStatus -R $OWNER/$REPO
@@ -32,35 +43,29 @@ gh pr view "$LEGION_ISSUE_ID" --json state,mergeable,mergeStateStatus -R $OWNER/
 
 | `state` | `mergeStateStatus` | Meaning | Action |
 |---------|-------------------|---------|--------|
-| `MERGED` | (any) | Another process merged it | Success — proceed to post-merge steps |
-| `OPEN` | `BEHIND` or `DIRTY` | Race condition — main moved | Retry (bounded) |
-| `OPEN` | anything else | Permission error, unknown error | Escalate with `user-input-needed` |
+| `MERGED` | (any) | Another process or auto-merge completed | No-op; the state machine owns post-merge work |
+| `OPEN` | `BEHIND` or `DIRTY` | Base changed after preparation | Rebase, push, and re-enable auto-merge |
+| `OPEN` | auto-merge blocked | Auto-merge is disabled or unavailable | Escalate with `user-input-needed`; never bypass protection |
+| `OPEN` | anything else | Permission error or unknown error | Escalate with `user-input-needed` |
 | `CLOSED` | (any) | PR closed without merge | Escalate — unexpected state |
 
-### Retry Loop
+### Base Change Handling
 
-Each retry iteration:
-1. Rebase onto latest main (`jj git fetch && jj rebase -d main`)
-2. Verify clean rebase — `jj status` must show no conflicts
-3. Push
-4. Wait for CI to pass (fix any CI failures)
-5. Retry merge
+For `BEHIND` or `DIRTY`, rebase onto the latest `main`, resolve any conflicts, push, and run the
+auto-merge command again. Do not replace it with a direct merge command or an `--admin` override.
 
-**Bound:** Max 2 retries. After exhaustion, escalate with `user-input-needed` and `Worker failed:` notification.
+### Why Native Auto-Merge
 
-### Why bounded
+The worker does not poll CI or own a conflict-retry merge loop. GitHub preserves the requested squash
+merge and merges as soon as branch protection allows it. If it cannot enable auto-merge, the worker
+escalates the exact failure instead of bypassing branch protection.
 
-Unbounded retries risk infinite loops on high-traffic repos where `main` moves faster than CI can run. 2 retries is enough for normal race conditions (where 1-2 other PRs merged). If it fails 3 times, something systemic is happening (e.g., a merge train, branch protection rules) that needs human attention.
+### Deployment Verification
 
-### Why retry substeps don't notify
-
-Only terminal exits (retry-exhausted, other-error, success) send `envoy_publish` notifications. Intermediate retry iterations are internal to the workflow — the controller doesn't need to know about retries in progress, only final outcomes.
+Deploy-time: verify `gh pr merge --auto --squash` enablement under the implementer-App installation token on a scratch PR.
 
 ## When to apply this pattern
 
-Any workflow step that:
-1. Can fail due to a race condition (resource moved between check and act)
-2. Has an API to inspect the current state after failure
-3. Can be retried with a fresh state (rebase, re-fetch, re-check)
+Any GitHub PR workflow that can delegate a merge until required checks and reviews are satisfied.
 
-The `mergeStateStatus` field is GitHub-specific. For Linear or other backends, find the equivalent state inspection mechanism.
+The `mergeStateStatus` field is GitHub-specific. For Linear or other backends, use the backend's equivalent state inspection mechanism and preserve the controller/state machine ownership of downstream work.

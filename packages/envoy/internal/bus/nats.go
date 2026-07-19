@@ -18,7 +18,7 @@ var streamCfg = &nats.StreamConfig{
 	Name:      Stream,
 	Subjects:  []string{"notifications.>"},
 	Retention: nats.LimitsPolicy,
-	MaxAge:    time.Hour,
+	MaxAge:    72 * time.Hour,
 	Storage:   nats.FileStorage,
 	Replicas:  1,
 }
@@ -64,7 +64,7 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		ReconnectWait: 2 * nats.DefaultReconnectWait,
 		DisconnectedErrCB: func(_ *nats.Conn, err error) {
 			if err != nil {
-			slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
+				slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
 				return
 			}
 			slog.Info("envoy nats disconnected")
@@ -86,7 +86,7 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 				slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
 				return
 			}
-				slog.Error("envoy nats async error", slog.String("error", err.Error()))
+			slog.Error("envoy nats async error", slog.String("error", err.Error()))
 		},
 	}
 }
@@ -144,9 +144,14 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 }
 
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
-	_, err := js.StreamInfo(Stream)
+	info, err := js.StreamInfo(Stream)
 	if err == nil {
-		return nil
+		if info.Config.MaxAge == cfg.MaxAge {
+			return nil
+		}
+		// Updating here migrates the deployed stream on the next listener start.
+		_, err = js.UpdateStream(cfg)
+		return err
 	}
 	if !errors.Is(err, nats.ErrStreamNotFound) {
 		return err
@@ -183,7 +188,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	if c.subSubject == "" || c.subHandler == nil {
 		return
 	}
-		slog.Info("envoy nats resubscribing", slog.String("subject", c.subSubject))
+	slog.Info("envoy nats resubscribing", slog.String("subject", c.subSubject))
 	sub, err := c.js.Subscribe(c.subSubject, c.subHandler, c.subOpts...)
 	if err != nil {
 		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
@@ -191,7 +196,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		return
 	}
 	c.subActive = sub
-		slog.Info("envoy nats resubscribed", slog.String("subject", c.subSubject))
+	slog.Info("envoy nats resubscribed", slog.String("subject", c.subSubject))
 }
 
 // Subscribe creates a JetStream subscription that auto-resubscribes on reconnect.

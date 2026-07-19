@@ -1,7 +1,10 @@
 # Merge Workflow
 
-Merge the PR into main, then clean up the workspace. Three-layer cleanup: merge worker (immediate),
-daemon auto-cleanup (on next state collect), controller backup sweep (Step 6).
+Prepare the PR and enable GitHub native auto-merge. GitHub merges when the required checks and
+review are satisfied. If the PR merges immediately (the common case when branch protection is not
+applied), the worker performs explicit issue-close verification and workspace cleanup. If the PR
+remains open (auto-merge armed, waiting on required checks), the controller observes the merge and
+handles post-merge transitions.
 
 ## Workflow
 
@@ -13,16 +16,15 @@ Before doing anything, verify the PR is open and mergeable:
 gh pr view "$LEGION_ISSUE_ID" --json state,merged,mergeable
 ```
 
-- If **already merged**: verify changes are on main (`jj log --revisions main`), then notify the controller and exit cleanly:
-  - Remove `worker-active`:
-    - **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
-    - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active"])`
-  - Notify controller (best-effort):
-    ```
-    envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER merge skipped — PR already merged")
-    ```
-    If `envoy_publish` fails, continue — the label is the source of truth.
-  - Exit
+- If **already merged**: The PR is merged. Verify the issue is closed (GitHub auto-close may not fire if the issue is not linked to the PR). If not closed, close it explicitly. Clean up the workspace, then exit. The state machine already owns the downstream transition and retro dispatch.
+
+  ```bash
+  ISSUE_STATE=$(gh issue view "$LEGION_ISSUE_ID" --json state -R $OWNER/$REPO | jq -r '.state')
+  if [ "$ISSUE_STATE" != "CLOSED" ]; then
+    gh issue close "$LEGION_ISSUE_ID" -R $OWNER/$REPO
+  fi
+  cd /tmp && rm -rf "$LEGION_DIR"
+  ```
 - If **closed without merge**: something unexpected happened.
   - Post comment:
     - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "PR was closed without merging. Unexpected state — needs investigation." -R $OWNER/$REPO`
@@ -87,165 +89,113 @@ fi
 jj git push
 ```
 
-### 5. Wait for CI
+### 5. Verify CI Status
+
+Before enabling auto-merge, verify that required checks are passing or pending (not failed):
 
 ```bash
 gh pr checks "$LEGION_ISSUE_ID" --watch
 ```
 
-**If CI fails:**
+[Remove this step once branch protection requires the checks — GitHub will then enforce them at merge.]
 
-1. Read the failure logs: `gh pr checks "$LEGION_ISSUE_ID"`
-2. Fix the issues (type errors, lint, test failures, build errors)
-3. Push and re-check: `gh pr checks "$LEGION_ISSUE_ID" --watch`
-4. Repeat until CI passes
+If checks fail, fix the issues, push, and re-run this step. If checks are green or pending, proceed to step 5.1.
 
-Only escalate with `user-input-needed` if something has gone fundamentally wrong (e.g., infrastructure issues, impossible conflicts, external service failures). Normal code issues like type errors should be fixed, not escalated.
+### 5.1. Enable GitHub Auto-Merge
 
-**If CI fails with a fundamental issue** (infrastructure failures, impossible conflicts, external service errors — NOT normal code issues):
-- Post comment explaining the fundamental failure:
-  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge blocked: CI has a fundamental failure that cannot be fixed by the merge worker. [describe the issue]" -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge blocked: fundamental CI failure.")`
-- Add `user-input-needed` label:
-  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
-- Notify controller (best-effort):
-  ```
-  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge blocked — fundamental CI failure")
-  ```
-  If `envoy_publish` fails, continue — the label is the source of truth.
-- Exit
-
-### 6. Merge (with conflict retry)
-
-Attempt to merge. If the merge fails due to a race condition (main moved since rebase), retry.
+Enable auto-merge after the branch is prepared and pushed. GitHub will merge when the required checks and review are satisfied.
 
 ```bash
-gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch
+gh pr merge "$LEGION_ISSUE_ID" --auto --squash --delete-branch
 ```
 
-**If merge succeeds:** Proceed to step 7.
+The `--auto` flag requests auto-merge enablement. On an immediately-mergeable PR (all required checks and reviews already satisfied), gh completes the merge in the same command. On a PR awaiting checks or review, gh arms auto-merge and returns; GitHub merges when requirements are met. The worker never uses `--admin` or bypasses required checks.
+If auto-merge is enabled (or the PR merged immediately), proceed to step 5.2 to check the merge status.
 
-**If merge fails — classify the failure** by checking PR state:
+### 5.2. Check PR Merge Status
+
+After enabling auto-merge, check whether the PR merged immediately (the common case when branch protection is not applied):
+
+```bash
+gh pr view "$LEGION_ISSUE_ID" --json state,mergedAt -R $OWNER/$REPO
+```
+
+**If `state` is `MERGED`:** The PR merged immediately. Proceed to step 5.3 to verify issue close and clean up the workspace.
+
+**If `state` is `OPEN`:** Auto-merge is armed and waiting on required checks. Exit; the controller observes the merge and handles post-merge transitions.
+### 5.3. Verify Issue Close and Clean Up Workspace
+
+The PR is merged. Verify the issue is closed (GitHub auto-close may not fire if the issue is not
+linked to the PR). If not closed, close it explicitly:
+
+```bash
+ISSUE_STATE=$(gh issue view "$LEGION_ISSUE_ID" --json state -R $OWNER/$REPO | jq -r '.state')
+if [ "$ISSUE_STATE" != "CLOSED" ]; then
+  gh issue close "$LEGION_ISSUE_ID" -R $OWNER/$REPO
+fi
+```
+
+Remove the workspace:
+
+```bash
+cd /tmp
+rm -rf "$LEGION_DIR"
+```
+
+Exit. The state machine handles retro dispatch and final cleanup.
+
+### 6. Handle Auto-Merge Enablement Failures
+If auto-merge cannot be enabled, classify the PR state before taking action:
 
 ```bash
 gh pr view "$LEGION_ISSUE_ID" --json state,mergeable,mergeStateStatus -R $OWNER/$REPO
 ```
 
-**If `state` is `MERGED`:** The PR was merged by another process (manual merge, auto-merge). Proceed to step 7 — this is a success, not a failure.
+**If `state` is `MERGED`:** no-op and exit. The state machine already owns the downstream transition and retro dispatch. Verify the issue is closed and clean up the workspace:
 
-**If `mergeStateStatus` is `BEHIND` or `DIRTY` (race condition — main moved):**
+```bash
+ISSUE_STATE=$(gh issue view "$LEGION_ISSUE_ID" --json state -R $OWNER/$REPO | jq -r '.state')
+if [ "$ISSUE_STATE" != "CLOSED" ]; then
+  gh issue close "$LEGION_ISSUE_ID" -R $OWNER/$REPO
+fi
+cd /tmp
+rm -rf "$LEGION_DIR"
+```
 
-Retry up to **2 times** (track your retry count):
+Then exit.
 
-1. Rebase onto latest main:
-   ```bash
-   jj git fetch
-   jj rebase -d main
-   ```
-2. Verify clean rebase — `jj status` must show no conflicts. If conflicts exist, resolve them (same as step 3). If conflicts are unresolvable, exit via the unresolvable-conflict path in step 3.
-3. Push: `jj git push`
-4. Wait for CI: `gh pr checks "$LEGION_ISSUE_ID" --watch` — fix any CI failures (same as step 5)
-5. Retry merge: `gh pr merge "$LEGION_ISSUE_ID" --squash --delete-branch`
-6. If merge succeeds, proceed to step 7. If it fails again, go back to substep 1 (unless retries exhausted).
+**If `mergeStateStatus` is `BEHIND` or `DIRTY` (base changed after preparation):**
 
-**If merge still fails after 2 retries:**
-- Post comment:
-  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge failed after 2 conflict retries. The PR keeps falling behind main despite rebasing. Manual intervention needed." -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge failed after 2 conflict retries. Manual intervention needed.")`
-- Add `user-input-needed` label:
-  - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
-- Notify controller (best-effort):
-  ```
-  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge failed after 2 conflict retries")
-  ```
-  If `envoy_publish` fails, continue — the label is the source of truth.
-- Exit
+Re-run steps 2 through 5.1 to rebase, resolve any conflicts, push, and enable auto-merge against the new base. Do not attempt a direct merge; always use `--auto`.
 
-**If merge fails due to branch protection rules** (e.g., "required status check", "review required", "restricted to certain users"):
+**If auto-merge is blocked** (for example, GitHub reports that auto-merge is disabled or unavailable for
+the repository):
 
 **NEVER use `gh pr merge --admin` or any admin override to bypass branch protection.** This is a security/governance rule — only Sami may authorize admin merges. Instead:
-- Post a comment explaining the branch protection failure:
-  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge blocked by branch protection: [exact error]. Escalating — only Sami can authorize an admin merge override." -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge blocked by branch protection: [exact error]. Escalating to Sami.")`
+- Post a comment explaining the auto-merge enablement failure:
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Auto-merge blocked: [exact error]. Enable or permit GitHub auto-merge; do not bypass branch protection." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Auto-merge blocked: [exact error].")`
 - Add `user-input-needed` label:
   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
 - Notify controller (best-effort):
   ```
-  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge blocked by branch protection — needs Sami approval for admin override")
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker blocked: $ISSUE_NUMBER auto-merge blocked")
   ```
   If `envoy_publish` fails, continue — the label is the source of truth.
 - Exit
 
-**If merge fails for any other reason** (permission error, unknown error — inspect the error output to determine the cause):
+**If auto-merge enablement fails for any other reason** (permission error, unknown error — inspect the
+error output to determine the cause):
 - Post a comment describing the failure and what you observed:
-  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Merge failed: [describe the error — permission denied, unexpected API error, etc.]. Manual intervention needed." -R $OWNER/$REPO`
-  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Merge failed: [describe error].")`
+  - **GitHub:** `gh issue comment $ISSUE_NUMBER --body "Auto-merge enablement failed: [describe the error — permission denied, unexpected API error, etc.]." -R $OWNER/$REPO`
+  - **Linear:** `linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="Auto-merge enablement failed: [describe error].")`
 - Add `user-input-needed` label:
   - **GitHub:** `gh issue edit $ISSUE_NUMBER --add-label "user-input-needed" --remove-label "worker-active" -R $OWNER/$REPO`
   - **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current without "worker-active" plus "user-input-needed"])`
 - Notify controller (best-effort):
   ```
-  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER merge failed — [brief error description]")
+  envoy_publish(topic="notifications.role.legion-controller", message="Worker failed: $ISSUE_NUMBER auto-merge enablement failed — [brief error description]")
   ```
   If `envoy_publish` fails, continue — the label is the source of truth.
 - Exit
-
-### 7. Close Issue
-
-After successful merge, explicitly close the issue to transition to Done:
-
-**GitHub:**
-```bash
-gh issue close $ISSUE_NUMBER -R $OWNER/$REPO --comment "Closed via PR merge."
-```
-
-**Linear:**
-```
-linear_linear(action="update", id=$LEGION_ISSUE_ID, state="Done")
-```
-
-Then remove `worker-active` if present:
-- **GitHub:** `gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO`
-- **Linear:** `linear_linear(action="update", id=$LEGION_ISSUE_ID, labels=[...current labels without "worker-active"])`
-
-### 7.5. Cleanup Workspace
-
-After the issue is closed and Done, clean up workspace and worker entries.
-Best-effort — do not fail the merge workflow if cleanup errors occur, but only prune worker state
-after workspace deletion succeeds (preserves retry handle for the daemon/controller backup layers).
-
-**1. Remove the filesystem workspace:**
-```bash
-CLEANUP_OK=false
-if curl -sf -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$LEGION_ISSUE_ID-merge/workspace" \
-  -H 'Content-Type: application/json' \
-  -d '{"repo": "'"$OWNER/$REPO"'"}'; then
-  CLEANUP_OK=true
-else
-  echo 'Workspace cleanup failed (non-fatal) — daemon/controller will retry'
-fi
-```
-
-**2. Prune worker entries only if workspace was removed:**
-```bash
-if [ "$CLEANUP_OK" = "true" ]; then
-  curl -sf -X POST "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/prune" \
-    -H 'Content-Type: application/json' \
-    -d '{"issueIds": ["'"$LEGION_ISSUE_ID"'"]}' || echo 'Worker prune failed (non-fatal)'
-fi
-```
-
-**Why here?** The daemon also auto-cleans Done issues on its next state collection cycle (Layer 1 safety net),
-and the controller has a backup sweep (Step 6). This merge-time cleanup is the fastest path — it reclaims
-disk space immediately when the issue completes, without waiting for the next poll cycle.
-
-Then notify the controller via Envoy (best-effort, exactly one notification):
-```
-envoy_publish(topic="notifications.role.legion-controller", message="Worker done: $ISSUE_NUMBER merge completed. Issue closed.")
-```
-If `envoy_publish` fails, continue — the label is the source of truth.
-
-> **Note:** GitHub auto-close may also fire when the PR merges, which is fine — closing an already-closed issue is a no-op. This explicit close is a safety net for cases where auto-close doesn't trigger (e.g., issue not linked to PR, Linear backend).

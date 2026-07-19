@@ -49,6 +49,19 @@ func TestCache_AfterRecordIsSeen(t *testing.T) {
 	}
 }
 
+func TestCache_ClearRemovesRecordedDelivery(t *testing.T) {
+	clock := newTestClock()
+	c := NewWithClock(10*time.Minute, clock.Now)
+	defer c.Stop()
+
+	c.Record("key-1", "ses-A")
+	c.Clear("key-1", "ses-A")
+
+	if c.Seen("key-1", "ses-A") {
+		t.Fatal("cleared delivery should not be seen")
+	}
+}
+
 func TestCache_DifferentSessionsIndependent(t *testing.T) {
 	clock := newTestClock()
 	c := NewWithClock(10*time.Minute, clock.Now)
