@@ -186,9 +186,21 @@ describe("fetchPhaseArtifacts", () => {
                 statusCheckRollup: {
                   contexts: {
                     nodes: [
-                      { name: "tester", conclusion: "SUCCESS", app: { databaseId: 42 } },
-                      { name: "architect", conclusion: "FAILURE", app: { databaseId: 42 } },
-                      { name: "tester", conclusion: "FAILURE", app: { databaseId: 99 } },
+                      {
+                        name: "tester",
+                        conclusion: "SUCCESS",
+                        checkSuite: { app: { databaseId: 42 } },
+                      },
+                      {
+                        name: "architect",
+                        conclusion: "FAILURE",
+                        checkSuite: { app: { databaseId: 42 } },
+                      },
+                      {
+                        name: "tester",
+                        conclusion: "FAILURE",
+                        checkSuite: { app: { databaseId: 99 } },
+                      },
                     ],
                   },
                 },
