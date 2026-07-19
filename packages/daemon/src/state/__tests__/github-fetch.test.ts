@@ -7,6 +7,34 @@ import type { CommandRunner } from "../fetch";
 import { fetchGitHubProjectItems } from "../github-fetch";
 
 describe("fetchGitHubProjectItems", () => {
+  it("passes a supplied GH_TOKEN environment to the GraphQL command runner", async () => {
+    // Given a board read with an owner-scoped GitHub App token in its subprocess environment.
+    const runner: CommandRunner = async (_command, options) => {
+      expect(options).toMatchObject({ env: { GH_TOKEN: "ghs_owner_token" } });
+      return {
+        stdout: JSON.stringify({
+          data: {
+            organization: {
+              projectV2: {
+                items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+              },
+            },
+          },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+
+    // When the project items fetch runs its GraphQL query.
+    await fetchGitHubProjectItems("testorg", 1, runner, {
+      env: { GH_TOKEN: "ghs_owner_token" },
+    });
+
+    // Then the runner receives the token-scoped process environment.
+    expect.assertions(1);
+  });
+
   it("successfully fetches from organization", async () => {
     const mockRunner: CommandRunner = async (cmd: string[]) => {
       expect(cmd).toContain("graphql");

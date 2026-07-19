@@ -3,7 +3,11 @@ import type { CodebaseIndexResponse } from "../index/types";
 import { getBackend, isBackendName } from "../state/backends/index";
 import type { BackendName } from "../state/backends/issue-tracker";
 import { ACTION_TO_MODE, buildCollectedState, canDispatchMode } from "../state/decision";
-import { enrichParsedIssues } from "../state/fetch";
+import {
+  type CommandRunnerOptions,
+  enrichParsedIssues,
+  type OwnerCommandRunnerOptionsProvider,
+} from "../state/fetch";
 import { fetchGitHubProjectItems } from "../state/github-fetch";
 import {
   type ActionType,
@@ -85,7 +89,12 @@ export interface ServerOptions {
   };
   feedbackLogger?: FeedbackLogger;
   /** Injectable fetcher for testing — defaults to fetchGitHubProjectItems */
-  fetchProjectItems?: (owner: string, projectNumber: number) => Promise<unknown>;
+  fetchProjectItems?: (
+    owner: string,
+    projectNumber: number,
+    runner?: Parameters<typeof fetchGitHubProjectItems>[2],
+    runnerOptions?: Parameters<typeof fetchGitHubProjectItems>[3]
+  ) => Promise<unknown>;
   /** Issue tracker backend name (needed for advance endpoint mutations) */
   issueBackend?: "linear" | "github";
   /** Maps worker mode to agent type for AgentPartInput on initial prompt. */
@@ -463,11 +472,32 @@ export function startServer(opts: ServerOptions): {
 
   const stateLoaded = loadState();
 
+  const tokenManager = opts.tokenManager;
+  const runnerOptionsForOwner: OwnerCommandRunnerOptionsProvider | undefined = tokenManager
+    ? async (owner: string): Promise<CommandRunnerOptions> => {
+        const { token } = await tokenManager.getToken("implement", owner);
+        const env = { ...process.env };
+        delete env.GITHUB_TOKEN;
+        return { env: { ...env, GH_TOKEN: token } };
+      }
+    : undefined;
+
+  const fetchProjectItemsForOwner = async (
+    owner: string,
+    projectNumber: number
+  ): Promise<unknown> => {
+    const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
+    if (!runnerOptionsForOwner) {
+      return fetchFn(owner, projectNumber);
+    }
+
+    return fetchFn(owner, projectNumber, undefined, await runnerOptionsForOwner(owner));
+  };
+
   const refreshResyncIssueRefs = async (): Promise<void> => {
     const refs = new Map<string, IssueRef>();
     const boardIds = [opts.legionId, ...(opts.extraProjects ?? [])];
     const tracker = getBackend("github");
-    const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
 
     for (const boardId of boardIds) {
       const parts = boardId.split("/");
@@ -479,7 +509,7 @@ export function startServer(opts: ServerOptions): {
         throw new Error("invalid_team_id: project number not a number");
       }
 
-      const rawIssues = await fetchFn(parts[0], projectNumber);
+      const rawIssues = await fetchProjectItemsForOwner(parts[0], projectNumber);
       for (const issue of tracker.parseIssues(rawIssues)) {
         if (!issue.source || issue.status === IssueStatus.DONE) {
           continue;
@@ -701,7 +731,12 @@ export function startServer(opts: ServerOptions): {
     const tracker = getBackend(backend);
     const parsed = tracker.parseIssues(rawIssues);
     const daemonUrl = `http://127.0.0.1:${server.port}`;
-    const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+    const issuesData = await enrichParsedIssues(
+      parsed,
+      daemonUrl,
+      undefined,
+      runnerOptionsForOwner
+    );
     const state = buildCollectedState(issuesData, opts.legionId);
     const titles =
       backend === "github" && rawIssues
@@ -1708,8 +1743,7 @@ export function startServer(opts: ServerOptions): {
                   if (!Number.isFinite(projectNumber)) {
                     throw new Error("invalid_team_id: project number not a number");
                   }
-                  const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
-                  const rawIssues = await fetchFn(boardParts[0], projectNumber);
+                  const rawIssues = await fetchProjectItemsForOwner(boardParts[0], projectNumber);
                   collectedBoards.push({ boardId, rawIssues });
                 } catch (error) {
                   const message = error instanceof Error ? error.message : String(error);
@@ -1756,7 +1790,12 @@ export function startServer(opts: ServerOptions): {
                 return serverError("server_not_started");
               }
               const daemonUrl = `http://127.0.0.1:${server.port}`;
-              const issuesData = await enrichParsedIssues(parsed, daemonUrl);
+              const issuesData = await enrichParsedIssues(
+                parsed,
+                daemonUrl,
+                undefined,
+                runnerOptionsForOwner
+              );
               const state = buildCollectedState(issuesData, opts.legionId);
 
               runPostCollectionProcessing(state, extractedTitles);
@@ -2214,8 +2253,7 @@ export function startServer(opts: ServerOptions): {
       return;
     }
 
-    const fetchFn = opts.fetchProjectItems ?? fetchGitHubProjectItems;
-    const rawIssues = await fetchFn(owner, projectNumber);
+    const rawIssues = await fetchProjectItemsForOwner(owner, projectNumber);
     const { state, titles: extractedTitles } = await fetchAndCollectState("github", rawIssues);
 
     runPostCollectionProcessing(state, extractedTitles, { skipDelta: true });

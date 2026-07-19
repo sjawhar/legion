@@ -8,7 +8,7 @@
  * so the existing GitHub backend parser can consume them directly.
  */
 
-import type { CommandResult, CommandRunner } from "./fetch";
+import type { CommandResult, CommandRunner, CommandRunnerOptions } from "./fetch";
 import { defaultRunner } from "./fetch";
 
 interface GitHubProjectItemNode {
@@ -272,7 +272,8 @@ async function executeGraphQLQuery(
   owner: string,
   projectNumber: number,
   cursor: string | null,
-  runner: CommandRunner
+  runner: CommandRunner,
+  runnerOptions: CommandRunnerOptions | undefined
 ): Promise<GitHubProjectItemsPage> {
   const cmd: string[] = [
     "gh",
@@ -291,7 +292,7 @@ async function executeGraphQLQuery(
     cmd.push("-f", `after=${cursor}`);
   }
 
-  const result: CommandResult = await runner(cmd);
+  const result: CommandResult = await runner(cmd, runnerOptions);
 
   if (result.exitCode !== 0) {
     throw new Error(`GitHub GraphQL query failed (exit ${result.exitCode}): ${result.stderr}`);
@@ -321,7 +322,8 @@ async function executeGraphQLQuery(
 export async function fetchGitHubProjectItems(
   owner: string,
   projectNumber: number,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner = defaultRunner,
+  runnerOptions?: CommandRunnerOptions
 ): Promise<{ items: Record<string, unknown>[] }> {
   const allItems: Record<string, unknown>[] = [];
   let cursor: string | null = null;
@@ -340,7 +342,14 @@ export async function fetchGitHubProjectItems(
 
     if (!useUserQuery) {
       try {
-        response = await executeGraphQLQuery(ORG_QUERY, owner, projectNumber, cursor, runner);
+        response = await executeGraphQLQuery(
+          ORG_QUERY,
+          owner,
+          projectNumber,
+          cursor,
+          runner,
+          runnerOptions
+        );
 
         if (response.errors?.length) {
           // Check if the error is about organization access
@@ -353,7 +362,14 @@ export async function fetchGitHubProjectItems(
           if (hasOrgAccessError) {
             // Fall back to user query
             useUserQuery = true;
-            response = await executeGraphQLQuery(USER_QUERY, owner, projectNumber, cursor, runner);
+            response = await executeGraphQLQuery(
+              USER_QUERY,
+              owner,
+              projectNumber,
+              cursor,
+              runner,
+              runnerOptions
+            );
             items = response.data?.user?.projectV2?.items;
           } else {
             throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
@@ -371,7 +387,14 @@ export async function fetchGitHubProjectItems(
 
         if (isAccessError) {
           useUserQuery = true;
-          response = await executeGraphQLQuery(USER_QUERY, owner, projectNumber, cursor, runner);
+          response = await executeGraphQLQuery(
+            USER_QUERY,
+            owner,
+            projectNumber,
+            cursor,
+            runner,
+            runnerOptions
+          );
 
           if (response.errors?.length) {
             throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
@@ -385,7 +408,14 @@ export async function fetchGitHubProjectItems(
       }
     } else {
       // Use user query
-      response = await executeGraphQLQuery(USER_QUERY, owner, projectNumber, cursor, runner);
+      response = await executeGraphQLQuery(
+        USER_QUERY,
+        owner,
+        projectNumber,
+        cursor,
+        runner,
+        runnerOptions
+      );
 
       if (response.errors?.length) {
         throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);

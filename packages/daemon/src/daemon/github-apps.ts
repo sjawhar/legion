@@ -1,5 +1,8 @@
-import { createPrivateKey } from "node:crypto";
 import type { GitHubAppRole, GitHubAppRoleConfig, GitHubAppsConfig } from "./config";
+import { generateJwt } from "./github-app-crypto";
+
+export { generateJwt } from "./github-app-crypto";
+export { buildRoleEnv } from "./github-app-env";
 
 const MODE_TO_ROLE: Record<string, GitHubAppRole> = {
   implement: "implement",
@@ -17,6 +20,10 @@ const ROLE_TO_APP_NAME: Record<GitHubAppRole, string> = {
 
 /** Token refresh window — regenerate when within 5 minutes of expiry */
 const REFRESH_WINDOW_MS = 5 * 60 * 1000;
+const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
+const INSTALLATIONS_PER_PAGE = 100;
+
+export type GitHubFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export function modeToRole(mode: string): GitHubAppRole {
   const role = MODE_TO_ROLE[mode];
@@ -33,68 +40,10 @@ export function getGitIdentity(appId: string, appName: string): { name: string; 
   };
 }
 
-function toBase64Url(buffer: ArrayBuffer | Uint8Array): string {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  return Buffer.from(bytes)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-function toPkcs8Pem(privateKeyPem: string): string {
-  if (privateKeyPem.includes("BEGIN PRIVATE KEY")) {
-    return privateKeyPem;
-  }
-  // PKCS#1 → PKCS#8 via node:crypto
-  return createPrivateKey(privateKeyPem).export({
-    type: "pkcs8",
-    format: "pem",
-  }) as string;
-}
-
-function pemToDer(pem: string): ArrayBuffer {
-  const base64 = pem
-    .replace(/-----BEGIN [^-]+-----/, "")
-    .replace(/-----END [^-]+-----/, "")
-    .replace(/\s/g, "");
-  const binary = Buffer.from(base64, "base64");
-  return binary.buffer.slice(binary.byteOffset, binary.byteOffset + binary.byteLength);
-}
-
-export async function generateJwt(appId: string, privateKeyPem: string): Promise<string> {
-  const pkcs8Pem = toPkcs8Pem(privateKeyPem);
-  const der = pemToDer(pkcs8Pem);
-
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    der,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-
-  const now = Math.floor(Date.now() / 1000);
-  const header = toBase64Url(
-    new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" }))
-  );
-  const payload = toBase64Url(
-    new TextEncoder().encode(JSON.stringify({ iss: appId, iat: now - 60, exp: now + 600 }))
-  );
-  const signingInput = `${header}.${payload}`;
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    new TextEncoder().encode(signingInput)
-  );
-
-  return `${signingInput}.${toBase64Url(signature)}`;
-}
-
 export async function exchangeToken(
   jwt: string,
   installationId: string,
-  fetchFn: typeof fetch = globalThis.fetch
+  fetchFn: GitHubFetch = globalThis.fetch
 ): Promise<{ token: string; expiresAt: string }> {
   const url = `https://api.github.com/app/installations/${installationId}/access_tokens`;
   const res = await fetchFn(url, {
@@ -126,15 +75,47 @@ interface CachedToken {
   gitIdentity: { name: string; email: string };
 }
 
+function installationCacheKey(owner: string): string {
+  return owner.toLowerCase();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readInstallation(value: unknown): { owner: string; id: string } {
+  if (!isRecord(value)) {
+    throw new Error("GitHub App installation discovery returned an invalid installation");
+  }
+  const account = value.account;
+  if (!isRecord(account)) {
+    throw new Error(
+      "GitHub App installation discovery returned an installation without an account"
+    );
+  }
+  const login = account.login;
+  const id = value.id;
+  if (
+    typeof login !== "string" ||
+    login.length === 0 ||
+    (typeof id !== "string" && (typeof id !== "number" || !Number.isFinite(id)))
+  ) {
+    throw new Error("GitHub App installation discovery returned an invalid installation account");
+  }
+  return { owner: login, id: String(id) };
+}
+
 export class TokenManager {
   private readonly cache = new Map<string, CachedToken>();
   private readonly pending = new Map<string, Promise<CachedToken>>();
-  private readonly fetchFn: typeof fetch;
+  private readonly installationCache = new Map<GitHubAppRole, Map<string, string>>();
+  private readonly missingInstallationCache = new Map<GitHubAppRole, Set<string>>();
+  private readonly fetchFn: GitHubFetch;
 
   constructor(
     private readonly config: GitHubAppsConfig,
     opts?: {
-      fetchFn?: typeof fetch;
+      fetchFn?: GitHubFetch;
     }
   ) {
     this.fetchFn = opts?.fetchFn ?? globalThis.fetch;
@@ -159,12 +140,12 @@ export class TokenManager {
       throw new Error(`role_not_configured: ${role}`);
     }
 
-    const installationId = roleConfig.installations[owner];
+    const installationId = await this.resolveInstallationId(role, roleConfig, owner);
     if (!installationId) {
-      throw new Error(`installation_not_configured: ${role}:${owner}`);
+      throw new Error(`github_app_not_installed: ${role} not installed on ${owner}`);
     }
 
-    const cacheKey = `${role}:${owner}`;
+    const cacheKey = `${role}:${installationCacheKey(owner)}`;
 
     // Check cache
     const cached = this.cache.get(cacheKey);
@@ -222,34 +203,77 @@ export class TokenManager {
     this.cache.set(cacheKey, result);
     return result;
   }
-}
 
-/**
- * Environment variables to strip from role serves to prevent credential leakage.
- * Workers should only have access to their role's GH_TOKEN.
- */
-const SCRUBBED_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR"];
-const SCRUBBED_ENV_PREFIX = "LEGION_GITHUB_APP_";
-
-export function buildRoleEnv(
-  token: string,
-  gitIdentity: { name: string; email: string },
-  baseEnv: Record<string, string>
-): Record<string, string> {
-  const env: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(baseEnv)) {
-    if (!SCRUBBED_ENV_KEYS.includes(key) && !key.startsWith(SCRUBBED_ENV_PREFIX)) {
-      env[key] = value;
+  private async resolveInstallationId(
+    role: GitHubAppRole,
+    roleConfig: GitHubAppRoleConfig,
+    owner: string
+  ): Promise<string | undefined> {
+    const ownerKey = installationCacheKey(owner);
+    const configuredId = Object.entries(roleConfig.installations ?? {}).find(
+      ([configuredOwner]) => installationCacheKey(configuredOwner) === ownerKey
+    )?.[1];
+    if (configuredId) {
+      return configuredId;
     }
+
+    const cache = this.installationCache.get(role) ?? new Map<string, string>();
+    this.installationCache.set(role, cache);
+    const cachedId = cache.get(ownerKey);
+    if (cachedId) {
+      return cachedId;
+    }
+
+    const missingOwners = this.missingInstallationCache.get(role) ?? new Set<string>();
+    this.missingInstallationCache.set(role, missingOwners);
+    if (missingOwners.has(ownerKey)) {
+      return undefined;
+    }
+
+    await this.discoverInstallations(roleConfig, cache);
+    const discoveredId = cache.get(ownerKey);
+    if (discoveredId) {
+      return discoveredId;
+    }
+
+    await this.discoverInstallations(roleConfig, cache);
+    const refreshedId = cache.get(ownerKey);
+    if (!refreshedId) {
+      missingOwners.add(ownerKey);
+    }
+    return refreshedId;
   }
 
-  env.GH_TOKEN = token;
-  env.GH_CONFIG_DIR = "/dev/null";
-  env.GIT_AUTHOR_NAME = gitIdentity.name;
-  env.GIT_AUTHOR_EMAIL = gitIdentity.email;
-  env.GIT_COMMITTER_NAME = gitIdentity.name;
-  env.GIT_COMMITTER_EMAIL = gitIdentity.email;
-
-  return env;
+  private async discoverInstallations(
+    roleConfig: GitHubAppRoleConfig,
+    cache: Map<string, string>
+  ): Promise<void> {
+    const jwt = await generateJwt(roleConfig.appId, roleConfig.privateKey);
+    for (let page = 1; ; page += 1) {
+      const url = new URL(GITHUB_APP_INSTALLATIONS_URL);
+      url.searchParams.set("per_page", String(INSTALLATIONS_PER_PAGE));
+      url.searchParams.set("page", String(page));
+      const response = await this.fetchFn(url, {
+        headers: {
+          Authorization: `Bearer ${jwt}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "legion-daemon",
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`GitHub App installation discovery failed (${response.status})`);
+      }
+      const payload: unknown = await response.json();
+      if (!Array.isArray(payload)) {
+        throw new Error("GitHub App installation discovery returned an invalid response");
+      }
+      for (const installation of payload) {
+        const resolved = readInstallation(installation);
+        cache.set(installationCacheKey(resolved.owner), resolved.id);
+      }
+      if (payload.length < INSTALLATIONS_PER_PAGE) {
+        return;
+      }
+    }
+  }
 }

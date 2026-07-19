@@ -162,11 +162,139 @@ describe("TokenManager", () => {
     }).toThrow("role_not_configured: review");
   });
 
-  it("throws when owner installation is not configured", async () => {
-    const manager = new TokenManager(implementConfig);
-    expect(async () => {
-      await manager.getToken("implement", "missing-owner");
-    }).toThrow("installation_not_configured: implement:missing-owner");
+  it("throws the explicit not-installed error after refreshed discovery misses an owner", async () => {
+    // Given an App with no configured installation and an empty installation API response.
+    const { privatePem } = await generateTestKeyPair();
+    const manager = new TokenManager(
+      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      {
+        fetchFn: async () =>
+          new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      }
+    );
+
+    // When a token is requested for an owner without an installation.
+    const request = manager.getToken("implement", "missing-owner");
+
+    // Then the failure identifies the role and owner rather than falling back to ambient auth.
+    await expect(request).rejects.toThrow(
+      "github_app_not_installed: implement not installed on missing-owner"
+    );
+  });
+
+  it("caches a missing owner after the one allowed installation refresh", async () => {
+    // Given an App whose installation discovery never includes the requested owner.
+    const { privatePem } = await generateTestKeyPair();
+    let discoveryCalls = 0;
+    const manager = new TokenManager(
+      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      {
+        fetchFn: async () => {
+          discoveryCalls += 1;
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      }
+    );
+
+    // When the same missing owner is requested twice.
+    await expect(manager.getToken("implement", "missing-owner")).rejects.toThrow(
+      "github_app_not_installed"
+    );
+    await expect(manager.getToken("implement", "MISSING-OWNER")).rejects.toThrow(
+      "github_app_not_installed"
+    );
+
+    // Then discovery ran only for the initial lookup and its one refresh.
+    expect(discoveryCalls).toBe(2);
+  });
+
+  it("discovers paginated installations case-insensitively and caches the resolved owner", async () => {
+    // Given a missing owner whose installation appears on the second API page.
+    const { privatePem } = await generateTestKeyPair();
+    const installationPages: number[] = [];
+    let tokenExchanges = 0;
+    const fetchFn = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/app/installations") {
+        expect(init?.headers).toMatchObject({ Authorization: expect.stringMatching(/^Bearer /) });
+        const page = Number(url.searchParams.get("page"));
+        installationPages.push(page);
+        const installations =
+          page === 1
+            ? Array.from({ length: 100 }, (_, index) => ({
+                id: index + 1,
+                account: { login: `other-${index}` },
+              }))
+            : [{ id: 222, account: { login: "Trajectory-Labs-PBC" } }];
+        return new Response(JSON.stringify(installations), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      tokenExchanges += 1;
+      expect(url.pathname).toBe("/app/installations/222/access_tokens");
+      return new Response(
+        JSON.stringify({ token: "ghs_discovered", expires_at: "2099-01-01T00:00:00Z" }),
+        { status: 201, headers: { "content-type": "application/json" } }
+      );
+    }) as unknown as typeof fetch;
+    const manager = new TokenManager(
+      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      { fetchFn }
+    );
+
+    // When equivalent owner spellings request a token twice.
+    const first = await manager.getToken("implement", "trajectory-labs-pbc");
+    const second = await manager.getToken("implement", "TRAJECTORY-LABS-PBC");
+
+    // Then discovery pages once, finds the installation case-insensitively, and reuses the token.
+    expect(first.token).toBe("ghs_discovered");
+    expect(second.token).toBe("ghs_discovered");
+    expect(installationPages).toEqual([1, 2]);
+    expect(tokenExchanges).toBe(1);
+  });
+
+  it("refreshes discovered installations once when a later owner is absent from the cache", async () => {
+    // Given an initial discovery cache for acme and a refreshed cache that adds beta.
+    const { privatePem } = await generateTestKeyPair();
+    let discoveryCalls = 0;
+    const fetchFn = mock(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/app/installations") {
+        discoveryCalls += 1;
+        const login = discoveryCalls === 1 ? "acme" : "beta";
+        const id = discoveryCalls === 1 ? 222 : 333;
+        return new Response(JSON.stringify([{ id, account: { login } }]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const installationId = url.pathname.split("/")[3];
+      return new Response(
+        JSON.stringify({ token: `ghs_${installationId}`, expires_at: "2099-01-01T00:00:00Z" }),
+        { status: 201, headers: { "content-type": "application/json" } }
+      );
+    }) as unknown as typeof fetch;
+    const manager = new TokenManager(
+      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      { fetchFn }
+    );
+
+    // When a second owner is requested after the initial discovery cache was populated.
+    const acme = await manager.getToken("implement", "acme");
+    const beta = await manager.getToken("implement", "beta");
+
+    // Then the absent owner triggers one cache refresh and receives its newly listed token.
+    expect(acme.token).toBe("ghs_222");
+    expect(beta.token).toBe("ghs_333");
+    expect(discoveryCalls).toBe(2);
   });
 
   it("caches tokens per role and owner until the refresh window", async () => {

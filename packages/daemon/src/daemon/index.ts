@@ -374,6 +374,10 @@ export async function startDaemon(
   let tokenManager: TokenManager | undefined;
   if (config.githubApps) {
     tokenManager = new TokenManager(config.githubApps);
+  } else if (config.issueBackend === "github") {
+    console.warn(
+      "daemon GitHub reads using ambient gh auth; configure github_apps for owner-keyed tokens"
+    );
   }
 
   const preState = await resolvedDeps.readStateFile(config.stateFilePath);
@@ -1034,6 +1038,7 @@ export async function startDaemon(
         fetchPhaseArtifactsBatch(refs, {
           reviewerAppId,
           reviewerAppLogin,
+          tokenManager,
         }),
       getLiveWorkers,
       getSessionStatus: (sessionId) => resolvedDeps.adapter.getSessionStatus(sessionId),

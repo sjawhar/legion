@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
@@ -9,7 +10,7 @@ export type GitHubAppRole = "implement" | "review";
 export interface GitHubAppRoleConfig {
   appId: string;
   privateKey: string;
-  installations: Record<string, string>;
+  installations?: Record<string, string>;
 }
 
 export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig>>;
@@ -78,7 +79,6 @@ const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 const DEFAULT_FEEDBACK_MAX_BYTES = 50 * 1024 * 1024;
 const EXTRA_PROJECT_PATTERN = /^[^/]+\/\d+$/;
 const GITHUB_APP_ROLES: GitHubAppRole[] = ["implement", "review"];
-const GITHUB_APP_FIELD_NAMES = ["app_id", "private_key", "installations"] as const;
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   extra_projects: null,
@@ -97,6 +97,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
     implement: {
       app_id: null,
       private_key: null,
+      private_key_command: null,
       installations: {
         [CONFIG_ANY_KEY]: null,
       },
@@ -104,6 +105,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
     review: {
       app_id: null,
       private_key: null,
+      private_key_command: null,
       installations: {
         [CONFIG_ANY_KEY]: null,
       },
@@ -193,6 +195,20 @@ function readStringRecord(value: unknown, fieldPath: string): Record<string, str
   }
 
   return result;
+}
+
+function executePrivateKeyCommand(command: string, fieldPath: string): string {
+  const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    const status = result.status === null ? "unknown" : String(result.status);
+    const stderr = result.stderr?.trim();
+    throw new Error(`${fieldPath} failed (exit ${status})${stderr ? `: ${stderr}` : ""}`);
+  }
+  const privateKey = result.stdout?.trim() ?? "";
+  if (!privateKey) {
+    throw new Error(`${fieldPath} produced empty output`);
+  }
+  return privateKey;
 }
 
 function readNumber(value: unknown, fieldPath: string): number | undefined {
@@ -389,31 +405,49 @@ function loadGitHubAppsFromFile(value: unknown): GitHubAppsConfig | undefined {
 
     const appId = readString(roleValue.app_id, `github_apps.${role}.app_id`);
     const privateKey = readString(roleValue.private_key, `github_apps.${role}.private_key`);
-    const installations = readStringRecord(
-      roleValue.installations,
-      `github_apps.${role}.installations`
+    const privateKeyCommand = readString(
+      roleValue.private_key_command,
+      `github_apps.${role}.private_key_command`
     );
-
-    const missing = GITHUB_APP_FIELD_NAMES.filter((fieldName) => {
-      const fieldValue = roleValue[fieldName];
-      return fieldValue === undefined || fieldValue === null || fieldValue === "";
-    });
-    const hasAnyField = GITHUB_APP_FIELD_NAMES.some((fieldName) => {
-      const fieldValue = roleValue[fieldName];
-      return fieldValue !== undefined && fieldValue !== null && fieldValue !== "";
-    });
+    const installations =
+      readStringRecord(roleValue.installations, `github_apps.${role}.installations`) ?? {};
+    const hasInlinePrivateKey = privateKey !== undefined && privateKey !== "";
+    const hasPrivateKeyCommand = privateKeyCommand !== undefined && privateKeyCommand !== "";
+    const hasAnyField =
+      appId !== undefined ||
+      hasInlinePrivateKey ||
+      hasPrivateKeyCommand ||
+      roleValue.installations !== undefined;
 
     if (!hasAnyField) {
       continue;
     }
-    if (missing.length > 0) {
-      throw new Error(`github_apps.${role} is missing required fields: ${missing.join(", ")}`);
+    if (appId === undefined || appId === "") {
+      throw new Error(`github_apps.${role} is missing required fields: app_id`);
+    }
+    if (hasInlinePrivateKey === hasPrivateKeyCommand) {
+      throw new Error(
+        `github_apps.${role} requires exactly one of private_key or private_key_command`
+      );
+    }
+    let resolvedPrivateKey: string;
+    if (hasInlinePrivateKey && privateKey !== undefined) {
+      resolvedPrivateKey = privateKey;
+    } else if (privateKeyCommand !== undefined) {
+      resolvedPrivateKey = executePrivateKeyCommand(
+        privateKeyCommand,
+        `github_apps.${role}.private_key_command`
+      );
+    } else {
+      throw new Error(
+        `github_apps.${role} requires exactly one of private_key or private_key_command`
+      );
     }
 
     config[role] = {
-      appId: appId as string,
-      privateKey: privateKey as string,
-      installations: installations as Record<string, string>,
+      appId,
+      privateKey: resolvedPrivateKey,
+      installations,
     };
     hasAny = true;
   }

@@ -129,6 +129,80 @@ describe("daemon config", () => {
 
       expect(config.githubApps).toBeUndefined();
     });
+
+    it("loads a private key from private_key_command without configured installations", () => {
+      // Given a role that externalizes its private key and relies on runtime installation discovery.
+      const result = loadConfigFromFile(
+        [
+          "github_apps:",
+          "  implement:",
+          "    app_id: impl-app",
+          '    private_key_command: "printf external-pem"',
+        ].join("\n"),
+        "/tmp/x"
+      );
+
+      // When the daemon config is loaded.
+      const githubApps = result.fields.githubApps;
+
+      // Then the command output becomes the private key and installations remain optional.
+      expect(githubApps).toMatchObject({
+        implement: { appId: "impl-app", privateKey: "external-pem", installations: {} },
+      });
+    });
+
+    it("rejects a private_key_command that fails", () => {
+      // Given a role whose external key command exits unsuccessfully.
+      const yaml = [
+        "github_apps:",
+        "  implement:",
+        "    app_id: impl-app",
+        '    private_key_command: "echo unavailable >&2; exit 7"',
+      ].join("\n");
+
+      // When configuration is loaded.
+      const load = () => loadConfigFromFile(yaml, "/tmp/x");
+
+      // Then loading fails loudly rather than accepting an unavailable credential.
+      expect(load).toThrow(
+        "github_apps.implement.private_key_command failed (exit 7): unavailable"
+      );
+    });
+
+    it("rejects a private_key_command that emits empty output", () => {
+      // Given a role whose external key command produces no PEM.
+      const yaml = [
+        "github_apps:",
+        "  implement:",
+        "    app_id: impl-app",
+        "    private_key_command: \"printf ''\"",
+      ].join("\n");
+
+      // When configuration is loaded.
+      const load = () => loadConfigFromFile(yaml, "/tmp/x");
+
+      // Then loading rejects the empty credential.
+      expect(load).toThrow("github_apps.implement.private_key_command produced empty output");
+    });
+
+    it("rejects roles that configure both inline and external private keys", () => {
+      // Given a role with ambiguous private-key sources.
+      const yaml = [
+        "github_apps:",
+        "  implement:",
+        "    app_id: impl-app",
+        "    private_key: inline-pem",
+        '    private_key_command: "printf external-pem"',
+      ].join("\n");
+
+      // When configuration is loaded.
+      const load = () => loadConfigFromFile(yaml, "/tmp/x");
+
+      // Then exactly one key source is required.
+      expect(load).toThrow(
+        "github_apps.implement requires exactly one of private_key or private_key_command"
+      );
+    });
   });
 
   describe("LEGION_EXTRA_PROJECTS parsing", () => {
@@ -403,13 +477,13 @@ describe("daemon config", () => {
       ).toThrow(/control characters/i);
     });
 
-    it("throws when a GitHub App role is partial and lists missing fields", () => {
+    it("throws when a GitHub App role omits both private key sources", () => {
       expect(() =>
         loadConfigFromFile(
           ["github_apps:", "  implement:", "    app_id: impl-app"].join("\n"),
           "/tmp/x"
         )
-      ).toThrow(/github_apps\.implement.*private_key.*installations/i);
+      ).toThrow("github_apps.implement requires exactly one of private_key or private_key_command");
     });
 
     it("throws when github app installations values are not strings", () => {
