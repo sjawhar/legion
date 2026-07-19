@@ -285,7 +285,7 @@ export function validateRuntime(
   return value;
 }
 
-function validateControllerSessionId(
+export function validateControllerSessionId(
   value: string | undefined,
   sourceName: string
 ): string | undefined {
@@ -873,13 +873,11 @@ export function resolveDaemonConfig(
     "LEGION_REVIEWER_APP_LOGIN",
     "reviewer_app_login"
   );
-  pushEnvDeprecationWarning(
-    warnings,
-    controllerSessionId.source,
-    env,
-    "LEGION_CONTROLLER_SESSION_ID",
-    "controller.session_id"
-  );
+  if (controllerSessionId.source === "env" && env.LEGION_CONTROLLER_SESSION_ID !== undefined) {
+    warnings.push(
+      "LEGION_CONTROLLER_SESSION_ID is deprecated; pass --controller-session to 'legion start' instead."
+    );
+  }
   pushEnvDeprecationWarning(
     warnings,
     controllerPrompt.source,

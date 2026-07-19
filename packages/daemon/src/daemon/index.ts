@@ -184,6 +184,7 @@ async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
       session_id: sessionId,
       topics: [
         "notifications.legion.controller",
+        "notifications.envoy.exceptions.>",
         "notifications.slack.*.*.mention",
         "notifications.github.*.*.mention",
       ],
@@ -1023,6 +1024,10 @@ export async function startDaemon(
     }, config.checkIntervalMs);
   };
 
+  // Suppress controller pushes for unchanged resync results: a wake must mean a delta
+  // (or a daemon restart, which resets this). The pass itself still runs and logs.
+  let lastResyncEmit: string | null = null;
+
   const buildResyncDeps = (): RunResyncDeps => {
     const reviewerAppId = config.reviewerAppId;
     const reviewerAppLogin = config.reviewerAppLogin;
@@ -1044,7 +1049,13 @@ export async function startDaemon(
       getSessionStatus: (sessionId) => resolvedDeps.adapter.getSessionStatus(sessionId),
       emitToController: (event) => {
         // The type marker distinguishes resync events from state-delta objects on the shared topic.
-        publishToController(JSON.stringify(event), config.envoyUrl, resolvedDeps.fetch);
+        const message = JSON.stringify(event);
+        if (message === lastResyncEmit) {
+          console.log("[resync] result unchanged; controller push suppressed");
+          return;
+        }
+        lastResyncEmit = message;
+        publishToController(message, config.envoyUrl, resolvedDeps.fetch);
       },
     };
   };

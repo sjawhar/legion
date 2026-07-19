@@ -12,6 +12,7 @@ import {
   resolveDaemonConfig,
   validateBackend,
   validateControllerPrompt,
+  validateControllerSessionId,
   validateRuntime,
 } from "../daemon/config";
 import { startDaemon } from "../daemon/index";
@@ -184,6 +185,7 @@ interface StartOptions {
   backend?: string;
   runtime?: string;
   config?: string;
+  controllerSession?: string;
   foreground?: boolean;
 }
 
@@ -258,6 +260,12 @@ export async function cmdStart(
   if (opts.runtime) {
     const validated = validateRuntime(opts.runtime, "--runtime");
     if (validated) cliOverrides.runtime = validated;
+  }
+  if (opts.controllerSession) {
+    cliOverrides.controllerSessionId = validateControllerSessionId(
+      opts.controllerSession,
+      "--controller-session"
+    );
   }
   if (team) {
     cliOverrides.legionId = await deps.resolveLegionId(team, { backend: opts.backend });
@@ -348,6 +356,7 @@ function buildDaemonArgs(team: string | undefined, opts: StartOptions): string[]
   if (opts.backend) args.push("--backend", opts.backend);
   if (opts.runtime) args.push("--runtime", opts.runtime);
   if (opts.config) args.push("--config", opts.config);
+  if (opts.controllerSession) args.push("--controller-session", opts.controllerSession);
   args.push("--foreground");
   return args;
 }
@@ -1257,6 +1266,10 @@ export const startCommand = defineCommand({
       description: "Agent runtime (opencode or claude-code)",
     },
     config: { type: "string", alias: "c", description: "Config file path" },
+    "controller-session": {
+      type: "string",
+      description: "OpenCode session ID (ses_...) to use as the interactive controller",
+    },
     foreground: {
       type: "boolean",
       alias: "f",
@@ -1271,6 +1284,7 @@ export const startCommand = defineCommand({
       backend: args.backend,
       runtime: args.runtime,
       config: args.config,
+      controllerSession: args["controller-session"],
       foreground: args.foreground,
     });
   },
@@ -1320,6 +1334,10 @@ export const restartCommand = defineCommand({
       description: "Agent runtime (opencode or claude-code)",
     },
     config: { type: "string", alias: "c", description: "Config file path" },
+    "controller-session": {
+      type: "string",
+      description: "OpenCode session ID (ses_...) to use as the interactive controller",
+    },
   },
   async run({ args }) {
     await cmdRestart(args.team, {
@@ -1328,6 +1346,7 @@ export const restartCommand = defineCommand({
       backend: args.backend,
       runtime: args.runtime,
       config: args.config,
+      controllerSession: args["controller-session"],
     });
   },
 });

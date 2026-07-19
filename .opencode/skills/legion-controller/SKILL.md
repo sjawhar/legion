@@ -9,7 +9,7 @@ description: Use when coordinating Legion workers across issues, dispatching wor
 > The state machine provides suggested actions and raw signals. This skill decides what
 > to do with them. Modify this file to change how issues flow through the pipeline.
 
-Persistent coordinator that loops forever, dispatching and resuming workers based on issue state.
+Persistent coordinator, woken by Envoy pushes, that dispatches and resumes workers based on issue state.
 
 ## Environment
 
@@ -27,12 +27,12 @@ Start the daemon from the Legion packages/daemon directory.
 cd ~/legion/default/packages/daemon && \
   PATH="$HOME/opencode/default/packages/opencode/dist/opencode-linux-x64/bin:$PATH" \
   ENVOY_URL=http://127.0.0.1:9020 \
-  LEGION_CONTROLLER_SESSION_ID=$MY_SESSION_ID \
-  bun run src/cli/index.ts start trajectory-labs-pbc/2 -b github -r opencode
+  bun run src/cli/index.ts start trajectory-labs-pbc/2 -b github -r opencode \
+    --controller-session $MY_SESSION_ID
 ```
 
 **Key details:**
-- **`LEGION_CONTROLLER_SESSION_ID` is required** — without it, the daemon spawns a separate controller session
+- **`--controller-session` is required for an interactive controller** — pass the current session's ID (from `envoy_whoami`). Session IDs change across sessions, so this belongs on the CLI, not in config. Without it, the daemon spawns a separate controller session. (`LEGION_CONTROLLER_SESSION_ID` env var and `controller.session_id` in legion.yaml still work as fallbacks; the env var is deprecated.)
 - **`ENVOY_URL`** is required so spawned opencode sessions can reach Envoy
 - **`-w` is NOT needed** — worker workspaces are auto-created by `ensureWorkspace()` (see Path Architecture below)
 - Only 2 env vars needed. Everything else is CLI args (`-b github -r opencode`).
@@ -54,10 +54,10 @@ cd ~/legion/default/packages/daemon && \
 
 ### User Interaction Priority
 
-At the start of each loop iteration, check if the user has sent a direct question or new instructions.
+At the start of each wake, check if the user has sent a direct question or new instructions.
 
-- If yes: **STOP** the current iteration, answer the user FIRST, then resume
-- Never continue looping while an unanswered user question is pending
+- If yes: **STOP** the current wake handling, answer the user FIRST, then resume
+- Never continue processing while an unanswered user question is pending
 - If mid-dispatch, finish the dispatch, then respond immediately
 
 This rule is about answering user questions directed AT the controller. It is distinct from Step 2 (Relay User Feedback), which relays user comments TO workers via issue labels.
@@ -87,29 +87,31 @@ The controller MUST NOT ask "should I continue?" for routine operations. Act on 
 
 ### Domain Authority Discovery
 
-At the start of each loop iteration, check if a `legion-po` role holder exists by calling
-`envoy_sessions` and scanning the result for a session whose `topics` array contains the
-exact string `"notifications.role.legion-po"`. Store the result as a boolean (`HAS_PO`)
-for the iteration.
+When a wake requires PO notification (triage routing or dispatch), check if a `legion-po` role
+holder exists by calling `envoy_sessions` and scanning the result for a session whose `topics`
+array contains the exact string `"notifications.role.legion-po"`. Store the result as a boolean
+(`HAS_PO`) for the current wake.
 
 If `envoy_sessions` fails or no session has the `legion-po` role topic, set `HAS_PO` to
-false and skip all PO notifications for this iteration. Domain authority is advisory, never
+false and skip all PO notifications for this wake. Domain authority is advisory, never
 blocking — the controller's existing logic is always the fallback.
 
 ## Envoy Notifications
 
-The daemon automatically subscribes the controller to `notifications.agent.<session_id>` at startup. Workers send completion notifications directly to the controller session via `envoy_send` (the controller session ID is included in the dispatch prompt's ENVOY section). This gives you instant notification instead of waiting for the next polling cycle. The `worker-done` label remains the source of truth — Envoy is a speed optimization.
+Envoy push is the controller's primary transport — there is no polling loop. The daemon subscribes the controller session to the topics below at startup, and workers additionally send completion notifications directly to the controller session via `envoy_send` (the controller session ID is included in the dispatch prompt's ENVOY section). GitHub artifacts (labels, check runs, PR state) remain the source of truth — every wake is advisory and is verified against a fresh state pass before acting. The daemon's resync pass is the safety net for any missed push.
 
 ### Subscription Policy
 
 The daemon subscribes the controller to these topics:
 
+- `notifications.legion.controller` — daemon resync reports (`{"type":"legion.resync",...}` — see the Resync Playbook below)
+- `notifications.envoy.exceptions.>` — delivery exceptions: messages published to a role/session with no holder, or whose delivery failed (see the Exception Playbook below)
 - `notifications.role.legion-controller` — role-based route to the active controller session (claimed via `POST /v1/roles/set` on daemon startup)
 - `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
 - `notifications.github.*.*.mention` — @mentions across all GitHub repos
 - `notifications.github.<owner>.<repo>.pr.<number>.ci` — a **debounced, per-commit CI summary** scoped to a specific PR (subscribe per-PR when a worker is waiting on CI). One settled summary per quiet burst of check activity, not a per-`check_run` firehose; `check_suite` and un-PR'd checks are not routed.
 
-**No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events. Polling handles board-level state adequately on its ~30s cycle. Only CI events scoped to a specific PR (time-sensitive for pipeline progression) get per-PR Envoy subscriptions.
+**No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events — that would recreate noise-driven drift. Workers hear their own issue/PR events via per-dispatch subscription manifests; the controller hears phase boundaries and exceptions only. Board-level gaps are healed by the resync pass.
 
 > **Slack topic format:** Slack topics use the real `team_id` (e.g., `T09FRELLTS8`), not the human-readable workspace slug (e.g., `trajectorylabs`). The Slack receiver publishes with the actual team ID from the Slack API. If you manually subscribe to specific Slack channels, use `notifications.slack.<team_id>.<channel_id>.mention` — see the Envoy skill for full topic format reference.
 
@@ -118,77 +120,97 @@ The daemon subscribes the controller to these topics:
 When a CI summary is received (via `notifications.github.<owner>.<repo>.pr.<number>.ci`), it is **one settled, per-commit summary** for PR #`<number>` — emitted after that commit's checks have been quiet for the debounce window (~5s), not a signal per individual `check_run` transition. The `PayloadSummary` is a compact JSON object `{"kind":"ci_summary","repo","number","sha","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}` — each status carries its count + full check-name list. The controller should:
 
 1. **Identify affected issues** — match the PR number from the topic to an issue with an active worker in `implement` or `test` mode
-2. **Trigger an early poll** — run a focused `fetch-and-collect` for the affected repo to pick up the CI status change immediately rather than waiting for the next polling cycle
+2. **Run a focused state pass** — run `fetch-and-collect` for the affected repo to pick up the CI status change and get a fresh `suggestedAction`
 3. **Act on results** — if CI passed and a worker is waiting, advance the pipeline (e.g., move from implement to test, or test to review)
 
-**CI summaries are advisory.** Because they are debounced, a summary already reflects a burst of settled checks rather than a single transition — but they still only trigger early polling and never bypass the normal state machine. The authoritative state comes from the poll results, not the Envoy event payload. A commit re-emits a summary only when its check set changes, so an unchanged pipeline stays quiet.
+**CI summaries are advisory.** Because they are debounced, a summary already reflects a burst of settled checks rather than a single transition — but they still only trigger a state pass and never bypass the normal state machine. The authoritative state comes from the state pass results, not the Envoy event payload. A commit re-emits a summary only when its check set changes, so an unchanged pipeline stays quiet.
 
 **Per-workflow visibility for non-PR runs:** if you need to react to a workflow that isn't attached to a PR (e.g. a release workflow on a tag push), subscribe to `notifications.github.<owner>.<repo>.workflow.<filename>.<action>` instead. See the [envoy skill](../envoy/SKILL.md) for the full taxonomy.
 
-## Algorithm
+## Wake-Driven Operation
 
-```dot
-digraph controller {
-    rankdir=TB;
-    start [label="Start Loop"];
-    fetch [label="1. Fetch Issues"];
-    feedback [label="2. Relay Feedback"];
-    worker_done [label="3. Process worker-done"];
-    triage [label="4. Route Triage"];
-    icebox [label="5. Pull Icebox"];
-    cleanup [label="6. Cleanup Done"];
-    heartbeat [label="7. Heartbeat"];
-    todo [label="8. Update To-Do"];
-    wait [label="9. Wait for Poller"];
-    start -> fetch -> feedback -> worker_done -> triage -> icebox -> cleanup -> heartbeat -> todo -> wait -> fetch;
-}
-```
+The controller does not poll and does not loop. It is a persistent session woken by
+Envoy pushes (delivered as user-turn notifications) and by direct user messages.
+Handle the wake, then end your turn — the next push re-invokes you. Never sleep,
+never spawn background pollers.
 
-**Do not exit.** Loop continuously.
+**Wakes are advisory; artifacts are truth.** Never act on a wake payload alone —
+re-read authoritative state (the state pass below) before any side-effectful action.
+A duplicate or stale wake must cause at worst a wasted read, never a wrong action.
 
-### Polling Architecture
+### Wake Sources
 
-The 9-step loop describes WHAT the controller does. Execution uses background polling via `task(run_in_background=true)`:
+| Wake | Carrier | Payload | Response |
+|---|---|---|---|
+| Resync report | `notifications.legion.controller` | `{"type":"legion.resync","recommendations":[...],"errors":[...]}` | Resync Playbook below |
+| Worker completion | `envoy_send` to the controller session | free text naming issue + phase | State pass → route by `suggestedAction` |
+| CI summary | `notifications.github.<owner>.<repo>.pr.<n>.ci` | `ci_summary` JSON | CI Event Handling above |
+| Delivery exception | `notifications.envoy.exceptions.<original topic>` | undeliverable message + original topic | Exception Playbook below |
+| Mention | `notifications.slack.*.*.mention` / `notifications.github.*.*.mention` | mention text | Answer, or route to the owning issue's worker |
+| User message | direct | — | Always first — before any other processing |
 
-1. **Main thread** — handles user messages, makes routing decisions, acts on poller reports. MUST never call `sleep` or block.
-2. **Background poller** — a persistent background task that calls `fetch-and-collect` (GitHub) or fetches issues and posts to `/state/collect` (Linear), and reports state changes every ~60 seconds.
-3. **Lifecycle:** Launch poller at session start. Check poller health each time the main thread processes a report — if the poller has stopped or timed out, re-launch immediately. The poller is disposable — cancel and re-launch freely.
+### The State Pass
 
-**Rules:**
-- Main thread MUST never call `sleep`
-- All polling via background tasks — main thread stays free for user instructions
-- When poller reports a state change, main thread acts synchronously then returns to idle
-- Polling output MUST NOT clutter the controller transcript — background agents keep noise out of the human's view
+On any wake that implies pipeline state may have changed, run steps 1–8 below for
+the affected issues. A resync wake covers the whole board; a single-PR wake can
+scope to that issue's repo. These are the same steps the old polling loop ran —
+triggered by wakes instead of a timer.
+
+### Resync Playbook
+
+The daemon runs a read-only, artifact-driven resync pass at startup and on a
+low-frequency timer (~10 min) and pushes the result to `notifications.legion.controller`.
+It is the universal healer: missed webhooks, zero-owner issues, and stalls all
+surface here. Route each recommendation by `reason`:
+
+| `reason` | Meaning | Controller action |
+|---|---|---|
+| `artifact_no_live_owner` (`mode` set) | Issue has the phase artifact that makes `mode` the expected next owner, but no live worker | Verify via state pass, then dispatch `mode`. Deterministic session IDs mean dispatch re-attaches if the session still lives — safe. |
+| `architect_veto` (`mode` null) | `architect` check run = failure on the issue's PR | Read the architect's veto comment, then classify: implementer rework / planner rework / new child issue / human escalation |
+| `idle_missing_phase_artifact` (`mode` set) | Worker session went idle without producing its expected phase artifact | ADVISORY ONLY. Message the worker via `envoy_send` and wait for a response (2-min timeout) before any action. Never auto-abort — Role Boundary rules apply unchanged |
+
+- **`errors` non-empty**: the daemon could not resolve artifacts for those issues
+  (API/auth failure). Do not dispatch for erroring issues. If the same issues error
+  across consecutive resyncs, investigate daemon auth/connectivity.
+- **Every push means a delta**: the daemon suppresses pushes for unchanged resync
+  results, so receiving one means something changed — or the daemon restarted
+  (suppression memory resets). If you do see an identical repeat, no-op it in one line.
+- **Many recommendations**: apply the priority order (unblock in-progress → advance
+  completed → start new) and the 10-worker capacity cap. It is fine to act on a
+  subset — the next resync re-surfaces the rest.
+
+### Exception Playbook
+
+A message published to a role or session with no holder — or whose delivery failed —
+arrives on `notifications.envoy.exceptions.<original topic>` instead of being
+silently dropped. On receipt:
+
+1. Identify the intended recipient from the original topic.
+2. Check `envoy_sessions` for the holder.
+3. Dead worker session → treat as `artifact_no_live_owner` for its issue: state pass, then re-dispatch (re-attaches or recreates deterministically).
+4. Role with no holder (e.g. `legion-controller` after a restart) → re-claim the role, then process the embedded message normally.
+5. Unclear → investigate before acting; never guess a recipient.
+
+### Turn-End Discipline
+
+- One wake = one turn. Process everything the wake implies, update the todo state
+  (step 8), then END your response. Do not idle-loop, sleep, or poll for "one more check".
+- Never block on long waits — anything worth waiting for will push a wake when it happens.
+  If nothing pushes, the daemon's resync timer guarantees a periodic wake; there is no
+  gap that polling would cover.
 
 **Responses are for the human.** Keep responses conversational and scannable:
 - Summarize worker status in tables, not raw JSON
 - Always end status updates with "Needs your attention" and "Autonomous" sections
 - Never dump raw `curl` output or JSON into the transcript
 
-**Fallback:** If background tasks are unavailable, process all 9 steps without any `sleep`, then end turn. External runtime re-invokes the controller.
+### Compaction-Proof Critical Context
 
-### Polling Efficiency
-
-These rules prevent the controller from burning its context window on redundant polling. They are **critical after compaction** — compaction preserves *what* to poll but often loses *how* to poll efficiently.
-
-**1. Always use the consolidated polling script.** Poll via a single bash script that fetches ALL tracked state in one execution. Do NOT decompose polling into individual `gh pr view` / `gh issue list` calls — each call in an explore-agent prompt adds ~75 lines of overhead to the context window.
-
-**2. Minimize explore-agent prompt size.** Poller sub-agent prompts must be terse. Bad: 80-line prompt with inline `gh` commands, baselines, and reporting instructions. Good: 2-line prompt that runs the script and diffs against the last result. Target ≤ 30 lines total context per poll cycle (prompt + result + metadata).
-
-**3. Adaptive poll frequency for holding patterns.** When all tracked items are blocked on human action and the poller reports no changes:
-- First 5 no-change cycles: maintain normal frequency
-- After 5 consecutive no-change cycles: poll every 5 minutes
-- After 20 consecutive no-change cycles (weekend/off-hours): poll every 15 minutes
-- Log frequency changes: `"Reduced poll frequency — N consecutive no-change cycles"`
-- Any state change resets the counter and restores normal frequency
-
-**4. Compaction-proof critical context.** The following MUST survive compaction (include verbatim in any compaction summary):
-- Polling script path (if using a consolidated script)
-- Watched-issues and watched-PRs file paths
-- Correct org/repo names for all tracked PRs
+The following MUST survive compaction (include verbatim in any compaction summary):
 - Daemon port and serve port
 - Controller session ID
-- Project board identifier
+- Project board identifier and correct org/repo names for all tracked PRs
+- A pointer to this skill's Wake Sources table
 
 ### 1. Fetch Issues
 
@@ -266,7 +288,7 @@ The state machine returns a `suggestedAction`. Route by prefix:
 | `relay_` | Forward information | Relay user feedback to worker |
 | `add_` | Add label | Add the specified label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --add-label`) |
 | `remove_` | Remove label + retry | Remove label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --remove-label`), then re-evaluate |
-| `retry_` | Wait | Do nothing this iteration, re-check next loop |
+| `retry_` | Wait | Do nothing now; the next wake or resync re-surfaces it |
 | `rebase_` | *(removed — conflicts route to `resume_implementer_for_changes`)* | N/A |
 | `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
 | `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
@@ -303,9 +325,9 @@ LEGION_ID-derived repo values for issue-scoped GitHub operations. Use `$ISSUE_RE
 
 **Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
 
-**`retry_pr_check`:** The GitHub API couldn't determine PR review state. Do nothing this iteration —
-don't dispatch a worker, don't transition status. The next loop iteration will re-run the state script
-which will retry the GitHub API call. If this persists across multiple iterations, investigate the
+**`retry_pr_check`:** The GitHub API couldn't determine PR review state. Do nothing for this wake —
+don't dispatch a worker, don't transition status. The next wake or resync will re-run the state pass
+which will retry the GitHub API call. If this persists across multiple resyncs, investigate the
 GitHub API connectivity.
 
 **`resume_implementer_for_changes` (conflict):** The PR has merge conflicts. The state machine returns
@@ -540,7 +562,7 @@ Before requesting merge approval, verify ALL conditions:
 |-------------------|--------|
 | `MERGEABLE` | Proceed with approval flow |
 | `CONFLICTING` | Resume the implementer: `legion prompt "$ISSUE_IDENTIFIER" --mode implement "...PR has merge conflicts. Rebase onto main and resolve conflicts."`. Do NOT call the GitHub update-branch API directly. |
-| `UNKNOWN` / null / API failure | Defer to next loop. Do NOT add `needs-approval`. |
+| `UNKNOWN` / null / API failure | Defer to a later wake. Do NOT add `needs-approval`. |
 
 **Resolving PR number:** `PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $ISSUE_REPO)`
 
@@ -640,7 +662,7 @@ envoy_publish(topic="notifications.role.legion-po", message="Triage: routing $IS
 Replace `[Icebox|Backlog|Todo]` with the actual routing decision. Proceed immediately — do not
 wait for a response. If `envoy_publish` fails, continue immediately — Envoy is advisory and the
 controller's normal flow remains the source of truth. If the PO disagrees, they comment on the
-issue, which the controller picks up via feedback relay (Step 2) on the next iteration.
+issue, which the controller picks up via feedback relay (Step 2) on a subsequent wake.
 
 ### 5. Pull from Icebox
 
@@ -650,9 +672,9 @@ issue, which the controller picks up via feedback relay (Step 2) on the next ite
 3. Move the oldest clarified item to Backlog
 4. Dispatch architect
 
-### 6. Cleanup Done (MUST run every iteration)
+### 6. Cleanup Done (MUST run on every state pass)
 
-**This step MUST execute on every loop iteration.** Iterate over ALL Done issues from the collected
+**This step MUST execute on every full state pass** (every resync wake at minimum). Iterate over ALL Done issues from the collected
 state that still have worker entries in the daemon. The daemon auto-cleans Done issues during
 state collection (Layer 1), and this controller sweep is the **backup safety net** (Layer 2) that catches stragglers — issues where the daemon
 auto-cleanup didn't fire (e.g., issue was closed manually, daemon restarted between collect cycles).
@@ -701,11 +723,12 @@ Maintain in context:
 - [ENG-ZZ] user-input-needed
 ```
 
-### 9. Wait for Poller
+### 9. End Turn
 
-The background poller handles timing. The main thread does not sleep — it processes poller reports as they arrive and returns to idle between reports. See **Polling Architecture** above.
-
-If operating in fallback mode (no background tasks), end turn here. The external runtime re-invokes the controller for the next iteration.
+All steps done for this wake: update the todo state, give the human a short status if
+anything changed, and end your response. The next Envoy push or user message re-invokes
+you. The daemon's resync timer guarantees a periodic wake even when nothing else pushes —
+see **Wake-Driven Operation** above.
 
 ## Dispatch vs Resume
 
@@ -1003,10 +1026,10 @@ For GitHub, call `fetch-and-collect` — the daemon fetches project items intern
 paginated GraphQL. For Linear, pass tracker output directly to `/state/collect`. Never
 hand-craft JSON, filter issues, or inject your own assumptions about labels or status.
 
-### 3. Fresh data every loop iteration
+### 3. Fresh data on every wake
 
-Fetch issues from the tracker at the start of every loop. Don't carry labels, statuses, or
-worker state between iterations — they go stale.
+Fetch issues from the tracker when handling a wake. Don't carry labels, statuses, or
+worker state between wakes — they go stale.
 
 ### 4. One PR per issue
 
@@ -1104,7 +1127,7 @@ If you catch yourself thinking any of these, STOP. You're about to make a mistak
 | Spawn new worker for user feedback | **Resume** existing session via HTTP API |
 | Skip Icebox when capacity exists | Pull oldest Icebox item if workers < 10 |
 | Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
-| Exit after processing all issues | **Never exit** - loop continuously via background polling (see Polling Architecture) |
+| Exit after processing all issues | End your turn after each wake — do not spawn pollers or idle-loop. Envoy pushes re-invoke you (see Wake-Driven Operation) |
 | Process issue with live worker | Skip it - worker is already handling |
 | Give workers step-by-step fix instructions | Invoke the skill. State the mode, issue ID, and backend only. |
 | Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. |
