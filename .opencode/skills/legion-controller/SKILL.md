@@ -105,7 +105,7 @@ Envoy push is the controller's primary transport — there is no polling loop. T
 The daemon subscribes the controller to these topics:
 
 - `notifications.legion.controller` — daemon resync reports (`{"type":"legion.resync",...}` — see the Resync Playbook below)
-- `notifications.envoy.exceptions.>` — delivery exceptions: messages published to a role/session with no holder, or whose delivery failed (see the Exception Playbook below)
+- `notifications.envoy.exceptions.notifications.legion.>`, `...role.legion-controller`, and `...agent.<controller session>` — delivery exceptions for **legion control lanes only**: a legion-topic/role/controller message with no holder, or whose delivery failed (see the Exception Playbook below). The controller is deliberately NOT subscribed to the global `notifications.envoy.exceptions.>` wildcard — that would make it the dead-letter consumer for every workstream on the broker. Worker-to-worker delivery losses are healed by the resync pass instead.
 - `notifications.role.legion-controller` — role-based route to the active controller session (claimed via `POST /v1/roles/set` on daemon startup)
 - `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
 - `notifications.github.*.*.mention` — @mentions across all GitHub repos
@@ -181,14 +181,16 @@ surface here. Route each recommendation by `reason`:
 
 ### Exception Playbook
 
-A message published to a role or session with no holder — or whose delivery failed —
-arrives on `notifications.envoy.exceptions.<original topic>` instead of being
-silently dropped. On receipt:
+A message on a **legion control lane** (a `legion.*` topic, the `legion-controller`
+role, or the controller's own agent topic) with no holder — or whose delivery
+failed — arrives on `notifications.envoy.exceptions.<original topic>` instead of
+being silently dropped. Exceptions for other workstreams' traffic do not reach the
+controller by design. On receipt:
 
 1. Identify the intended recipient from the original topic.
 2. Check `envoy_sessions` for the holder.
-3. Dead worker session → treat as `artifact_no_live_owner` for its issue: state pass, then re-dispatch (re-attaches or recreates deterministically).
-4. Role with no holder (e.g. `legion-controller` after a restart) → re-claim the role, then process the embedded message normally.
+3. Message meant for the controller (role or agent lane) → re-claim the role if unheld, then process the embedded message normally.
+4. Dead-worker losses do not arrive here — the resync pass surfaces them as `artifact_no_live_owner` within its timer interval.
 5. Unclear → investigate before acting; never guess a recipient.
 
 ### Turn-End Discipline
