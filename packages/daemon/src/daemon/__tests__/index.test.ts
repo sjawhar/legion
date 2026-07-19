@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun
 import { createServer } from "node:net";
 import { type DaemonConfig, resolveDaemonConfig } from "../config";
 import { resolveLegionPaths } from "../paths";
-import type { ResyncPassResult } from "../resync";
+import type { ResyncPassResult, RunResyncDeps } from "../resync";
 import type { RuntimeAdapter } from "../runtime/types";
 import type { WorkerEntry } from "../serve-manager";
 import type { ServerOptions } from "../server";
@@ -303,6 +303,44 @@ describe("daemon entry", () => {
     }
   });
 
+  it("subscribes the external controller to the resync, mention, and envoy-exception topics", async () => {
+    const handle = await startDaemonForTest(
+      {
+        controllerSessionId: "ses_test",
+        issueBackend: "github",
+        stateFilePath: "/tmp/daemon-workers.json",
+      },
+      {
+        readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+        writeStateFile: async () => {},
+        adapter: makeAdapter(),
+        startServer: () => ({
+          server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+          stop: () => {},
+          fetchAndProcessState: async () => {},
+        }),
+        setTimeout: silentSetTimeout,
+        clearTimeout: noopClearTimeout,
+        fetch: originalFetch,
+      }
+    );
+
+    await Bun.sleep(100); // Flush fire-and-forget Envoy calls
+
+    const controllerSubscriptions = mockEnvoy.subscribeCalls.filter(
+      (c) => c.session_id === "ses_test"
+    );
+    expect(controllerSubscriptions).toHaveLength(1);
+    expect(controllerSubscriptions[0].topics).toEqual([
+      "notifications.legion.controller",
+      "notifications.envoy.exceptions.>",
+      "notifications.slack.*.*.mention",
+      "notifications.github.*.*.mention",
+    ]);
+
+    await handle.stop();
+  });
+
   describe("resync lifecycle", () => {
     it("runs once at startup and once for each configured timer tick without dispatching", async () => {
       const resyncIntervalMs = 2_000;
@@ -361,6 +399,98 @@ describe("daemon entry", () => {
       expect(resyncPass).toHaveBeenCalledTimes(2);
       expect(refreshResyncIssueRefs).toHaveBeenCalledTimes(2);
       expect(createSessionCalls).toHaveLength(0);
+      await handle.stop();
+    });
+
+    it("suppresses controller pushes when the resync result is unchanged", async () => {
+      const resyncIntervalMs = 2_000;
+      const scheduledCallbacks: Array<{ callback: TimeoutCallback; delay: number }> = [];
+      const published: Array<{ topic: string; message: string }> = [];
+      const recommendationA = {
+        issueId: "acme-api-42",
+        mode: "test" as const,
+        reason: "artifact_no_live_owner" as const,
+      };
+      const recommendationB = {
+        issueId: "acme-api-43",
+        mode: "review" as const,
+        reason: "artifact_no_live_owner" as const,
+      };
+      let currentRecommendation: typeof recommendationA | typeof recommendationB = recommendationA;
+      const resyncPass = mock(async (deps: RunResyncDeps): Promise<ResyncPassResult> => {
+        await deps.emitToController({
+          type: "legion.resync",
+          recommendations: [currentRecommendation],
+          errors: [],
+        });
+        return { recommendations: [currentRecommendation], errors: [] };
+      });
+      const mockSetTimeout: typeof setTimeout = Object.assign(
+        ((callback: TimeoutCallback, delay?: number) => {
+          scheduledCallbacks.push({ callback, delay: delay ?? 0 });
+          return {} as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout,
+        { __promisify__: setTimeout.__promisify__ }
+      );
+      const fetch = Object.assign(
+        async (url: string | URL | Request, init?: RequestInit) => {
+          if (new URL(String(url)).pathname === "/v1/messages/publish") {
+            const body = JSON.parse(String(init?.body)) as { topic: string; message: string };
+            published.push(body);
+            return Response.json({ event_id: "test" });
+          }
+          return originalFetch(url, init);
+        },
+        { preconnect: originalFetch.preconnect }
+      );
+
+      const handle = await startDaemonForTest(
+        {
+          stateFilePath: "/tmp/daemon-workers.json",
+          legionId: TEAM_ID,
+          controllerSessionId: "ses_test",
+          issueBackend: "github",
+          resyncIntervalMs,
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          adapter: makeAdapter(),
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+            refreshResyncIssueRefs: async () => {},
+          }),
+          runResyncPass: resyncPass,
+          setTimeout: mockSetTimeout,
+          clearTimeout: () => {},
+          fetch,
+        }
+      );
+
+      // Startup pass publishes.
+      expect(published).toHaveLength(1);
+
+      const resyncTimer = scheduledCallbacks.find(({ delay }) => delay === resyncIntervalMs);
+      if (!resyncTimer) {
+        throw new Error("Expected resync timer to be scheduled");
+      }
+
+      // Identical result on the next pass: push suppressed.
+      await resyncTimer.callback();
+      expect(resyncPass).toHaveBeenCalledTimes(2);
+      expect(published).toHaveLength(1);
+
+      // Changed result: push resumes.
+      currentRecommendation = recommendationB;
+      await resyncTimer.callback();
+      expect(published).toHaveLength(2);
+
+      // And an unchanged repeat of the new result is suppressed again.
+      await resyncTimer.callback();
+      expect(published).toHaveLength(2);
+
       await handle.stop();
     });
 

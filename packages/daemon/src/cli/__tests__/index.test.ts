@@ -413,6 +413,64 @@ describe("cmdStart config wiring", () => {
     }
   });
 
+  it("--controller-session overrides config-file and env session IDs", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-controller-session-"));
+    const homeDir = path.join(tempDir, "home");
+    const configPath = path.join(tempDir, "legion.yaml");
+
+    try {
+      fs.mkdirSync(homeDir, { recursive: true });
+      await writeFile(configPath, "project: auto/team\ncontroller:\n  session_id: ses_from_yaml\n");
+      process.chdir(tempDir);
+      process.env.HOME = homeDir;
+      delete process.env.XDG_CONFIG_HOME;
+
+      try {
+        await cmdStart(
+          undefined,
+          { config: configPath, controllerSession: "ses_from_cli", foreground: true },
+          {
+            startDaemon: async (config) => {
+              startDaemonCalls.push(config as unknown as Record<string, unknown>);
+              throw new Error(START_DAEMON_ABORT);
+            },
+            resolveLegionId: async (team) => team,
+          }
+        );
+        throw new Error("Expected cmdStart to reject");
+      } catch (error) {
+        expect((error as Error).message).toContain(START_DAEMON_ABORT);
+      }
+
+      expect(startDaemonCalls).toHaveLength(1);
+      expect(startDaemonCalls[0]).toEqual(
+        expect.objectContaining({ controllerSessionId: "ses_from_cli" })
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --controller-session values without the ses_ prefix", async () => {
+    try {
+      await cmdStart(
+        "some/team",
+        { controllerSession: "not-a-session", foreground: true },
+        {
+          startDaemon: async () => {
+            throw new Error(START_DAEMON_ABORT);
+          },
+          resolveLegionId: async (team) => team,
+        }
+      );
+      throw new Error("Expected cmdStart to reject");
+    } catch (error) {
+      expect((error as Error).message).toContain("--controller-session");
+      expect((error as Error).message).toContain("ses_");
+    }
+    expect(startDaemonCalls).toHaveLength(0);
+  });
+
   it("explicit --config overrides auto-discovery", async () => {
     const tempDir = await mkdtemp(path.join(tmpdir(), "legion-start-explicit-config-"));
     const homeDir = path.join(tempDir, "home");
