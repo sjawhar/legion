@@ -37,16 +37,29 @@ export interface CommandResult {
   exitCode: number;
 }
 
+export interface CommandRunnerOptions {
+  readonly env?: NodeJS.ProcessEnv;
+}
+
 /**
  * Protocol for running external commands (dependency injection for testing).
  */
-export type CommandRunner = (cmd: string[]) => Promise<CommandResult>;
+export type CommandRunner = (
+  cmd: string[],
+  options?: CommandRunnerOptions
+) => Promise<CommandResult>;
+
+export type OwnerCommandRunnerOptionsProvider = (owner: string) => Promise<CommandRunnerOptions>;
 
 /**
  * Default command runner using Bun.spawn.
  */
-export async function defaultRunner(cmd: string[]): Promise<CommandResult> {
+export async function defaultRunner(
+  cmd: string[],
+  options?: CommandRunnerOptions
+): Promise<CommandResult> {
   const proc = Bun.spawn(cmd, {
+    env: options?.env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -211,7 +224,8 @@ export function mapMergeableState(state: string | null | undefined): MergeableSt
  * signaling — with separate GitHub Apps for impl and review roles, native
  * reviews are the canonical signal.
  *
- * Batches all PRs across all repositories into one API call.
+ * Batches all PRs across all repositories into one API call by default. When
+ * owner-scoped runner options are supplied, queries each owner separately.
  * Retries up to 3 times with exponential backoff on failure.
  *
  * @param prRefs - Dict mapping issue_id to GitHubPRRef
@@ -221,7 +235,50 @@ export function mapMergeableState(state: string | null | undefined): MergeableSt
  */
 export async function getPrReviewStateBatch(
   prRefs: Record<string, GitHubPRRefType>,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner = defaultRunner,
+  runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
+): Promise<Record<string, ReviewStateLiteral | null>> {
+  if (!runnerOptionsForOwner) {
+    return getPrReviewStateBatchWithOptions(prRefs, runner);
+  }
+
+  const batches = new Map<string, { owner: string; refs: Record<string, GitHubPRRefType> }>();
+  for (const [issueId, ref] of Object.entries(prRefs)) {
+    const ownerKey = ref.owner.toLowerCase();
+    const batch = batches.get(ownerKey);
+    if (batch) {
+      batch.refs[issueId] = ref;
+    } else {
+      batches.set(ownerKey, { owner: ref.owner, refs: { [issueId]: ref } });
+    }
+  }
+
+  const result: Record<string, ReviewStateLiteral | null> = {};
+  for (const batch of batches.values()) {
+    try {
+      Object.assign(
+        result,
+        await getPrReviewStateBatchWithOptions(
+          batch.refs,
+          runner,
+          await runnerOptionsForOwner(batch.owner),
+          1
+        )
+      );
+    } catch {
+      for (const issueId of Object.keys(batch.refs)) {
+        result[issueId] = null;
+      }
+    }
+  }
+  return result;
+}
+
+async function getPrReviewStateBatchWithOptions(
+  prRefs: Record<string, GitHubPRRefType>,
+  runner: CommandRunner,
+  runnerOptions?: CommandRunnerOptions,
+  maxAttempts: number = 3
 ): Promise<Record<string, ReviewStateLiteral | null>> {
   if (Object.keys(prRefs).length === 0) {
     return {};
@@ -268,8 +325,7 @@ export async function getPrReviewStateBatch(
 
   const query = `query { ${queryParts.join(" ")} }`;
 
-  // Retry loop with exponential backoff (3 attempts)
-  const maxAttempts = 3;
+  // Retry loop with exponential backoff (configurable attempts)
   let lastError: GitHubAPIError = new GitHubAPIError("All retry attempts failed");
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -279,13 +335,10 @@ export async function getPrReviewStateBatch(
       await sleep(waitMs);
     }
 
-    const { stdout, stderr, exitCode } = await runner([
-      "gh",
-      "api",
-      "graphql",
-      "-f",
-      `query=${query}`,
-    ]);
+    const { stdout, stderr, exitCode } = await runner(
+      ["gh", "api", "graphql", "-f", `query=${query}`],
+      runnerOptions
+    );
 
     if (exitCode !== 0) {
       lastError = new GitHubAPIError(`GraphQL query failed: ${stderr}`);
@@ -362,7 +415,8 @@ interface CiAndMergeStatus {
  * Fetch CI and mergeable status for multiple PRs in a single GraphQL query.
  *
  * Uses statusCheckRollup on the latest commit of each PR, plus the mergeable field.
- * Batches all PRs across all repositories into one API call.
+ * Batches all PRs across all repositories into one API call by default. When
+ * owner-scoped runner options are supplied, queries each owner separately.
  * Retries up to 3 times with exponential backoff on failure.
  *
  * @param prRefs - Dict mapping issue_id to GitHubPRRef
@@ -372,7 +426,50 @@ interface CiAndMergeStatus {
  */
 export async function getCiStatusBatch(
   prRefs: Record<string, GitHubPRRefType>,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner = defaultRunner,
+  runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
+): Promise<Record<string, CiAndMergeStatus>> {
+  if (!runnerOptionsForOwner) {
+    return getCiStatusBatchWithOptions(prRefs, runner);
+  }
+
+  const batches = new Map<string, { owner: string; refs: Record<string, GitHubPRRefType> }>();
+  for (const [issueId, ref] of Object.entries(prRefs)) {
+    const ownerKey = ref.owner.toLowerCase();
+    const batch = batches.get(ownerKey);
+    if (batch) {
+      batch.refs[issueId] = ref;
+    } else {
+      batches.set(ownerKey, { owner: ref.owner, refs: { [issueId]: ref } });
+    }
+  }
+
+  const result: Record<string, CiAndMergeStatus> = {};
+  for (const batch of batches.values()) {
+    try {
+      Object.assign(
+        result,
+        await getCiStatusBatchWithOptions(
+          batch.refs,
+          runner,
+          await runnerOptionsForOwner(batch.owner),
+          1
+        )
+      );
+    } catch {
+      for (const issueId of Object.keys(batch.refs)) {
+        result[issueId] = { ciStatus: null, mergeableStatus: null };
+      }
+    }
+  }
+  return result;
+}
+
+async function getCiStatusBatchWithOptions(
+  prRefs: Record<string, GitHubPRRefType>,
+  runner: CommandRunner,
+  runnerOptions?: CommandRunnerOptions,
+  maxAttempts: number = 3
 ): Promise<Record<string, CiAndMergeStatus>> {
   if (Object.keys(prRefs).length === 0) {
     return {};
@@ -418,8 +515,7 @@ export async function getCiStatusBatch(
 
   const query = `query { ${queryParts.join(" ")} }`;
 
-  // Retry loop with exponential backoff (3 attempts)
-  const maxAttempts = 3;
+  // Retry loop with exponential backoff (configurable attempts)
   let lastError: GitHubAPIError = new GitHubAPIError("All retry attempts failed");
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -428,13 +524,10 @@ export async function getCiStatusBatch(
       await sleep(waitMs);
     }
 
-    const { stdout, stderr, exitCode } = await runner([
-      "gh",
-      "api",
-      "graphql",
-      "-f",
-      `query=${query}`,
-    ]);
+    const { stdout, stderr, exitCode } = await runner(
+      ["gh", "api", "graphql", "-f", `query=${query}`],
+      runnerOptions
+    );
 
     if (exitCode !== 0) {
       lastError = new GitHubAPIError(`GraphQL query failed: ${stderr}`);
@@ -524,7 +617,8 @@ export async function getCiStatusBatch(
 export async function enrichParsedIssues(
   parsedIssues: ParsedIssue[],
   daemonUrl: string,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner = defaultRunner,
+  runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
 ): Promise<FetchedIssueData[]> {
   const prRefsForStatus: Record<string, GitHubPRRefType> = {};
   for (const p of parsedIssues) {
@@ -553,7 +647,7 @@ export async function enrichParsedIssues(
         return;
       }
       try {
-        prReviewMap = await getPrReviewStateBatch(prRefsForStatus, runner);
+        prReviewMap = await getPrReviewStateBatch(prRefsForStatus, runner, runnerOptionsForOwner);
       } catch {
         for (const issueId of Object.keys(prRefsForStatus)) {
           prReviewMap[issueId] = null;
@@ -565,7 +659,7 @@ export async function enrichParsedIssues(
         return;
       }
       try {
-        ciAndMergeMap = await getCiStatusBatch(ciRefsForStatus, runner);
+        ciAndMergeMap = await getCiStatusBatch(ciRefsForStatus, runner, runnerOptionsForOwner);
       } catch {
         for (const issueId of Object.keys(ciRefsForStatus)) {
           ciAndMergeMap[issueId] = { ciStatus: null, mergeableStatus: null };

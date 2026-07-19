@@ -941,6 +941,169 @@ describe("enrichParsedIssues", () => {
     }
   });
 
+  it("uses owner-scoped tokens and degrades only the failed owner", async () => {
+    // Given PRs belonging to two owners, with beta's GitHub App token unable to query GitHub.
+    const calls: Array<{ query: string; token: string | undefined }> = [];
+    const runner: CommandRunner = async (cmd, options) => {
+      const query = cmd.at(-1) ?? "";
+      const token = options?.env?.GH_TOKEN;
+      calls.push({ query, token });
+      if (!token || token === "ghs_beta") {
+        return { stdout: "", stderr: "beta unavailable", exitCode: 1 };
+      }
+      if (query.includes("latestReviews")) {
+        return {
+          stdout: JSON.stringify({
+            data: { repo0: { pr0: { latestReviews: { nodes: [{ state: "APPROVED" }] } } } },
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repo0: {
+              pr0: {
+                mergeable: "MERGEABLE",
+                commits: {
+                  nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+                },
+              },
+            },
+          },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const issues = [
+      createParsedIssue("ACME-1", "Needs Review", ["worker-done"], {
+        owner: "acme",
+        repo: "widgets",
+        number: 1,
+      }),
+      createParsedIssue("BETA-2", "Needs Review", ["worker-done"], {
+        owner: "beta",
+        repo: "api",
+        number: 2,
+      }),
+    ];
+    const runnerOptionsForOwner = async (owner: string) => ({
+      env: { GH_TOKEN: `ghs_${owner}` },
+    });
+
+    // When enrichment runs with owner-scoped runner options.
+    const result = await enrichParsedIssues(
+      issues,
+      "http://127.0.0.1:99999",
+      runner,
+      runnerOptionsForOwner
+    );
+
+    // Then both PR and CI reads use each owner's token, while beta alone degrades.
+    const reviewCalls = calls.filter((call) => call.query.includes("latestReviews"));
+    const ciCalls = calls.filter((call) => call.query.includes("statusCheckRollup"));
+    expect([...new Set(reviewCalls.map((call) => call.token))].sort()).toEqual([
+      "ghs_acme",
+      "ghs_beta",
+    ]);
+    expect([...new Set(ciCalls.map((call) => call.token))].sort()).toEqual([
+      "ghs_acme",
+      "ghs_beta",
+    ]);
+    expect(reviewCalls.filter((call) => call.token === "ghs_beta")).toHaveLength(1);
+    expect(ciCalls.filter((call) => call.token === "ghs_beta")).toHaveLength(1);
+    expect(result).toMatchObject([
+      {
+        issueId: "ACME-1",
+        prReviewState: "approved",
+        ciStatus: "passing",
+        mergeableStatus: "mergeable",
+      },
+      {
+        issueId: "BETA-2",
+        prReviewState: null,
+        ciStatus: null,
+        mergeableStatus: null,
+      },
+    ]);
+  });
+
+  it("keeps one ambient batch per enrichment when no owner options are supplied", async () => {
+    // Given PRs from separate owners without a configured token provider.
+    const calls: Array<{ query: string; options: unknown }> = [];
+    const runner: CommandRunner = async (cmd, options) => {
+      const query = cmd.at(-1) ?? "";
+      calls.push({ query, options });
+      if (query.includes("latestReviews")) {
+        return {
+          stdout: JSON.stringify({
+            data: {
+              repo0: { pr0: { latestReviews: { nodes: [{ state: "APPROVED" }] } } },
+              repo1: {
+                pr0: { latestReviews: { nodes: [{ state: "CHANGES_REQUESTED" }] } },
+              },
+            },
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repo0: {
+              pr0: {
+                mergeable: "MERGEABLE",
+                commits: {
+                  nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }],
+                },
+              },
+            },
+            repo1: {
+              pr0: {
+                mergeable: "CONFLICTING",
+                commits: {
+                  nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }],
+                },
+              },
+            },
+          },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const issues = [
+      createParsedIssue("ACME-1", "Needs Review", ["worker-done"], {
+        owner: "acme",
+        repo: "widgets",
+        number: 1,
+      }),
+      createParsedIssue("BETA-2", "Needs Review", ["worker-done"], {
+        owner: "beta",
+        repo: "api",
+        number: 2,
+      }),
+    ];
+
+    // When enrichment runs without a token provider.
+    const result = await enrichParsedIssues(issues, "http://127.0.0.1:99999", runner);
+
+    // Then review and CI each retain their single ambient cross-owner query.
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.options === undefined)).toBe(true);
+    expect(result).toMatchObject([
+      { issueId: "ACME-1", prReviewState: "approved", ciStatus: "passing" },
+      {
+        issueId: "BETA-2",
+        prReviewState: "changes_requested",
+        ciStatus: "failing",
+      },
+    ]);
+  });
+
   it("sets ciStatus to null when no PR", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(async () => {

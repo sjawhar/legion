@@ -260,6 +260,49 @@ describe("daemon entry", () => {
     currentMockEnvoy = null;
   });
 
+  it("warns once when a GitHub daemon uses ambient gh credentials", async () => {
+    // Given a GitHub-backed daemon without github_apps configuration.
+    const warningCalls: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warningCalls.push(args.map(String).join(" "));
+    let handle: Awaited<ReturnType<typeof startDaemon>> | undefined;
+
+    try {
+      // When the daemon starts.
+      handle = await startDaemonForTest(
+        {
+          controllerSessionId: "ses_test",
+          githubApps: undefined,
+          issueBackend: "github",
+          stateFilePath: "/tmp/daemon-workers.json",
+        },
+        {
+          readStateFile: async () => ({ workers: {}, crashHistory: {} }),
+          writeStateFile: async () => {},
+          startServer: () => ({
+            server: { port: 15555 } as ReturnType<typeof Bun.serve>,
+            stop: () => {},
+            fetchAndProcessState: async () => {},
+            refreshResyncIssueRefs: async () => {},
+            listNonTerminalIssues: () => [],
+            getLiveWorkers: async () => ({}),
+          }),
+          setTimeout: silentSetTimeout,
+          clearTimeout: noopClearTimeout,
+          fetch: originalFetch,
+        }
+      );
+
+      // Then the compatibility path is conspicuous and emitted only once.
+      expect(warningCalls).toEqual([
+        "daemon GitHub reads using ambient gh auth; configure github_apps for owner-keyed tokens",
+      ]);
+    } finally {
+      console.warn = originalWarn;
+      await handle?.stop();
+    }
+  });
+
   describe("resync lifecycle", () => {
     it("runs once at startup and once for each configured timer tick without dispatching", async () => {
       const resyncIntervalMs = 2_000;

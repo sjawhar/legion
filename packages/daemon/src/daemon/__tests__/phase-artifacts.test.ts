@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 // allow: SIZE_OK — independently executable cases cover one GraphQL artifact boundary.
 import type { CommandRunner } from "../../state/fetch";
+import { TokenManager } from "../github-apps";
 import {
   fetchPhaseArtifacts,
   fetchPhaseArtifactsBatch,
@@ -88,6 +89,76 @@ describe("fetchPhaseArtifacts", () => {
     expect(result.artifacts[issueRef.issueId]?.headSha).toBe("first-head");
     expect(result.artifacts[secondRef.issueId]?.headSha).toBe("second-head");
     expect(result.errors).toEqual([]);
+  });
+
+  it("splits artifact queries by owner and degrades only the failed owner batch", async () => {
+    // Given two pull requests owned by distinct accounts and owner-scoped implement tokens.
+    const betaRef: IssueRef = {
+      ...issueRef,
+      issueId: "beta-api-43",
+      prRef: { owner: "beta", repo: "api", number: 102 },
+    };
+    const tokenManager = new TokenManager({});
+    tokenManager.getToken = async (role, owner) => ({
+      token: `ghs_${role}_${owner}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      gitIdentity: { name: "legion-implement[bot]", email: "bot@example.com" },
+    });
+    const calls: Array<{
+      command: string[];
+      token: string | undefined;
+      githubToken: string | undefined;
+    }> = [];
+    const runner = async (command: string[], options?: { readonly env?: NodeJS.ProcessEnv }) => {
+      const token = options?.env?.GH_TOKEN;
+      calls.push({ command, token, githubToken: options?.env?.GITHUB_TOKEN });
+      if (token === "ghs_implement_beta") {
+        throw new Error("beta unavailable");
+      }
+      return {
+        stdout: JSON.stringify({ data: { repo0: { pr0: pullRequestWithHead("acme-head") } } }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+
+    const originalGitHubToken = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "ambient-token";
+
+    try {
+      // When the batch resolves phase artifacts.
+      const result = await fetchPhaseArtifactsBatch([issueRef, betaRef], {
+        reviewerAppId: 42,
+        reviewerAppLogin: "legion-reviewer[bot]",
+        runner,
+        tokenManager,
+      });
+
+      // Then aliases start independently per owner, each call receives its token, and only beta degrades.
+      expect(calls).toHaveLength(2);
+      expect(calls.map((call) => call.token).sort()).toEqual([
+        "ghs_implement_acme",
+        "ghs_implement_beta",
+      ]);
+      expect(calls.every((call) => call.githubToken === undefined)).toBe(true);
+      for (const call of calls) {
+        expect(call.command.find((argument) => argument.startsWith("query="))).toContain(
+          "repo0: repository"
+        );
+        expect(call.command.find((argument) => argument.startsWith("query="))).toContain(
+          "pr0: pullRequest"
+        );
+      }
+      expect(result.artifacts[issueRef.issueId]?.headSha).toBe("acme-head");
+      expect(result.artifacts[betaRef.issueId]?.resolved.headSha).toBe("unresolvable");
+      expect(result.errors).toEqual([{ issueId: betaRef.issueId, message: "beta unavailable" }]);
+    } finally {
+      if (originalGitHubToken === undefined) {
+        delete process.env.GITHUB_TOKEN;
+      } else {
+        process.env.GITHUB_TOKEN = originalGitHubToken;
+      }
+    }
   });
 
   it("preserves resolved PR aliases when a nonzero GraphQL response contains partial data", async () => {

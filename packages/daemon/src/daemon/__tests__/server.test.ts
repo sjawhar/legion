@@ -214,6 +214,86 @@ describe("daemon server", () => {
     mockEnvoy.stop();
   });
 
+  it("uses the implement token for the owner parsed from each daemon board read", async () => {
+    // Given a daemon configured with an owner-scoped token manager and a two-part legion ID.
+    const calls: unknown[][] = [];
+    const fetchProjectItems = async (...args: unknown[]): Promise<unknown> => {
+      calls.push(args);
+      return [];
+    };
+    await startTestServer({
+      legionId: "trajectory-labs-pbc/2",
+      tokenManager: createTestTokenManager({}),
+      fetchProjectItems,
+    });
+
+    // When both the automatic collection and resync board reads run.
+    await serverFetchAndProcessState?.();
+    await serverRefreshResyncIssueRefs?.();
+
+    // Then each read is scoped to the board owner and receives its GitHub App token.
+    expect(calls).toHaveLength(2);
+    for (const [owner, projectNumber, _runner, options] of calls) {
+      expect(owner).toBe("trajectory-labs-pbc");
+      expect(projectNumber).toBe(2);
+      expect(options).toMatchObject({
+        env: { GH_TOKEN: "ghs_owner_token:implement:trajectory-labs-pbc" },
+      });
+    }
+  });
+
+  it("uses the owner token for the fetch-and-collect board read", async () => {
+    // Given a board fetch with an ambient compatibility token that must not be inherited.
+    const calls: Array<{
+      owner: string;
+      projectNumber: number;
+      options?: { readonly env?: NodeJS.ProcessEnv };
+    }> = [];
+    const fetchProjectItems = async (
+      owner: string,
+      projectNumber: number,
+      _runner?: unknown,
+      options?: { readonly env?: NodeJS.ProcessEnv }
+    ): Promise<unknown> => {
+      calls.push({ owner, projectNumber, options });
+      return [];
+    };
+    const originalGitHubToken = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "ambient-token";
+
+    try {
+      await startTestServer({
+        legionId: "trajectory-labs-pbc/2",
+        tokenManager: createTestTokenManager({}),
+        fetchProjectItems,
+      });
+
+      // When the daemon fetches and collects its GitHub board.
+      const response = await requestJson("/state/fetch-and-collect", {
+        method: "POST",
+        body: JSON.stringify({ backend: "github" }),
+      });
+
+      // Then the fetch uses the board owner's app token and removes the ambient token.
+      expect(response.status).toBe(200);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        owner: "trajectory-labs-pbc",
+        projectNumber: 2,
+        options: {
+          env: { GH_TOKEN: "ghs_owner_token:implement:trajectory-labs-pbc" },
+        },
+      });
+      expect(calls[0]?.options?.env?.GITHUB_TOKEN).toBeUndefined();
+    } finally {
+      if (originalGitHubToken === undefined) {
+        delete process.env.GITHUB_TOKEN;
+      } else {
+        process.env.GITHUB_TOKEN = originalGitHubToken;
+      }
+    }
+  });
+
   it("returns health data with default runtime", async () => {
     await startTestServer();
     const response = await requestJson("/health");

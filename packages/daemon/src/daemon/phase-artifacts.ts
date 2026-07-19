@@ -1,4 +1,10 @@
-import { type CommandResult, type CommandRunner, defaultRunner } from "../state/fetch";
+import {
+  type CommandResult,
+  type CommandRunner,
+  type CommandRunnerOptions,
+  defaultRunner,
+} from "../state/fetch";
+import type { TokenManager } from "./github-apps";
 
 // allow: SIZE_OK — batch construction and decoding share the exact alias map.
 export type ArtifactResolution = "resolved" | "unresolvable";
@@ -37,6 +43,7 @@ export interface FetchPhaseArtifactsDeps {
   readonly reviewerAppId: number;
   readonly reviewerAppLogin: string;
   readonly runner?: CommandRunner;
+  readonly tokenManager?: TokenManager;
 }
 
 export interface PhaseArtifactError {
@@ -268,8 +275,9 @@ function failedBatch(refs: readonly IssueRef[], message: string): PhaseArtifactB
   return { artifacts, errors };
 }
 
-export async function fetchPhaseArtifactsBatch(
+async function fetchOwnerPhaseArtifacts(
   refs: readonly IssueRef[],
+  owner: string,
   deps: FetchPhaseArtifactsDeps
 ): Promise<PhaseArtifactBatch> {
   const { query, aliases } = queryFor(refs);
@@ -277,7 +285,17 @@ export async function fetchPhaseArtifactsBatch(
 
   let result: CommandResult;
   try {
-    result = await (deps.runner ?? defaultRunner)(["gh", "api", "graphql", "-f", `query=${query}`]);
+    let runnerOptions: CommandRunnerOptions | undefined;
+    if (deps.tokenManager) {
+      const { token } = await deps.tokenManager.getToken("implement", owner);
+      const env = { ...process.env };
+      delete env.GITHUB_TOKEN;
+      runnerOptions = { env: { ...env, GH_TOKEN: token } };
+    }
+    result = await (deps.runner ?? defaultRunner)(
+      ["gh", "api", "graphql", "-f", `query=${query}`],
+      runnerOptions
+    );
   } catch (error) {
     return failedBatch(
       refs,
@@ -323,6 +341,37 @@ export async function fetchPhaseArtifactsBatch(
     }
     artifacts[alias.ref.issueId] = artifactsFor(pullRequest, deps);
   }
+  return { artifacts, errors };
+}
+
+export async function fetchPhaseArtifactsBatch(
+  refs: readonly IssueRef[],
+  deps: FetchPhaseArtifactsDeps
+): Promise<PhaseArtifactBatch> {
+  const artifacts: Record<string, PhaseArtifacts> = {};
+  const errors: PhaseArtifactError[] = [];
+  const groups = new Map<string, { owner: string; refs: IssueRef[] }>();
+
+  for (const ref of refs) {
+    if (!ref.prRef) {
+      artifacts[ref.issueId] = noPrPhaseArtifacts();
+      continue;
+    }
+    const key = ref.prRef.owner.toLowerCase();
+    const group = groups.get(key);
+    if (group) {
+      group.refs.push(ref);
+    } else {
+      groups.set(key, { owner: ref.prRef.owner, refs: [ref] });
+    }
+  }
+
+  for (const group of groups.values()) {
+    const batch = await fetchOwnerPhaseArtifacts(group.refs, group.owner, deps);
+    Object.assign(artifacts, batch.artifacts);
+    errors.push(...batch.errors);
+  }
+
   return { artifacts, errors };
 }
 
