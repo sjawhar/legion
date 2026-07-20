@@ -57,22 +57,24 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	// Publish mention topic with same structure: type.number.mention
 	num := githubNumber(input.Event, input.Body)
 	base := githubParentKind(input.Event, input.Body)
-	// Fanned-out copies carry distinct dedupe keys: the listener dedupes per
-	// (dedupe_key, session), so sharing the base key would suppress these copies
-	// for any session whose subscriptions also match the base topic.
+	// Fan-out copies share the base dedupe key, and the MOST SPECIFIC copy is
+	// published FIRST. The listener dedupes per (dedupe_key, session) and the
+	// per-machine listener consumes in stream (= publish) order, so a session
+	// whose subscriptions match several copies receives exactly one push,
+	// labeled with the most specific matching topic. Publishing the base copy
+	// first instead would silently starve the more specific subscriptions.
+	mentions := []Envelope{}
 	if num != "" {
 		// notifications.github.owner.repo.pr.7706.mention
 		mention := item
 		mention.Topic = GithubSubject(owner, repo, base+"."+num+".mention")
-		mention.DedupeKey = item.DedupeKey + ".mention"
-		out = append(out, mention)
+		mentions = append(mentions, mention)
 	}
 	// Also publish repo-wide mention: notifications.github.owner.repo.mention
 	mention := item
 	mention.Topic = GithubSubject(owner, repo, "mention")
-	mention.DedupeKey = item.DedupeKey + ".mention.repo"
-	out = append(out, mention)
-	return out
+	mentions = append(mentions, mention)
+	return append(mentions, out...)
 }
 
 // CIObservation is the per-(PR, check) fact the CI summary aggregator needs,
@@ -208,10 +210,11 @@ func SlackEnvelopes(input SlackEnvelopeInput) []Envelope {
 		if team != "" && channel != "" {
 			threaded := item
 			threaded.Topic = SlackThreadSubject(team, channel, thread, slackKind(input.Body))
-			// Distinct key so the thread copy survives per-(key, session) dedupe
-			// when the session is also subscribed to the channel topic.
-			threaded.DedupeKey = item.DedupeKey + ".thread"
-			out = append(out, threaded)
+			// Thread copy FIRST, sharing the base dedupe key: per-(key, session)
+			// dedupe + publish-order delivery means a dual-subscribed session gets
+			// one push labeled with the most specific topic, while thread-only and
+			// channel-only subscribers each get their matching copy.
+			out = []Envelope{threaded, item}
 		}
 	}
 	return out

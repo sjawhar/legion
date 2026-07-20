@@ -159,14 +159,17 @@ func TestGithubEnvelopesWithMention(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.github.sjawhar.envoy.comment" {
-		t.Fatalf("unexpected comment topic: %s", items[0].Topic)
+	// Most-specific copy first: the shared dedupe key means whichever copy is
+	// delivered first wins per (key, session); publish order puts the mention
+	// copy ahead so mention subscribers see the mention-labeled copy.
+	if items[0].Topic != "notifications.github.sjawhar.envoy.mention" {
+		t.Fatalf("unexpected mention topic: %s", items[0].Topic)
 	}
-	if items[1].Topic != "notifications.github.sjawhar.envoy.mention" {
-		t.Fatalf("unexpected mention topic: %s", items[1].Topic)
+	if items[1].Topic != "notifications.github.sjawhar.envoy.comment" {
+		t.Fatalf("unexpected comment topic: %s", items[1].Topic)
 	}
-	if items[1].DedupeKey != "github.d1.mention.repo" {
-		t.Fatalf("unexpected mention dedupe key: %s", items[1].DedupeKey)
+	if items[0].DedupeKey != items[1].DedupeKey {
+		t.Fatalf("dedupe keys differ: mention=%s comment=%s", items[0].DedupeKey, items[1].DedupeKey)
 	}
 }
 
@@ -196,8 +199,8 @@ func TestGithubEnvelopesReview(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[1].Topic != "notifications.github.sjawhar.envoy.mention" {
-		t.Fatalf("unexpected mention topic: %s", items[1].Topic)
+	if items[0].Topic != "notifications.github.sjawhar.envoy.mention" {
+		t.Fatalf("unexpected mention topic: %s", items[0].Topic)
 	}
 }
 
@@ -451,20 +454,19 @@ func TestGithubEnvelopesMentionWithNumber(t *testing.T) {
 	if len(items) != 3 {
 		t.Fatalf("expected 3 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.github.sjawhar.envoy.issue.99.comment" {
+	// Order: scoped mention, repo-wide mention, then the base comment copy.
+	// Shared dedupe key + publish order = most-specific copy wins per session.
+	if items[0].Topic != "notifications.github.sjawhar.envoy.issue.99.mention" {
 		t.Fatalf("unexpected topic[0]: %s", items[0].Topic)
 	}
-	if items[1].Topic != "notifications.github.sjawhar.envoy.issue.99.mention" {
+	if items[1].Topic != "notifications.github.sjawhar.envoy.mention" {
 		t.Fatalf("unexpected topic[1]: %s", items[1].Topic)
 	}
-	if items[1].DedupeKey != "github.d1.mention" {
-		t.Fatalf("unexpected dedupe key[1]: %s", items[1].DedupeKey)
-	}
-	if items[2].Topic != "notifications.github.sjawhar.envoy.mention" {
+	if items[2].Topic != "notifications.github.sjawhar.envoy.issue.99.comment" {
 		t.Fatalf("unexpected topic[2]: %s", items[2].Topic)
 	}
-	if items[2].DedupeKey != "github.d1.mention.repo" {
-		t.Fatalf("unexpected dedupe key[2]: %s", items[2].DedupeKey)
+	if items[0].DedupeKey != "github.d1" || items[1].DedupeKey != "github.d1" || items[2].DedupeKey != "github.d1" {
+		t.Fatalf("expected shared dedupe key github.d1: %s / %s / %s", items[0].DedupeKey, items[1].DedupeKey, items[2].DedupeKey)
 	}
 }
 
@@ -487,22 +489,19 @@ func TestSlackEnvelopesThread(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.slack.T123.C123.message" {
-		t.Fatalf("unexpected channel topic: %s", items[0].Topic)
+	// Thread copy first: the shared dedupe key means whichever copy is delivered
+	// first wins per (key, session). Publishing the thread copy ahead of the
+	// channel copy gives dual-subscribed sessions ONE push labeled with the most
+	// specific topic — instead of the channel copy silently starving the thread
+	// subscription (observed live 2026-07-20).
+	if items[0].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.message" {
+		t.Fatalf("unexpected thread topic: %s", items[0].Topic)
 	}
-	// Thread topic must use normalized ts (dot→underscore) and kind suffix
-	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.message" {
-		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
+	if items[1].Topic != "notifications.slack.T123.C123.message" {
+		t.Fatalf("unexpected channel topic: %s", items[1].Topic)
 	}
-	// Fanned-out copies carry DISTINCT dedupe keys: the listener dedupes per
-	// (dedupe_key, session), so a shared key silently suppresses the thread copy
-	// for any session also subscribed to the channel's .message topic — making
-	// thread subscriptions nonfunctional (observed live 2026-07-20).
-	if items[0].DedupeKey != "slack.Ev123" {
-		t.Fatalf("unexpected channel dedupe key: %s", items[0].DedupeKey)
-	}
-	if items[1].DedupeKey != "slack.Ev123.thread" {
-		t.Fatalf("unexpected thread dedupe key: %s", items[1].DedupeKey)
+	if items[0].DedupeKey != "slack.Ev123" || items[1].DedupeKey != "slack.Ev123" {
+		t.Fatalf("expected shared dedupe key slack.Ev123: %s / %s", items[0].DedupeKey, items[1].DedupeKey)
 	}
 }
 
@@ -525,15 +524,14 @@ func TestSlackEnvelopesThreadMention(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.slack.T123.C123.mention" {
-		t.Fatalf("unexpected channel topic: %s", items[0].Topic)
+	if items[0].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.mention" {
+		t.Fatalf("unexpected thread topic: %s", items[0].Topic)
 	}
-	// Thread mention must use .mention kind suffix
-	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.mention" {
-		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
+	if items[1].Topic != "notifications.slack.T123.C123.mention" {
+		t.Fatalf("unexpected channel topic: %s", items[1].Topic)
 	}
-	if items[1].DedupeKey != "slack.Ev123.thread" {
-		t.Fatalf("unexpected thread dedupe key: %s", items[1].DedupeKey)
+	if items[0].DedupeKey != "slack.Ev123" || items[1].DedupeKey != "slack.Ev123" {
+		t.Fatalf("expected shared dedupe key slack.Ev123: %s / %s", items[0].DedupeKey, items[1].DedupeKey)
 	}
 }
 
