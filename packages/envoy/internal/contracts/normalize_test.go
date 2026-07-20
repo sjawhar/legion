@@ -165,6 +165,9 @@ func TestGithubEnvelopesWithMention(t *testing.T) {
 	if items[1].Topic != "notifications.github.sjawhar.envoy.mention" {
 		t.Fatalf("unexpected mention topic: %s", items[1].Topic)
 	}
+	if items[1].DedupeKey != "github.d1.mention.repo" {
+		t.Fatalf("unexpected mention dedupe key: %s", items[1].DedupeKey)
+	}
 }
 
 func TestGithubEnvelopesReview(t *testing.T) {
@@ -454,8 +457,14 @@ func TestGithubEnvelopesMentionWithNumber(t *testing.T) {
 	if items[1].Topic != "notifications.github.sjawhar.envoy.issue.99.mention" {
 		t.Fatalf("unexpected topic[1]: %s", items[1].Topic)
 	}
+	if items[1].DedupeKey != "github.d1.mention" {
+		t.Fatalf("unexpected dedupe key[1]: %s", items[1].DedupeKey)
+	}
 	if items[2].Topic != "notifications.github.sjawhar.envoy.mention" {
 		t.Fatalf("unexpected topic[2]: %s", items[2].Topic)
+	}
+	if items[2].DedupeKey != "github.d1.mention.repo" {
+		t.Fatalf("unexpected dedupe key[2]: %s", items[2].DedupeKey)
 	}
 }
 
@@ -485,9 +494,15 @@ func TestSlackEnvelopesThread(t *testing.T) {
 	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.message" {
 		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
 	}
-	// Both envelopes share the same dedupe_key (critical for single-delivery guarantee)
-	if items[0].DedupeKey != items[1].DedupeKey {
-		t.Fatalf("dedupe keys differ: channel=%s thread=%s", items[0].DedupeKey, items[1].DedupeKey)
+	// Fanned-out copies carry DISTINCT dedupe keys: the listener dedupes per
+	// (dedupe_key, session), so a shared key silently suppresses the thread copy
+	// for any session also subscribed to the channel's .message topic — making
+	// thread subscriptions nonfunctional (observed live 2026-07-20).
+	if items[0].DedupeKey != "slack.Ev123" {
+		t.Fatalf("unexpected channel dedupe key: %s", items[0].DedupeKey)
+	}
+	if items[1].DedupeKey != "slack.Ev123.thread" {
+		t.Fatalf("unexpected thread dedupe key: %s", items[1].DedupeKey)
 	}
 }
 
@@ -516,6 +531,9 @@ func TestSlackEnvelopesThreadMention(t *testing.T) {
 	// Thread mention must use .mention kind suffix
 	if items[1].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.mention" {
 		t.Fatalf("unexpected thread topic: %s", items[1].Topic)
+	}
+	if items[1].DedupeKey != "slack.Ev123.thread" {
+		t.Fatalf("unexpected thread dedupe key: %s", items[1].DedupeKey)
 	}
 }
 
