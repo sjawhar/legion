@@ -37,6 +37,11 @@ const DEFAULT_GLOBAL_PERMISSION: PermissionConfig = {
   edit: "allow",
   bash: "allow",
   task: "allow",
+  // Headless workers cannot answer permission asks: an external_directory "ask"
+  // deadlocks the session on its first read outside the workspace (the
+  // legion-worker skill's own workflow files live outside every workspace by
+  // construction). bash is already "allow", so the read gate adds no security.
+  external_directory: "allow",
 };
 
 interface AgentConfigEntry {
@@ -148,6 +153,7 @@ const OpenCodeLegion: Plugin = async (ctx) => {
           edit: "deny",
           write: "deny",
           bash: "deny",
+          external_directory: "allow",
           task: "allow",
         };
       }

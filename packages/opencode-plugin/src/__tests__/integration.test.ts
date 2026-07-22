@@ -492,6 +492,33 @@ describe("opencode-legion plugin", () => {
         expect((permission as { edit?: string }).edit).toBe("allow");
         expect((permission as { bash?: string }).bash).toBe("allow");
         expect((permission as { read?: string }).read).toBe("allow");
+        // Headless workers have nobody to answer permission asks: an external_directory
+        // "ask" deadlocks the session on its first read outside the workspace (e.g. the
+        // legion-worker skill's own workflow files). bash is already "allow", so the
+        // read gate adds no security — only the deadlock.
+        expect((permission as { external_directory?: string }).external_directory).toBe("allow");
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("allows external_directory reads for the read-only conductor agent", async () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-legion-permission-"));
+      try {
+        const ctx = createStubContext(tempRoot);
+        const hooks = await OpenCodeLegion(ctx);
+        const config: Record<string, unknown> = {};
+
+        await hooks.config?.(config);
+
+        const agents = (
+          config as { agent?: Record<string, { permission?: Record<string, unknown> }> }
+        ).agent;
+        const conductor = agents?.conductor;
+        expect(conductor).toBeTruthy();
+        expect(conductor?.permission?.external_directory).toBe("allow");
+        // The conductor stays read-only otherwise
+        expect(conductor?.permission?.bash).toBe("deny");
       } finally {
         fs.rmSync(tempRoot, { recursive: true, force: true });
       }
