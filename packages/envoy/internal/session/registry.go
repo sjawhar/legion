@@ -21,6 +21,10 @@ type SessionEntry struct {
 	Dir       string `json:"dir"`
 	Title     string `json:"title"`
 	UpdatedAt int64  `json:"updated_at"`
+	// Driving reports whether the claiming process is the one actually driving
+	// this session (its explicit -s target or a session it owns), as opposed to a
+	// process that merely has the session loaded from shared on-disk state.
+	Driving bool `json:"driving,omitempty"`
 }
 
 type SessionRegistryOption func(*sessionRegistryOpts)
@@ -310,7 +314,14 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 	if r == nil {
 		return ErrNoKV
 	}
-	entry.UpdatedAt = time.Now().UnixMilli()
+	// Several live processes can hold the same session (shared on-disk state), and
+	// blind last-writer-wins routed deliveries to whichever heartbeated last —
+	// including processes not driving the session. mergeForClaim arbitrates.
+	cur, curErr := r.Get(sessionID)
+	entry, err := mergeForClaim(cur, curErr, entry, time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
 	buf, err := json.Marshal(entry)
 	if err != nil {
 		return err

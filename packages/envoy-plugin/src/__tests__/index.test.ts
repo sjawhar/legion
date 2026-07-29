@@ -655,3 +655,207 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
     expect(subscribed.length).toBe(0);
   });
 });
+
+// Several live processes can hold the same session (opencode session state is on
+// shared disk). Envoy arbitrates competing route claims by whether the claiming
+// process is DRIVING the session, so the plugin must report that honestly:
+// sessions that have run in this process are driven; siblings re-adopted after a
+// serve restart are recovery claims that must not displace a live driver.
+describe("claims report whether this process drives the session", () => {
+  it("marks sessions that have been busy in this process as driving", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+
+    const claims: { id: string; driving: unknown }[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        claims.push({ id: body.session_id, driving: body.driving });
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_driven", status: { type: "busy" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+
+      const own = claims.filter((c) => c.id === "ses_driven");
+      expect(own.length).toBeGreaterThan(0);
+      expect(own.every((c) => c.driving === true)).toBe(true);
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+
+  it("marks siblings re-adopted after a serve restart as not driving", async () => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+
+    const claims: { id: string; driving: unknown }[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        claims.push({ id: body.session_id, driving: body.driving });
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        // A sibling session in the same dir, held by some other process.
+        return new Response(
+          JSON.stringify([
+            { session_id: "ses_sibling", machine_id: "", dir: process.cwd(), port: 34751 },
+            { session_id: "ses_driven", machine_id: "", dir: process.cwd(), port: 42145 },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_driven", status: { type: "busy" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+
+      const sibling = claims.filter((c) => c.id === "ses_sibling");
+      expect(sibling.length).toBeGreaterThan(0);
+      expect(sibling.every((c) => c.driving !== true)).toBe(true);
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  });
+});
+
+// Serve-restart recovery must not hijack sessions that a LIVE process still
+// serves. Because opencode session state is on shared disk and every `oc -s`
+// launch is its own process, a new process in a shared directory used to
+// re-point every sibling session's route at itself (observed: 231 sessions
+// claimed by one process in a single burst, then refreshed every 2 minutes).
+// Envoy then delivers there, and that process starts its own model loop on a
+// session another process owns — two loops, one transcript.
+describe("re-adoption only rescues sessions whose serve is gone", () => {
+  const runReadopt = async (siblingPortAlive: boolean) => {
+    const originalEnvoyUrl = process.env.ENVOY_URL;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    const siblingPort = 34751;
+
+    const subscribed: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/v1/interests/subscribe") && init?.body) {
+        const body = JSON.parse(init.body as string);
+        subscribed.push(body.session_id);
+        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/v1/sessions")) {
+        return new Response(
+          JSON.stringify([
+            { session_id: "ses_self", machine_id: "m", dir: process.cwd(), port: 42145 },
+            {
+              session_id: "ses_sibling",
+              machine_id: "m",
+              dir: process.cwd(),
+              port: siblingPort,
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      // Liveness probe against the sibling's registered port.
+      if (url.includes(`:${siblingPort}/`)) {
+        if (siblingPortAlive) {
+          return new Response(JSON.stringify({ healthy: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error("connection refused");
+      }
+      if (url.includes("/session/")) return new Response("not found", { status: 404 });
+      throw new Error("connection refused");
+    }) as typeof fetch;
+
+    let dispose: (() => void) | undefined;
+    try {
+      const pluginModule = await import("../server");
+      const hooks = await pluginModule.default({
+        serverUrl: new URL("http://127.0.0.1:13381/"),
+      } as never);
+      dispose = (hooks as { dispose?: () => void }).dispose;
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_self", status: { type: "busy" } },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      return subscribed;
+    } finally {
+      dispose?.();
+      globalThis.fetch = originalFetch;
+      process.env.ENVOY_URL = originalEnvoyUrl;
+    }
+  };
+
+  it("does not adopt a sibling whose registered port is still serving", async () => {
+    const subscribed = await runReadopt(true);
+
+    expect(subscribed).toContain("ses_self");
+    expect(subscribed).not.toContain("ses_sibling");
+  });
+
+  it("adopts a sibling whose registered port is gone", async () => {
+    const subscribed = await runReadopt(false);
+
+    expect(subscribed).toContain("ses_sibling");
+  });
+});
