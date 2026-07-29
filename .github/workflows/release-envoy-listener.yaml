@@ -61,14 +61,15 @@ jobs:
               MAJOR=true
             elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
               MINOR=true
-            elif echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
+            elif echo "$msg" | grep -qE '^(fix|refactor|perf)(\(.+\))?:'; then
               PATCH=true
             fi
           done <<< "$COMMITS"
 
           if ! $MAJOR && ! $MINOR && ! $PATCH; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "No version-bumping commits since $LATEST_TAG"
+            echo "::notice title=No release published::No version-bumping commits since $LATEST_TAG"
+            echo "**No release published** — No version-bumping commits since $LATEST_TAG" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
