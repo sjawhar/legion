@@ -302,96 +302,6 @@ describe("heartbeat refreshes all busy sessions (fix 1a)", () => {
   });
 });
 
-describe("re-adopts sibling sessions after serve restart (fix 1b)", () => {
-  it("registers idle same-dir+machine siblings on first activity, ignoring other machines/dirs", async () => {
-    const originalEnvoyUrl = process.env.ENVOY_URL;
-    process.env.ENVOY_URL = "http://127.0.0.1:59999";
-    const cwd = process.cwd();
-
-    const subscribed: string[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes("/v1/interests/subscribe") && init?.body) {
-        const body = JSON.parse(init.body as string);
-        subscribed.push(body.session_id);
-        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (url.includes("/v1/sessions")) {
-        return new Response(
-          JSON.stringify([
-            {
-              session_id: "ses_active",
-              machine_id: "M",
-              dir: cwd,
-              port: 13381,
-              title: "",
-              topics: [],
-              updated_at: Date.now(),
-            },
-            {
-              session_id: "ses_idle",
-              machine_id: "M",
-              dir: cwd,
-              port: 9,
-              title: "Idle",
-              topics: [],
-              updated_at: Date.now(),
-            },
-            {
-              session_id: "ses_foreign",
-              machine_id: "OTHER",
-              dir: cwd,
-              port: 7,
-              title: "",
-              topics: [],
-              updated_at: Date.now(),
-            },
-            {
-              session_id: "ses_otherdir",
-              machine_id: "M",
-              dir: "/somewhere/else",
-              port: 8,
-              title: "",
-              topics: [],
-              updated_at: Date.now(),
-            },
-          ]),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      if (url.includes("/session/")) return new Response("not found", { status: 404 });
-      throw new Error("connection refused");
-    }) as typeof fetch;
-
-    try {
-      const pluginModule = await import("../server");
-      const hooks = await pluginModule.default({
-        serverUrl: new URL("http://127.0.0.1:13381/"),
-      } as never);
-
-      await hooks.event({
-        event: {
-          type: "session.status",
-          properties: { sessionID: "ses_active", status: { type: "busy" } },
-        },
-      });
-      await new Promise((r) => setTimeout(r, 100));
-
-      expect(subscribed).toContain("ses_active");
-      expect(subscribed).toContain("ses_idle");
-      expect(subscribed).not.toContain("ses_foreign");
-      expect(subscribed).not.toContain("ses_otherdir");
-    } finally {
-      globalThis.fetch = originalFetch;
-      process.env.ENVOY_URL = originalEnvoyUrl;
-    }
-  });
-});
-
 describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
   it("stops re-subscribing a session after session.deleted", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
@@ -452,88 +362,6 @@ describe("prunes deleted sessions from the heartbeat (fix 2)", () => {
       expect(aEnd).toBe(aMark);
       // ses_B is still alive -> heartbeat keeps refreshing it.
       expect(bEnd).toBeGreaterThan(bMark);
-    } finally {
-      dispose?.();
-      globalThis.fetch = originalFetch;
-      process.env.ENVOY_URL = originalEnvoyUrl;
-      if (originalHb === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
-      else process.env.ENVOY_HEARTBEAT_MS = originalHb;
-    }
-  });
-});
-
-describe("re-adoption retries until the registry shows our own session (fix 3)", () => {
-  it("adopts an idle sibling once /v1/sessions includes self on a later poll", async () => {
-    const originalEnvoyUrl = process.env.ENVOY_URL;
-    const originalHb = process.env.ENVOY_HEARTBEAT_MS;
-    process.env.ENVOY_URL = "http://127.0.0.1:59999";
-    process.env.ENVOY_HEARTBEAT_MS = "40";
-    const cwd = process.cwd();
-
-    let sessionsCalls = 0;
-    const subscribed: string[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes("/v1/interests/subscribe") && init?.body) {
-        const body = JSON.parse(init.body as string);
-        subscribed.push(body.session_id);
-        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (url.includes("/v1/sessions")) {
-        sessionsCalls += 1;
-        // First poll: self not persisted yet. Later polls: self + idle sibling present.
-        const body =
-          sessionsCalls <= 1
-            ? []
-            : [
-                {
-                  session_id: "ses_active",
-                  machine_id: "M",
-                  dir: cwd,
-                  port: 13381,
-                  title: "",
-                  topics: [],
-                  updated_at: Date.now(),
-                },
-                {
-                  session_id: "ses_idle",
-                  machine_id: "M",
-                  dir: cwd,
-                  port: 9,
-                  title: "Idle",
-                  topics: [],
-                  updated_at: Date.now(),
-                },
-              ];
-        return new Response(JSON.stringify(body), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (url.includes("/session/")) return new Response("not found", { status: 404 });
-      throw new Error("connection refused");
-    }) as typeof fetch;
-
-    let dispose: (() => void) | undefined;
-    try {
-      const pluginModule = await import("../server");
-      const hooks = await pluginModule.default({
-        serverUrl: new URL("http://127.0.0.1:13381/"),
-      } as never);
-      dispose = (hooks as { dispose?: () => void }).dispose;
-      await hooks.event({
-        event: {
-          type: "session.status",
-          properties: { sessionID: "ses_active", status: { type: "busy" } },
-        },
-      });
-      await new Promise((r) => setTimeout(r, 200));
-
-      expect(subscribed).toContain("ses_idle");
     } finally {
       dispose?.();
       globalThis.fetch = originalFetch;
@@ -713,72 +541,21 @@ describe("claims report whether this process drives the session", () => {
       process.env.ENVOY_URL = originalEnvoyUrl;
     }
   });
-
-  it("marks siblings re-adopted after a serve restart as not driving", async () => {
-    const originalEnvoyUrl = process.env.ENVOY_URL;
-    process.env.ENVOY_URL = "http://127.0.0.1:59999";
-
-    const claims: { id: string; driving: unknown }[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes("/v1/interests/subscribe") && init?.body) {
-        const body = JSON.parse(init.body as string);
-        claims.push({ id: body.session_id, driving: body.driving });
-        return new Response(JSON.stringify({ session_id: body.session_id, topics: [] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      if (url.includes("/v1/sessions")) {
-        // A sibling session in the same dir, held by some other process.
-        return new Response(
-          JSON.stringify([
-            { session_id: "ses_sibling", machine_id: "", dir: process.cwd(), port: 34751 },
-            { session_id: "ses_driven", machine_id: "", dir: process.cwd(), port: 42145 },
-          ]),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      if (url.includes("/session/")) return new Response("not found", { status: 404 });
-      throw new Error("connection refused");
-    }) as typeof fetch;
-
-    let dispose: (() => void) | undefined;
-    try {
-      const pluginModule = await import("../server");
-      const hooks = await pluginModule.default({
-        serverUrl: new URL("http://127.0.0.1:13381/"),
-      } as never);
-      dispose = (hooks as { dispose?: () => void }).dispose;
-
-      await hooks.event({
-        event: {
-          type: "session.status",
-          properties: { sessionID: "ses_driven", status: { type: "busy" } },
-        },
-      });
-      await new Promise((r) => setTimeout(r, 60));
-
-      const sibling = claims.filter((c) => c.id === "ses_sibling");
-      expect(sibling.length).toBeGreaterThan(0);
-      expect(sibling.every((c) => c.driving !== true)).toBe(true);
-    } finally {
-      dispose?.();
-      globalThis.fetch = originalFetch;
-      process.env.ENVOY_URL = originalEnvoyUrl;
-    }
-  });
 });
 
 // Serve-restart recovery must not hijack sessions that a LIVE process still
 // serves. Because opencode session state is on shared disk and every `oc -s`
-// launch is its own process, a new process in a shared directory used to
-// re-point every sibling session's route at itself (observed: 231 sessions
-// claimed by one process in a single burst, then refreshed every 2 minutes).
-// Envoy then delivers there, and that process starts its own model loop on a
-// session another process owns — two loops, one transcript.
-describe("re-adoption only rescues sessions whose serve is gone", () => {
+// launch is its own process, a new process in a shared directory re-pointed
+// every sibling session's route at itself (observed: 231 sessions claimed by one
+// process in a single burst, then refreshed every 2 minutes). Envoy then
+// delivers there, and that process starts its own model loop on a session
+// another process owns — two loops, one transcript.
+//
+// A process may therefore claim ONLY sessions it has actually run. Keeping
+// idle-but-owned sessions reachable is the daemon's job (it knows the serve port
+// and the session IDs it dispatched), not something a stranger process may
+// arrange by adopting routes.
+describe("a process claims only sessions it has run", () => {
   const runReadopt = async (siblingPortAlive: boolean) => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
@@ -810,7 +587,7 @@ describe("re-adoption only rescues sessions whose serve is gone", () => {
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
-      // Liveness probe against the sibling's registered port.
+      // Any liveness probe at all means readopt is still trying to adopt.
       if (url.includes(`:${siblingPort}/`)) {
         if (siblingPortAlive) {
           return new Response(JSON.stringify({ healthy: true }), {
@@ -846,16 +623,12 @@ describe("re-adoption only rescues sessions whose serve is gone", () => {
     }
   };
 
-  it("does not adopt a sibling whose registered port is still serving", async () => {
-    const subscribed = await runReadopt(true);
+  it("never claims a sibling session, whether or not its serve is alive", async () => {
+    for (const siblingServeAlive of [true, false]) {
+      const subscribed = await runReadopt(siblingServeAlive);
 
-    expect(subscribed).toContain("ses_self");
-    expect(subscribed).not.toContain("ses_sibling");
-  });
-
-  it("adopts a sibling whose registered port is gone", async () => {
-    const subscribed = await runReadopt(false);
-
-    expect(subscribed).toContain("ses_sibling");
+      expect(subscribed).toContain("ses_self");
+      expect(subscribed).not.toContain("ses_sibling");
+    }
   });
 });

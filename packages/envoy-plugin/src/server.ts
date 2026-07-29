@@ -30,8 +30,6 @@ export default async (input: { serverUrl: URL }) => {
   // sessions, so tracking only the most-recently-active one lets idle siblings
   // expire out of the registry and become undeliverable.
   const trackedSessions = new Map<string, { title: string | null; driving: boolean }>();
-  // Guard so sibling re-adoption (after a serve restart) runs at most once.
-  let readoptDone = false;
   /** Cached port — resolved asynchronously, null until first successful resolution. */
   let resolvedPort: number | null = null;
 
@@ -107,68 +105,16 @@ export default async (input: { serverUrl: URL }) => {
       }),
     }).catch(() => {});
 
-  // Does a process still answer on this port? Used to tell an orphaned session
-  // (previous serve gone: connection refused) from one a live process is still
-  // serving. Unknown port => treat as alive, i.e. do not adopt.
-  const serveAlive = async (port: number | undefined): Promise<boolean> => {
-    if (!port) return true;
-    if (port === currentPort()) return false;
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1000);
-      try {
-        await fetch(`http://127.0.0.1:${port}/global/health`, { signal: controller.signal });
-        return true;
-      } finally {
-        clearTimeout(timeout);
-      }
-    } catch {
-      return false;
-    }
-  };
-
-  // After a serve restart, sessions that were live in the previous serve instance
-  // do NOT re-register on their own (registration is gated on a session going
-  // busy), so an idle session waiting to RECEIVE a message silently falls out of
-  // the registry. Recover them once, on first activity: read the live registry and
-  // re-subscribe siblings that share this serve's machine + dir at the new port.
+  // A process registers ONLY the sessions it has actually run (see the busy
+  // handler below). It must never claim a route for a session it merely has
+  // loaded from shared on-disk state: doing so re-points that session's route
+  // here, envoy delivers here, and this process starts a second model loop on a
+  // session another process is driving.
   //
-  // Only sessions whose registered serve is GONE may be adopted. Session state
-  // lives on shared disk and every `oc -s` launch is its own process, so a
-  // same-dir sibling is usually owned by another LIVE process. Adopting those
-  // re-points their route here; envoy then delivers here, and this process
-  // starts its own model loop on a session someone else is driving — two loops
-  // interleaving one transcript. A refused connection on the registered port is
-  // the "previous serve is gone" signal this recovery was written for.
-  const readoptSiblings = async (selfSessionID: string) => {
-    if (readoptDone) return;
-    const port = currentPort();
-    if (!port) return;
-    try {
-      const res = await call("/v1/sessions");
-      const sessions = JSON.parse(res) as Array<{
-        session_id: string;
-        machine_id: string;
-        dir: string;
-        title?: string;
-        port?: number;
-      }>;
-      // Authoritative machine id for this serve = the listener-stamped machine of
-      // our own active session. Only adopt siblings that match it (and our dir) to
-      // avoid hijacking a same-path session that lives on another machine.
-      const self = sessions.find((s) => s.session_id === selfSessionID);
-      if (!self) return;
-      readoptDone = true;
-      for (const s of sessions) {
-        if (s.machine_id !== self.machine_id) continue;
-        if (s.dir !== cwd) continue;
-        if (trackedSessions.has(s.session_id)) continue;
-        if (await serveAlive(s.port)) continue;
-        trackedSessions.set(s.session_id, { title: s.title ?? null, driving: false });
-        subscribeSession(s.session_id, s.title ?? null, port, false);
-      }
-    } catch {}
-  };
+  // That means a session whose process is gone stays unreachable until it runs
+  // again. Keeping dispatched-but-idle workers reachable is the daemon's job — it
+  // knows the serve port and the session IDs it dispatched — not something a
+  // stranger process may arrange by adopting routes.
 
   // Heartbeat: re-subscribe every tracked session to refresh the envoy_sessions
   // TTL (5-min). Refreshes ALL sessions that have been busy in this serve, not
@@ -184,8 +130,6 @@ export default async (input: { serverUrl: URL }) => {
     for (const [sessionID, info] of trackedSessions) {
       subscribeSession(sessionID, info.title, port, info.driving);
     }
-    // Retry sibling re-adoption until the registry shows our own session.
-    if (!readoptDone && activeSessionID) readoptSiblings(activeSessionID).catch(() => {});
   }, heartbeatMs);
   heartbeatInterval.unref?.();
 
@@ -238,9 +182,6 @@ export default async (input: { serverUrl: URL }) => {
             return t;
           });
           if (port) {
-            // Await so our own session is persisted in the registry before
-            // readoptSiblings reads it back (otherwise self may be absent and
-            // re-adoption would be skipped).
             await subscribeSession(sessionID, activeSessionTitle, port, true);
             // After the title arrives, send one follow-up subscribe with it.
             titlePromise.then((title) => {
@@ -254,9 +195,6 @@ export default async (input: { serverUrl: URL }) => {
               }
               if (activeSessionID === sessionID) activeSessionTitle = title;
             });
-            // Recover idle siblings orphaned by a serve restart (retries from the
-            // heartbeat until the registry shows our own session).
-            readoptSiblings(sessionID).catch(() => {});
           }
         }
       }
