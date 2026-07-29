@@ -29,7 +29,7 @@ export default async (input: { serverUrl: URL }) => {
   // refreshes the envoy_sessions TTL for ALL of them — a single serve hosts many
   // sessions, so tracking only the most-recently-active one lets idle siblings
   // expire out of the registry and become undeliverable.
-  const trackedSessions = new Map<string, { title: string | null }>();
+  const trackedSessions = new Map<string, { title: string | null; driving: boolean }>();
   // Guard so sibling re-adoption (after a serve restart) runs at most once.
   let readoptDone = false;
   /** Cached port — resolved asynchronously, null until first successful resolution. */
@@ -84,7 +84,16 @@ export default async (input: { serverUrl: URL }) => {
   // Fire an immediate async attempt (non-blocking)
   syncPort().catch(() => {});
 
-  const subscribeSession = (sessionID: string, title: string | null, port: number) =>
+  // driving = this process is the one running the session (it has gone busy
+  // here), as opposed to a sibling re-adopted from shared on-disk state after a
+  // serve restart. Envoy uses it to keep a live driver's route from being stolen
+  // by another process that merely holds the same session.
+  const subscribeSession = (
+    sessionID: string,
+    title: string | null,
+    port: number,
+    driving: boolean
+  ) =>
     call("/v1/interests/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -94,14 +103,43 @@ export default async (input: { serverUrl: URL }) => {
         topics: [`notifications.agent.${sessionID}`],
         port,
         title: title ?? "",
+        driving,
       }),
     }).catch(() => {});
+
+  // Does a process still answer on this port? Used to tell an orphaned session
+  // (previous serve gone: connection refused) from one a live process is still
+  // serving. Unknown port => treat as alive, i.e. do not adopt.
+  const serveAlive = async (port: number | undefined): Promise<boolean> => {
+    if (!port) return true;
+    if (port === currentPort()) return false;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1000);
+      try {
+        await fetch(`http://127.0.0.1:${port}/global/health`, { signal: controller.signal });
+        return true;
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch {
+      return false;
+    }
+  };
 
   // After a serve restart, sessions that were live in the previous serve instance
   // do NOT re-register on their own (registration is gated on a session going
   // busy), so an idle session waiting to RECEIVE a message silently falls out of
   // the registry. Recover them once, on first activity: read the live registry and
   // re-subscribe siblings that share this serve's machine + dir at the new port.
+  //
+  // Only sessions whose registered serve is GONE may be adopted. Session state
+  // lives on shared disk and every `oc -s` launch is its own process, so a
+  // same-dir sibling is usually owned by another LIVE process. Adopting those
+  // re-points their route here; envoy then delivers here, and this process
+  // starts its own model loop on a session someone else is driving — two loops
+  // interleaving one transcript. A refused connection on the registered port is
+  // the "previous serve is gone" signal this recovery was written for.
   const readoptSiblings = async (selfSessionID: string) => {
     if (readoptDone) return;
     const port = currentPort();
@@ -113,6 +151,7 @@ export default async (input: { serverUrl: URL }) => {
         machine_id: string;
         dir: string;
         title?: string;
+        port?: number;
       }>;
       // Authoritative machine id for this serve = the listener-stamped machine of
       // our own active session. Only adopt siblings that match it (and our dir) to
@@ -124,8 +163,9 @@ export default async (input: { serverUrl: URL }) => {
         if (s.machine_id !== self.machine_id) continue;
         if (s.dir !== cwd) continue;
         if (trackedSessions.has(s.session_id)) continue;
-        trackedSessions.set(s.session_id, { title: s.title ?? null });
-        subscribeSession(s.session_id, s.title ?? null, port);
+        if (await serveAlive(s.port)) continue;
+        trackedSessions.set(s.session_id, { title: s.title ?? null, driving: false });
+        subscribeSession(s.session_id, s.title ?? null, port, false);
       }
     } catch {}
   };
@@ -142,7 +182,7 @@ export default async (input: { serverUrl: URL }) => {
     const port = currentPort();
     if (!port) return;
     for (const [sessionID, info] of trackedSessions) {
-      subscribeSession(sessionID, info.title, port);
+      subscribeSession(sessionID, info.title, port, info.driving);
     }
     // Retry sibling re-adoption until the registry shows our own session.
     if (!readoptDone && activeSessionID) readoptSiblings(activeSessionID).catch(() => {});
@@ -187,7 +227,7 @@ export default async (input: { serverUrl: URL }) => {
           activeSessionID = sessionID;
           activeSessionTitle = null;
           if (!trackedSessions.has(sessionID)) {
-            trackedSessions.set(sessionID, { title: null });
+            trackedSessions.set(sessionID, { title: null, driving: true });
           }
           await syncPort();
           const port = currentPort();
@@ -201,15 +241,16 @@ export default async (input: { serverUrl: URL }) => {
             // Await so our own session is persisted in the registry before
             // readoptSiblings reads it back (otherwise self may be absent and
             // re-adoption would be skipped).
-            await subscribeSession(sessionID, activeSessionTitle, port);
+            await subscribeSession(sessionID, activeSessionTitle, port, true);
             // After the title arrives, send one follow-up subscribe with it.
             titlePromise.then((title) => {
               if (!title) return;
               // Update tracked metadata even if this session is no longer the
               // active one (another session may have become busy meanwhile).
               if (trackedSessions.has(sessionID)) {
-                trackedSessions.set(sessionID, { title });
-                subscribeSession(sessionID, title, currentPort() ?? 0);
+                const driving = trackedSessions.get(sessionID)?.driving ?? true;
+                trackedSessions.set(sessionID, { title, driving });
+                subscribeSession(sessionID, title, currentPort() ?? 0, driving);
               }
               if (activeSessionID === sessionID) activeSessionTitle = title;
             });
@@ -263,6 +304,8 @@ export default async (input: { serverUrl: URL }) => {
             topics: [topic],
             port: currentPort() ?? 0,
             title: activeSessionTitle ?? "",
+            // A tool call runs in this process, so it is the driving holder.
+            driving: true,
           }),
         });
       } catch (err) {
@@ -298,6 +341,7 @@ export default async (input: { serverUrl: URL }) => {
               topics: args.topics,
               port: currentPort() ?? 0,
               title: activeSessionTitle ?? "",
+              driving: true,
             }),
           });
         },

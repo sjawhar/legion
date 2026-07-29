@@ -725,13 +725,7 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var body struct {
-			SessionID string   `json:"session_id"`
-			Dir       string   `json:"dir"`
-			Topics    []string `json:"topics"`
-			Port      int      `json:"port"`
-			Title     string   `json:"title"`
-		}
+		var body subscribeBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
@@ -756,12 +750,7 @@ func main() {
 			return
 		}
 		if body.Port > 0 {
-			if err := d.sessions.Put(body.SessionID, session.SessionEntry{
-				Port:      body.Port,
-				MachineID: cfg.MachineID,
-				Dir:       body.Dir,
-				Title:     body.Title,
-			}); err != nil {
+			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, cfg.MachineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 			}
 		}
