@@ -22,7 +22,7 @@ const SessionWireSchema = z.object({
   self_subscribed: z.boolean(),
 });
 
-export type EnvoyFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type EnvoyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export type EnvoyClientConfig = {
   readonly baseUrl: string;

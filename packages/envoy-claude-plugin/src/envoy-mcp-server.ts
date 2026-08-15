@@ -1,29 +1,16 @@
+import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
+import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
+import { createEnvoyClient } from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import ky from "ky"
 import { z } from "zod"
 
-import { envoyToolDefinitions } from "./envoy-client"
-
-const ENVOY_URL = "http://127.0.0.1:9020"
-
-const sendSchema = z.object({ target_session: z.string().min(1), message: z.string().min(1) })
-const publishSchema = z.object({ topic: z.string().min(1), message: z.string().min(1) })
-const subscribeSchema = z.object({ topics: z.array(z.string().min(1)).min(1) })
-const unsubscribeSchema = z.object({ topics: z.array(z.string().min(1)).optional() })
-const sessionsSchema = z.object({ machine: z.string().min(1).optional() })
-const roleSchema = z.object({ role: z.string().min(1) })
-const toolNameSchema = z.enum([
-  "envoy_send",
-  "envoy_publish",
-  "envoy_subscribe",
-  "envoy_unsubscribe",
-  "envoy_list",
-  "envoy_whoami",
-  "envoy_sessions",
-  "envoy_role_set",
-])
+export const envoyMcpToolDefinitions = envoyToolSpecs.map((spec) => ({
+  name: spec.name,
+  description: spec.description,
+  inputSchema: z.toJSONSchema(z.object(spec.arguments)),
+}))
 
 class MissingClaudeSessionError extends Error {
   readonly name = "MissingClaudeSessionError"
@@ -55,84 +42,75 @@ function mcpResult(value: unknown): {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
 
-async function envoyPost(path: string, body: unknown): Promise<unknown> {
-  return ky
-    .post(new URL(path, process.env["ENVOY_URL"] ?? ENVOY_URL), {
-      json: body,
-      retry: 0,
-      timeout: 5_000,
-    })
-    .json<unknown>()
-}
-
-async function envoyGet(path: string): Promise<unknown> {
-  return ky
-    .get(new URL(path, process.env["ENVOY_URL"] ?? ENVOY_URL), {
-      retry: 0,
-      timeout: 5_000,
-    })
-    .json<unknown>()
-}
-
-async function executeEnvoyTool(name: string, input: unknown): Promise<unknown> {
+export async function executeEnvoyTool(name: string, input: unknown): Promise<unknown> {
   const sessionId = currentSessionId()
-  const toolName = toolNameSchema.parse(name)
+  const spec = envoyToolSpecs.find((candidate) => candidate.name === name)
+  if (!spec) {
+    throw new UnsupportedEnvoyToolError(name)
+  }
+  const client = createEnvoyClient({
+    baseUrl: envoyDefaultsFromEnvironment(process.env).envoyUrl,
+    fetch: globalThis.fetch,
+  })
 
-  switch (toolName) {
-    case "envoy_send": {
-      const args = sendSchema.parse(input)
-      return envoyPost("/v1/messages/send", { source_session: sessionId, ...args })
+  switch (spec.operation) {
+    case EnvoyToolOperation.send: {
+      const args = z.object(spec.arguments).parse(input)
+      return client.send({
+        sourceSessionID: sessionId,
+        targetSessionID: args.target_session,
+        message: args.message,
+      })
     }
-    case "envoy_publish": {
-      const args = publishSchema.parse(input)
-      return envoyPost("/v1/messages/publish", { source_session: sessionId, ...args })
+    case EnvoyToolOperation.publish: {
+      const args = z.object(spec.arguments).parse(input)
+      return client.publish({
+        sourceSessionID: sessionId,
+        topic: args.topic,
+        message: args.message,
+      })
     }
-    case "envoy_subscribe": {
-      const args = subscribeSchema.parse(input)
-      return envoyPost("/v1/interests/subscribe", {
-        session_id: sessionId,
-        dir: process.cwd(),
+    case EnvoyToolOperation.subscribe: {
+      const args = z.object(spec.arguments).parse(input)
+      return client.subscribe({
+        sessionID: sessionId,
+        directory: process.cwd(),
         topics: args.topics,
         port: 0,
         title: "",
         driving: true,
-        self_subscribed: true,
+        selfSubscribed: true,
       })
     }
-    case "envoy_unsubscribe": {
-      const args = unsubscribeSchema.parse(input)
-      return envoyPost("/v1/interests/unsubscribe", {
-        session_id: sessionId,
-        topics: args.topics ?? [],
-      })
+    case EnvoyToolOperation.unsubscribe: {
+      const args = z.object(spec.arguments).parse(input)
+      await client.unsubscribe({ sessionID: sessionId, topics: args.topics ?? [] })
+      return undefined
     }
-    case "envoy_list":
-      return envoyGet(`/v1/interests/${encodeURIComponent(sessionId)}`)
-    case "envoy_whoami":
+    case EnvoyToolOperation.listInterests:
+      z.object(spec.arguments).parse(input)
+      return client.getInterest(sessionId)
+    case EnvoyToolOperation.whoami:
+      z.object(spec.arguments).parse(input)
       return {
         session_id: sessionId,
         machine_id: process.env["HOSTNAME"] ?? "unknown",
         dir: process.cwd(),
       }
-    case "envoy_sessions": {
-      const args = sessionsSchema.parse(input)
-      const sessions = await envoyGet("/v1/sessions")
-      if (!args.machine || !Array.isArray(sessions)) {
+    case EnvoyToolOperation.listSessions: {
+      const args = z.object(spec.arguments).parse(input)
+      const sessions = await client.listSessions()
+      if (!args.machine) {
         return sessions
       }
-      return sessions.filter(
-        (session): boolean =>
-          typeof session === "object" &&
-          session !== null &&
-          Reflect.get(session, "machine_id") === args.machine,
-      )
+      return sessions.filter((session) => session.machine_id === args.machine)
     }
-    case "envoy_role_set": {
-      const args = roleSchema.parse(input)
-      return envoyPost("/v1/roles/set", { session_id: sessionId, ...args })
+    case EnvoyToolOperation.setRole: {
+      const args = z.object(spec.arguments).parse(input)
+      return client.setRole({ sessionID: sessionId, role: args.role })
     }
     default:
-      throw new UnsupportedEnvoyToolError(toolName)
+      throw new UnsupportedEnvoyToolError(name)
   }
 }
 
@@ -146,7 +124,7 @@ export async function runEnvoyMcpServer(): Promise<void> {
     },
   )
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: envoyToolDefinitions }))
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: envoyMcpToolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
     mcpResult(await executeEnvoyTool(request.params.name, request.params.arguments)),
   )
