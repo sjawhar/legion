@@ -6,12 +6,14 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
   pull_request:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
 
@@ -21,6 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       contracts: ${{ steps.filter.outputs.contracts }}
+      envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
@@ -32,11 +35,15 @@ jobs:
           filters: |
             contracts:
               - 'packages/contracts/**'
+            envoy_client:
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
             envoy:
               - 'packages/envoy/**'
               - 'packages/contracts/**'
             plugin:
               - 'packages/envoy-plugin/**'
+              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             claude_plugin:
               - 'packages/envoy-claude-plugin/**'
@@ -84,6 +91,30 @@ jobs:
         with:
           name: opencode-legion-envoy-plugin-pr
           path: out/pr-artifacts/*.tgz
+
+  envoy-client:
+    needs: changes
+    if: needs.changes.outputs.envoy_client == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build contracts for Envoy client
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Lint Envoy client
+        run: bun run lint
+        working-directory: packages/envoy-client
+      - name: Typecheck Envoy client
+        run: bun run typecheck
+        working-directory: packages/envoy-client
+      - name: Test Envoy client
+        run: bun run test
+        working-directory: packages/envoy-client
+      - name: Build Envoy client
+        run: bun run build
+        working-directory: packages/envoy-client
 
   envoy-claude-plugin:
     needs: changes

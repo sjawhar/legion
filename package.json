@@ -6,6 +6,7 @@
   "private": true,
   "workspaces": [
     "packages/contracts",
+    "packages/envoy-client",
     "packages/daemon",
     "packages/envoy-plugin",
     "packages/envoy-claude-plugin",
