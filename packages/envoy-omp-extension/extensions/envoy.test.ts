@@ -40,10 +40,15 @@ type Subscription = {
 const natsState = {
   subscriptions: new Map<string, Subscription>(),
   connectedNames: [] as string[],
+  failConnects: 0,
 };
 
 mock.module("nats", () => ({
   connect: async ({ name }: { readonly name: string }) => {
+    if (natsState.failConnects > 0) {
+      natsState.failConnects -= 1;
+      throw new Error("CONNECTION_REFUSED");
+    }
     natsState.connectedNames.push(name);
     return {
       isClosed: () => false,
@@ -72,6 +77,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   natsState.connectedNames.length = 0;
   natsState.subscriptions.clear();
+  natsState.failConnects = 0;
 });
 
 function createPi() {
@@ -203,5 +209,39 @@ describe("envoy OMP extension", () => {
       session_id: "ses_whoami",
       dir: "/tmp/envoy-omp-test",
     });
+  });
+
+  test("retries NATS in the background when the initial connection fails", async () => {
+    natsState.failConnects = 1;
+    const notifications: string[] = [];
+    const intervals: { callback: () => void; intervalMs: number }[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { getSessionId: () => "ses_retry" },
+      setInterval: (callback, intervalMs) => intervals.push({ callback, intervalMs }),
+      ui: { notify: (message) => notifications.push(message) },
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?retry");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    expect(notifications[0]).toContain("retrying in the background");
+    expect(natsState.subscriptions.has("notifications.agent.ses_retry")).toBe(false);
+    const retry = intervals[0];
+    if (retry === undefined) throw new Error("retry interval was not registered");
+
+    retry.callback();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(natsState.subscriptions.has("notifications.agent.ses_retry")).toBe(true);
+    expect(notifications[1]).toContain("NATS connection established");
+    const connectionsAfterRecovery = natsState.connectedNames.length;
+
+    retry.callback();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(natsState.connectedNames.length).toBe(connectionsAfterRecovery);
   });
 });
