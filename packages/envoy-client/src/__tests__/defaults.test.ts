@@ -19,7 +19,7 @@ describe("envoyDefaultsFromEnvironment", () => {
   test("uses protocol defaults when environment values are absent or invalid", () => {
     expect(envoyDefaultsFromEnvironment({ ENVOY_HEARTBEAT_MS: "not-a-number" })).toEqual({
       envoyUrl: "http://127.0.0.1:9020",
-      natsUrls: ["nats://127.0.0.1:4222"],
+      natsUrls: ["nats://envoy-nats:4222"],
       heartbeatMs: 120_000,
     });
   });

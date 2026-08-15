@@ -1,5 +1,8 @@
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-const DEFAULT_NATS_URL = "nats://127.0.0.1:4222";
+// NATS lives on the tailnet host `envoy-nats`, not on each machine. The
+// pre-consolidation OMP extension defaulted to this URL; a localhost default
+// silently breaks inbound delivery for every session that omits ENVOY_NATS_URL.
+const DEFAULT_NATS_URL = "nats://envoy-nats:4222";
 const DEFAULT_HEARTBEAT_MS = 120_000;
 const MIN_HEARTBEAT_MS = 25;
 

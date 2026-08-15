@@ -45,6 +45,7 @@ type PiApi = {
 };
 
 const codec = StringCodec();
+const NATS_RETRY_INTERVAL_MS = 15_000;
 
 export default function envoyExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
@@ -58,7 +59,15 @@ export default function envoyExtension(pi: PiApi): void {
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
-    connection = await connect({ servers: [...defaults.natsUrls], name: `omp-${sessionID || "unknown"}` });
+    connection = await connect({
+      servers: [...defaults.natsUrls],
+      name: `omp-${sessionID || "unknown"}`,
+      // Survive NATS drops after the first connection: nats.js re-subscribes
+      // existing subscriptions on its own once reconnected.
+      reconnect: true,
+      maxReconnectAttempts: -1,
+      reconnectTimeWait: 2_000,
+    });
     return connection;
   };
 
@@ -113,15 +122,36 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("session_start", async (_event, context) => {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
-    try {
+    let established = false;
+    const establish = async (): Promise<void> => {
       await ensureConnection();
       await subscribe(agentSubject(sessionID));
       if (process.env.ENVOY_REGISTER_SESSION === "1") {
         await registerSession(context);
         context.setInterval(() => void registerSession(context), defaults.heartbeatMs);
       }
+      established = true;
+    };
+    try {
+      await establish();
     } catch (error) {
-      context.ui.notify(`envoy: NATS unavailable (${messageFor(error)})`, "warning");
+      context.ui.notify(
+        `envoy: NATS unavailable (${messageFor(error)}); retrying in the background`,
+        "warning",
+      );
+      let attempting = false;
+      context.setInterval(() => {
+        if (established || attempting) return;
+        attempting = true;
+        void establish()
+          .then(() => context.ui.notify("envoy: NATS connection established", "warning"))
+          // Quiet on purpose: the initial warning disclosed the outage, and a
+          // fresh warning every retry tick would spam the session.
+          .catch(() => undefined)
+          .finally(() => {
+            attempting = false;
+          });
+      }, NATS_RETRY_INTERVAL_MS);
     }
   });
 
