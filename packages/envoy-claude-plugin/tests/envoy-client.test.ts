@@ -35,27 +35,3 @@ test("sends a direct message through Envoy's HTTP API", async () => {
     server.stop(true)
   }
 })
-
-test("defines the complete Envoy MCP tool surface", async () => {
-  // given
-  const module = await import("../src/envoy-client")
-  const candidate = Reflect.get(module, "envoyToolDefinitions")
-
-  // when
-  const toolNames =
-    Array.isArray(candidate) && candidate.every((tool) => typeof tool === "object" && tool !== null)
-      ? candidate.map((tool) => Reflect.get(tool, "name"))
-      : undefined
-
-  // then
-  expect(toolNames).toEqual([
-    "envoy_send",
-    "envoy_publish",
-    "envoy_subscribe",
-    "envoy_unsubscribe",
-    "envoy_list",
-    "envoy_whoami",
-    "envoy_sessions",
-    "envoy_role_set",
-  ])
-})

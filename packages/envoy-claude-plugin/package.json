@@ -22,6 +22,8 @@
     "lint": "bunx biome check src/"
   },
   "dependencies": {
+    "@legion/contracts": "workspace:*",
+    "@legion/envoy-client": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ky": "^2.0.2",
     "nats": "^2.29.2",
