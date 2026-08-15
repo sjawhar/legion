@@ -5,7 +5,6 @@ import { z } from "zod"
 import { monitorSessionId } from "./monitor-identity"
 import { subscriptionTopics } from "./subscription-topics"
 
-const NATS_URL = "nats://envoy-nats:4222"
 const EnvoyEnvelopeSchema = z.object({ payload_summary: z.string().min(1) })
 
 type NativeMessageInput = {
@@ -90,8 +89,16 @@ export async function runEnvoyMonitor(): Promise<void> {
     sessionId,
     additionalTopics: process.env["ENVOY_TOPICS"],
   })
+  const natsUrl = process.env["ENVOY_NATS_URL"]
+  if (natsUrl === undefined || natsUrl.trim().length === 0) {
+    // The broker's location is deployment configuration; there is no default.
+    process.stderr.write(
+      "envoy monitor: ENVOY_NATS_URL is not set; inbound envoy messages are disabled\n",
+    )
+    return
+  }
   const connection = await connect({
-    servers: process.env["ENVOY_NATS_URL"] ?? NATS_URL,
+    servers: natsUrl,
     name: `claude-envoy-${sessionId}`,
   })
   const codec = StringCodec()

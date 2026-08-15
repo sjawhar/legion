@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { z } from "zod";
 
@@ -73,7 +73,15 @@ mock.module("nats", () => ({
 
 const originalFetch = globalThis.fetch;
 
+const originalNatsUrl = process.env.ENVOY_NATS_URL;
+
+beforeEach(() => {
+  process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
+});
+
 afterEach(() => {
+  if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
+  else process.env.ENVOY_NATS_URL = originalNatsUrl;
   globalThis.fetch = originalFetch;
   natsState.connectedNames.length = 0;
   natsState.subscriptions.clear();
@@ -209,6 +217,28 @@ describe("envoy OMP extension", () => {
       session_id: "ses_whoami",
       dir: "/tmp/envoy-omp-test",
     });
+  });
+
+  test("disables inbound messaging loudly when ENVOY_NATS_URL is unset", async () => {
+    delete process.env.ENVOY_NATS_URL;
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { getSessionId: () => "ses_unconfigured" },
+      setInterval: (callback) => intervals.push(callback),
+      ui: { notify: (message) => notifications.push(message) },
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?unconfigured");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    expect(notifications[0]).toContain("ENVOY_NATS_URL is not set");
+    expect(natsState.connectedNames.length).toBe(0);
+    expect(intervals.length).toBe(0);
+    expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
   });
 
   test("retries NATS in the background when the initial connection fails", async () => {

@@ -1,8 +1,9 @@
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-// NATS lives on the tailnet host `envoy-nats`, not on each machine. The
-// pre-consolidation OMP extension defaulted to this URL; a localhost default
-// silently breaks inbound delivery for every session that omits ENVOY_NATS_URL.
-const DEFAULT_NATS_URL = "nats://envoy-nats:4222";
+// There is deliberately no NATS default: the broker's location is deployment
+// configuration (this fleet sets ENVOY_NATS_URL in the shared shell env), and
+// any baked-in value silently misroutes every deployment it doesn't match.
+// An empty natsUrls means "inbound messaging not configured" - consumers must
+// degrade loudly instead of dialing an invented address.
 const DEFAULT_HEARTBEAT_MS = 120_000;
 const MIN_HEARTBEAT_MS = 25;
 
@@ -22,15 +23,16 @@ export function envoyDefaultsFromEnvironment(environment: EnvoyEnvironment): Env
       ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
       : DEFAULT_HEARTBEAT_MS;
   // biome-ignore lint/complexity/useLiteralKeys: index signatures require bracket access.
-  const natsUrls = environment["ENVOY_NATS_URL"]
-    ?.split(",")
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0) ?? [DEFAULT_NATS_URL];
+  const natsUrls =
+    environment["ENVOY_NATS_URL"]
+      ?.split(",")
+      .map((url) => url.trim())
+      .filter((url) => url.length > 0) ?? [];
 
   return {
     // biome-ignore lint/complexity/useLiteralKeys: index signatures require bracket access.
     envoyUrl: normalizeEnvoyUrl(environment["ENVOY_URL"] ?? DEFAULT_ENVOY_URL),
-    natsUrls: natsUrls.length > 0 ? natsUrls : [DEFAULT_NATS_URL],
+    natsUrls,
     heartbeatMs,
   };
 }
