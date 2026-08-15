@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@legion/contracts": [
+        "../contracts/src/index.ts"
+      ],
+      "@legion/envoy-client/defaults": [
+        "../envoy-client/src/defaults.ts"
+      ],
+      "@legion/envoy-client/display": [
+        "../envoy-client/src/display.ts"
+      ],
+      "@legion/envoy-client/tool-contract": [
+        "../envoy-client/src/tool-contract.ts"
+      ],
+      "@legion/envoy-client/transport": [
+        "../envoy-client/src/transport.ts"
+      ]
+    },
+    "strict": true,
+    "noEmit": true,
+    "types": [
+      "bun"
+    ],
+    "skipLibCheck": true
+  },
+  "include": [
+    "extensions/envoy.ts"
+  ]
+}

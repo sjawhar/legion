@@ -5,6 +5,7 @@
   "type": "module",
   "files": [
     ".claude-plugin/**",
+    ".mcp.json",
     "bin/**",
     "monitors/**",
     "src/**",
@@ -21,6 +22,7 @@
     "lint": "bunx biome check src/"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "ky": "^2.0.2",
     "nats": "^2.29.2",
     "zod": "^4.0.0"

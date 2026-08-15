@@ -22,6 +22,8 @@
     "lint": "bunx biome check src/"
   },
   "dependencies": {
+    "@legion/contracts": "workspace:*",
+    "@legion/envoy-client": "workspace:*",
     "@opencode-ai/plugin": "~1.14.46"
   },
   "peerDependencies": {

@@ -1,3 +1,7 @@
+import { agentSubject } from "@legion/contracts";
+import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { tool } from "@opencode-ai/plugin/tool";
 import { loadEnvoyConfig } from "./config";
 import { buildDispatchMcpEntry, injectEnvoyMcp } from "./dispatch-mcp";
@@ -5,24 +9,22 @@ import { dispatchSubscriptionTopic } from "./dispatch-subscribe";
 import { logger } from "./log";
 import { resolvePort } from "./port";
 
-const root = process.env.ENVOY_URL ?? "http://127.0.0.1:9020";
-
-/** HTTP timeout for Envoy calls — prevent hanging when NATS/Envoy is unavailable. */
-const CALL_TIMEOUT_MS = 5_000;
-
-async function call(path: string, init?: RequestInit) {
-  const res = await fetch(`${root}${path}`, {
-    ...init,
-    signal: init?.signal ?? AbortSignal.timeout(CALL_TIMEOUT_MS),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(text || `${res.status}`);
-  return text;
-}
+const [
+  subscribeSpec,
+  unsubscribeSpec,
+  listSpec,
+  sendSpec,
+  publishSpec,
+  roleSetSpec,
+  whoamiSpec,
+  sessionsSpec,
+] = envoyToolSpecs;
 
 export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
   const config = await loadEnvoyConfig(cwd);
+  const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
+  const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
   let activeSessionID: string | null = null;
   let activeSessionTitle: string | null = null;
   // All sessions that have become busy in this serve instance. The heartbeat
@@ -61,7 +63,7 @@ export default async (input: { serverUrl: URL }) => {
   const fetchTitle = async (sessionID: string): Promise<string | null> => {
     try {
       const res = await fetch(`${input.serverUrl.href}session/${sessionID}`, {
-        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+        signal: AbortSignal.timeout(5_000),
       });
       if (!res.ok) return null;
       const data = (await res.json()) as { title?: string };
@@ -92,18 +94,16 @@ export default async (input: { serverUrl: URL }) => {
     port: number,
     driving: boolean
   ) =>
-    call("/v1/interests/subscribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: sessionID,
-        dir: cwd,
-        topics: [`notifications.agent.${sessionID}`],
+    envoy
+      .subscribe({
+        sessionID,
+        directory: cwd,
+        topics: [agentSubject(sessionID)],
         port,
         title: title ?? "",
         driving,
-      }),
-    }).catch(() => {});
+      })
+      .catch(() => {});
 
   // A process registers ONLY the sessions it has actually run (see the busy
   // handler below). It must never claim a route for a session it merely has
@@ -119,11 +119,7 @@ export default async (input: { serverUrl: URL }) => {
   // Heartbeat: re-subscribe every tracked session to refresh the envoy_sessions
   // TTL (5-min). Refreshes ALL sessions that have been busy in this serve, not
   // just the most recently active one. Interval is env-tunable for tests/tuning.
-  const rawHeartbeatMs = Number(process.env.ENVOY_HEARTBEAT_MS);
-  const heartbeatMs =
-    Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
-      ? Math.max(rawHeartbeatMs, 25)
-      : 2 * 60 * 1000;
+  const heartbeatMs = envoyDefaults.heartbeatMs;
   const heartbeatInterval = setInterval(() => {
     const port = currentPort();
     if (!port) return;
@@ -214,11 +210,7 @@ export default async (input: { serverUrl: URL }) => {
             activeSessionTitle = null;
           }
           // Best-effort: drop the deleted session's interests so routing stops.
-          call("/v1/interests/unsubscribe", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ session_id: deletedID, topics: [] }),
-          }).catch(() => {});
+          envoy.unsubscribe({ sessionID: deletedID, topics: [] }).catch(() => {});
         }
       }
     },
@@ -233,18 +225,13 @@ export default async (input: { serverUrl: URL }) => {
       const topic = dispatchSubscriptionTopic(input.tool, output.output);
       if (!topic) return;
       try {
-        await call("/v1/interests/subscribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: input.sessionID,
-            dir: cwd,
-            topics: [topic],
-            port: currentPort() ?? 0,
-            title: activeSessionTitle ?? "",
-            // A tool call runs in this process, so it is the driving holder.
-            driving: true,
-          }),
+        await envoy.subscribe({
+          sessionID: input.sessionID,
+          directory: cwd,
+          topics: [topic],
+          port: currentPort() ?? 0,
+          title: activeSessionTitle ?? "",
+          driving: true,
         });
       } catch (err) {
         logger.warn(
@@ -259,132 +246,77 @@ export default async (input: { serverUrl: URL }) => {
     },
     tool: {
       envoy_subscribe: tool({
-        description:
-          "Subscribe this session to Envoy notification topics. GitHub topics are resource-scoped: notifications.github.<owner>.<repo>.pr.<number>, notifications.github.<owner>.<repo>.issue.<number>.comment, etc. Use NATS wildcards for broad subscriptions: notifications.github.<owner>.<repo>.pr.> (all PR events). Other topics: notifications.agent.<session_id>, notifications.slack.<team_id>.<channel_id>.message, notifications.slack.<team_id>.<channel_id>.mention. Use this when a session should RECEIVE future events.",
-        args: {
-          topics: tool.schema
-            .array(tool.schema.string())
-            .describe(
-              "NATS-style topic patterns to subscribe to. GitHub topics include resource number: notifications.github.owner.repo.pr.123 (PR state), notifications.github.owner.repo.pr.123.comment (PR comments), notifications.github.owner.repo.issue.456.> (all events on issue). Use > wildcard for broad matching. Other examples: notifications.agent.ses_123, notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention"
-            ),
-        },
+        description: subscribeSpec.description,
+        args: { topics: tool.schema.array(tool.schema.string()) },
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy subscribe" });
-          return call("/v1/interests/subscribe", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              session_id: ctx.sessionID,
-              dir: ctx.directory,
+          return JSON.stringify(
+            await envoy.subscribe({
+              sessionID: ctx.sessionID,
+              directory: ctx.directory,
               topics: args.topics,
               port: currentPort() ?? 0,
               title: activeSessionTitle ?? "",
               driving: true,
-            }),
-          });
+            })
+          );
         },
       }),
       envoy_unsubscribe: tool({
-        description:
-          "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted.",
-        args: {
-          topics: tool.schema
-            .array(tool.schema.string())
-            .optional()
-            .describe("Topics to remove, or omit to remove all"),
-        },
+        description: unsubscribeSpec.description,
+        args: { topics: tool.schema.array(tool.schema.string()).optional() },
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy unsubscribe" });
-          return call("/v1/interests/unsubscribe", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              session_id: ctx.sessionID,
-              topics: args.topics ?? [],
-            }),
-          });
+          await envoy.unsubscribe({ sessionID: ctx.sessionID, topics: args.topics ?? [] });
+          return "ok";
         },
       }),
       envoy_list: tool({
-        description:
-          "List the current Envoy topic subscriptions for this session so you can confirm the exact topic shapes that are active.",
+        description: listSpec.description,
         args: {},
         async execute(_args, ctx) {
           ctx.metadata({ title: "Envoy list" });
-          return call(`/v1/interests/${ctx.sessionID}`);
+          return JSON.stringify(await envoy.getInterest(ctx.sessionID));
         },
       }),
       envoy_send: tool({
-        description:
-          "Send an Envoy agent-to-agent message directly to another session by session ID. Use this for coordination between agents or to notify a known controller/worker session. This is for SEND, not subscription.",
-        args: {
-          target_session: tool.schema
-            .string()
-            .describe("Target OpenCode session ID, e.g. ses_2e6ca3034ffejVikSZ8mDwk0mR"),
-          message: tool.schema
-            .string()
-            .describe("Message body to deliver to that session as a new user turn/notification"),
-        },
+        description: sendSpec.description,
+        args: { target_session: tool.schema.string(), message: tool.schema.string() },
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy send" });
-          return call("/v1/messages/send", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              source_session: ctx.sessionID,
-              target_session: args.target_session,
+          return JSON.stringify(
+            await envoy.send({
+              sourceSessionID: ctx.sessionID,
+              targetSessionID: args.target_session,
               message: args.message,
-            }),
-          });
+            })
+          );
         },
       }),
       envoy_publish: tool({
-        description:
-          "Publish an Envoy message to any topic. Use for broadcast to named topics like notifications.role.legion-controller, team channels, or custom routing. Subscribers matching the topic will receive the message. This is for BROADCAST, not session-targeted delivery (use envoy_send for that).",
-        args: {
-          topic: tool.schema
-            .string()
-            .describe("NATS-style topic to publish to, e.g. notifications.role.legion-controller"),
-          message: tool.schema.string().describe("Message body to broadcast"),
-        },
+        description: publishSpec.description,
+        args: { topic: tool.schema.string(), message: tool.schema.string() },
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy publish" });
-          return call("/v1/messages/publish", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              source_session: ctx.sessionID,
+          return JSON.stringify(
+            await envoy.publish({
+              sourceSessionID: ctx.sessionID,
               topic: args.topic,
               message: args.message,
-            }),
-          });
+            })
+          );
         },
       }),
       envoy_role_set: tool({
-        description:
-          "Set the current session as the holder of a named role. Messages published to notifications.role.<role> will route to this session. Only one session holds a role at a time — claiming it removes it from the previous holder.",
-        args: {
-          role: tool.schema
-            .string()
-            .describe(
-              "Role name to claim (lowercase alphanumeric, hyphens, underscores). E.g. opencode-dev, legion-controller, legion-po"
-            ),
-        },
+        description: roleSetSpec.description,
+        args: { role: tool.schema.string() },
         async execute(args, ctx) {
           ctx.metadata({ title: "Set Envoy role" });
-          return call("/v1/roles/set", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              session_id: ctx.sessionID,
-              role: args.role,
-            }),
-          });
+          return JSON.stringify(await envoy.setRole({ sessionID: ctx.sessionID, role: args.role }));
         },
       }),
       envoy_whoami: tool({
-        description:
-          "Returns this session's Envoy identity: session ID, machine ID, port, and directory.",
+        description: whoamiSpec.description,
         args: {},
         async execute(_args, ctx) {
           ctx.metadata({ title: "Envoy whoami" });
@@ -403,25 +335,15 @@ export default async (input: { serverUrl: URL }) => {
         },
       }),
       envoy_sessions: tool({
-        description:
-          "List all live sessions registered with Envoy. Returns session ID, machine ID, port, directory, title, topics, and last-seen timestamp for each. Use the optional machine filter to show only sessions on a specific host.",
-        args: {
-          machine: tool.schema
-            .string()
-            .optional()
-            .describe(
-              "Filter to sessions on this machine ID (e.g. hostname). Omit to list all machines."
-            ),
-        },
+        description: sessionsSpec.description,
+        args: { machine: tool.schema.string().optional() },
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy sessions" });
-          const res = await call("/v1/sessions");
-          if (!args.machine) return res;
-          const sessions = JSON.parse(res) as Array<{
-            machine_id: string;
-          }>;
+          const sessions = await envoy.listSessions();
           return JSON.stringify(
-            sessions.filter((s) => s.machine_id === args.machine),
+            args.machine
+              ? sessions.filter((session) => session.machine_id === args.machine)
+              : sessions,
             null,
             2
           );

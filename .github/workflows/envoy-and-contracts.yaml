@@ -6,14 +6,18 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
+      - "packages/envoy-omp-extension/**"
   pull_request:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
+      - "packages/envoy-omp-extension/**"
 
 jobs:
   # Detect which packages actually changed to skip unnecessary jobs.
@@ -21,9 +25,11 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       contracts: ${{ steps.filter.outputs.contracts }}
+      envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
+      envoy_omp_extension: ${{ steps.filter.outputs.envoy_omp_extension }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -32,14 +38,21 @@ jobs:
           filters: |
             contracts:
               - 'packages/contracts/**'
+            envoy_client:
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
             envoy:
               - 'packages/envoy/**'
               - 'packages/contracts/**'
             plugin:
               - 'packages/envoy-plugin/**'
+              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             claude_plugin:
               - 'packages/envoy-claude-plugin/**'
+              - 'packages/contracts/**'
+            envoy_omp_extension:
+              - 'packages/envoy-omp-extension/**'
               - 'packages/contracts/**'
 
   contracts:
@@ -85,6 +98,54 @@ jobs:
           name: opencode-legion-envoy-plugin-pr
           path: out/pr-artifacts/*.tgz
 
+  envoy-client:
+    needs: changes
+    if: needs.changes.outputs.envoy_client == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build contracts for Envoy client
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Lint Envoy client
+        run: bun run lint
+        working-directory: packages/envoy-client
+      - name: Typecheck Envoy client
+        run: bun run typecheck
+        working-directory: packages/envoy-client
+      - name: Test Envoy client
+        run: bun run test
+        working-directory: packages/envoy-client
+      - name: Build Envoy client
+        run: bun run build
+        working-directory: packages/envoy-client
+
+  envoy-omp-extension:
+    needs: changes
+    if: needs.changes.outputs.envoy_omp_extension == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build contracts for envoy-omp-extension
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Lint envoy-omp-extension
+        run: bun run lint
+        working-directory: packages/envoy-omp-extension
+      - name: Typecheck envoy-omp-extension
+        run: bun run typecheck
+        working-directory: packages/envoy-omp-extension
+      - name: Test envoy-omp-extension
+        run: bun run test
+        working-directory: packages/envoy-omp-extension
+      - name: Build envoy-omp-extension
+        run: bun run build
+        working-directory: packages/envoy-omp-extension
+
   envoy-claude-plugin:
     needs: changes
     if: needs.changes.outputs.claude_plugin == 'true'
@@ -122,7 +183,7 @@ jobs:
         run: bun run gen:go
         working-directory: packages/contracts
       - name: Unit test envoy Go package
-        run: go test $(go list ./... | grep -v /integration)
+        run: go list ./... | grep -v /integration | xargs go test
         working-directory: packages/envoy
       - name: Integration test envoy (testcontainers + NATS)
         run: go test ./internal/integration/ -timeout 300s -count=1

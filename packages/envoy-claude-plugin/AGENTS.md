@@ -25,7 +25,9 @@ CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
   changes are needed.
 - Keep direct subscription to `notifications.agent.<session-id>`; do not add Envoy listener
   registry registration to this package.
-- Set `ENVOY_SESSION_ID` for a stable direct route. The fallback identity changes on restart.
+- The monitor uses `CLAUDE_CODE_SESSION_ID` for its direct route. Set `ENVOY_SESSION_ID` only
+  to explicitly override that identity for controlled QA; without either identity, the monitor
+  exits with an error rather than subscribing to a made-up route.
 - Preserve one stdout line per inbound message because Claude Code consumes Monitor output as
   events.
 

@@ -1,0 +1,28 @@
+{
+  "name": "@legion/envoy-omp-extension",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./envoy": {
+      "types": "./extensions/envoy.ts",
+      "default": "./dist/envoy.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome lint extensions/"
+  },
+  "dependencies": {
+    "@legion/contracts": "workspace:*",
+    "@legion/envoy-client": "workspace:*",
+    "nats": "^2.29.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0",
+    "zod": "^4.1.8"
+  }
+}

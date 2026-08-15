@@ -71,6 +71,7 @@ legion handoff write|read|message    # Workers: write/read structured handoff da
 | Envoy event routing    | `packages/envoy/`                             | See @packages/envoy/AGENTS.md             |
 | Shared event contracts | `packages/contracts/`                         | See @packages/contracts/AGENTS.md         |
 | Envoy OpenCode bridge  | `packages/envoy-plugin/`                      | See @packages/envoy-plugin/AGENTS.md      |
+| Envoy OMP adapter      | `packages/envoy-omp-extension/`               | See @packages/envoy-omp-extension/AGENTS.md |
 
 ## Conventions
 
