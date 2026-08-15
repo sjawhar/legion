@@ -1,0 +1,14 @@
+{
+  "name": "legion-plugins",
+  "owner": {
+    "name": "Sami Jawhar"
+  },
+  "description": "Claude Code plugins for Legion.",
+  "plugins": [
+    {
+      "name": "claude-envoy-bridge",
+      "source": "./packages/envoy-claude-plugin",
+      "description": "Delivers Envoy NATS notifications into Claude Code."
+    }
+  ]
+}
