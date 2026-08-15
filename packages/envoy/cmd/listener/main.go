@@ -189,10 +189,16 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 				}
 			}
 			if result.Delivered {
-				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "delivered"})
-				cfg.messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
+				deliveryStatus := "delivered"
+				deliveryLog := "listener agent delivered"
+				if result.Skipped {
+					deliveryStatus = "skipped"
+					deliveryLog = "listener agent skipped push"
+				}
+				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", deliveryStatus})
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", deliveryStatus})
 				cfg.dedupeCache.Record(item.DedupeKey, sessionID)
-				cfg.logger.DeliveryLog(slog.LevelInfo, "listener agent delivered", sessionID, item.Topic, item.EventID, "delivered")
+				cfg.logger.DeliveryLog(slog.LevelInfo, deliveryLog, sessionID, item.Topic, item.EventID, deliveryStatus)
 			} else if result.Err == nil {
 				if isControlTopic(item.Topic) && !isExceptionsTopic(item.Topic) {
 					if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
@@ -248,7 +254,8 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 			}
 			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 			deliveryTimer := metrics.NewTimer()
-			if err := cfg.deliverer.Deliver(item, interest); err != nil {
+			delivery, err := cfg.deliverer.DeliverWithResult(item, interest)
+			if err != nil {
 				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "failed"})
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
 				cfg.logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
@@ -267,8 +274,12 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 					}
 				}
 			} else {
-				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", "delivered"})
-				cfg.messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
+				deliveryStatus := "delivered"
+				if delivery.Skipped {
+					deliveryStatus = "skipped"
+				}
+				deliveryTimer.ObserveDuration(cfg.deliveryDuration, [2]string{"delivery_status", deliveryStatus})
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", deliveryStatus})
 				cfg.dedupeCache.Record(item.DedupeKey, interest.SessionID)
 			}
 		}
@@ -434,13 +445,14 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 // sessionInfo is the joined view of an Interest (topics, dir, machine) and a
 // SessionEntry (port). Returned by GET /v1/sessions.
 type sessionInfo struct {
-	SessionID string   `json:"session_id"`
-	MachineID string   `json:"machine_id"`
-	Dir       string   `json:"dir"`
-	Port      int      `json:"port"`
-	Title     string   `json:"title"`
-	Topics    []string `json:"topics"`
-	UpdatedAt int64    `json:"updated_at"`
+	SessionID      string   `json:"session_id"`
+	MachineID      string   `json:"machine_id"`
+	Dir            string   `json:"dir"`
+	Port           int      `json:"port"`
+	Title          string   `json:"title"`
+	SelfSubscribed bool     `json:"self_subscribed"`
+	Topics         []string `json:"topics"`
+	UpdatedAt      int64    `json:"updated_at"`
 }
 
 // sessionsHandler returns all live sessions by iterating the session registry
@@ -464,12 +476,13 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 		result := make([]sessionInfo, 0, len(entries))
 		for _, entry := range entries {
 			info := sessionInfo{
-				SessionID: entry.SessionID,
-				MachineID: entry.MachineID,
-				Dir:       entry.Dir,
-				Port:      entry.Port,
-				Title:     entry.Title,
-				UpdatedAt: entry.UpdatedAt,
+				SessionID:      entry.SessionID,
+				MachineID:      entry.MachineID,
+				Dir:            entry.Dir,
+				Port:           entry.Port,
+				Title:          entry.Title,
+				SelfSubscribed: entry.SelfSubscribed,
+				UpdatedAt:      entry.UpdatedAt,
 			}
 			if registry != nil {
 				if interest, err := registry.Get(entry.SessionID); err == nil {
@@ -558,6 +571,46 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(item)
+	}
+}
+
+func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body subscribeBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
+		d := state.Load()
+		item, err := d.registry.Upsert(store.Interest{
+			SessionID: body.SessionID,
+			MachineID: machineID,
+			Dir:       body.Dir,
+		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
+		if err != nil {
+			// WARN, not Error: this is a transient condition (typically a NATS/KV
+			// hiccup during heartbeat) and the plugin's next 2-min heartbeat will
+			// retry. Logged at WARN so subscription-drop incidents are greppable
+			// in one shot instead of requiring 2-hour log forensics.
+			logger.Warn("listener upsert failed",
+				slog.String("session_id", body.SessionID),
+				slog.Any("topics", body.Topics),
+				slog.String("error", err.Error()))
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if body.Port > 0 || body.SelfSubscribed {
+			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
+				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(item)
@@ -720,43 +773,7 @@ func main() {
 	// /v1/* routes on a sub-mux, gated by a single readiness middleware.
 	v1 := http.NewServeMux()
 
-	v1.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body subscribeBody
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.String("dir", body.Dir))
-		d := deps.Load()
-		item, err := d.registry.Upsert(store.Interest{
-			SessionID: body.SessionID,
-			MachineID: cfg.MachineID,
-			Dir:       body.Dir,
-		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
-		if err != nil {
-			// WARN, not Error: this is a transient condition (typically a NATS/KV
-			// hiccup during heartbeat) and the plugin's next 2-min heartbeat will
-			// retry. Logged at WARN so subscription-drop incidents are greppable
-			// in one shot instead of requiring 2-hour log forensics.
-			logger.Warn("listener upsert failed",
-				slog.String("session_id", body.SessionID),
-				slog.Any("topics", body.Topics),
-				slog.String("error", err.Error()))
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		if body.Port > 0 {
-			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, cfg.MachineID)); err != nil {
-				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(item)
-	})
+	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(&deps, cfg.MachineID, logger))
 	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

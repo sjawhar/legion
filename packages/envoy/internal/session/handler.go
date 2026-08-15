@@ -10,6 +10,7 @@ import (
 // HandleAgentResult captures the outcome of agent message handling.
 type HandleAgentResult struct {
 	Delivered bool
+	Skipped   bool
 	ShouldNAK bool
 	Err       error
 }
@@ -27,19 +28,21 @@ func HandleAgentMessage(
 ) HandleAgentResult {
 	// Interest path: direct delivery if interest matches this machine
 	if interest != nil && interest.MachineID == machineID {
-		if err := deliverer.Deliver(item, *interest); err != nil {
+		delivery, err := deliverer.DeliverWithResult(item, *interest)
+		if err != nil {
 			if errors.Is(err, ErrWrongMachine) {
 				return HandleAgentResult{Delivered: false}
 			}
 			return HandleAgentResult{ShouldNAK: true, Err: err}
 		}
-		return HandleAgentResult{Delivered: true}
+		return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
 	}
 
 	// No interest on this machine — try delivery via session registry directly.
 	// The session registry (KV) resolves the port/machine.
 	synth := store.Interest{SessionID: sessionID, MachineID: machineID}
-	if err := deliverer.Deliver(item, synth); err != nil {
+	delivery, err := deliverer.DeliverWithResult(item, synth)
+	if err != nil {
 		if errors.Is(err, ErrWrongMachine) {
 			return HandleAgentResult{Delivered: false}
 		}
@@ -47,5 +50,5 @@ func HandleAgentMessage(
 		// another listener may own this session.
 		return HandleAgentResult{Delivered: false}
 	}
-	return HandleAgentResult{Delivered: true}
+	return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
 }

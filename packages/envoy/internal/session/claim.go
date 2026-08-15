@@ -17,6 +17,7 @@ const claimStaleAfter = 5 * time.Minute
 // Precedence, in order:
 //   - a transient KV error is returned so the caller refuses to write
 //   - no incumbent, or the same process re-claiming: accept
+//   - a portless claim cannot displace a live portful route
 //   - a driving claim always wins (beats a non-driving incumbent; a newer
 //     driving claim beats an older one, which is a genuine re-home)
 //   - a non-driving claim cannot displace a live driving incumbent; it may take
@@ -24,6 +25,9 @@ const claimStaleAfter = 5 * time.Minute
 func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64) (SessionEntry, error) {
 	if curErr != nil && !errors.Is(curErr, nats.ErrKeyNotFound) {
 		return SessionEntry{}, curErr
+	}
+	if curErr == nil && next.Port == 0 && cur.Port > 0 && !claimStale(cur, now) {
+		return cur, nil
 	}
 	if curErr == nil && next.Port != cur.Port && !next.Driving && cur.Driving && !claimStale(cur, now) {
 		return cur, nil

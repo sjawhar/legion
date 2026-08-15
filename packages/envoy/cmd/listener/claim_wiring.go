@@ -14,15 +14,17 @@ type subscribeBody struct {
 	// rather than a process that merely has it loaded from shared on-disk state.
 	// Absent (older plugins) means "not driving", which is the safe default: a
 	// claim without the flag cannot displace a live driving claim.
-	Driving bool `json:"driving"`
+	Driving        bool `json:"driving"`
+	SelfSubscribed bool `json:"self_subscribed"`
 }
 
 func sessionEntryFromSubscribe(body subscribeBody, machineID string) session.SessionEntry {
 	return session.SessionEntry{
-		Port:      body.Port,
-		MachineID: machineID,
-		Dir:       body.Dir,
-		Title:     body.Title,
-		Driving:   body.Driving,
+		Port:           body.Port,
+		MachineID:      machineID,
+		Dir:            body.Dir,
+		Title:          body.Title,
+		Driving:        body.Driving,
+		SelfSubscribed: body.SelfSubscribed,
 	}
 }

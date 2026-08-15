@@ -780,6 +780,67 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 	}
 }
 
+func TestSubscribeHandler_StoresSelfSubscribedSessionWithoutPort(t *testing.T) {
+	// Given
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{registry: registry, sessions: sessions})
+	handler := subscribeHandler(&state, "test-machine", logging.New("test"))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/interests/subscribe",
+		strings.NewReader(`{"session_id":"ses_omp","topics":["notifications.agent.ses_omp"],"self_subscribed":true}`),
+	)
+
+	// When
+	handler.ServeHTTP(recorder, request)
+
+	// Then
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	entry, err := sessions.Get("ses_omp")
+	if err != nil {
+		t.Fatalf("get stored session: %v", err)
+	}
+	if entry.Port != 0 || !entry.SelfSubscribed {
+		t.Fatalf("expected portless self-subscribed session, got %+v", entry)
+	}
+}
+
+func TestSessionsHandler_ReportsSelfSubscribedSession(t *testing.T) {
+	// Given
+	registry, sessions := setupSessionsTest(t, map[string][]string{
+		"ses_omp": {"notifications.test.>"},
+	}, nil)
+	if err := sessions.Put("ses_omp", session.SessionEntry{SelfSubscribed: true}); err != nil {
+		t.Fatalf("register self-subscribed session: %v", err)
+	}
+	handler := sessionsHandler(registry, sessions)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+
+	// When
+	handler.ServeHTTP(recorder, request)
+
+	// Then
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode sessions response: %v", err)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("expected one session, got %d", len(payload))
+	}
+	selfSubscribed, ok := payload[0]["self_subscribed"].(bool)
+	if !ok || !selfSubscribed {
+		t.Fatalf("expected self_subscribed session, got %#v", payload[0])
+	}
+}
+
 func TestSessionsHandler_NilSessionRegistry(t *testing.T) {
 	// When session registry is nil, endpoint returns 503
 	handler := sessionsHandler(nil, nil)
@@ -1368,6 +1429,68 @@ func TestListenerDeliveryHandler_DedupesSuccessfulDelivery(t *testing.T) {
 	}
 }
 
+func TestListenerDeliveryHandler_RecordsPortlessSelfSubscribedDeliveryAsSkipped(t *testing.T) {
+	// Given
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected prompt_async request")
+	}))
+	item := listenerTestEnvelope("notifications.github.owner.repo.issue.1", "self-subscribed-skip")
+	if _, err := harness.registry.Upsert(store.Interest{
+		SessionID: "ses_omp",
+		MachineID: "test-machine",
+	}, []string{item.Topic}); err != nil {
+		t.Fatalf("register interest: %v", err)
+	}
+	if err := harness.sessions.Put("ses_omp", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register self-subscribed session: %v", err)
+	}
+
+	// When
+	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+	// Then
+	recorder := httptest.NewRecorder()
+	harness.metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
+		t.Fatalf("expected skipped delivery metric, got %s", body)
+	}
+	if strings.Contains(body, `test_messages_delivered{delivery_status="delivered"} 1`) {
+		t.Fatalf("expected no delivered metric for skipped push, got %s", body)
+	}
+}
+
+func TestListenerDeliveryHandler_RecordsPortlessSelfSubscribedAgentDeliveryAsSkipped(t *testing.T) {
+	// Given
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected prompt_async request")
+	}))
+	item := listenerTestEnvelope(contracts.AgentSubject("ses_omp"), "self-subscribed-agent-skip")
+	if _, err := harness.registry.Upsert(store.Interest{
+		SessionID: "ses_omp",
+		MachineID: "test-machine",
+	}, []string{item.Topic}); err != nil {
+		t.Fatalf("register agent interest: %v", err)
+	}
+	if err := harness.sessions.Put("ses_omp", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register self-subscribed session: %v", err)
+	}
+
+	// When
+	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+	// Then
+	recorder := httptest.NewRecorder()
+	harness.metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
+		t.Fatalf("expected skipped agent delivery metric, got %s", body)
+	}
+	if strings.Contains(body, `test_messages_delivered{delivery_status="delivered"} 1`) {
+		t.Fatalf("expected no delivered metric for skipped agent push, got %s", body)
+	}
+}
+
 func TestListenerDeliveryHandler_FailedDeliveryOnNonControlTopic_NoException(t *testing.T) {
 	// Given: a non-control topic (e.g. notifications.github.x.y.issue.1)
 	// When: delivery fails
@@ -1452,6 +1575,7 @@ type listenerDeliveryHarness struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
+	metrics  *metrics.Registry
 	handler  natsgo.MsgHandler
 }
 
@@ -1483,6 +1607,7 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		client:   client,
 		registry: registry,
 		sessions: sessions,
+		metrics:  met,
 		handler: listenerDeliveryHandler(listenerDeliveryHandlerConfig{
 			client:            client,
 			registry:          registry,
