@@ -1,0 +1,6 @@
+{
+  "name": "claude-envoy-bridge",
+  "version": "0.1.0",
+  "description": "Deliver Envoy NATS notifications into Claude Code through a Monitor companion process.",
+  "monitors": "./monitors/monitors.json"
+}

@@ -7,11 +7,13 @@ on:
       - "packages/envoy/**"
       - "packages/contracts/**"
       - "packages/envoy-plugin/**"
+      - "packages/envoy-claude-plugin/**"
   pull_request:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
       - "packages/envoy-plugin/**"
+      - "packages/envoy-claude-plugin/**"
 
 jobs:
   # Detect which packages actually changed to skip unnecessary jobs.
@@ -21,6 +23,7 @@ jobs:
       contracts: ${{ steps.filter.outputs.contracts }}
       envoy: ${{ steps.filter.outputs.envoy }}
       plugin: ${{ steps.filter.outputs.plugin }}
+      claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -34,6 +37,9 @@ jobs:
               - 'packages/contracts/**'
             plugin:
               - 'packages/envoy-plugin/**'
+              - 'packages/contracts/**'
+            claude_plugin:
+              - 'packages/envoy-claude-plugin/**'
               - 'packages/contracts/**'
 
   contracts:
@@ -77,6 +83,28 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: opencode-legion-envoy-plugin-pr
+          path: out/pr-artifacts/*.tgz
+
+  envoy-claude-plugin:
+    needs: changes
+    if: needs.changes.outputs.claude_plugin == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Lint Claude Envoy plugin
+        run: bun run lint
+        working-directory: packages/envoy-claude-plugin
+      - name: Typecheck Claude Envoy plugin
+        run: bun run typecheck
+        working-directory: packages/envoy-claude-plugin
+      - name: Pack Claude Envoy plugin
+        run: bun pm pack --destination ../../out/pr-artifacts
+        working-directory: packages/envoy-claude-plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-legion-envoy-plugin-pr
           path: out/pr-artifacts/*.tgz
 
   envoy-go:
