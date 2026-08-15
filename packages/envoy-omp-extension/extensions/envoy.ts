@@ -122,6 +122,13 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("session_start", async (_event, context) => {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    if (defaults.natsUrls.length === 0) {
+      context.ui.notify(
+        "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled (outbound tools still work)",
+        "warning",
+      );
+      return;
+    }
     let established = false;
     const establish = async (): Promise<void> => {
       await ensureConnection();
