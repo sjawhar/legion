@@ -22,9 +22,9 @@ function terminationSignal(): Promise<void> {
 export async function runEnvoyMonitor(): Promise<void> {
   const environment = {
     ENVOY_SESSION_ID: process.env["ENVOY_SESSION_ID"],
-    CLAUDE_SESSION_ID: process.env["CLAUDE_SESSION_ID"],
+    CLAUDE_CODE_SESSION_ID: process.env["CLAUDE_CODE_SESSION_ID"],
   }
-  const sessionId = monitorSessionId(environment, process.ppid)
+  const sessionId = monitorSessionId(environment)
   const topics = subscriptionTopics({
     sessionId,
     additionalTopics: process.env["ENVOY_TOPICS"],
