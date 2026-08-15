@@ -1,0 +1,8 @@
+[
+  {
+    "name": "envoy-bridge",
+    "command": "bun ${CLAUDE_PLUGIN_ROOT}/bin/envoy-monitor.ts",
+    "description": "Envoy notifications for this Claude Code session",
+    "when": "always"
+  }
+]
