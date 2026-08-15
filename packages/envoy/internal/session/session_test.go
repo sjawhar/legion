@@ -151,6 +151,132 @@ func TestDeliver_NoRegistryEntry(t *testing.T) {
 	}
 }
 
+func TestDeliver_SkipsPush_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
+	// Given
+	var requests atomic.Int32
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("unexpected prompt_async request")
+	})}
+	var entry session.SessionEntry
+	if err := json.Unmarshal([]byte(`{"self_subscribed":true}`), &entry); err != nil {
+		t.Fatalf("decode self-subscribed session entry: %v", err)
+	}
+	if err := sessions.Put("ses_omp", entry); err != nil {
+		t.Fatalf("register self-subscribed session: %v", err)
+	}
+
+	// When
+	err := deliverer.Deliver(
+		newTestEnvelope("agent", "notifications.agent.ses_omp", "test message"),
+		store.Interest{SessionID: "ses_omp"},
+	)
+
+	// Then
+	if err != nil {
+		t.Fatalf("expected self-subscribed portless delivery to succeed, got %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("expected no prompt_async request, got %d", got)
+	}
+}
+
+func TestDeliver_ReturnsError_whenSessionHasNoPortAndIsNotSelfSubscribed(t *testing.T) {
+	// Given
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_portless", session.SessionEntry{}); err != nil {
+		t.Fatalf("register portless session: %v", err)
+	}
+
+	// When
+	err := deliverer.Deliver(
+		newTestEnvelope("agent", "notifications.agent.ses_portless", "test message"),
+		store.Interest{SessionID: "ses_portless"},
+	)
+
+	// Then
+	if err == nil || !strings.Contains(err.Error(), "no live serve port") {
+		t.Fatalf("expected no-live-serve-port error, got %v", err)
+	}
+}
+
+func TestDeliver_UsesPort_whenSelfSubscribedSessionAlsoHasOne(t *testing.T) {
+	// Given
+	var requests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_portful", session.SessionEntry{
+		Port:           mockPort(target.URL),
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register self-subscribed session with port: %v", err)
+	}
+
+	// When
+	err := deliverer.Deliver(
+		newTestEnvelope("agent", "notifications.agent.ses_portful", "test message"),
+		store.Interest{SessionID: "ses_portful"},
+	)
+
+	// Then
+	if err != nil {
+		t.Fatalf("expected portful self-subscribed delivery to succeed, got %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("expected one prompt_async request, got %d", got)
+	}
+}
+
+func TestSessionRegistry_PortlessSelfSubscribedClaimPreservesLivePortfulRoute(t *testing.T) {
+	for _, driving := range []bool{false, true} {
+		t.Run(fmt.Sprintf("incumbent driving %t", driving), func(t *testing.T) {
+			// Given
+			var requests atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+
+			sessions, deliverer := newKVDeliverer(t)
+			port := mockPort(target.URL)
+			if err := sessions.Put("ses_oc", session.SessionEntry{Port: port, Driving: driving}); err != nil {
+				t.Fatalf("register portful session: %v", err)
+			}
+
+			// When
+			if err := sessions.Put("ses_oc", session.SessionEntry{SelfSubscribed: true}); err != nil {
+				t.Fatalf("register portless self-subscribed session: %v", err)
+			}
+			err := deliverer.Deliver(
+				newTestEnvelope("agent", "notifications.agent.ses_oc", "test message"),
+				store.Interest{SessionID: "ses_oc"},
+			)
+
+			// Then
+			entry, getErr := sessions.Get("ses_oc")
+			if getErr != nil {
+				t.Fatalf("get preserved session route: %v", getErr)
+			}
+			if entry.Port != port {
+				t.Fatalf("expected portful route %d to survive, got %+v", port, entry)
+			}
+			if err != nil {
+				t.Fatalf("expected preserved route to deliver, got %v", err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("expected one prompt_async request, got %d", got)
+			}
+		})
+	}
+}
+
 func TestDeliver_PromptAsyncBody(t *testing.T) {
 	var receivedBody []byte
 

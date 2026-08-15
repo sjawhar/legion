@@ -24,7 +24,8 @@ type SessionEntry struct {
 	// Driving reports whether the claiming process is the one actually driving
 	// this session (its explicit -s target or a session it owns), as opposed to a
 	// process that merely has the session loaded from shared on-disk state.
-	Driving bool `json:"driving,omitempty"`
+	Driving        bool `json:"driving,omitempty"`
+	SelfSubscribed bool `json:"self_subscribed,omitempty"`
 }
 
 type SessionRegistryOption func(*sessionRegistryOpts)

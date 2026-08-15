@@ -25,20 +25,34 @@ type Deliverer struct {
 	Sessions     SessionLookup
 }
 
+// DeliveryResult describes a completed delivery attempt.
+type DeliveryResult struct {
+	Skipped bool
+}
+
 func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) error {
+	_, err := d.DeliverWithResult(item, interest)
+	return err
+}
+
+func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
 	text := d.Text(item)
 
 	if d.Sessions == nil {
-		return fmt.Errorf("no session registry configured")
+		return DeliveryResult{}, fmt.Errorf("no session registry configured")
 	}
 	entryVal, err := d.Sessions.Get(interest.SessionID)
 	if err != nil {
-		return fmt.Errorf("no live serve port for session %s", interest.SessionID)
+		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
+	}
+	if entryVal.SelfSubscribed && entryVal.Port == 0 {
+		// The session consumes its own NATS subscription; there is nothing to push to.
+		return DeliveryResult{Skipped: true}, nil
 	}
 	if entryVal.Port > 0 {
-		return d.prompt(entryVal.Port, entryVal.MachineID, interest.SessionID, text)
+		return DeliveryResult{}, d.prompt(entryVal.Port, entryVal.MachineID, interest.SessionID, text)
 	}
-	return fmt.Errorf("no live serve port for session %s", interest.SessionID)
+	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {

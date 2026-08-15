@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -30,5 +31,29 @@ func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
 
 	if got.Driving {
 		t.Fatalf("expected a payload without the flag to claim non-driving, got %+v", got)
+	}
+}
+
+func TestSessionEntryFromSubscribe_CarriesSelfSubscribedFlag(t *testing.T) {
+	// Given
+	var body subscribeBody
+	if err := json.Unmarshal([]byte(`{"session_id":"ses_omp","self_subscribed":true}`), &body); err != nil {
+		t.Fatalf("decode subscribe body: %v", err)
+	}
+
+	// When
+	entry, err := json.Marshal(sessionEntryFromSubscribe(body, "devbox-sami"))
+	if err != nil {
+		t.Fatalf("encode session entry: %v", err)
+	}
+
+	// Then
+	var payload map[string]any
+	if err := json.Unmarshal(entry, &payload); err != nil {
+		t.Fatalf("decode session entry: %v", err)
+	}
+	selfSubscribed, ok := payload["self_subscribed"].(bool)
+	if !ok || !selfSubscribed {
+		t.Fatalf("expected self_subscribed session entry, got %s", entry)
 	}
 }

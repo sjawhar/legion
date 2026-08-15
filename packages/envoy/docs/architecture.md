@@ -46,8 +46,8 @@ All `/v1/*` endpoints return 503 until NATS initialization completes.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/sessions` | GET | Lists all sessions across all machines — joins `envoy_interests` (topics, dir) with `envoy_sessions` (port) |
-| `/v1/interests/subscribe` | POST | Subscribe a session to topics |
+| `/v1/sessions` | GET | Lists all sessions across all machines — joins `envoy_interests` (topics, dir) with `envoy_sessions` (port, self-subscribed delivery mode) |
+| `/v1/interests/subscribe` | POST | Subscribe a session to topics; `self_subscribed: true` permits a portless session that consumes its own NATS subscription |
 | `/v1/interests/unsubscribe` | POST | Unsubscribe a session from topics |
 | `/v1/interests/` | GET | List all interests |
 | `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's interests |
