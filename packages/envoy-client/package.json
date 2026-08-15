@@ -1,0 +1,38 @@
+{
+  "name": "@legion/envoy-client",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./defaults": {
+      "types": "./src/defaults.ts",
+      "default": "./dist/defaults.js"
+    },
+    "./display": {
+      "types": "./src/display.ts",
+      "default": "./dist/display.js"
+    },
+    "./tool-contract": {
+      "types": "./src/tool-contract.ts",
+      "default": "./dist/tool-contract.js"
+    },
+    "./transport": {
+      "types": "./src/transport.ts",
+      "default": "./dist/transport.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/defaults.ts src/display.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/"
+  },
+  "dependencies": {
+    "@legion/contracts": "workspace:*",
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

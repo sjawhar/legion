@@ -20,12 +20,13 @@ From the Legion repository root, install workspace dependencies and load the pac
 
 ```bash
 bun install
-ENVOY_SESSION_ID=my-claude-session claude --plugin-dir packages/envoy-claude-plugin
+claude --plugin-dir packages/envoy-claude-plugin
 ```
 
-`ENVOY_SESSION_ID` gives the monitor a stable direct address. Without it, the monitor uses
-`CLAUDE_SESSION_ID`, then a local `claude-<parent-pid>` fallback. No Claude configuration-file
-changes are required.
+The monitor subscribes using Claude Code's `CLAUDE_CODE_SESSION_ID`. `ENVOY_SESSION_ID` is an
+explicit override for controlled QA. If neither is available, the monitor exits with an actionable
+error rather than subscribing to a made-up address. No Claude configuration-file changes are
+required.
 
 ## Send from a Claude session
 
@@ -48,5 +49,5 @@ bun run --cwd packages/envoy-claude-plugin test
 ## Caveats
 
 Claude Code owns Monitor stdout semantics, including any truncation of unusually long event lines.
-The stable session identity is caller-supplied through `ENVOY_SESSION_ID`; the process-ID fallback
-changes when Claude restarts.
+The monitor needs a real session identity, supplied by Claude Code or explicitly through
+`ENVOY_SESSION_ID` for controlled QA.

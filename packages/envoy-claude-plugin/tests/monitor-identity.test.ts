@@ -1,41 +1,36 @@
 import { expect, test } from "bun:test"
 
+import { monitorSessionId } from "../src/monitor-identity"
+
 test("prefers an explicitly configured Envoy session ID", async () => {
   // given
-  const module = await import("../src/monitor-identity")
-  const candidate = Reflect.get(module, "monitorSessionId")
+  const environment = {
+    ENVOY_SESSION_ID: "claude-adapter",
+    CLAUDE_CODE_SESSION_ID: "claude-native",
+  }
 
   // when
-  const output =
-    typeof candidate === "function"
-      ? candidate({ ENVOY_SESSION_ID: "claude-adapter", CLAUDE_SESSION_ID: "claude-native" }, 0)
-      : undefined
+  const output = monitorSessionId(environment)
 
   // then
   expect(output).toBe("claude-adapter")
 })
 
-test("uses Claude's native session ID when no Envoy override exists", async () => {
+test("uses Claude Code's session ID when no Envoy override exists", async () => {
   // given
-  const module = await import("../src/monitor-identity")
-  const candidate = Reflect.get(module, "monitorSessionId")
+  const environment = { CLAUDE_CODE_SESSION_ID: "claude-native" }
 
   // when
-  const output =
-    typeof candidate === "function" ? candidate({ CLAUDE_SESSION_ID: "claude-native" }, 0) : undefined
+  const output = monitorSessionId(environment)
 
   // then
   expect(output).toBe("claude-native")
 })
 
-test("derives a stable local identity from Claude's parent process", async () => {
+test("rejects an absent session ID instead of inventing a PID-derived identity", async () => {
   // given
-  const module = await import("../src/monitor-identity")
-  const candidate = Reflect.get(module, "monitorSessionId")
-
-  // when
-  const output = typeof candidate === "function" ? candidate({}, 4312) : undefined
-
   // then
-  expect(output).toBe("claude-4312")
+  expect(() => monitorSessionId({})).toThrow(
+    "Envoy monitor requires ENVOY_SESSION_ID or CLAUDE_CODE_SESSION_ID; Claude Code did not provide a session identity",
+  )
 })
