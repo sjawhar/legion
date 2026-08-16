@@ -37,8 +37,15 @@ type Subscription = {
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{ readonly subject: string; readonly data: Uint8Array }>;
 };
 
+type SubscriptionControls = {
+  readonly push: (data: string) => void;
+  readonly end: () => void;
+  readonly fail: (error: Error) => void;
+};
+
 const natsState = {
   subscriptions: new Map<string, Subscription>(),
+  controls: new Map<string, SubscriptionControls>(),
   connectedNames: [] as string[],
   failConnects: 0,
 };
@@ -55,12 +62,45 @@ mock.module("nats", () => ({
       drain: async () => undefined,
       subscribe: (topic: string) => {
         let active = true;
+        const queue: { readonly subject: string; readonly data: Uint8Array }[] = [];
+        let wake: (() => void) | undefined;
+        let ended = false;
+        let failure: Error | undefined;
+        const notify = () => {
+          wake?.();
+          wake = undefined;
+        };
+        const controls = {
+          push: (data: string) => {
+            queue.push({ subject: topic, data: new TextEncoder().encode(data) });
+            notify();
+          },
+          end: () => {
+            ended = true;
+            notify();
+          },
+          fail: (error: Error) => {
+            failure = error;
+            notify();
+          },
+        };
+        natsState.controls.set(topic, controls);
         const subscription: Subscription = {
           unsubscribe: () => {
             active = false;
           },
           [Symbol.asyncIterator]: () => ({
-            next: async () => (active ? { done: false, value: await new Promise<never>(() => {}) } : { done: true }),
+            next: async (): Promise<IteratorResult<{ readonly subject: string; readonly data: Uint8Array }>> => {
+              for (;;) {
+                if (failure) throw failure;
+                if (!active || ended) return { done: true, value: undefined };
+                const item = queue.shift();
+                if (item) return { done: false, value: item };
+                await new Promise<void>((resolve) => {
+                  wake = resolve;
+                });
+              }
+            },
           }),
         };
         natsState.subscriptions.set(topic, subscription);
@@ -85,7 +125,9 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   natsState.connectedNames.length = 0;
   natsState.subscriptions.clear();
+  natsState.controls.clear();
   natsState.failConnects = 0;
+  delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
 });
 
 function createPi() {
@@ -273,5 +315,60 @@ describe("envoy OMP extension", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(natsState.connectedNames.length).toBe(connectionsAfterRecovery);
+  });
+
+  test("a failed message injection does not tear down the subscription", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-throw");
+    const fixture = createPi();
+    let throwNext = true;
+    const delivered: string[] = [];
+    const pi: TestPi = {
+      ...fixture.pi,
+      sendMessage: (message) => {
+        if (throwNext) {
+          throwNext = false;
+          throw new Error("injection rejected mid-compaction");
+        }
+        delivered.push(message.content);
+      },
+    };
+
+    envoyExtension(pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pump"));
+    const controls = natsState.controls.get("notifications.agent.ses_pump");
+    expect(controls).toBeDefined();
+
+    controls?.push("first message hits the throwing window");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controls?.push("second message must still deliver");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(delivered.length).toBe(1);
+    expect(delivered[0]).toContain("second message must still deliver");
+  });
+
+  test("an ended subscription iterator resubscribes instead of going deaf", async () => {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?resubscribe");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_deaf"));
+    const first = natsState.controls.get("notifications.agent.ses_deaf");
+    expect(first).toBeDefined();
+
+    // Kill the iterator the way a closed/errored connection does.
+    first?.end();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const second = natsState.controls.get("notifications.agent.ses_deaf");
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+
+    second?.push("post-recovery message");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fixture.messages.some((m) => m.includes("post-recovery message"))).toBe(true);
   });
 });
