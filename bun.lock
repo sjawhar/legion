@@ -4,6 +4,10 @@
   "workspaces": {
     "": {
       "name": "legion",
+      "dependencies": {
+        "nats": "^2.29.2",
+        "zod": "^4.1.8",
+      },
     },
     "packages/contracts": {
       "name": "@legion/contracts",
@@ -99,7 +103,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "0.3.2",
+      "version": "0.4.1",
       "dependencies": {
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",

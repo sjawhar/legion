@@ -1,5 +1,10 @@
 {
   "name": "legion",
+  "omp": {
+    "extensions": [
+      "./packages/envoy-omp-extension/extensions/envoy.ts"
+    ]
+  },
   "version": "0.16.1",
   "type": "module",
   "description": "Autonomous development swarm using OpenCode agents",
@@ -13,5 +18,9 @@
     "packages/envoy-claude-plugin",
     "packages/dispatch",
     "packages/opencode-plugin"
-  ]
+  ],
+  "dependencies": {
+    "nats": "^2.29.2",
+    "zod": "^4.1.8"
+  }
 }
