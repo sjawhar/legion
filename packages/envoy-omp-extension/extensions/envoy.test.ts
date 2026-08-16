@@ -26,7 +26,7 @@ type TestPi = {
   readonly zod: typeof z;
   readonly registerTool: (tool: RegisteredTool) => void;
   readonly on: (
-    event: "session_start" | "session_shutdown",
+    event: "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
     handler: (event: unknown, context: SessionContext) => Promise<void>,
   ) => void;
   readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
@@ -41,6 +41,7 @@ type SubscriptionControls = {
   readonly push: (data: string) => void;
   readonly end: () => void;
   readonly fail: (error: Error) => void;
+  readonly active: () => boolean;
 };
 
 const natsState = {
@@ -83,6 +84,7 @@ mock.module("nats", () => ({
             failure = error;
             notify();
           },
+          active: () => active,
         };
         natsState.controls.set(topic, controls);
         const subscription: Subscription = {
@@ -315,6 +317,20 @@ describe("envoy OMP extension", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(natsState.connectedNames.length).toBe(connectionsAfterRecovery);
+  });
+
+  test("rebinds the direct subscription after an in-process session switch", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?session-switch");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_switch"));
+    const beforeSwitch = natsState.controls.get("notifications.agent.ses_before_switch");
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_switch"));
+
+    expect(beforeSwitch?.active()).toBe(false);
+    expect(natsState.controls.get("notifications.agent.ses_after_switch")?.active()).toBe(true);
   });
 
   test("a failed message injection does not tear down the subscription", async () => {
