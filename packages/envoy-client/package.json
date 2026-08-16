@@ -5,18 +5,22 @@
   "exports": {
     "./defaults": {
       "types": "./src/defaults.ts",
+      "bun": "./src/defaults.ts",
       "default": "./dist/defaults.js"
     },
     "./display": {
       "types": "./src/display.ts",
+      "bun": "./src/display.ts",
       "default": "./dist/display.js"
     },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
+      "bun": "./src/tool-contract.ts",
       "default": "./dist/tool-contract.js"
     },
     "./transport": {
       "types": "./src/transport.ts",
+      "bun": "./src/transport.ts",
       "default": "./dist/transport.js"
     }
   },
