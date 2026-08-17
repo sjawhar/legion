@@ -35,7 +35,7 @@ type PiApi = {
     readonly execute: (id: string, parameters: ToolParameters) => Promise<ToolResult>;
   }) => void;
   readonly on: (
-    event: "session_start" | "session_shutdown",
+    event: "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
     handler: (event: unknown, context: SessionContext) => Promise<void>,
   ) => void;
   readonly sendMessage: (
@@ -56,6 +56,7 @@ export default function envoyExtension(pi: PiApi): void {
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
+  let heartbeatRegistered = false;
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
@@ -133,10 +134,10 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
-  const registerSession = async (context: SessionContext): Promise<void> => {
+  const registerSession = async (): Promise<void> => {
     await client.subscribe({
       sessionID,
-      directory: context.cwd,
+      directory: sessionDirectory,
       topics: [agentSubject(sessionID)],
       port: 0,
       title: "",
@@ -145,9 +146,27 @@ export default function envoyExtension(pi: PiApi): void {
     });
   };
 
-  pi.on("session_start", async (_event, context) => {
+  const establishSession = async (context: SessionContext): Promise<void> => {
+    const previousTopic = sessionID === "" ? undefined : agentSubject(sessionID);
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    const currentTopic = agentSubject(sessionID);
+    if (previousTopic !== undefined && previousTopic !== currentTopic) {
+      subscriptions.get(previousTopic)?.unsubscribe();
+      subscriptions.delete(previousTopic);
+    }
+    await ensureConnection();
+    await subscribe(currentTopic);
+    if (process.env.ENVOY_REGISTER_SESSION === "1") {
+      await registerSession();
+      if (!heartbeatRegistered) {
+        context.setInterval(() => void registerSession(), defaults.heartbeatMs);
+        heartbeatRegistered = true;
+      }
+    }
+  };
+
+  pi.on("session_start", async (_event, context) => {
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
         "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled (outbound tools still work)",
@@ -157,12 +176,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     let established = false;
     const establish = async (): Promise<void> => {
-      await ensureConnection();
-      await subscribe(agentSubject(sessionID));
-      if (process.env.ENVOY_REGISTER_SESSION === "1") {
-        await registerSession(context);
-        context.setInterval(() => void registerSession(context), defaults.heartbeatMs);
-      }
+      await establishSession(context);
       established = true;
     };
     try {
@@ -187,6 +201,15 @@ export default function envoyExtension(pi: PiApi): void {
       }, NATS_RETRY_INTERVAL_MS);
     }
   });
+
+  const rebind = async (_event: unknown, context: SessionContext): Promise<void> => {
+    if (defaults.natsUrls.length === 0) return;
+    await establishSession(context);
+  };
+
+  pi.on("session_switch", rebind);
+  pi.on("session_branch", rebind);
+  pi.on("session_tree", rebind);
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
