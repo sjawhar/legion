@@ -97,6 +97,36 @@ export default function envoyExtension(pi: PiApi): void {
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
   let shuttingDown = false;
 
+  // Topics this session closed on purpose: the session-switch rebind and the
+  // envoy_unsubscribe tool. The pump's recovery path below exists for
+  // connections that died under us, and it cannot tell those two cases apart on
+  // its own, because an explicit unsubscribe() ends the async iterator exactly
+  // the way a dropped connection does. Without this marker the recovery path
+  // resurrects the topic seconds later, so a switched-away session keeps
+  // receiving the previous session's traffic and envoy_unsubscribe silently
+  // undoes itself.
+  const intentionallyClosed = new Set<string>();
+
+  // Topics whose pump is sitting in the resubscribe delay. Such a topic has no
+  // entry in `subscriptions`, so this is the only way to know a deliberate close
+  // still has something to suppress.
+  const awaitingRetry = new Set<string>();
+
+  // Drop a topic we no longer want. Every marker set here is consumed again by
+  // the pump end-path, the retry callback, or the next subscribe(), so the set
+  // cannot accumulate topics that were never live in the first place.
+  const closeIntentionally = (topic: string): boolean => {
+    const subscription = subscriptions.get(topic);
+    if (subscription === undefined) {
+      if (awaitingRetry.has(topic)) intentionallyClosed.add(topic);
+      return false;
+    }
+    intentionallyClosed.add(topic);
+    subscription.unsubscribe();
+    subscriptions.delete(topic);
+    return true;
+  };
+
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
     try {
       for await (const message of subscription) {
@@ -111,15 +141,27 @@ export default function envoyExtension(pi: PiApi): void {
     } catch {
       // Iterator failure falls through to the resubscribe path below.
     }
-    subscriptions.delete(topic);
+    // Only retire our own generation: a later subscribe() for this topic may
+    // already own the map entry.
+    if (subscriptions.get(topic) === subscription) subscriptions.delete(topic);
     if (shuttingDown) return;
-    // The iterator only ends when the connection was closed or errored out
-    // from under nats.js's own reconnect handling. Re-establish rather than
-    // staying silently deaf while the HTTP registration heartbeat keeps the
-    // session looking healthy in the registry.
+    // A close we asked for is not an outage. Consume the marker so a later,
+    // genuine death of this same topic still recovers.
+    if (intentionallyClosed.delete(topic)) return;
+    // Otherwise the iterator only ended because the connection was closed or
+    // errored out from under nats.js's own reconnect handling. Re-establish
+    // rather than staying silently deaf while the HTTP registration heartbeat
+    // keeps the session looking healthy in the registry.
     const retry = (delayMs: number): void => {
+      awaitingRetry.add(topic);
       setTimeout(() => {
+        awaitingRetry.delete(topic);
+        // A subscribe() during the delay already cleared the marker and owns the
+        // topic, so there is nothing to do here.
         if (shuttingDown || subscriptions.has(topic)) return;
+        // A close that landed during the delay leaves the marker for us instead
+        // of the pump end-path. Consume it here so it cannot outlive the timer.
+        if (intentionallyClosed.delete(topic)) return;
         void subscribe(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
       }, delayMs);
     };
@@ -129,6 +171,8 @@ export default function envoyExtension(pi: PiApi): void {
   const subscribe = async (topic: string): Promise<boolean> => {
     if (subscriptions.has(topic)) return false;
     const subscription = (await ensureConnection()).subscribe(topic);
+    // A fresh subscription supersedes any earlier deliberate close of this topic.
+    intentionallyClosed.delete(topic);
     subscriptions.set(topic, subscription);
     void pump(topic, subscription);
     return true;
@@ -152,8 +196,7 @@ export default function envoyExtension(pi: PiApi): void {
     sessionID = context.sessionManager.getSessionId();
     const currentTopic = agentSubject(sessionID);
     if (previousTopic !== undefined && previousTopic !== currentTopic) {
-      subscriptions.get(previousTopic)?.unsubscribe();
-      subscriptions.delete(previousTopic);
+      closeIntentionally(previousTopic);
     }
     await ensureConnection();
     await subscribe(currentTopic);
@@ -218,6 +261,8 @@ export default function envoyExtension(pi: PiApi): void {
     } finally {
       connection = undefined;
       subscriptions.clear();
+      intentionallyClosed.clear();
+      awaitingRetry.clear();
     }
   });
 
@@ -242,13 +287,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.unsubscribe: {
           const targets = topicsFor(parameters, [...subscriptions.keys()]);
-          const removed = targets.filter((topic) => {
-            const subscription = subscriptions.get(topic);
-            if (subscription === undefined) return false;
-            subscription.unsubscribe();
-            subscriptions.delete(topic);
-            return true;
-          });
+          const removed = targets.filter((topic) => closeIntentionally(topic));
           return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, { removed });
         }
         case EnvoyToolOperation.listInterests:
