@@ -93,17 +93,43 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
+  const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
+  let shuttingDown = false;
+
+  const pump = async (topic: string, subscription: Subscription): Promise<void> => {
+    try {
+      for await (const message of subscription) {
+        try {
+          deliver(message.subject, codec.decode(message.data));
+        } catch {
+          // A single failed injection (e.g. sendMessage during compaction)
+          // must not tear down the subscription; drop the message and keep
+          // pumping.
+        }
+      }
+    } catch {
+      // Iterator failure falls through to the resubscribe path below.
+    }
+    subscriptions.delete(topic);
+    if (shuttingDown) return;
+    // The iterator only ends when the connection was closed or errored out
+    // from under nats.js's own reconnect handling. Re-establish rather than
+    // staying silently deaf while the HTTP registration heartbeat keeps the
+    // session looking healthy in the registry.
+    const retry = (delayMs: number): void => {
+      setTimeout(() => {
+        if (shuttingDown || subscriptions.has(topic)) return;
+        void subscribe(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
+      }, delayMs);
+    };
+    retry(RESUBSCRIBE_DELAY_MS);
+  };
+
   const subscribe = async (topic: string): Promise<boolean> => {
     if (subscriptions.has(topic)) return false;
     const subscription = (await ensureConnection()).subscribe(topic);
     subscriptions.set(topic, subscription);
-    void (async () => {
-      try {
-        for await (const message of subscription) deliver(message.subject, codec.decode(message.data));
-      } finally {
-        subscriptions.delete(topic);
-      }
-    })();
+    void pump(topic, subscription);
     return true;
   };
 
@@ -163,6 +189,7 @@ export default function envoyExtension(pi: PiApi): void {
   });
 
   pi.on("session_shutdown", async () => {
+    shuttingDown = true;
     try {
       await connection?.drain();
     } finally {
