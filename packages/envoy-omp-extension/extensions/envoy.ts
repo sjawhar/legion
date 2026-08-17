@@ -1,4 +1,6 @@
 import * as os from "node:os";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { agentSubject } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { toEnvelopeDisplay } from "@legion/envoy-client/display";
@@ -48,8 +50,8 @@ type PiApi = {
     }
   ) => void;
   readonly on: (
-    event: "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
-    handler: (event: unknown, context: SessionContext) => Promise<void>,
+    event: "resources_discover" | "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
+    handler: (event: unknown, context: SessionContext) => Promise<unknown>,
   ) => void;
   readonly sendMessage: (
     message: { readonly customType: string; readonly content: string; readonly display: boolean },
@@ -59,6 +61,7 @@ type PiApi = {
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
+const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
 
 export default function envoyExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
@@ -70,6 +73,8 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionDirectory = "";
   let sessionID = "";
   let heartbeatRegistered = false;
+
+  pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;

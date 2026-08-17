@@ -62,8 +62,8 @@ legion handoff write|read|message    # Workers: write/read structured handoff da
 | Add CLI command        | `packages/daemon/src/cli/index.ts`            | citty `defineCommand` pattern             |
 | Change HTTP API        | `packages/daemon/src/daemon/server.ts`        | See @packages/daemon/src/daemon/AGENTS.md |
 | Change state machine   | `packages/daemon/src/state/decision.ts`       | See @packages/daemon/src/state/AGENTS.md  |
-| Add worker workflow    | `.opencode/skills/legion-worker/workflows/`   | See @.opencode/skills/AGENTS.md           |
-| Change controller loop | `.opencode/skills/legion-controller/SKILL.md` | See @.opencode/skills/AGENTS.md           |
+| Add worker workflow    | `skills/legion-worker/workflows/`             | See @skills/AGENTS.md                     |
+| Change controller loop | `skills/legion-controller/SKILL.md`           | See @skills/AGENTS.md                     |
 | Modify issue types     | `packages/daemon/src/state/types.ts`          | Shared by daemon + state                  |
 | Worker process mgmt    | `packages/daemon/src/daemon/serve-manager.ts` | Spawns `opencode serve`                   |
 | Port allocation        | `packages/daemon/src/daemon/ports.ts`         | Sequential from base 13381                |
