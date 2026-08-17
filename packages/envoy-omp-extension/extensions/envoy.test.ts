@@ -90,6 +90,11 @@ mock.module("nats", () => ({
         const subscription: Subscription = {
           unsubscribe: () => {
             active = false;
+            // nats.js ends the async iterator on unsubscribe(), which is what
+            // makes a deliberate close indistinguishable from a dropped
+            // connection inside the pump. A mock that leaves the iterator
+            // parked cannot observe that, and lets resubscribe bugs ship green.
+            notify();
           },
           [Symbol.asyncIterator]: () => ({
             next: async (): Promise<IteratorResult<{ readonly subject: string; readonly data: Uint8Array }>> => {
@@ -331,6 +336,93 @@ describe("envoy OMP extension", () => {
 
     expect(beforeSwitch?.active()).toBe(false);
     expect(natsState.controls.get("notifications.agent.ses_after_switch")?.active()).toBe(true);
+  });
+
+  test("an in-process session switch does not resurrect the previous session's topic", async () => {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?switch-no-resubscribe");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_left_behind"));
+    const abandoned = natsState.controls.get("notifications.agent.ses_left_behind");
+    expect(abandoned).toBeDefined();
+
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_current"));
+    // Well past ENVOY_RESUBSCRIBE_DELAY_MS, so the pump has had its chance to
+    // treat this deliberate close as an outage and recover from it.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    // A resubscribe installs a new controls object for the topic; the original
+    // surviving means no second subscription was ever opened.
+    expect(natsState.controls.get("notifications.agent.ses_left_behind")).toBe(abandoned);
+    expect(abandoned?.active()).toBe(false);
+    expect(natsState.controls.get("notifications.agent.ses_current")?.active()).toBe(true);
+
+    abandoned?.push("addressed to the session we switched away from");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(fixture.messages.some((m) => m.includes("addressed to the session we switched away from"))).toBe(false);
+  });
+
+  test("envoy_unsubscribe is not undone by the resubscribe path", async () => {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?unsubscribe-stays");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_unsub"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (subscribeTool === undefined || unsubscribeTool === undefined) throw new Error("subscription tools were not registered");
+
+    await subscribeTool.execute("", { topics: ["team.standup"] });
+    const dropped = natsState.controls.get("team.standup");
+    expect(dropped).toBeDefined();
+
+    const result = await unsubscribeTool.execute("", { topics: ["team.standup"] });
+    expect(result.details.removed).toEqual(["team.standup"]);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(natsState.controls.get("team.standup")).toBe(dropped);
+
+    dropped?.push("published after the tool said it was unsubscribed");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(fixture.messages.some((m) => m.includes("published after the tool said it was unsubscribed"))).toBe(false);
+  });
+
+  test("a deliberately closed topic still recovers from a genuine death once it is back", async () => {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?marker-is-consumed");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_home"));
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_away"));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    // Switch back: the topic we closed on purpose is legitimately wanted again.
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_home"));
+    const reopened = natsState.controls.get("notifications.agent.ses_home");
+    expect(reopened?.active()).toBe(true);
+
+    // Now kill it the way a dropped connection does. The close marker from the
+    // first switch must have been consumed, so recovery still happens.
+    reopened?.end();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const recovered = natsState.controls.get("notifications.agent.ses_home");
+    expect(recovered).toBeDefined();
+    expect(recovered).not.toBe(reopened);
+
+    recovered?.push("delivered after a genuine iterator death");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(fixture.messages.some((m) => m.includes("delivered after a genuine iterator death"))).toBe(true);
   });
 
   test("a failed message injection does not tear down the subscription", async () => {
