@@ -3,6 +3,9 @@
   "omp": {
     "extensions": [
       "./packages/envoy-omp-extension/extensions/envoy.ts"
+    ],
+    "skills": [
+      "./.opencode/skills"
     ]
   },
   "version": "0.16.1",
