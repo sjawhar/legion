@@ -5,6 +5,7 @@ import { toEnvelopeDisplay } from "@legion/envoy-client/display";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
 type ToolParameters = Readonly<Record<string, string | readonly string[] | undefined>>;
 
@@ -34,6 +35,18 @@ type PiApi = {
     readonly parameters: unknown;
     readonly execute: (id: string, parameters: ToolParameters) => Promise<ToolResult>;
   }) => void;
+  readonly registerCommand: (
+    name: string,
+    command: {
+      readonly description: string;
+      readonly handler: (
+        args: string,
+        context: {
+          readonly ui: { readonly notify: (message: string, level: "info" | "warning") => void };
+        }
+      ) => Promise<void>;
+    }
+  ) => void;
   readonly on: (
     event: "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
     handler: (event: unknown, context: SessionContext) => Promise<void>,
@@ -275,6 +288,8 @@ export default function envoyExtension(pi: PiApi): void {
       execute: async (_id, parameters) => execute(spec.operation, parameters),
     });
   }
+
+  registerEnvoyWhoamiCommand(pi, () => ({ sessionID, machineID, directory: sessionDirectory }));
 
   async function execute(operation: EnvoyToolOperation, parameters: ToolParameters): Promise<ToolResult> {
     try {

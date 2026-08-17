@@ -9,7 +9,7 @@
     }
   },
   "scripts": {
-    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm",
+    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome lint extensions/"

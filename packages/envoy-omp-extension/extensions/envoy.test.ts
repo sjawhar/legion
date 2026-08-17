@@ -15,6 +15,12 @@ type RegisteredTool = {
   readonly execute: (id: string, params: Record<string, unknown>) => Promise<ToolResult>;
 };
 
+type RegisteredCommand = {
+  readonly name: string;
+  readonly description: string | undefined;
+  readonly handler: (args: string, context: CommandContext) => Promise<void>;
+};
+
 type SessionContext = {
   readonly cwd: string;
   readonly sessionManager: { readonly getSessionId: () => string };
@@ -22,9 +28,14 @@ type SessionContext = {
   readonly ui: { readonly notify: (message: string, level: "warning") => void };
 };
 
+type CommandContext = {
+  readonly ui: { readonly notify: (message: string, level: "info" | "warning" | "error") => void };
+};
+
 type TestPi = {
   readonly zod: typeof z;
   readonly registerTool: (tool: RegisteredTool) => void;
+  readonly registerCommand: (name: string, command: Omit<RegisteredCommand, "name">) => void;
   readonly on: (
     event: "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
     handler: (event: unknown, context: SessionContext) => Promise<void>,
@@ -49,6 +60,11 @@ const natsState = {
   controls: new Map<string, SubscriptionControls>(),
   connectedNames: [] as string[],
   failConnects: 0,
+};
+
+const clipboardState = {
+  copiedSessionIDs: [] as string[],
+  error: undefined as Error | undefined,
 };
 
 mock.module("nats", () => ({
@@ -118,6 +134,13 @@ mock.module("nats", () => ({
   StringCodec: () => ({ decode: (data: Uint8Array) => new TextDecoder().decode(data) }),
 }));
 
+mock.module("@oh-my-pi/pi-coding-agent", () => ({
+  copyToClipboard: async (text: string) => {
+    if (clipboardState.error !== undefined) throw clipboardState.error;
+    clipboardState.copiedSessionIDs.push(text);
+  },
+}));
+
 const originalFetch = globalThis.fetch;
 
 const originalNatsUrl = process.env.ENVOY_NATS_URL;
@@ -134,20 +157,25 @@ afterEach(() => {
   natsState.subscriptions.clear();
   natsState.controls.clear();
   natsState.failConnects = 0;
+  clipboardState.copiedSessionIDs.length = 0;
+  clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
 });
 
-function createPi() {
+function createPi(options: { readonly clipboardError?: Error } = {}) {
+  clipboardState.error = options.clipboardError;
+  const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
   const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<void>>();
   const messages: string[] = [];
   const pi: TestPi = {
     zod: z,
     registerTool: (tool) => tools.push(tool),
+    registerCommand: (name, command) => commands.push({ name, ...command }),
     on: (event, handler) => handlers.set(event, handler),
     sendMessage: (message) => messages.push(message.content),
   };
-  return { handlers, messages, pi, tools };
+  return { commands, copiedSessionIDs: clipboardState.copiedSessionIDs, handlers, messages, pi, tools };
 }
 
 function sessionContext(sessionID = "ses_omp"): SessionContext {
@@ -157,6 +185,10 @@ function sessionContext(sessionID = "ses_omp"): SessionContext {
     setInterval: () => undefined,
     ui: { notify: () => undefined },
   };
+}
+
+function commandContext(notifications: string[]): CommandContext {
+  return { ui: { notify: (message) => notifications.push(message) } };
 }
 
 function response(body: unknown): Response {
@@ -266,6 +298,59 @@ describe("envoy OMP extension", () => {
       session_id: "ses_whoami",
       dir: "/tmp/envoy-omp-test",
     });
+  });
+
+  test("registers /envoy_whoami and displays the current identity after copying its session ID", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?whoami-command");
+    const fixture = createPi();
+    const notifications: string[] = [];
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_command"));
+    const whoami = fixture.commands.find((command) => command.name === "envoy_whoami");
+    if (whoami === undefined) throw new Error("/envoy_whoami was not registered");
+
+    await whoami.handler("", commandContext(notifications));
+
+    expect(fixture.copiedSessionIDs).toEqual(["ses_command"]);
+    expect(notifications[0]).toContain("ses_command");
+    expect(notifications[0]).toContain("/tmp/envoy-omp-test");
+    expect(notifications[0]).toContain("Copied");
+  });
+
+  test("reports the new session identity from /envoy_whoami after an in-process switch", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?whoami-command-switch");
+    const fixture = createPi();
+    const notifications: string[] = [];
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_command"));
+    await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_command"));
+    const whoami = fixture.commands.find((command) => command.name === "envoy_whoami");
+    if (whoami === undefined) throw new Error("/envoy_whoami was not registered");
+
+    await whoami.handler("", commandContext(notifications));
+
+    expect(fixture.copiedSessionIDs).toEqual(["ses_after_command"]);
+    expect(notifications[0]).toContain("ses_after_command");
+    expect(notifications[0]).not.toContain("ses_before_command");
+  });
+
+  test("still displays the current session identity when clipboard copy fails", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?whoami-command-copy-failure");
+    const fixture = createPi({ clipboardError: new Error("clipboard unavailable") });
+    const notifications: string[] = [];
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_clipboard_unavailable"));
+    const whoami = fixture.commands.find((command) => command.name === "envoy_whoami");
+    if (whoami === undefined) throw new Error("/envoy_whoami was not registered");
+
+    await whoami.handler("", commandContext(notifications));
+
+    expect(fixture.copiedSessionIDs).toEqual([]);
+    expect(notifications[0]).toContain("ses_clipboard_unavailable");
+    expect(notifications[0]).toContain("Could not copy");
   });
 
   test("disables inbound messaging loudly when ENVOY_NATS_URL is unset", async () => {
