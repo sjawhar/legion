@@ -29,6 +29,7 @@
     "skipLibCheck": true
   },
   "include": [
-    "extensions/envoy.ts"
+    "extensions/envoy.ts",
+    "extensions/omp-host.d.ts"
   ]
 }
