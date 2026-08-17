@@ -22,7 +22,7 @@
 | `packages/daemon/src/daemon/config.ts` | Modify | Add `autoAdvance` flag |
 | `packages/daemon/src/daemon/index.ts` | Modify | Wire Envoy subscription for worker-done events, call auto-advance |
 | `packages/daemon/src/cli/index.ts` | Modify | Add `cmdAdvance()` + `advanceCommand`, register in `mainCommand` |
-| `.opencode/skills/legion-controller/SKILL.md` | Modify | Update to use `legion advance` where appropriate |
+| `skills/legion-controller/SKILL.md` | Modify | Update to use `legion advance` where appropriate |
 | `packages/daemon/src/state/__tests__/issue-tracker-mutations.test.ts` | Create | Tests for `transitionIssue()` and `removeLabel()` |
 | `packages/daemon/src/daemon/__tests__/advance.test.ts` | Create | Tests for `POST /state/advance` endpoint |
 | `packages/daemon/src/daemon/__tests__/auto-advance.test.ts` | Create | Tests for auto-progression logic |
@@ -1221,11 +1221,11 @@ jj new
 ## Task 8: Update Controller Skill — Depends on: Task 5, Task 6
 
 **Files:**
-- Modify: `.opencode/skills/legion-controller/SKILL.md`
+- Modify: `skills/legion-controller/SKILL.md`
 
 - [ ] **Step 1: Read the current controller skill**
 
-Read `.opencode/skills/legion-controller/SKILL.md` to understand the full dispatch flow that needs updating.
+Read `skills/legion-controller/SKILL.md` to understand the full dispatch flow that needs updating.
 
 - [ ] **Step 2: Update the controller skill to use `legion advance`**
 

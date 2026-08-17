@@ -61,20 +61,20 @@ Create `docs/solutions/index.json` with the inverted index. Keys are source path
       "architecture-patterns/sync-to-async-modular-refactoring.md",
       "integration-patterns/tmux-askuserquestion-navigation.md"
     ],
-    ".opencode/skills/legion-worker": [
+    "skills/legion-worker": [
       "skill-patterns/worker-skill-failure-modes.md",
       "daemon/deferred-review-comments-pattern.md",
       "integration-patterns/controller-worker-protocol.md"
     ],
-    ".opencode/skills/legion-controller": [
+    "skills/legion-controller": [
       "integration-patterns/controller-worker-protocol.md",
       "daemon/controller-lifecycle-separation.md",
       "daemon/controller-observability.md"
     ],
-    ".opencode/skills/linear": [
+    "skills/linear": [
       "integration-issues/linear-mcp-label-resolution.md"
     ],
-    ".opencode/skills": [
+    "skills": [
       "skill-patterns/parallel-subagent-background-execution.md",
       "delegation/delegation-hardening-retro.md",
       "delegation/hardening-patterns.md"
@@ -88,7 +88,7 @@ Create `docs/solutions/index.json` with the inverted index. Keys are source path
 
 **Bootstrap mapping rationale:**
 - Each learning file is mapped to the code areas it documents (derived from frontmatter `module`/`component`/`tags` fields where available, directory prefix as fallback)
-- A learning can appear under multiple keys (e.g., `controller-lifecycle-separation.md` appears under both `packages/daemon/src/state` and `.opencode/skills/legion-controller`)
+- A learning can appear under multiple keys (e.g., `controller-lifecycle-separation.md` appears under both `packages/daemon/src/state` and `skills/legion-controller`)
 - Keys are directory-level prefixes, not individual files — this enables substring matching against issue text keywords like "daemon", "state", "controller", "worker", "skills"
 - All 25 existing learning files are indexed across 11 prefix keys
 - Stale entries from file renames are harmless — the plan workflow gracefully handles missing files
@@ -116,7 +116,7 @@ jj new
 ### Task 2: Modify retro SKILL.md — add index update step — Independent
 
 **Files:**
-- Modify: `.opencode/skills/legion-retro/SKILL.md` (insert after step 4, before step 5)
+- Modify: `skills/legion-retro/SKILL.md` (insert after step 4, before step 5)
 
 **Step 1: Locate the insertion point**
 
@@ -161,17 +161,17 @@ After writing learning files to `docs/solutions/`, update the learnings index so
    ```
 
 3. For each learning file you just wrote:
-   - Extract **directory-level path prefixes** from the PR's changed files. Group to the 3rd or 4th path segment (e.g., `packages/daemon/src/state/decision.ts` → `packages/daemon/src/state`, `.opencode/skills/legion-worker/workflows/plan.md` → `.opencode/skills/legion-worker`).
+   - Extract **directory-level path prefixes** from the PR's changed files. Group to the 3rd or 4th path segment (e.g., `packages/daemon/src/state/decision.ts` → `packages/daemon/src/state`, `skills/legion-worker/workflows/plan.md` → `skills/legion-worker`).
    - For each unique prefix, add the learning file path (relative to `docs/solutions/`) to that prefix's array in `index.json`. Create the key if it doesn't exist.
    - Deduplicate: don't add a learning that's already listed under a key.
 
 4. Write the updated `docs/solutions/index.json`. Preserve all existing entries — only add new mappings.
 
-**Example:** If the PR changed `packages/daemon/src/state/decision.ts` and `.opencode/skills/legion-worker/workflows/plan.md`, and you wrote `docs/solutions/daemon/my-new-learning.md`:
+**Example:** If the PR changed `packages/daemon/src/state/decision.ts` and `skills/legion-worker/workflows/plan.md`, and you wrote `docs/solutions/daemon/my-new-learning.md`:
 
 Add `"daemon/my-new-learning.md"` to these index keys (creating them if missing):
 - `"packages/daemon/src/state"`
-- `".opencode/skills/legion-worker"`
+- `"skills/legion-worker"`
 
 **If `docs/solutions/index.json` doesn't exist or is invalid JSON:** Skip this step and note it in the issue comment. The index is advisory — its absence should never block the retro workflow.
 
@@ -179,10 +179,10 @@ Add `"daemon/my-new-learning.md"` to these index keys (creating them if missing)
 
 **Step 3: Verify the modification**
 
-Run: `grep -q "Update Learnings Index" .opencode/skills/legion-retro/SKILL.md`
+Run: `grep -q "Update Learnings Index" skills/legion-retro/SKILL.md`
 Expected: exit code 0
 
-Run: `grep -q "docs/solutions/index.json" .opencode/skills/legion-retro/SKILL.md`
+Run: `grep -q "docs/solutions/index.json" skills/legion-retro/SKILL.md`
 Expected: exit code 0
 
 **Step 4: Describe and advance**
@@ -197,7 +197,7 @@ jj new
 ### Task 3: Modify plan.md — add learnings injection step — Independent
 
 **Files:**
-- Modify: `.opencode/skills/legion-worker/workflows/plan.md` (insert between step 1.5 and step 2)
+- Modify: `skills/legion-worker/workflows/plan.md` (insert between step 1.5 and step 2)
 
 **Step 1: Locate the insertion point**
 
@@ -267,10 +267,10 @@ Before invoking `/workflows:plan`, check the learnings index for applicable prio
 
 **Step 3: Verify the modification**
 
-Run: `grep -q "Inject Relevant Learnings" .opencode/skills/legion-worker/workflows/plan.md`
+Run: `grep -q "Inject Relevant Learnings" skills/legion-worker/workflows/plan.md`
 Expected: exit code 0
 
-Run: `grep -q "Cap at 3 learnings maximum" .opencode/skills/legion-worker/workflows/plan.md`
+Run: `grep -q "Cap at 3 learnings maximum" skills/legion-worker/workflows/plan.md`
 Expected: exit code 0
 
 **Step 4: Describe and advance**

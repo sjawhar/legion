@@ -22,10 +22,10 @@
 | `packages/daemon/src/handoff/types.ts` | Modify | Add `RequiredSkills` interface, add field to `PlanHandoff` |
 | `packages/daemon/src/handoff/schema.ts` | Modify | Add Zod schema for `requiredSkills`, add to `planSchema` |
 | `packages/daemon/src/handoff/__tests__/ledger.test.ts` | Modify | Add roundtrip test for `requiredSkills` field |
-| `.opencode/skills/legion-worker/workflows/plan.md` | Modify | Update steps 1.2, 5, 5.5 for skill categorization and handoff |
-| `.opencode/skills/legion-worker/workflows/implement.md` | Modify | Add skill loading from plan handoff at step 1.6 |
-| `.opencode/skills/legion-worker/workflows/test.md` | Modify | Add skill loading from plan handoff at step 1 |
-| `.opencode/skills/legion-worker/workflows/review.md` | Modify | Add skill loading from plan handoff at step 1 |
+| `skills/legion-worker/workflows/plan.md` | Modify | Update steps 1.2, 5, 5.5 for skill categorization and handoff |
+| `skills/legion-worker/workflows/implement.md` | Modify | Add skill loading from plan handoff at step 1.6 |
+| `skills/legion-worker/workflows/test.md` | Modify | Add skill loading from plan handoff at step 1 |
+| `skills/legion-worker/workflows/review.md` | Modify | Add skill loading from plan handoff at step 1 |
 
 ---
 
@@ -164,7 +164,7 @@ jj new
 ### Task 2: Update plan workflow to formalize skill categorization and include requiredSkills — Independent
 
 **Files:**
-- Modify: `.opencode/skills/legion-worker/workflows/plan.md` (steps 1.2, 5, 5.5)
+- Modify: `skills/legion-worker/workflows/plan.md` (steps 1.2, 5, 5.5)
 
 - [ ] **Step 1: Update step 1.2 — formalize skill categorization output**
 
@@ -262,9 +262,9 @@ jj new
 ### Task 3: Update downstream workflows to read requiredSkills from plan handoff — Independent
 
 **Files:**
-- Modify: `.opencode/skills/legion-worker/workflows/implement.md` (step 1.6)
-- Modify: `.opencode/skills/legion-worker/workflows/test.md` (step 1)
-- Modify: `.opencode/skills/legion-worker/workflows/review.md` (step 1)
+- Modify: `skills/legion-worker/workflows/implement.md` (step 1.6)
+- Modify: `skills/legion-worker/workflows/test.md` (step 1)
+- Modify: `skills/legion-worker/workflows/review.md` (step 1)
 
 The same behavioral change applies to all three files: read `requiredSkills.<phase>` from the plan handoff and invoke those skills. If the field is present, use it (skip independent discovery for that phase). If absent, fall back to the existing independent skill discovery.
 
@@ -351,10 +351,10 @@ For each modified workflow file, verify:
 
 Specific grep checks:
 ```bash
-grep -n "requiredSkills" .opencode/skills/legion-worker/workflows/plan.md
-grep -n "requiredSkills" .opencode/skills/legion-worker/workflows/implement.md
-grep -n "requiredSkills" .opencode/skills/legion-worker/workflows/test.md
-grep -n "requiredSkills" .opencode/skills/legion-worker/workflows/review.md
+grep -n "requiredSkills" skills/legion-worker/workflows/plan.md
+grep -n "requiredSkills" skills/legion-worker/workflows/implement.md
+grep -n "requiredSkills" skills/legion-worker/workflows/test.md
+grep -n "requiredSkills" skills/legion-worker/workflows/review.md
 ```
 Expected: Each file contains at least one reference to `requiredSkills`.
 

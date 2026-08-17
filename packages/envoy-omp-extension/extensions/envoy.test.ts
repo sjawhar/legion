@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 
 type ToolResult = {
@@ -26,8 +28,8 @@ type TestPi = {
   readonly zod: typeof z;
   readonly registerTool: (tool: RegisteredTool) => void;
   readonly on: (
-    event: "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
-    handler: (event: unknown, context: SessionContext) => Promise<void>,
+    event: "resources_discover" | "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
+    handler: (event: unknown, context: SessionContext) => Promise<unknown>,
   ) => void;
   readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
 };
@@ -139,7 +141,7 @@ afterEach(() => {
 
 function createPi() {
   const tools: RegisteredTool[] = [];
-  const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<void>>();
+  const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
   const messages: string[] = [];
   const pi: TestPi = {
     zod: z,
@@ -164,6 +166,28 @@ function response(body: unknown): Response {
 }
 
 describe("envoy OMP extension", () => {
+  test("discovers the bundled envoy skill from the repository root", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?resources-discover");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    const resourcesDiscover = fixture.handlers.get("resources_discover");
+    if (resourcesDiscover === undefined) throw new Error("resources_discover was not registered");
+
+    const result = await resourcesDiscover({}, sessionContext());
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("skillPaths" in result) ||
+      !Array.isArray(result.skillPaths) ||
+      typeof result.skillPaths[0] !== "string"
+    ) {
+      throw new Error("resources_discover did not return a skill path");
+    }
+
+    expect(existsSync(join(result.skillPaths[0], "envoy", "SKILL.md"))).toBe(true);
+  });
+
   test("registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {

@@ -91,8 +91,8 @@ export function fallbackPrefix(filePath: string): string {
     return parts.slice(0, 4).join("/");
   }
 
-  if (parts[0] === ".opencode" && parts[1] === "skills" && parts.length >= 3) {
-    return parts.slice(0, 3).join("/");
+  if (parts[0] === "skills" && parts.length >= 2) {
+    return parts.slice(0, 2).join("/");
   }
 
   const dirname = path.posix.dirname(normalizedPath);

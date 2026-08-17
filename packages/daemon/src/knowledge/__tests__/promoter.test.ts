@@ -74,12 +74,12 @@ describe("readAssembledIndex", () => {
     });
     await writeEntryFile(indexDir, "issue-2", {
       "packages/daemon/src/state": ["knowledge/b.md"],
-      ".opencode/skills/legion-worker": ["knowledge/b.md"],
+      "skills/legion-worker": ["knowledge/b.md"],
     });
 
     const result = await readAssembledIndex(indexDir);
     expect(result.index["packages/daemon/src/state"]).toEqual(["knowledge/a.md", "knowledge/b.md"]);
-    expect(result.index[".opencode/skills/legion-worker"]).toEqual(["knowledge/b.md"]);
+    expect(result.index["skills/legion-worker"]).toEqual(["knowledge/b.md"]);
   });
 
   it("deduplicates paths across entry files", async () => {
@@ -132,13 +132,10 @@ describe("deriveIndexPrefixes", () => {
   it("prefers the longest existing key match before fallback", () => {
     expect(
       deriveIndexPrefixes(
-        [
-          "packages/daemon/src/state/decision.ts",
-          ".opencode/skills/legion-worker/workflows/plan.md",
-        ],
+        ["packages/daemon/src/state/decision.ts", "skills/legion-worker/workflows/plan.md"],
         ["packages/daemon", "packages/daemon/src/state"]
       )
-    ).toEqual([".opencode/skills/legion-worker", "packages/daemon/src/state"]);
+    ).toEqual(["packages/daemon/src/state", "skills/legion-worker"]);
   });
 });
 
@@ -162,7 +159,7 @@ describe("applyPromotions", () => {
           path: "knowledge/promoted.md",
           touchedPaths: [
             "packages/daemon/src/state/decision.ts",
-            ".opencode/skills/legion-worker/workflows/plan.md",
+            "skills/legion-worker/workflows/plan.md",
           ],
         },
       ],
@@ -173,19 +170,19 @@ describe("applyPromotions", () => {
     expect(result.mutations).toEqual([
       {
         action: "upsert",
-        key: ".opencode/skills/legion-worker",
+        key: "packages/daemon/src/state",
         learningPath: "knowledge/promoted.md",
       },
       {
         action: "upsert",
-        key: "packages/daemon/src/state",
+        key: "skills/legion-worker",
         learningPath: "knowledge/promoted.md",
       },
     ]);
 
     const savedEntry = JSON.parse(await readFile(path.join(indexDir, "test-issue.json"), "utf-8"));
     expect(savedEntry.entries["packages/daemon/src/state"]).toEqual(["knowledge/promoted.md"]);
-    expect(savedEntry.entries[".opencode/skills/legion-worker"]).toEqual(["knowledge/promoted.md"]);
+    expect(savedEntry.entries["skills/legion-worker"]).toEqual(["knowledge/promoted.md"]);
 
     // Verify assembled index includes both existing and new entries
     const assembled = await readAssembledIndex(indexDir);
