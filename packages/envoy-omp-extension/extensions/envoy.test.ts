@@ -324,25 +324,24 @@ describe("envoy OMP extension", () => {
     });
   });
 
-  test("registers /envoy_whoami and displays the current identity after copying its session ID", async () => {
+  test("registers /whoami and copies the current session ID to the clipboard", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?whoami-command");
     const fixture = createPi();
     const notifications: string[] = [];
 
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_command"));
-    const whoami = fixture.commands.find((command) => command.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("/envoy_whoami was not registered");
+    const whoami = fixture.commands.find((command) => command.name === "whoami");
+    if (whoami === undefined) throw new Error("/whoami was not registered");
 
     await whoami.handler("", commandContext(notifications));
 
     expect(fixture.copiedSessionIDs).toEqual(["ses_command"]);
     expect(notifications[0]).toContain("ses_command");
-    expect(notifications[0]).toContain("/tmp/envoy-omp-test");
-    expect(notifications[0]).toContain("Copied");
+    expect(notifications[0]).toContain("Session ID copied");
   });
 
-  test("reports the new session identity from /envoy_whoami after an in-process switch", async () => {
+  test("copies the new session identity from /whoami after an in-process switch", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?whoami-command-switch");
     const fixture = createPi();
     const notifications: string[] = [];
@@ -350,8 +349,8 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_command"));
     await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_command"));
-    const whoami = fixture.commands.find((command) => command.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("/envoy_whoami was not registered");
+    const whoami = fixture.commands.find((command) => command.name === "whoami");
+    if (whoami === undefined) throw new Error("/whoami was not registered");
 
     await whoami.handler("", commandContext(notifications));
 
@@ -360,15 +359,15 @@ describe("envoy OMP extension", () => {
     expect(notifications[0]).not.toContain("ses_before_command");
   });
 
-  test("still displays the current session identity when clipboard copy fails", async () => {
+  test("still displays the current session ID when clipboard copy fails", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?whoami-command-copy-failure");
     const fixture = createPi({ clipboardError: new Error("clipboard unavailable") });
     const notifications: string[] = [];
 
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_clipboard_unavailable"));
-    const whoami = fixture.commands.find((command) => command.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("/envoy_whoami was not registered");
+    const whoami = fixture.commands.find((command) => command.name === "whoami");
+    if (whoami === undefined) throw new Error("/whoami was not registered");
 
     await whoami.handler("", commandContext(notifications));
 
