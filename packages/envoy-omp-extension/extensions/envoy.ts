@@ -221,7 +221,25 @@ export default function envoyExtension(pi: PiApi): void {
     if (process.env.ENVOY_REGISTER_SESSION === "1") {
       await registerSession();
       if (!heartbeatRegistered) {
-        context.setInterval(() => void registerSession(), defaults.heartbeatMs);
+        // Never let a heartbeat tick reject unhandled: OMP treats unhandled
+        // rejections as fatal (postmortem exitAfterFatal), so a registry blip
+        // would kill a live session. Warn once per outage; registration
+        // self-heals on the next successful tick.
+        let heartbeatOutageNotified = false;
+        context.setInterval(() => {
+          void registerSession()
+            .then(() => {
+              heartbeatOutageNotified = false;
+            })
+            .catch((error) => {
+              if (heartbeatOutageNotified) return;
+              heartbeatOutageNotified = true;
+              context.ui.notify(
+                `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
+                "warning",
+              );
+            });
+        }, defaults.heartbeatMs);
         heartbeatRegistered = true;
       }
     }
@@ -265,7 +283,13 @@ export default function envoyExtension(pi: PiApi): void {
 
   const rebind = async (_event: unknown, context: SessionContext): Promise<void> => {
     if (defaults.natsUrls.length === 0) return;
-    await establishSession(context);
+    try {
+      await establishSession(context);
+    } catch (error) {
+      // A switch during a network outage must degrade, not fail the handler;
+      // the next switch or the NATS client's own reconnect re-establishes.
+      context.ui.notify(`envoy: rebind failed (${messageFor(error)}); will recover on reconnect`, "warning");
+    }
   };
 
   pi.on("session_switch", rebind);
@@ -275,7 +299,12 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
     try {
-      await connection?.drain();
+      // Bound the drain: on a dead connection it can hang past OMP's 2s
+      // shutdown-handler budget and the flush is best-effort anyway.
+      const drain = connection?.drain();
+      if (drain) await Promise.race([drain, new Promise((resolve) => setTimeout(resolve, 1_000))]);
+    } catch {
+      // A failed drain on shutdown is not actionable.
     } finally {
       connection = undefined;
       subscriptions.clear();
