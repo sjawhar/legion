@@ -24,12 +24,19 @@ export function registerEnvoyWhoamiCommand(
   api: EnvoyWhoamiCommandApi,
   currentIdentity: () => EnvoyIdentity
 ): void {
-  api.registerCommand("envoy_whoami", {
-    description: "Show this session's Envoy identity and copy its session ID to the clipboard.",
+  api.registerCommand("whoami", {
+    description: "Copy session ID",
     handler: async (_args, context) => {
       const identity = currentIdentity();
+      if (identity.sessionID === "") {
+        context.ui.notify("No active session", "warning");
+        return;
+      }
       const copied = await copySessionID(copyToClipboard, identity.sessionID);
-      context.ui.notify(formatIdentity(identity, copied), copied ? "info" : "warning");
+      context.ui.notify(
+        copied ? `Session ID copied: ${identity.sessionID}` : `Could not copy session ID: ${identity.sessionID}`,
+        copied ? "info" : "warning"
+      );
     },
   });
 }
@@ -46,13 +53,3 @@ async function copySessionID(
   }
 }
 
-function formatIdentity(identity: EnvoyIdentity, copied: boolean): string {
-  const clipboard = copied
-    ? "Copied session ID to clipboard."
-    : "Could not copy session ID to clipboard.";
-  return `${JSON.stringify(
-    { session_id: identity.sessionID, machine_id: identity.machineID, dir: identity.directory },
-    null,
-    2
-  )}\n\n${clipboard}`;
-}
