@@ -1,13 +1,11 @@
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent";
 
-type EnvoyIdentity = {
-  readonly sessionID: string;
-  readonly machineID: string;
-  readonly directory: string;
-};
-
 type CommandContext = {
   readonly ui: { readonly notify: (message: string, level: "info" | "warning") => void };
+  // OMP command handlers receive the full extension context; the live session
+  // manager is the source of truth for the session ID. The envoy closure's
+  // cached ID is stale for sessions created lazily after session_start.
+  readonly sessionManager?: { readonly getSessionId: () => string };
 };
 
 type EnvoyWhoamiCommandApi = {
@@ -22,19 +20,19 @@ type EnvoyWhoamiCommandApi = {
 
 export function registerEnvoyWhoamiCommand(
   api: EnvoyWhoamiCommandApi,
-  currentIdentity: () => EnvoyIdentity
+  cachedSessionID: () => string
 ): void {
   api.registerCommand("whoami", {
     description: "Copy session ID",
     handler: async (_args, context) => {
-      const identity = currentIdentity();
-      if (identity.sessionID === "") {
+      const sessionID = context.sessionManager?.getSessionId() || cachedSessionID();
+      if (sessionID === "") {
         context.ui.notify("No active session", "warning");
         return;
       }
-      const copied = await copySessionID(copyToClipboard, identity.sessionID);
+      const copied = await copySessionID(copyToClipboard, sessionID);
       context.ui.notify(
-        copied ? `Session ID copied: ${identity.sessionID}` : `Could not copy session ID: ${identity.sessionID}`,
+        copied ? `Session ID copied: ${sessionID}` : `Could not copy session ID: ${sessionID}`,
         copied ? "info" : "warning"
       );
     },
