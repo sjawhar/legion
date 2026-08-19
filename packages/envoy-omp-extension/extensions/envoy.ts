@@ -226,8 +226,17 @@ export default function envoyExtension(pi: PiApi): void {
         // would kill a live session. Warn once per outage; registration
         // self-heals on the next successful tick.
         let heartbeatOutageNotified = false;
+        let healing = false;
         context.setInterval(() => {
-          void registerSession()
+          // Sessions can be created lazily after session_start (a fresh TUI
+          // has no session yet), and the ID this closure registered with goes
+          // stale. Heal on drift: rebind the topic and re-register under the
+          // live ID instead of heartbeating a dead identity forever.
+          const liveSessionID = context.sessionManager.getSessionId();
+          const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
+          if (healing) return;
+          healing = true;
+          void (drifted ? establishSession(context) : registerSession())
             .then(() => {
               heartbeatOutageNotified = false;
             })
@@ -238,6 +247,9 @@ export default function envoyExtension(pi: PiApi): void {
                 `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
                 "warning",
               );
+            })
+            .finally(() => {
+              healing = false;
             });
         }, defaults.heartbeatMs);
         heartbeatRegistered = true;
@@ -323,7 +335,7 @@ export default function envoyExtension(pi: PiApi): void {
     });
   }
 
-  registerEnvoyWhoamiCommand(pi, () => ({ sessionID, machineID, directory: sessionDirectory }));
+  registerEnvoyWhoamiCommand(pi, () => sessionID);
 
   async function execute(operation: EnvoyToolOperation, parameters: ToolParameters): Promise<ToolResult> {
     try {

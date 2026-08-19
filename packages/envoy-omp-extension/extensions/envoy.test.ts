@@ -684,4 +684,64 @@ describe("envoy OMP extension", () => {
     // OMP kills shutdown handlers at 2s; the bounded drain must finish first.
     expect(Date.now() - startedAt).toBeLessThan(1_900);
   });
+
+  test("/whoami reads the live session ID when the session was created after session_start", async () => {
+    globalThis.fetch = async () => response({ session_id: "ses_live", machine_id: "test", dir: "/tmp", topics: [] });
+    const { default: envoyExtension } = await import("./envoy.ts?whoami-live-id");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    // A fresh TUI: session_start fires before any session exists.
+    await fixture.handlers.get("session_start")?.({}, sessionContext(""));
+    const whoami = fixture.commands.find((command) => command.name === "whoami");
+    if (whoami === undefined) throw new Error("/whoami was not registered");
+
+    // The session materialized later; the command context carries the live
+    // session manager and must win over the extension's cached empty ID.
+    const notifications: string[] = [];
+    await whoami.handler("", {
+      ui: { notify: (message) => notifications.push(message) },
+      sessionManager: { getSessionId: () => "ses_live" },
+    });
+
+    expect(fixture.copiedSessionIDs).toEqual(["ses_live"]);
+    expect(notifications[0]).toContain("ses_live");
+  });
+
+  test("the heartbeat heals a stale registration when the session ID drifts", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    const registered: string[] = [];
+    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.body !== undefined) {
+        const body = JSON.parse(init.body.toString());
+        if (typeof body.session_id === "string") registered.push(body.session_id);
+      }
+      return response({ session_id: "ses_created", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-drift");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    let liveSessionID = "";
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { getSessionId: () => liveSessionID },
+      setInterval: (callback) => intervals.push(callback),
+      ui: { notify: () => undefined },
+    };
+
+    envoyExtension(fixture.pi);
+    // Fresh TUI: no session yet at session_start; the closure registers "".
+    await fixture.handlers.get("session_start")?.({}, context);
+    expect(intervals.length).toBe(1);
+
+    // The session materializes later; the next heartbeat must rebind the
+    // NATS topic and re-register under the live ID instead of heartbeating
+    // the dead identity forever.
+    liveSessionID = "ses_created";
+    for (const tick of intervals) tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(registered.at(-1)).toBe("ses_created");
+    expect(natsState.controls.has("notifications.agent.ses_created")).toBe(true);
+  });
 });
