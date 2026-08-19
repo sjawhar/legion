@@ -62,6 +62,7 @@ const natsState = {
   controls: new Map<string, SubscriptionControls>(),
   connectedNames: [] as string[],
   failConnects: 0,
+  drainHangs: false,
 };
 
 const clipboardState = {
@@ -78,7 +79,9 @@ mock.module("nats", () => ({
     natsState.connectedNames.push(name);
     return {
       isClosed: () => false,
-      drain: async () => undefined,
+      drain: async () => {
+        if (natsState.drainHangs) await new Promise(() => undefined);
+      },
       subscribe: (topic: string) => {
         let active = true;
         const queue: { readonly subject: string; readonly data: Uint8Array }[] = [];
@@ -159,6 +162,8 @@ afterEach(() => {
   natsState.subscriptions.clear();
   natsState.controls.clear();
   natsState.failConnects = 0;
+  natsState.drainHangs = false;
+  delete process.env.ENVOY_REGISTER_SESSION;
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
@@ -586,5 +591,97 @@ describe("envoy OMP extension", () => {
     second?.push("post-recovery message");
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fixture.messages.some((m) => m.includes("post-recovery message"))).toBe(true);
+  });
+
+  test("a heartbeat tick during a registry outage warns once instead of rejecting unhandled", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    // The extension captures fetch by value at creation, so the blip must be
+    // flipped inside the same function object rather than by reassigning
+    // globalThis.fetch afterwards.
+    let registryDown = false;
+    globalThis.fetch = async () => {
+      if (registryDown) throw new Error("network unreachable");
+      return response({ session_id: "ses_heartbeat", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-blip");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const notifications: string[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { getSessionId: () => "ses_heartbeat" },
+      setInterval: (callback) => intervals.push(callback),
+      ui: { notify: (message) => notifications.push(message) },
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    // The healthy start must land on the heartbeat branch, not the NATS-retry
+    // branch; a failed registration here would register the wrong interval.
+    expect(notifications).toEqual([]);
+    expect(intervals.length).toBe(1);
+
+    // The internet blip: every registry call now rejects. bun:test swallows
+    // unhandled rejections before user listeners, so the observable contract
+    // is the owned rejection's warning: exactly one per outage, however many
+    // ticks elapse. On the unfixed code the tick rejects unhandled (fatal in
+    // OMP via postmortem exitAfterFatal) and no warning ever appears.
+    registryDown = true;
+    for (const tick of intervals) tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    for (const tick of intervals) tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const warnings = notifications.filter((message) => message.includes("registry heartbeat failed"));
+    expect(warnings).toHaveLength(1);
+  });
+
+  test("a rebind during a network outage notifies instead of failing the handler", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    let registryDown = false;
+    globalThis.fetch = async () => {
+      if (registryDown) throw new Error("network unreachable");
+      return response({ session_id: "ses_rebind", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?rebind-blip");
+    const fixture = createPi();
+    const notifications: string[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { getSessionId: () => "ses_rebind" },
+      setInterval: () => undefined,
+      ui: { notify: (message) => notifications.push(message) },
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    registryDown = true;
+    const switched: SessionContext = {
+      ...context,
+      sessionManager: { getSessionId: () => "ses_rebind_next" },
+    };
+
+    // The handler must resolve; a rejection here surfaces as an extension
+    // handler failure on a live session.
+    await fixture.handlers.get("session_switch")?.({}, switched);
+
+    expect(notifications.some((message) => message.includes("rebind failed"))).toBe(true);
+  });
+
+  test("session_shutdown resolves within its budget when drain hangs on a dead connection", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-hang");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+
+    natsState.drainHangs = true;
+    const startedAt = Date.now();
+    await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+
+    // OMP kills shutdown handlers at 2s; the bounded drain must finish first.
+    expect(Date.now() - startedAt).toBeLessThan(1_900);
   });
 });
