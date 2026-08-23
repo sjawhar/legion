@@ -2,7 +2,7 @@
 
 Tracked OMP extension for Envoy messaging. It shares the Envoy HTTP client, tool contract, envelope
 display data, and subject helpers with the other Legion adapters while keeping OMP's direct NATS
-subscription and Pi follow-up delivery local.
+subscription and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind it).
 
 ## Session identity
 

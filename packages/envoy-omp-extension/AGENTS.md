@@ -4,7 +4,7 @@ Tracked OMP adapter for Envoy messaging.
 
 ## Overview
 
-This package owns Pi-specific tool registration, direct NATS subscriptions, follow-up delivery,
+This package owns Pi-specific tool registration, direct NATS subscriptions, steering delivery,
 and optional self-subscription registration. HTTP transport, tool metadata, envelope parsing, and
 subject construction come from the Envoy core packages.
 
@@ -20,5 +20,5 @@ subject construction come from the Envoy core packages.
 ## Critical conventions
 
 - Register schemas through the injected `pi.zod`; OMP rejects schemas built from another Zod instance.
-- Keep direct NATS subscription lifecycle and Pi follow-up delivery adapter-local.
+- Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
 - Do not alter `~/.omp` from this package. The README documents the developer symlink transition.

@@ -55,7 +55,7 @@ type PiApi = {
   ) => void;
   readonly sendMessage: (
     message: { readonly customType: string; readonly content: string; readonly display: boolean },
-    options: { readonly deliverAs: "followUp"; readonly triggerTurn: boolean },
+    options: { readonly deliverAs: "steer"; readonly triggerTurn: boolean },
   ) => void;
 };
 
@@ -106,9 +106,12 @@ export default function envoyExtension(pi: PiApi): void {
     } catch {
       summary = raw;
     }
+    // Steering: mid-turn the message is injected at the next tool boundary
+    // instead of waiting for the turn to finish; idle it still starts a turn
+    // (triggerTurn), so wake-on-message behavior is unchanged.
     pi.sendMessage(
       { customType: "envoy-message", content: `[ENVOY message on topic "${subject}"${source}]\n${summary}`, display: true },
-      { deliverAs: "followUp", triggerTurn: true },
+      { deliverAs: "steer", triggerTurn: true },
     );
   };
 

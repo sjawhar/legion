@@ -175,14 +175,18 @@ function createPi(options: { readonly clipboardError?: Error } = {}) {
   const tools: RegisteredTool[] = [];
   const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
   const messages: string[] = [];
+  const deliveries: { readonly content: string; readonly options: unknown }[] = [];
   const pi: TestPi = {
     zod: z,
     registerTool: (tool) => tools.push(tool),
     registerCommand: (name, command) => commands.push({ name, ...command }),
     on: (event, handler) => handlers.set(event, handler),
-    sendMessage: (message) => messages.push(message.content),
+    sendMessage: (message, options) => {
+      messages.push(message.content);
+      deliveries.push({ content: message.content, options });
+    },
   };
-  return { commands, copiedSessionIDs: clipboardState.copiedSessionIDs, handlers, messages, pi, tools };
+  return { commands, copiedSessionIDs: clipboardState.copiedSessionIDs, deliveries, handlers, messages, pi, tools };
 }
 
 function sessionContext(sessionID = "ses_omp"): SessionContext {
@@ -567,6 +571,24 @@ describe("envoy OMP extension", () => {
 
     expect(delivered.length).toBe(1);
     expect(delivered[0]).toContain("second message must still deliver");
+  });
+
+  test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_steer"));
+    const controls = natsState.controls.get("notifications.agent.ses_steer");
+    expect(controls).toBeDefined();
+
+    controls?.push("steer me mid-turn");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(fixture.deliveries.length).toBe(1);
+    expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {
