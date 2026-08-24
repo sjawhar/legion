@@ -28,7 +28,8 @@ describe("legion gh", () => {
       expect(spawnArgs).toEqual(["api", "user"]);
       expect(childEnvironment?.GH_TOKEN).toBe("scoped-token");
       expect(childEnvironment?.GITHUB_TOKEN).toBeUndefined();
-      expect(childEnvironment?.GH_CONFIG_DIR).toBe("/dev/null");
+      expect(childEnvironment?.GH_CONFIG_DIR).toMatch(/[/\\]legion[/\\]gh$/);
+      expect(childEnvironment?.GH_CONFIG_DIR).not.toBe("/dev/null");
       expect(process.env.GH_TOKEN).toBeUndefined();
     } finally {
       if (parentToken === undefined) delete process.env.GH_TOKEN;
