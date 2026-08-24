@@ -65,6 +65,7 @@ describe("provisionIssueWorkspace", () => {
       run: async (cmd, opts) => {
         calls.push({ cmd, opts });
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
+          expect(existsSync(path.dirname(repoCloneDir))).toBeTrue();
           await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
         }
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
@@ -105,6 +106,28 @@ describe("provisionIssueWorkspace", () => {
       `task:\n  maxRecursionDepth: 11\nextensions:\n  - ${extensionPackage}\n`
     );
     expect(spec).toEqual({ repoCloneDir, workspaceDir, bookmark });
+  });
+
+  test("creates a missing workspace parent before adding an issue workspace", async () => {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const issue = formatIssueKey("acme", "widgets", 42);
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+    await provisionIssueWorkspace(issue, {
+      extensionPackage,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      run: async (cmd) => {
+        if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+          expect(existsSync(path.dirname(workspaceDir))).toBeTrue();
+          await mkdir(workspaceDir, { recursive: true });
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
   });
 
   test("does not add a second workspace when an issue is reactivated", async () => {

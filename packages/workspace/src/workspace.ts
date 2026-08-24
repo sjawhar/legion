@@ -105,6 +105,8 @@ async function ensureRepoClone(
     return;
   }
 
+  await mkdir(path.dirname(repoCloneDir), { recursive: true });
+
   const remote = `https://github.com/${owner}/${repo}`;
   await runChecked(deps, ["jj", "git", "clone", remote, repoCloneDir], {
     env: credentialEnv,
@@ -121,6 +123,8 @@ async function createWorkspace(
   workspaceName: string,
   bookmark: string
 ): Promise<void> {
+  await mkdir(path.dirname(workspaceDir), { recursive: true });
+
   const gitDir = `${repoCloneDir}/.jj/repo/store/git`;
   const pruneArgs = ["git", `--git-dir=${gitDir}`, "worktree", "prune"];
   const initialWorkspaceArgs = [

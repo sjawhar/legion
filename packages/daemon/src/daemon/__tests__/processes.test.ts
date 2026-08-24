@@ -1147,9 +1147,7 @@ describe("ProcessManager", () => {
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
-          command[1] === "new-window"
-            ? [...command.slice(0, -1), "sleep 999"]
-            : command;
+          command[1] === "new-window" ? [...command.slice(0, -1), "sleep 999"] : command;
         const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
         const [stdout, stderr, exitCode] = await Promise.all([
           new Response(child.stdout).text(),
