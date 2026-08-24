@@ -1,12 +1,8 @@
 import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
-
+import { HANDOFF_PHASES, type PhaseHandoff } from "@legion/contracts";
 import { resolveLegionPaths } from "../daemon/paths";
 import { readAllHandoffs } from "../handoff/ledger";
-import {
-  HANDOFF_PHASES,
-  type PhaseHandoff,
-} from "@legion/envoy-omp-extension/legion/handoff-schema";
 import {
   type LearningFeedbackPhase,
   type LearningFeedbackRecord,
@@ -186,4 +182,3 @@ export async function captureLearningFeedbackFromWorkspace(
     written: true,
   };
 }
-

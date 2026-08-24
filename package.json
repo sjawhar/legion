@@ -16,7 +16,8 @@
     "packages/daemon",
     "packages/envoy-plugin",
     "packages/envoy-claude-plugin",
-    "packages/dispatch"
+    "packages/dispatch",
+    "packages/workspace"
   ],
   "dependencies": {
     "nats": "^2.29.2",

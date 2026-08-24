@@ -22,6 +22,7 @@ export interface CommandResult {
 }
 
 export interface CommandRunnerOptions {
+  readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
 }
 
@@ -43,6 +44,7 @@ export async function defaultRunner(
   options?: CommandRunnerOptions
 ): Promise<CommandResult> {
   const proc = Bun.spawn(cmd, {
+    cwd: options?.cwd,
     env: options?.env,
     stdout: "pipe",
     stderr: "pipe",

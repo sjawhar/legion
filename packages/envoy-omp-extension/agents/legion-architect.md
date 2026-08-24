@@ -5,7 +5,7 @@ tools: ["read", "task", "hub"]
 spawns: ["legion-architect", "legion-planner", "legion-implementer", "legion-tester", "legion-reviewer", "legion-merger", "oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-architect"]
-# Mirrors validatePhaseHandoff from @legion/envoy-omp-extension/legion/handoff-schema (Task 21).
+# Mirrors validatePhaseHandoff from @legion/contracts.
 output:
   type: object
   required: ["schemaVersion", "phase", "completed"]

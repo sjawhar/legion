@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonConfig } from "../config";
+import type { DaemonEnvironment } from "../environment";
 import { startDaemon } from "../index";
 import { newLegionState } from "../legion-state";
 
@@ -54,6 +55,7 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     dispatchUrl: "http://127.0.0.1:13380",
     dispatchBearer: "dispatch-bearer",
+    ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 4,
@@ -68,6 +70,17 @@ function config(stateDir: string): DaemonConfig {
     stateDir,
   };
 }
+
+const daemonEnvironment: DaemonEnvironment = {
+  commands: {
+    jj: "/tools/jj",
+    git: "/tools/git",
+    gh: "/tools/gh",
+    tmux: "/tools/tmux",
+  },
+  ompInvocation: "/tools/omp",
+  paneEnv: { PATH: "/full/bin:/usr/bin" },
+};
 
 describe("startDaemon", () => {
   it("boots the API, intake, and lifecycle timers then persists on SIGTERM", async () => {
@@ -89,7 +102,12 @@ describe("startDaemon", () => {
             saves += 1;
           },
           createNatsTransport: async () => nats,
-          runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+          runner: async () => ({
+            stdout: "[]",
+            stderr: "LEGION_OMP_AGENTS=available\n",
+            exitCode: 0,
+          }),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
           envoyPublish: async () => {},
           fetchGitHubProjectItems: async () => ({ items: [] }),
@@ -147,6 +165,49 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("rejects an OMP invocation without pi.agents before accepting daemon work", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = { ...config(stateDir), ompInvocation: "omp-without-agents" };
+    let loadedState = false;
+    let natsCreated = false;
+    let probeCommand: string[] | undefined;
+
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            runner: async (command) => {
+              probeCommand = command;
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS_MISSING\n", exitCode: 0 };
+            },
+            resolveDaemonEnvironment: async () => daemonEnvironment,
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+            createNatsTransport: async () => {
+              natsCreated = true;
+              throw new Error("NATS must not start after a failed OMP capability probe");
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents");
+
+      expect(probeCommand?.slice(0, 4)).toEqual([
+        "sh",
+        "-c",
+        expect.stringContaining(
+          '/tools/omp models --no-extensions --extension "$1" --json >/dev/null'
+        ),
+        "sh",
+      ]);
+      expect(probeCommand?.at(-1)).toContain("legion-omp-probe-");
+      expect(loadedState).toBeFalse();
+      expect(natsCreated).toBeFalse();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
 
   it("closes API and NATS while surfacing a rejected tracked event during stop", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
@@ -158,7 +219,12 @@ describe("startDaemon", () => {
         loadState: async () => state,
         saveState: async () => {},
         createNatsTransport: async () => nats,
-        runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+        runner: async () => ({
+          stdout: "[]",
+          stderr: "LEGION_OMP_AGENTS=available\n",
+          exitCode: 0,
+        }),
+        resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
         envoyPublish: async () => {},
         fetchGitHubProjectItems: async () => ({ items: [] }),

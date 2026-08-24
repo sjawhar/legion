@@ -59,7 +59,7 @@ export interface CatchupWorkerPayload extends LegionEventPayload {
 
 export interface WorkerCatchupDeps {
   runner: CommandRunner;
-  tokenManager: TokenManager;
+  tokenManager: Pick<TokenManager, "getToken">;
 }
 
 interface Artifact {

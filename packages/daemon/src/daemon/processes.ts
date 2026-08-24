@@ -10,6 +10,9 @@ import {
   roleTopic,
   sanitizeToken,
 } from "@legion/contracts";
+import { provisionIssueWorkspace } from "@legion/workspace";
+import type { CommandRunnerOptions } from "../state/fetch";
+import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import type { LegionState, TreeState, WorkerRoleClaim } from "./legion-state";
 
@@ -43,12 +46,19 @@ export interface ProcessManagerDeps {
   state: LegionState;
   saveState(): Promise<void>;
   config: DaemonConfig;
-  run(cmd: string[]): Promise<{ stdout: string; exitCode: number }>;
+  ompInvocation: string;
+  panePath: string;
+  run(
+    cmd: string[],
+    options?: CommandRunnerOptions
+  ): Promise<{ stdout: string; stderr?: string; exitCode: number }>;
   natsPublish(subject: string, json: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
   mintBootToken(tree: IssueKey, generation: number): Promise<string>;
+  provisioningToken(owner: string): Promise<string>;
   statPrompt?(promptPath: string): Promise<unknown>;
+  workerCatchup: WorkerCatchupDeps;
   now(): number;
 }
 
@@ -75,7 +85,6 @@ function controlReplyType(raw: string): "ack" | "nack" {
   }
   return payload.type;
 }
-
 
 /** Starts and supervises only the tmux trees whose locator it records in Legion state. */
 export class ProcessManager {
@@ -144,6 +153,7 @@ export class ProcessManager {
       ...(existing?.sessionId ? { sessionId: existing.sessionId } : {}),
       agentId,
     };
+    this.redeliverHeldRoleEvents(treeKey, issue, role);
     await this.deps.saveState();
   }
 
@@ -248,7 +258,11 @@ export class ProcessManager {
     return process.exitCode === 0 ? "alive" : "dead";
   }
 
-  async controlDirective(tree: IssueKey, directive: ControlDirective): Promise<void> {
+  async controlDirective(
+    tree: IssueKey,
+    directive: ControlDirective,
+    redeliver = true
+  ): Promise<boolean> {
     const generation = this.deps.state.trees[tree]?.generation;
     if (generation === undefined) throw new Error(`Unknown Legion tree: ${tree}`);
     const reply = controlReplyType(
@@ -258,10 +272,10 @@ export class ProcessManager {
       )
     );
     if (reply === "ack") {
-      if ("redeliver" in directive) {
+      if (redeliver && "redeliver" in directive) {
         this.deps.natsPublish(directive.redeliver.topic, directive.redeliver.payload);
       }
-      return;
+      return true;
     }
     if (directive.type !== "shutdown") {
       this.publishController({
@@ -270,6 +284,7 @@ export class ProcessManager {
         role: directive.type === "revive-worker" ? directive.role : "architect",
       });
     }
+    return false;
   }
 
   async resurrect(treeKey: IssueKey): Promise<void> {
@@ -281,6 +296,31 @@ export class ProcessManager {
     });
     this.resurrecting.set(treeKey, resurrection);
     return resurrection;
+  }
+  async markTreeReady(treeKey: IssueKey): Promise<void> {
+    const tree = this.requireTree(treeKey);
+    const recoveries = tree.recoveryEvents;
+    if (!recoveries?.length) return;
+    for (const recovery of [...recoveries]) {
+      let recovered = false;
+      if (recovery.issue === treeKey && recovery.role === "architect") {
+        this.deps.natsPublish(recovery.original.topic, recovery.original.payload);
+        recovered = true;
+      } else {
+        const backing = this.roleBacking(recovery.issue, recovery.role);
+        if (backing?.agentId) {
+          recovered = await this.reviveWorker(
+            treeKey,
+            recovery.issue,
+            recovery.role,
+            backing.agentId,
+            recovery.original
+          );
+        }
+      }
+      if (recovered) recoveries.splice(recoveries.indexOf(recovery), 1);
+    }
+    await this.deps.saveState();
   }
 
   beginLinger(treeKey: IssueKey): void {
@@ -345,6 +385,7 @@ export class ProcessManager {
           redeliver: exception.original,
         });
       } else {
+        await this.persistRecovery(root, parsed.issue, parsed.role, exception.original);
         await this.resurrect(root);
       }
       return;
@@ -358,20 +399,68 @@ export class ProcessManager {
     }
 
     if ((await this.probe(root)) === "dead") {
+      await this.persistRecovery(root, parsed.issue, parsed.role, exception.original);
       await this.resurrect(root);
       return;
     }
 
+    await this.reviveWorker(root, parsed.issue, parsed.role, backing.agentId, exception.original);
+  }
+
+  private async reviveWorker(
+    root: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    agentId: string,
+    original: Redelivery
+  ): Promise<boolean> {
     const sessionFile = this.requireTree(root).locator?.ompSessionFile;
     if (!sessionFile) throw new Error(`Live Legion tree ${root} has no OMP session file`);
-    await this.controlDirective(root, {
-      type: "revive-worker",
-      issue: parsed.issue,
-      role: parsed.role,
-      agentId: backing.agentId,
-      parentSessionFile: sessionFile,
-      redeliver: exception.original,
-    });
+    const revived = await this.controlDirective(
+      root,
+      {
+        type: "revive-worker",
+        issue,
+        role,
+        agentId,
+        parentSessionFile: sessionFile,
+        redeliver: original,
+      },
+      false
+    );
+    if (!revived) return false;
+    const catchup = await workerCatchup(this.deps.state, issue, role, this.deps.workerCatchup);
+    this.deps.natsPublish(
+      roleTopic(roleToken(this.deps.state.project, issue, role)),
+      JSON.stringify(catchup)
+    );
+    this.deps.natsPublish(original.topic, original.payload);
+    return true;
+  }
+
+  private async persistRecovery(
+    root: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    original: Redelivery
+  ): Promise<void> {
+    const tree = this.requireTree(root);
+    let recoveries = tree.recoveryEvents;
+    if (!recoveries) {
+      recoveries = [];
+      tree.recoveryEvents = recoveries;
+    }
+    if (
+      !recoveries.some(
+        (recovery) =>
+          recovery.issue === issue &&
+          recovery.role === role &&
+          recovery.original.eventId === original.eventId
+      )
+    ) {
+      recoveries.push({ issue, role, original });
+    }
+    await this.deps.saveState();
   }
 
   private startRoot(issue: IssueKey): void {
@@ -437,10 +526,20 @@ export class ProcessManager {
 
   private async spawnTree(tree: TreeState): Promise<void> {
     const name = treeName(tree.root);
-    const treeDir = path.join(this.deps.config.stateDir, "trees", name);
+    const parsedTree = parseIssueKey(tree.root);
+    if (!parsedTree) throw new Error(`Invalid IssueKey: ${tree.root}`);
+    const workspace = await provisionIssueWorkspace(tree.root, {
+      extensionPackage: EXTENSION_PACKAGE,
+      stateDir: this.deps.config.stateDir,
+      maxRecursionDepth: this.deps.config.maxRecursionDepth,
+      provisioningToken: async () => await this.deps.provisioningToken(parsedTree.owner),
+      run: async (command, options) => {
+        const result = await this.deps.run(command, options);
+        return { ...result, stderr: result.stderr ?? "" };
+      },
+    });
     const promptPath = path.join(EXTENSION_PACKAGE, "agents", "architect-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
-    await this.writeOmpConfig(treeDir, this.deps.config.maxRecursionDepth);
     const session = `legion-${this.deps.state.project}`;
     await this.ensureTmuxSession(session);
     const generation = tree.generation;
@@ -473,7 +572,11 @@ export class ProcessManager {
       `LEGION_WORKER_BUDGET=${this.deps.config.workerBudget}`,
       "-e",
       `LEGION_MAX_RECURSION_DEPTH=${this.deps.config.maxRecursionDepth}`,
-      `cd ${shellPath(treeDir)} && omp --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      "-e",
+      `LEGION_STATE_DIR=${this.deps.config.stateDir}`,
+      "-e",
+      `PATH=${this.deps.panePath}`,
+      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
@@ -508,7 +611,9 @@ export class ProcessManager {
       `ENVOY_NATS_URL=${this.deps.config.natsUrls.join(",")}`,
       "-e",
       `ENVOY_URL=${this.deps.config.envoyUrl}`,
-      `cd ${shellPath(controllerDir)} && omp --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      "-e",
+      `PATH=${this.deps.panePath}`,
+      `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
@@ -590,6 +695,20 @@ export class ProcessManager {
       heldAt: new Date(this.deps.now()).toISOString(),
       eventId: event.eventId,
     });
+  }
+  private redeliverHeldRoleEvents(treeKey: IssueKey, issue: IssueKey, role: LegionRole): void {
+    if (this.deps.state.issues[issue]?.released !== true) return;
+    const token = roleToken(this.deps.state.project, issue, role);
+    const heldEvents = this.requireTree(treeKey).heldEvents;
+    for (let index = 0; index < heldEvents.length; ) {
+      const held = heldEvents[index];
+      if (held?.role !== role) {
+        index += 1;
+        continue;
+      }
+      this.deps.natsPublish(roleTopic(token), held.payloadJson);
+      heldEvents.splice(index, 1);
+    }
   }
 
   private redeliverHeldControllerEvents(): void {

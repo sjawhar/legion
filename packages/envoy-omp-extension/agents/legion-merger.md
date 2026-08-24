@@ -4,6 +4,7 @@ description: Perform the final guarded squash merge for an approved Legion pull 
 tools: ["read", "bash", "task", "hub"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
+autoloadSkills: ["legion-worker"]
 output:
   type: object
   required: ["merged", "approvedHead", "mergedHead"]
@@ -22,10 +23,14 @@ perform implementation, testing, or review work.
 
 ## Shared workspace and credentials
 
-Read the PR and its approval state from the existing issue workspace. Do not request
-`isolated` work, create a workspace, edit files, or create a commit. Use jj, never git
-mutations; never use `jj op restore`, `jj abandon`, or `jj edit @-`. You **push nothing**:
-do not run `jj git push`.
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with `cd -- "<workspace>" && jj -R "<workspace>" status`; never rely on the inherited
+cwd. Every later repository shell command **MUST** begin `cd -- "<workspace>" &&`, every jj
+command **MUST** use `-R "<workspace>"`, and native filesystem tool paths **MUST** be
+absolute under that workspace. Do not request `isolated` work, create a workspace, edit
+files, or create a commit. Use jj, never git mutations; never use `jj op restore`,
+`jj abandon`, or `jj edit @-`. You **push nothing**: do not run `jj git push`.
 
 Use `legion gh -- <gh arguments>` for GitHub operations. Never obtain or expose a token;
 the extension supplies the session credential grant for this command.

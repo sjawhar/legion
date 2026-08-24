@@ -4,7 +4,8 @@ description: Implement one Legion issue end to end in the assigned shared jj wor
 tools: ["read", "edit", "write", "bash", "task", "hub"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
-# Mirrors validatePhaseHandoff from @legion/envoy-omp-extension/legion/handoff-schema (Task 21).
+autoloadSkills: ["legion-worker"]
+# Mirrors validatePhaseHandoff from @legion/contracts.
 output:
   type: object
   required: ["schemaVersion", "phase", "completed"]
@@ -34,13 +35,17 @@ reporting it.
 
 ## Shared workspace and credentials
 
-This workspace and its bookmark already belong to the issue and are shared sequentially
-by phase workers. Do not request `isolated` work, create another workspace, or replace
-another phase's commit. Use jj, never git mutations. Start with `jj status` and inspect
-`jj log`; never use `jj op restore`, `jj abandon`, or `jj edit @-`. Create reviewable
-commits only with `jj split -m "<message>" <paths…>`. Before a push, inspect
-`jj log -r 'ancestors(@, 5)'`, then push the existing issue branch with plain
-`jj git push`.
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with `cd -- "<workspace>" && jj -R "<workspace>" status`; never rely on the inherited
+cwd. Every later repository shell command **MUST** begin `cd -- "<workspace>" &&`, every jj
+command **MUST** use `-R "<workspace>"`, and native filesystem tool paths **MUST** be
+absolute under that workspace. Do not request `isolated` work, create another workspace, or
+replace another phase's commit. Use jj, never git mutations; never use `jj op restore`,
+`jj abandon`, or `jj edit @-`. Create reviewable commits only with
+`jj -R "<workspace>" split -m "<message>" <paths…>`. Before a push, inspect
+`jj -R "<workspace>" log -r 'ancestors(@, 5)'`, then push the existing issue branch with
+`jj -R "<workspace>" git push`.
 
 Use `legion gh -- <gh arguments>` for GitHub work, including opening or updating the PR.
 Never obtain or print a token. The extension injects a short-lived credential grant when

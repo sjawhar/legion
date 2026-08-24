@@ -49,8 +49,8 @@ export interface ExceptionInfo {
 }
 
 interface HeldTarget {
-  issue: IssueKey;
-  tree: TreeState;
+  heldEvents: HeldEvent[];
+  isActive(): boolean;
 }
 
 interface CheckInput {
@@ -177,11 +177,11 @@ function heldTarget(state: LegionState, token: string): HeldTarget | undefined {
   const parsed = parseRoleToken(state.project, token);
   if (!parsed || "controller" in parsed) return undefined;
   const tree = treeFor(state, parsed.issue);
-  return tree ? { issue: parsed.issue, tree } : undefined;
-}
-
-function isActive(state: LegionState, target: HeldTarget): boolean {
-  return state.issues[target.issue]?.released === true && target.tree.status === "active";
+  if (!tree) return undefined;
+  return {
+    heldEvents: tree.heldEvents,
+    isActive: () => state.issues[parsed.issue]?.released === true && tree.status === "active",
+  };
 }
 
 function addHeld(
@@ -196,13 +196,13 @@ function addHeld(
     heldAt: new Date(envelope.issued_at).toISOString(),
     eventId: envelope.event_id,
   };
-  target.tree.heldEvents.push(held);
+  target.heldEvents.push(held);
   return held;
 }
 
 function removeHeld(target: HeldTarget, held: HeldEvent): void {
-  const index = target.tree.heldEvents.indexOf(held);
-  if (index >= 0) target.tree.heldEvents.splice(index, 1);
+  const index = target.heldEvents.indexOf(held);
+  if (index >= 0) target.heldEvents.splice(index, 1);
 }
 
 function isMention(subject: string): boolean {
@@ -244,6 +244,8 @@ function exceptionInfo(
 }
 
 export interface EventPump {
+  redeliverControllerEvents(): Promise<void>;
+  publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
   stop(): void;
   drain(): Promise<void>;
 }
@@ -253,6 +255,10 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   const retryTimers = new Set<unknown>();
   const pending = new Set<Promise<void>>();
   const failures: unknown[] = [];
+  const controllerTarget: HeldTarget = {
+    heldEvents: deps.state.controllerHeldEvents,
+    isActive: () => true,
+  };
 
   const track = (operation: Promise<void>): void => {
     pending.add(operation);
@@ -292,7 +298,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     held: HeldEvent | undefined,
     attempt: number
   ): Promise<void> => {
-    if (stopped || (target && !isActive(deps.state, target))) return;
+    if (stopped || (target && !target.isActive())) return;
     try {
       await deps.envoyPublish(roleTopic(role), payloadJson);
     } catch {
@@ -313,25 +319,28 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   ): Promise<void> => {
     const payloadJson = JSON.stringify(payload);
     const target = heldTarget(deps.state, role);
-    if (target && !isActive(deps.state, target)) {
+    if (target && !target.isActive()) {
       addHeld(target, role, payloadJson, envelope);
       return;
     }
     await publishRole(role, payloadJson, envelope, target, undefined, 0);
   };
 
+  const publishController = async (payloadJson: string, envelope: EnvelopeJson): Promise<void> => {
+    const role = controllerToken(deps.state.project);
+    if (!controllerTarget.isActive()) {
+      addHeld(controllerTarget, role, payloadJson, envelope);
+      await deps.saveState();
+      return;
+    }
+    await publishRole(role, payloadJson, envelope, controllerTarget, undefined, 0);
+  };
+
   const applyEffects = async (effects: Effect[], envelope: EnvelopeJson): Promise<void> => {
     for (const effect of effects) {
       if (effect.kind === "publish") await publishEffect(effect.role, effect.payload, envelope);
       else if (effect.kind === "controller") {
-        await publishRole(
-          controllerToken(deps.state.project),
-          JSON.stringify(effect.payload),
-          envelope,
-          undefined,
-          undefined,
-          0
-        );
+        await publishController(JSON.stringify(effect.payload), envelope);
       } else if (effect.kind === "linger") {
         await deps.onLinger(effect.tree);
       } else if (effect.kind === "probe") {
@@ -385,13 +394,9 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     const envelope = EnvelopeSchema.parse(JSON.parse(data)) as EnvelopeJson;
     if (CHECK_TOPIC.test(subject)) await handleCheck(subject, envelope);
     else if (isMention(subject)) {
-      await publishRole(
-        controllerToken(deps.state.project),
+      await publishController(
         typeof envelope.payload === "string" ? envelope.payload : "{}",
-        envelope,
-        undefined,
-        undefined,
-        0
+        envelope
       );
     } else {
       const exception = exceptionInfo(deps.state, subject, envelope);
@@ -418,6 +423,25 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   }, SETTLE_INTERVAL_MS);
 
   return {
+    async publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void> {
+      await publishController(JSON.stringify(payload), envelope);
+    },
+    async redeliverControllerEvents(): Promise<void> {
+      for (const held of [...deps.state.controllerHeldEvents]) {
+        const heldAt = Date.parse(held.heldAt);
+        await publishRole(
+          controllerToken(deps.state.project),
+          held.payloadJson,
+          {
+            event_id: held.eventId,
+            issued_at: Number.isNaN(heldAt) ? Date.now() : heldAt,
+          },
+          controllerTarget,
+          held,
+          0
+        );
+      }
+    },
     async drain(): Promise<void> {
       while (pending.size > 0) await Promise.allSettled([...pending]);
       if (failures.length > 0) throw new AggregateError(failures, "Event pump processing failed");

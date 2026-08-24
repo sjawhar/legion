@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { HANDOFF_PHASES, type HandoffPhase, isHandoffPhase } from "@legion/contracts";
 import { defineCommand, runMain } from "citty";
 import { z } from "zod";
 import {
@@ -27,11 +28,6 @@ import {
   writeMessage,
   writePhaseHandoff,
 } from "../handoff/ledger";
-import {
-  HANDOFF_PHASES,
-  isHandoffPhase,
-  type HandoffPhase,
-} from "@legion/envoy-omp-extension/legion/handoff-schema";
 
 export class CliError extends Error {
   constructor(

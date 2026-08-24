@@ -257,7 +257,6 @@ describe("handoff ledger", () => {
     expect(readPhaseHandoff(workspaceDir, "test")).toBeNull();
   });
 
-
   it("validates handoff data with learningsInjected and learningsHelpful for each phase", async () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 

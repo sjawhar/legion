@@ -1,0 +1,28 @@
+{
+  "name": "@legion/workspace",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/"
+  },
+  "dependencies": {
+    "@legion/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

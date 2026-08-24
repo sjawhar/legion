@@ -101,6 +101,7 @@ describe("legion state", () => {
       dispatchThreads: [],
       attribution: [],
       phases: {},
+      controllerHeldEvents: [],
     });
   });
 

@@ -1,9 +1,5 @@
+import { HANDOFF_PHASES, type HandoffPhase } from "@legion/contracts";
 import { z } from "zod";
-
-import {
-  HANDOFF_PHASES,
-  type HandoffPhase,
-} from "@legion/envoy-omp-extension/legion/handoff-schema";
 
 export const KNOWLEDGE_SCHEMA_VERSION = 1 as const;
 

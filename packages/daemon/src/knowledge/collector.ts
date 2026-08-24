@@ -1,13 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-
+import { HANDOFF_PHASES, LEGION_DIR_NAME, type PhaseHandoff } from "@legion/contracts";
 import { resolveLegionPaths } from "../daemon/paths";
 import { readAllHandoffs } from "../handoff/ledger";
-import {
-  HANDOFF_PHASES,
-  LEGION_DIR_NAME,
-  type PhaseHandoff,
-} from "@legion/envoy-omp-extension/legion/handoff-schema";
 import {
   type CollectedIssueFeedback,
   type LearningFeedbackPhase,

@@ -238,6 +238,28 @@ describe("reduceGithubEvent", () => {
     ]);
     expect(state.issues[child].state).toBe("closed");
   });
+  it("propagates a daemon-recorded closing comment when GitHub omits it from the close webhook", () => {
+    const state = rootState();
+    attachChild(state);
+    const childNode = state.issues[child] as unknown as { finalCommentRef?: string };
+    childNode.finalCommentRef = "https://github.com/acme/widgets/issues/2#issuecomment-55";
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(effects(state, { action: "closed", issue: issue(2, { state: "closed" }) })).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: {
+          type: "child-closed",
+          child,
+          completion: "closed",
+          remaining: 0,
+          finalCommentRef: "https://github.com/acme/widgets/issues/2#issuecomment-55",
+        },
+      },
+      { kind: "publish", role: architect, payload: { type: "children-complete" } },
+    ]);
+  });
 
   it("re-arms children-complete after reopening a child and fires it on the next close", () => {
     const state = rootState();
@@ -350,11 +372,10 @@ describe("reduceGithubEvent", () => {
     ]);
   });
 
-  it("holds inactive child issue comments and accumulates their durable event", () => {
+  it("holds inactive child issue comments without a role claim", () => {
     const state = rootState();
     attachChild(state, false);
-    const childArchitect = claim(state, child, "architect");
-
+    const childArchitect = roleToken(state.project, child, "architect");
     expect(
       effects(
         state,
@@ -484,6 +505,26 @@ describe("reduceGithubEvent", () => {
         kind: "publish",
         role: architect,
         payload: { type: "dispatch-reply", thread: 1, author: "sami", body: "Approved" },
+      },
+    ]);
+  });
+  it("routes dispatch replies with the requesting issue and role recorded by the mapping", () => {
+    const state = rootState();
+    attachChild(state);
+    const implementer = claim(state, child, "implementer");
+    state.dispatchThreads.push({ repo, thread: 73, role: "implementer", issue: child, tree: root });
+
+    expect(
+      effects(state, {
+        action: "created",
+        issue: issue(73),
+        comment: { user: { login: "sami" }, body: "Please fix it", html_url: "comment-url" },
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: implementer,
+        payload: { type: "dispatch-reply", thread: 73, author: "sami", body: "Please fix it" },
       },
     ]);
   });

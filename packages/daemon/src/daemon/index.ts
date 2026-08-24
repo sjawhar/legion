@@ -1,6 +1,8 @@
-import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { controllerToken, type IssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
 import { connect, StringCodec, type Subscription } from "nats";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
@@ -9,13 +11,24 @@ import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
-import { type EventPumpDeps, startEventPump } from "./events";
+import {
+  createDaemonRunner,
+  type DaemonEnvironment,
+  type ResolveDaemonEnvironmentDeps,
+  resolveDaemonEnvironment,
+} from "./environment";
+import { type EventPump, type EventPumpDeps, startEventPump } from "./events";
 import { TokenManager } from "./github-apps";
 import { loadState, saveState } from "./legion-state";
 import { ProcessManager, type ProcessManagerDeps } from "./processes";
 import { runResync } from "./resync";
 
 const LINGER_SWEEP_INTERVAL_MS = 60_000;
+const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
+const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) {
+  process.stderr.write(pi.agents ? "LEGION_OMP_AGENTS=available\\n" : "LEGION_OMP_AGENTS=missing\\n");
+}
+`;
 
 export interface NatsTransport {
   subscribe(subject: string, callback: (subject: string, data: string) => void): () => void;
@@ -34,6 +47,10 @@ interface DaemonDependencies {
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   fetchGitHubProjectItems(): Promise<{ items: Record<string, unknown>[] }>;
   tokenManager: Pick<TokenManager, "getToken">;
+  resolveDaemonEnvironment(
+    ompInvocation: string,
+    deps: ResolveDaemonEnvironmentDeps
+  ): Promise<DaemonEnvironment>;
   setTimeout(callback: () => void, delayMs: number): unknown;
   clearTimeout(timer: unknown): void;
   setInterval(callback: () => void, delayMs: number): unknown;
@@ -121,6 +138,31 @@ async function publishToEnvoy(
     throw new Error(`Envoy publish to ${topic} failed with status ${response.status}`);
   }
 }
+async function verifyOmpAgentsCapability(
+  ompInvocation: string,
+  runner: CommandRunner
+): Promise<void> {
+  const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-omp-probe-"));
+  const probePath = path.join(probeDir, "probe.mjs");
+  try {
+    await writeFile(probePath, OMP_AGENTS_CAPABILITY_PROBE, "utf8");
+    const result = await runner([
+      "sh",
+      "-c",
+      `${ompInvocation} models --no-extensions --extension "$1" --json >/dev/null`,
+      "sh",
+      probePath,
+    ]);
+    if (result.exitCode === 0 && result.stderr.includes(OMP_AGENTS_CAPABILITY_MARKER)) return;
+
+    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    throw new Error(
+      `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
+    );
+  } finally {
+    await rm(probeDir, { recursive: true, force: true });
+  }
+}
 
 function defaultDependencies(config: DaemonConfig): DaemonDependencies {
   const board = projectBoard(config.legionId);
@@ -130,6 +172,7 @@ function defaultDependencies(config: DaemonConfig): DaemonDependencies {
     saveState,
     createNatsTransport,
     runner: defaultRunner,
+    resolveDaemonEnvironment,
     statPrompt: stat,
     envoyPublish: (topic, payloadJson) => publishToEnvoy(config, topic, payloadJson),
     fetchGitHubProjectItems: () => fetchGitHubProjectItems(board.owner, board.number),
@@ -153,6 +196,11 @@ export async function startDaemon(
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
   const deps = { ...defaultDependencies(config), ...options.deps };
+  const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
+    run: deps.runner,
+  });
+  const runner = createDaemonRunner(environment, deps.runner);
+  await verifyOmpAgentsCapability(environment.ompInvocation, runner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -182,12 +230,17 @@ export async function startDaemon(
     state,
     saveState: save,
     config,
-    run: deps.runner,
+    ompInvocation: environment.ompInvocation,
+    panePath: environment.paneEnv.PATH,
+    run: runner,
     natsPublish: (subject, data) => nats.publish(subject, data),
     natsRequest: (subject, data) => nats.request(subject, data),
     mintControllerCapability: async () => api.mintControllerCapability(),
     mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),
+    provisioningToken: async (owner) =>
+      (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
+    workerCatchup: { runner, tokenManager: deps.tokenManager },
     now: deps.now,
   });
 
@@ -198,18 +251,6 @@ export async function startDaemon(
       JSON.stringify(payload)
     );
   };
-
-  const apiDeps: LegionApiDeps = {
-    state,
-    saveState: save,
-    runner: deps.runner,
-    tokenManager: deps.tokenManager,
-    processManager,
-    envoyPublish: deps.envoyPublish,
-    dispatch: { url: config.dispatchUrl, bearer: config.dispatchBearer },
-    onTreeReady: emitOverseerCatchup,
-  };
-  api = startLegionApi({ port: config.port, hostname: "127.0.0.1", gates: config.gates }, apiDeps);
 
   const eventDeps: EventPumpDeps = {
     nats,
@@ -225,14 +266,31 @@ export async function startDaemon(
     },
     onApprovalStatus: (effect) =>
       setApprovalStatus(effect, {
-        runner: deps.runner,
+        runner,
         tokenManager: deps.tokenManager,
         appLogins: config.appLogins,
         gatesMerge: config.gates.merge,
       }),
     config,
   };
-  const eventPump = startEventPump(eventDeps);
+  const eventPump: EventPump = startEventPump(eventDeps);
+  const apiDeps: LegionApiDeps = {
+    state,
+    saveState: save,
+    runner,
+    tokenManager: deps.tokenManager,
+    processManager,
+    envoyPublish: deps.envoyPublish,
+    dispatch: { url: config.dispatchUrl, bearer: config.dispatchBearer },
+    onTreeReady: emitOverseerCatchup,
+    onControllerReady: () => eventPump.redeliverControllerEvents(),
+    onControllerEvent: (payload) =>
+      eventPump.publishControllerEvent(payload, {
+        event_id: `api-controller:${randomUUID()}`,
+        issued_at: deps.now(),
+      }),
+  };
+  api = startLegionApi({ port: config.port, hostname: "127.0.0.1", gates: config.gates }, apiDeps);
   const ready = nats.ready();
 
   const emitResync = async (): Promise<void> => {
@@ -242,7 +300,10 @@ export async function startDaemon(
       fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
       now: deps.now,
     });
-    await deps.envoyPublish(roleTopic(controllerToken(state.project)), JSON.stringify(payload));
+    await eventPump.publishControllerEvent(payload, {
+      event_id: `resync:${randomUUID()}`,
+      issued_at: deps.now(),
+    });
   };
 
   let stopped = false;

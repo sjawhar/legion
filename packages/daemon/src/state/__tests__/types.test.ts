@@ -77,5 +77,3 @@ describe("GitHubPRRef.fromUrl", () => {
     expect(ref?.number).toBe(456);
   });
 });
-
-

@@ -1,6 +1,11 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { assertLegionProjectToken, type IssueKey, isLegionProjectToken } from "@legion/contracts";
+import {
+  assertLegionProjectToken,
+  type IssueKey,
+  isLegionProjectToken,
+  type LegionRole,
+} from "@legion/contracts";
 import { z } from "zod";
 
 export interface IssueNode {
@@ -12,6 +17,7 @@ export interface IssueNode {
   released: boolean;
   labels: string[];
   backlogMarker?: string;
+  finalCommentRef?: string;
 }
 
 export interface HeldEvent {
@@ -19,6 +25,11 @@ export interface HeldEvent {
   payloadJson: string;
   heldAt: string;
   eventId: string;
+}
+export interface RecoveryEvent {
+  issue: IssueKey;
+  role: LegionRole;
+  original: { topic: string; payload: string; eventId: string };
 }
 
 export interface TreeState {
@@ -29,6 +40,7 @@ export interface TreeState {
   lingerUntil?: string;
   launchFailures: number;
   heldEvents: HeldEvent[];
+  recoveryEvents?: RecoveryEvent[];
 }
 
 export interface PrState {
@@ -80,7 +92,6 @@ export interface SpawnCapability {
   role: string;
 }
 
-
 export interface LegionState {
   version: 5;
   project: string;
@@ -94,6 +105,7 @@ export interface LegionState {
   dispatchThreads: DispatchThread[];
   attribution: AttributionEntry[];
   phases: Record<IssueKey, { phase: string; sessionId: string } | undefined>;
+  controllerHeldEvents: HeldEvent[];
   controllerCapabilityHash?: string;
 }
 
@@ -130,6 +142,7 @@ const IssueNodeSchema = z
     released: z.boolean(),
     labels: z.array(GateLabelSchema),
     backlogMarker: z.string().optional(),
+    finalCommentRef: z.string().optional(),
   })
   .strict();
 const HeldEventSchema = z
@@ -140,6 +153,20 @@ const HeldEventSchema = z
     eventId: z.string(),
   })
   .strict();
+const RecoveryEventSchema = z
+  .object({
+    issue: IssueKeySchema,
+    role: z.enum(["architect", "planner", "implementer", "tester", "reviewer", "merger"]),
+    original: z
+      .object({
+        topic: z.string(),
+        payload: z.string(),
+        eventId: z.string(),
+      })
+      .strict(),
+  })
+  .strict();
+
 const TreeStateSchema = z
   .object({
     root: IssueKeySchema,
@@ -157,6 +184,7 @@ const TreeStateSchema = z
     lingerUntil: z.string().optional(),
     launchFailures: z.number().int().nonnegative(),
     heldEvents: z.array(HeldEventSchema),
+    recoveryEvents: z.array(RecoveryEventSchema).optional(),
   })
   .strict();
 const PrStateSchema = z
@@ -250,6 +278,7 @@ const LegionStateSchema = z
     dispatchThreads: z.array(DispatchThreadSchema),
     attribution: z.array(AttributionEntrySchema),
     phases: z.record(IssueKeySchema, PhaseSchema),
+    controllerHeldEvents: z.array(HeldEventSchema).default([]),
     controllerCapabilityHash: z
       .string()
       .regex(/^[a-f0-9]{64}$/)
@@ -277,6 +306,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     dispatchThreads: [],
     attribution: [],
     phases: {},
+    controllerHeldEvents: [],
   };
 }
 

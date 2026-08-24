@@ -2,12 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-
+import type { HandoffPhase, PhaseHandoff } from "@legion/contracts";
 import { writePhaseHandoff } from "../../handoff/ledger";
-import type {
-  HandoffPhase,
-  PhaseHandoff,
-} from "@legion/envoy-omp-extension/legion/handoff-schema";
 import {
   buildLearningFeedbackRecordFromHandoffs,
   captureLearningFeedbackFromWorkspace,

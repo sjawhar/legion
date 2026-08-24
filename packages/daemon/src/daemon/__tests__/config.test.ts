@@ -21,6 +21,7 @@ describe("daemon config", () => {
       LEGION_MAX_RECURSION_DEPTH: "11",
       LEGION_LINGER_HOURS: "48",
       LEGION_WORKER_BUDGET: "9",
+      LEGION_OMP_INVOCATION: "custom-omp-from-env",
     });
 
     expect(config).toMatchObject({
@@ -41,6 +42,7 @@ describe("daemon config", () => {
       ciQuietMs: 30_000,
       resyncIntervalMs: 600_000,
       gates: { design: "root-issues", merge: "human" },
+      ompInvocation: "custom-omp-from-env",
     });
     expect(config.stateDir).toEndWith(path.join(".legion", "acme42"));
   });
@@ -65,6 +67,7 @@ describe("daemon config", () => {
         "worker_budget: 2",
         "ci_quiet_ms: 45000",
         "resync_interval_seconds: 120",
+        "omp_invocation: mise x github:acme/oh-my-pi@18.0.3 -- omp",
         "state_dir: ./state",
         "gates:",
         "  design: off",
@@ -96,6 +99,7 @@ describe("daemon config", () => {
       resyncIntervalMs: 120_000,
       stateDir: "/tmp/legion-config/state",
       gates: { design: "off", merge: "off" },
+      ompInvocation: "mise x github:acme/oh-my-pi@18.0.3 -- omp",
     });
     expect(file.warnings).toEqual([]);
   });

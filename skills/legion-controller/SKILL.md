@@ -11,23 +11,23 @@ routes raw events into an architect.
 
 ## Start and claim the controller role
 
-At startup, claim `legion-<project>-controller` with `envoy_role_set`. A claim is
-last-claim-wins, so an interactive session may take over this role. Do this before handling
-any wake.
+The Legion extension claims `legion-<project>-controller` and registers controller readiness
+with the daemon during session startup. Do not handle a wake unless that startup succeeded.
 
-Call the `envoy_whoami` tool, then take `session_id` from its result and substitute that
-literal value for `<session-id>` below. Announce readiness only after that tool call; keep the
-controller secret out of transcripts and logs.
+For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` and
+`LEGION_DAEMON_URL` in its environment, then run:
 
-```bash
-curl --fail-with-body --request POST "$LEGION_DAEMON_URL/legion/v1/controller/ready" \
-  --header 'content-type: application/json' \
-  --data "$(jq -n --arg secret "$LEGION_CONTROLLER_SECRET" --arg sessionId "<session-id>" \
-    '{secret: $secret, sessionId: $sessionId}')"
+```text
+/legion-claim-controller
 ```
 
-This boot call lets the daemon redeliver held controller work. It does not turn the
-controller into a state holder: daemon state and GitHub artifacts remain authoritative.
+The command resolves the project from daemon state, claims the Envoy role for the current
+session, and posts readiness before controller commands can act. It retains the environment
+capability for `legion admit`, `legion approve`, and `legion backlog`. Never pass a secret as a
+command argument or copy it into a transcript.
+
+This handshake lets the daemon redeliver held controller work. It does not turn the controller
+into a state holder: daemon state and GitHub artifacts remain authoritative.
 
 ## Turn discipline
 

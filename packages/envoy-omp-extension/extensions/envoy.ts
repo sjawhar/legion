@@ -18,12 +18,14 @@ type ToolResult = {
 };
 
 
-type SessionContext = {
+export interface EnvoySessionContext {
   readonly cwd: string;
   readonly sessionManager: { readonly getSessionId: () => string };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: { readonly notify: (message: string, level: "warning") => void };
-};
+}
+
+type SessionContext = EnvoySessionContext;
 
 type PiApi = {
   readonly zod: {
@@ -62,6 +64,45 @@ type PiApi = {
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
+
+type LegionRoleClaim = (
+  sessionID: string,
+  role: string,
+  context?: EnvoySessionContext
+) => Promise<void>;
+
+type LegionRoleClaimReady = {
+  readonly promise: Promise<LegionRoleClaim>;
+  readonly resolve: (claim: LegionRoleClaim | PromiseLike<LegionRoleClaim>) => void;
+};
+
+type LegionRoleClaimBridge = {
+  claim: LegionRoleClaim | undefined;
+  readonly ready: LegionRoleClaimReady;
+};
+
+interface GlobalLegionRoleClaimBridgeStore {
+  [key: symbol]: LegionRoleClaimBridge | undefined;
+}
+
+const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.envoy-omp-extension.role-claim-bridge");
+
+function legionRoleClaimBridge(): LegionRoleClaimBridge {
+  const store = globalThis as typeof globalThis & GlobalLegionRoleClaimBridgeStore;
+  return (store[LEGION_ROLE_CLAIM_BRIDGE] ??= {
+    claim: undefined,
+    ready: Promise.withResolvers<LegionRoleClaim>(),
+  });
+}
+
+export async function claimEnvoyRole(
+  sessionID: string,
+  role: string,
+  context?: EnvoySessionContext
+): Promise<void> {
+  const bridge = legionRoleClaimBridge();
+  await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
+}
 const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
 
 export default function envoyExtension(pi: PiApi): void {
@@ -286,6 +327,30 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
+  const setEnvoyRole = async (role: string): Promise<void> => {
+    const topic = ROLE_TOPIC_PREFIX + role;
+    const previousTopic = claimedRoleTopic;
+    await client.setRole({ sessionID, role });
+    claimedRoleTopic = topic;
+    if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
+    if (previousTopic !== undefined && previousTopic !== topic) {
+      await client.unsubscribe({ sessionID, topics: [previousTopic] });
+    }
+  };
+
+  const bridge = legionRoleClaimBridge();
+  const claim: LegionRoleClaim = async (targetSessionID, role, callerContext) => {
+    const context = callerContext ?? activeSessionContext;
+    if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
+      throw new Error(`Envoy has no active session for Legion role claim: ${targetSessionID}`);
+    }
+    if (sessionID !== targetSessionID) await establishSession(context);
+    await setEnvoyRole(role);
+    await registerSession();
+  };
+  bridge.claim = claim;
+  bridge.ready.resolve(claim);
+
   pi.on("session_start", async (_event, context) => {
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
@@ -424,14 +489,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
-          const topic = ROLE_TOPIC_PREFIX + role;
-          const previousTopic = claimedRoleTopic;
-          await client.setRole({ sessionID, role });
-          claimedRoleTopic = topic;
-          if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
-          if (previousTopic !== undefined && previousTopic !== topic) {
-            await client.unsubscribe({ sessionID, topics: [previousTopic] });
-          }
+          await setEnvoyRole(role);
           return success(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.whoami: {

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   type IssueKey,
   type LegionRole,
   roleToken,
+  roleTopic,
 } from "@legion/contracts";
 import type { DaemonConfig } from "../config";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
@@ -37,6 +38,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     natsUrls: ["nats://127.0.0.1:4222"],
     dispatchUrl: "http://127.0.0.1:13380",
     dispatchBearer: "dispatch-bearer",
+    ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: [],
     appLogins: [],
     admissionCap: 1,
@@ -103,14 +105,17 @@ function manager(
   const commands: string[][] = [];
   const publications: Array<{ subject: string; json: string }> = [];
   const controlRequests: Array<{ subject: string; json: string }> = [];
+  const { run: requestedRun, ...overrides } = options;
+  const commandRunner =
+    requestedRun ??
+    (async (command: string[]) => {
+      commands.push(command);
+      return { stdout: "", exitCode: 0 };
+    });
   const deps: ProcessManagerDeps = {
     state,
     saveState: async () => {},
     config: config("/state"),
-    run: async (command) => {
-      commands.push(command);
-      return { stdout: "", exitCode: 0 };
-    },
     natsPublish: (subject, json) => publications.push({ subject, json }),
     natsRequest: async (subject, json) => {
       controlRequests.push({ subject, json });
@@ -118,9 +123,40 @@ function manager(
     },
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
+    provisioningToken: async () => "daemon-installation-token",
     statPrompt: async () => {},
+    ompInvocation: "/opt/oh-my-pi/18.0.3/omp",
+    panePath: "/full/bin:/usr/bin",
+    workerCatchup: {
+      runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+      tokenManager: {
+        getToken: async () => ({
+          token: "worker-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "42+legion-implement[bot]@users.noreply.github.com",
+          },
+        }),
+      },
+    },
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
-    ...options,
+    ...overrides,
+    run: async (command, runnerOptions) => {
+      const result = await commandRunner(command, runnerOptions);
+      if (result.exitCode !== 0) return result;
+      if (command[0] === "jj" && command[1] === "git" && command[2] === "clone") {
+        const cloneDir = command[4];
+        if (!cloneDir) throw new Error("Jujutsu clone is missing its destination");
+        await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
+      }
+      if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+        const workspaceDir = command[3];
+        if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+        await mkdir(workspaceDir, { recursive: true });
+      }
+      return result;
+    },
   };
   return { manager: new ProcessManager(deps), state, commands, controlRequests, publications };
 }
@@ -155,16 +191,32 @@ describe("ProcessManager", () => {
     expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
   });
 
-  it("writes the root extension config before executing the exact tmux spawn argv", async () => {
+  it("provisions the root issue workspace before launching OMP in that workspace", async () => {
     const stateDir = await temporaryDir();
+    const repo = path.join(stateDir, "repos", "github.com", "sjawhar", "legion");
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(path.join(repo, ".jj"), { recursive: true });
+    const workspaceCalls: Array<{
+      readonly command: string[];
+      readonly opts:
+        | { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> }
+        | undefined;
+    }> = [];
     const {
       manager: processes,
       state,
       commands,
     } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
-      run: async (command) => {
+      run: async (
+        command: string[],
+        opts?: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> }
+      ) => {
         commands.push(command);
+        workspaceCalls.push({ command, opts });
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+          await mkdir(workspace, { recursive: true });
+        }
         return command[1] === "has-session"
           ? { stdout: "", exitCode: 1 }
           : { stdout: "", exitCode: 0 };
@@ -173,12 +225,16 @@ describe("ProcessManager", () => {
 
     await processes.spawnRoot(root);
 
-    const treeDir = path.join(stateDir, "trees", "sjawhar-legion-42");
-    expect(await readFile(path.join(treeDir, ".omp", "config.yml"), "utf8")).toBe(
+    expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe(
       `task:\n  maxRecursionDepth: 8\nextensions:\n  - ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}\n`
     );
     expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
     expect(commands).toEqual([
+      ["jj", "git", "fetch", "-R", repo],
+      ["git", `--git-dir=${repo}/.jj/repo/store/git`, "worktree", "prune"],
+      ["jj", "workspace", "add", workspace, "--name", "issue-42", "--revision", "main", "-R", repo],
+      ["jj", "bookmark", "set", "legion/issue-42"],
+      ["git", "-C", workspace, "config", "credential.helper", "!legion credential"],
       ["tmux", "has-session", "-t", "legion-omp"],
       ["tmux", "new-session", "-d", "-s", "legion-omp"],
       [
@@ -208,9 +264,54 @@ describe("ProcessManager", () => {
         "LEGION_WORKER_BUDGET=5",
         "-e",
         "LEGION_MAX_RECURSION_DEPTH=8",
-        `cd ${treeDir} && omp --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
+        "-e",
+        `LEGION_STATE_DIR=${stateDir}`,
+        "-e",
+        "PATH=/full/bin:/usr/bin",
+        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
       ],
     ]);
+    expect(workspaceCalls).toContainEqual({
+      command: ["jj", "bookmark", "set", "legion/issue-42"],
+      opts: { cwd: workspace },
+    });
+    expect(workspaceCalls).toContainEqual({
+      command: ["jj", "git", "fetch", "-R", repo],
+      opts: {
+        env: {
+          GIT_ASKPASS: expect.stringMatching(/provisioning-credential-.+\/askpass$/),
+          GIT_TERMINAL_PROMPT: "0",
+          LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
+        },
+      },
+    });
+  });
+  it("uses the resolved OMP invocation and full PATH for root and controller windows", async () => {
+    const stateDir = await temporaryDir();
+    const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
+    const panePath = "/full/bin:/usr/bin";
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      ompInvocation,
+      panePath,
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+    await processes.ensureController();
+
+    const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const controllerDir = path.join(stateDir, "controller");
+    const extensionDir = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const windows = commands.filter((command) => command[1] === "new-window");
+    expect(windows.map((command) => command.at(-1))).toEqual([
+      `cd ${workspaceDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
+      `cd ${controllerDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/agents/controller-root.md)"`,
+    ]);
+    expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
   });
 
   it("rolls back a failed tmux launch instead of retaining an active tree or admission slot", async () => {
@@ -481,7 +582,7 @@ describe("ProcessManager", () => {
     expect(publications).toEqual([]);
   });
 
-  it("redelivers an exception exactly once after its control directive acknowledges", async () => {
+  it("publishes post-backing events immediately after worker catch-up", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.issues[child] = {
@@ -493,18 +594,118 @@ describe("ProcessManager", () => {
       released: true,
       labels: [],
     };
-    state.roles[roleToken("omp", child, "implementer")] = {
-      issue: child,
-      role: "implementer",
-      agentId: "agent-worker",
-    };
     const original = exception(roleToken("omp", child, "implementer")).original;
     const { manager: processes, controlRequests, publications } = manager(state, { run: liveRun });
+    await processes.registerRoleBacking(root, child, "implementer", "agent-worker");
 
     await processes.handleException(exception(roleToken("omp", child, "implementer"), original));
 
     expect(controlRequests).toHaveLength(1);
-    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
+    expect(publications).toEqual([
+      {
+        subject: roleTopic(roleToken("omp", child, "implementer")),
+        json: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      { subject: original.topic, json: original.payload },
+    ]);
+    expect(state.trees[root]?.heldEvents).toEqual([]);
+  });
+  it("drains released child holds in order exactly once when role backing registers", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const token = roleToken("omp", child, "implementer");
+    const first = {
+      topic: roleTopic(token),
+      payload: '{"sequence":1}',
+      eventId: "evt-first",
+    };
+    const second = {
+      topic: roleTopic(token),
+      payload: '{"sequence":2}',
+      eventId: "evt-second",
+    };
+    const { manager: processes, publications } = manager(state);
+
+    await processes.handleException(exception(token, first));
+    await processes.handleException(exception(token, second));
+    await processes.registerRoleBacking(root, child, "implementer", "agent-worker");
+    await processes.registerRoleBacking(root, child, "implementer", "agent-worker");
+
+    expect(publications).toEqual([
+      { subject: roleTopic(token), json: first.payload },
+      { subject: roleTopic(token), json: second.payload },
+    ]);
+    expect(state.trees[root]?.heldEvents).toEqual([]);
+  });
+  it("keeps unreleased child holds until the wave release trigger", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: false,
+      labels: [],
+    };
+    const token = roleToken("omp", child, "implementer");
+    const original = {
+      topic: roleTopic(token),
+      payload: '{"sequence":1}',
+      eventId: "evt-unreleased",
+    };
+    const { manager: processes, publications } = manager(state);
+
+    await processes.handleException(exception(token, original));
+    await processes.registerRoleBacking(root, child, "implementer", "agent-worker");
+
+    expect(publications).toEqual([]);
+    expect(state.trees[root]?.heldEvents).toEqual([
+      expect.objectContaining({ eventId: original.eventId, role: "implementer" }),
+    ]);
+  });
+  it("sends worker catch-up before the original event after a successful worker revival", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    state.roles[token] = { issue: child, role, agentId: "agent-worker" };
+    const original = exception(token).original;
+    const { manager: processes, publications } = manager(state, {
+      run: async (command) => {
+        if (command[0] === "gh") return { stdout: "[]", exitCode: 0 };
+        return liveRun(command);
+      },
+    });
+
+    await processes.handleException(exception(token, original));
+
+    expect(publications).toEqual([
+      {
+        subject: roleTopic(token),
+        json: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      { subject: original.topic, json: original.payload },
+    ]);
   });
 
   it("routes a directive nack to the controller without redelivering its exception", async () => {
@@ -527,7 +728,8 @@ describe("ProcessManager", () => {
     const original = exception(roleToken("omp", child, "implementer")).original;
     const { manager: processes, publications } = manager(state, {
       run: liveRun,
-      natsRequest: async () => JSON.stringify({ type: "nack", error: "worker transcript is missing" }),
+      natsRequest: async () =>
+        JSON.stringify({ type: "nack", error: "worker transcript is missing" }),
     });
 
     await processes.handleException(exception(roleToken("omp", child, "implementer"), original));
@@ -682,7 +884,13 @@ describe("ProcessManager", () => {
     await processes.handleException(exception(roleToken("omp", child, "architect")));
 
     const original = exception(roleToken("omp", child, "architect")).original;
-    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
+    expect(publications).toEqual([
+      {
+        subject: roleTopic(roleToken("omp", child, "architect")),
+        json: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      { subject: original.topic, json: original.payload },
+    ]);
   });
 
   it("marks an exited tree dead, releases its admission slot, and preserves held events", async () => {
@@ -759,6 +967,77 @@ describe("ProcessManager", () => {
 
     expect(state.trees[root]).toMatchObject({ generation: 2, heldEvents: [] });
   });
+  it("persists a dead worker's original delivery before resurrecting its root", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    state.roles[token] = { issue: child, role, agentId: "agt-worker" };
+    const original = exception(token).original;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) =>
+        command[1] === "list-windows" ? { stdout: "", exitCode: 1 } : { stdout: "", exitCode: 0 },
+    });
+
+    await processes.handleException(exception(token, original));
+
+    const recoveredTree = state.trees[root] as unknown as {
+      recoveryEvents?: Array<{ issue: IssueKey; role: LegionRole; original: unknown }>;
+    };
+    expect(recoveredTree.recoveryEvents).toEqual([{ issue: child, role, original }]);
+  });
+  it("delivers worker catch-up and the original event once the resurrected root is ready", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    state.roles[token] = { issue: child, role, agentId: "agt-worker" };
+    const original = exception(token).original;
+    const { manager: processes, publications } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        if (command[1] === "list-windows") return { stdout: "", exitCode: 1 };
+        if (command[0] === "gh") return { stdout: "[]", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.handleException(exception(token, original));
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("resurrected root is missing its locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: "/state/root-session.json" };
+    await processes.markTreeReady(root);
+
+    expect(publications).toEqual([
+      {
+        subject: roleTopic(token),
+        json: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      { subject: original.topic, json: original.payload },
+    ]);
+    expect(state.trees[root].recoveryEvents).toEqual([]);
+  });
 
   it("holds an exception until an unbacked worker exists", async () => {
     const state = newLegionState("omp", 1);
@@ -809,7 +1088,13 @@ describe("ProcessManager", () => {
     await processes.handleException(exception(roleToken("omp", child, role)));
 
     const original = exception(roleToken("omp", child, role)).original;
-    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
+    expect(publications).toEqual([
+      {
+        subject: roleTopic(roleToken("omp", child, role)),
+        json: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      { subject: original.topic, json: original.payload },
+    ]);
   });
 
   it("resurrects a dead backed worker and reports a revival nack to the controller", async () => {
@@ -851,6 +1136,7 @@ describe("ProcessManager", () => {
     });
   });
 
+  // Requires a real tmux installation to exercise pane lifecycle.
   it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
     "probes a real tmux pane as alive, detects its death, and resurrects it once",
     async () => {

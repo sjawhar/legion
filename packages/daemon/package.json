@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@legion/contracts": "workspace:*",
-    "@legion/envoy-omp-extension": "workspace:*",
+    "@legion/workspace": "workspace:*",
     "@opencode-ai/sdk": "https://github.com/sjawhar/opencode/releases/download/v1.2.4-post.2/opencode-ai-sdk-1.2.4-post.1.tgz",
     "citty": "^0.2.0",
     "nats": "^2.29.2",

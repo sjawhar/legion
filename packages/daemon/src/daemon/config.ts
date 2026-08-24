@@ -22,6 +22,7 @@ export interface DaemonConfig {
   natsUrls: string[];
   dispatchUrl: string;
   dispatchBearer: string;
+  ompInvocation: string;
   boardProjectIds: string[];
   appLogins: string[];
   admissionCap: number;
@@ -69,6 +70,7 @@ const DEFAULT_LINGER_HOURS = 72;
 const DEFAULT_CI_QUIET_MS = 30_000;
 const DEFAULT_MAX_FIX_ATTEMPTS = 3;
 const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
+const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
@@ -76,6 +78,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   envoy_url: null,
   nats_urls: null,
   dispatch_url: null,
+  omp_invocation: null,
   board_project_ids: null,
   app_logins: null,
   admission_cap: null,
@@ -341,6 +344,10 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
   if (natsUrls !== undefined) fields.natsUrls = natsUrls;
   const dispatchUrl = readString(config.dispatch_url, "dispatch_url");
   if (dispatchUrl !== undefined) fields.dispatchUrl = validateUrl(dispatchUrl, "dispatch_url");
+  const ompInvocation = readString(config.omp_invocation, "omp_invocation");
+  if (ompInvocation !== undefined) {
+    fields.ompInvocation = requireNonEmpty(ompInvocation, "omp_invocation");
+  }
   const boardProjectIds = readStringArray(config.board_project_ids, "board_project_ids");
   if (boardProjectIds !== undefined) fields.boardProjectIds = boardProjectIds;
   const appLogins = readStringArray(config.app_logins, "app_logins");
@@ -433,6 +440,12 @@ export function resolveDaemonConfig(
   if (dispatchBearer === undefined) {
     throw new Error("LEGION_DISPATCH_BEARER is required");
   }
+  const ompInvocation = resolveValue(
+    opts.cliOverrides?.ompInvocation,
+    fileString(fields, "ompInvocation"),
+    env.LEGION_OMP_INVOCATION,
+    DEFAULT_OMP_INVOCATION
+  );
 
   const boardProjectIds = resolveValue(
     opts.cliOverrides?.boardProjectIds,
@@ -532,6 +545,7 @@ export function resolveDaemonConfig(
       natsUrls: natsUrls.value,
       dispatchUrl: validateUrl(dispatchUrl.value, "LEGION_DISPATCH_URL"),
       dispatchBearer: requireNonEmpty(dispatchBearer, "LEGION_DISPATCH_BEARER"),
+      ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,
       appLogins: appLogins.value,
       admissionCap: admissionCap.value,

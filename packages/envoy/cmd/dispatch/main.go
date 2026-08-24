@@ -34,8 +34,8 @@ import (
 )
 
 const (
-	listenAddr     = ":8766"
-	shutdownTimout = 5 * time.Second
+	defaultListenAddr = ":8766"
+	shutdownTimout    = 5 * time.Second
 )
 
 func main() {
@@ -115,6 +115,11 @@ func main() {
 	}
 
 	handler := routes.New(appCtx)
+	listenAddr, err := listenAddress()
+	if err != nil {
+		slog.Error("dispatch: resolve listen address", "error", err)
+		os.Exit(1)
+	}
 	server := &http.Server{
 		Addr:    listenAddr,
 		Handler: handler,
@@ -136,7 +141,6 @@ func main() {
 		slog.Warn("dispatch: shutdown", "error", err)
 	}
 }
-
 
 func defaultDataDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -250,4 +254,18 @@ func parsePositiveInt(raw string) (int, error) {
 		return 0, fmt.Errorf("not a positive integer: %q", raw)
 	}
 	return n, nil
+}
+func listenAddress() (string, error) {
+	port := strings.TrimSpace(os.Getenv("DISPATCH_PORT"))
+	if port == "" {
+		return defaultListenAddr, nil
+	}
+	parsed, err := parsePositiveInt(port)
+	if err != nil {
+		return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
+	}
+	if parsed > 65535 {
+		return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
+	}
+	return ":" + port, nil
 }

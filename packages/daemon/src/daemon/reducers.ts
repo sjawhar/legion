@@ -1,4 +1,4 @@
-import { formatIssueKey, type IssueKey } from "@legion/contracts";
+import { formatIssueKey, type IssueKey, LEGION_ROLES, roleToken } from "@legion/contracts";
 import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
 export interface LegionEventPayload {
@@ -118,13 +118,6 @@ function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
   return undefined;
 }
 
-function roleToken(state: LegionState, issue: IssueKey, role: RoutedRole): string | undefined {
-  for (const [token, claim] of Object.entries(state.roles)) {
-    if ("issue" in claim && claim.issue === issue && claim.role === role) return token;
-  }
-  return undefined;
-}
-
 function hold(
   tree: TreeState,
   role: string,
@@ -141,16 +134,17 @@ function hold(
 
 function routeToken(
   state: LegionState,
+  issue: IssueKey,
   token: string,
   payload: LegionEventPayload,
   envelope: EnvelopeJson
 ): Effect[] {
-  const claim = state.roles[token];
-  if (!claim || !("issue" in claim)) return [];
-  const node = state.issues[claim.issue];
-  const tree = treeFor(state, claim.issue);
+  const node = state.issues[issue];
+  const tree = treeFor(state, issue);
   if (!node || !tree) return [];
-  if (node.released && tree.status !== "closed") return [{ kind: "publish", role: token, payload }];
+  if (node.released && tree.status !== "closed" && state.roles[token]) {
+    return [{ kind: "publish", role: token, payload }];
+  }
   hold(tree, token, payload, envelope);
   return [{ kind: "hold", tree: tree.root, role: token, payload }];
 }
@@ -162,8 +156,7 @@ function route(
   payload: LegionEventPayload,
   envelope: EnvelopeJson
 ): Effect[] {
-  const token = roleToken(state, issue, role);
-  return token ? routeToken(state, token, payload, envelope) : [];
+  return routeToken(state, issue, roleToken(state.project, issue, role), payload, envelope);
 }
 
 function openChildren(state: LegionState, parent: IssueNode): number {
@@ -196,6 +189,7 @@ function addNode(
     children: prior?.children ?? [],
     released: prior?.released ?? released,
     labels: labels(raw.labels),
+    ...(prior?.finalCommentRef ? { finalCommentRef: prior.finalCommentRef } : {}),
   };
   const ancestor = parent ?? prior?.parent;
   if (ancestor) node.parent = ancestor;
@@ -441,7 +435,10 @@ function issueEvent(
         completion: stringValue(raw.state_reason) ?? "closed",
         remaining: openChildren(state, parent),
         finalCommentRef:
-          stringValue(raw.final_comment_ref) ?? stringValue(payload.final_comment_ref) ?? null,
+          stringValue(raw.final_comment_ref) ??
+          stringValue(payload.final_comment_ref) ??
+          node.finalCommentRef ??
+          null,
       },
       envelope
     );
@@ -455,6 +452,7 @@ function issueEvent(
 
   if (payload.action !== "reopened") return [];
   node.state = "open";
+  delete node.finalCommentRef;
   if (node.parent)
     return route(state, node.parent, "architect", { type: "child-reopened", child: key }, envelope);
   const tree = state.trees[key];
@@ -496,15 +494,17 @@ function issueComment(
     (thread) => thread.repo === repo && thread.thread === number
   );
   if (dispatch) {
-    const key = keyFor(repo, number);
-    const token = state.roles[dispatch.role]
-      ? dispatch.role
-      : key
-        ? roleToken(state, key, dispatch.role as RoutedRole)
-        : undefined;
-    return token
-      ? routeToken(state, token, { type: "dispatch-reply", thread: number, author, body }, envelope)
-      : [];
+    const dispatchRole = LEGION_ROLES.find((role) => role === dispatch.role);
+    if (!dispatchRole) {
+      throw new Error(`Invalid Legion dispatch role: ${dispatch.role}`);
+    }
+    return routeToken(
+      state,
+      dispatch.issue,
+      roleToken(state.project, dispatch.issue, dispatchRole),
+      { type: "dispatch-reply", thread: number, author, body },
+      envelope
+    );
   }
   if (rawIssue.pull_request !== undefined) {
     const pr = state.prs[`${repo}#${number}`];

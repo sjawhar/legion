@@ -4,12 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { controllerToken, formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
-import {
-  type LegionApi,
-  type LegionApiDeps,
-  type LegionApiFetch,
-  startLegionApi,
-} from "../api";
+import { type LegionApi, type LegionApiDeps, type LegionApiFetch, startLegionApi } from "../api";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 
 const root = formatIssueKey("acme", "widgets", 1);
@@ -111,6 +106,7 @@ describe("Legion HTTP API", () => {
     admissionResult?: "spawned" | "queued";
     admit?: (issue: IssueKey) => "spawned" | "queued";
     dispatchFetch?: LegionApiFetch;
+    onTreeReady?: (tree: IssueKey) => Promise<void>;
   }) {
     const runner =
       options?.runner ??
@@ -177,6 +173,11 @@ describe("Legion HTTP API", () => {
         registerRoleBacking: (tree, issue, role, agentId) => {
           backingRegistrations.push({ tree, issue, role, agentId });
         },
+        markTreeReady: () => {},
+        beginLinger: (tree) => {
+          const treeState = state.trees[tree];
+          if (treeState) treeState.status = "lingering";
+        },
         markProcessDead: () => {},
         markControllerReady: () => {
           const controller = state.roles[controllerToken(state.project)];
@@ -216,7 +217,15 @@ describe("Legion HTTP API", () => {
               },
             })),
       },
+      onControllerReady: async () => {},
+      onControllerEvent: async (payload) => {
+        publications.push({
+          topic: `notifications.role.${controllerToken(state.project)}`,
+          payload: JSON.stringify(payload),
+        });
+      },
       saveState: options?.saveState ?? (async () => {}),
+      onTreeReady: options?.onTreeReady,
     };
     api = startLegionApi(
       {
@@ -281,7 +290,7 @@ describe("Legion HTTP API", () => {
     return { status: response.status, body: responseBody };
   }
 
-  it("records process start, creates an inert child, releases its held events, and releases its admission slot on exit", async () => {
+  it("drains each held event exactly once when a child wave releases", async () => {
     await start();
     const bootToken = await api?.mintBootToken(root, 3);
     if (!bootToken) throw new Error("boot nonce was not minted");
@@ -307,6 +316,15 @@ describe("Legion HTTP API", () => {
       gates: { design: "root-issues", merge: "human" },
       secret: expect.any(String),
     });
+    if (
+      typeof started.body !== "object" ||
+      started.body === null ||
+      !("secret" in started.body) ||
+      typeof started.body.secret !== "string"
+    ) {
+      throw new Error("root start response is missing its architect capability");
+    }
+    const architect = { sessionId: "ses_root", secret: started.body.secret };
     expect(state.trees[root]).toMatchObject({
       status: "active",
       locator: { ompSessionFile: "/tmp/root.json" },
@@ -317,6 +335,7 @@ describe("Legion HTTP API", () => {
       title: "Child",
       body: "Build it",
       labels: ["needs-approval"],
+      ...architect,
     });
     expect(created.response.status).toBe(200);
     expect(created.body).toEqual({ issue: child, url: "https://github.com/acme/widgets/issues/2" });
@@ -351,7 +370,11 @@ describe("Legion HTTP API", () => {
       heldAt: "2026-08-23T00:00:00.000Z",
       eventId: "evt-1",
     });
-    const released = await json("/legion/v1/waves/release", { tree: root, children: [child] });
+    const released = await json("/legion/v1/waves/release", {
+      tree: root,
+      children: [child],
+      ...architect,
+    });
     expect(released.body).toEqual({ released: [child] });
     expect(state.issues[child]?.released).toBe(true);
     expect(publications).toEqual([
@@ -361,11 +384,28 @@ describe("Legion HTTP API", () => {
       },
     ]);
     expect(state.trees[root]?.heldEvents).toEqual([]);
+    const releasedAgain = await json("/legion/v1/waves/release", {
+      tree: root,
+      children: [child],
+      ...architect,
+    });
+    expect(releasedAgain.body).toEqual({ released: [child] });
+    expect(publications).toHaveLength(1);
 
     const rootIssue = state.issues[root];
     if (!rootIssue) throw new Error("Root issue is missing from test state");
     rootIssue.state = "closed";
-    const exited = await json("/legion/v1/process/exit", { tree: root, generation: 3 });
+    const unauthenticatedExit = await json("/legion/v1/process/exit", {
+      tree: root,
+      generation: 3,
+    });
+    expect(unauthenticatedExit.response.status).toBe(403);
+    expect(releaseSlots).toEqual([]);
+    const exited = await json("/legion/v1/process/exit", {
+      tree: root,
+      generation: 3,
+      ...architect,
+    });
     expect(exited.response.status).toBe(200);
     expect(releaseSlots).toEqual([root]);
     expect(state.trees[root]?.status).toBe("closed");
@@ -407,10 +447,49 @@ describe("Legion HTTP API", () => {
       ).response.status
     ).toBe(403);
   });
+  it("emits root catch-up only after the architect has confirmed readiness", async () => {
+    const treeReady: IssueKey[] = [];
+    await start({
+      onTreeReady: async (tree) => {
+        treeReady.push(tree);
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
 
+    expect(treeReady).toEqual([]);
+    expect(
+      (
+        await json("/legion/v1/process/ready", {
+          tree: root,
+          sessionId: "ses_root",
+          secret: started.body.secret,
+        })
+      ).response.status
+    ).toBe(200);
+    expect(treeReady).toEqual([root]);
+  });
 
   it("writes only inside the caller tree and implements comments, bodies, labels, close, escalation, dispatch registration, gates, admission, backlog, and redacted state", async () => {
     await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architect = { sessionId: "ses_root", secret: started.body.secret };
     const rootIssue = state.issues[root];
     if (!rootIssue) throw new Error("Root issue is missing from test state");
     rootIssue.children.push(child);
@@ -428,6 +507,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       issue: foreign,
       body: "nope",
+      ...architect,
     });
     expect(outOfTree.response.status).toBe(403);
 
@@ -435,6 +515,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       issue: child,
       body: "Please fix",
+      ...architect,
     });
     expect(comments.body).toEqual({
       commentId: 55,
@@ -445,12 +526,18 @@ describe("Legion HTTP API", () => {
       "api",
       "repos/acme/widgets/issues/2/comments",
       "-f",
-      'body=Please fix\n\n<!-- legion: {"session":"","issue":"acme/widgets#2"} -->',
+      'body=Please fix\n\n<!-- legion: {"session":"ses_root","issue":"acme/widgets#2"} -->',
     ]);
 
     expect(
-      (await json("/legion/v1/issues/body", { tree: root, issue: child, body: "# Spec" })).response
-        .status
+      (
+        await json("/legion/v1/issues/body", {
+          tree: root,
+          issue: child,
+          body: "# Spec",
+          ...architect,
+        })
+      ).response.status
     ).toBe(200);
     expect(commands.at(-1)).toEqual([
       "gh",
@@ -466,6 +553,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       issue: child,
       add: ["unknown-label"],
+      ...architect,
     });
     expect(rejectedLabel.response.status).toBe(400);
 
@@ -474,6 +562,7 @@ describe("Legion HTTP API", () => {
       issue: child,
       add: ["human-approved"],
       remove: ["legion-child"],
+      ...architect,
     });
     expect(controllerLabel.response.status).toBe(400);
 
@@ -481,6 +570,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       issue: child,
       add: ["needs-approval"],
+      ...architect,
     });
     expect(labels.body).toEqual({ labels: ["legion-child", "needs-approval"] });
     expect(state.issues[child]?.labels).toEqual(["legion-child", "needs-approval"]);
@@ -491,6 +581,7 @@ describe("Legion HTTP API", () => {
           tree: root,
           kind: "capacity",
           context: { blocked: true },
+          ...architect,
         })
       ).response.status
     ).toBe(200);
@@ -504,17 +595,11 @@ describe("Legion HTTP API", () => {
       }),
     });
 
-
-    state.roles[roleToken(state.project, root, "architect")] = {
-      issue: root,
-      role: "architect",
-      sessionId: "ses_architect",
-    };
     const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
       tree: root,
       issue: child,
       role: "implementer",
-      sessionId: "ses_architect",
+      ...architect,
     });
     expect(
       (
@@ -606,10 +691,13 @@ describe("Legion HTTP API", () => {
     ).toBe(200);
     expect(controllerReadyCalls).toBe(1);
 
-    expect(
-      (await json("/legion/v1/issues/close", { tree: root, issue: child, comment: "Closing" }))
-        .response.status
-    ).toBe(200);
+    const closed = await json("/legion/v1/issues/close", {
+      tree: root,
+      issue: child,
+      comment: "Closing",
+      ...architect,
+    });
+    expect(closed.response.status).toBe(200);
     expect(state.issues[child]?.state).toBe("closed");
     expect(state.dispatchThreads).toEqual([]);
 
@@ -619,6 +707,144 @@ describe("Legion HTTP API", () => {
     expect(stateJson).not.toContain("controllerCapabilityHash");
   });
 
+  it("requires the owning architect capability for every architect lifecycle write", async () => {
+    await start();
+    const rootIssue = state.issues[root];
+    const otherTree = state.trees[otherRoot];
+    if (!rootIssue || !otherTree) throw new Error("test state is missing a root issue");
+    rootIssue.children.push(child);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      state: "open",
+      children: [],
+      released: true,
+      labels: ["legion-child"],
+    };
+    otherTree.locator = { tmuxSession: "legion-omp", tmuxWindow: "acme-other-9" };
+
+    const rootBootToken = await api?.mintBootToken(root, 3);
+    const otherBootToken = await api?.mintBootToken(otherRoot, 1);
+    if (!rootBootToken || !otherBootToken) throw new Error("root boot nonces were not minted");
+    const rootStarted = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root_architect",
+      bootToken: rootBootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
+    const otherStarted = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: otherRoot,
+      generation: 1,
+      rootSessionId: "ses_other_architect",
+      bootToken: otherBootToken,
+      ompSessionFile: "/tmp/other.json",
+    });
+    expect(rootStarted.response.status).toBe(200);
+    expect(otherStarted.response.status).toBe(200);
+
+    const workerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_root_architect",
+      secret: rootStarted.body.secret,
+    });
+    expect(workerSpawn.response.status).toBe(200);
+    expect(
+      (
+        await json("/legion/v1/role-backing", {
+          tree: root,
+          issue: root,
+          role: "tester",
+          agentId: "agent-tester",
+          sessionId: "ses_tester",
+          spawnToken: workerSpawn.body.spawnToken,
+        })
+      ).response.status
+    ).toBe(200);
+    const workerPhase = await json<PhaseResponse>("/legion/v1/phase", {
+      tree: root,
+      issue: root,
+      phase: "tester",
+      sessionId: "ses_tester",
+      spawnToken: workerSpawn.body.spawnToken,
+    });
+    expect(workerPhase.response.status).toBe(200);
+    expect(state.roles[roleToken(state.project, root, "tester")]).toEqual({
+      issue: root,
+      role: "tester",
+      sessionId: "ses_tester",
+      agentId: "agent-tester",
+    });
+
+    const lifecycleWrites: Array<{ path: string; body: Record<string, unknown> }> = [
+      {
+        path: "/legion/v1/issues",
+        body: { tree: root, title: "Child", body: "Build it", labels: ["needs-approval"] },
+      },
+      { path: "/legion/v1/waves/release", body: { tree: root, children: [child] } },
+      {
+        path: "/legion/v1/issues/comment",
+        body: { tree: root, issue: child, body: "Please fix" },
+      },
+      { path: "/legion/v1/issues/body", body: { tree: root, issue: child, body: "# Spec" } },
+      {
+        path: "/legion/v1/issues/labels",
+        body: { tree: root, issue: child, add: ["needs-approval"] },
+      },
+      { path: "/legion/v1/issues/close", body: { tree: root, issue: child } },
+      {
+        path: "/legion/v1/escalate",
+        body: { tree: root, kind: "capacity", context: { blocked: true } },
+      },
+      {
+        path: "/legion/v1/spawn-token",
+        body: { tree: root, issue: child, role: "implementer" },
+      },
+    ];
+
+    for (const write of lifecycleWrites) {
+      expect((await json(write.path, write.body)).response.status).toBe(403);
+      expect(
+        (
+          await json(write.path, {
+            ...write.body,
+            sessionId: "ses_root_architect",
+            secret: "wrong-secret",
+          })
+        ).response.status
+      ).toBe(403);
+      expect(
+        (
+          await json(write.path, {
+            ...write.body,
+            sessionId: "ses_tester",
+            secret: workerPhase.body.secret,
+          })
+        ).response.status
+      ).toBe(403);
+      expect(
+        (
+          await json(write.path, {
+            ...write.body,
+            sessionId: "ses_other_architect",
+            secret: otherStarted.body.secret,
+          })
+        ).response.status
+      ).toBe(403);
+      expect(
+        (
+          await json(write.path, {
+            ...write.body,
+            sessionId: "ses_root_architect",
+            secret: rootStarted.body.secret,
+          })
+        ).response.status
+      ).toBe(200);
+    }
+  });
   it("requires a bound architect capability before forwarding Dispatch and registering its returned thread", async () => {
     const dispatchRequests: Array<{ url: string; headers: Headers; body: string }> = [];
     await start({
@@ -830,17 +1056,23 @@ describe("Legion HTTP API", () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-spawn-capability-"));
     const file = path.join(tempDir, "state.json");
     try {
-      state.roles[roleToken(state.project, root, "architect")] = {
-        issue: root,
-        role: "architect",
-        sessionId: "ses_architect",
-      };
       await start({ saveState: async () => saveState(file, state) });
+      const bootToken = await api?.mintBootToken(root, 3);
+      if (!bootToken) throw new Error("boot nonce was not minted");
+      const started = await json<{ secret: string }>("/legion/v1/process/started", {
+        tree: root,
+        generation: 3,
+        rootSessionId: "ses_architect",
+        bootToken,
+        ompSessionFile: "/tmp/root.json",
+      });
+      expect(started.response.status).toBe(200);
       const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
         tree: root,
         issue: root,
         role: "reviewer",
         sessionId: "ses_architect",
+        secret: started.body.secret,
       });
       expect(
         (
@@ -963,22 +1195,29 @@ describe("Legion HTTP API", () => {
 
   it("rejects a phase whose spawn token was minted for another role", async () => {
     await start();
-    state.roles[roleToken(state.project, root, "architect")] = {
-      issue: root,
-      role: "architect",
-      sessionId: "ses_architect",
-    };
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
     const testerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
       tree: root,
       issue: root,
       role: "tester",
       sessionId: "ses_architect",
+      secret: started.body.secret,
     });
     const reviewerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
       tree: root,
       issue: root,
       role: "reviewer",
       sessionId: "ses_architect",
+      secret: started.body.secret,
     });
     expect(
       (
@@ -1006,16 +1245,22 @@ describe("Legion HTTP API", () => {
 
   it("binds grants to the daemon-registered session role, rejects wrong and expired secrets, and returns exact git credential bytes", async () => {
     await start();
-    state.roles[roleToken(state.project, root, "architect")] = {
-      issue: root,
-      role: "architect",
-      sessionId: "ses_architect",
-    };
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
     const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
       tree: root,
       issue: root,
       role: "tester",
       sessionId: "ses_architect",
+      secret: started.body.secret,
     });
     const unregisteredSession = await json("/legion/v1/phase", {
       tree: root,
@@ -1093,5 +1338,59 @@ describe("Legion HTTP API", () => {
     now += 60_001;
     const expired = await json("/legion/v1/gh-token", { grantId: grant.body.grantId });
     expect(expired.response.status).toBe(403);
+  });
+  it("attributes a daemon-initiated root close and begins linger without waiting for GitHub", async () => {
+    await start({
+      runner: async (command) => {
+        commands.push(command);
+        if (command.some((part) => part.endsWith("/comments"))) {
+          return {
+            stdout: JSON.stringify({
+              id: 99,
+              html_url: "https://github.com/acme/widgets/issues/1#issuecomment-99",
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
+
+    expect(
+      (
+        await json("/legion/v1/issues/close", {
+          tree: root,
+          issue: root,
+          sessionId: "ses_root",
+          secret: started.body.secret,
+          comment: "Completed",
+        })
+      ).response.status
+    ).toBe(200);
+    expect(commands).toEqual([
+      [
+        "gh",
+        "api",
+        "repos/acme/widgets/issues/1/comments",
+        "-f",
+        'body=Completed\n\n<!-- legion: {"session":"ses_root","issue":"acme/widgets#1"} -->',
+      ],
+      ["gh", "api", "-X", "PATCH", "repos/acme/widgets/issues/1", "-f", "state=closed"],
+    ]);
+    expect(state.issues[root] as unknown).toMatchObject({
+      state: "closed",
+      finalCommentRef: "https://github.com/acme/widgets/issues/1#issuecomment-99",
+    });
+    expect(state.trees[root]).toMatchObject({ status: "lingering" });
   });
 });

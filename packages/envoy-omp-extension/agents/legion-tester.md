@@ -4,7 +4,8 @@ description: Verify a Legion issue against its acceptance criteria and return re
 tools: ["read", "edit", "write", "bash", "task", "hub"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
-# Mirrors validatePhaseHandoff from @legion/envoy-omp-extension/legion/handoff-schema (Task 21).
+autoloadSkills: ["legion-worker"]
+# Mirrors validatePhaseHandoff from @legion/contracts.
 output:
   type: object
   required: ["schemaVersion", "phase", "completed"]
@@ -39,13 +40,17 @@ oracle, scout, reviewer, or explorer subagents, but never spawn a `legion-*` age
 
 ## Shared workspace and credentials
 
-Use the existing sequentially shared issue workspace. Do not request `isolated` work,
-create a new workspace, or change another phase's bookmark. Use jj, never git mutations.
-Start with `jj status` and inspect `jj log`; never use `jj op restore`, `jj abandon`, or
-`jj edit @-`. Make only path-scoped logical commits with
-`jj split -m "<message>" <paths…>`. Before a push, inspect
-`jj log -r 'ancestors(@, 5)'`; use plain `jj git push` only for the existing issue
-branch.
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with `cd -- "<workspace>" && jj -R "<workspace>" status`; never rely on the inherited
+cwd. Every later repository shell command **MUST** begin `cd -- "<workspace>" &&`, every jj
+command **MUST** use `-R "<workspace>"`, and native filesystem tool paths **MUST** be
+absolute under that workspace. Do not request `isolated` work, create a new workspace, or
+change another phase's bookmark. Use jj, never git mutations; never use `jj op restore`,
+`jj abandon`, or `jj edit @-`. Make only path-scoped logical commits with
+`jj -R "<workspace>" split -m "<message>" <paths…>`. Before a push, inspect
+`jj -R "<workspace>" log -r 'ancestors(@, 5)'`; use
+`jj -R "<workspace>" git push` only for the existing issue branch.
 
 Run GitHub commands through `legion gh -- <gh arguments>`. Do not obtain or expose
 tokens; the extension grants credentials only around `legion gh --` and `jj git push`.

@@ -25,34 +25,47 @@ facts and the decision needed.
 
 ## Workspace and handoff precedence
 
-The extension provisions one jj workspace and issue bookmark. Do not create an isolated
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with:
+
+```bash
+cd -- "<workspace>" && jj -R "<workspace>" status
+```
+
+Never rely on the inherited cwd. Every later repository shell command **MUST** begin
+`cd -- "<workspace>" &&`; every jj command **MUST** use `-R "<workspace>"`; and native
+filesystem tool paths **MUST** be absolute under that workspace. Do not create an isolated
 worktree, change the workspace topology, or mix another issue's work into it. Concurrent
 issues have disjoint workspaces; phases for this issue are sequential.
 
 On every start, and especially after revival or re-creation, read the issue and then the
-committed predecessor handoffs in lifecycle order:
+committed predecessor handoffs in lifecycle order from `<workspace>/.legion/`:
 
-1. `.legion/architect.json`
-2. `.legion/plan.json`
-3. `.legion/implement.json`
-4. `.legion/test.json`
-5. `.legion/review.json`
+1. `architect.json`
+2. `plan.json`
+3. `implement.json`
+4. `test.json`
+5. `review.json`
 
 Read only files that precede the assigned phase. The live path returns JSON matching the task
 `outputSchema` directly to the architect. The durable path uses the **same schema** in
-`.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior transcript,
-the committed file wins: it is the copy that survived.
+`<workspace>/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
+transcript, the committed file wins: it is the copy that survived.
 
 ## jj Safety Rules
 
-- **Always `jj new` to create isolated commits.** Never `jj edit @-` to go back to a parent — this changes what `@` points to and makes `jj abandon` dangerous.
-- **Never `jj abandon` without first running `jj log`** to verify what `@` is. Abandoning the wrong commit destroys all changes on it.
-- **If you accidentally abandon the wrong commit:** `jj op restore` recovers the last operation.
-- **Before pushing, check ancestry:** `jj log -r 'ancestors(@, 5)'` — verify only your issue's commits are in the chain, not unrelated work.
+- **Always `jj -R "<workspace>" new` to create isolated commits.** Never
+  `jj -R "<workspace>" edit @-` to go back to a parent — this changes what `@` points to
+  and makes `jj abandon` dangerous.
+- **Never `jj -R "<workspace>" abandon`.** If a mistake would require abandoning work,
+  stop and send the owning architect the `jj -R "<workspace>" log` evidence.
+- **Before pushing, check ancestry:** `jj -R "<workspace>" log -r 'ancestors(@, 5)'` —
+  verify only your issue's commits are in the chain, not unrelated work.
 
 **Shared operation safety:** Never run `jj op restore` in a Legion workspace. It rewrites the
 shared operation log. If a mistake reaches that point, stop and send the owning architect the
-`jj log` evidence; recover only through the approved, path-scoped workflow.
+`jj -R "<workspace>" log` evidence; recover only through the approved, path-scoped workflow.
 
 ## Phase work
 
@@ -98,11 +111,14 @@ Only the implementer creates the issue bookmark, pushes it, and opens the pull r
 its implementation commit and verification, it uses this exact branch name and push procedure:
 
 ```bash
-jj bookmark set legion/issue-<n> && jj git push --bookmark legion/issue-<n> --allow-new
+cd -- "<workspace>" && \
+  jj -R "<workspace>" bookmark set legion/issue-<n> && \
+  jj -R "<workspace>" git push --bookmark legion/issue-<n> --allow-new
 ```
 
-The provisioned issue workspace configures `credential.helper = !legion credential`, so `jj git
-push` authenticates transparently through the same session capability. Never handle a token.
+The provisioned issue workspace configures `credential.helper = !legion credential`, so
+`jj -R "<workspace>" git push` authenticates transparently through the same session
+capability. Never handle a token.
 
 Then create the pull request with the `github` tool's `pr_create` operation. The credential
 helper and `legion gh` provide the GitHub identity; never export, fetch, or replace a token.
@@ -118,27 +134,30 @@ generated envelope fields.
 Write the phase-specific handoff:
 
 ```bash
-legion handoff write --phase <p> --data '<JSON object of phase-specific fields only>'
+cd -- "<workspace>" && \
+  legion handoff write --phase <p> --data '<JSON object of phase-specific fields only>'
 ```
 
 Then verify the durable artifact exists:
 
 ```bash
-test -f .legion/<phase>.json
+test -f "<workspace>/.legion/<phase>.json"
 ```
 
 Then commit that exact handoff file onto the issue branch:
 
 ```bash
-jj split -m "<phase>: record handoff" .legion/<phase>.json
+cd -- "<workspace>" && \
+  jj -R "<workspace>" split -m "<phase>: record handoff" .legion/<phase>.json
 ```
 
 If the issue bookmark exists locally, advance it and push it with the provisioned credential
 helper. `--allow-new` also publishes the locally provisioned bookmark on its first push:
 
 ```bash
-jj bookmark set legion/issue-<n>
-jj git push --bookmark legion/issue-<n> --allow-new
+cd -- "<workspace>" && \
+  jj -R "<workspace>" bookmark set legion/issue-<n> && \
+  jj -R "<workspace>" git push --bookmark legion/issue-<n> --allow-new
 ```
 
 Do not report phase completion until the write, existence check, and handoff commit succeed;

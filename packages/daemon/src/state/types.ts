@@ -20,7 +20,6 @@ export type IssueStatusLiteral =
   | "Retro"
   | "Done";
 
-
 /**
  * CI check status for a PR.
  * - "passing": all checks succeeded
@@ -145,7 +144,6 @@ const _lowercaseAliasMap = new Map<string, IssueStatusLiteral>(
   Object.entries(IssueStatus.ALIASES).map(([k, v]) => [k.toLowerCase(), v])
 );
 
-
 export type { LinearIssueRaw } from "./backends/linear";
 
 // =============================================================================
@@ -211,7 +209,6 @@ export interface ParsedIssue {
   source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
   blockedByIds: string[];
   isBlocked: boolean;
-
 }
 
 /**
@@ -235,4 +232,3 @@ export function createParsedIssue(
     isBlocked: blockedByIds.length > 0,
   };
 }
-

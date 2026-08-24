@@ -56,4 +56,7 @@ jobs:
       - name: Test daemon
         run: bun test
         working-directory: packages/daemon
+        env:
+          LEGION_E2E: "1"
+          LEGION_TMUX_LIVE: "1"
 

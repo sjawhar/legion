@@ -4,7 +4,8 @@ description: Review a Legion issue for correctness, regressions, and acceptance-
 tools: ["read", "bash", "task", "hub"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
-# Mirrors validatePhaseHandoff from @legion/envoy-omp-extension/legion/handoff-schema (Task 21).
+autoloadSkills: ["legion-worker"]
+# Mirrors validatePhaseHandoff from @legion/contracts.
 output:
   type: object
   required: ["schemaVersion", "phase", "completed"]
@@ -40,12 +41,17 @@ do not open dispatch threads.
 
 ## Shared workspace and credentials
 
-Use the existing issue workspace and its existing branch. Do not request `isolated` work,
-create a workspace, or make unrelated history. Use jj, never git mutations. Start with
-`jj status` and inspect `jj log`; never use `jj op restore`, `jj abandon`, or `jj edit @-`.
-If a required reviewer-owned cleanup commit is needed, create it only with
-`jj split -m "<message>" <paths…>`. Before any push, inspect
-`jj log -r 'ancestors(@, 5)'`; push only with plain `jj git push`.
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with `cd -- "<workspace>" && jj -R "<workspace>" status`; never rely on the inherited
+cwd. Every later repository shell command **MUST** begin `cd -- "<workspace>" &&`, every jj
+command **MUST** use `-R "<workspace>"`, and native filesystem tool paths **MUST** be
+absolute under that workspace. Do not request `isolated` work, create a workspace, or make
+unrelated history. Use jj, never git mutations; never use `jj op restore`, `jj abandon`, or
+`jj edit @-`. If a required reviewer-owned cleanup commit is needed, create it only with
+`jj -R "<workspace>" split -m "<message>" <paths…>`. Before any push, inspect
+`jj -R "<workspace>" log -r 'ancestors(@, 5)'`; push only with
+`jj -R "<workspace>" git push`.
 
 Use `legion gh -- <gh arguments>` for every GitHub operation. Do not request, print, or
 persist a token; the extension grants credentials around `legion gh --` and `jj git push`.

@@ -100,6 +100,7 @@ function config(): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     dispatchUrl: "http://127.0.0.1:13380",
     dispatchBearer: "dispatch-bearer",
+    ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion[bot]"],
     admissionCap: 4,
@@ -426,6 +427,55 @@ describe("core-NATS event pump", () => {
       vi.useRealTimers();
     }
   });
+  it("persists failed controller events and redelivers them after the controller registers", async () => {
+    const { state, issue } = stateForIssue();
+    state.trees[issue].status = "closed";
+    const nats = new FakeNats();
+    const publications: Array<{ topic: string; payloadJson: string }> = [];
+    let controllerAvailable = false;
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        if (!controllerAvailable) throw new Error("controller listener is unavailable");
+        publications.push({ topic, payloadJson });
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.issue.1",
+      envelope({
+        action: "reopened",
+        repository: { full_name: "acme/widgets" },
+        issue: { number: 1, state: "open" },
+      })
+    );
+    await flush();
+
+    const persisted = state;
+    expect(persisted.controllerHeldEvents).toEqual([
+      {
+        role: controllerToken(state.project),
+        payloadJson: JSON.stringify({ type: "reactivation", issue }),
+        heldAt: new Date(1_000).toISOString(),
+        eventId: "event-1",
+      },
+    ]);
+
+    state.roles[controllerToken(state.project)] = {
+      role: "controller",
+      sessionId: "ses-controller",
+    };
+    controllerAvailable = true;
+    await pump.redeliverControllerEvents();
+
+    expect(publications).toEqual([
+      {
+        topic: roleTopic(controllerToken(state.project)),
+        payloadJson: JSON.stringify({ type: "reactivation", issue }),
+      },
+    ]);
+    expect(persisted.controllerHeldEvents).toEqual([]);
+    pump.stop();
+  });
 
   it("passes a project issue-role delivery exception to the process manager", async () => {
     const { state, implementer } = stateForIssue();
@@ -574,6 +624,10 @@ describe("core-NATS event pump", () => {
 
   it("forwards mention envelopes directly to the controller role", async () => {
     const { state } = stateForIssue();
+    state.roles[controllerToken(state.project)] = {
+      role: "controller",
+      sessionId: "ses-controller",
+    };
     const nats = new FakeNats();
     const published: Array<{ topic: string; payloadJson: string }> = [];
     const pump = startEventPump(

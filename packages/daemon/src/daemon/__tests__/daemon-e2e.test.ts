@@ -12,10 +12,17 @@ import {
 } from "@legion/contracts";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import type { DaemonConfig } from "../config";
+import type { DaemonEnvironment } from "../environment";
 import { type DaemonHandle, startDaemon } from "../index";
 
 const NATS_IMAGE = "nats:2.10";
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+
+const DAEMON_ENVIRONMENT: DaemonEnvironment = {
+  commands: { jj: "/tools/jj", git: "/tools/git", gh: "/tools/gh", tmux: "tmux" },
+  ompInvocation: "/tools/omp",
+  paneEnv: { PATH: process.env.PATH ?? "" },
+};
 
 interface CommandResult {
   stdout: string;
@@ -145,6 +152,7 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     natsUrls: [natsUrl],
     dispatchUrl: "http://127.0.0.1:13380",
     dispatchBearer: "dispatch-bearer",
+    ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 1,
@@ -171,6 +179,7 @@ async function post(url: string, body: Record<string, unknown>): Promise<Respons
 }
 
 describe("daemon end-to-end", () => {
+  // Requires Docker to create an isolated NATS broker.
   it.skipIf(process.env.LEGION_E2E !== "1")(
     "routes a GitHub event through admission and revives an unclaimed worker over live NATS",
     async () => {
@@ -191,9 +200,12 @@ describe("daemon end-to-end", () => {
       let tmuxSessionExists = false;
       const controllerSpawn = Promise.withResolvers<string[]>();
       const rootSpawn = Promise.withResolvers<string[]>();
+      const rootRespawn = Promise.withResolvers<string[]>();
+      let rootSpawnCount = 0;
       const controllerTriage = Promise.withResolvers<NatsEvent>();
       const childArchitectPublication = Promise.withResolvers<NatsEvent>();
       const workerPublication = Promise.withResolvers<NatsEvent>();
+      const workerPublications: NatsEvent[] = [];
       const workerDirective = Promise.withResolvers<NatsEvent>();
       let roleSubscription: Subscription | undefined;
       let controlSubscription: Subscription | undefined;
@@ -201,7 +213,28 @@ describe("daemon end-to-end", () => {
       let controlPump: Promise<void> | undefined;
 
       const runner = async (command: string[]): Promise<CommandResult> => {
+        if (command[0] === "sh") {
+          return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 0 };
+        }
+        if (command[0] === "/tools/jj" && command[1] === "git" && command[2] === "clone") {
+          const cloneDir = command.at(-1);
+          if (!cloneDir) throw new Error("Fake Jujutsu clone is missing its destination");
+          await mkdir(path.join(cloneDir, ".jj", "repo", "store", "git"), { recursive: true });
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        if (command[0] === "/tools/jj" && command[1] === "workspace" && command[2] === "add") {
+          const workspaceDir = command[3];
+          if (!workspaceDir) throw new Error("Fake Jujutsu workspace is missing its destination");
+          await mkdir(workspaceDir, { recursive: true });
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        if (command[0] === "/tools/jj" || command[0] === "/tools/git") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
         if (command[0] === "kill") return { stdout: "", stderr: "", exitCode: 0 };
+        if (command[0] === "gh" || command[0] === "/tools/gh") {
+          return { stdout: "[]", stderr: "", exitCode: 0 };
+        }
         if (command[0] !== "tmux") {
           throw new Error(`Fake GitHub runner received unexpected command: ${command.join(" ")}`);
         }
@@ -219,7 +252,11 @@ describe("daemon end-to-end", () => {
             throw new Error(`tmux new-window command is missing -n: ${command.join(" ")}`);
           windows.add(window);
           if (window === "controller") controllerSpawn.resolve([...command]);
-          if (window === "acme-widgets-1") rootSpawn.resolve([...command]);
+          if (window === "acme-widgets-1") {
+            rootSpawnCount += 1;
+            if (rootSpawnCount === 1) rootSpawn.resolve([...command]);
+            else rootRespawn.resolve([...command]);
+          }
           return { stdout: "", stderr: "", exitCode: 0 };
         }
         if (command[1] === "list-windows") {
@@ -260,7 +297,10 @@ describe("daemon end-to-end", () => {
             if (event.subject === roleTopic(controller)) controllerTriage.resolve(event);
             if (event.subject === roleTopic(childArchitect))
               childArchitectPublication.resolve(event);
-            if (event.subject === roleTopic(worker)) workerPublication.resolve(event);
+            if (event.subject === roleTopic(worker)) {
+              workerPublications.push(event);
+              workerPublication.resolve(event);
+            }
           }
         })();
         controlPump = (async () => {
@@ -277,6 +317,9 @@ describe("daemon end-to-end", () => {
               event.payload.type === "revive-worker"
             ) {
               workerDirective.resolve(event);
+              if (message.reply) {
+                message.respond(codec.encode(JSON.stringify({ type: "ack" })));
+              }
             }
           }
         })();
@@ -284,12 +327,23 @@ describe("daemon end-to-end", () => {
 
         daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), {
           deps: {
+            resolveDaemonEnvironment: async () => DAEMON_ENVIRONMENT,
             runner,
             envoyPublish: async (topic, payload) => {
               broker?.publish(topic, codec.encode(payload));
               await broker?.flush();
             },
             fetchGitHubProjectItems: async () => ({ items: [] }),
+            tokenManager: {
+              getToken: async () => ({
+                token: "test-token",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implement[bot]",
+                  email: "42+legion-implement[bot]@users.noreply.github.com",
+                },
+              }),
+            },
             onSignal: () => {},
           },
         });
@@ -358,29 +412,61 @@ describe("daemon end-to-end", () => {
         );
         await mkdir(path.dirname(rootSessionFile), { recursive: true });
         await writeFile(rootSessionFile, "{}\n", "utf8");
+        const rootBootToken = rootSpawnArgv
+          .find((argument) => argument.startsWith("LEGION_BOOT_TOKEN="))
+          ?.slice("LEGION_BOOT_TOKEN=".length);
+        if (!rootBootToken) throw new Error("Root tmux spawn did not include its boot token");
         const started = await post(`${daemonUrl}/legion/v1/process/started`, {
           tree: root,
           generation: 1,
+          bootToken: rootBootToken,
           rootSessionId: "root-session",
           ompSessionFile: rootSessionFile,
         });
-        expect(await started.json()).toMatchObject({
-          controlSubject: `legion.ctl.${sanitizeToken(root)}.1`,
-        });
+        const rootStarted = (await started.json()) as { controlSubject: string; secret: string };
+        expect(rootStarted.controlSubject).toBe(`legion.ctl.${sanitizeToken(root)}.1`);
+        const architect = { sessionId: "root-session", secret: rootStarted.secret };
+        await post(`${daemonUrl}/legion/v1/process/ready`, { tree: root, ...architect });
 
+        const architectSpawn = await post(`${daemonUrl}/legion/v1/spawn-token`, {
+          tree: root,
+          issue: child,
+          role: "architect",
+          ...architect,
+        });
+        const { spawnToken: architectSpawnToken } = (await architectSpawn.json()) as {
+          spawnToken: string;
+        };
         await post(`${daemonUrl}/legion/v1/role-backing`, {
           tree: root,
           issue: child,
           role: "architect",
           agentId: "child-architect",
+          sessionId: "child-architect-session",
+          spawnToken: architectSpawnToken,
         });
+        const workerSpawn = await post(`${daemonUrl}/legion/v1/spawn-token`, {
+          tree: root,
+          issue: child,
+          role: "implementer",
+          ...architect,
+        });
+        const { spawnToken: workerSpawnToken } = (await workerSpawn.json()) as {
+          spawnToken: string;
+        };
         await post(`${daemonUrl}/legion/v1/role-backing`, {
           tree: root,
           issue: child,
           role: "implementer",
           agentId: "child-worker",
+          sessionId: "child-worker-session",
+          spawnToken: workerSpawnToken,
         });
-        await post(`${daemonUrl}/legion/v1/waves/release`, { tree: root, children: [child] });
+        await post(`${daemonUrl}/legion/v1/waves/release`, {
+          tree: root,
+          children: [child],
+          ...architect,
+        });
 
         const childCommentTopic = "notifications.github.acme.widgets.issue.2.comment";
         broker.publish(
@@ -435,6 +521,7 @@ describe("daemon end-to-end", () => {
         expect(directive.subject).toBe(`legion.ctl.${sanitizeToken(root)}.1`);
         expect(directive.payload).toEqual({
           type: "revive-worker",
+          issue: child,
           role: "implementer",
           agentId: "child-worker",
           parentSessionFile: rootSessionFile,

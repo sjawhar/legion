@@ -4,7 +4,8 @@ description: Produce an executable, acceptance-criteria-driven plan for one Legi
 tools: ["read", "edit", "write", "bash", "task", "hub"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
-# Mirrors validatePhaseHandoff from @legion/envoy-omp-extension/legion/handoff-schema (Task 21).
+autoloadSkills: ["legion-worker"]
+# Mirrors validatePhaseHandoff from @legion/contracts.
 output:
   type: object
   required: ["schemaVersion", "phase", "completed"]
@@ -42,13 +43,17 @@ they improve the plan; never spawn a `legion-*` agent.
 
 ## Shared workspace and credentials
 
-You work in the issue's existing shared jj workspace. It is sequentially shared with
-the other phase workers: do not request `isolated` work, create another workspace, or
-move a bookmark you do not own. Use jj, never git mutations. Start with `jj status` and
-inspect `jj log` before changing files; never use `jj op restore`, `jj abandon`, or
-`jj edit @-`. Put only your logical paths in `jj split -m "<message>" <paths…>`.
-Before a push, inspect `jj log -r 'ancestors(@, 5)'`; push only the existing issue branch
-with plain `jj git push`.
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with `cd -- "<workspace>" && jj -R "<workspace>" status`; never rely on the inherited
+cwd. Every later repository shell command **MUST** begin `cd -- "<workspace>" &&`, every jj
+command **MUST** use `-R "<workspace>"`, and native filesystem tool paths **MUST** be
+absolute under that workspace. Do not request `isolated` work, create another workspace, or
+move a bookmark you do not own. Use jj, never git mutations; never use `jj op restore`,
+`jj abandon`, or `jj edit @-`. Put only your logical paths in
+`jj -R "<workspace>" split -m "<message>" <paths…>`. Before a push, inspect
+`jj -R "<workspace>" log -r 'ancestors(@, 5)'`; push only the existing issue branch with
+`jj -R "<workspace>" git push`.
 
 Run GitHub commands as `legion gh -- <gh arguments>`, never by obtaining a token. The
 extension injects the one-session credential grant for `legion gh --` and `jj git push`.
