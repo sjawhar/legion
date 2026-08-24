@@ -32,6 +32,17 @@ require_command() {
 require_env() {
   [[ -n "${!1:-}" ]] || fail "$1 is required"
 }
+normalize_github_webhook_secret() {
+  local original_secret="$GITHUB_WEBHOOK_SECRET"
+
+  GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET#"${GITHUB_WEBHOOK_SECRET%%[![:space:]]*}"}"
+  GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET%"${GITHUB_WEBHOOK_SECRET##*[![:space:]]}"}"
+  if [[ "$GITHUB_WEBHOOK_SECRET" != "$original_secret" ]]; then
+    printf 'WARNING: GITHUB_WEBHOOK_SECRET stored secret contains whitespace; trimmed leading/trailing whitespace\n' >&2
+  fi
+  export GITHUB_WEBHOOK_SECRET
+}
+
 
 require_numeric() {
   [[ "${!1:-}" =~ ^[0-9]+$ ]] || fail "$1 must be numeric"
@@ -416,6 +427,39 @@ wait_for_webhook_forwarder() {
 
   fail "webhook forwarder did not report a tunnel-ready signal; inspect ${log_file}"
 }
+assert_webhook_round_trip() {
+  local payload='{"zen":"legion smoke round-trip"}'
+  local signature
+  local status
+
+  signature="$(SMOKE_WEBHOOK_PAYLOAD="$payload" bun -e '
+    import { createHmac } from "node:crypto";
+    process.stdout.write(createHmac("sha256", process.env.GITHUB_WEBHOOK_SECRET).update(process.env.SMOKE_WEBHOOK_PAYLOAD).digest("hex"));
+  ')" || fail "could not sign local GitHub ping"
+  status="$(curl --connect-timeout 2 --max-time 10 --output /dev/null --silent --show-error \
+    --write-out '%{http_code}' \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --header "X-GitHub-Delivery: smoke-round-trip-$(date +%s%N)" \
+    --header 'X-GitHub-Event: ping' \
+    --header "X-Hub-Signature-256: sha256=${signature}" \
+    --data-binary "$payload" \
+    "http://127.0.0.1:${listener_port}/webhook/github")" ||
+    fail "could not deliver signed local GitHub ping to listener"
+
+  case "$status" in
+    200)
+      printf 'GREEN webhook round-trip: listener accepted signed ping\n'
+      ;;
+    401)
+      fail 'listener rejected signed webhook round-trip (HTTP 401): secret mismatch'
+      ;;
+    *)
+      fail "listener rejected signed webhook round-trip (HTTP ${status})"
+      ;;
+  esac
+}
+
 
 main() {
   require_command base64
@@ -437,6 +481,8 @@ main() {
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
+  require_env GITHUB_WEBHOOK_SECRET
+  normalize_github_webhook_secret
   require_env GITHUB_WEBHOOK_SECRET
   require_env GH_AGENT_APP_PRIVATE_KEY_B64
   require_env GH_REVIEW_APP_PRIVATE_KEY_B64
@@ -496,9 +542,11 @@ main() {
     remove_recorded_forwarder_hook webhook-forward
     start_process_group webhook-forward gh webhook forward --repo "$SMOKE_REPO" \
       --events "$webhook_events" \
+      --secret "$GITHUB_WEBHOOK_SECRET" \
       --url "http://127.0.0.1:${listener_port}/webhook/github"
   fi
   wait_for_webhook_forwarder
+  assert_webhook_round_trip
   record_forwarder_hook webhook-forward "repos/${SMOKE_REPO}/hooks"
   if [[ "$board_scope" == "org" ]]; then
     if pid_is_live "${smoke_dir}/board-webhook-forward.pid" &&
@@ -508,6 +556,7 @@ main() {
       remove_recorded_forwarder_hook board-webhook-forward
       start_process_group board-webhook-forward gh webhook forward --org "$(project_owner)" \
         --events projects_v2_item \
+        --secret "$GITHUB_WEBHOOK_SECRET" \
         --url "http://127.0.0.1:${listener_port}/webhook/github"
     fi
     wait_for_webhook_forwarder board-webhook-forward

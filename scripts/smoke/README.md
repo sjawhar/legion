@@ -31,7 +31,7 @@ It also requires these secret inputs:
 | `GH_AGENT_APP_PRIVATE_KEY_B64` | Base64-encoded implementation App private key. |
 | `GH_REVIEW_APP_PRIVATE_KEY_B64` | Base64-encoded reviewer App private key. |
 
-Provide secrets with the `secrets` wrapper rather than writing a `.env` file. The private keys stay in the process environment; `up.sh` writes only `private_key_command` references into its generated daemon configuration. The webhook forwarder inherits `GITHUB_WEBHOOK_SECRET` from its environment; the rig never passes that secret through a process argument.
+Provide secrets with the `secrets` wrapper rather than writing a `.env` file. The private keys stay in the process environment; `up.sh` writes only `private_key_command` references into its generated daemon configuration. `up.sh` trims leading and trailing whitespace from `GITHUB_WEBHOOK_SECRET` once during validation and prints `WARNING` when the stored secret contains whitespace. It passes that same normalized secret to the listener and to `gh webhook forward --secret`.
 ### Human-controlled gates
 
 | Variable | Required for | Behavior when absent |
@@ -53,7 +53,7 @@ secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_P
   bash -c 'GITHUB_WEBHOOK_SECRET="$ENVOY_GITHUB_WEBHOOK_SECRET" exec bash scripts/smoke/up.sh'
 ```
 
-The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. `up.sh` builds the Envoy listener and Dispatch binaries, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz`, starts Dispatch at `127.0.0.1:18766/healthz`, starts `gh webhook forward` and waits for its `Forwarding Webhook events from GitHub...` tunnel-ready signal, then launches the daemon with its normal Bun command:
+The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. `up.sh` builds the Envoy listener and Dispatch binaries, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz`, starts Dispatch at `127.0.0.1:18766/healthz`, starts `gh webhook forward`, waits for its `Forwarding Webhook events from GitHub...` tunnel-ready signal, and requires a locally signed GitHub `ping` to receive HTTP 200 from the listener before launching the daemon with its normal Bun command:
 
 ```sh
 bun run packages/daemon/src/cli/index.ts start <owner>/<board-number> --config /path/to/legion.yaml
