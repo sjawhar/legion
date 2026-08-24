@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -195,7 +196,37 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	return item, nil
 }
 
+func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
+	for _, topic := range topics {
+		if !strings.HasPrefix(topic, contracts.RoleTopicPrefix) {
+			continue
+		}
+		role := strings.TrimPrefix(topic, contracts.RoleTopicPrefix)
+		if role == "" || strings.ContainsAny(role, "*>") {
+			continue
+		}
+		entry, err := r.roleKV.Get(role)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if string(entry.Value()) != sessionID {
+			continue
+		}
+		err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
+		if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *Registry) Remove(sessionID string, topics []string) error {
+	if err := r.releaseRoleClaims(sessionID, topics); err != nil {
+		return err
+	}
 	// Empty topics = unsubscribe from everything (delete the entry)
 	if len(topics) == 0 {
 		return r.kv.Delete(sessionID)
@@ -240,6 +271,19 @@ func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) 
 		return Interest{}, err
 	}
 	return item, nil
+}
+
+// RoleHolder returns the authoritative session ID for role. An unclaimed role
+// returns an empty holder without an error.
+func (r *Registry) RoleHolder(role string) (string, error) {
+	entry, err := r.roleKV.Get(role)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(entry.Value()), nil
 }
 
 // Get returns the Interest for a session. Cache first, direct KV read on miss.

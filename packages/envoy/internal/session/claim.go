@@ -7,10 +7,10 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// claimStaleAfter is how long a claim may go unrefreshed before another holder
+// ClaimStaleAfter is how long a claim may go unrefreshed before another holder
 // may take the route. The plugin heartbeats every 2 minutes, so this allows two
 // missed heartbeats before assuming the claiming process is gone.
-const claimStaleAfter = 5 * time.Minute
+const ClaimStaleAfter = 5 * time.Minute
 
 // mergeForClaim decides which of two competing claims on a session route wins.
 //
@@ -37,5 +37,5 @@ func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64)
 }
 
 func claimStale(entry SessionEntry, now int64) bool {
-	return now-entry.UpdatedAt >= int64(claimStaleAfter/time.Millisecond)
+	return now-entry.UpdatedAt >= int64(ClaimStaleAfter/time.Millisecond)
 }

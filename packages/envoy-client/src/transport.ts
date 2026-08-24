@@ -60,6 +60,7 @@ export type PublishInput = {
   readonly sourceSessionID: string;
   readonly topic: string;
   readonly message: string;
+  readonly payload?: string;
   readonly idempotencyKey?: string;
 };
 
@@ -161,6 +162,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
           source_session: input.sourceSessionID,
           topic: input.topic,
           message: input.message,
+          ...(input.payload === undefined ? {} : { payload: input.payload }),
           ...(input.idempotencyKey === undefined ? {} : { idempotency_key: input.idempotencyKey }),
         })
       ),

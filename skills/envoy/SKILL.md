@@ -11,7 +11,7 @@ Envoy is Legion's event-routing subsystem. It delivers Slack, GitHub, and agent-
 
 - `envoy_subscribe(topics)` — make the current session RECEIVE future events on those topics
 - `envoy_unsubscribe(topics?)` — stop receiving some or all topics
-- `envoy_list()` — show the session's current subscriptions
+- `envoy_list()` — show the union of live local and persisted registry subscriptions, with each topic marked `live`, `registry`, or `both`
 - `envoy_send(target_session, message)` — SEND a message directly to another session
 
 ## Topic formats
@@ -30,7 +30,14 @@ Example:
 - Role topic:
   - `notifications.role.<role>`
 
-Role topics route to exactly one session — whoever last called `envoy_role_set(role="<role>")`. Claiming a role transfers it from the previous holder using ordered last-writer-wins semantics.
+Role topics route to one current live holder. `envoy_role_set(role="<role>")` transfers the
+claim using ordered last-writer-wins semantics; the listener then resolves the holder when it
+receives a role message. The role lane uses core NATS, not JetStream: a listener queue subscriber
+sends a receipt-backed request with the original role topic to the holder's
+`notifications.agent.<session_id>` subject. The OMP agent pump replies after accepting it; no
+receipt within two seconds produces a `delivery_failed` exception. A role claimant does not
+subscribe directly to the role topic, and messages are not retained, replayed, or retried for a
+future holder.
 
 Examples:
 
@@ -54,11 +61,14 @@ GitHub topics are **resource-scoped** — every event includes the resource type
   - `notifications.github.<owner>.<repo>.issue.<number>.comment`
 - PR review submitted:
   - `notifications.github.<owner>.<repo>.pr.<number>.review`
+- Raw CI check observation (per-PR, immediate):
+  - `notifications.github.<owner>.<repo>.pr.<number>.check`
+  - Every PR-associated `check_run` publishes one raw observation per associated PR. `Payload` is JSON with `sha`, `name`, `status`, and `conclusion`; `PayloadSummary` names the check and its state.
 - CI/check summary (per-PR, per-commit, debounced):
   - `notifications.github.<owner>.<repo>.pr.<number>.ci`
-  - **Not** a per-check-event firehose. `check_run` webhooks attached to a PR are aggregated ingest-side into per-commit state (JetStream KV bucket `envoy_ci_state`) and re-emitted as **one debounced JSON summary** once the commit's checks have been quiet for the debounce window (`ENVOY_CI_DEBOUNCE`, default `5s`). A subscriber sees the checks "build up" instead of every transition. A new summary is emitted only when the check set actually changes (new push → fresh tally; a re-run flips a check back to running and re-emits).
-  - Payload: `PayloadSummary` is a compact JSON object (`Payload` unused): `{"kind":"ci_summary","repo":"<o>/<r>","number":"<n>","sha":"<sha>","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}`. Each status is `{count, checks}` with the full sorted name list (nothing collapsed); every status is always present (`{"count":0,"checks":[]}` when empty).
-  - `check_suite` is ignored (per-app rollup, no per-check name). Checks not tied to a PR are dropped — there is no repo-wide CI topic. For non-PR visibility, use the `workflow.<filename>.<action>` family instead. Individual GitHub Actions *jobs* (`workflow_job` webhooks) are not routed — only whole workflow runs.
+  - The same `check_run` updates ingest-side per-commit state in JetStream KV bucket `envoy_ci_state`. Once the check set has been quiet for `ENVOY_CI_DEBOUNCE` (default `5s`), Envoy publishes one JSON summary. A new summary is emitted only when the check set changes; a new push starts a fresh tally, and a re-run that returns to running changes the tally.
+  - `PayloadSummary` is a compact JSON object (`Payload` unused): `{"kind":"ci_summary","repo":"<o>/<r>","number":"<n>","sha":"<sha>","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}`. Each status is `{count, checks}` with the full sorted name list; every status is present (`{"count":0,"checks":[]}` when empty).
+  - `check_suite` is ignored (it is a per-app rollup without a per-check name). Checks not tied to a PR are dropped, so there is no repo-wide CI topic. For non-PR visibility, use `workflow.<filename>.<action>`; individual GitHub Actions `workflow_job` events are not routed.
 - Mention events (per-resource):
   - `notifications.github.<owner>.<repo>.pr.<number>.mention`
   - `notifications.github.<owner>.<repo>.issue.<number>.mention`
@@ -175,7 +185,7 @@ You do NOT need to subscribe in order to send or publish.
 
 **Don't `sleep`-poll. Don't "check back in N minutes."** Subscribe to the event and continue with productive work — the system will wake the session when the event arrives.
 
-1. Identify the relevant topic (e.g., `notifications.github.<owner>.<repo>.pr.<num>.>` for all PR events; `.pr.<num>.ci` for per-PR check/CI status updates; `.workflow.<filename>.completed` for a workflow run finishing)
+1. Identify the relevant topic (e.g., `notifications.github.<owner>.<repo>.pr.<num>.>` for all PR events; `.pr.<num>.check` for immediate per-check state; `.pr.<num>.ci` for the debounced PR summary; `.workflow.<filename>.completed` for a workflow run finishing)
 2. Call `envoy_subscribe([...])`
 3. Move on to other work, or end the response and let the watcher wake you
 4. The next response is triggered by the event, with the payload available in your context
@@ -186,9 +196,9 @@ If you have nothing else to do, end the response. The user is not your alarm clo
 
 - `envoy_subscribe(topics)` — receive future events on those topics
 - `envoy_unsubscribe(topics?)` — stop receiving some or all topics
-- `envoy_list()` — show current subscriptions
+- `envoy_list()` — show live and persisted subscriptions, marked by source
 - `envoy_send(target_session, message)` — send directly to a specific session (point-to-point)
-- `envoy_publish(topic, message)` — broadcast to any topic (all matching subscribers receive it)
+- `envoy_publish(topic, message)` — publish a normal topic to matching subscribers or route a role topic to its current holder
 - `envoy_role_set(role)` — claim a named role for the current session (exactly-one-holder)
 
 ## Patterns
@@ -288,7 +298,7 @@ Catches all conversations and event kinds for the specified phone number.
 - Sessions choose their own Slack/GitHub subscriptions
 - Different sessions can subscribe to different channels/repos
 - Agent-to-agent delivery uses exact session IDs
-- If you are unsure what a session is currently subscribed to, call `envoy_list()` first
+- `envoy_list()` distinguishes `live`, `registry`, and `both`; a `live` topic is receiving now even when the listener registry has not caught up.
 - For Slack, use the real `team_id` in topics (for example `T09FRELLTS8`), not a workspace slug like `trajectorylabs`
 - GitHub mention routing is body-based because GitHub has no dedicated app mention webhook event
 
@@ -312,7 +322,7 @@ envoy_subscribe([
 envoy_list()
 ```
 
-Confirm `notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.>` appears in the subscription list.
+Confirm `notifications.whatsapp.15551234567.5551234567@s.whatsapp.net.>` appears as `live` or `both`.
 
 ### Step 3: Publish a synthetic test envelope (Session B — a different session)
 
@@ -330,7 +340,7 @@ Session A should receive a notification containing the text "Synthetic WhatsApp 
 - NATS routes the message to the listener
 - The listener delivers to the subscribed session (Session A ≠ the publishing session)
 
-**If the notification does not arrive:** Check `envoy_list()` in Session A to confirm the subscription is still active. Verify the topic in `envoy_publish` matches the subscription pattern. Ensure you are publishing from a **different** session than the one subscribed.
+**If the notification does not arrive:** Check `envoy_list()` in Session A. The topic should be `live` or `both`; `registry` alone does not confirm the local subscription is receiving. Verify the topic in `envoy_publish` matches the subscription pattern. Ensure you are publishing from a **different** session than the one subscribed.
 
 ### Reference: Real WhatsApp Envelope Shape
 

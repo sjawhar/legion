@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/sjawhar/envoy/internal/logging"
 	"log"
 	"log/slog"
 	"net"
@@ -13,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -46,16 +47,44 @@ const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
 
 var rolePattern = regexp.MustCompile(rolePatternString)
 
+// roleForwardDedupePrefix marks an envelope already sent from the role arbiter
+// to its selected agent subject. The durable agent-stream replay must ACK it
+// without re-entering the arbiter.
+const roleForwardDedupePrefix = "envoy.role.forward."
+
+const roleReceiptTimeout = 2 * time.Second
+
 func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
 }
 
 // startListenerSubscription preserves the durable consumer so restarts resume
-// from the last ACKed message instead of skipping pending work.
+// from the last ACKed non-role message instead of skipping pending work.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
+	subjects := bus.StreamSubjects()
+	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err == nil && (info.Config.FilterSubject != "" ||
+		!slices.Equal(info.Config.FilterSubjects, subjects) ||
+		info.Config.AckPolicy != nats.AckExplicitPolicy ||
+		info.Config.AckWait != 60*time.Second ||
+		info.Config.MaxAckPending != 256 ||
+		info.Config.MaxDeliver != 20) {
+		config := info.Config
+		config.FilterSubject = ""
+		config.FilterSubjects = subjects
+		config.AckPolicy = nats.AckExplicitPolicy
+		config.AckWait = 60 * time.Second
+		config.MaxAckPending = 256
+		config.MaxDeliver = 20
+		if _, err := client.JS().UpdateConsumer(bus.Stream, &config); err != nil {
+			return nil, err
+		}
+	}
 	return client.Subscribe(
-		"notifications.>",
+		"",
 		handler,
+		nats.BindStream(bus.Stream),
+		nats.ConsumerFilterSubjects(subjects...),
 		nats.Durable(consumer),
 		nats.AckExplicit(),
 		nats.ManualAck(),
@@ -92,11 +121,62 @@ type listenerDeliveryHandlerConfig struct {
 	deliveryDuration  *metrics.Histogram
 }
 
+type deliveryMode uint8
+
+const (
+	coreDelivery deliveryMode = iota
+	durableDelivery
+)
+
+type deliveryMessage struct {
+	data []byte
+	mode deliveryMode
+	msg  *nats.Msg
+}
+
+// finalize makes core delivery's loss-on-failure semantics explicit: only a
+// durable JetStream message receives an acknowledgement or retry request.
+func (message deliveryMessage) finalize(retry bool) {
+	if message.mode != durableDelivery {
+		return
+	}
+	if retry {
+		_ = message.msg.NakWithDelay(30 * time.Second)
+		return
+	}
+	_ = message.msg.Ack()
+}
+
+// Ack finalizes a message without retrying. It keeps callers agnostic to the
+// transport while core NATS delivery remains intentionally non-durable.
+func (message deliveryMessage) Ack() error {
+	message.finalize(false)
+	return nil
+}
+
+func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+	handler := listenerDeliveryHandler(cfg)
+	return func(msg *nats.Msg) {
+		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg})
+	}
+}
+
+func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+	handler := listenerDeliveryHandler(cfg)
+	return func(msg *nats.Msg) {
+		handler(deliveryMessage{data: msg.Data, mode: coreDelivery})
+	}
+}
+
 type deliveryExceptionPayload struct {
 	OriginalTopic  string `json:"original_topic"`
 	EventID        string `json:"event_id"`
 	Reason         string `json:"reason"`
 	PayloadSummary string `json:"payload_summary"`
+	Payload        string `json:"payload"`
+	DedupeKey      string `json:"dedupe_key"`
+	Source         string `json:"source"`
+	SourceSession  string `json:"source_session"`
 }
 
 func isControlTopic(topic string) bool {
@@ -113,6 +193,10 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		EventID:        item.EventID,
 		Reason:         reason,
 		PayloadSummary: item.PayloadSummary,
+		Payload:        item.Payload,
+		DedupeKey:      item.DedupeKey,
+		Source:         item.Source,
+		SourceSession:  item.SourceSession,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal delivery exception: %w", err)
@@ -138,33 +222,100 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	return nil
 }
 
-func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMessage) {
+	return func(message deliveryMessage) {
 		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
+		if err := json.Unmarshal(message.data, &item); err != nil {
 			cfg.logger.Error("listener decode failed", slog.String("error", err.Error()))
-			_ = msg.Ack()
+			message.finalize(false)
 			return
 		}
 		if err := item.Validate(); err != nil {
 			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
-			_ = msg.Ack()
+			message.finalize(false)
 			return
 		}
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
 		cfg.logger.Info("listener received", slog.String("source", item.Source), slog.String("source_session", item.SourceSession), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("payload_summary", item.PayloadSummary))
+		if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+			if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
+				_ = message.Ack()
+				return
+			}
+			role := strings.TrimPrefix(item.Topic, contracts.RoleTopicPrefix)
+			sessionID, err := cfg.registry.RoleHolder(role)
+			if err != nil {
+				cfg.logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", err.Error()))
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				if exceptionErr := publishDeliveryException(cfg.client, item, "delivery_failed"); exceptionErr != nil {
+					cfg.logger.Error("listener exception publish failed", slog.String("error", exceptionErr.Error()), slog.String("topic", item.Topic))
+				}
+				_ = message.Ack()
+				return
+			}
+			if sessionID == "" {
+				if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
+					cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+				}
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+				cfg.logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
+				_ = message.Ack()
+				return
+			}
+			now := time.Now().UnixMilli()
+			holder, holderErr := cfg.sessions.Get(sessionID)
+			if holderErr != nil || holder.UpdatedAt <= 0 || now-holder.UpdatedAt >= int64(session.ClaimStaleAfter/time.Millisecond) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				cfg.logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
+				if exceptionErr := publishDeliveryException(cfg.client, item, "delivery_failed"); exceptionErr != nil {
+					cfg.logger.Error("listener exception publish failed", slog.String("error", exceptionErr.Error()), slog.String("topic", item.Topic))
+				}
+				_ = message.Ack()
+				return
+			}
+			if item.SourceSession != "" && item.SourceSession == sessionID {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener skip role echo", sessionID, item.Topic, item.EventID, "skipped")
+				_ = message.Ack()
+				return
+			}
+			if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) || cfg.attemptCache.Seen(item.DedupeKey, sessionID) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
+				cfg.logger.DeliveryLog(slog.LevelInfo, "listener role dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
+				_ = message.Ack()
+				return
+			}
+			cfg.attemptCache.Record(item.DedupeKey, sessionID)
+			forwarded := item
+			forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
+			if err := cfg.client.RequestCoreTo(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
+				cfg.attemptCache.Clear(item.DedupeKey, sessionID)
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				cfg.logger.DeliveryLog(slog.LevelError, "listener role forward failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+				if exceptionErr := publishDeliveryException(cfg.client, item, "delivery_failed"); exceptionErr != nil {
+					cfg.logger.Error("listener exception publish failed", slog.String("error", exceptionErr.Error()), slog.String("topic", item.Topic))
+				}
+				_ = message.Ack()
+				return
+			}
+			cfg.dedupeCache.Record(item.DedupeKey, sessionID)
+			cfg.messagesDelivered.Inc([2]string{"delivery_status", "delivered"})
+			cfg.logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered")
+			_ = message.Ack()
+			return
+		}
 		if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
 			sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 			if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-				_ = msg.Ack()
+				message.finalize(false)
 				return
 			}
 			if cfg.attemptCache.Seen(item.DedupeKey, sessionID) {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", sessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
-				_ = msg.Ack()
+				message.finalize(false)
 				return
 			}
 			interest, err := cfg.registry.Get(sessionID)
@@ -205,7 +356,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 						cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 						cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 						cfg.messagesNAKed.Inc()
-						_ = msg.NakWithDelay(30 * time.Second)
+						message.finalize(true)
 						return
 					}
 				}
@@ -214,9 +365,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 			}
 			if result.ShouldNAK {
 				cfg.messagesNAKed.Inc()
-				_ = msg.NakWithDelay(30 * time.Second)
+				message.finalize(true)
 			} else {
-				_ = msg.Ack()
+				message.finalize(false)
 			}
 			return
 		}
@@ -226,12 +377,12 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 				if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
 					cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 					cfg.messagesNAKed.Inc()
-					_ = msg.NakWithDelay(30 * time.Second)
+					message.finalize(true)
 					return
 				}
 			}
 			cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))
-			_ = msg.Ack()
+			message.finalize(false)
 			return
 		}
 		var failed bool
@@ -288,9 +439,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 		}
 		if failed {
 			cfg.messagesNAKed.Inc()
-			_ = msg.NakWithDelay(30 * time.Second)
+			message.finalize(true)
 		} else {
-			_ = msg.Ack()
+			message.finalize(false)
 		}
 	}
 }
@@ -396,6 +547,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			SourceSession  string `json:"source_session"`
 			Topic          string `json:"topic"`
 			Message        string `json:"message"`
+			Payload        string `json:"payload"`
 			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -426,6 +578,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			DedupeKey:      dedupeKey,
 			IssuedAt:       contracts.NowMillis(),
 			PayloadSummary: body.Message,
+			Payload:        body.Payload,
 			TraceID:        id.New(),
 		}
 		if err := item.Validate(); err != nil {
@@ -563,8 +716,22 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			return
 		}
 		d := state.Load()
-		if d == nil || d.registry == nil {
+		if d == nil || d.registry == nil || d.sessions == nil {
 			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			return
+		}
+		entry, err := d.sessions.Get(body.SessionID)
+		if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			http.Error(w, "read session registration: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			entry = session.SessionEntry{}
+		}
+		entry.MachineID = machineID
+		entry.SelfSubscribed = true
+		if err := d.sessions.Put(body.SessionID, entry); err != nil {
+			http.Error(w, "register role claimant: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role)
@@ -957,12 +1124,28 @@ func main() {
 
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 	healthzConsumer = consumer
+	roleQueue := "envoy-listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
 	// Subscribe with retry — during rolling deployments, the old container may still
 	// hold the durable consumer binding. Before subscribing, check if the consumer
 	// is push-bound by a stale connection and force-delete it if so.
+	deliveryConfig := listenerDeliveryHandlerConfig{
+		client:            client,
+		registry:          registry,
+		sessions:          sessions,
+		machineID:         cfg.MachineID,
+		deliverer:         &deliver,
+		dedupeCache:       dedupeCache,
+		attemptCache:      attemptCache,
+		logger:            logger,
+		messagesReceived:  messagesReceived,
+		messagesDelivered: messagesDelivered,
+		messagesNAKed:     messagesNAKed,
+		deliveryDuration:  deliveryDuration,
+	}
+
 	var sub *nats.Subscription
 	for attempt := 1; attempt <= 10; attempt++ {
 		// If consumer exists and is push-bound by a dead connection, delete it.
@@ -978,20 +1161,7 @@ func main() {
 				)
 			}
 		}
-		sub, err = startListenerSubscription(client, consumer, listenerDeliveryHandler(listenerDeliveryHandlerConfig{
-			client:            client,
-			registry:          registry,
-			sessions:          sessions,
-			machineID:         cfg.MachineID,
-			deliverer:         &deliver,
-			dedupeCache:       dedupeCache,
-			attemptCache:      attemptCache,
-			logger:            logger,
-			messagesReceived:  messagesReceived,
-			messagesDelivered: messagesDelivered,
-			messagesNAKed:     messagesNAKed,
-			deliveryDuration:  deliveryDuration,
-		}))
+		sub, err = startListenerSubscription(client, consumer, jetStreamDeliveryHandler(deliveryConfig))
 		if err == nil {
 			break
 		}
@@ -1021,6 +1191,19 @@ func main() {
 		time.Sleep(backoff)
 	}
 	_ = sub // used by NATS internally
+
+	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), roleQueue)
+	if err != nil {
+		logger.Error("core role subscription failed", slog.String("error", err.Error()))
+		client.Conn.Close()
+		os.Exit(1)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		logger.Error("core role subscription flush failed", slog.String("error", err.Error()))
+		client.Conn.Close()
+		os.Exit(1)
+	}
+	_ = roleSub
 
 	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
 	deps.Store(&listenerDeps{

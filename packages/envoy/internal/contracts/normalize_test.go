@@ -1015,6 +1015,35 @@ func TestGithubCIObservations(t *testing.T) {
 	})
 }
 
+func TestGithubCIEnvelopeCarriesPRInDedupeIdentity(t *testing.T) {
+	item, err := GithubCIEnvelope(GithubCIEnvelopeInput{
+		Observation: CIObservation{
+			Owner:      "sjawhar",
+			Repo:       "legion",
+			Number:     "42",
+			SHA:        "deadbeef",
+			CheckName:  "unit-tests",
+			Status:     "completed",
+			Conclusion: "failure",
+		},
+		Delivery: "delivery-123",
+		EventID:  "evt-ci-123",
+		TraceID:  "trace-ci-123",
+	})
+	if err != nil {
+		t.Fatalf("build CI envelope: %v", err)
+	}
+	if item.Topic != "notifications.github.sjawhar.legion.pr.42.check" {
+		t.Fatalf("topic = %q", item.Topic)
+	}
+	if item.DedupeKey != "ghck.delivery-123.pr.42.unit-tests" {
+		t.Fatalf("dedupe key = %q", item.DedupeKey)
+	}
+	if item.PayloadSummary != "check unit-tests: completed/failure @ deadbee" {
+		t.Fatalf("payload summary = %q", item.PayloadSummary)
+	}
+}
+
 func TestGhostWisprSubject(t *testing.T) {
 	cases := []struct {
 		sessionId string

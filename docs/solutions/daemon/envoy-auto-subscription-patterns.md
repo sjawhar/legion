@@ -128,11 +128,14 @@ envoy_unsubscribe([
 envoy_unsubscribe([])
 ```
 
-### Controller CI Subscriptions [REMOVED]
+### Controller CI Subscriptions
 
-**Removed in #377.** The daemon previously subscribed the controller to `notifications.github.{owner}.{repo}.ci` on first worker dispatch per repo, tracked via `subscribedCiRepos` Set. This was removed because CI events from unrelated branches (Vercel previews, skipped jobs) flooded the controller with noise. The controller can subscribe manually via `envoy_subscribe` when it specifically needs to watch a CI run.
-
-**Topic itself removed later.** The bare `notifications.github.<owner>.<repo>.ci` topic is no longer emitted at all — Envoy now drops `check_run`/`check_suite` events that aren't attached to a PR. Per-PR CI events (`notifications.github.<o>.<r>.pr.<n>.ci`) continue to route. For visibility into workflows that aren't tied to a PR (e.g. release workflows on tag pushes), subscribe to the per-workflow topic `notifications.github.<o>.<r>.workflow.<filename>.<action>` instead. See [envoy-github-topic-taxonomy](../architecture-patterns/envoy-github-topic-taxonomy.md).
+The daemon does not auto-subscribe the controller to repository-wide CI. Subscribe explicitly to
+`notifications.github.<owner>.<repo>.pr.<number>.check` for immediate per-check observations or
+`notifications.github.<owner>.<repo>.pr.<number>.ci` for the debounced per-commit summary. There
+is no bare repository-wide CI topic; `check_suite` and `check_run` events without an associated PR
+are not routed. For workflows outside a PR, subscribe to
+`notifications.github.<owner>.<repo>.workflow.<filename>.<action>`.
 
 ### Resume Re-Subscription
 
