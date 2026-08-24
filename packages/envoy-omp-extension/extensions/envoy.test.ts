@@ -319,6 +319,8 @@ describe("envoy OMP extension", () => {
   test("keeps registry registration aligned with live subscriptions", async () => {
     process.env.ENVOY_REGISTER_SESSION = "1";
     const registrations: { readonly topics: readonly string[] }[] = [];
+    const unregistrations: (readonly string[])[] = [];
+    const registryTopics = new Set<string>();
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/v1/interests/subscribe") {
@@ -328,7 +330,22 @@ describe("envoy OMP extension", () => {
           readonly topics: readonly string[];
         };
         registrations.push(body);
-        return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: body.topics });
+        for (const topic of body.topics) registryTopics.add(topic);
+        return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: [...registryTopics] });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly topics: readonly string[] };
+        unregistrations.push(body.topics);
+        for (const topic of body.topics) registryTopics.delete(topic);
+        return response({});
+      }
+      if (url.pathname === "/v1/interests/ses_registry") {
+        return response({
+          session_id: "ses_registry",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [...registryTopics],
+        });
       }
       return response({ session_id: "ses_registry", machine_id: "test", dir: "/tmp", topics: [] });
     };
@@ -344,7 +361,10 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, context);
     const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
     const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    if (subscribeTool === undefined || unsubscribeTool === undefined) throw new Error("subscription tools were not registered");
+    const listTool = fixture.tools.find((tool) => tool.name === "envoy_list");
+    if (subscribeTool === undefined || unsubscribeTool === undefined || listTool === undefined) {
+      throw new Error("subscription tools were not registered");
+    }
 
     const topic = "notifications.github.o.r.pr.>";
     await subscribeTool.execute("", { topics: [topic] });
@@ -354,7 +374,13 @@ describe("envoy OMP extension", () => {
     expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
 
     await unsubscribeTool.execute("", { topics: [topic] });
+    expect(unregistrations).toEqual([[topic]]);
     expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry"]);
+    const result = await listTool.execute("", {});
+    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+      topics: ["notifications.agent.ses_registry"],
+    });
+    expect(result.details.interests).toEqual([{ topic: "notifications.agent.ses_registry", source: "both" }]);
   });
 
   test("merges locally live subscriptions into envoy_list before the next heartbeat", async () => {

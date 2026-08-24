@@ -359,7 +359,12 @@ export default function envoyExtension(pi: PiApi): void {
           const targets = topicsFor(parameters, [...subscriptions.keys()]);
           const removed = targets.filter((topic) => closeIntentionally(topic));
           const registrationError =
-            removed.length === 0 ? undefined : await registerSession().then(() => undefined, messageFor);
+            removed.length === 0
+              ? undefined
+              : await client
+                  .unsubscribe({ sessionID, topics: removed })
+                  .then(registerSession)
+                  .then(() => undefined, messageFor);
           return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
             removed,
             ...(registrationError === undefined ? {} : { registrationError }),
