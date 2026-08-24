@@ -125,7 +125,7 @@ async function createWorkspace(
 ): Promise<void> {
   await mkdir(path.dirname(workspaceDir), { recursive: true });
 
-  const gitDir = `${repoCloneDir}/.jj/repo/store/git`;
+  const gitDir = path.join(repoCloneDir, ".git");
   const pruneArgs = ["git", `--git-dir=${gitDir}`, "worktree", "prune"];
   const initialWorkspaceArgs = [
     "jj",
@@ -204,6 +204,7 @@ export async function provisionIssueWorkspace(
   const { owner, repo, number } = parsedIssue;
   const repoCloneDir = path.join(deps.stateDir, "repos", "github.com", owner, repo);
   const workspaceDir = path.join(deps.stateDir, "workspaces", owner, repo, `issue-${number}`);
+  const gitDir = path.join(repoCloneDir, ".git");
   const bookmark = `legion/issue-${number}`;
 
   const credential = await createProvisioningCredential(
@@ -226,8 +227,7 @@ export async function provisionIssueWorkspace(
   await runChecked(deps, ["jj", "bookmark", "set", bookmark], { cwd: workspaceDir });
   await runChecked(deps, [
     "git",
-    "-C",
-    workspaceDir,
+    `--git-dir=${gitDir}`,
     "config",
     "credential.helper",
     CREDENTIAL_HELPER,

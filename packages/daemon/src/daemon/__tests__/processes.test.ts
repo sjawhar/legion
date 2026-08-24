@@ -231,10 +231,10 @@ describe("ProcessManager", () => {
     expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
     expect(commands).toEqual([
       ["jj", "git", "fetch", "-R", repo],
-      ["git", `--git-dir=${repo}/.jj/repo/store/git`, "worktree", "prune"],
+      ["git", `--git-dir=${repo}/.git`, "worktree", "prune"],
       ["jj", "workspace", "add", workspace, "--name", "issue-42", "--revision", "main", "-R", repo],
       ["jj", "bookmark", "set", "legion/issue-42"],
-      ["git", "-C", workspace, "config", "credential.helper", "!legion credential"],
+      ["git", `--git-dir=${repo}/.git`, "config", "credential.helper", "!legion credential"],
       ["tmux", "has-session", "-t", "legion-omp"],
       ["tmux", "new-session", "-d", "-s", "legion-omp"],
       [

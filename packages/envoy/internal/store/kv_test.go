@@ -284,11 +284,23 @@ func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 		ctr.Terminate(ctx)
 		t.Fatalf("failed to get NATS URI: %v", err)
 	}
-	conn, err := natsgo.Connect(uri)
+
+	const connectTimeout = 30 * time.Second
+	const retryInterval = 100 * time.Millisecond
+	deadline := time.Now().Add(connectTimeout)
+	var conn *natsgo.Conn
+	for time.Now().Before(deadline) {
+		conn, err = natsgo.Connect(uri, natsgo.Timeout(time.Second), natsgo.NoReconnect())
+		if err == nil {
+			break
+		}
+		time.Sleep(retryInterval)
+	}
 	if err != nil {
 		ctr.Terminate(ctx)
-		t.Fatalf("failed to connect: %v", err)
+		t.Fatalf("failed to connect within %s: %v", connectTimeout, err)
 	}
+
 	cleanup := func() {
 		conn.Close()
 		ctr.Terminate(ctx)

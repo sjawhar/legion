@@ -70,6 +70,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Pre-pull daemon E2E NATS image
+        run: docker pull nats:2.10
+
       - name: Test daemon
         run: bun test
         working-directory: packages/daemon

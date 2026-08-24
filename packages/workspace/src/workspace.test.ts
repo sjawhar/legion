@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { formatIssueKey } from "@legion/contracts";
-import { provisionIssueWorkspace } from "./workspace";
+import { provisionIssueWorkspace, type RunResult } from "./workspace";
 
 type RunCall = {
   readonly cmd: string[];
@@ -48,6 +48,18 @@ async function temporaryDirectory(): Promise<string> {
   return directory;
 }
 
+const STOCK_JJ = ["mise", "x", "github:jj-vcs/jj@0.44.0", "--", "jj"];
+
+async function runCommand(command: string[]): Promise<RunResult> {
+  const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
 describe("provisionIssueWorkspace", () => {
   test("clones a missing repository before fetching and provisioning its issue workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
@@ -83,7 +95,7 @@ describe("provisionIssueWorkspace", () => {
     expect(calls.map((call) => call.cmd)).toEqual([
       ["jj", "git", "clone", "https://github.com/acme/widgets", repoCloneDir],
       ["jj", "git", "fetch", "-R", repoCloneDir],
-      ["git", `--git-dir=${repoCloneDir}/.jj/repo/store/git`, "worktree", "prune"],
+      ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       [
         "jj",
         "workspace",
@@ -97,7 +109,13 @@ describe("provisionIssueWorkspace", () => {
         repoCloneDir,
       ],
       ["jj", "bookmark", "set", bookmark],
-      ["git", "-C", workspaceDir, "config", "credential.helper", "!legion credential"],
+      [
+        "git",
+        `--git-dir=${repoCloneDir}/.git`,
+        "config",
+        "credential.helper",
+        "!legion credential",
+      ],
     ]);
     expect(
       calls.flatMap(({ cmd }) => cmd).some((argument) => argument.startsWith("user."))
@@ -128,6 +146,44 @@ describe("provisionIssueWorkspace", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     });
+  });
+  test("configures the backing Git repository for a stock JJ workspace", async () => {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const issue = formatIssueKey("acme", "widgets", 42);
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const gitDir = path.join(repoCloneDir, ".git");
+    await mkdir(path.dirname(repoCloneDir), { recursive: true });
+    expect(
+      (await runCommand([...STOCK_JJ, "git", "init", "--colocate", repoCloneDir])).exitCode
+    ).toBe(0);
+    expect(
+      (await runCommand([...STOCK_JJ, "bookmark", "set", "main", "-R", repoCloneDir])).exitCode
+    ).toBe(0);
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+    await provisionIssueWorkspace(issue, {
+      extensionPackage,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      run: async (cmd) => {
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return runCommand(cmd[0] === "jj" ? [...STOCK_JJ, ...cmd.slice(1)] : cmd);
+      },
+    });
+
+    expect(existsSync(path.join(workspaceDir, ".git"))).toBeFalse();
+    const credential = await runCommand([
+      "git",
+      `--git-dir=${gitDir}`,
+      "config",
+      "--get",
+      "credential.helper",
+    ]);
+    expect(credential.exitCode).toBe(0);
+    expect(credential.stdout.trim()).toBe("!legion credential");
   });
 
   test("does not add a second workspace when an issue is reactivated", async () => {
@@ -166,7 +222,13 @@ describe("provisionIssueWorkspace", () => {
     expect(calls.map((call) => call.cmd)).toEqual([
       ["jj", "git", "fetch", "-R", repoCloneDir],
       ["jj", "bookmark", "set", "legion/issue-42"],
-      ["git", "-C", workspaceDir, "config", "credential.helper", "!legion credential"],
+      [
+        "git",
+        `--git-dir=${repoCloneDir}/.git`,
+        "config",
+        "credential.helper",
+        "!legion credential",
+      ],
     ]);
   });
 
@@ -175,7 +237,7 @@ describe("provisionIssueWorkspace", () => {
     const issue = formatIssueKey("acme", "widgets", 42);
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
     const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
-    const gitDir = path.join(repoCloneDir, ".jj", "repo", "store", "git");
+    const gitDir = path.join(repoCloneDir, ".git");
     const calls: RunCall[] = [];
     let workspaceAddAttempts = 0;
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
@@ -243,7 +305,7 @@ describe("provisionIssueWorkspace", () => {
         repoCloneDir,
       ],
       ["jj", "bookmark", "set", "legion/issue-42"],
-      ["git", "-C", workspaceDir, "config", "credential.helper", "!legion credential"],
+      ["git", `--git-dir=${gitDir}`, "config", "credential.helper", "!legion credential"],
     ]);
   });
 

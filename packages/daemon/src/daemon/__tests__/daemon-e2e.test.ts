@@ -16,6 +16,11 @@ import type { DaemonEnvironment } from "../environment";
 import { type DaemonHandle, startDaemon } from "../index";
 
 const NATS_IMAGE = "nats:2.10";
+const NATS_READY_TIMEOUT_MS = 30_000;
+const NATS_READY_POLL_MS = 100;
+const NATS_CONNECT_TIMEOUT_MS = 1_000;
+const E2E_TEST_TIMEOUT_MS = NATS_READY_TIMEOUT_MS + 5_000;
+
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
 
 const DAEMON_ENVIRONMENT: DaemonEnvironment = {
@@ -102,6 +107,30 @@ async function startNats(port: number): Promise<NatsContainer> {
     throw new Error(`Unable to start NATS container ${name}: ${result.stderr || result.stdout}`);
   }
   return { name, url: `nats://127.0.0.1:${port}` };
+}
+async function connectNatsWhenReady(url: string, name: string): Promise<NatsConnection> {
+  const deadline = Date.now() + NATS_READY_TIMEOUT_MS;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      return await connect({
+        servers: [url],
+        name,
+        reconnect: false,
+        timeout: NATS_CONNECT_TIMEOUT_MS,
+      });
+    } catch (error) {
+      lastError = error;
+      // Docker readiness follows the platform clock; delay to avoid busy-polling real connections.
+      await Bun.sleep(NATS_READY_POLL_MS);
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `NATS at ${url} did not accept a connection within ${NATS_READY_TIMEOUT_MS}ms: ${reason}`
+  );
 }
 
 async function stopNats(name: string): Promise<void> {
@@ -275,14 +304,7 @@ describe("daemon end-to-end", () => {
 
       try {
         nats = await startNats(natsPort);
-        // Docker's NATS startup is an external process event; wait for its protocol handshake, not a fixed sleep.
-        broker = await connect({
-          servers: [nats.url],
-          name: `legion-daemon-e2e-observer-${project}`,
-          waitOnFirstConnect: true,
-          maxReconnectAttempts: -1,
-          reconnectTimeWait: 20,
-        });
+        broker = await connectNatsWhenReady(nats.url, `legion-daemon-e2e-observer-${project}`);
         const codec = StringCodec();
         const role = broker.subscribe("notifications.role.>");
         const control = broker.subscribe("legion.ctl.>");
@@ -539,6 +561,7 @@ describe("daemon end-to-end", () => {
         await removePromptFixtures();
         await rm(stateDir, { recursive: true, force: true });
       }
-    }
+    },
+    E2E_TEST_TIMEOUT_MS
   );
 });
