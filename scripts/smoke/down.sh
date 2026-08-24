@@ -51,6 +51,37 @@ terminate_pid_file() {
   kill -KILL "$pid" 2>/dev/null || true
   printf 'STOPPED %s (pid %s)\n' "$name" "$pid"
 }
+terminate_process_group_file() {
+  local name="$1"
+  local pid_file="${smoke_dir}/${name}.pid"
+  local start_file="${smoke_dir}/${name}.start"
+  local pgid
+  local expected_start
+  local actual_start
+  local attempt
+
+  [[ -r "$pid_file" && -r "$start_file" ]] || {
+    rm -f "$pid_file" "$start_file"
+    return 0
+  }
+  pgid="$(<"$pid_file")"
+  expected_start="$(<"$start_file")"
+  actual_start="$(process_start_time "$pgid" 2>/dev/null || true)"
+  if [[ -z "$actual_start" || "$actual_start" != "$expected_start" ]]; then
+    rm -f "$pid_file" "$start_file"
+    return 0
+  fi
+  rm -f "$pid_file" "$start_file"
+
+  kill -- "-${pgid}"
+  for ((attempt = 1; attempt <= 10; attempt += 1)); do
+    kill -0 -- "-${pgid}" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -KILL -- "-${pgid}" 2>/dev/null || true
+  printf 'STOPPED %s (pgid %s)\n' "$name" "$pgid"
+}
+
 
 close_protection_probe() {
   local pr_file="${smoke_dir}/protection-probe-pr"
@@ -70,12 +101,15 @@ remove_webhook_forwarder() {
   local name="$1"
   local hook_file="${smoke_dir}/${name}.hook"
   local hook_endpoint
+  local delete_response
+
 
   [[ -n "${SMOKE_REPO:-}" && -r "$hook_file" ]] || return 0
   hook_endpoint="$(<"$hook_file")"
   rm -f "$hook_file"
   [[ "$hook_endpoint" =~ ^(repos|orgs)/[^/]+(/[^/]+)?/hooks/[0-9]+$ ]] || return 0
-  gh api -X DELETE "$hook_endpoint" >/dev/null 2>&1 ||
+  delete_response="$(gh api -X DELETE "$hook_endpoint" 2>&1)" ||
+    [[ "$delete_response" == *'"status":"404"'* ]] ||
     warn "could not remove managed ${name} hook"
 }
 
@@ -91,8 +125,8 @@ stop_tmux_session() {
 }
 
 main() {
-  terminate_pid_file webhook-forward
-  terminate_pid_file board-webhook-forward
+  terminate_process_group_file webhook-forward
+  terminate_process_group_file board-webhook-forward
   remove_webhook_forwarder webhook-forward
   remove_webhook_forwarder board-webhook-forward
   terminate_pid_file daemon

@@ -42,6 +42,12 @@ process_start_time() {
   [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
   awk '{print $22}' "/proc/${pid}/stat"
 }
+process_group_id() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
+  awk '{print $5}' "/proc/${pid}/stat"
+}
+
 
 pid_is_live() {
   local pid_file="$1"
@@ -95,6 +101,33 @@ start_process() {
   printf '%s\n' "$start_time" >"$start_file"
   printf 'STARTED %s (pid %s)\n' "$name" "$pid"
 }
+start_process_group() {
+  local name="$1"
+  local pid_file="${smoke_dir}/${name}.pid"
+  local start_file="${smoke_dir}/${name}.start"
+  local log_file="${smoke_dir}/${name}.log"
+  local pid
+  local pgid
+  local start_time
+  shift
+
+  if pid_is_live "$pid_file"; then
+    printf 'REUSED %s (pgid %s)\n' "$name" "$(<"$pid_file")"
+    return
+  fi
+  : >"$log_file"
+
+  rm -f "$pid_file" "$start_file"
+  setsid "$@" >>"$log_file" 2>&1 &
+  pid="$!"
+  start_time="$(process_start_time "$pid")" || fail "${name} exited before its ownership record was written"
+  pgid="$(process_group_id "$pid")" || fail "${name} exited before its process group was recorded"
+  [[ "$pgid" == "$pid" ]] || fail "${name} did not start in its own process group"
+  printf '%s\n' "$pgid" >"$pid_file"
+  printf '%s\n' "$start_time" >"$start_file"
+  printf 'STARTED %s (pgid %s)\n' "$name" "$pgid"
+}
+
 
 wait_for_http() {
   local name="$1"
@@ -397,6 +430,7 @@ main() {
   require_command tr
   require_command ss
   require_command awk
+  require_command setsid
   local board_scope
   local owner_type
   local dispatch_bearer
@@ -457,10 +491,10 @@ main() {
   wait_for_http 'dispatch' "http://127.0.0.1:${dispatch_port}/healthz" "${smoke_dir}/dispatch.pid"
   if pid_is_live "${smoke_dir}/webhook-forward.pid" &&
     [[ -r "${smoke_dir}/webhook-forward.log" && "$(<"${smoke_dir}/webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
-    printf 'REUSED webhook forwarder (pid %s)\n' "$(<"${smoke_dir}/webhook-forward.pid")"
+    printf 'REUSED webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/webhook-forward.pid")"
   else
     remove_recorded_forwarder_hook webhook-forward
-    start_process webhook-forward gh webhook forward --repo "$SMOKE_REPO" \
+    start_process_group webhook-forward gh webhook forward --repo "$SMOKE_REPO" \
       --events "$webhook_events" \
       --url "http://127.0.0.1:${listener_port}/webhook/github"
   fi
@@ -469,10 +503,10 @@ main() {
   if [[ "$board_scope" == "org" ]]; then
     if pid_is_live "${smoke_dir}/board-webhook-forward.pid" &&
       [[ -r "${smoke_dir}/board-webhook-forward.log" && "$(<"${smoke_dir}/board-webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
-      printf 'REUSED board webhook forwarder (pid %s)\n' "$(<"${smoke_dir}/board-webhook-forward.pid")"
+      printf 'REUSED board webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/board-webhook-forward.pid")"
     else
       remove_recorded_forwarder_hook board-webhook-forward
-      start_process board-webhook-forward gh webhook forward --org "$(project_owner)" \
+      start_process_group board-webhook-forward gh webhook forward --org "$(project_owner)" \
         --events projects_v2_item \
         --url "http://127.0.0.1:${listener_port}/webhook/github"
     fi
