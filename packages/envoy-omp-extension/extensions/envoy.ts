@@ -17,16 +17,6 @@ type ToolResult = {
   readonly isError?: boolean;
 };
 
-type RoleWatch = {
-  readonly waitForSelf: () => Promise<void>;
-  readonly stop: () => void;
-};
-
-type RoleWatchWaiter = {
-  readonly promise: Promise<void>;
-  readonly resolve: () => void;
-  readonly reject: (reason?: unknown) => void;
-};
 
 type SessionContext = {
   readonly cwd: string;
@@ -72,7 +62,6 @@ type PiApi = {
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
-const ROLE_KV_BUCKET = "envoy_roles";
 const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
 
 export default function envoyExtension(pi: PiApi): void {
@@ -85,8 +74,7 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionDirectory = "";
   let sessionID = "";
   let heartbeatRegistered = false;
-  let roleSubscriptionTopic: string | undefined;
-  const roleWatches = new Map<string, RoleWatch>();
+  let claimedRoleTopic: string | undefined;
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -105,12 +93,9 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const deliver = async (subject: string, raw: string): Promise<void> => {
-    // A role subscription is live only while its direct roleKV watch names
-    // this session as holder. The guard also drops messages the NATS iterator
-    // had queued before a takeover closed the subscription.
-    if (subject.startsWith(ROLE_TOPIC_PREFIX) && roleSubscriptionTopic !== subject) return;
     let summary = raw;
     let source = "";
+    let displayTopic = subject;
     try {
       const display = toEnvelopeDisplay(JSON.parse(raw));
       if (dedupeKeys.has(display.dedupeKey)) return;
@@ -121,6 +106,7 @@ export default function envoyExtension(pi: PiApi): void {
       }
       summary = display.summary;
       source = display.sourceSessionID === undefined ? "" : ` from ${display.sourceSessionID}`;
+      displayTopic = display.topic;
     } catch {
       summary = raw;
     }
@@ -128,7 +114,7 @@ export default function envoyExtension(pi: PiApi): void {
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
     pi.sendMessage(
-      { customType: "envoy-message", content: `[ENVOY message on topic "${subject}"${source}]\n${summary}`, display: true },
+      { customType: "envoy-message", content: `[ENVOY message on topic "${displayTopic}"${source}]\n${summary}`, display: true },
       { deliverAs: "steer", triggerTurn: true },
     );
   };
@@ -167,92 +153,6 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
-  const stopRoleWatch = (topic: string): void => {
-    const watch = roleWatches.get(topic);
-    if (watch === undefined) return;
-    roleWatches.delete(topic);
-    watch.stop();
-  };
-
-  const closeRoleSubscription = (topic: string): void => {
-    if (roleSubscriptionTopic !== topic) return;
-    roleSubscriptionTopic = undefined;
-    closeIntentionally(topic);
-    stopRoleWatch(topic);
-  };
-
-  const watchRole = async (topic: string): Promise<RoleWatch> => {
-    const existing = roleWatches.get(topic);
-    if (existing !== undefined) return existing;
-
-    const role = topic.slice(ROLE_TOPIC_PREFIX.length);
-    const initialized = Promise.withResolvers<void>();
-    const roleKV = await (await ensureConnection()).jetstream().views.kv(ROLE_KV_BUCKET);
-    const updates = await roleKV.watch({
-      key: role,
-      initializedFn: initialized.resolve,
-    });
-    let holder: string | undefined;
-    let stopped = false;
-    let waiter: RoleWatchWaiter | undefined;
-    const stoppedError = () => new Error(`role ownership watch stopped for ${topic}`);
-    const roleWatch: RoleWatch = {
-      waitForSelf: async () => {
-        if (holder !== sessionID) {
-          if (stopped) throw stoppedError();
-          waiter ??= Promise.withResolvers<void>();
-          await waiter.promise;
-        }
-        if (holder !== sessionID) throw new Error(`role ${role} is no longer held by this session`);
-      },
-      stop: () => {
-        if (stopped) return;
-        stopped = true;
-        updates.stop();
-        initialized.reject(stoppedError());
-        waiter?.reject(stoppedError());
-      },
-    };
-    roleWatches.set(topic, roleWatch);
-
-    const abandon = (error: Error): void => {
-      if (!stopped) {
-        stopped = true;
-        updates.stop();
-      }
-      if (roleWatches.get(topic) === roleWatch) roleWatches.delete(topic);
-      initialized.reject(error);
-      waiter?.reject(error);
-      if (roleSubscriptionTopic === topic) {
-        roleSubscriptionTopic = undefined;
-        closeIntentionally(topic);
-      }
-    };
-
-    void (async () => {
-      try {
-        for await (const entry of updates) {
-          holder = entry.operation === "PUT" ? entry.string() : undefined;
-          if (holder === sessionID) {
-            waiter?.resolve();
-            continue;
-          }
-          if (roleSubscriptionTopic === topic) {
-            closeRoleSubscription(topic);
-            continue;
-          }
-          if (waiter !== undefined) stopRoleWatch(topic);
-        }
-      } catch (error) {
-        abandon(error instanceof Error ? error : new Error(`role ownership watch failed for ${topic}`));
-        return;
-      }
-      if (!stopped && roleWatches.get(topic) === roleWatch) abandon(stoppedError());
-    })();
-
-    await initialized.promise;
-    return roleWatch;
-  };
 
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
     try {
@@ -427,9 +327,6 @@ export default function envoyExtension(pi: PiApi): void {
     } catch {
       // A failed drain on shutdown is not actionable.
     } finally {
-      for (const watch of roleWatches.values()) watch.stop();
-      roleWatches.clear();
-      roleSubscriptionTopic = undefined;
       connection = undefined;
       subscriptions.clear();
       intentionallyClosed.clear();
@@ -465,13 +362,12 @@ export default function envoyExtension(pi: PiApi): void {
           });
         }
         case EnvoyToolOperation.unsubscribe: {
-          const targets = topicsFor(parameters, [...subscriptions.keys()]);
-          const removed = targets.filter((topic) => closeIntentionally(topic));
-          if (roleSubscriptionTopic !== undefined && removed.includes(roleSubscriptionTopic)) {
-            const releasedRoleTopic = roleSubscriptionTopic;
-            roleSubscriptionTopic = undefined;
-            stopRoleWatch(releasedRoleTopic);
-          }
+          const targets = topicsFor(parameters, [
+            ...subscriptions.keys(),
+            ...(claimedRoleTopic === undefined ? [] : [claimedRoleTopic]),
+          ]);
+          const removed = targets.filter((topic) => closeIntentionally(topic) || topic === claimedRoleTopic);
+          if (claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic)) claimedRoleTopic = undefined;
           const registrationError =
             removed.length === 0
               ? undefined
@@ -508,20 +404,10 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
           const topic = ROLE_TOPIC_PREFIX + role;
-          const previousTopic = roleSubscriptionTopic;
-          const roleWatch = await watchRole(topic);
-          try {
-            await client.setRole({ sessionID, role });
-            await roleWatch.waitForSelf();
-          } catch (error) {
-            if (roleSubscriptionTopic !== topic) stopRoleWatch(topic);
-            throw error;
-          }
-          await subscribe(topic);
-          roleSubscriptionTopic = topic;
+          const previousTopic = claimedRoleTopic;
+          await client.setRole({ sessionID, role });
+          claimedRoleTopic = topic;
           if (previousTopic !== undefined && previousTopic !== topic) {
-            closeIntentionally(previousTopic);
-            stopRoleWatch(previousTopic);
             await client.unsubscribe({ sessionID, topics: [previousTopic] });
           }
           return success(`Now holding role: ${role}`, { role });

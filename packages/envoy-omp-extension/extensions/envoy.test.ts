@@ -50,11 +50,6 @@ type Subscription = {
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{ readonly subject: string; readonly data: Uint8Array }>;
 };
 
-type RoleWatchControls = {
-  readonly setHolder: (holder: string | undefined) => void;
-  readonly stop: () => void;
-  readonly active: () => boolean;
-};
 
 type SubscriptionControls = {
   readonly push: (data: string) => void;
@@ -67,18 +62,11 @@ const natsState = {
   subscriptions: new Map<string, Subscription>(),
   controls: new Map<string, SubscriptionControls>(),
   controlsByTopic: new Map<string, SubscriptionControls[]>(),
-  roleHolders: new Map<string, string>(),
-  roleWatchers: new Map<string, RoleWatchControls[]>(),
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
 };
 
-function setRoleHolder(role: string, holder: string | undefined): void {
-  if (holder === undefined) natsState.roleHolders.delete(role);
-  else natsState.roleHolders.set(role, holder);
-  for (const watcher of natsState.roleWatchers.get(role) ?? []) watcher.setHolder(holder);
-}
 
 const clipboardState = {
   copiedSessionIDs: [] as string[],
@@ -97,78 +85,6 @@ mock.module("nats", () => ({
       drain: async () => {
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
       },
-      jetstream: () => ({
-        views: {
-          kv: async (bucket: string) => {
-            if (bucket !== "envoy_roles") throw new Error(`unexpected KV bucket ${bucket}`);
-            return {
-              watch: async ({
-                key,
-                initializedFn,
-              }: {
-                readonly key?: string | readonly string[];
-                readonly initializedFn?: () => void;
-              }) => {
-                if (typeof key !== "string") throw new Error("role watch must specify one key");
-                let active = true;
-                const queue: (
-                  | {
-                      readonly key: string;
-                      readonly operation: "PUT" | "DEL";
-                      readonly string: () => string;
-                    }
-                  | (() => void)
-                )[] = [];
-                let wake: (() => void) | undefined;
-                const notify = () => {
-                  wake?.();
-                  wake = undefined;
-                };
-                const controls: RoleWatchControls = {
-                  setHolder: (holder) => {
-                    if (!active) return;
-                    queue.push({
-                      key,
-                      operation: holder === undefined ? "DEL" : "PUT",
-                      string: () => holder ?? "",
-                    });
-                    notify();
-                  },
-                  stop: () => {
-                    active = false;
-                    notify();
-                  },
-                  active: () => active,
-                };
-                const watchers = natsState.roleWatchers.get(key);
-                if (watchers === undefined) natsState.roleWatchers.set(key, [controls]);
-                else watchers.push(controls);
-                controls.setHolder(natsState.roleHolders.get(key));
-                queue.push(() => initializedFn?.());
-                return {
-                  stop: controls.stop,
-                  [Symbol.asyncIterator]: () => ({
-                    next: async () => {
-                      for (;;) {
-                        if (!active) return { done: true, value: undefined };
-                        const item = queue.shift();
-                        if (typeof item === "function") {
-                          item();
-                          continue;
-                        }
-                        if (item !== undefined) return { done: false, value: item };
-                        const pending = Promise.withResolvers<void>();
-                        wake = pending.resolve;
-                        await pending.promise;
-                      }
-                    },
-                  }),
-                };
-              },
-            };
-          },
-        },
-      }),
       subscribe: (topic: string) => {
         let active = true;
         const queue: { readonly subject: string; readonly data: Uint8Array }[] = [];
@@ -252,11 +168,6 @@ afterEach(() => {
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
-  for (const watchers of natsState.roleWatchers.values()) {
-    for (const watcher of watchers) watcher.stop();
-  }
-  natsState.roleHolders.clear();
-  natsState.roleWatchers.clear();
   natsState.connectedNames.length = 0;
   natsState.subscriptions.clear();
   natsState.controls.clear();
@@ -298,6 +209,19 @@ function commandContext(notifications: string[]): CommandContext {
   return { ui: { notify: (message) => notifications.push(message) } };
 }
 
+function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string) {
+  return JSON.stringify({
+    event_id: `evt-${dedupeKey}`,
+    source: "envoy",
+    source_event_id: `source-${dedupeKey}`,
+    topic: `notifications.role.${role}`,
+    dedupe_key: dedupeKey,
+    issued_at: 1,
+    payload_summary: summary,
+    trace_id: `trace-${dedupeKey}`,
+  });
+}
+
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
@@ -333,7 +257,6 @@ describe("envoy OMP extension", () => {
       requests.push({ path: url.pathname, body });
       if (url.pathname === "/v1/roles/set") {
         const role = typeof body?.role === "string" ? body.role : "";
-        setRoleHolder(role, "ses_omp");
         return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [`notifications.role.${role}`] });
       }
       if (url.pathname === "/v1/sessions") return response([]);
@@ -386,7 +309,7 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("injects a claimed core role event without HTTP session verification and replaces a superseded role subscription", async () => {
+  test("injects a role event forwarded to the claimed agent subject with original role-topic framing", async () => {
     let currentRoleTopic = "";
     const requests: string[] = [];
     const unregistrations: (readonly string[])[] = [];
@@ -397,7 +320,6 @@ describe("envoy OMP extension", () => {
       if (url.pathname === "/v1/roles/set") {
         const role = typeof body?.role === "string" ? body.role : "";
         currentRoleTopic = `notifications.role.${role}`;
-        setRoleHolder(role, "ses_role_a");
         return response({
           session_id: "ses_role_a",
           machine_id: "test",
@@ -405,78 +327,56 @@ describe("envoy OMP extension", () => {
           topics: [currentRoleTopic],
         });
       }
-      if (url.pathname === "/v1/sessions") {
-        return response([
-          {
-            session_id: "ses_role_a",
-            machine_id: "test",
-            dir: "/tmp/envoy-omp-test",
-            port: 0,
-            title: "",
-            topics: [currentRoleTopic],
-            self_subscribed: true,
-          },
-        ]);
-      }
       if (url.pathname === "/v1/interests/unsubscribe") {
         const topics = Array.isArray(body?.topics) ? body.topics.filter((topic): topic is string => typeof topic === "string") : [];
         unregistrations.push(topics);
         return response({});
       }
-      if (url.pathname === "/v1/interests/subscribe") {
-        return response({
-          session_id: "ses_role_a",
-          machine_id: "test",
-          dir: "/tmp/envoy-omp-test",
-          topics: body?.topics ?? [],
-        });
-      }
       return response({});
     };
-    const { default: envoyExtension } = await import("./envoy.ts?role-core-subscription");
+    const { default: envoyExtension } = await import("./envoy.ts?role-agent-delivery");
     const fixture = createPi();
     const injected = Promise.withResolvers<void>();
-    const pi: TestPi = {
+    envoyExtension({
       ...fixture.pi,
       sendMessage: (message, options) => {
         fixture.pi.sendMessage(message, options);
         injected.resolve();
       },
-    };
-
-    envoyExtension(pi);
+    });
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
     const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
     if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
     await roleTool.execute("", { role: "legion-controller" });
-    const controller = natsState.controls.get("notifications.role.legion-controller");
-    if (controller === undefined) throw new Error("role topic was not subscribed");
-    controller.push("role message");
+
+    expect(natsState.controls.get(currentRoleTopic)).toBeUndefined();
+    const agent = natsState.controls.get("notifications.agent.ses_role_a");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(forwardedRoleEnvelope("legion-controller", "role message", "role-agent-delivery"));
     await injected.promise;
-    expect(fixture.messages.some((message) => message.includes("role message"))).toBe(true);
+    expect(fixture.messages).toContain(
+      '[ENVOY message on topic "notifications.role.legion-controller"]\nrole message',
+    );
     expect(requests).not.toContain("/v1/sessions");
 
     await roleTool.execute("", { role: "legion-reviewer" });
-    expect(controller.active()).toBe(false);
     expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
-    const reviewer = natsState.controls.get("notifications.role.legion-reviewer");
-    if (reviewer === undefined) throw new Error("replacement role topic was not subscribed");
-
     await unsubscribeTool.execute("", { topics: ["notifications.role.legion-reviewer"] });
-    expect(reviewer.active()).toBe(false);
+    expect(unregistrations).toEqual([
+      ["notifications.role.legion-controller"],
+      ["notifications.role.legion-reviewer"],
+    ]);
   });
 
-  test("closes A's role subscription on the ownership watch before the immediate post-takeover publish", async () => {
+  test("injects a post-takeover forwarded role event into B only", async () => {
     const role = "legion-controller";
     const roleTopic = `notifications.role.${role}`;
-    const sessionVerificationRequests: string[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
         const holder = typeof body?.session_id === "string" ? body.session_id : "";
-        setRoleHolder(role, holder);
         return response({
           session_id: holder,
           machine_id: "test",
@@ -484,25 +384,9 @@ describe("envoy OMP extension", () => {
           topics: [roleTopic],
         });
       }
-      if (url.pathname === "/v1/sessions") {
-        sessionVerificationRequests.push(url.pathname);
-        // Reproduce listener.Registry.Get's lagging KV-watch cache immediately
-        // after B takes the role: it still reports A as the holder.
-        return response([
-          {
-            session_id: "ses_role_a",
-            machine_id: "test",
-            dir: "/tmp/envoy-omp-test",
-            port: 0,
-            title: "",
-            topics: [roleTopic],
-            self_subscribed: true,
-          },
-        ]);
-      }
       return response({});
     };
-    const { default: envoyExtensionA } = await import("./envoy.ts?role-takeover-a");
+    const { default: envoyExtensionA } = await import("./envoy.ts?role-agent-takeover-a");
     const fixtureA = createPi();
     envoyExtensionA(fixtureA.pi);
     await fixtureA.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
@@ -510,7 +394,7 @@ describe("envoy OMP extension", () => {
     if (roleToolA === undefined) throw new Error("role tool was not registered for session A");
     await roleToolA.execute("", { role });
 
-    const { default: envoyExtensionB } = await import("./envoy.ts?role-takeover-b");
+    const { default: envoyExtensionB } = await import("./envoy.ts?role-agent-takeover-b");
     const fixtureB = createPi();
     const injectedB = Promise.withResolvers<void>();
     envoyExtensionB({
@@ -525,43 +409,34 @@ describe("envoy OMP extension", () => {
     if (roleToolB === undefined) throw new Error("role tool was not registered for session B");
     await roleToolB.execute("", { role });
 
-    const controls = natsState.controlsByTopic.get(roleTopic);
-    if (controls === undefined || controls.length !== 2) throw new Error("both role subscriptions were not created");
-    expect(controls[0]?.active()).toBe(false);
-
-    for (const control of controls) control.push("role takeover event");
+    expect(natsState.controls.get(roleTopic)).toBeUndefined();
+    const agentB = natsState.controls.get("notifications.agent.ses_role_b");
+    if (agentB === undefined) throw new Error("B agent subject was not subscribed");
+    agentB.push(forwardedRoleEnvelope(role, "post-takeover role event", "role-agent-takeover"));
     await injectedB.promise;
-
-    expect(fixtureA.messages.some((message) => message.includes("role takeover event"))).toBe(false);
-    expect(fixtureB.messages.some((message) => message.includes("role takeover event"))).toBe(true);
-    expect(sessionVerificationRequests).toEqual([]);
+    expect(fixtureA.messages.some((message) => message.includes("post-takeover role event"))).toBe(false);
+    expect(fixtureB.messages).toContain(
+      '[ENVOY message on topic "notifications.role.legion-controller"]\npost-takeover role event',
+    );
   });
 
-  test("keeps claimed role delivery live while the listener HTTP API is unavailable", async () => {
+  test("keeps forwarded role delivery live while the listener HTTP API is unavailable", async () => {
     const role = "legion-controller";
-    const roleTopic = `notifications.role.${role}`;
     let listenerAvailable = true;
-    const sessionVerificationRequested = Promise.withResolvers<void>();
-    globalThis.fetch = async (input, init) => {
+    globalThis.fetch = async (input) => {
       const url = new URL(input.toString());
-      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
-        setRoleHolder(role, typeof body?.session_id === "string" ? body.session_id : "");
         return response({
           session_id: "ses_role_a",
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
-          topics: [roleTopic],
+          topics: [`notifications.role.${role}`],
         });
       }
-      if (url.pathname === "/v1/sessions") {
-        sessionVerificationRequested.resolve();
-        if (!listenerAvailable) throw new Error("listener API unavailable");
-        return response([]);
-      }
+      if (!listenerAvailable) throw new Error("listener API unavailable");
       return response({});
     };
-    const { default: envoyExtension } = await import("./envoy.ts?role-listener-down");
+    const { default: envoyExtension } = await import("./envoy.ts?role-agent-listener-down");
     const fixture = createPi();
     const injected = Promise.withResolvers<void>();
     envoyExtension({
@@ -576,16 +451,12 @@ describe("envoy OMP extension", () => {
     if (roleTool === undefined) throw new Error("role tool was not registered");
     await roleTool.execute("", { role });
 
-    const controller = natsState.controls.get(roleTopic);
-    if (controller === undefined) throw new Error("role topic was not subscribed");
+    const agent = natsState.controls.get("notifications.agent.ses_role_a");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
     listenerAvailable = false;
-    controller.push("role event while listener is down");
-
-    const outcome = await Promise.race([
-      injected.promise.then(() => "injected"),
-      sessionVerificationRequested.promise.then(() => "session verification"),
-    ]);
-    expect(outcome).toBe("injected");
+    agent.push(forwardedRoleEnvelope(role, "role event while listener is down", "role-agent-listener-down"));
+    await injected.promise;
+    expect(fixture.messages.some((message) => message.includes("role event while listener is down"))).toBe(true);
   });
 
   test("registers an optional self-subscribed interest on session start", async () => {

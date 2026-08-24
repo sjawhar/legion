@@ -273,6 +273,19 @@ func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) 
 	return item, nil
 }
 
+// RoleHolder returns the authoritative session ID for role. An unclaimed role
+// returns an empty holder without an error.
+func (r *Registry) RoleHolder(role string) (string, error) {
+	entry, err := r.roleKV.Get(role)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(entry.Value()), nil
+}
+
 // Get returns the Interest for a session. Cache first, direct KV read on miss.
 // The KV fallback also repopulates the cache, bridging the warm-up window after
 // Open() before watch() has fully populated the cache.

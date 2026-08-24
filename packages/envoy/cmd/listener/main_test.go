@@ -446,21 +446,36 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 }
 
 func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) {
-	delivered := make(chan struct{}, 1)
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		delivered <- struct{}{}
-		return listenerDeliveryResponse(http.StatusNoContent), nil
-	}))
-	roleTopic := contracts.RoleTopicPrefix + "legion-delivery"
-	harness.registerTarget(t, "ses_role_delivery", roleTopic)
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "legion-delivery"
+	roleTopic := contracts.RoleTopicPrefix + role
+	if _, err := harness.registry.SetRole("ses_role_a", "test-machine", role); err != nil {
+		t.Fatalf("claim role for A: %v", err)
+	}
+	// Set B as the KV value that the core handler must resolve. This models a
+	// publish that races the handover: the single listener chooses one current
+	// owner, rather than relying on two holders to observe the change first.
+	if _, err := harness.registry.SetRole("ses_role_b", "test-machine", role); err != nil {
+		t.Fatalf("transfer role to B: %v", err)
+	}
 
-	coreSubscription, err := harness.client.Conn.Subscribe("notifications.role.>", harness.coreHandler)
+	probeA, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_a"))
+	if err != nil {
+		t.Fatalf("subscribe A agent subject: %v", err)
+	}
+	t.Cleanup(func() { _ = probeA.Unsubscribe() })
+	probeB, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_b"))
+	if err != nil {
+		t.Fatalf("subscribe B agent subject: %v", err)
+	}
+	t.Cleanup(func() { _ = probeB.Unsubscribe() })
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
 	if err != nil {
 		t.Fatalf("subscribe to core role lane: %v", err)
 	}
 	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
 	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush core role subscription: %v", err)
+		t.Fatalf("flush role subscriptions: %v", err)
 	}
 	if harness.client.SubOK() {
 		t.Fatal("role lane should not create a JetStream consumer")
@@ -484,11 +499,32 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		return item
 	}
 
-	publishRole(roleTopic)
-	select {
-	case <-delivered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("core role lane was not delivered")
+	item := publishRole(roleTopic)
+	forwardedMessage, err := probeB.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read forwarded role event for B: %v", err)
+	}
+	if forwardedMessage.Subject != contracts.AgentSubject("ses_role_b") {
+		t.Fatalf("forwarded subject = %q, want B agent subject", forwardedMessage.Subject)
+	}
+	var forwarded contracts.Envelope
+	if err := json.Unmarshal(forwardedMessage.Data, &forwarded); err != nil {
+		t.Fatalf("decode forwarded role envelope: %v", err)
+	}
+	if forwarded.Topic != roleTopic {
+		t.Fatalf("forwarded envelope topic = %q, want original role topic %q", forwarded.Topic, roleTopic)
+	}
+	if forwarded.EventID != item.EventID {
+		t.Fatalf("forwarded event id = %q, want %q", forwarded.EventID, item.EventID)
+	}
+	if forwarded.Source != "envoy" {
+		t.Fatalf("forwarded source = %q, want envoy router marker", forwarded.Source)
+	}
+	if _, err := probeA.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("A received a post-takeover role event: %v", err)
+	}
+	if _, err := probeB.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("B received duplicate forwarded role event: %v", err)
 	}
 
 	unclaimedTopic := contracts.RoleTopicPrefix + "legion-no-holder"
@@ -498,7 +534,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
 	if err := harness.client.Conn.Flush(); err != nil {
-		t.Fatalf("flush core exception subscription: %v", err)
+		t.Fatalf("flush exception subscription: %v", err)
 	}
 	unclaimed := publishRole(unclaimedTopic)
 	assertDeliveryException(t, exceptionProbe, unclaimed, "no_holder")
@@ -507,8 +543,8 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read notification stream: %v", err)
 	}
-	if info.State.Msgs != 0 {
-		t.Fatalf("role lanes were durably captured: stream has %d messages", info.State.Msgs)
+	if info.State.Msgs != 1 {
+		t.Fatalf("agent-subject role forward was captured %d times, want exactly once", info.State.Msgs)
 	}
 }
 

@@ -16,6 +16,9 @@ import (
 
 const Stream = "ENVOY_NOTIFICATIONS"
 
+// coreRoleQueueGroup elects one listener to arbitrate every live role event.
+const coreRoleQueueGroup = "envoy-role-delivery"
+
 var streamCfg = &nats.StreamConfig{
 	Name: Stream,
 	Subjects: []string{
@@ -301,7 +304,7 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler) (*nats.S
 	c.mu.Unlock()
 	c.coreSubMu.Lock()
 	defer c.coreSubMu.Unlock()
-	sub, err := conn.Subscribe(subject, handler)
+	sub, err := conn.QueueSubscribe(subject, coreRoleQueueGroup, handler)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +451,7 @@ func (c *Client) restoreCoreSubscription() error {
 		c.coreSubActive = nil
 	}
 	slog.Info("envoy nats recovery core resubscribing", slog.String("subject", c.coreSubSubject))
-	sub, err := conn.Subscribe(c.coreSubSubject, c.coreSubHandler)
+	sub, err := conn.QueueSubscribe(c.coreSubSubject, coreRoleQueueGroup, c.coreSubHandler)
 	if err != nil {
 		return err
 	}
@@ -505,8 +508,16 @@ func (c *Client) Publish(item contracts.Envelope) error {
 	return err
 }
 
-// PublishCore publishes directly to NATS without waiting for a JetStream acknowledgment.
+// PublishCore publishes directly to the envelope's NATS subject without
+// waiting for a JetStream acknowledgment.
 func (c *Client) PublishCore(item contracts.Envelope) error {
+	return c.PublishCoreTo(item.Topic, item)
+}
+
+// PublishCoreTo publishes item directly to subject. The subject can differ
+// from item.Topic when an authoritative router forwards an envelope while
+// retaining its original topic for the recipient.
+func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	data, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -516,5 +527,5 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return c.Conn.Publish(item.Topic, data)
+	return c.Conn.Publish(subject, data)
 }
