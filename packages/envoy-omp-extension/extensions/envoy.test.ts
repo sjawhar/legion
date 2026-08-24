@@ -285,6 +285,62 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("envoy_role_set injects core role messages and replaces a superseded role subscription", async () => {
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        const role = typeof body?.role === "string" ? body.role : "";
+        return response({
+          session_id: "ses_role",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        return response({
+          session_id: "ses_role",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: body?.topics ?? [],
+        });
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-core-subscription");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    const pi: TestPi = {
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    };
+
+    envoyExtension(pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
+
+    await roleTool.execute("", { role: "legion-controller" });
+    const controller = natsState.controls.get("notifications.role.legion-controller");
+    if (controller === undefined) throw new Error("role topic was not subscribed");
+    controller.push("role message");
+    await injected.promise;
+    expect(fixture.messages.some((message) => message.includes("role message"))).toBe(true);
+
+    await roleTool.execute("", { role: "legion-reviewer" });
+    expect(controller.active()).toBe(false);
+    const reviewer = natsState.controls.get("notifications.role.legion-reviewer");
+    if (reviewer === undefined) throw new Error("replacement role topic was not subscribed");
+
+    await unsubscribeTool.execute("", { topics: ["notifications.role.legion-reviewer"] });
+    expect(reviewer.active()).toBe(false);
+  });
+
   test("registers an optional self-subscribed interest on session start", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {
@@ -620,6 +676,57 @@ describe("envoy OMP extension", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(fixture.messages.some((m) => m.includes("published after the tool said it was unsubscribed"))).toBe(false);
+  });
+
+  test("envoy_unsubscribe deregisters a topic while its pump waits to retry", async () => {
+    const unregistrations: (readonly string[])[] = [];
+    const retryScheduled = Promise.withResolvers<void>();
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((_: () => void) => {
+      retryScheduled.resolve();
+      return undefined as never;
+    }) as typeof setTimeout;
+    try {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+        if (url.pathname === "/v1/interests/unsubscribe") {
+          const topics = Array.isArray(body?.topics) ? body.topics.filter((topic): topic is string => typeof topic === "string") : [];
+          unregistrations.push(topics);
+          return response({});
+        }
+        if (url.pathname === "/v1/interests/subscribe") {
+          return response({
+            session_id: "ses_awaiting_retry",
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            topics: body?.topics ?? [],
+          });
+        }
+        return response({});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?unsubscribe-awaiting-retry");
+      const fixture = createPi();
+
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_awaiting_retry"));
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+      if (subscribeTool === undefined || unsubscribeTool === undefined) throw new Error("subscription tools were not registered");
+
+      const topic = "notifications.retrying";
+      await subscribeTool.execute("", { topics: [topic] });
+      const controls = natsState.controls.get(topic);
+      if (controls === undefined) throw new Error("subscription was not created");
+      controls.end();
+      await retryScheduled.promise;
+
+      const result = await unsubscribeTool.execute("", { topics: [topic] });
+      expect(result.details.removed).toEqual([topic]);
+      expect(unregistrations).toEqual([[topic]]);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
   });
 
   test("a deliberately closed topic still recovers from a genuine death once it is back", async () => {

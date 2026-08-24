@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject } from "@legion/contracts";
+import { agentSubject, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { toEnvelopeDisplay } from "@legion/envoy-client/display";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
@@ -73,6 +73,7 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionDirectory = "";
   let sessionID = "";
   let heartbeatRegistered = false;
+  let roleSubscriptionTopic: string | undefined;
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -139,8 +140,9 @@ export default function envoyExtension(pi: PiApi): void {
   const closeIntentionally = (topic: string): boolean => {
     const subscription = subscriptions.get(topic);
     if (subscription === undefined) {
-      if (awaitingRetry.has(topic)) intentionallyClosed.add(topic);
-      return false;
+      if (!awaitingRetry.has(topic)) return false;
+      intentionallyClosed.add(topic);
+      return true;
     }
     intentionallyClosed.add(topic);
     subscription.unsubscribe();
@@ -358,6 +360,9 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.unsubscribe: {
           const targets = topicsFor(parameters, [...subscriptions.keys()]);
           const removed = targets.filter((topic) => closeIntentionally(topic));
+          if (roleSubscriptionTopic !== undefined && removed.includes(roleSubscriptionTopic)) {
+            roleSubscriptionTopic = undefined;
+          }
           const registrationError =
             removed.length === 0
               ? undefined
@@ -393,7 +398,15 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
+          const topic = ROLE_TOPIC_PREFIX + role;
+          const previousTopic = roleSubscriptionTopic;
           await client.setRole({ sessionID, role });
+          await subscribe(topic);
+          roleSubscriptionTopic = topic;
+          if (previousTopic !== undefined && previousTopic !== topic) {
+            closeIntentionally(previousTopic);
+            await client.unsubscribe({ sessionID, topics: [previousTopic] });
+          }
           return success(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.whoami: {
