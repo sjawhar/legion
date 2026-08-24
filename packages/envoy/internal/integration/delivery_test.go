@@ -176,7 +176,7 @@ func newEnvelope(source, topic, summary, dedupeKey string) contracts.Envelope {
 // startConsumer subscribes to NATS and processes messages using the same logic as the listener.
 func (env *testEnv) startConsumer(machineID string) {
 	env.t.Helper()
-	_, err := env.client.JS().Subscribe("notifications.>", func(msg *natsgo.Msg) {
+	_, err := env.client.JS().Subscribe("", func(msg *natsgo.Msg) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
 			msg.Ack()
@@ -236,7 +236,14 @@ func (env *testEnv) startConsumer(machineID string) {
 		} else {
 			msg.Ack()
 		}
-	}, natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck(), natsgo.AckWait(10*time.Second))
+	},
+		natsgo.BindStream(bus.Stream),
+		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
+		natsgo.DeliverNew(),
+		natsgo.AckExplicit(),
+		natsgo.ManualAck(),
+		natsgo.AckWait(10*time.Second),
+	)
 	if err != nil {
 		env.t.Fatalf("failed to subscribe: %v", err)
 	}
@@ -609,19 +616,19 @@ func TestDelivery_DedupeWindowExpiry(t *testing.T) {
 func TestDelivery_MalformedEnvelope(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
-	env.registerSession("ses_healthy", port, []string{"notifications.agent.ses_healthy"})
+	env.registerSession("ses_healthy", port, []string{"notifications.github.acme.widgets.*"})
 	env.startConsumer("test-machine")
 
 	// Publish raw invalid JSON
-	_, err := env.client.JS().Publish("notifications.agent.ses_healthy", []byte("not json {{{"))
+	_, err := env.client.JS().Publish("notifications.github.acme.widgets.bad", []byte("not json {{{"))
 	if err != nil {
 		t.Fatalf("failed to publish invalid JSON: %v", err)
 	}
 
 	// Publish valid JSON with empty required fields
-	emptyEnv := contracts.Envelope{Topic: "notifications.agent.ses_healthy"}
+	emptyEnv := contracts.Envelope{Topic: "notifications.github.acme.widgets.bad"}
 	emptyData, _ := json.Marshal(emptyEnv)
-	_, err = env.client.JS().Publish("notifications.agent.ses_healthy", emptyData)
+	_, err = env.client.JS().Publish("notifications.github.acme.widgets.bad", emptyData)
 	if err != nil {
 		t.Fatalf("failed to publish empty envelope: %v", err)
 	}
@@ -629,7 +636,7 @@ func TestDelivery_MalformedEnvelope(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Verify consumer is still alive by delivering a valid message
-	publishEnvelope(env, newEnvelope("slack", "notifications.agent.ses_healthy", "still alive", "dedupe-alive"))
+	publishEnvelope(env, newEnvelope("github", "notifications.github.acme.widgets.valid", "still alive", "dedupe-alive"))
 	time.Sleep(2 * time.Second)
 	if count := deliveries.Load(); count != 1 {
 		t.Fatalf("expected 1 delivery (only valid message), consumer should survive malformed input, got %d", count)
@@ -669,7 +676,7 @@ func TestDelivery_MaxDeliverExhaustion(t *testing.T) {
 
 	// Custom consumer: short AckWait, MaxDeliver(3), always NAK (no dedupe)
 	attempts := &atomic.Int32{}
-	_, err := env.client.JS().Subscribe("notifications.>", func(msg *natsgo.Msg) {
+	_, err := env.client.JS().Subscribe("", func(msg *natsgo.Msg) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
 			msg.Ack()
@@ -682,7 +689,15 @@ func TestDelivery_MaxDeliverExhaustion(t *testing.T) {
 
 		attempts.Add(1)
 		msg.NakWithDelay(500 * time.Millisecond)
-	}, natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck(), natsgo.AckWait(2*time.Second), natsgo.MaxDeliver(3))
+	},
+		natsgo.BindStream(bus.Stream),
+		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
+		natsgo.DeliverNew(),
+		natsgo.AckExplicit(),
+		natsgo.ManualAck(),
+		natsgo.AckWait(2*time.Second),
+		natsgo.MaxDeliver(3),
+	)
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}

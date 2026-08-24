@@ -112,8 +112,10 @@ func (h *listenerHarness) start() {
 		return
 	}
 	sub, err := h.client.Subscribe(
-		"notifications.>",
+		"",
 		h.handle,
+		natsgo.BindStream(bus.Stream),
+		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
 		natsgo.Durable(h.consumer),
 		natsgo.AckExplicit(),
 		natsgo.ManualAck(),

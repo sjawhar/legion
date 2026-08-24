@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -140,27 +139,17 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	}
 }
 
-type contextDialer struct {
-	ctx context.Context
-}
-
-func (dialer contextDialer) Dial(network, address string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(dialer.ctx, network, address)
-}
-
 func connect(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
 	return connectWithContext(context.Background(), name, urls, reconnectCB, closedCB)
 }
 
 func connectWithContext(ctx context.Context, name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	var nc *nats.Conn
-	var err error
+	var lastErr error
 	for range 10 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		next := options(name, urls, reconnectCB, closedCB)
-		next.CustomDialer = contextDialer{ctx: ctx}
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
@@ -170,9 +159,29 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 				next.Timeout = remaining
 			}
 		}
-		nc, err = next.Connect()
-		if err == nil {
-			return nc, nil
+		type connectionResult struct {
+			conn *nats.Conn
+			err  error
+		}
+		result := make(chan connectionResult, 1)
+		go func() {
+			conn, err := next.Connect()
+			result <- connectionResult{conn: conn, err: err}
+		}()
+		select {
+		case connected := <-result:
+			if connected.err == nil {
+				return connected.conn, nil
+			}
+			lastErr = connected.err
+		case <-ctx.Done():
+			go func() {
+				connected := <-result
+				if connected.conn != nil {
+					connected.conn.Close()
+				}
+			}()
+			return nil, ctx.Err()
 		}
 		timer := time.NewTimer(time.Second)
 		select {
@@ -182,7 +191,7 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 		case <-timer.C:
 		}
 	}
-	return nil, err
+	return nil, lastErr
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options

@@ -98,6 +98,40 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 	}
 }
 
+func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
+	baseCtx := context.Background()
+	ctr, err := tcnats.Run(baseCtx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(baseCtx) })
+	uri, err := ctr.ConnectionString(baseCtx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+
+	connectCtx, cancel := context.WithTimeout(baseCtx, time.Second)
+	defer cancel()
+	reconnected := make(chan struct{}, 1)
+	conn, err := connectWithContext(connectCtx, "reconnect-dialer-test", []string{uri}, func(*nats.Conn) {
+		reconnected <- struct{}{}
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect with deadline: %v", err)
+	}
+	defer conn.Close()
+	<-connectCtx.Done()
+
+	if err := conn.ForceReconnect(); err != nil {
+		t.Fatalf("force reconnect: %v", err)
+	}
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("connection did not automatically reconnect after its initial context expired")
+	}
+}
+
 func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testing.T) {
 	// Given
 	oldConfig := *streamCfg
