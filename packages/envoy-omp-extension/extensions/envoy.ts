@@ -203,7 +203,7 @@ export default function envoyExtension(pi: PiApi): void {
     await client.subscribe({
       sessionID,
       directory: sessionDirectory,
-      topics: [agentSubject(sessionID)],
+      topics: [...new Set([agentSubject(sessionID), ...subscriptions.keys()])],
       port: 0,
       title: "",
       driving: false,
@@ -347,15 +347,35 @@ export default function envoyExtension(pi: PiApi): void {
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of topicsFor(parameters)) (await subscribe(topic) ? added : already).push(topic);
-          return success(`Subscribed: ${added.join(", ") || "(none new)"}`, { added, already });
+          const registrationError =
+            added.length === 0 ? undefined : await registerSession().then(() => undefined, messageFor);
+          return success(`Subscribed: ${added.join(", ") || "(none new)"}`, {
+            added,
+            already,
+            ...(registrationError === undefined ? {} : { registrationError }),
+          });
         }
         case EnvoyToolOperation.unsubscribe: {
           const targets = topicsFor(parameters, [...subscriptions.keys()]);
           const removed = targets.filter((topic) => closeIntentionally(topic));
-          return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, { removed });
+          const registrationError =
+            removed.length === 0 ? undefined : await registerSession().then(() => undefined, messageFor);
+          return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
+            removed,
+            ...(registrationError === undefined ? {} : { registrationError }),
+          });
         }
-        case EnvoyToolOperation.listInterests:
-          return success(JSON.stringify(await client.getInterest(sessionID), null, 2));
+        case EnvoyToolOperation.listInterests: {
+          const registry = await client.getInterest(sessionID);
+          const interests = new Map<string, "registry" | "live" | "both">();
+          for (const topic of registry.topics) interests.set(topic, subscriptions.has(topic) ? "both" : "registry");
+          for (const topic of subscriptions.keys()) {
+            if (!interests.has(topic)) interests.set(topic, "live");
+          }
+          return success(JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2), {
+            interests: [...interests].map(([topic, source]) => ({ topic, source })),
+          });
+        }
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "target_session");
           await client.send({ sourceSessionID: sessionID, targetSessionID, message: stringFor(parameters, "message") });

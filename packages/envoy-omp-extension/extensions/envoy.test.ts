@@ -316,6 +316,91 @@ describe("envoy OMP extension", () => {
     delete process.env.ENVOY_REGISTER_SESSION;
   });
 
+  test("keeps registry registration aligned with live subscriptions", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    const registrations: { readonly topics: readonly string[] }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly dir: string;
+          readonly topics: readonly string[];
+        };
+        registrations.push(body);
+        return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: body.topics });
+      }
+      return response({ session_id: "ses_registry", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?live-registration");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_registry"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (subscribeTool === undefined || unsubscribeTool === undefined) throw new Error("subscription tools were not registered");
+
+    const topic = "notifications.github.o.r.pr.>";
+    await subscribeTool.execute("", { topics: [topic] });
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+
+    for (const tick of intervals) tick();
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+
+    await unsubscribeTool.execute("", { topics: [topic] });
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry"]);
+  });
+
+  test("merges locally live subscriptions into envoy_list before the next heartbeat", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly dir: string;
+          readonly topics: readonly string[];
+        };
+        return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: body.topics });
+      }
+      if (url.pathname === "/v1/interests/ses_list") {
+        return response({
+          session_id: "ses_list",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: ["notifications.agent.ses_list", "notifications.registry-only"],
+        });
+      }
+      return response({ session_id: "ses_list", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?list-live-subscriptions");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_list"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const listTool = fixture.tools.find((tool) => tool.name === "envoy_list");
+    if (subscribeTool === undefined || listTool === undefined) throw new Error("subscription tools were not registered");
+
+    await subscribeTool.execute("", { topics: ["notifications.live-only"] });
+    const result = await listTool.execute("", {});
+
+    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+      topics: ["notifications.agent.ses_list", "notifications.registry-only", "notifications.live-only"],
+    });
+    expect(result.details.interests).toEqual([
+      { topic: "notifications.agent.ses_list", source: "both" },
+      { topic: "notifications.registry-only", source: "registry" },
+      { topic: "notifications.live-only", source: "live" },
+    ]);
+  });
+
   test("reports the active session directory through envoy_whoami", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
     const fixture = createPi();
