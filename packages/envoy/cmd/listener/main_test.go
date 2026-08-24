@@ -383,6 +383,73 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 	}
 }
 
+func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) {
+	delivered := make(chan struct{}, 1)
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		delivered <- struct{}{}
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	roleTopic := contracts.RoleTopicPrefix + "legion-delivery"
+	harness.registerTarget(t, "ses_role_delivery", roleTopic)
+
+	coreSubscription, err := harness.client.Conn.Subscribe("notifications.role.>", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe to core role lane: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush core role subscription: %v", err)
+	}
+	if harness.client.SubOK() {
+		t.Fatal("role lane should not create a JetStream consumer")
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client})
+	handler := publishHandler(&state)
+	publishRole := func(topic string) contracts.Envelope {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"role event","source":"agent"}`))
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("publish role topic %q: status = %d, body = %s", topic, recorder.Code, recorder.Body.String())
+		}
+		var item contracts.Envelope
+		if err := json.NewDecoder(recorder.Body).Decode(&item); err != nil {
+			t.Fatalf("decode published role envelope: %v", err)
+		}
+		return item
+	}
+
+	publishRole(roleTopic)
+	select {
+	case <-delivered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("core role lane was not delivered")
+	}
+
+	unclaimedTopic := contracts.RoleTopicPrefix + "legion-no-holder"
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + unclaimedTopic)
+	if err != nil {
+		t.Fatalf("subscribe to core exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush core exception subscription: %v", err)
+	}
+	unclaimed := publishRole(unclaimedTopic)
+	assertDeliveryException(t, exceptionProbe, unclaimed, "no_holder")
+
+	info, err := harness.client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read notification stream: %v", err)
+	}
+	if info.State.Msgs != 0 {
+		t.Fatalf("role lanes were durably captured: stream has %d messages", info.State.Msgs)
+	}
+}
+
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	client := setupPublishTestClient(t)
 	var state atomic.Pointer[listenerDeps]
@@ -396,12 +463,12 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	}{
 		{
 			name:       "defaults to agent when source omitted",
-			body:       `{"topic":"notifications.test.foo","message":"hello"}`,
+			body:       `{"topic":"notifications.github.acme.widgets.source","message":"hello"}`,
 			wantSource: "agent",
 		},
 		{
 			name:       "defaults to agent when source empty",
-			body:       `{"source":"","topic":"notifications.test.foo","message":"hello"}`,
+			body:       `{"source":"","topic":"notifications.github.acme.widgets.source","message":"hello"}`,
 			wantSource: "agent",
 		},
 		{
@@ -1107,7 +1174,7 @@ func TestIdempotencyKey_Publish(t *testing.T) {
 
 	// Test: same idempotency_key produces same DedupeKey
 	rr1 := httptest.NewRecorder()
-	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello","idempotency_key":"publish-xyz"}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.publish","message":"hello","idempotency_key":"publish-xyz"}`))
 	req1.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr1, req1)
 
@@ -1120,7 +1187,7 @@ func TestIdempotencyKey_Publish(t *testing.T) {
 	}
 
 	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello","idempotency_key":"publish-xyz"}`))
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.publish","message":"hello","idempotency_key":"publish-xyz"}`))
 	req2.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr2, req2)
 
@@ -1148,7 +1215,7 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 
 	// Test: no idempotency_key produces different DedupeKeys (existing behavior)
 	rr1 := httptest.NewRecorder()
-	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello"}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.backwards","message":"hello"}`))
 	req1.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr1, req1)
 
@@ -1161,7 +1228,7 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 	}
 
 	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello"}`))
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.backwards","message":"hello"}`))
 	req2.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr2, req2)
 
@@ -1224,7 +1291,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		EventID:        "evt-restart-1",
 		Source:         "test",
 		SourceEventID:  "src-restart-1",
-		Topic:          "notifications.test.restart",
+		Topic:          "notifications.github.acme.widgets.restart",
 		DedupeKey:      "dedupe-restart-1",
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "first",
@@ -1252,12 +1319,24 @@ func TestDurableConsumerRestart(t *testing.T) {
 	}
 
 	firstListener.Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
+		if infoErr == nil && !info.PushBound {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
+	if infoErr != nil || info.PushBound {
+		t.Fatalf("durable consumer remained push-bound after listener close: info=%+v error=%v", info, infoErr)
+	}
 
 	second := contracts.Envelope{
 		EventID:        "evt-restart-2",
 		Source:         "test",
 		SourceEventID:  "src-restart-2",
-		Topic:          "notifications.test.restart",
+		Topic:          "notifications.github.acme.widgets.restart",
 		DedupeKey:      "dedupe-restart-2",
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "second",
@@ -1267,7 +1346,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		EventID:        "evt-restart-3",
 		Source:         "test",
 		SourceEventID:  "src-restart-3",
-		Topic:          "notifications.test.restart",
+		Topic:          "notifications.github.acme.widgets.restart",
 		DedupeKey:      "dedupe-restart-3",
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "third",
@@ -1379,15 +1458,27 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 				t.Fatalf("subscribe exception probe: %v", err)
 			}
 			t.Cleanup(func() { _ = probe.Unsubscribe() })
-			consumer := "listener-no-holder-" + id.New()
-			sub, err := startListenerSubscription(harness.client, consumer, harness.handler)
+			var sub *natsgo.Subscription
+			if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+				sub, err = harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+			} else {
+				consumer := "listener-no-holder-" + id.New()
+				sub, err = startListenerSubscription(harness.client, consumer, harness.handler)
+			}
 			if err != nil {
 				t.Fatalf("start listener subscription: %v", err)
 			}
 			t.Cleanup(func() { _ = sub.Unsubscribe() })
+			if err := harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush listener subscription: %v", err)
+			}
 
 			// When
-			if err := harness.client.Publish(item); err != nil {
+			publish := harness.client.Publish
+			if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+				publish = harness.client.PublishCore
+			}
+			if err := publish(item); err != nil {
 				t.Fatalf("publish control topic: %v", err)
 			}
 
@@ -1631,11 +1722,12 @@ func TestListenerDeliveryHandler_FailedDeliveryOnExceptionTopic_NoException(t *t
 }
 
 type listenerDeliveryHarness struct {
-	client   *bus.Client
-	registry *store.Registry
-	sessions *session.SessionRegistry
-	metrics  *metrics.Registry
-	handler  natsgo.MsgHandler
+	client      *bus.Client
+	registry    *store.Registry
+	sessions    *session.SessionRegistry
+	metrics     *metrics.Registry
+	handler     natsgo.MsgHandler
+	coreHandler natsgo.MsgHandler
 }
 
 func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
@@ -1662,25 +1754,27 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		deliverer.HTTPClient = &http.Client{Transport: transport}
 	}
 	met := metrics.New()
+	deliveryConfig := listenerDeliveryHandlerConfig{
+		client:            client,
+		registry:          registry,
+		sessions:          sessions,
+		machineID:         "test-machine",
+		deliverer:         &deliverer,
+		dedupeCache:       dedupeCache,
+		attemptCache:      attemptCache,
+		logger:            logging.New("test"),
+		messagesReceived:  met.NewCounter("test_messages_received", "test"),
+		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
+		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
+		deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
+	}
 	return listenerDeliveryHarness{
-		client:   client,
-		registry: registry,
-		sessions: sessions,
-		metrics:  met,
-		handler: listenerDeliveryHandler(listenerDeliveryHandlerConfig{
-			client:            client,
-			registry:          registry,
-			sessions:          sessions,
-			machineID:         "test-machine",
-			deliverer:         &deliverer,
-			dedupeCache:       dedupeCache,
-			attemptCache:      attemptCache,
-			logger:            logging.New("test"),
-			messagesReceived:  met.NewCounter("test_messages_received", "test"),
-			messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
-			messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
-			deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
-		}),
+		client:      client,
+		registry:    registry,
+		sessions:    sessions,
+		metrics:     met,
+		handler:     jetStreamDeliveryHandler(deliveryConfig),
+		coreHandler: coreNATSDeliveryHandler(deliveryConfig),
 	}
 }
 

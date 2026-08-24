@@ -92,6 +92,42 @@ type listenerDeliveryHandlerConfig struct {
 	deliveryDuration  *metrics.Histogram
 }
 
+type deliveryMessage struct {
+	data         []byte
+	ack          func() error
+	nakWithDelay func(time.Duration) error
+}
+
+func (message deliveryMessage) Ack() error {
+	return message.ack()
+}
+
+func (message deliveryMessage) NakWithDelay(delay time.Duration) error {
+	return message.nakWithDelay(delay)
+}
+
+func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+	handler := listenerDeliveryHandler(cfg)
+	return func(msg *nats.Msg) {
+		handler(deliveryMessage{
+			data:         msg.Data,
+			ack:          func() error { return msg.Ack() },
+			nakWithDelay: func(delay time.Duration) error { return msg.NakWithDelay(delay) },
+		})
+	}
+}
+
+func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
+	handler := listenerDeliveryHandler(cfg)
+	return func(msg *nats.Msg) {
+		handler(deliveryMessage{
+			data:         msg.Data,
+			ack:          func() error { return nil },
+			nakWithDelay: func(time.Duration) error { return nil },
+		})
+	}
+}
+
 type deliveryExceptionPayload struct {
 	OriginalTopic  string `json:"original_topic"`
 	EventID        string `json:"event_id"`
@@ -140,23 +176,27 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	if err := exception.Validate(); err != nil {
 		return fmt.Errorf("validate delivery exception: %w", err)
 	}
-	if err := client.Publish(exception); err != nil {
+	publish := client.Publish
+	if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+		publish = client.PublishCore
+	}
+	if err := publish(exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
 	}
 	return nil
 }
 
-func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
-	return func(msg *nats.Msg) {
+func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMessage) {
+	return func(message deliveryMessage) {
 		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
+		if err := json.Unmarshal(message.data, &item); err != nil {
 			cfg.logger.Error("listener decode failed", slog.String("error", err.Error()))
-			_ = msg.Ack()
+			_ = message.Ack()
 			return
 		}
 		if err := item.Validate(); err != nil {
 			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
-			_ = msg.Ack()
+			_ = message.Ack()
 			return
 		}
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
@@ -166,13 +206,13 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 			if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-				_ = msg.Ack()
+				_ = message.Ack()
 				return
 			}
 			if cfg.attemptCache.Seen(item.DedupeKey, sessionID) {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", sessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
-				_ = msg.Ack()
+				_ = message.Ack()
 				return
 			}
 			interest, err := cfg.registry.Get(sessionID)
@@ -213,7 +253,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 						cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 						cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 						cfg.messagesNAKed.Inc()
-						_ = msg.NakWithDelay(30 * time.Second)
+						_ = message.NakWithDelay(30 * time.Second)
 						return
 					}
 				}
@@ -222,9 +262,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 			}
 			if result.ShouldNAK {
 				cfg.messagesNAKed.Inc()
-				_ = msg.NakWithDelay(30 * time.Second)
+				_ = message.NakWithDelay(30 * time.Second)
 			} else {
-				_ = msg.Ack()
+				_ = message.Ack()
 			}
 			return
 		}
@@ -234,12 +274,12 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 				if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
 					cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 					cfg.messagesNAKed.Inc()
-					_ = msg.NakWithDelay(30 * time.Second)
+					_ = message.NakWithDelay(30 * time.Second)
 					return
 				}
 			}
 			cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))
-			_ = msg.Ack()
+			_ = message.Ack()
 			return
 		}
 		var failed bool
@@ -296,9 +336,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 		}
 		if failed {
 			cfg.messagesNAKed.Inc()
-			_ = msg.NakWithDelay(30 * time.Second)
+			_ = message.NakWithDelay(30 * time.Second)
 		} else {
-			_ = msg.Ack()
+			_ = message.Ack()
 		}
 	}
 }
@@ -441,7 +481,11 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if err := d.client.Publish(item); err != nil {
+		publish := d.client.Publish
+		if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+			publish = d.client.PublishCore
+		}
+		if err := publish(item); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -971,6 +1015,21 @@ func main() {
 	// Subscribe with retry — during rolling deployments, the old container may still
 	// hold the durable consumer binding. Before subscribing, check if the consumer
 	// is push-bound by a stale connection and force-delete it if so.
+	deliveryConfig := listenerDeliveryHandlerConfig{
+		client:            client,
+		registry:          registry,
+		sessions:          sessions,
+		machineID:         cfg.MachineID,
+		deliverer:         &deliver,
+		dedupeCache:       dedupeCache,
+		attemptCache:      attemptCache,
+		logger:            logger,
+		messagesReceived:  messagesReceived,
+		messagesDelivered: messagesDelivered,
+		messagesNAKed:     messagesNAKed,
+		deliveryDuration:  deliveryDuration,
+	}
+
 	var sub *nats.Subscription
 	for attempt := 1; attempt <= 10; attempt++ {
 		// If consumer exists and is push-bound by a dead connection, delete it.
@@ -986,20 +1045,7 @@ func main() {
 				)
 			}
 		}
-		sub, err = startListenerSubscription(client, consumer, listenerDeliveryHandler(listenerDeliveryHandlerConfig{
-			client:            client,
-			registry:          registry,
-			sessions:          sessions,
-			machineID:         cfg.MachineID,
-			deliverer:         &deliver,
-			dedupeCache:       dedupeCache,
-			attemptCache:      attemptCache,
-			logger:            logger,
-			messagesReceived:  messagesReceived,
-			messagesDelivered: messagesDelivered,
-			messagesNAKed:     messagesNAKed,
-			deliveryDuration:  deliveryDuration,
-		}))
+		sub, err = startListenerSubscription(client, consumer, jetStreamDeliveryHandler(deliveryConfig))
 		if err == nil {
 			break
 		}
@@ -1029,6 +1075,19 @@ func main() {
 		time.Sleep(backoff)
 	}
 	_ = sub // used by NATS internally
+
+	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig))
+	if err != nil {
+		logger.Error("core role subscription failed", slog.String("error", err.Error()))
+		client.Conn.Close()
+		os.Exit(1)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		logger.Error("core role subscription flush failed", slog.String("error", err.Error()))
+		client.Conn.Close()
+		os.Exit(1)
+	}
+	_ = roleSub
 
 	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
 	deps.Store(&listenerDeps{
