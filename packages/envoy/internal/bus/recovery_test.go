@@ -10,6 +10,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -137,10 +138,7 @@ func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer client.Close()
-	publisher, err := natsgo.Connect(uri)
-	if err != nil {
-		t.Fatalf("connect publisher: %v", err)
-	}
+	publisher := testnats.Connect(t, uri)
 	defer publisher.Close()
 
 	var received atomic.Int32
@@ -178,10 +176,7 @@ func TestCoreSubscriptionsShareQueueGroup(t *testing.T) {
 		t.Fatalf("connect second client: %v", err)
 	}
 	defer second.Close()
-	publisher, err := natsgo.Connect(uri)
-	if err != nil {
-		t.Fatalf("connect publisher: %v", err)
-	}
+	publisher := testnats.Connect(t, uri)
 	defer publisher.Close()
 
 	var received atomic.Int32

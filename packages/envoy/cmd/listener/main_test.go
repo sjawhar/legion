@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -1659,10 +1660,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
 	}
-	legacyConn, err := natsgo.Connect(uri)
-	if err != nil {
-		t.Fatalf("connect legacy NATS client: %v", err)
-	}
+	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
 	if err != nil {
 		t.Fatalf("open legacy JetStream: %v", err)
@@ -2277,10 +2275,7 @@ func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original 
 
 func TestHealthzConsumerLag(t *testing.T) {
 	natsURI := sharedListenerTestNATSURI(t)
-	conn, err := natsgo.Connect(natsURI)
-	if err != nil {
-		t.Fatalf("failed to connect to NATS: %v", err)
-	}
+	conn := testnats.Connect(t, natsURI)
 	defer conn.Close()
 
 	resetListenerTestState(t, conn)
@@ -2294,6 +2289,7 @@ func TestHealthzConsumerLag(t *testing.T) {
 
 	// Create a consumer
 	consumerName := "listener-test-machine"
+	_ = client.JS().DeleteConsumer(bus.Stream, consumerName)
 	_, err = client.Subscribe(
 		"",
 		func(msg *natsgo.Msg) { _ = msg.Ack() },
@@ -2306,6 +2302,7 @@ func TestHealthzConsumerLag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
+	defer func() { _ = client.JS().DeleteConsumer(bus.Stream, consumerName) }()
 
 	// Get consumer info to verify it exists and has the expected fields
 	consumerInfo, err := client.JS().ConsumerInfo(bus.Stream, consumerName)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -217,10 +218,7 @@ func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
 	}
-	legacyConn, err := nats.Connect(uri)
-	if err != nil {
-		t.Fatalf("connect legacy NATS client: %v", err)
-	}
+	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
 	if err != nil {
 		t.Fatalf("open legacy JetStream: %v", err)

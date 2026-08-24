@@ -8,6 +8,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -25,11 +26,7 @@ func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 		ctr.Terminate(ctx)
 		t.Fatalf("failed to get NATS URI: %v", err)
 	}
-	conn, err := natsgo.Connect(uri)
-	if err != nil {
-		ctr.Terminate(ctx)
-		t.Fatalf("failed to connect: %v", err)
-	}
+	conn := testnats.Connect(t, uri)
 	cleanup := func() {
 		conn.Close()
 		ctr.Terminate(ctx)
