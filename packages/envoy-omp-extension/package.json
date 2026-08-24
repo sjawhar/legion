@@ -2,7 +2,11 @@
   "name": "@legion/envoy-omp-extension",
   "version": "0.1.0",
   "type": "module",
+  "omp": {
+    "extensions": ["extensions/envoy.ts", "extensions/legion.ts"]
+  },
   "exports": {
+    "./legion/handoff-schema": "./src/legion/handoff-schema.ts",
     "./envoy": {
       "types": "./extensions/envoy.ts",
       "default": "./dist/envoy.js"
@@ -17,6 +21,7 @@
   "dependencies": {
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
+    "@toon-format/toon": "^4.1.1",
     "nats": "^2.29.2"
   },
   "devDependencies": {

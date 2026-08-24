@@ -2,9 +2,11 @@ import { appendFile, mkdir, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { resolveLegionPaths } from "../daemon/paths";
-import { readAllHandoffs, writePhaseHandoff } from "../handoff/ledger";
-import { HANDOFF_PHASES } from "../handoff/schema";
-import type { PhaseHandoff } from "../handoff/types";
+import { readAllHandoffs } from "../handoff/ledger";
+import {
+  HANDOFF_PHASES,
+  type PhaseHandoff,
+} from "@legion/envoy-omp-extension/legion/handoff-schema";
 import {
   type LearningFeedbackPhase,
   type LearningFeedbackRecord,
@@ -185,21 +187,3 @@ export async function captureLearningFeedbackFromWorkspace(
   };
 }
 
-export interface CaptureRetroLearningFeedbackOptions {
-  docsCreated?: string[];
-  learningsHelpful?: string[];
-  learningsInjected?: string[];
-  reason?: string;
-  skipped?: boolean;
-  workspaceDir: string;
-}
-
-export function captureRetroLearningFeedback(options: CaptureRetroLearningFeedbackOptions): void {
-  writePhaseHandoff(options.workspaceDir, "retro", {
-    docsCreated: options.docsCreated,
-    learningsHelpful: options.learningsHelpful,
-    learningsInjected: options.learningsInjected,
-    reason: options.reason,
-    skipped: options.skipped,
-  });
-}

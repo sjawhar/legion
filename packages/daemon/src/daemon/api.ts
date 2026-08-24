@@ -13,11 +13,11 @@ import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
 import type { GitHubAppRole } from "./config";
 import type { TokenManager } from "./github-apps";
-import type { LegionState } from "./legion-state";
+import type { LegionState, WorkerRoleClaim } from "./legion-state";
 
 const GRANT_TTL_MS = 60_000;
 
-type Repository = LegionState["dispatchThreads"][number]["repo"];
+type DispatchThreadResult = { thread: number; url: string };
 
 type MergeGateSetting = "human" | "off";
 
@@ -51,6 +51,11 @@ export interface LegionApiProcessManager {
   markControllerReady(): void | Promise<void>;
 }
 
+export type LegionApiFetch = (
+  input: string | URL | Request,
+  init?: RequestInit
+) => Promise<Response>;
+
 export interface LegionApiDeps {
   state: LegionState;
   saveState?: () => Promise<void>;
@@ -58,12 +63,14 @@ export interface LegionApiDeps {
   tokenManager: Pick<TokenManager, "getToken"> | LegionApiTokenManager;
   processManager: LegionApiProcessManager;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
+  dispatch: { url: string; bearer: string; fetch?: LegionApiFetch };
   onTreeReady?(tree: IssueKey): Promise<void>;
 }
 
 export interface LegionApi {
   server: Bun.Server<undefined>;
   mintControllerCapability(): Promise<string>;
+  mintBootToken(tree: IssueKey, generation: number): Promise<string>;
   stop(): void;
 }
 
@@ -171,6 +178,10 @@ function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
 function secretHash(secret: string): Buffer {
   return createHash("sha256").update(secret).digest();
 }
+function spawnCapabilityKey(spawnToken: string): string {
+  return secretHash(spawnToken).toString("hex");
+}
+
 
 function equalSecret(expected: Buffer, supplied: string): boolean {
   const actual = secretHash(supplied);
@@ -227,6 +238,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   const runner = deps.runner ?? defaultRunner;
   const now = config.now ?? Date.now;
   const capabilities = new Map<string, SessionCapability>();
+  const bootTokens = new Map<string, { tree: IssueKey; generation: number }>();
   const grants = new Map<string, Grant>();
   let controllerReady = false;
   const save = async (): Promise<void> => {
@@ -280,6 +292,76 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     }
     return result.stdout;
   };
+  const dispatchThread = async (
+    parent: string,
+    subject: string,
+    body: string,
+    ask: unknown,
+    urgency: unknown
+  ): Promise<DispatchThreadResult> => {
+    const response = await (deps.dispatch.fetch ?? fetch)(`${deps.dispatch.url.replace(/\/+$/, "")}/mcp`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${deps.dispatch.bearer}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: randomUUID(),
+        method: "tools/call",
+        params: {
+          name: "dispatch",
+          arguments: {
+            parent,
+            subject,
+            body,
+            ...(ask === undefined ? {} : { ask }),
+            ...(urgency === undefined ? {} : { urgency }),
+          },
+        },
+      }),
+    });
+    const responseBody = await response.text();
+    if (!response.ok) {
+      throw new Error(`Dispatch MCP request failed with ${response.status}: ${responseBody}`);
+    }
+    const payload: unknown = JSON.parse(responseBody);
+    if (typeof payload !== "object" || payload === null || !("result" in payload)) {
+      throw new Error("Dispatch MCP response is missing a result");
+    }
+    const result = payload.result;
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("content" in result) ||
+      !Array.isArray(result.content)
+    ) {
+      throw new Error("Dispatch MCP response has invalid content");
+    }
+    const text = result.content[0];
+    if (
+      typeof text !== "object" ||
+      text === null ||
+      !("text" in text) ||
+      typeof text.text !== "string"
+    ) {
+      throw new Error("Dispatch MCP response is missing result text");
+    }
+    const dispatched: unknown = JSON.parse(text.text);
+    if (
+      typeof dispatched !== "object" ||
+      dispatched === null ||
+      !("thread" in dispatched) ||
+      typeof dispatched.thread !== "number" ||
+      !Number.isInteger(dispatched.thread) ||
+      !("url" in dispatched) ||
+      typeof dispatched.url !== "string"
+    ) {
+      throw new Error("Dispatch MCP result must contain an integer thread and URL");
+    }
+    return { thread: dispatched.thread, url: dispatched.url };
+  };
 
   const appendFooter = (tree: IssueKey, issue: IssueKey, body: string): string => {
     const session =
@@ -295,6 +377,33 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     }
     return grant;
   };
+  const requireSessionCapability = (
+    body: Record<string, unknown>,
+    tree: IssueKey,
+    issue: IssueKey
+  ): SessionCapability => {
+    const sessionId = body.sessionId;
+    const suppliedSecret = body.secret;
+    if (
+      typeof sessionId !== "string" ||
+      sessionId.length === 0 ||
+      typeof suppliedSecret !== "string" ||
+      suppliedSecret.length === 0
+    ) {
+      throw new HttpError(403, "Invalid session secret");
+    }
+    const capability = capabilities.get(sessionId);
+    if (
+      !capability ||
+      capability.tree !== tree ||
+      capability.issue !== issue ||
+      !equalSecret(capability.secretHash, suppliedSecret)
+    ) {
+      throw new HttpError(403, "Invalid session secret");
+    }
+    return capability;
+  };
+
 
   const handler = async (request: Request): Promise<Response> => {
     try {
@@ -303,7 +412,8 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       if (request.method === "GET" && pathname === "/legion/v1/state") {
         const state = structuredClone(deps.state);
         delete state.controllerCapabilityHash;
-        return Response.json(state);
+        const { spawnCapabilities: _spawnCapabilities, ...redacted } = state;
+        return Response.json(redacted);
       }
       if (request.method !== "POST") {
         throw new HttpError(404, "Not found");
@@ -317,6 +427,15 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         if (!treeState || treeState.generation !== generation) {
           throw new HttpError(409, "Stale process generation");
         }
+        const bootToken = body.bootToken;
+        if (typeof bootToken !== "string" || bootToken.length === 0) {
+          throw new HttpError(403, "Invalid root boot token");
+        }
+        const boot = bootTokens.get(bootToken);
+        if (!boot || boot.tree !== tree || boot.generation !== generation) {
+          throw new HttpError(403, "Invalid root boot token");
+        }
+        bootTokens.delete(bootToken);
         const rootSessionId = requiredString(body, "rootSessionId");
         const ompSessionFile = requiredString(body, "ompSessionFile");
         if (!treeState.locator) {
@@ -337,12 +456,20 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           role: "architect",
           sessionId: rootSessionId,
         };
+        const secret = randomUUID();
+        capabilities.set(rootSessionId, {
+          tree,
+          issue: tree,
+          role: "architect",
+          secretHash: secretHash(secret),
+        });
         await save();
         await deps.onTreeReady?.(tree);
         return Response.json({
           roleTokens: roles,
           controlSubject: `legion.ctl.${sanitizeToken(tree)}.${generation}`,
           gates: config.gates,
+          secret,
         });
       }
 
@@ -361,6 +488,23 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         }
         await save();
         return Response.json({});
+      }
+
+      if (pathname === "/legion/v1/spawn-token") {
+        const { tree, issue } = requireTreeIssue(body);
+        const role = legionRole(requiredString(body, "role"));
+        const sessionId = requiredString(body, "sessionId");
+        const holder = Object.values(deps.state.roles).find(
+          (claim): claim is WorkerRoleClaim =>
+            "issue" in claim && claim.sessionId === sessionId && claim.role === "architect"
+        );
+        if (!holder || !treeContains(deps.state, tree, holder.issue)) {
+          throw new HttpError(403, "Only a tree architect may mint a worker spawn token");
+        }
+        const spawnToken = randomUUID();
+        deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)] = { tree, issue, role };
+        await save();
+        return Response.json({ spawnToken });
       }
 
       if (pathname === "/legion/v1/issues") {
@@ -575,25 +719,43 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
 
       if (pathname === "/legion/v1/dispatch-threads") {
         const { tree, issue } = requireTreeIssue(body);
+        const capability = requireSessionCapability(body, tree, issue);
+        const role = legionRole(requiredString(body, "role"));
+        if (role !== capability.role) {
+          throw new HttpError(403, "Dispatch role does not match the authenticated session");
+        }
+        if (role !== "architect") {
+          throw new HttpError(403, "Only an architect may open a Dispatch thread");
+        }
+        const parent = issueKey(body, "parent");
+        if (!treeContains(deps.state, tree, parent)) {
+          throw new HttpError(403, "Dispatch parent is outside the caller tree");
+        }
+        const subject = requiredString(body, "subject");
+        const dispatchBody = requiredString(body, "body");
+        const urgency = body.urgency;
+        if (
+          urgency !== undefined &&
+          urgency !== "low" &&
+          urgency !== "med" &&
+          urgency !== "high" &&
+          urgency !== "blocking"
+        ) {
+          throw new HttpError(400, "Invalid Dispatch urgency");
+        }
+        const dispatched = await dispatchThread(parent, subject, dispatchBody, body.ask, urgency);
         const parsedIssue = parseIssueKey(issue);
         if (!parsedIssue) {
           throw new Error(`Invalid issue key in Legion state: ${issue}`);
         }
-        const repo = requiredString(body, "repo");
-        if (repo !== `${parsedIssue.owner}/${parsedIssue.repo}`) {
-          throw new HttpError(403, "Dispatch thread repository is outside issue tree");
-        }
-        const thread = requiredNumber(body, "thread");
-        const role = legionRole(requiredString(body, "role"));
+        const repo = `${parsedIssue.owner}/${parsedIssue.repo}` as `${string}/${string}`;
         const existingMapping = deps.state.dispatchThreads.find(
-          (entry) => entry.repo === repo && entry.thread === thread
+          (entry) => entry.repo === repo && entry.thread === dispatched.thread
         );
         if (existingMapping && (existingMapping.tree !== tree || existingMapping.issue !== issue)) {
           throw new HttpError(403, "Dispatch thread is already owned by another issue");
         }
-        // The repository slug is derived from the validated issue key.
-        const repository = repo as Repository;
-        const entry = { repo: repository, thread, role, issue, tree };
+        const entry = { repo, thread: dispatched.thread, role, issue, tree };
         if (existingMapping) {
           const index = deps.state.dispatchThreads.indexOf(existingMapping);
           deps.state.dispatchThreads[index] = entry;
@@ -601,7 +763,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           deps.state.dispatchThreads.push(entry);
         }
         await save();
-        return Response.json({});
+        return Response.json(dispatched);
       }
 
       if (pathname === "/legion/v1/phase") {
@@ -609,6 +771,16 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         const phase = requiredString(body, "phase");
         const sessionId = requiredString(body, "sessionId");
         const role = roleForSession(deps.state, issue, sessionId, phase);
+        const spawnToken = requiredString(body, "spawnToken");
+        const expectedSpawn = deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
+        if (
+          !expectedSpawn ||
+          expectedSpawn.tree !== tree ||
+          expectedSpawn.issue !== issue ||
+          expectedSpawn.role !== role
+        ) {
+          throw new HttpError(403, "Worker session is not bound to a matching daemon-issued spawn token");
+        }
         const secret = randomUUID();
         capabilities.set(sessionId, { tree, issue, role, secretHash: secretHash(secret) });
         deps.state.phases[issue] = { phase, sessionId };
@@ -627,6 +799,18 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         const { tree, issue } = requireTreeIssue(body);
         const role = legionRole(requiredString(body, "role"));
         const agentId = requiredString(body, "agentId");
+        const sessionId = requiredString(body, "sessionId");
+        const spawnToken = requiredString(body, "spawnToken");
+        const expectedSpawn = deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
+        if (
+          !expectedSpawn ||
+          expectedSpawn.tree !== tree ||
+          expectedSpawn.issue !== issue ||
+          expectedSpawn.role !== role
+        ) {
+          throw new HttpError(403, "Unknown or mismatched Legion spawn token");
+        }
+        deps.state.roles[roleToken(deps.state.project, issue, role)] = { issue, role, sessionId, agentId };
         await deps.processManager.registerRoleBacking(tree, issue, role, agentId);
         await save();
         return Response.json({});
@@ -634,20 +818,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
 
       if (pathname === "/legion/v1/grants") {
         const { tree, issue } = requireTreeIssue(body);
-        const sessionId = requiredString(body, "sessionId");
-        const suppliedSecret = body.secret;
-        if (typeof suppliedSecret !== "string" || suppliedSecret.length === 0) {
-          throw new HttpError(403, "Invalid session secret");
-        }
-        const capability = capabilities.get(sessionId);
-        if (
-          !capability ||
-          capability.tree !== tree ||
-          capability.issue !== issue ||
-          !equalSecret(capability.secretHash, suppliedSecret)
-        ) {
-          throw new HttpError(403, "Invalid session secret");
-        }
+        const capability = requireSessionCapability(body, tree, issue);
         const grantId = randomUUID();
         const expiresAt = now() + GRANT_TTL_MS;
         grants.set(grantId, { issue, role: capability.role, expiresAt });
@@ -770,6 +941,15 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   });
   return {
     server,
+    mintBootToken: async (tree, generation) => {
+      const treeState = deps.state.trees[tree];
+      if (!treeState || treeState.generation !== generation) {
+        throw new Error(`Cannot mint boot token for stale tree generation ${tree}`);
+      }
+      const bootToken = randomUUID();
+      bootTokens.set(bootToken, { tree, generation });
+      return bootToken;
+    },
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");

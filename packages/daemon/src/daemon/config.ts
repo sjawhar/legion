@@ -21,6 +21,7 @@ export interface DaemonConfig {
   envoyUrl: string;
   natsUrls: string[];
   dispatchUrl: string;
+  dispatchBearer: string;
   boardProjectIds: string[];
   appLogins: string[];
   admissionCap: number;
@@ -428,6 +429,10 @@ export function resolveDaemonConfig(
   if (!dispatchUrl.value || dispatchUrl.value.trim().length === 0) {
     throw new Error("LEGION_DISPATCH_URL is required (or set dispatch_url in legion.yaml)");
   }
+  const dispatchBearer = env.LEGION_DISPATCH_BEARER;
+  if (dispatchBearer === undefined) {
+    throw new Error("LEGION_DISPATCH_BEARER is required");
+  }
 
   const boardProjectIds = resolveValue(
     opts.cliOverrides?.boardProjectIds,
@@ -526,6 +531,7 @@ export function resolveDaemonConfig(
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       natsUrls: natsUrls.value,
       dispatchUrl: validateUrl(dispatchUrl.value, "LEGION_DISPATCH_URL"),
+      dispatchBearer: requireNonEmpty(dispatchBearer, "LEGION_DISPATCH_BEARER"),
       boardProjectIds: boardProjectIds.value,
       appLogins: appLogins.value,
       admissionCap: admissionCap.value,

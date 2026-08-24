@@ -3,8 +3,11 @@ import path from "node:path";
 
 import { resolveLegionPaths } from "../daemon/paths";
 import { readAllHandoffs } from "../handoff/ledger";
-import { HANDOFF_PHASES, LEGION_DIR_NAME } from "../handoff/schema";
-import type { PhaseHandoff } from "../handoff/types";
+import {
+  HANDOFF_PHASES,
+  LEGION_DIR_NAME,
+  type PhaseHandoff,
+} from "@legion/envoy-omp-extension/legion/handoff-schema";
 import {
   type CollectedIssueFeedback,
   type LearningFeedbackPhase,

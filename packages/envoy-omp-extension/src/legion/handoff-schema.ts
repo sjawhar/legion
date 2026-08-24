@@ -1,18 +1,12 @@
 import { z } from "zod";
-import type { HandoffMessage, HandoffPhase, PhaseHandoff } from "./types";
 
 export const HANDOFF_SCHEMA_VERSION = 1 as const;
 export const LEGION_DIR_NAME = ".legion";
 export const MESSAGES_DIR_NAME = "messages";
 
-export const HANDOFF_PHASES: readonly HandoffPhase[] = [
-  "architect",
-  "plan",
-  "implement",
-  "test",
-  "review",
-  "retro",
-];
+export const HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"] as const;
+
+export type HandoffPhase = (typeof HANDOFF_PHASES)[number];
 
 export const PHASE_FILE_NAMES: Record<HandoffPhase, string> = {
   architect: "architect.json",
@@ -20,16 +14,97 @@ export const PHASE_FILE_NAMES: Record<HandoffPhase, string> = {
   implement: "implement.json",
   test: "test.json",
   review: "review.json",
-  retro: "retro.json",
 };
 
-const isoTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+export interface RoutingHints {
+  skipArchitect?: boolean;
+  complexity?: "trivial" | "small" | "medium" | "large";
+  estimatedImplementers?: number;
+}
 
-const handoffPhase = z.enum(["architect", "plan", "implement", "test", "review", "retro"]);
+export interface RequiredSkills {
+  implement?: string[];
+  test?: string[];
+  review?: string[];
+}
+
+export interface BaseHandoff {
+  schemaVersion: 1;
+  phase: HandoffPhase;
+  completed: string;
+  /** Canonical docs/solutions/ paths injected into this phase */
+  learningsInjected?: string[];
+  /** Subset of learningsInjected the worker found materially helpful */
+  learningsHelpful?: string[];
+}
+
+export interface ArchitectHandoff extends BaseHandoff {
+  phase: "architect";
+  scope?: "trivial" | "small" | "medium" | "large";
+  components?: string[];
+  subIssues?: string[];
+  routingHints?: RoutingHints;
+  concerns?: string[];
+}
+
+export interface PlanHandoff extends BaseHandoff {
+  phase: "plan";
+  taskCount?: number;
+  independentTasks?: number;
+  routingHints?: RoutingHints;
+  concerns?: string[];
+  workflowRecommendation?: string;
+  requiredSkills?: RequiredSkills;
+}
+
+export interface ImplementHandoff extends BaseHandoff {
+  phase: "implement";
+  filesChanged?: string[];
+  trickyParts?: string[];
+  deviations?: string[];
+  openQuestions?: string[];
+  subPlanningNeeded?: boolean;
+  discoveredComplexity?: string[];
+  suggestedSubWorkers?: number;
+}
+
+export interface TestHandoff extends BaseHandoff {
+  phase: "test";
+  passed?: number;
+  failed?: number;
+  failures?: Array<{ criterion: string; evidence: string }>;
+  documentationFeedback?: string;
+  observations?: string[];
+}
+
+export interface ReviewHandoff extends BaseHandoff {
+  phase: "review";
+  critical?: number;
+  important?: number;
+  minor?: number;
+  verdict?: "approved" | "changes_requested";
+  keyFindings?: Array<{ severity: string; file: string; description: string }>;
+}
+
+export interface HandoffMessage {
+  from: HandoffPhase;
+  to: HandoffPhase;
+  body: string;
+  timestamp: string;
+}
+
+export type PhaseHandoff =
+  | ArchitectHandoff
+  | PlanHandoff
+  | ImplementHandoff
+  | TestHandoff
+  | ReviewHandoff;
+
+const isoTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+const handoffPhase = z.enum(HANDOFF_PHASES);
 
 const routingHintsSchema = z
   .object({
-    skipRetro: z.boolean().optional(),
     skipArchitect: z.boolean().optional(),
     complexity: z.enum(["trivial", "small", "medium", "large"]).optional(),
     estimatedImplementers: z.number().optional(),
@@ -69,8 +144,6 @@ const planSchema = baseHandoffSchema.extend({
   independentTasks: z.number().optional(),
   routingHints: routingHintsSchema,
   concerns: z.array(z.string()).optional(),
-  /** @deprecated Use learningsInjected on BaseHandoff instead */
-  learningsUsed: z.array(z.string()).optional(),
   workflowRecommendation: z.string().optional(),
   requiredSkills: requiredSkillsSchema,
 });
@@ -110,20 +183,12 @@ const reviewSchema = baseHandoffSchema.extend({
     .optional(),
 });
 
-const retroSchema = baseHandoffSchema.extend({
-  phase: z.literal("retro"),
-  skipped: z.boolean().optional(),
-  reason: z.string().optional(),
-  docsCreated: z.array(z.string()).optional(),
-});
-
 const phaseHandoffSchema = z.discriminatedUnion("phase", [
   architectSchema.passthrough(),
   planSchema.passthrough(),
   implementSchema.passthrough(),
   testSchema.passthrough(),
   reviewSchema.passthrough(),
-  retroSchema.passthrough(),
 ]);
 
 const handoffMessageSchema = z.object({
@@ -139,25 +204,10 @@ export function isHandoffPhase(value: unknown): value is HandoffPhase {
 
 export function validatePhaseHandoff(value: unknown): PhaseHandoff | null {
   const result = phaseHandoffSchema.safeParse(value);
-  if (!result.success) {
-    return null;
-  }
-  const data = result.data;
-  // Backward compat: migrate plan.learningsUsed → learningsInjected
-  if (data.phase === "plan" && "learningsUsed" in data) {
-    const { learningsUsed, ...rest } = data as Record<string, unknown>;
-    if (Array.isArray(learningsUsed) && !rest.learningsInjected) {
-      (rest as Record<string, unknown>).learningsInjected = learningsUsed;
-    }
-    return rest as unknown as PhaseHandoff;
-  }
-  return data as PhaseHandoff;
+  return result.success ? (result.data as PhaseHandoff) : null;
 }
 
 export function validateHandoffMessage(value: unknown): HandoffMessage | null {
   const result = handoffMessageSchema.safeParse(value);
-  if (!result.success) {
-    return null;
-  }
-  return result.data as HandoffMessage;
+  return result.success ? (result.data as HandoffMessage) : null;
 }

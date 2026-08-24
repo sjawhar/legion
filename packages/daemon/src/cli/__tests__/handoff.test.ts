@@ -207,6 +207,26 @@ describe("handoff command", () => {
     const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
     expect(errors.join("\n")).toContain("Invalid phase");
   });
+  it("rejects retro because it does not write a phase handoff file", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    try {
+      await runCommand(write, { phase: "retro", data: "{}" });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errorMock = console.error;
+    if (
+      typeof errorMock !== "function" ||
+      !("mock" in errorMock) ||
+      typeof errorMock.mock !== "object" ||
+      errorMock.mock === null ||
+      !("calls" in errorMock.mock) ||
+      !Array.isArray(errorMock.mock.calls)
+    ) {
+      throw new Error("console.error is not a Bun mock");
+    }
+    expect(errorMock.mock.calls.flat().join("\n")).toContain("Invalid phase");
+  });
 
   it("exits non-zero for invalid JSON data", async () => {
     const write = getSubCommand(handoffCommand, "write");

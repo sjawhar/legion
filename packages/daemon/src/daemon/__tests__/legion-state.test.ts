@@ -87,13 +87,14 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v4 state with a valid project and admission capacity", () => {
+  it("initializes empty v5 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 4,
+      version: 5,
       project: "omp",
       issues: {},
       trees: {},
       roles: {},
+      spawnCapabilities: {},
       prs: {},
       prByBranch: {},
       admission: { cap: 4, active: [], queue: [] },
@@ -152,19 +153,19 @@ describe("legion state", () => {
     expect((await readdir(tempDir)).filter((entry) => entry.includes(".tmp-"))).toEqual([]);
   });
 
-  it("rejects prior v3 state rather than silently migrating launch-failure state", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v4-"));
+  it("rejects prior v4 state rather than silently migrating spawn capabilities", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v5-"));
     const file = path.join(tempDir, "state.json");
-    await writeFile(file, JSON.stringify({ version: 3 }), "utf8");
+    await writeFile(file, JSON.stringify({ version: 4 }), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow(
-      "Unsupported Legion state version: 3"
+      "Unsupported Legion state version: 4"
     );
   });
   it("rejects malformed current-version state instead of accepting a partial object", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v4-"));
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v5-"));
     const file = path.join(tempDir, "state.json");
-    await writeFile(file, JSON.stringify({ version: 4 }), "utf8");
+    await writeFile(file, JSON.stringify({ version: 5 }), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow("Invalid Legion state");
   });

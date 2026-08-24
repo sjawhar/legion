@@ -36,6 +36,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     dispatchUrl: "http://127.0.0.1:13380",
+    dispatchBearer: "dispatch-bearer",
     boardProjectIds: [],
     appLogins: [],
     admissionCap: 1,
@@ -96,10 +97,12 @@ function manager(
   manager: ProcessManager;
   state: LegionState;
   commands: string[][];
+  controlRequests: Array<{ subject: string; json: string }>;
   publications: Array<{ subject: string; json: string }>;
 } {
   const commands: string[][] = [];
   const publications: Array<{ subject: string; json: string }> = [];
+  const controlRequests: Array<{ subject: string; json: string }> = [];
   const deps: ProcessManagerDeps = {
     state,
     saveState: async () => {},
@@ -109,12 +112,17 @@ function manager(
       return { stdout: "", exitCode: 0 };
     },
     natsPublish: (subject, json) => publications.push({ subject, json }),
+    natsRequest: async (subject, json) => {
+      controlRequests.push({ subject, json });
+      return JSON.stringify({ type: "ack" });
+    },
     mintControllerCapability: async () => "controller-secret",
+    mintBootToken: async () => "boot-token",
     statPrompt: async () => {},
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
     ...options,
   };
-  return { manager: new ProcessManager(deps), state, commands, publications };
+  return { manager: new ProcessManager(deps), state, commands, controlRequests, publications };
 }
 
 afterAll(async () => {
@@ -185,6 +193,8 @@ describe("ProcessManager", () => {
         "-e",
         "LEGION_GENERATION=1",
         "-e",
+        "LEGION_BOOT_TOKEN=boot-token",
+        "-e",
         "LEGION_DAEMON_URL=http://127.0.0.1:13999",
         "-e",
         "LEGION_PROJECT=omp",
@@ -192,8 +202,6 @@ describe("ProcessManager", () => {
         "ENVOY_NATS_URL=nats://127.0.0.1:4222",
         "-e",
         "ENVOY_URL=http://127.0.0.1:9020",
-        "-e",
-        "LEGION_DISPATCH_URL=http://127.0.0.1:13380",
         "-e",
         "LEGION_CONTROL_SUBJECT=legion.ctl.sjawhar-legion-42.1",
         "-e",
@@ -455,22 +463,80 @@ describe("ProcessManager", () => {
 
     expect(state.trees[root].status).toBe("closed");
     expect(state.roles[roleToken("omp", root, "architect")]).toBeUndefined();
-    expect(publications).toEqual([
-      { subject: "legion.ctl.sjawhar-legion-42.1", json: '{"type":"shutdown"}' },
-    ]);
+    expect(publications).toEqual([]);
     expect(commands).toContainEqual(["tmux", "kill-window", "-t", "legion-omp:sjawhar-legion-42"]);
   });
 
-  it("publishes control directives on the sanitized tree generation topic", () => {
+  it("requests control directives on the sanitized tree generation topic", async () => {
     const state = newLegionState("omp", 1);
     tree(state, root, 3);
-    const { manager: processes, publications } = manager(state);
+    const { manager: processes, controlRequests, publications } = manager(state);
     const directive: ControlDirective = { type: "shutdown" };
 
-    processes.controlDirective(root, directive);
+    await processes.controlDirective(root, directive);
+
+    expect(controlRequests).toEqual([
+      { subject: "legion.ctl.sjawhar-legion-42.3", json: '{"type":"shutdown"}' },
+    ]);
+    expect(publications).toEqual([]);
+  });
+
+  it("redelivers an exception exactly once after its control directive acknowledges", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.roles[roleToken("omp", child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      agentId: "agent-worker",
+    };
+    const original = exception(roleToken("omp", child, "implementer")).original;
+    const { manager: processes, controlRequests, publications } = manager(state, { run: liveRun });
+
+    await processes.handleException(exception(roleToken("omp", child, "implementer"), original));
+
+    expect(controlRequests).toHaveLength(1);
+    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
+  });
+
+  it("routes a directive nack to the controller without redelivering its exception", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "open",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.roles[roleToken("omp", child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      agentId: "agent-worker",
+    };
+    const original = exception(roleToken("omp", child, "implementer")).original;
+    const { manager: processes, publications } = manager(state, {
+      run: liveRun,
+      natsRequest: async () => JSON.stringify({ type: "nack", error: "worker transcript is missing" }),
+    });
+
+    await processes.handleException(exception(roleToken("omp", child, "implementer"), original));
 
     expect(publications).toEqual([
-      { subject: "legion.ctl.sjawhar-legion-42.3", json: '{"type":"shutdown"}' },
+      {
+        subject: `notifications.role.${controllerToken("omp")}`,
+        json: JSON.stringify({ type: "revive-failed", issue: child, role: "implementer" }),
+      },
     ]);
   });
 
@@ -615,18 +681,8 @@ describe("ProcessManager", () => {
     const { manager: processes, publications } = manager(restarted, { run: liveRun });
     await processes.handleException(exception(roleToken("omp", child, "architect")));
 
-    expect(publications).toEqual([
-      {
-        subject: "legion.ctl.sjawhar-legion-42.1",
-        json: JSON.stringify({
-          type: "revive-worker",
-          role: "architect",
-          agentId: "agt-restarted",
-          parentSessionFile: "/state/trees/sjawhar-legion-42/.omp/session.json",
-          redeliver: exception(roleToken("omp", child, "architect")).original,
-        }),
-      },
-    ]);
+    const original = exception(roleToken("omp", child, "architect")).original;
+    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
   });
 
   it("marks an exited tree dead, releases its admission slot, and preserves held events", async () => {
@@ -682,15 +738,8 @@ describe("ProcessManager", () => {
 
     await processes.handleException(exception(roleToken("omp", root, "architect")));
 
-    expect(publications).toEqual([
-      {
-        subject: "legion.ctl.sjawhar-legion-42.1",
-        json: JSON.stringify({
-          type: "reclaim-architect",
-          redeliver: exception(roleToken("omp", root, "architect")).original,
-        }),
-      },
-    ]);
+    const original = exception(roleToken("omp", root, "architect")).original;
+    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
     expect(state.trees[root].heldEvents).toEqual([]);
   });
 
@@ -759,18 +808,8 @@ describe("ProcessManager", () => {
 
     await processes.handleException(exception(roleToken("omp", child, role)));
 
-    expect(publications).toEqual([
-      {
-        subject: "legion.ctl.sjawhar-legion-42.1",
-        json: JSON.stringify({
-          type: "revive-worker",
-          role,
-          agentId: "agt-sub-architect",
-          parentSessionFile: "/state/trees/sjawhar-legion-42/.omp/session.json",
-          redeliver: exception(roleToken("omp", child, role)).original,
-        }),
-      },
-    ]);
+    const original = exception(roleToken("omp", child, role)).original;
+    expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
   });
 
   it("resurrects a dead backed worker and reports a revival nack to the controller", async () => {

@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { controllerToken, formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
-import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
+import {
+  type LegionApi,
+  type LegionApiDeps,
+  type LegionApiFetch,
+  startLegionApi,
+} from "../api";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 
 const root = formatIssueKey("acme", "widgets", 1);
@@ -105,6 +110,7 @@ describe("Legion HTTP API", () => {
     mintController?: boolean;
     admissionResult?: "spawned" | "queued";
     admit?: (issue: IssueKey) => "spawned" | "queued";
+    dispatchFetch?: LegionApiFetch;
   }) {
     const runner =
       options?.runner ??
@@ -188,6 +194,28 @@ describe("Legion HTTP API", () => {
       envoyPublish: async (topic, payload) => {
         publications.push({ topic, payload });
       },
+      dispatch: {
+        url: "http://dispatch.test",
+        bearer: "dispatch-bearer",
+        fetch:
+          options?.dispatchFetch ??
+          (async () =>
+            Response.json({
+              jsonrpc: "2.0",
+              id: "dispatch",
+              result: {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      thread: 44,
+                      url: "https://github.test/acme/widgets/issues/44",
+                    }),
+                  },
+                ],
+              },
+            })),
+      },
       saveState: options?.saveState ?? (async () => {}),
     };
     api = startLegionApi(
@@ -255,11 +283,14 @@ describe("Legion HTTP API", () => {
 
   it("records process start, creates an inert child, releases its held events, and releases its admission slot on exit", async () => {
     await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
 
     const started = await json("/legion/v1/process/started", {
       tree: root,
       generation: 3,
       rootSessionId: "ses_root",
+      bootToken,
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
@@ -274,6 +305,7 @@ describe("Legion HTTP API", () => {
       },
       controlSubject: "legion.ctl.acme-widgets-1.3",
       gates: { design: "root-issues", merge: "human" },
+      secret: expect.any(String),
     });
     expect(state.trees[root]).toMatchObject({
       status: "active",
@@ -338,6 +370,44 @@ describe("Legion HTTP API", () => {
     expect(releaseSlots).toEqual([root]);
     expect(state.trees[root]?.status).toBe("closed");
   });
+  it("requires a daemon-minted single-use boot nonce before root registration", async () => {
+    await start();
+    const input = {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      ompSessionFile: "/tmp/root.json",
+    };
+
+    expect((await json("/legion/v1/process/started", input)).response.status).toBe(403);
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    expect(
+      (
+        await json("/legion/v1/process/started", {
+          ...input,
+          bootToken: "wrong-boot-token",
+        })
+      ).response.status
+    ).toBe(403);
+    expect(
+      (
+        await json("/legion/v1/process/started", {
+          ...input,
+          bootToken,
+        })
+      ).response.status
+    ).toBe(200);
+    expect(
+      (
+        await json("/legion/v1/process/started", {
+          ...input,
+          bootToken,
+        })
+      ).response.status
+    ).toBe(403);
+  });
+
 
   it("writes only inside the caller tree and implements comments, bodies, labels, close, escalation, dispatch registration, gates, admission, backlog, and redacted state", async () => {
     await start();
@@ -434,42 +504,18 @@ describe("Legion HTTP API", () => {
       }),
     });
 
-    const foreignDispatch = await json("/legion/v1/dispatch-threads", {
+
+    state.roles[roleToken(state.project, root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_architect",
+    };
+    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
       tree: root,
-      issue: foreign,
-      repo: "acme/other",
-      thread: 66,
-      role: "reviewer",
+      issue: child,
+      role: "implementer",
+      sessionId: "ses_architect",
     });
-    expect(foreignDispatch.response.status).toBe(403);
-
-    expect(
-      (
-        await json("/legion/v1/dispatch-threads", {
-          tree: root,
-          issue: child,
-          repo: "acme/widgets",
-          thread: 44,
-          role: "reviewer",
-        })
-      ).response.status
-    ).toBe(200);
-    expect(
-      (
-        await json("/legion/v1/dispatch-threads", {
-          tree: root,
-          issue: root,
-          repo: "acme/widgets",
-          thread: 45,
-          role: "architect",
-        })
-      ).response.status
-    ).toBe(200);
-    expect(state.dispatchThreads).toEqual([
-      { repo: "acme/widgets", thread: 44, role: "reviewer", issue: child, tree: root },
-      { repo: "acme/widgets", thread: 45, role: "architect", issue: root, tree: root },
-    ]);
-
     expect(
       (
         await json("/legion/v1/role-backing", {
@@ -477,6 +523,8 @@ describe("Legion HTTP API", () => {
           issue: child,
           role: "implementer",
           agentId: "agent-17",
+          sessionId: "ses_implementer",
+          spawnToken: spawn.body.spawnToken,
         })
       ).response.status
     ).toBe(200);
@@ -563,14 +611,117 @@ describe("Legion HTTP API", () => {
         .response.status
     ).toBe(200);
     expect(state.issues[child]?.state).toBe("closed");
-    expect(state.dispatchThreads).toEqual([
-      { repo: "acme/widgets", thread: 45, role: "architect", issue: root, tree: root },
-    ]);
+    expect(state.dispatchThreads).toEqual([]);
 
     const stateResponse = await request("/legion/v1/state");
     const stateJson = await stateResponse.text();
     expect(stateJson).not.toContain("minted-");
     expect(stateJson).not.toContain("controllerCapabilityHash");
+  });
+
+  it("requires a bound architect capability before forwarding Dispatch and registering its returned thread", async () => {
+    const dispatchRequests: Array<{ url: string; headers: Headers; body: string }> = [];
+    await start({
+      dispatchFetch: async (input, init) => {
+        dispatchRequests.push({
+          url: input.toString(),
+          headers: new Headers(init?.headers),
+          body: String(init?.body ?? ""),
+        });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: "dispatch",
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  thread: 77,
+                  url: "https://github.test/acme/widgets/issues/77",
+                }),
+              },
+            ],
+          },
+        });
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const input = {
+      tree: root,
+      issue: root,
+      role: "architect",
+      parent: root,
+      subject: "Need approval",
+      body: "Choose a scope",
+      ask: [{ question: "Approve?" }],
+      urgency: "blocking",
+    };
+
+    expect((await json("/legion/v1/dispatch-threads", input)).response.status).toBe(403);
+    expect(
+      (
+        await json("/legion/v1/dispatch-threads", {
+          ...input,
+          role: "reviewer",
+          sessionId: "ses_architect",
+          secret: started.body.secret,
+        })
+      ).response.status
+    ).toBe(403);
+    expect(
+      (
+        await json("/legion/v1/dispatch-threads", {
+          ...input,
+          parent: foreign,
+          sessionId: "ses_architect",
+          secret: started.body.secret,
+        })
+      ).response.status
+    ).toBe(403);
+
+    const dispatched = await json("/legion/v1/dispatch-threads", {
+      ...input,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+
+    expect(dispatched.response.status).toBe(200);
+    expect(dispatched.body).toEqual({
+      thread: 77,
+      url: "https://github.test/acme/widgets/issues/77",
+    });
+    expect(dispatchRequests).toHaveLength(1);
+    const dispatchRequest = dispatchRequests[0];
+    if (!dispatchRequest) throw new Error("expected one Dispatch request");
+    expect(dispatchRequest.url).toBe("http://dispatch.test/mcp");
+    expect(JSON.parse(dispatchRequest.body)).toEqual({
+      jsonrpc: "2.0",
+      id: expect.any(String),
+      method: "tools/call",
+      params: {
+        name: "dispatch",
+        arguments: {
+          parent: root,
+          subject: "Need approval",
+          body: "Choose a scope",
+          ask: [{ question: "Approve?" }],
+          urgency: "blocking",
+        },
+      },
+    });
+    expect(dispatchRequest.headers.get("Authorization")).toBe("Bearer dispatch-bearer");
+    expect(state.dispatchThreads).toEqual([
+      { repo: "acme/widgets", thread: 77, role: "architect", issue: root, tree: root },
+    ]);
   });
 
   it("preserves controller authorization and dispatch ownership across a persisted API restart", async () => {
@@ -593,17 +744,46 @@ describe("Legion HTTP API", () => {
     };
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-api-state-"));
     const file = path.join(tempDir, "state.json");
+    const dispatchFetch: LegionApiFetch = async () =>
+      Response.json({
+        jsonrpc: "2.0",
+        id: "dispatch",
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                thread: 44,
+                url: "https://github.test/acme/widgets/issues/44",
+              }),
+            },
+          ],
+        },
+      });
     try {
-      await start({ saveState: async () => saveState(file, state) });
+      await start({ saveState: async () => saveState(file, state), dispatchFetch });
+      const rootBootToken = await api?.mintBootToken(root, 3);
+      if (!rootBootToken) throw new Error("root boot nonce was not minted");
+      const rootStarted = await json<{ secret: string }>("/legion/v1/process/started", {
+        tree: root,
+        generation: 3,
+        rootSessionId: "ses_dispatch_root",
+        bootToken: rootBootToken,
+        ompSessionFile: "/tmp/root.json",
+      });
+      expect(rootStarted.response.status).toBe(200);
       const originalControllerSecret = controllerSecret;
       expect(
         (
           await json("/legion/v1/dispatch-threads", {
             tree: root,
             issue: root,
-            repo: "acme/widgets",
-            thread: 44,
             role: "architect",
+            parent: root,
+            subject: "Need decision",
+            body: "Choose one",
+            sessionId: "ses_dispatch_root",
+            secret: rootStarted.body.secret,
           })
         ).response.status
       ).toBe(200);
@@ -612,7 +792,17 @@ describe("Legion HTTP API", () => {
       api?.stop();
 
       const reloaded = await loadState(file, { project: "omp", cap: 2 });
-      await start({ state: reloaded, mintController: false });
+      await start({ state: reloaded, mintController: false, dispatchFetch });
+      const competingBootToken = await api?.mintBootToken(competingRoot, 1);
+      if (!competingBootToken) throw new Error("competing boot nonce was not minted");
+      const competingStarted = await json<{ secret: string }>("/legion/v1/process/started", {
+        tree: competingRoot,
+        generation: 1,
+        rootSessionId: "ses_dispatch_competing",
+        bootToken: competingBootToken,
+        ompSessionFile: "/tmp/competing.json",
+      });
+      expect(competingStarted.response.status).toBe(200);
       expect(
         (
           await json("/legion/v1/gates/approve", {
@@ -624,11 +814,59 @@ describe("Legion HTTP API", () => {
       const hijack = await json("/legion/v1/dispatch-threads", {
         tree: competingRoot,
         issue: competingRoot,
-        repo: "acme/widgets",
-        thread: 44,
         role: "architect",
+        parent: competingRoot,
+        subject: "Hijack",
+        body: "No",
+        sessionId: "ses_dispatch_competing",
+        secret: competingStarted.body.secret,
       });
       expect(hijack.response.status).toBe(403);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+  it("preserves a worker spawn capability across daemon restart so its backed session can register phase", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-spawn-capability-"));
+    const file = path.join(tempDir, "state.json");
+    try {
+      state.roles[roleToken(state.project, root, "architect")] = {
+        issue: root,
+        role: "architect",
+        sessionId: "ses_architect",
+      };
+      await start({ saveState: async () => saveState(file, state) });
+      const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+        tree: root,
+        issue: root,
+        role: "reviewer",
+        sessionId: "ses_architect",
+      });
+      expect(
+        (
+          await json("/legion/v1/role-backing", {
+            tree: root,
+            issue: root,
+            role: "reviewer",
+            agentId: "agent-reviewer",
+            sessionId: "ses_recreated",
+            spawnToken: spawn.body.spawnToken,
+          })
+        ).response.status
+      ).toBe(200);
+      api?.stop();
+
+      const reloaded = await loadState(file, { project: "omp", cap: 2 });
+      await start({ state: reloaded, mintController: false });
+      const phase = await json("/legion/v1/phase", {
+        tree: root,
+        issue: root,
+        phase: "reviewer",
+        sessionId: "ses_recreated",
+        spawnToken: spawn.body.spawnToken,
+      });
+
+      expect(phase.response.status).toBe(200);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -723,25 +961,88 @@ describe("Legion HTTP API", () => {
     }
   });
 
-  it("binds grants to the registered session role, rejects wrong and expired secrets, and returns exact git credential bytes", async () => {
+  it("rejects a phase whose spawn token was minted for another role", async () => {
     await start();
+    state.roles[roleToken(state.project, root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_architect",
+    };
+    const testerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_architect",
+    });
+    const reviewerSpawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+      tree: root,
+      issue: root,
+      role: "reviewer",
+      sessionId: "ses_architect",
+    });
+    expect(
+      (
+        await json("/legion/v1/role-backing", {
+          tree: root,
+          issue: root,
+          role: "reviewer",
+          agentId: "agent-reviewer",
+          sessionId: "ses_reviewer",
+          spawnToken: reviewerSpawn.body.spawnToken,
+        })
+      ).response.status
+    ).toBe(200);
+
+    const replay = await json("/legion/v1/phase", {
+      tree: root,
+      issue: root,
+      phase: "reviewer",
+      sessionId: "ses_reviewer",
+      spawnToken: testerSpawn.body.spawnToken,
+    });
+
+    expect(replay.response.status).toBe(403);
+  });
+
+  it("binds grants to the daemon-registered session role, rejects wrong and expired secrets, and returns exact git credential bytes", async () => {
+    await start();
+    state.roles[roleToken(state.project, root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_architect",
+    };
+    const spawn = await json<{ spawnToken: string }>("/legion/v1/spawn-token", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      sessionId: "ses_architect",
+    });
     const unregisteredSession = await json("/legion/v1/phase", {
       tree: root,
       issue: root,
       phase: "tester",
       sessionId: "ses_unregistered",
+      spawnToken: spawn.body.spawnToken,
     });
     expect(unregisteredSession.response.status).toBe(403);
-    state.roles[roleToken(state.project, root, "tester")] = {
-      issue: root,
-      role: "tester",
-      sessionId: "ses_tester",
-    };
+    expect(
+      (
+        await json("/legion/v1/role-backing", {
+          tree: root,
+          issue: root,
+          role: "tester",
+          agentId: "agent-tester",
+          sessionId: "ses_tester",
+          spawnToken: spawn.body.spawnToken,
+        })
+      ).response.status
+    ).toBe(200);
     const roleBypass = await json("/legion/v1/phase", {
       tree: root,
       issue: root,
       phase: "reviewer",
       sessionId: "ses_tester",
+      spawnToken: spawn.body.spawnToken,
     });
     expect(roleBypass.response.status).toBe(403);
 
@@ -750,6 +1051,7 @@ describe("Legion HTTP API", () => {
       issue: root,
       phase: "tester",
       sessionId: "ses_tester",
+      spawnToken: spawn.body.spawnToken,
     });
     expect(phase.status).toBe(200);
     expect(phase.body).toEqual({

@@ -74,13 +74,20 @@ export interface ControllerRoleClaim {
 }
 
 export type RoleClaim = WorkerRoleClaim | ControllerRoleClaim;
+export interface SpawnCapability {
+  tree: IssueKey;
+  issue: IssueKey;
+  role: string;
+}
+
 
 export interface LegionState {
-  version: 4;
+  version: 5;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
   roles: Record<string, RoleClaim>;
+  spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
   prByBranch: Record<string, string>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
@@ -190,6 +197,13 @@ const ControllerRoleClaimSchema = z
   })
   .strict();
 const RoleClaimSchema = z.union([WorkerRoleClaimSchema, ControllerRoleClaimSchema]);
+const SpawnCapabilitySchema = z
+  .object({
+    tree: IssueKeySchema,
+    issue: IssueKeySchema,
+    role: z.string(),
+  })
+  .strict();
 const DispatchThreadSchema = z
   .object({
     repo: RepositorySchema,
@@ -216,13 +230,14 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(4),
+    version: z.literal(5),
     project: z
       .string()
       .refine(isLegionProjectToken, { message: "Expected valid Legion project token" }),
     issues: z.record(IssueKeySchema, IssueNodeSchema),
     trees: z.record(IssueKeySchema, TreeStateSchema),
     roles: z.record(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN), RoleClaimSchema),
+    spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),
     prByBranch: z.record(z.string(), z.string()),
     admission: z
@@ -250,11 +265,12 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 4,
+    version: 5,
     project,
     issues: {},
     trees: {},
     roles: {},
+    spawnCapabilities: {},
     prs: {},
     prByBranch: {},
     admission: { cap, active: [], queue: [] },
@@ -280,7 +296,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 4) {
+  if (version !== 5) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

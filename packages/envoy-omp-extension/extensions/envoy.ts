@@ -1,11 +1,11 @@
 import * as os from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject, ROLE_TOPIC_PREFIX } from "@legion/contracts";
+import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { toEnvelopeDisplay } from "@legion/envoy-client/display";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
+import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -94,32 +94,38 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
-    let summary = raw;
-    let source = "";
+    let payloadText = raw;
     let displayTopic = subject;
     let duplicate = false;
     try {
-      const display = toEnvelopeDisplay(JSON.parse(raw));
-      duplicate = dedupeKeys.has(display.dedupeKey);
+      const envelope = EnvelopeSchema.parse(JSON.parse(raw));
+      duplicate = dedupeKeys.has(envelope.dedupe_key);
       if (!duplicate) {
-        dedupeKeys.add(display.dedupeKey);
+        dedupeKeys.add(envelope.dedupe_key);
         if (dedupeKeys.size > 1000) {
           const oldest = dedupeKeys.values().next();
           if (!oldest.done) dedupeKeys.delete(oldest.value);
         }
-        summary = display.summary;
-        source = display.sourceSessionID === undefined ? "" : ` from ${display.sourceSessionID}`;
-        displayTopic = display.topic;
+        displayTopic = envelope.topic;
+        if (envelope.payload === undefined) {
+          payloadText = encode({ summary: envelope.payload_summary });
+        } else {
+          try {
+            payloadText = encode(JSON.parse(envelope.payload));
+          } catch {
+            payloadText = envelope.payload;
+          }
+        }
       }
     } catch {
-      summary = raw;
+      payloadText = raw;
     }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
     if (!duplicate) {
       pi.sendMessage(
-        { customType: "envoy-message", content: `[ENVOY message on topic "${displayTopic}"${source}]\n${summary}`, display: true },
+        { customType: "envoy-message", content: `[ENVOY ${displayTopic}]\n${payloadText}`, display: true },
         { deliverAs: "steer", triggerTurn: true },
       );
     }

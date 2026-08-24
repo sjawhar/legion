@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { decode } from "@toon-format/toon";
 import { z } from "zod";
 
 type ToolResult = {
@@ -317,6 +318,105 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("injects a structured envelope payload as a TOON block that round-trips to the payload", async () => {
+    const payload = {
+      failed: [
+        { check: "typecheck", conclusion: "failure" },
+        { check: "unit", conclusion: "failure" },
+      ],
+      kind: "ci_summary",
+      number: 42,
+    };
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?toon-structured-payload");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-toon-structured",
+        source: "envoy",
+        source_event_id: "source-toon-structured",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "envoy.agent.toon-structured",
+        issued_at: 1,
+        payload_summary: "CI failures",
+        payload: JSON.stringify(payload),
+        trace_id: "trace-toon-structured",
+      }),
+    );
+    await injected.promise;
+
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("structured delivery was not injected");
+    const prefix = "[ENVOY notifications.agent.ses_omp]\n";
+    expect(content.startsWith(prefix)).toBe(true);
+    expect(decode(content.slice(prefix.length))).toEqual(payload);
+  });
+
+  test("injects a non-JSON envelope payload as raw text without serializing its envelope", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?toon-plain-text-payload");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-toon-plain-text",
+        source: "envoy",
+        source_event_id: "source-toon-plain-text",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "envoy.agent.toon-plain-text",
+        issued_at: 1,
+        payload_summary: "plain text",
+        payload: "plain-text payload",
+        trace_id: "trace-toon-plain-text",
+      }),
+    );
+    await injected.promise;
+
+    expect(fixture.messages).toEqual(["[ENVOY notifications.agent.ses_omp]\nplain-text payload"]);
+  });
+
+  test("injects malformed envelope JSON as raw text", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?toon-malformed-envelope");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push("{this is not JSON");
+    await injected.promise;
+
+    expect(fixture.messages).toEqual(["[ENVOY notifications.agent.ses_omp]\n{this is not JSON"]);
+  });
+
   test("injects a role event forwarded to the claimed agent subject with original role-topic framing", async () => {
     let currentRoleTopic = "";
     const requests: string[] = [];
@@ -363,9 +463,11 @@ describe("envoy OMP extension", () => {
     if (agent === undefined) throw new Error("agent subject was not subscribed");
     agent.push(forwardedRoleEnvelope("legion-controller", "role message", "role-agent-delivery"));
     await injected.promise;
-    expect(fixture.messages).toContain(
-      '[ENVOY message on topic "notifications.role.legion-controller"]\nrole message',
-    );
+    const roleDelivery = fixture.messages[0];
+    if (roleDelivery === undefined) throw new Error("role delivery was not injected");
+    const rolePrefix = "[ENVOY notifications.role.legion-controller]\n";
+    expect(roleDelivery.startsWith(rolePrefix)).toBe(true);
+    expect(decode(roleDelivery.slice(rolePrefix.length))).toEqual({ summary: "role message" });
     expect(requests).not.toContain("/v1/sessions");
 
     await roleTool.execute("", { role: "legion-reviewer" });
@@ -423,9 +525,11 @@ describe("envoy OMP extension", () => {
     agentB.push(forwardedRoleEnvelope(role, "post-takeover role event", "role-agent-takeover"));
     await injectedB.promise;
     expect(fixtureA.messages.some((message) => message.includes("post-takeover role event"))).toBe(false);
-    expect(fixtureB.messages).toContain(
-      '[ENVOY message on topic "notifications.role.legion-controller"]\npost-takeover role event',
-    );
+    const takeoverDelivery = fixtureB.messages[0];
+    if (takeoverDelivery === undefined) throw new Error("takeover delivery was not injected");
+    const takeoverPrefix = "[ENVOY notifications.role.legion-controller]\n";
+    expect(takeoverDelivery.startsWith(takeoverPrefix)).toBe(true);
+    expect(decode(takeoverDelivery.slice(takeoverPrefix.length))).toEqual({ summary: "post-takeover role event" });
   });
 
   test("keeps forwarded role delivery live while the listener HTTP API is unavailable", async () => {

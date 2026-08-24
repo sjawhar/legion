@@ -144,6 +144,7 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: [natsUrl],
     dispatchUrl: "http://127.0.0.1:13380",
+    dispatchBearer: "dispatch-bearer",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 1,

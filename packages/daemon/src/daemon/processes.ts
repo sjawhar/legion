@@ -23,12 +23,13 @@ type Redelivery = { topic: string; payload: string; eventId: string };
 export type ControlDirective =
   | {
       type: "revive-worker";
+      issue: IssueKey;
       role: LegionRole;
       agentId: string;
       parentSessionFile: string;
       redeliver: Redelivery;
     }
-  | { type: "reclaim-architect"; redeliver: Redelivery }
+  | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery }
   | { type: "shutdown" };
 
 export interface ExceptionInfo {
@@ -44,7 +45,9 @@ export interface ProcessManagerDeps {
   config: DaemonConfig;
   run(cmd: string[]): Promise<{ stdout: string; exitCode: number }>;
   natsPublish(subject: string, json: string): void;
+  natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
+  mintBootToken(tree: IssueKey, generation: number): Promise<string>;
   statPrompt?(promptPath: string): Promise<unknown>;
   now(): number;
 }
@@ -60,6 +63,19 @@ function treeName(issue: IssueKey): string {
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
 }
+function controlReplyType(raw: string): "ack" | "nack" {
+  const payload: unknown = JSON.parse(raw);
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    !("type" in payload) ||
+    (payload.type !== "ack" && payload.type !== "nack")
+  ) {
+    throw new Error("Invalid Legion control directive reply");
+  }
+  return payload.type;
+}
+
 
 /** Starts and supervises only the tmux trees whose locator it records in Legion state. */
 export class ProcessManager {
@@ -232,13 +248,28 @@ export class ProcessManager {
     return process.exitCode === 0 ? "alive" : "dead";
   }
 
-  controlDirective(tree: IssueKey, directive: ControlDirective): void {
+  async controlDirective(tree: IssueKey, directive: ControlDirective): Promise<void> {
     const generation = this.deps.state.trees[tree]?.generation;
     if (generation === undefined) throw new Error(`Unknown Legion tree: ${tree}`);
-    this.deps.natsPublish(
-      `legion.ctl.${sanitizeToken(tree)}.${generation}`,
-      JSON.stringify(directive)
+    const reply = controlReplyType(
+      await this.deps.natsRequest(
+        `legion.ctl.${sanitizeToken(tree)}.${generation}`,
+        JSON.stringify(directive)
+      )
     );
+    if (reply === "ack") {
+      if ("redeliver" in directive) {
+        this.deps.natsPublish(directive.redeliver.topic, directive.redeliver.payload);
+      }
+      return;
+    }
+    if (directive.type !== "shutdown") {
+      this.publishController({
+        type: "revive-failed",
+        issue: directive.issue,
+        role: directive.type === "revive-worker" ? directive.role : "architect",
+      });
+    }
   }
 
   async resurrect(treeKey: IssueKey): Promise<void> {
@@ -264,7 +295,9 @@ export class ProcessManager {
 
   expireLinger(treeKey: IssueKey): void {
     const tree = this.requireTree(treeKey);
-    this.controlDirective(treeKey, { type: "shutdown" });
+    void this.controlDirective(treeKey, { type: "shutdown" }).catch((error) => {
+      console.error(`[legion] shutdown directive failed for ${treeKey}:`, error);
+    });
     if (tree.locator) {
       void this.deps.run([
         "tmux",
@@ -306,7 +339,11 @@ export class ProcessManager {
 
     if (parsed.role === "architect" && parsed.issue === root) {
       if ((await this.probe(root)) === "alive") {
-        this.controlDirective(root, { type: "reclaim-architect", redeliver: exception.original });
+        await this.controlDirective(root, {
+          type: "reclaim-architect",
+          issue: parsed.issue,
+          redeliver: exception.original,
+        });
       } else {
         await this.resurrect(root);
       }
@@ -327,8 +364,9 @@ export class ProcessManager {
 
     const sessionFile = this.requireTree(root).locator?.ompSessionFile;
     if (!sessionFile) throw new Error(`Live Legion tree ${root} has no OMP session file`);
-    this.controlDirective(root, {
+    await this.controlDirective(root, {
       type: "revive-worker",
+      issue: parsed.issue,
       role: parsed.role,
       agentId: backing.agentId,
       parentSessionFile: sessionFile,
@@ -406,6 +444,7 @@ export class ProcessManager {
     const session = `legion-${this.deps.state.project}`;
     await this.ensureTmuxSession(session);
     const generation = tree.generation;
+    const bootToken = await this.deps.mintBootToken(tree.root, generation);
     const window = name;
     const result = await this.deps.run([
       "tmux",
@@ -419,6 +458,8 @@ export class ProcessManager {
       "-e",
       `LEGION_GENERATION=${generation}`,
       "-e",
+      `LEGION_BOOT_TOKEN=${bootToken}`,
+      "-e",
       `LEGION_DAEMON_URL=http://127.0.0.1:${this.deps.config.port}`,
       "-e",
       `LEGION_PROJECT=${this.deps.state.project}`,
@@ -426,8 +467,6 @@ export class ProcessManager {
       `ENVOY_NATS_URL=${this.deps.config.natsUrls.join(",")}`,
       "-e",
       `ENVOY_URL=${this.deps.config.envoyUrl}`,
-      "-e",
-      `LEGION_DISPATCH_URL=${this.deps.config.dispatchUrl}`,
       "-e",
       `LEGION_CONTROL_SUBJECT=legion.ctl.${sanitizeToken(tree.root)}.${generation}`,
       "-e",
@@ -469,8 +508,6 @@ export class ProcessManager {
       `ENVOY_NATS_URL=${this.deps.config.natsUrls.join(",")}`,
       "-e",
       `ENVOY_URL=${this.deps.config.envoyUrl}`,
-      "-e",
-      `LEGION_DISPATCH_URL=${this.deps.config.dispatchUrl}`,
       `cd ${shellPath(controllerDir)} && omp --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     if (result.exitCode !== 0) {

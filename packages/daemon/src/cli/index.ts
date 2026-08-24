@@ -27,8 +27,11 @@ import {
   writeMessage,
   writePhaseHandoff,
 } from "../handoff/ledger";
-import { HANDOFF_PHASES, isHandoffPhase } from "../handoff/schema";
-import type { HandoffPhase } from "../handoff/types";
+import {
+  HANDOFF_PHASES,
+  isHandoffPhase,
+  type HandoffPhase,
+} from "@legion/envoy-omp-extension/legion/handoff-schema";
 
 export class CliError extends Error {
   constructor(

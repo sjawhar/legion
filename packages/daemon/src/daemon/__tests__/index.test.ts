@@ -27,6 +27,9 @@ class FakeNats {
   publish(subject: string, data: string): void {
     this.publications.push({ subject, data });
   }
+  async request(_subject: string, _data: string): Promise<string> {
+    return JSON.stringify({ type: "ack" });
+  }
 
   emit(subject: string, data: string): void {
     for (const subscription of this.subscriptions) {
@@ -50,6 +53,7 @@ function config(stateDir: string): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     dispatchUrl: "http://127.0.0.1:13380",
+    dispatchBearer: "dispatch-bearer",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],
     admissionCap: 4,
@@ -122,7 +126,7 @@ describe("startDaemon", () => {
 
       const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ version: 4, project: "acme1" });
+      expect(await response.json()).toMatchObject({ version: 5, project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
         "notifications.github.>",
         "notifications.slack.*.*.mention",

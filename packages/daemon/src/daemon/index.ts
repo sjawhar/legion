@@ -20,6 +20,7 @@ const LINGER_SWEEP_INTERVAL_MS = 60_000;
 export interface NatsTransport {
   subscribe(subject: string, callback: (subject: string, data: string) => void): () => void;
   publish(subject: string, data: string): void;
+  request(subject: string, data: string): Promise<string>;
   ready(): Promise<void>;
   close(): Promise<void>;
 }
@@ -90,6 +91,10 @@ async function createNatsTransport(config: DaemonConfig): Promise<NatsTransport>
     },
     publish(subject, data) {
       connection.publish(subject, codec.encode(data));
+    },
+    async request(subject, data) {
+      const reply = await connection.request(subject, codec.encode(data), { timeout: 10_000 });
+      return codec.decode(reply.data);
     },
     ready() {
       return connection.flush();
@@ -179,7 +184,9 @@ export async function startDaemon(
     config,
     run: deps.runner,
     natsPublish: (subject, data) => nats.publish(subject, data),
+    natsRequest: (subject, data) => nats.request(subject, data),
     mintControllerCapability: async () => api.mintControllerCapability(),
+    mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),
     statPrompt: deps.statPrompt,
     now: deps.now,
   });
@@ -199,6 +206,7 @@ export async function startDaemon(
     tokenManager: deps.tokenManager,
     processManager,
     envoyPublish: deps.envoyPublish,
+    dispatch: { url: config.dispatchUrl, bearer: config.dispatchBearer },
     onTreeReady: emitOverseerCatchup,
   };
   api = startLegionApi({ port: config.port, hostname: "127.0.0.1", gates: config.gates }, apiDeps);

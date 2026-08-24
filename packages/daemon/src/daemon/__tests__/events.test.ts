@@ -99,6 +99,7 @@ function config(): DaemonConfig {
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
     dispatchUrl: "http://127.0.0.1:13380",
+    dispatchBearer: "dispatch-bearer",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion[bot]"],
     admissionCap: 4,

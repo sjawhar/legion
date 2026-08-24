@@ -18,8 +18,12 @@ import {
   PHASE_FILE_NAMES,
   validateHandoffMessage,
   validatePhaseHandoff,
-} from "./schema";
-import type { HandoffMessage, HandoffPhase, PhaseHandoff } from "./types";
+} from "@legion/envoy-omp-extension/legion/handoff-schema";
+import type {
+  HandoffMessage,
+  HandoffPhase,
+  PhaseHandoff,
+} from "@legion/envoy-omp-extension/legion/handoff-schema";
 
 function ensureDir(dir: string): void {
   mkdirSync(dir, { recursive: true });

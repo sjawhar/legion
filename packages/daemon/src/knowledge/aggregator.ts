@@ -1,4 +1,4 @@
-import type { HandoffPhase } from "../handoff/types";
+import type { HandoffPhase } from "@legion/envoy-omp-extension/legion/handoff-schema";
 import {
   type CollectedIssueFeedback,
   type HelpfulIssueContext,

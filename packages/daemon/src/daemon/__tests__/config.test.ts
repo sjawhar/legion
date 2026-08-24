@@ -6,6 +6,7 @@ const requiredEnv = {
   LEGION_ID: "Acme/42",
   ENVOY_NATS_URL: "nats://one:4222, nats://two:4222",
   LEGION_DISPATCH_URL: "http://127.0.0.1:13380",
+  LEGION_DISPATCH_BEARER: "dispatch-bearer",
 };
 
 describe("daemon config", () => {
@@ -29,6 +30,7 @@ describe("daemon config", () => {
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
       dispatchUrl: "http://127.0.0.1:13380",
+      dispatchBearer: "dispatch-bearer",
       boardProjectIds: ["PVT_alpha", "PVT_beta"],
       appLogins: ["legion-implement[bot]", "legion-review[bot]"],
       maxFixAttempts: 5,
@@ -70,7 +72,10 @@ describe("daemon config", () => {
       ].join("\n"),
       "/tmp/legion-config"
     );
-    const { config } = resolveDaemonConfig({ configFile: file, env: {} });
+    const { config } = resolveDaemonConfig({
+      configFile: file,
+      env: { LEGION_DISPATCH_BEARER: "dispatch-bearer" },
+    });
 
     expect(config).toMatchObject({
       project: "acme7",
@@ -79,6 +84,7 @@ describe("daemon config", () => {
       envoyUrl: "http://listener:9020",
       natsUrls: ["nats://one:4222"],
       dispatchUrl: "http://dispatch:13380",
+      dispatchBearer: "dispatch-bearer",
       boardProjectIds: ["PVT_one"],
       appLogins: ["legion-implement[bot]"],
       maxFixAttempts: 4,

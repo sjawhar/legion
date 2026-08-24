@@ -30,6 +30,9 @@
   },
   "include": [
     "extensions/envoy.ts",
-    "extensions/omp-host.d.ts"
+    "extensions/legion.ts",
+    "extensions/legion.test.ts",
+    "extensions/omp-host.d.ts",
+    "src/legion/**/*.ts"
   ]
 }
