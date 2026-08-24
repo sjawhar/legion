@@ -207,6 +207,11 @@ export async function provisionIssueWorkspace(
   const gitDir = path.join(repoCloneDir, ".git");
   const bookmark = `legion/issue-${number}`;
 
+  const workspaceExists = existsSync(workspaceDir);
+  if (workspaceExists) {
+    await runChecked(deps, ["jj", "workspace", "update-stale"], { cwd: workspaceDir });
+  }
+
   const credential = await createProvisioningCredential(
     deps.stateDir,
     await deps.provisioningToken()
@@ -220,11 +225,13 @@ export async function provisionIssueWorkspace(
     await rm(credential.directory, { force: true, recursive: true });
   }
 
-  if (!existsSync(workspaceDir)) {
+  if (!workspaceExists) {
     await createWorkspace(deps, repoCloneDir, workspaceDir, `issue-${number}`, bookmark);
   }
 
-  await runChecked(deps, ["jj", "bookmark", "set", bookmark], { cwd: workspaceDir });
+  await runChecked(deps, ["jj", "bookmark", "set", bookmark, "--allow-backwards"], {
+    cwd: workspaceDir,
+  });
   await runChecked(deps, [
     "git",
     `--git-dir=${gitDir}`,

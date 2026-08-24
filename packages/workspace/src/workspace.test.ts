@@ -50,8 +50,13 @@ async function temporaryDirectory(): Promise<string> {
 
 const STOCK_JJ = ["mise", "x", "github:jj-vcs/jj@0.44.0", "--", "jj"];
 
-async function runCommand(command: string[]): Promise<RunResult> {
-  const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+async function runCommand(command: string[], options?: RunCall["opts"]): Promise<RunResult> {
+  const child = Bun.spawn(command, {
+    cwd: options?.cwd,
+    env: options?.env ? { ...process.env, ...options.env } : undefined,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -108,7 +113,7 @@ describe("provisionIssueWorkspace", () => {
         "-R",
         repoCloneDir,
       ],
-      ["jj", "bookmark", "set", bookmark],
+      ["jj", "bookmark", "set", bookmark, "--allow-backwards"],
       [
         "git",
         `--git-dir=${repoCloneDir}/.git`,
@@ -216,12 +221,13 @@ describe("provisionIssueWorkspace", () => {
       workspaceDir,
       bookmark: "legion/issue-42",
     });
-    const fetch = calls[0];
+    const fetch = calls[1];
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
     expect(calls.map((call) => call.cmd)).toEqual([
+      ["jj", "workspace", "update-stale"],
       ["jj", "git", "fetch", "-R", repoCloneDir],
-      ["jj", "bookmark", "set", "legion/issue-42"],
+      ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
       [
         "git",
         `--git-dir=${repoCloneDir}/.git`,
@@ -230,6 +236,81 @@ describe("provisionIssueWorkspace", () => {
         "!legion credential",
       ],
     ]);
+  });
+
+  test("repairs a stale reused workspace after its remote issue branch is deleted", async () => {
+    for (const { name, command } of [
+      { name: "local Sami JJ", command: ["jj"] },
+      { name: "stock JJ 0.44", command: STOCK_JJ },
+    ]) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const issue = formatIssueKey("acme", "widgets", 42);
+      const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+      const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+      const remoteDir = path.join(stateDir, "remote");
+      const siblingDir = path.join(stateDir, "sibling");
+      const bookmark = "legion/issue-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      const runSuccessfully = async (args: string[], options?: RunCall["opts"]) => {
+        const result = await runCommand([...command, ...args], options);
+        expect(result.exitCode, `${name}: ${args.join(" ")}\n${result.stderr}`).toBe(0);
+        return result;
+      };
+      const deps = {
+        extensionPackage,
+        stateDir,
+        provisioningToken: async () => "installation-token",
+        run: (cmd: string[], opts?: RunCall["opts"]) =>
+          runCommand(cmd[0] === "jj" ? [...command, ...cmd.slice(1)] : cmd, opts),
+      };
+
+      await mkdir(path.dirname(repoCloneDir), { recursive: true });
+      await runSuccessfully(["git", "init", "--colocate", remoteDir]);
+      await runSuccessfully(["git", "init", "--colocate", repoCloneDir]);
+      await runSuccessfully(["bookmark", "set", "main"], { cwd: repoCloneDir });
+      await runSuccessfully(["git", "remote", "add", "origin", remoteDir], { cwd: repoCloneDir });
+
+      await provisionIssueWorkspace(issue, deps);
+      await runSuccessfully([
+        "workspace",
+        "add",
+        siblingDir,
+        "--name",
+        "sibling",
+        "--revision",
+        "main",
+        "-R",
+        repoCloneDir,
+      ]);
+      await runSuccessfully(["new", "-m", "sibling advancement"], { cwd: siblingDir });
+      await runSuccessfully(["bookmark", "set", "sibling-advance"], { cwd: siblingDir });
+      await runSuccessfully(
+        ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
+        { cwd: repoCloneDir }
+      );
+      await runSuccessfully(["bookmark", "delete", bookmark], { cwd: repoCloneDir });
+      await runSuccessfully(
+        ["git", "push", "--remote", "origin", "--deleted", "--allow-empty-description"],
+        { cwd: repoCloneDir }
+      );
+      expect(
+        (await runCommand([...command, "bookmark", "list", bookmark], { cwd: remoteDir })).stdout
+      ).not.toContain(bookmark);
+      await runSuccessfully(
+        ["bookmark", "set", "--revision", "sibling-advance", "--allow-backwards", bookmark],
+        { cwd: repoCloneDir }
+      );
+
+      await expect(provisionIssueWorkspace(issue, deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(
+        (await runCommand([...command, "bookmark", "list", bookmark], { cwd: workspaceDir })).stdout
+      ).toContain(bookmark);
+    }
   });
 
   test("recovers a jj registration for a deleted issue workspace", async () => {
@@ -304,7 +385,7 @@ describe("provisionIssueWorkspace", () => {
         "-R",
         repoCloneDir,
       ],
-      ["jj", "bookmark", "set", "legion/issue-42"],
+      ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
       ["git", `--git-dir=${gitDir}`, "config", "credential.helper", "!legion credential"],
     ]);
   });
