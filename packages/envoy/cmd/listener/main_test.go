@@ -455,15 +455,13 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	// Set B as the KV value that the core handler must resolve. This models a
 	// publish that races the handover: the single listener chooses one current
 	// owner, rather than relying on two holders to observe the change first.
-	if _, err := harness.registry.SetRole("ses_role_b", "test-machine", role); err != nil {
-		t.Fatalf("transfer role to B: %v", err)
-	}
-	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
-		MachineID:      "test-machine",
-		Port:           1,
-		SelfSubscribed: true,
-	}); err != nil {
-		t.Fatalf("register live holder B: %v", err)
+	claimState := atomic.Pointer[listenerDeps]{}
+	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	claimRecorder := httptest.NewRecorder()
+	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role_b","role":"legion-delivery"}`))
+	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	if claimRecorder.Code != http.StatusOK {
+		t.Fatalf("claim B role without prior registration: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
 
 	probeA, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_a"))
@@ -743,9 +741,9 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 }
 
 func TestRoleSetHandler_SetsRole(t *testing.T) {
-	registry := setupAdminTestRegistry(t, nil)
+	registry, sessions := setupSessionsTest(t, nil, nil)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry})
+	state.Store(&listenerDeps{registry: registry, sessions: sessions})
 	handler := roleSetHandler(&state, "test-machine")
 
 	rec := httptest.NewRecorder()
@@ -777,6 +775,30 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 	}
 	if len(persisted.Topics) != 1 || persisted.Topics[0] != "notifications.role.legion-controller" {
 		t.Fatalf("expected persisted role topic, got %v", persisted.Topics)
+	}
+
+	registered, err := sessions.Get("ses_role")
+	if err != nil {
+		t.Fatalf("role claim did not register session: %v", err)
+	}
+	if !registered.SelfSubscribed {
+		t.Fatal("role claim session registration is not self-subscribed")
+	}
+	firstUpdatedAt := registered.UpdatedAt
+	time.Sleep(time.Millisecond)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role","role":"legion-controller"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected re-claim 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	refreshed, err := sessions.Get("ses_role")
+	if err != nil {
+		t.Fatalf("read re-claimed session: %v", err)
+	}
+	if refreshed.UpdatedAt <= firstUpdatedAt {
+		t.Fatalf("re-claim did not refresh session heartbeat: first=%d refreshed=%d", firstUpdatedAt, refreshed.UpdatedAt)
 	}
 }
 

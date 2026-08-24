@@ -687,8 +687,22 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			return
 		}
 		d := state.Load()
-		if d == nil || d.registry == nil {
+		if d == nil || d.registry == nil || d.sessions == nil {
 			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			return
+		}
+		entry, err := d.sessions.Get(body.SessionID)
+		if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			http.Error(w, "read session registration: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			entry = session.SessionEntry{}
+		}
+		entry.MachineID = machineID
+		entry.SelfSubscribed = true
+		if err := d.sessions.Put(body.SessionID, entry); err != nil {
+			http.Error(w, "register role claimant: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role)
