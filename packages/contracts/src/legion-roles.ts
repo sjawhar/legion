@@ -55,10 +55,10 @@ function decodeIssuePart(part: string): string | undefined {
       continue;
     }
 
-    const escape = part[index + 1];
-    if (escape === "u") decoded += "_";
-    else if (escape === "d") decoded += ".";
-    else if (escape === "h") decoded += "-";
+    const escapeCode = part[index + 1];
+    if (escapeCode === "u") decoded += "_";
+    else if (escapeCode === "d") decoded += ".";
+    else if (escapeCode === "h") decoded += "-";
     else return undefined;
     index += 1;
   }
@@ -69,14 +69,21 @@ export function formatIssueKey(owner: string, repo: string, number: number): Iss
   return `${owner}/${repo}#${number}`;
 }
 
-export function parseIssueKey(s: string): { owner: string; repo: string; number: number } | undefined {
+export function parseIssueKey(
+  s: string
+): { owner: string; repo: string; number: number } | undefined {
   const match = /^([^/#]+)\/([^/#]+)#(\d+)$/.exec(s);
   if (!match) return undefined;
 
-  const number = Number(match[3]);
+  const owner = match[1];
+  const repo = match[2];
+  const numberPart = match[3];
+  if (!owner || !repo || !numberPart) return undefined;
+
+  const number = Number(numberPart);
   if (!Number.isSafeInteger(number)) return undefined;
 
-  return { owner: match[1], repo: match[2], number };
+  return { owner, repo, number };
 }
 
 export function sanitizeToken(part: string): string {
@@ -123,17 +130,26 @@ export function parseRoleToken(
   const rest = token.slice(prefix.length);
   if (rest === "controller") return { controller: true };
 
-  const match = /^([a-z0-9_]+)__([a-z0-9_]+)-(\d+)-(architect|planner|implementer|tester|reviewer|merger)$/.exec(rest);
-  if (!match || !isLegionRole(match[4])) return undefined;
+  const match =
+    /^([a-z0-9_]+)__([a-z0-9_]+)-(\d+)-(architect|planner|implementer|tester|reviewer|merger)$/.exec(
+      rest
+    );
+  if (!match) return undefined;
 
-  const owner = decodeIssuePart(match[1]);
-  const repo = decodeIssuePart(match[2]);
-  const number = Number(match[3]);
+  const ownerPart = match[1];
+  const repoPart = match[2];
+  const numberPart = match[3];
+  const role = match[4];
+  if (!ownerPart || !repoPart || !numberPart || !role || !isLegionRole(role)) return undefined;
+
+  const owner = decodeIssuePart(ownerPart);
+  const repo = decodeIssuePart(repoPart);
+  const number = Number(numberPart);
   if (!owner || !repo || !Number.isSafeInteger(number)) return undefined;
 
   return {
     project,
     issue: formatIssueKey(owner, repo, number),
-    role: match[4],
+    role,
   };
 }

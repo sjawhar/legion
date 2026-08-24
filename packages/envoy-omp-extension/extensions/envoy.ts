@@ -89,10 +89,15 @@ const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.envoy-omp-extension.role-cla
 
 function legionRoleClaimBridge(): LegionRoleClaimBridge {
   const store = globalThis as typeof globalThis & GlobalLegionRoleClaimBridgeStore;
-  return (store[LEGION_ROLE_CLAIM_BRIDGE] ??= {
+  const bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
+  if (bridge) return bridge;
+
+  const createdBridge = {
     claim: undefined,
     ready: Promise.withResolvers<LegionRoleClaim>(),
-  });
+  };
+  store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
+  return createdBridge;
 }
 
 export async function claimEnvoyRole(
