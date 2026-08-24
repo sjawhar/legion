@@ -1371,6 +1371,8 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 			// Given
 			harness := newListenerDeliveryHarness(t, nil)
 			item := listenerTestEnvelope(tc.topic, "dedupe-no-holder-"+tc.name)
+			item.Payload = `{"reason":"no_holder"}`
+			item.SourceSession = "ses_source_" + tc.name
 			exceptionTopic := "notifications.envoy.exceptions." + tc.topic
 			probe, err := harness.client.Conn.SubscribeSync(exceptionTopic)
 			if err != nil {
@@ -1444,6 +1446,8 @@ func TestListenerDeliveryHandler_RetriesFailedDelivery(t *testing.T) {
 		return nil, errors.New("prompt_async unavailable")
 	}))
 	item := listenerTestEnvelope(contracts.AgentSubject("ses_retry"), "dedupe-retry")
+	item.Payload = `{"reason":"delivery_failed"}`
+	item.SourceSession = "ses_source_delivery_failed"
 	harness.registerTarget(t, "ses_retry", item.Topic)
 	data := marshalListenerEnvelope(t, item)
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -1752,12 +1756,37 @@ func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original 
 		EventID        string `json:"event_id"`
 		Reason         string `json:"reason"`
 		PayloadSummary string `json:"payload_summary"`
+		Payload        string `json:"payload"`
+		DedupeKey      string `json:"dedupe_key"`
+		Source         string `json:"source"`
+		SourceSession  string `json:"source_session"`
 	}
 	if err := json.Unmarshal([]byte(exception.Payload), &payload); err != nil {
 		t.Fatalf("decode exception payload: %v", err)
 	}
-	if payload.OriginalTopic != original.Topic || payload.EventID != original.EventID || payload.Reason != reason || payload.PayloadSummary != original.PayloadSummary {
-		t.Fatalf("unexpected exception payload: %+v", payload)
+	if payload.OriginalTopic != original.Topic {
+		t.Fatalf("exception original topic = %q, want %q", payload.OriginalTopic, original.Topic)
+	}
+	if payload.EventID != original.EventID {
+		t.Fatalf("exception event ID = %q, want %q", payload.EventID, original.EventID)
+	}
+	if payload.Reason != reason {
+		t.Fatalf("exception reason = %q, want %q", payload.Reason, reason)
+	}
+	if payload.PayloadSummary != original.PayloadSummary {
+		t.Fatalf("exception payload summary = %q, want %q", payload.PayloadSummary, original.PayloadSummary)
+	}
+	if payload.Payload != original.Payload {
+		t.Fatalf("exception payload = %q, want %q", payload.Payload, original.Payload)
+	}
+	if payload.DedupeKey != original.DedupeKey {
+		t.Fatalf("exception dedupe key = %q, want %q", payload.DedupeKey, original.DedupeKey)
+	}
+	if payload.Source != original.Source {
+		t.Fatalf("exception source = %q, want %q", payload.Source, original.Source)
+	}
+	if payload.SourceSession != original.SourceSession {
+		t.Fatalf("exception source session = %q, want %q", payload.SourceSession, original.SourceSession)
 	}
 }
 

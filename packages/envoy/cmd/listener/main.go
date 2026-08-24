@@ -97,6 +97,10 @@ type deliveryExceptionPayload struct {
 	EventID        string `json:"event_id"`
 	Reason         string `json:"reason"`
 	PayloadSummary string `json:"payload_summary"`
+	Payload        string `json:"payload"`
+	DedupeKey      string `json:"dedupe_key"`
+	Source         string `json:"source"`
+	SourceSession  string `json:"source_session"`
 }
 
 func isControlTopic(topic string) bool {
@@ -113,6 +117,10 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		EventID:        item.EventID,
 		Reason:         reason,
 		PayloadSummary: item.PayloadSummary,
+		Payload:        item.Payload,
+		DedupeKey:      item.DedupeKey,
+		Source:         item.Source,
+		SourceSession:  item.SourceSession,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal delivery exception: %w", err)
