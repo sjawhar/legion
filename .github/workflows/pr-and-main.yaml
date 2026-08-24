@@ -50,12 +50,14 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Setup mise
-        uses: jdx/mise-action@v3
-        with:
-          version: "2026.8.12"
-          tool_versions: |
-            github:jj-vcs/jj 0.44.0
+      - name: Install daemon live-test tools
+        env:
+          MISE_VERSION: v2026.8.12
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
 
       - name: Verify daemon live-test tools
         run: |

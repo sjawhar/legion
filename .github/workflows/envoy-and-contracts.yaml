@@ -129,6 +129,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
+      - name: Install extension test tools
+        env:
+          MISE_VERSION: v2026.8.12
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
+      - name: Verify extension test tools
+        run: |
+          mise env --json
+          jj --version
       - run: bun install --frozen-lockfile
       - name: Build contracts for envoy-omp-extension
         run: bun run build

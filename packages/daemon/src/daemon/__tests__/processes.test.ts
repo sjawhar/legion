@@ -1145,8 +1145,9 @@ describe("ProcessManager", () => {
       const state = newLegionState(project, 1);
       const session = `legion-${project}`;
       const commandRunner = async (command: string[]) => {
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
-          command[0] === "tmux" && command[1] === "new-window"
+          command[1] === "new-window"
             ? [...command.slice(0, -1), "sleep 999"]
             : command;
         const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
