@@ -14,8 +14,10 @@ import (
 
 type streamInfoJetStream struct {
 	nats.JetStreamContext
-	config         nats.StreamConfig
-	purgedSubjects []string
+	config                    nats.StreamConfig
+	purgedSubjects            []string
+	roleMessages              int
+	injectRoleMessageOnUpdate bool
 }
 
 func (js *streamInfoJetStream) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
@@ -23,6 +25,10 @@ func (js *streamInfoJetStream) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.Stre
 }
 
 func (js *streamInfoJetStream) UpdateStream(cfg *nats.StreamConfig, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
+	if js.injectRoleMessageOnUpdate {
+		js.roleMessages++
+		js.injectRoleMessageOnUpdate = false
+	}
 	js.config = *cfg
 	return &nats.StreamInfo{Config: js.config}, nil
 }
@@ -30,8 +36,12 @@ func (js *streamInfoJetStream) UpdateStream(cfg *nats.StreamConfig, _ ...nats.JS
 func (js *streamInfoJetStream) PurgeStream(_ string, opts ...nats.JSOpt) error {
 	for _, opt := range opts {
 		request, ok := opt.(*nats.StreamPurgeRequest)
-		if ok && request.Subject != "" {
-			js.purgedSubjects = append(js.purgedSubjects, request.Subject)
+		if !ok || request.Subject == "" {
+			continue
+		}
+		js.purgedSubjects = append(js.purgedSubjects, request.Subject)
+		if request.Subject == "notifications.role.>" || request.Subject == "notifications.envoy.exceptions.notifications.role.>" {
+			js.roleMessages = 0
 		}
 	}
 	return nil
@@ -163,9 +173,36 @@ func TestEnsureStreamWithConfigPurgesLegacyRoleMessages(t *testing.T) {
 	wantPurgedSubjects := []string{
 		"notifications.role.>",
 		"notifications.envoy.exceptions.notifications.role.>",
+		"notifications.role.>",
+		"notifications.envoy.exceptions.notifications.role.>",
 	}
 	if !reflect.DeepEqual(js.purgedSubjects, wantPurgedSubjects) {
 		t.Fatalf("purged subjects = %v, want %v", js.purgedSubjects, wantPurgedSubjects)
+	}
+}
+
+func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *testing.T) {
+	oldConfig := *streamCfg
+	oldConfig.Subjects = []string{"notifications.>"}
+	js := &streamInfoJetStream{
+		config:                    oldConfig,
+		injectRoleMessageOnUpdate: true,
+	}
+
+	if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+		t.Fatalf("ensure stream: %v", err)
+	}
+	if js.roleMessages != 0 {
+		t.Fatalf("legacy role messages published during migration remained: %d", js.roleMessages)
+	}
+	wantPurges := []string{
+		"notifications.role.>",
+		"notifications.envoy.exceptions.notifications.role.>",
+		"notifications.role.>",
+		"notifications.envoy.exceptions.notifications.role.>",
+	}
+	if !reflect.DeepEqual(js.purgedSubjects, wantPurges) {
+		t.Fatalf("purged subjects = %v, want %v", js.purgedSubjects, wantPurges)
 	}
 }
 

@@ -52,6 +52,8 @@ var rolePattern = regexp.MustCompile(rolePatternString)
 // without re-entering the arbiter.
 const roleForwardDedupePrefix = "envoy.role.forward."
 
+const roleReceiptTimeout = 2 * time.Second
+
 func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
 }
@@ -286,7 +288,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			cfg.attemptCache.Record(item.DedupeKey, sessionID)
 			forwarded := item
 			forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-			if err := cfg.client.PublishCoreTo(contracts.AgentSubject(sessionID), forwarded); err != nil {
+			if err := cfg.client.RequestCoreTo(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
 				cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
 				cfg.logger.DeliveryLog(slog.LevelError, "listener role forward failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
@@ -545,6 +547,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			SourceSession  string `json:"source_session"`
 			Topic          string `json:"topic"`
 			Message        string `json:"message"`
+			Payload        string `json:"payload"`
 			IdempotencyKey string `json:"idempotency_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -575,6 +578,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			DedupeKey:      dedupeKey,
 			IssuedAt:       contracts.NowMillis(),
 			PayloadSummary: body.Message,
+			Payload:        body.Payload,
 			TraceID:        id.New(),
 		}
 		if err := item.Validate(); err != nil {

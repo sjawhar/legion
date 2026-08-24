@@ -474,6 +474,15 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatalf("subscribe B agent subject: %v", err)
 	}
 	t.Cleanup(func() { _ = probeB.Unsubscribe() })
+	receiptResponder, err := harness.client.Conn.Subscribe(contracts.AgentSubject("ses_role_b"), func(message *natsgo.Msg) {
+		if message.Reply != "" {
+			_ = message.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe B receipt responder: %v", err)
+	}
+	t.Cleanup(func() { _ = receiptResponder.Unsubscribe() })
 	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
 	if err != nil {
 		t.Fatalf("subscribe to core role lane: %v", err)
@@ -586,6 +595,93 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	if info.State.Msgs != 2 {
 		t.Fatalf("agent-subject role forwards were captured %d times, want two", info.State.Msgs)
 	}
+}
+
+func TestPublishHandler_RoleNoHolderExceptionPreservesPayload(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	roleTopic := contracts.RoleTopicPrefix + "payload-no-holder"
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role arbiter: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscriptions: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client})
+	payload := `{"kind":"role-event","number":42}`
+	requestBody, err := json.Marshal(map[string]string{
+		"topic":   roleTopic,
+		"message": "structured role event",
+		"payload": payload,
+		"source":  "agent",
+	})
+	if err != nil {
+		t.Fatalf("marshal structured role request: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(string(requestBody)))
+	publishHandler(&state).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("publish role payload: status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var published contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+		t.Fatalf("decode published envelope: %v", err)
+	}
+
+	if published.Payload != payload {
+		t.Fatalf("published payload = %q, want %q", published.Payload, payload)
+	}
+	assertDeliveryException(t, exceptionProbe, published, "no_holder")
+}
+func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	role := "fresh-deaf-holder"
+	roleTopic := contracts.RoleTopicPrefix + role
+	var claimState atomic.Pointer[listenerDeps]
+	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	claimRecorder := httptest.NewRecorder()
+	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_deaf","role":"`+role+`"}`))
+	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	if claimRecorder.Code != http.StatusOK {
+		t.Fatalf("claim deaf holder: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
+	}
+
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role arbiter: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscriptions: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","source":"agent"}`))
+	publishHandler(&state).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var published contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+		t.Fatalf("decode published envelope: %v", err)
+	}
+	assertDeliveryException(t, exceptionProbe, published, "delivery_failed")
 }
 
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {

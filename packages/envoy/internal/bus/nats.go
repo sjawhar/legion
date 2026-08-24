@@ -310,12 +310,18 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		if info.Config.MaxAge == cfg.MaxAge && slices.Equal(info.Config.Subjects, cfg.Subjects) {
 			return nil
 		}
+		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(cfg.Subjects)
 		if err := migrateRoleLanesOffStream(js, &info.Config, cfg); err != nil {
 			return err
 		}
 		// Updating here reconciles the deployed stream on the next listener start.
-		_, err = js.UpdateStream(cfg)
-		return err
+		if _, err = js.UpdateStream(cfg); err != nil {
+			return err
+		}
+		if migratingRoleLanes {
+			return purgeLegacyRoleMessages(js)
+		}
+		return nil
 	}
 	if !errors.Is(err, nats.ErrStreamNotFound) {
 		return err
@@ -605,4 +611,45 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 		return err
 	}
 	return c.Conn.Publish(subject, data)
+}
+
+// RequestCoreTo delivers item directly to subject and waits for an empty
+// receiver receipt. Agent subjects are captured by the notification stream,
+// whose non-empty JetStream publish acknowledgement is not a receiver receipt.
+func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
+	data, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := c.ensureConnWithContext(ctx); err != nil {
+		return err
+	}
+	deadline, _ := ctx.Deadline()
+	inbox := nats.NewInbox()
+	receipt, err := c.Conn.SubscribeSync(inbox)
+	if err != nil {
+		return err
+	}
+	defer receipt.Unsubscribe()
+	if err := c.Conn.PublishRequest(subject, inbox, data); err != nil {
+		return err
+	}
+	if err := c.Conn.Flush(); err != nil {
+		return err
+	}
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nats.ErrTimeout
+		}
+		response, err := receipt.NextMsg(remaining)
+		if err != nil {
+			return err
+		}
+		if len(response.Data) == 0 && response.Header == nil {
+			return nil
+		}
+	}
 }

@@ -93,31 +93,37 @@ export default function envoyExtension(pi: PiApi): void {
     return connection;
   };
 
-  const deliver = async (subject: string, raw: string): Promise<void> => {
+  const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
     let summary = raw;
     let source = "";
     let displayTopic = subject;
+    let duplicate = false;
     try {
       const display = toEnvelopeDisplay(JSON.parse(raw));
-      if (dedupeKeys.has(display.dedupeKey)) return;
-      dedupeKeys.add(display.dedupeKey);
-      if (dedupeKeys.size > 1000) {
-        const oldest = dedupeKeys.values().next();
-        if (!oldest.done) dedupeKeys.delete(oldest.value);
+      duplicate = dedupeKeys.has(display.dedupeKey);
+      if (!duplicate) {
+        dedupeKeys.add(display.dedupeKey);
+        if (dedupeKeys.size > 1000) {
+          const oldest = dedupeKeys.values().next();
+          if (!oldest.done) dedupeKeys.delete(oldest.value);
+        }
+        summary = display.summary;
+        source = display.sourceSessionID === undefined ? "" : ` from ${display.sourceSessionID}`;
+        displayTopic = display.topic;
       }
-      summary = display.summary;
-      source = display.sourceSessionID === undefined ? "" : ` from ${display.sourceSessionID}`;
-      displayTopic = display.topic;
     } catch {
       summary = raw;
     }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    pi.sendMessage(
-      { customType: "envoy-message", content: `[ENVOY message on topic "${displayTopic}"${source}]\n${summary}`, display: true },
-      { deliverAs: "steer", triggerTurn: true },
-    );
+    if (!duplicate) {
+      pi.sendMessage(
+        { customType: "envoy-message", content: `[ENVOY message on topic "${displayTopic}"${source}]\n${summary}`, display: true },
+        { deliverAs: "steer", triggerTurn: true },
+      );
+    }
+    if (reply !== "" && subject === agentSubject(sessionID)) (await ensureConnection()).publish(reply);
   };
 
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
@@ -159,7 +165,7 @@ export default function envoyExtension(pi: PiApi): void {
     try {
       for await (const message of subscription) {
         try {
-          await deliver(message.subject, codec.decode(message.data));
+          await deliver(message.subject, codec.decode(message.data), message.reply ?? "");
         } catch {
           // A single failed injection (e.g. sendMessage during compaction)
           // must not tear down the subscription; drop the message and keep

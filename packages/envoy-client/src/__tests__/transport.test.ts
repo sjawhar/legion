@@ -151,12 +151,14 @@ describe("EnvoyClient", () => {
       sourceSessionID: "ses_sender",
       topic: "notifications.role.controller",
       message: "broadcast",
+      payload: `{"kind":"role-event"}`,
     });
 
     expect(await recorded.requests[0]?.json()).toEqual({
       source_session: "ses_sender",
       topic: "notifications.role.controller",
       message: "broadcast",
+      payload: `{"kind":"role-event"}`,
     });
   });
 

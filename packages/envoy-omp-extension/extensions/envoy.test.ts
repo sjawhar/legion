@@ -47,12 +47,15 @@ type TestPi = {
 
 type Subscription = {
   readonly unsubscribe: () => void;
-  readonly [Symbol.asyncIterator]: () => AsyncIterator<{ readonly subject: string; readonly data: Uint8Array }>;
+  readonly [Symbol.asyncIterator]: () => AsyncIterator<{
+    readonly subject: string;
+    readonly data: Uint8Array;
+    readonly reply: string;
+  }>;
 };
 
-
 type SubscriptionControls = {
-  readonly push: (data: string) => void;
+  readonly push: (data: string, reply?: string) => void;
   readonly end: () => void;
   readonly fail: (error: Error) => void;
   readonly active: () => boolean;
@@ -62,6 +65,7 @@ const natsState = {
   subscriptions: new Map<string, Subscription>(),
   controls: new Map<string, SubscriptionControls>(),
   controlsByTopic: new Map<string, SubscriptionControls[]>(),
+  published: [] as { readonly subject: string; readonly data: Uint8Array | undefined }[],
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
@@ -85,9 +89,10 @@ mock.module("nats", () => ({
       drain: async () => {
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
       },
+      publish: (subject: string, data?: Uint8Array) => natsState.published.push({ subject, data }),
       subscribe: (topic: string) => {
         let active = true;
-        const queue: { readonly subject: string; readonly data: Uint8Array }[] = [];
+        const queue: { readonly subject: string; readonly data: Uint8Array; readonly reply: string }[] = [];
         let wake: (() => void) | undefined;
         let ended = false;
         let failure: Error | undefined;
@@ -96,8 +101,8 @@ mock.module("nats", () => ({
           wake = undefined;
         };
         const controls = {
-          push: (data: string) => {
-            queue.push({ subject: topic, data: new TextEncoder().encode(data) });
+          push: (data: string, reply = "") => {
+            queue.push({ subject: topic, data: new TextEncoder().encode(data), reply });
             notify();
           },
           end: () => {
@@ -124,7 +129,9 @@ mock.module("nats", () => ({
             notify();
           },
           [Symbol.asyncIterator]: () => ({
-            next: async (): Promise<IteratorResult<{ readonly subject: string; readonly data: Uint8Array }>> => {
+            next: async (): Promise<
+              IteratorResult<{ readonly subject: string; readonly data: Uint8Array; readonly reply: string }>
+            > => {
               for (;;) {
                 if (failure) throw failure;
                 if (!active || ended) return { done: true, value: undefined };
@@ -169,6 +176,7 @@ afterEach(() => {
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   natsState.connectedNames.length = 0;
+  natsState.published.length = 0;
   natsState.subscriptions.clear();
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
@@ -991,6 +999,30 @@ describe("envoy OMP extension", () => {
     expect(fixture.deliveries.length).toBe(1);
     expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+  });
+
+  test("acknowledges an agent-subject request after steering injection", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?agent-receipt");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_receipt"));
+    const controls = natsState.controls.get("notifications.agent.ses_receipt");
+    if (controls === undefined) throw new Error("agent subject was not subscribed");
+
+    controls.push(forwardedRoleEnvelope("legion-controller", "receipt event", "agent-receipt"), "_INBOX.receipt");
+    await injected.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.receipt"]);
   });
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {
