@@ -268,7 +268,7 @@ describe("ProcessManager", () => {
         `LEGION_STATE_DIR=${stateDir}`,
         "-e",
         "PATH=/full/bin:/usr/bin",
-        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
+        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
       ],
     ]);
     expect(workspaceCalls).toContainEqual({
@@ -286,7 +286,7 @@ describe("ProcessManager", () => {
       },
     });
   });
-  it("uses the resolved OMP invocation and full PATH for root and controller windows", async () => {
+  it("passes the packaged extension root to OMP discovery for root and controller windows", async () => {
     const stateDir = await temporaryDir();
     const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
     const panePath = "/full/bin:/usr/bin";
@@ -308,8 +308,8 @@ describe("ProcessManager", () => {
     const extensionDir = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
-      `cd ${controllerDir} && ${ompInvocation} --append-system-prompt "$(cat ${extensionDir}/agents/controller-root.md)"`,
+      `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
+      `cd ${controllerDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/controller-root.md)"`,
     ]);
     expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
   });

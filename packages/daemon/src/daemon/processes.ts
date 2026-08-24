@@ -576,7 +576,7 @@ export class ProcessManager {
       `LEGION_STATE_DIR=${this.deps.config.stateDir}`,
       "-e",
       `PATH=${this.deps.panePath}`,
-      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
@@ -613,7 +613,7 @@ export class ProcessManager {
       `ENVOY_URL=${this.deps.config.envoyUrl}`,
       "-e",
       `PATH=${this.deps.panePath}`,
-      `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);

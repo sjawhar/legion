@@ -28,12 +28,8 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
-const {
-  default: legionExtension,
-  classifySession,
-  handleLegionControlDirective,
-  registerWorkerBudgetPermit,
-} = await import("./legion");
+const { default: legionExtension, classifySession, handleLegionControlDirective } =
+  await import("./legion");
 
 type SessionContext = {
   readonly cwd: string;
@@ -421,7 +417,7 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_TREE = tree;
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     process.env.LEGION_STATE_DIR = stateDir;
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = (async (input, _init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/legion/v1/process/started") {
         return Response.json({
