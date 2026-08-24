@@ -17,6 +17,17 @@ type ToolResult = {
   readonly isError?: boolean;
 };
 
+type RoleWatch = {
+  readonly waitForSelf: () => Promise<void>;
+  readonly stop: () => void;
+};
+
+type RoleWatchWaiter = {
+  readonly promise: Promise<void>;
+  readonly resolve: () => void;
+  readonly reject: (reason?: unknown) => void;
+};
+
 type SessionContext = {
   readonly cwd: string;
   readonly sessionManager: { readonly getSessionId: () => string };
@@ -61,6 +72,7 @@ type PiApi = {
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
+const ROLE_KV_BUCKET = "envoy_roles";
 const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
 
 export default function envoyExtension(pi: PiApi): void {
@@ -74,6 +86,7 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionID = "";
   let heartbeatRegistered = false;
   let roleSubscriptionTopic: string | undefined;
+  const roleWatches = new Map<string, RoleWatch>();
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -92,16 +105,10 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const deliver = async (subject: string, raw: string): Promise<void> => {
-    if (subject.startsWith(ROLE_TOPIC_PREFIX)) {
-      const holder = (await client.listSessions()).find((session) => session.topics.includes(subject));
-      if (holder?.session_id !== sessionID) {
-        if (roleSubscriptionTopic === subject) {
-          roleSubscriptionTopic = undefined;
-          closeIntentionally(subject);
-        }
-        return;
-      }
-    }
+    // A role subscription is live only while its direct roleKV watch names
+    // this session as holder. The guard also drops messages the NATS iterator
+    // had queued before a takeover closed the subscription.
+    if (subject.startsWith(ROLE_TOPIC_PREFIX) && roleSubscriptionTopic !== subject) return;
     let summary = raw;
     let source = "";
     try {
@@ -158,6 +165,93 @@ export default function envoyExtension(pi: PiApi): void {
     subscription.unsubscribe();
     subscriptions.delete(topic);
     return true;
+  };
+
+  const stopRoleWatch = (topic: string): void => {
+    const watch = roleWatches.get(topic);
+    if (watch === undefined) return;
+    roleWatches.delete(topic);
+    watch.stop();
+  };
+
+  const closeRoleSubscription = (topic: string): void => {
+    if (roleSubscriptionTopic !== topic) return;
+    roleSubscriptionTopic = undefined;
+    closeIntentionally(topic);
+    stopRoleWatch(topic);
+  };
+
+  const watchRole = async (topic: string): Promise<RoleWatch> => {
+    const existing = roleWatches.get(topic);
+    if (existing !== undefined) return existing;
+
+    const role = topic.slice(ROLE_TOPIC_PREFIX.length);
+    const initialized = Promise.withResolvers<void>();
+    const roleKV = await (await ensureConnection()).jetstream().views.kv(ROLE_KV_BUCKET);
+    const updates = await roleKV.watch({
+      key: role,
+      initializedFn: initialized.resolve,
+    });
+    let holder: string | undefined;
+    let stopped = false;
+    let waiter: RoleWatchWaiter | undefined;
+    const stoppedError = () => new Error(`role ownership watch stopped for ${topic}`);
+    const roleWatch: RoleWatch = {
+      waitForSelf: async () => {
+        if (holder !== sessionID) {
+          if (stopped) throw stoppedError();
+          waiter ??= Promise.withResolvers<void>();
+          await waiter.promise;
+        }
+        if (holder !== sessionID) throw new Error(`role ${role} is no longer held by this session`);
+      },
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        updates.stop();
+        initialized.reject(stoppedError());
+        waiter?.reject(stoppedError());
+      },
+    };
+    roleWatches.set(topic, roleWatch);
+
+    const abandon = (error: Error): void => {
+      if (!stopped) {
+        stopped = true;
+        updates.stop();
+      }
+      if (roleWatches.get(topic) === roleWatch) roleWatches.delete(topic);
+      initialized.reject(error);
+      waiter?.reject(error);
+      if (roleSubscriptionTopic === topic) {
+        roleSubscriptionTopic = undefined;
+        closeIntentionally(topic);
+      }
+    };
+
+    void (async () => {
+      try {
+        for await (const entry of updates) {
+          holder = entry.operation === "PUT" ? entry.string() : undefined;
+          if (holder === sessionID) {
+            waiter?.resolve();
+            continue;
+          }
+          if (roleSubscriptionTopic === topic) {
+            closeRoleSubscription(topic);
+            continue;
+          }
+          if (waiter !== undefined) stopRoleWatch(topic);
+        }
+      } catch (error) {
+        abandon(error instanceof Error ? error : new Error(`role ownership watch failed for ${topic}`));
+        return;
+      }
+      if (!stopped && roleWatches.get(topic) === roleWatch) abandon(stoppedError());
+    })();
+
+    await initialized.promise;
+    return roleWatch;
   };
 
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
@@ -333,6 +427,9 @@ export default function envoyExtension(pi: PiApi): void {
     } catch {
       // A failed drain on shutdown is not actionable.
     } finally {
+      for (const watch of roleWatches.values()) watch.stop();
+      roleWatches.clear();
+      roleSubscriptionTopic = undefined;
       connection = undefined;
       subscriptions.clear();
       intentionallyClosed.clear();
@@ -371,7 +468,9 @@ export default function envoyExtension(pi: PiApi): void {
           const targets = topicsFor(parameters, [...subscriptions.keys()]);
           const removed = targets.filter((topic) => closeIntentionally(topic));
           if (roleSubscriptionTopic !== undefined && removed.includes(roleSubscriptionTopic)) {
+            const releasedRoleTopic = roleSubscriptionTopic;
             roleSubscriptionTopic = undefined;
+            stopRoleWatch(releasedRoleTopic);
           }
           const registrationError =
             removed.length === 0
@@ -410,11 +509,19 @@ export default function envoyExtension(pi: PiApi): void {
           const role = stringFor(parameters, "role");
           const topic = ROLE_TOPIC_PREFIX + role;
           const previousTopic = roleSubscriptionTopic;
-          await client.setRole({ sessionID, role });
+          const roleWatch = await watchRole(topic);
+          try {
+            await client.setRole({ sessionID, role });
+            await roleWatch.waitForSelf();
+          } catch (error) {
+            if (roleSubscriptionTopic !== topic) stopRoleWatch(topic);
+            throw error;
+          }
           await subscribe(topic);
           roleSubscriptionTopic = topic;
           if (previousTopic !== undefined && previousTopic !== topic) {
             closeIntentionally(previousTopic);
+            stopRoleWatch(previousTopic);
             await client.unsubscribe({ sessionID, topics: [previousTopic] });
           }
           return success(`Now holding role: ${role}`, { role });

@@ -50,6 +50,12 @@ type Subscription = {
   readonly [Symbol.asyncIterator]: () => AsyncIterator<{ readonly subject: string; readonly data: Uint8Array }>;
 };
 
+type RoleWatchControls = {
+  readonly setHolder: (holder: string | undefined) => void;
+  readonly stop: () => void;
+  readonly active: () => boolean;
+};
+
 type SubscriptionControls = {
   readonly push: (data: string) => void;
   readonly end: () => void;
@@ -61,10 +67,18 @@ const natsState = {
   subscriptions: new Map<string, Subscription>(),
   controls: new Map<string, SubscriptionControls>(),
   controlsByTopic: new Map<string, SubscriptionControls[]>(),
+  roleHolders: new Map<string, string>(),
+  roleWatchers: new Map<string, RoleWatchControls[]>(),
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
 };
+
+function setRoleHolder(role: string, holder: string | undefined): void {
+  if (holder === undefined) natsState.roleHolders.delete(role);
+  else natsState.roleHolders.set(role, holder);
+  for (const watcher of natsState.roleWatchers.get(role) ?? []) watcher.setHolder(holder);
+}
 
 const clipboardState = {
   copiedSessionIDs: [] as string[],
@@ -81,8 +95,80 @@ mock.module("nats", () => ({
     return {
       isClosed: () => false,
       drain: async () => {
-        if (natsState.drainHangs) await new Promise(() => undefined);
+        if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
       },
+      jetstream: () => ({
+        views: {
+          kv: async (bucket: string) => {
+            if (bucket !== "envoy_roles") throw new Error(`unexpected KV bucket ${bucket}`);
+            return {
+              watch: async ({
+                key,
+                initializedFn,
+              }: {
+                readonly key?: string | readonly string[];
+                readonly initializedFn?: () => void;
+              }) => {
+                if (typeof key !== "string") throw new Error("role watch must specify one key");
+                let active = true;
+                const queue: (
+                  | {
+                      readonly key: string;
+                      readonly operation: "PUT" | "DEL";
+                      readonly string: () => string;
+                    }
+                  | (() => void)
+                )[] = [];
+                let wake: (() => void) | undefined;
+                const notify = () => {
+                  wake?.();
+                  wake = undefined;
+                };
+                const controls: RoleWatchControls = {
+                  setHolder: (holder) => {
+                    if (!active) return;
+                    queue.push({
+                      key,
+                      operation: holder === undefined ? "DEL" : "PUT",
+                      string: () => holder ?? "",
+                    });
+                    notify();
+                  },
+                  stop: () => {
+                    active = false;
+                    notify();
+                  },
+                  active: () => active,
+                };
+                const watchers = natsState.roleWatchers.get(key);
+                if (watchers === undefined) natsState.roleWatchers.set(key, [controls]);
+                else watchers.push(controls);
+                controls.setHolder(natsState.roleHolders.get(key));
+                queue.push(() => initializedFn?.());
+                return {
+                  stop: controls.stop,
+                  [Symbol.asyncIterator]: () => ({
+                    next: async () => {
+                      for (;;) {
+                        if (!active) return { done: true, value: undefined };
+                        const item = queue.shift();
+                        if (typeof item === "function") {
+                          item();
+                          continue;
+                        }
+                        if (item !== undefined) return { done: false, value: item };
+                        const pending = Promise.withResolvers<void>();
+                        wake = pending.resolve;
+                        await pending.promise;
+                      }
+                    },
+                  }),
+                };
+              },
+            };
+          },
+        },
+      }),
       subscribe: (topic: string) => {
         let active = true;
         const queue: { readonly subject: string; readonly data: Uint8Array }[] = [];
@@ -128,9 +214,9 @@ mock.module("nats", () => ({
                 if (!active || ended) return { done: true, value: undefined };
                 const item = queue.shift();
                 if (item) return { done: false, value: item };
-                await new Promise<void>((resolve) => {
-                  wake = resolve;
-                });
+                const pending = Promise.withResolvers<void>();
+                wake = pending.resolve;
+                await pending.promise;
               }
             },
           }),
@@ -162,16 +248,21 @@ afterEach(() => {
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   globalThis.fetch = originalFetch;
+  delete process.env.ENVOY_REGISTER_SESSION;
+  clipboardState.copiedSessionIDs.length = 0;
+  clipboardState.error = undefined;
+  delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+  for (const watchers of natsState.roleWatchers.values()) {
+    for (const watcher of watchers) watcher.stop();
+  }
+  natsState.roleHolders.clear();
+  natsState.roleWatchers.clear();
   natsState.connectedNames.length = 0;
   natsState.subscriptions.clear();
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
   natsState.drainHangs = false;
-  delete process.env.ENVOY_REGISTER_SESSION;
-  clipboardState.copiedSessionIDs.length = 0;
-  clipboardState.error = undefined;
-  delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
 });
 
 function createPi(options: { readonly clipboardError?: Error } = {}) {
@@ -240,6 +331,11 @@ describe("envoy OMP extension", () => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       requests.push({ path: url.pathname, body });
+      if (url.pathname === "/v1/roles/set") {
+        const role = typeof body?.role === "string" ? body.role : "";
+        setRoleHolder(role, "ses_omp");
+        return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [`notifications.role.${role}`] });
+      }
       if (url.pathname === "/v1/sessions") return response([]);
       if (url.pathname === "/v1/interests/ses_omp") return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [] });
       return response({
@@ -290,17 +386,20 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("envoy_role_set injects core role messages and replaces a superseded role subscription", async () => {
+  test("injects a claimed core role event without HTTP session verification and replaces a superseded role subscription", async () => {
     let currentRoleTopic = "";
+    const requests: string[] = [];
     const unregistrations: (readonly string[])[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      requests.push(url.pathname);
       if (url.pathname === "/v1/roles/set") {
         const role = typeof body?.role === "string" ? body.role : "";
         currentRoleTopic = `notifications.role.${role}`;
+        setRoleHolder(role, "ses_role_a");
         return response({
-          session_id: "ses_role",
+          session_id: "ses_role_a",
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
           topics: [currentRoleTopic],
@@ -309,7 +408,7 @@ describe("envoy OMP extension", () => {
       if (url.pathname === "/v1/sessions") {
         return response([
           {
-            session_id: "ses_role",
+            session_id: "ses_role_a",
             machine_id: "test",
             dir: "/tmp/envoy-omp-test",
             port: 0,
@@ -326,7 +425,7 @@ describe("envoy OMP extension", () => {
       }
       if (url.pathname === "/v1/interests/subscribe") {
         return response({
-          session_id: "ses_role",
+          session_id: "ses_role_a",
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
           topics: body?.topics ?? [],
@@ -346,17 +445,17 @@ describe("envoy OMP extension", () => {
     };
 
     envoyExtension(pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role"));
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
     const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
     if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
-
     await roleTool.execute("", { role: "legion-controller" });
     const controller = natsState.controls.get("notifications.role.legion-controller");
     if (controller === undefined) throw new Error("role topic was not subscribed");
     controller.push("role message");
     await injected.promise;
     expect(fixture.messages.some((message) => message.includes("role message"))).toBe(true);
+    expect(requests).not.toContain("/v1/sessions");
 
     await roleTool.execute("", { role: "legion-reviewer" });
     expect(controller.active()).toBe(false);
@@ -368,25 +467,30 @@ describe("envoy OMP extension", () => {
     expect(reviewer.active()).toBe(false);
   });
 
-  test("delivers a core role event only to the current holder after takeover", async () => {
-    const roleTopic = "notifications.role.legion-controller";
-    let holderSessionID = "ses_role_a";
+  test("closes A's role subscription on the ownership watch before the immediate post-takeover publish", async () => {
+    const role = "legion-controller";
+    const roleTopic = `notifications.role.${role}`;
+    const sessionVerificationRequests: string[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
-        holderSessionID = typeof body?.session_id === "string" ? body.session_id : "";
+        const holder = typeof body?.session_id === "string" ? body.session_id : "";
+        setRoleHolder(role, holder);
         return response({
-          session_id: holderSessionID,
+          session_id: holder,
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
           topics: [roleTopic],
         });
       }
       if (url.pathname === "/v1/sessions") {
+        sessionVerificationRequests.push(url.pathname);
+        // Reproduce listener.Registry.Get's lagging KV-watch cache immediately
+        // after B takes the role: it still reports A as the holder.
         return response([
           {
-            session_id: holderSessionID,
+            session_id: "ses_role_a",
             machine_id: "test",
             dir: "/tmp/envoy-omp-test",
             port: 0,
@@ -400,16 +504,11 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtensionA } = await import("./envoy.ts?role-takeover-a");
     const fixtureA = createPi();
-    envoyExtensionA({
-      ...fixtureA.pi,
-      sendMessage: (message, options) => {
-        fixtureA.pi.sendMessage(message, options);
-      },
-    });
+    envoyExtensionA(fixtureA.pi);
     await fixtureA.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
     const roleToolA = fixtureA.tools.find((tool) => tool.name === "envoy_role_set");
     if (roleToolA === undefined) throw new Error("role tool was not registered for session A");
-    await roleToolA.execute("", { role: "legion-controller" });
+    await roleToolA.execute("", { role });
 
     const { default: envoyExtensionB } = await import("./envoy.ts?role-takeover-b");
     const fixtureB = createPi();
@@ -424,16 +523,69 @@ describe("envoy OMP extension", () => {
     await fixtureB.handlers.get("session_start")?.({}, sessionContext("ses_role_b"));
     const roleToolB = fixtureB.tools.find((tool) => tool.name === "envoy_role_set");
     if (roleToolB === undefined) throw new Error("role tool was not registered for session B");
-    await roleToolB.execute("", { role: "legion-controller" });
+    await roleToolB.execute("", { role });
 
     const controls = natsState.controlsByTopic.get(roleTopic);
     if (controls === undefined || controls.length !== 2) throw new Error("both role subscriptions were not created");
+    expect(controls[0]?.active()).toBe(false);
+
     for (const control of controls) control.push("role takeover event");
     await injectedB.promise;
 
     expect(fixtureA.messages.some((message) => message.includes("role takeover event"))).toBe(false);
     expect(fixtureB.messages.some((message) => message.includes("role takeover event"))).toBe(true);
-    expect(controls[0]?.active()).toBe(false);
+    expect(sessionVerificationRequests).toEqual([]);
+  });
+
+  test("keeps claimed role delivery live while the listener HTTP API is unavailable", async () => {
+    const role = "legion-controller";
+    const roleTopic = `notifications.role.${role}`;
+    let listenerAvailable = true;
+    const sessionVerificationRequested = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        setRoleHolder(role, typeof body?.session_id === "string" ? body.session_id : "");
+        return response({
+          session_id: "ses_role_a",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [roleTopic],
+        });
+      }
+      if (url.pathname === "/v1/sessions") {
+        sessionVerificationRequested.resolve();
+        if (!listenerAvailable) throw new Error("listener API unavailable");
+        return response([]);
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-listener-down");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+    await roleTool.execute("", { role });
+
+    const controller = natsState.controls.get(roleTopic);
+    if (controller === undefined) throw new Error("role topic was not subscribed");
+    listenerAvailable = false;
+    controller.push("role event while listener is down");
+
+    const outcome = await Promise.race([
+      injected.promise.then(() => "injected"),
+      sessionVerificationRequested.promise.then(() => "session verification"),
+    ]);
+    expect(outcome).toBe("injected");
   });
 
   test("registers an optional self-subscribed interest on session start", async () => {
