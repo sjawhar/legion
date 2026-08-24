@@ -68,7 +68,9 @@ describe("daemon GraphQL queries validate against GitHub's published schema", ()
     const org = captureRunner(() =>
       ok({ data: { organization: { projectV2: { items: emptyPage } } } })
     );
-    await fetchGitHubProjectItems("acme", 2, org.runner);
+    await fetchGitHubProjectItems("acme", 2, org.runner, async () => ({
+      env: { GH_TOKEN: "ghs_schema_test" },
+    }));
 
     const user = captureRunner((call) =>
       call === 1
@@ -77,7 +79,9 @@ describe("daemon GraphQL queries validate against GitHub's published schema", ()
           })
         : ok({ data: { user: { projectV2: { items: emptyPage } } } })
     );
-    await fetchGitHubProjectItems("acme", 2, user.runner);
+    await fetchGitHubProjectItems("acme", 2, user.runner, async () => ({
+      env: { GH_TOKEN: "ghs_schema_test" },
+    }));
 
     const captured = [...org.queries, ...user.queries];
     expect(captured.length).toBeGreaterThanOrEqual(3);

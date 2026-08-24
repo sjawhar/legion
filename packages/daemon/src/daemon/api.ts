@@ -13,7 +13,7 @@ import {
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
 import type { GitHubAppRole } from "./config";
-import type { TokenManager } from "./github-apps";
+import { buildRoleEnv, type TokenManager } from "./github-apps";
 import type { LegionState } from "./legion-state";
 
 const GRANT_TTL_MS = 60_000;
@@ -214,10 +214,6 @@ function equalSecretHash(expectedHash: string, supplied: string): boolean {
   return timingSafeEqual(Buffer.from(expectedHash, "hex"), secretHash(supplied));
 }
 
-function childEnv(token: string): NodeJS.ProcessEnv {
-  return { ...process.env, GH_TOKEN: token };
-}
-
 function issueUrl(issue: IssueKey): string {
   const parsed = parseIssueKey(issue);
   if (!parsed) {
@@ -305,7 +301,9 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
 
   const gh = async (issue: IssueKey, command: string[], appRole: GitHubAppRole = "implement") => {
     const lease = await tokenForIssue(issue, appRole);
-    const result = await runner(command, { env: childEnv(lease.token) });
+    const result = await runner(command, {
+      env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
+    });
     if (result.exitCode !== 0) {
       throw new Error(`GitHub command failed: ${result.stderr || result.stdout}`);
     }

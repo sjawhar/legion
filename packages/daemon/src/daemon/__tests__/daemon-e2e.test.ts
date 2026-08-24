@@ -355,7 +355,7 @@ describe("daemon end-to-end", () => {
               broker?.publish(topic, codec.encode(payload));
               await broker?.flush();
             },
-            fetchGitHubProjectItems: async () => ({ items: [] }),
+            fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
             tokenManager: {
               getToken: async () => ({
                 token: "test-token",

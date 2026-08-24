@@ -6,7 +6,7 @@ import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
 import { connect, StringCodec, type Subscription } from "nats";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
-import { fetchGitHubProjectItems } from "../state/github-fetch";
+import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state/github-fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
@@ -18,7 +18,7 @@ import {
   resolveDaemonEnvironment,
 } from "./environment";
 import { type EventPump, type EventPumpDeps, startEventPump } from "./events";
-import { TokenManager } from "./github-apps";
+import { buildRoleEnv, TokenManager } from "./github-apps";
 import { loadState, saveState } from "./legion-state";
 import { ProcessManager, type ProcessManagerDeps } from "./processes";
 import { runResync } from "./resync";
@@ -45,7 +45,7 @@ interface DaemonDependencies {
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
-  fetchGitHubProjectItems(): Promise<{ items: Record<string, unknown>[] }>;
+  fetchGitHubProjectItems(): Promise<GitHubProjectItemsResult>;
   tokenManager: Pick<TokenManager, "getToken">;
   resolveDaemonEnvironment(
     ompInvocation: string,
@@ -79,6 +79,18 @@ function projectBoard(legionId: string): { owner: string; number: number } {
     throw new Error(`LEGION_ID must match owner/number (got: ${legionId})`);
   }
   return { owner, number };
+}
+
+export function createBoardProjectItemsFetcher(
+  board: { owner: string; number: number },
+  tokenManager: Pick<TokenManager, "getToken">,
+  runner: CommandRunner = defaultRunner
+): () => Promise<GitHubProjectItemsResult> {
+  return () =>
+    fetchGitHubProjectItems(board.owner, board.number, runner, async (owner) => {
+      const lease = await tokenManager.getToken("implement", owner);
+      return { env: buildRoleEnv(lease.token, lease.gitIdentity, process.env) };
+    });
 }
 
 async function createNatsTransport(config: DaemonConfig): Promise<NatsTransport> {
@@ -175,7 +187,7 @@ function defaultDependencies(config: DaemonConfig): DaemonDependencies {
     resolveDaemonEnvironment,
     statPrompt: stat,
     envoyPublish: (topic, payloadJson) => publishToEnvoy(config, topic, payloadJson),
-    fetchGitHubProjectItems: () => fetchGitHubProjectItems(board.owner, board.number),
+    fetchGitHubProjectItems: createBoardProjectItemsFetcher(board, tokenManager),
     tokenManager,
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimeout: (timer) => clearTimeout(timer as number),
@@ -195,12 +207,14 @@ export async function startDaemon(
   config: DaemonConfig,
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
+  const board = projectBoard(config.legionId);
   const deps = { ...defaultDependencies(config), ...options.deps };
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
   });
   const runner = createDaemonRunner(environment, deps.runner);
   await verifyOmpAgentsCapability(environment.ompInvocation, runner);
+  await deps.tokenManager.getToken("implement", board.owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -300,6 +314,9 @@ export async function startDaemon(
       fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
       now: deps.now,
     });
+    console.log(
+      `[legion] resync complete: anomalies=${payload.anomalies.length} excluded-null-content-items=${payload.excludedNullContentItems}`
+    );
     await eventPump.publishControllerEvent(payload, {
       event_id: `resync:${randomUUID()}`,
       issued_at: deps.now(),

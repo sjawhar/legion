@@ -59,6 +59,7 @@ describe("runResync", () => {
           detail: "released open issue has no active Legion tree",
         },
       ],
+      excludedNullContentItems: 0,
     });
   });
 
@@ -68,7 +69,7 @@ describe("runResync", () => {
 
     const event = await runResync(resyncDeps(state, [boardIssue()]));
 
-    expect(event).toEqual({ type: "resync", anomalies: [] });
+    expect(event).toEqual({ type: "resync", anomalies: [], excludedNullContentItems: 0 });
   });
 
   it("reports an open board issue missing from the daemon state without dispatching it", async () => {
@@ -85,6 +86,7 @@ describe("runResync", () => {
           detail: "open board issue is absent from Legion state",
         },
       ],
+      excludedNullContentItems: 0,
     });
   });
 
@@ -103,6 +105,7 @@ describe("runResync", () => {
           detail: "open board issue has an error project status",
         },
       ],
+      excludedNullContentItems: 0,
     });
   });
 
@@ -127,6 +130,7 @@ describe("runResync", () => {
           detail: "tree launch failed 3 times",
         },
       ],
+      excludedNullContentItems: 0,
     });
   });
 
@@ -141,6 +145,23 @@ describe("runResync", () => {
       heldEvents: [],
     };
 
-    expect(await runResync(resyncDeps(state, []))).toEqual({ type: "resync", anomalies: [] });
+    expect(await runResync(resyncDeps(state, []))).toEqual({
+      type: "resync",
+      anomalies: [],
+      excludedNullContentItems: 0,
+    });
+  });
+  it("completes the resync while reporting board items excluded for null content", async () => {
+    const state = newLegionState("omp", 1);
+    const event = await runResync({
+      ...resyncDeps(state, []),
+      fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 1 }),
+    });
+
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      excludedNullContentItems: 1,
+    });
   });
 });

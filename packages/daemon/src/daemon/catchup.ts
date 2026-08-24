@@ -1,6 +1,6 @@
 import { type IssueKey, type LegionRole, parseIssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
-import { modeToRole, type TokenManager } from "./github-apps";
+import { buildRoleEnv, modeToRole, type TokenManager } from "./github-apps";
 import type { LegionState, PrState, TreeState } from "./legion-state";
 import type { LegionEventPayload } from "./reducers";
 
@@ -373,7 +373,7 @@ export async function workerCatchup(
     parsedIssue.owner
   );
   const options: CommandRunnerOptions = {
-    env: { ...process.env, GH_TOKEN: credential.token },
+    env: buildRoleEnv(credential.token, credential.gitIdentity, process.env),
   };
   const unhandled: CatchupUnhandled[] = [];
   for (const artifact of artifactsFor(s, issue)) {

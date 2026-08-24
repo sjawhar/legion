@@ -2,10 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
-import { startDaemon } from "../index";
+import * as daemonIndex from "../index";
 import { newLegionState } from "../legion-state";
+
+const { startDaemon } = daemonIndex;
 
 class FakeNats {
   readonly subscriptions: Array<{
@@ -83,6 +86,78 @@ const daemonEnvironment: DaemonEnvironment = {
 };
 
 describe("startDaemon", () => {
+  it("runs board resync queries with the board owner's implementer App token", async () => {
+    const originalEnvironment = {
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+    };
+    process.env.GH_TOKEN = "personal-gh-token";
+    process.env.GITHUB_TOKEN = "personal-github-token";
+    process.env.GH_CONFIG_DIR = "/home/user/.config/gh";
+    const commandOptions: CommandRunnerOptions[] = [];
+    const runner: CommandRunner = async (_command, options) => {
+      if (options) commandOptions.push(options);
+      return {
+        stdout: JSON.stringify({
+          data: {
+            organization: {
+              projectV2: {
+                items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+              },
+            },
+          },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const tokenCalls: Array<{ role: string; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: "implement" | "review", owner: string) => {
+        tokenCalls.push({ role, owner });
+        return {
+          token: "ghs_board_owner_app_token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "3202636+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+
+    try {
+      const { createBoardProjectItemsFetcher } = daemonIndex as typeof daemonIndex & {
+        createBoardProjectItemsFetcher?: (
+          board: { owner: string; number: number },
+          manager: typeof tokenManager,
+          commandRunner: CommandRunner
+        ) => () => Promise<unknown>;
+      };
+      expect(createBoardProjectItemsFetcher).toBeFunction();
+      if (!createBoardProjectItemsFetcher) throw new Error("Missing board resync fetcher");
+      await createBoardProjectItemsFetcher(
+        { owner: "trajectory-labs-pbc", number: 7 },
+        tokenManager,
+        runner
+      )();
+      expect(tokenCalls).toEqual([{ role: "implement", owner: "trajectory-labs-pbc" }]);
+      expect(commandOptions).toHaveLength(1);
+      expect(commandOptions[0]?.env).toMatchObject({
+        GH_TOKEN: "ghs_board_owner_app_token",
+        GH_CONFIG_DIR: "/dev/null",
+      });
+      expect(commandOptions[0]?.env?.GITHUB_TOKEN).toBeUndefined();
+    } finally {
+      if (originalEnvironment.GH_TOKEN === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = originalEnvironment.GH_TOKEN;
+      if (originalEnvironment.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = originalEnvironment.GITHUB_TOKEN;
+      if (originalEnvironment.GH_CONFIG_DIR === undefined) delete process.env.GH_CONFIG_DIR;
+      else process.env.GH_CONFIG_DIR = originalEnvironment.GH_CONFIG_DIR;
+    }
+  });
   it("boots the API, intake, and lifecycle timers then persists on SIGTERM", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
@@ -110,7 +185,7 @@ describe("startDaemon", () => {
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
           envoyPublish: async () => {},
-          fetchGitHubProjectItems: async () => ({ items: [] }),
+          fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -227,7 +302,7 @@ describe("startDaemon", () => {
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
         envoyPublish: async () => {},
-        fetchGitHubProjectItems: async () => ({ items: [] }),
+        fetchGitHubProjectItems: async () => ({ items: [], excludedNullContentItems: 0 }),
         tokenManager: {
           getToken: async () => ({
             token: "test-token",

@@ -11,12 +11,16 @@ export type ResyncAnomaly = {
 export interface LegionEventPayload {
   type: "resync";
   anomalies: ResyncAnomaly[];
+  excludedNullContentItems: number;
 }
 
 export interface RunResyncDeps {
   state: LegionState;
   config: Pick<DaemonConfig, "resyncIntervalMs">;
-  fetchGitHubProjectItems(): Promise<{ items: Record<string, unknown>[] }>;
+  fetchGitHubProjectItems(): Promise<{
+    items: Record<string, unknown>[];
+    excludedNullContentItems?: number;
+  }>;
   now(): number;
 }
 
@@ -79,11 +83,11 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
   const now = deps.now();
   const last = lastRunAt.get(deps.state);
   if (last !== undefined && now - last < deps.config.resyncIntervalMs) {
-    return { type: "resync", anomalies: [] };
+    return { type: "resync", anomalies: [], excludedNullContentItems: 0 };
   }
 
   lastRunAt.set(deps.state, now);
-  const { items } = await deps.fetchGitHubProjectItems();
+  const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
   const anomalies: ResyncAnomaly[] = [];
   const launchFailedTrees = new Set<IssueKey>();
   for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
@@ -132,5 +136,5 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
       });
     }
   }
-  return { type: "resync", anomalies };
+  return { type: "resync", anomalies, excludedNullContentItems };
 }

@@ -11,7 +11,7 @@ describe("legion gh", () => {
 
     try {
       await cmdGh(["api", "user"], {
-        env: { LEGION_GRANT: "grant-123" },
+        env: { LEGION_GRANT: "grant-123", GITHUB_TOKEN: "personal-github-token" },
         fetch: async (input, init) => {
           request = new Request(String(input), init);
           return Response.json({ token: "scoped-token" });
@@ -27,6 +27,8 @@ describe("legion gh", () => {
       expect(new URL(request?.url ?? "").pathname).toBe("/legion/v1/gh-token");
       expect(spawnArgs).toEqual(["api", "user"]);
       expect(childEnvironment?.GH_TOKEN).toBe("scoped-token");
+      expect(childEnvironment?.GITHUB_TOKEN).toBeUndefined();
+      expect(childEnvironment?.GH_CONFIG_DIR).toBe("/dev/null");
       expect(process.env.GH_TOKEN).toBeUndefined();
     } finally {
       if (parentToken === undefined) delete process.env.GH_TOKEN;

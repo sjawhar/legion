@@ -2,13 +2,15 @@
  * Tests for GitHub GraphQL project fetching with organization/user fallback.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { CommandRunner } from "../fetch";
 import { fetchGitHubProjectItems } from "../github-fetch";
 
+const testRunnerOptionsForOwner = async () => ({ env: { GH_TOKEN: "ghs_test_token" } });
+
 describe("fetchGitHubProjectItems", () => {
-  it("passes a supplied GH_TOKEN environment to the GraphQL command runner", async () => {
-    // Given a board read with an owner-scoped GitHub App token in its subprocess environment.
+  it("passes owner-scoped runner options to the GraphQL command runner", async () => {
+    // Given a board read whose owner resolves to a GitHub App token.
     const runner: CommandRunner = async (_command, options) => {
       expect(options).toMatchObject({ env: { GH_TOKEN: "ghs_owner_token" } });
       return {
@@ -25,14 +27,16 @@ describe("fetchGitHubProjectItems", () => {
         exitCode: 0,
       };
     };
+    const runnerOptionsForOwner = async (owner: string) => {
+      expect(owner).toBe("testorg");
+      return { env: { GH_TOKEN: "ghs_owner_token" } };
+    };
 
     // When the project items fetch runs its GraphQL query.
-    await fetchGitHubProjectItems("testorg", 1, runner, {
-      env: { GH_TOKEN: "ghs_owner_token" },
-    });
+    await fetchGitHubProjectItems("testorg", 1, runner, runnerOptionsForOwner);
 
     // Then the runner receives the token-scoped process environment.
-    expect.assertions(1);
+    expect.assertions(2);
   });
 
   it("successfully fetches from organization", async () => {
@@ -73,7 +77,12 @@ describe("fetchGitHubProjectItems", () => {
       };
     };
 
-    const result = await fetchGitHubProjectItems("testorg", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "testorg",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0]).toMatchObject({
@@ -161,7 +170,12 @@ describe("fetchGitHubProjectItems", () => {
       };
     };
 
-    const result = await fetchGitHubProjectItems("testorg", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "testorg",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
     expect(callCount).toBe(2);
     expect(result.items).toHaveLength(2);
     expect((result.items[0].content as { number: number }).number).toBe(1);
@@ -222,7 +236,12 @@ describe("fetchGitHubProjectItems", () => {
       }
     };
 
-    const result = await fetchGitHubProjectItems("testuser", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "testuser",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(callCount).toBe(2);
     expect(result.items).toHaveLength(1);
@@ -270,7 +289,12 @@ describe("fetchGitHubProjectItems", () => {
       }
     };
 
-    const result = await fetchGitHubProjectItems("testuser", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "testuser",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(callCount).toBe(2);
     expect(result.items).toHaveLength(0);
@@ -366,7 +390,12 @@ describe("fetchGitHubProjectItems", () => {
       }
     };
 
-    const result = await fetchGitHubProjectItems("testuser", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "testuser",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(callCount).toBe(3);
     expect(result.items).toHaveLength(2);
@@ -414,7 +443,7 @@ describe("fetchGitHubProjectItems", () => {
     };
 
     try {
-      await fetchGitHubProjectItems("testorg", 1, mockRunner);
+      await fetchGitHubProjectItems("testorg", 1, mockRunner, testRunnerOptionsForOwner);
       throw new Error("Expected fetchGitHubProjectItems to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
@@ -448,7 +477,7 @@ describe("fetchGitHubProjectItems", () => {
     };
 
     try {
-      await fetchGitHubProjectItems("nonexistent", 1, mockRunner);
+      await fetchGitHubProjectItems("nonexistent", 1, mockRunner, testRunnerOptionsForOwner);
       throw new Error("Expected fetchGitHubProjectItems to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
@@ -473,7 +502,7 @@ describe("fetchGitHubProjectItems", () => {
     };
 
     try {
-      await fetchGitHubProjectItems("testorg", 1, mockRunner);
+      await fetchGitHubProjectItems("testorg", 1, mockRunner, testRunnerOptionsForOwner);
       throw new Error("Expected fetchGitHubProjectItems to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
@@ -528,7 +557,12 @@ describe("fetchGitHubProjectItems", () => {
       exitCode: 0,
     });
 
-    const result = await fetchGitHubProjectItems("sjawhar", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "sjawhar",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0]).toMatchObject({
@@ -571,7 +605,12 @@ describe("fetchGitHubProjectItems", () => {
       exitCode: 0,
     });
 
-    const result = await fetchGitHubProjectItems("sjawhar", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "sjawhar",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0]).toMatchObject({ blockerRefs: [] });
@@ -608,12 +647,61 @@ describe("fetchGitHubProjectItems", () => {
       exitCode: 0,
     });
 
-    const result = await fetchGitHubProjectItems("sjawhar", 1, mockRunner);
+    const result = await fetchGitHubProjectItems(
+      "sjawhar",
+      1,
+      mockRunner,
+      testRunnerOptionsForOwner
+    );
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0]).toMatchObject({
       blockerRefs: [],
       content: { type: "PullRequest", number: 44 },
     });
+  });
+  it("warns and excludes a board item whose content is hidden by the board token", async () => {
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await fetchGitHubProjectItems(
+        "trajectory-labs-pbc",
+        7,
+        async () => ({
+          stdout: JSON.stringify({
+            data: {
+              organization: {
+                projectV2: {
+                  items: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        id: "PVTI_cross_owner",
+                        fieldValueByName: { name: "Todo" },
+                        labels: { labels: { nodes: [] } },
+                        content: null,
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+          stderr: "",
+          exitCode: 0,
+        }),
+        async () => ({ env: { GH_TOKEN: "ghs_board_token" } })
+      );
+
+      expect(result).toEqual({ items: [], excludedNullContentItems: 1 });
+      expect(warning).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: "legion.resync.cross_owner_project_item",
+          board: "trajectory-labs-pbc/7",
+          itemId: "PVTI_cross_owner",
+        })
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
 });

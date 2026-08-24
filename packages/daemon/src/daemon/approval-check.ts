@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { CommandRunner } from "../state/fetch";
 import type { GitHubAppRole } from "./config";
-import type { TokenManager } from "./github-apps";
+import { buildRoleEnv, type TokenManager } from "./github-apps";
 
 const reviewsResponse = z.array(
   z.object({
@@ -61,7 +61,7 @@ export async function setApprovalStatus(
     throw new Error(`Invalid repository: ${effect.repo}`);
   }
   const lease = await deps.tokenManager.getToken("implement", owner);
-  const env = { ...process.env, GH_TOKEN: lease.token };
+  const env = buildRoleEnv(lease.token, lease.gitIdentity, process.env);
   const reviewsResult = await deps.runner(
     ["gh", "api", `repos/${effect.repo}/pulls/${effect.pr}/reviews`],
     {

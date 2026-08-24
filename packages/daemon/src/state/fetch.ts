@@ -170,6 +170,9 @@ export async function getPrReviewStateBatch(
   runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
 ): Promise<Record<string, ReviewStateLiteral | null>> {
   if (!runnerOptionsForOwner) {
+    if (runner === defaultRunner) {
+      throw new Error("Owner-scoped GitHub App runner options are required for GraphQL reads");
+    }
     return getPrReviewStateBatchWithOptions(prRefs, runner);
   }
 
@@ -361,6 +364,9 @@ export async function getCiStatusBatch(
   runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
 ): Promise<Record<string, CiAndMergeStatus>> {
   if (!runnerOptionsForOwner) {
+    if (runner === defaultRunner) {
+      throw new Error("Owner-scoped GitHub App runner options are required for GraphQL reads");
+    }
     return getCiStatusBatchWithOptions(prRefs, runner);
   }
 

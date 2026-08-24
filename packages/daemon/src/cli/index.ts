@@ -12,6 +12,7 @@ import {
   loadConfigFromFile,
   resolveDaemonConfig,
 } from "../daemon/config";
+import { buildGitHubTokenEnv } from "../daemon/github-app-env";
 import { startDaemon } from "../daemon/index";
 import {
   findLegionByProjectId,
@@ -95,7 +96,7 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (!payload.success) {
     throw new CliError("Daemon returned an invalid GitHub credential response");
   }
-  const exitCode = await deps.spawnGh(args, { ...deps.env, GH_TOKEN: payload.data.token });
+  const exitCode = await deps.spawnGh(args, buildGitHubTokenEnv(payload.data.token, deps.env));
   if (exitCode !== 0) throw new CliError(`gh exited with status ${exitCode}`, exitCode);
 }
 
