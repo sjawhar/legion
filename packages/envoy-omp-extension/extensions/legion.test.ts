@@ -486,7 +486,7 @@ describe("Legion OMP extension", () => {
       },
     });
     expect(await jjBookmarks(workspace)).toContain("legion/issue-43");
-    expect(await gitConfig(workspace, "credential.helper")).toBe("!legion credential");
+    expect(await gitConfig(repo, "credential.helper")).toBe("!legion credential");
     expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toContain(
       "maxRecursionDepth: 8"
     );
