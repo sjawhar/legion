@@ -47,7 +47,7 @@ func githubSenderField(payload map[string]any, field string) string {
 
 // CIRecorder folds a single check_run observation into the per-commit CI state.
 // The listener's cistore.Store satisfies this interface; the debounced summary
-// is emitted separately by the summary loop, so the handler never publishes CI.
+// is emitted separately after the handler publishes the raw observation.
 type CIRecorder interface {
 	Record(owner, repo, number, sha, checkName, status, conclusion string) error
 }
@@ -112,6 +112,43 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				}
 				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.Status, o.Conclusion); err != nil {
 					log.Printf("github ci record failed: %v", err)
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				payload, err := json.Marshal(struct {
+					SHA        string `json:"sha"`
+					Name       string `json:"name"`
+					Status     string `json:"status"`
+					Conclusion string `json:"conclusion"`
+				}{
+					SHA:        o.SHA,
+					Name:       o.CheckName,
+					Status:     o.Status,
+					Conclusion: o.Conclusion,
+				})
+				if err != nil {
+					log.Printf("github ci observation payload failed: %v", err)
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				sha7 := o.SHA[:min(7, len(o.SHA))]
+				item := contracts.Envelope{
+					EventID:        id.New(),
+					Source:         "github",
+					SourceEventID:  delivery,
+					Topic:          contracts.GithubSubject(o.Owner, o.Repo, "pr."+o.Number+".check"),
+					DedupeKey:      "ghck." + delivery + "." + o.CheckName,
+					IssuedAt:       contracts.NowMillis(),
+					PayloadSummary: fmt.Sprintf("check %s: %s/%s @ %s", o.CheckName, o.Status, o.Conclusion, sha7),
+					Payload:        string(payload),
+					TraceID:        id.New(),
+				}
+				if err := item.Validate(); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := publisher.Publish(item); err != nil {
+					log.Printf("github ci observation publish failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return
 				}
