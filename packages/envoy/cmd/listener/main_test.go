@@ -1498,6 +1498,41 @@ func TestIsControlTopic(t *testing.T) {
 	}
 }
 
+func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const controller = "legion-controller"
+	if _, err := harness.registry.SetRole("ses_role", "test-machine", controller); err != nil {
+		t.Fatalf("claim controller role: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_role", "test-machine", "legion-reviewer"); err != nil {
+		t.Fatalf("claim reviewer role: %v", err)
+	}
+	controllerTopic := contracts.RoleTopicPrefix + controller
+	if err := harness.registry.Remove("ses_role", []string{controllerTopic}); err != nil {
+		t.Fatalf("release controller role: %v", err)
+	}
+
+	item := listenerTestEnvelope(controllerTopic, "released-controller-role")
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + controllerTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	sub, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe core role handler: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush subscriptions: %v", err)
+	}
+
+	if err := harness.client.PublishCore(item); err != nil {
+		t.Fatalf("publish released controller role: %v", err)
+	}
+	assertDeliveryException(t, probe, item, "no_holder")
+}
+
 func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
 	cases := []struct {
 		name  string

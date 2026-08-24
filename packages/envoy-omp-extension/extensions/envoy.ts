@@ -91,7 +91,17 @@ export default function envoyExtension(pi: PiApi): void {
     return connection;
   };
 
-  const deliver = (subject: string, raw: string): void => {
+  const deliver = async (subject: string, raw: string): Promise<void> => {
+    if (subject.startsWith(ROLE_TOPIC_PREFIX)) {
+      const holder = (await client.listSessions()).find((session) => session.topics.includes(subject));
+      if (holder?.session_id !== sessionID) {
+        if (roleSubscriptionTopic === subject) {
+          roleSubscriptionTopic = undefined;
+          closeIntentionally(subject);
+        }
+        return;
+      }
+    }
     let summary = raw;
     let source = "";
     try {
@@ -154,7 +164,7 @@ export default function envoyExtension(pi: PiApi): void {
     try {
       for await (const message of subscription) {
         try {
-          deliver(message.subject, codec.decode(message.data));
+          await deliver(message.subject, codec.decode(message.data));
         } catch {
           // A single failed injection (e.g. sendMessage during compaction)
           // must not tear down the subscription; drop the message and keep

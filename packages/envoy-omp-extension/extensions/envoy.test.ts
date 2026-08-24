@@ -60,6 +60,7 @@ type SubscriptionControls = {
 const natsState = {
   subscriptions: new Map<string, Subscription>(),
   controls: new Map<string, SubscriptionControls>(),
+  controlsByTopic: new Map<string, SubscriptionControls[]>(),
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
@@ -108,6 +109,9 @@ mock.module("nats", () => ({
           active: () => active,
         };
         natsState.controls.set(topic, controls);
+        const controlsForTopic = natsState.controlsByTopic.get(topic);
+        if (controlsForTopic === undefined) natsState.controlsByTopic.set(topic, [controls]);
+        else controlsForTopic.push(controls);
         const subscription: Subscription = {
           unsubscribe: () => {
             active = false;
@@ -161,6 +165,7 @@ afterEach(() => {
   natsState.connectedNames.length = 0;
   natsState.subscriptions.clear();
   natsState.controls.clear();
+  natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
   natsState.drainHangs = false;
   delete process.env.ENVOY_REGISTER_SESSION;
@@ -286,17 +291,32 @@ describe("envoy OMP extension", () => {
   });
 
   test("envoy_role_set injects core role messages and replaces a superseded role subscription", async () => {
+    let currentRoleTopic = "";
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
         const role = typeof body?.role === "string" ? body.role : "";
+        currentRoleTopic = `notifications.role.${role}`;
         return response({
           session_id: "ses_role",
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
-          topics: [`notifications.role.${role}`],
+          topics: [currentRoleTopic],
         });
+      }
+      if (url.pathname === "/v1/sessions") {
+        return response([
+          {
+            session_id: "ses_role",
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            port: 0,
+            title: "",
+            topics: [currentRoleTopic],
+            self_subscribed: true,
+          },
+        ]);
       }
       if (url.pathname === "/v1/interests/subscribe") {
         return response({
@@ -339,6 +359,74 @@ describe("envoy OMP extension", () => {
 
     await unsubscribeTool.execute("", { topics: ["notifications.role.legion-reviewer"] });
     expect(reviewer.active()).toBe(false);
+  });
+
+  test("delivers a core role event only to the current holder after takeover", async () => {
+    const roleTopic = "notifications.role.legion-controller";
+    let holderSessionID = "ses_role_a";
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        holderSessionID = typeof body?.session_id === "string" ? body.session_id : "";
+        return response({
+          session_id: holderSessionID,
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [roleTopic],
+        });
+      }
+      if (url.pathname === "/v1/sessions") {
+        return response([
+          {
+            session_id: holderSessionID,
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            port: 0,
+            title: "",
+            topics: [roleTopic],
+            self_subscribed: true,
+          },
+        ]);
+      }
+      return response({});
+    };
+    const { default: envoyExtensionA } = await import("./envoy.ts?role-takeover-a");
+    const fixtureA = createPi();
+    envoyExtensionA({
+      ...fixtureA.pi,
+      sendMessage: (message, options) => {
+        fixtureA.pi.sendMessage(message, options);
+      },
+    });
+    await fixtureA.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
+    const roleToolA = fixtureA.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleToolA === undefined) throw new Error("role tool was not registered for session A");
+    await roleToolA.execute("", { role: "legion-controller" });
+
+    const { default: envoyExtensionB } = await import("./envoy.ts?role-takeover-b");
+    const fixtureB = createPi();
+    const injectedB = Promise.withResolvers<void>();
+    envoyExtensionB({
+      ...fixtureB.pi,
+      sendMessage: (message, options) => {
+        fixtureB.pi.sendMessage(message, options);
+        injectedB.resolve();
+      },
+    });
+    await fixtureB.handlers.get("session_start")?.({}, sessionContext("ses_role_b"));
+    const roleToolB = fixtureB.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleToolB === undefined) throw new Error("role tool was not registered for session B");
+    await roleToolB.execute("", { role: "legion-controller" });
+
+    const controls = natsState.controlsByTopic.get(roleTopic);
+    if (controls === undefined || controls.length !== 2) throw new Error("both role subscriptions were not created");
+    for (const control of controls) control.push("role takeover event");
+    await injectedB.promise;
+
+    expect(fixtureA.messages.some((message) => message.includes("role takeover event"))).toBe(false);
+    expect(fixtureB.messages.some((message) => message.includes("role takeover event"))).toBe(true);
+    expect(controls[0]?.active()).toBe(false);
   });
 
   test("registers an optional self-subscribed interest on session start", async () => {
