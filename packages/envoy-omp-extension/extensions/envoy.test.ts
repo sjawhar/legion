@@ -215,7 +215,7 @@ function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string)
     source: "envoy",
     source_event_id: `source-${dedupeKey}`,
     topic: `notifications.role.${role}`,
-    dedupe_key: dedupeKey,
+    dedupe_key: `envoy.role.forward.${dedupeKey}`,
     issued_at: 1,
     payload_summary: summary,
     trace_id: `trace-${dedupeKey}`,

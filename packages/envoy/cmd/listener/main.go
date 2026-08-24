@@ -46,6 +46,11 @@ const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
 
 var rolePattern = regexp.MustCompile(rolePatternString)
 
+// roleForwardDedupePrefix marks an envelope already sent from the role arbiter
+// to its selected agent subject. The durable agent-stream replay must ACK it
+// without re-entering the arbiter.
+const roleForwardDedupePrefix = "envoy.role.forward."
+
 func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
 }
@@ -202,11 +207,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
 		cfg.logger.Info("listener received", slog.String("source", item.Source), slog.String("source_session", item.SourceSession), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.String("payload_summary", item.PayloadSummary))
 		if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
-			// Forwarded role envelopes retain their role topic for the recipient
-			// but are replayed from the agent JetStream stream on restart. They
-			// have already passed through the sole role arbiter, so never route
-			// them a second time.
-			if item.Source == "envoy" {
+			if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 				_ = message.Ack()
 				return
 			}
@@ -230,6 +231,17 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 				_ = message.Ack()
 				return
 			}
+			now := time.Now().UnixMilli()
+			holder, holderErr := cfg.sessions.Get(sessionID)
+			if holderErr != nil || holder.UpdatedAt <= 0 || now-holder.UpdatedAt >= int64(session.ClaimStaleAfter/time.Millisecond) {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})
+				cfg.logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
+				if exceptionErr := publishDeliveryException(cfg.client, item, "delivery_failed"); exceptionErr != nil {
+					cfg.logger.Error("listener exception publish failed", slog.String("error", exceptionErr.Error()), slog.String("topic", item.Topic))
+				}
+				_ = message.Ack()
+				return
+			}
 			if item.SourceSession != "" && item.SourceSession == sessionID {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener skip role echo", sessionID, item.Topic, item.EventID, "skipped")
@@ -244,7 +256,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			}
 			cfg.attemptCache.Record(item.DedupeKey, sessionID)
 			forwarded := item
-			forwarded.Source = "envoy"
+			forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
 			if err := cfg.client.PublishCoreTo(contracts.AgentSubject(sessionID), forwarded); err != nil {
 				cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "failed"})

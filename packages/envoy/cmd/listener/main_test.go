@@ -458,6 +458,13 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	if _, err := harness.registry.SetRole("ses_role_b", "test-machine", role); err != nil {
 		t.Fatalf("transfer role to B: %v", err)
 	}
+	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
+		MachineID:      "test-machine",
+		Port:           1,
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register live holder B: %v", err)
+	}
 
 	probeA, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_a"))
 	if err != nil {
@@ -484,10 +491,10 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: harness.client})
 	handler := publishHandler(&state)
-	publishRole := func(topic string) contracts.Envelope {
+	publishRole := func(topic, source string) contracts.Envelope {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"role event","source":"agent"}`))
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"role event","source":"`+source+`"}`))
 		handler.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("publish role topic %q: status = %d, body = %s", topic, recorder.Code, recorder.Body.String())
@@ -499,7 +506,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		return item
 	}
 
-	item := publishRole(roleTopic)
+	item := publishRole(roleTopic, "agent")
 	forwardedMessage, err := probeB.NextMsg(5 * time.Second)
 	if err != nil {
 		t.Fatalf("read forwarded role event for B: %v", err)
@@ -517,14 +524,49 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	if forwarded.EventID != item.EventID {
 		t.Fatalf("forwarded event id = %q, want %q", forwarded.EventID, item.EventID)
 	}
-	if forwarded.Source != "envoy" {
-		t.Fatalf("forwarded source = %q, want envoy router marker", forwarded.Source)
+	if forwarded.Source != item.Source {
+		t.Fatalf("forwarded source = %q, want original source %q", forwarded.Source, item.Source)
+	}
+	if !strings.HasPrefix(forwarded.DedupeKey, "envoy.role.forward.") {
+		t.Fatalf("forwarded dedupe key = %q, want arbiter prefix", forwarded.DedupeKey)
 	}
 	if _, err := probeA.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("A received a post-takeover role event: %v", err)
 	}
 	if _, err := probeB.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("B received duplicate forwarded role event: %v", err)
+	}
+
+	deadRole := "legion-dead-holder"
+	deadTopic := contracts.RoleTopicPrefix + deadRole
+	if _, err := harness.registry.SetRole("ses_role_dead", "test-machine", deadRole); err != nil {
+		t.Fatalf("claim dead holder role: %v", err)
+	}
+	deadProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + deadTopic)
+	if err != nil {
+		t.Fatalf("subscribe dead-holder exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = deadProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush dead-holder exception subscription: %v", err)
+	}
+	dead := publishRole(deadTopic, "agent")
+	assertDeliveryException(t, deadProbe, dead, "delivery_failed")
+
+	externalEnvoy := publishRole(roleTopic, "envoy")
+	externalMessage, err := probeB.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read externally sourced envoy role event for B: %v", err)
+	}
+	var externalForwarded contracts.Envelope
+	if err := json.Unmarshal(externalMessage.Data, &externalForwarded); err != nil {
+		t.Fatalf("decode externally sourced forwarded envelope: %v", err)
+	}
+	if externalForwarded.Source != "envoy" {
+		t.Fatalf("externally sourced forwarded source = %q, want envoy", externalForwarded.Source)
+	}
+	if externalForwarded.EventID != externalEnvoy.EventID {
+		t.Fatalf("externally sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalEnvoy.EventID)
 	}
 
 	unclaimedTopic := contracts.RoleTopicPrefix + "legion-no-holder"
@@ -536,15 +578,15 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	if err := harness.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush exception subscription: %v", err)
 	}
-	unclaimed := publishRole(unclaimedTopic)
+	unclaimed := publishRole(unclaimedTopic, "agent")
 	assertDeliveryException(t, exceptionProbe, unclaimed, "no_holder")
 
 	info, err := harness.client.JS().StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("read notification stream: %v", err)
 	}
-	if info.State.Msgs != 1 {
-		t.Fatalf("agent-subject role forward was captured %d times, want exactly once", info.State.Msgs)
+	if info.State.Msgs != 2 {
+		t.Fatalf("agent-subject role forwards were captured %d times, want two", info.State.Msgs)
 	}
 }
 
