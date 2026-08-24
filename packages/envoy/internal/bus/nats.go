@@ -36,7 +36,24 @@ var streamCfg = &nats.StreamConfig{
 type ConnectOption func(*connectOpts)
 
 type connectOpts struct {
-	replicas int
+	replicas                    int
+	publishAcknowledgementClock AcknowledgementClock
+}
+
+// AcknowledgementClock supplies deadline contexts for JetStream publish acknowledgements.
+type AcknowledgementClock interface {
+	WithTimeout(context.Context, time.Duration) (context.Context, context.CancelFunc)
+}
+
+type wallClock struct{}
+
+func (wallClock) WithTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
+}
+
+// WithPublishAcknowledgementClock overrides the clock that bounds JetStream publish acknowledgements.
+func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
+	return func(o *connectOpts) { o.publishAcknowledgementClock = clock }
 }
 
 // WithReplicas overrides the stream replica count (default 1).
@@ -45,10 +62,11 @@ func WithReplicas(n int) ConnectOption {
 }
 
 type Client struct {
-	Conn *nats.Conn
-	js   nats.JetStreamContext
-	urls []string
-	mu   sync.Mutex
+	Conn                        *nats.Conn
+	js                          nats.JetStreamContext
+	urls                        []string
+	publishAcknowledgementClock AcknowledgementClock
+	mu                          sync.Mutex
 
 	// subscriber state for auto-resubscribe
 	subMu      sync.Mutex
@@ -155,11 +173,15 @@ func Dial(name string, urls []string) (*nats.Conn, error) {
 }
 
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
-	opts := connectOpts{replicas: 1}
+	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}}
 	for _, o := range options {
 		o(&opts)
 	}
-	c := &Client{urls: urls, stopCh: make(chan struct{})}
+	c := &Client{
+		urls:                        urls,
+		publishAcknowledgementClock: opts.publishAcknowledgementClock,
+		stopCh:                      make(chan struct{}),
+	}
 	nc, err := connect("envoy", urls, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
@@ -468,7 +490,7 @@ func (c *Client) Publish(item contracts.Envelope) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err

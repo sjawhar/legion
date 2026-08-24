@@ -317,9 +317,10 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 	}
 }
 
-func setupPublishTestClient(t *testing.T) *bus.Client {
+func setupPublishTestClient(t *testing.T, options ...bus.ConnectOption) *bus.Client {
 	t.Helper()
-	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	options = append([]bus.ConnectOption{bus.WithReplicas(1)}, options...)
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, options...)
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
@@ -328,8 +329,63 @@ func setupPublishTestClient(t *testing.T) *bus.Client {
 	return client
 }
 
+type listenerAcknowledgementClock struct {
+	mu        sync.Mutex
+	elapsed   time.Duration
+	deadlines []listenerAcknowledgementDeadline
+}
+
+type listenerAcknowledgementDeadline struct {
+	at     time.Duration
+	cancel context.CancelFunc
+}
+
+func (clock *listenerAcknowledgementClock) WithTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	clock.mu.Lock()
+	clock.deadlines = append(clock.deadlines, listenerAcknowledgementDeadline{
+		at:     clock.elapsed + timeout,
+		cancel: cancel,
+	})
+	clock.mu.Unlock()
+	return ctx, cancel
+}
+
+func (clock *listenerAcknowledgementClock) Advance(elapsed time.Duration) bool {
+	clock.mu.Lock()
+	clock.elapsed += elapsed
+	var due []context.CancelFunc
+	remaining := clock.deadlines[:0]
+	for _, deadline := range clock.deadlines {
+		if deadline.at <= clock.elapsed {
+			due = append(due, deadline.cancel)
+			continue
+		}
+		remaining = append(remaining, deadline)
+	}
+	clock.deadlines = remaining
+	clock.mu.Unlock()
+
+	for _, cancel := range due {
+		cancel()
+	}
+	return len(due) > 0
+}
+
+func (clock *listenerAcknowledgementClock) CancelAll() {
+	clock.mu.Lock()
+	deadlines := clock.deadlines
+	clock.deadlines = nil
+	clock.mu.Unlock()
+
+	for _, deadline := range deadlines {
+		deadline.cancel()
+	}
+}
+
 func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
-	client := setupPublishTestClient(t)
+	clock := &listenerAcknowledgementClock{}
+	client := setupPublishTestClient(t, bus.WithPublishAcknowledgementClock(clock))
 	info, err := client.JS().StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("stream info: %v", err)
@@ -346,7 +402,10 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 		}
 	})
 
-	noAck, err := client.Conn.Subscribe("notifications.unbound", func(*natsgo.Msg) {})
+	published := make(chan struct{}, 1)
+	noAck, err := client.Conn.Subscribe("notifications.unbound", func(*natsgo.Msg) {
+		published <- struct{}{}
+	})
 	if err != nil {
 		t.Fatalf("subscribe to publish subject without sending an ack: %v", err)
 	}
@@ -357,29 +416,32 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: client})
-	server := httptest.NewServer(publishHandler(&state))
-	t.Cleanup(server.Close)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	t.Cleanup(clock.CancelAll)
+	go func() {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.unbound","message":"ping","source":"agent"}`))
+		request.Header.Set("Content-Type", "application/json")
+		publishHandler(&state).ServeHTTP(recorder, request)
+		response <- recorder
+	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/messages/publish", strings.NewReader(`{"topic":"notifications.unbound","message":"ping","source":"agent"}`))
-	if err != nil {
-		t.Fatalf("create publish request: %v", err)
+	select {
+	case <-published:
+		if !clock.Advance(5 * time.Second) {
+			t.Fatal("publish acknowledgement deadline exceeded 5s")
+		}
+	case <-t.Context().Done():
+		t.Fatal("publish did not reach the acknowledgement wait")
 	}
-	request.Header.Set("Content-Type", "application/json")
 
-	started := time.Now()
-	response, err := server.Client().Do(request)
-	elapsed := time.Since(started)
-	if err != nil {
-		t.Fatalf("publish request did not return before deadline: %v", err)
-	}
-	defer response.Body.Close()
-	if elapsed > 5*time.Second+500*time.Millisecond {
-		t.Fatalf("publish response took %s, want a bounded response within 5s", elapsed)
-	}
-	if response.StatusCode != http.StatusOK && response.StatusCode < http.StatusInternalServerError {
-		t.Fatalf("publish status = %d, want 200 or 5xx", response.StatusCode)
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusOK && recorder.Code < http.StatusInternalServerError {
+			t.Fatalf("publish status = %d, want 200 or 5xx", recorder.Code)
+		}
+	case <-t.Context().Done():
+		t.Fatal("publish handler did not return when its acknowledgement deadline expired")
 	}
 }
 
