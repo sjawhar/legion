@@ -37,7 +37,7 @@ Agent messages  --/       |
 - one Slack receiver container on the public EC2 host
 - NATS cluster across all machines via Tailscale mesh, with JetStream for durable notifications and core NATS for live role routing
 - JetStream stream `ENVOY_NOTIFICATIONS` with 1h retention for non-role notification replay on listener restart
-- Role lanes and delivery-exception lanes for role topics use core NATS; they have no durable consumer, retention, or replay
+- Role lanes and delivery-exception lanes for role topics use core NATS; they have no durable consumer, retention, or replay. Stream reconciliation excludes role subjects and purges any role message captured while that configuration is updated.
 - JetStream KV bucket `envoy_interests` with 3 replicas for session subscriptions
 - JetStream KV bucket `envoy_sessions` with 5m TTL for session port/host data
 
@@ -55,7 +55,7 @@ All `/v1/*` endpoints return 503 until NATS initialization completes.
 | `/v1/roles/set` | POST | Claim a role for a live session and register its role topic |
 | `/v1/registry/{session_id}` | GET | Get a session's registry entry (port, machine) |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message |
-| `/v1/messages/publish` | POST | Publish an event; role topics use core NATS, while JetStream acknowledgement for every other topic is bounded to five seconds |
+| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics use core NATS, while JetStream acknowledgement for every other topic is bounded to five seconds. |
 | `/healthz` | GET | Health check (always available, even during startup) |
 
 ## Subscription visibility
@@ -68,10 +68,12 @@ state even while an interest registration or cleanup request is delayed or unava
 ## Role delivery and exceptions
 
 `notifications.role.<role>` is a live, exactly-one-holder lane. The listener's core-NATS
-queue subscriber resolves the current live role holder at delivery time, then forwards the
-envelope with its original role topic to `notifications.agent.<session_id>` over core NATS.
-A role claimant does not subscribe directly to its role subject, and a role message is not
-retained for a future claimant.
+queue subscriber resolves the current live role holder at delivery time, then sends a
+receipt-backed request with the original role topic to `notifications.agent.<session_id>`.
+The extension's agent pump replies after accepting that envelope. If no receipt arrives within
+two seconds, delivery fails and Envoy emits its `delivery_failed` exception. A role claimant
+does not subscribe directly to its role subject, and a role message is not retained for a future
+claimant.
 
 When a control delivery has no live holder or fails, Envoy emits an envelope on
 `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves the
@@ -82,7 +84,7 @@ original delivery fields:
 | `original_topic` | Original envelope topic |
 | `event_id` | Original envelope event ID |
 | `reason` | `no_holder` or `delivery_failed` |
-| `payload_summary`, `payload` | Original payload fields |
+| `payload_summary`, `payload` | Original human summary and distinct machine payload |
 | `dedupe_key` | Original envelope dedupe key |
 | `source`, `source_session` | Original envelope source fields |
 

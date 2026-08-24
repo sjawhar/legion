@@ -33,9 +33,11 @@ Example:
 Role topics route to one current live holder. `envoy_role_set(role="<role>")` transfers the
 claim using ordered last-writer-wins semantics; the listener then resolves the holder when it
 receives a role message. The role lane uses core NATS, not JetStream: a listener queue subscriber
-forwards the envelope with its original role topic to the holder's
-`notifications.agent.<session_id>` subject. A role claimant does not subscribe directly to the
-role topic, and messages are not retained, replayed, or retried for a future holder.
+sends a receipt-backed request with the original role topic to the holder's
+`notifications.agent.<session_id>` subject. The OMP agent pump replies after accepting it; no
+receipt within two seconds produces a `delivery_failed` exception. A role claimant does not
+subscribe directly to the role topic, and messages are not retained, replayed, or retried for a
+future holder.
 
 Examples:
 

@@ -7,8 +7,9 @@ Tracked OMP adapter for Envoy messaging.
 This package owns Pi-specific tool registration, direct NATS subscriptions, steering delivery,
 and optional self-subscription registration. HTTP transport, tool metadata, envelope parsing, and
 subject construction come from the Envoy core packages. Role claims are routed by the listener:
-this extension receives the forwarded envelope on its direct agent subject instead of subscribing
-to a role subject itself.
+this extension receives a receipt-backed request on its direct agent subject instead of subscribing
+to a role subject itself. The agent pump replies after it accepts the envelope, so the listener can
+turn a claimed-but-deaf holder into a `delivery_failed` exception after two seconds.
 
 ## Where to look
 

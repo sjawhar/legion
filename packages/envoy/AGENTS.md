@@ -31,14 +31,14 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 
 - `packages/contracts` is the source of truth for event contract shape; regenerate Go output from there.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
-- Listener-hosted `github` / `slack` / `ghostwispr` webhook handlers must fail loudly when publishing fails. JetStream acknowledgement waits are bounded to five seconds, so ingress cannot wait indefinitely for a publish confirmation.
+- Listener-hosted `github` / `slack` / `ghostwispr` webhook handlers must fail loudly when publishing fails. JetStream acknowledgement waits are bounded to five seconds, so ingress cannot wait indefinitely for a publish confirmation. For `/v1/messages/publish`, keep the human `message` summary separate from optional machine `payload`: they populate `payload_summary` and `payload` respectively.
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
 - `ENVOY_GHOSTWISPR_SIGNING_SECRET` is optional for trusted Ghost Wispr deployments; when unset, skip signature verification explicitly rather than half-verifying missing headers.
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
-- Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time and forwards the envelope with its original role topic to that holder's agent subject. Do not add durable role consumers or retry transit for role messages.
-- A failed or unheld control delivery emits `notifications.envoy.exceptions.<original-topic>`. Its payload preserves `original_topic`, `event_id`, `reason`, `payload_summary`, `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional.
+- Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject. The agent pump returns an empty receipt after accepting the envelope; no receipt within two seconds is `delivery_failed` and emits an exception. Do not add durable role consumers or retry transit for role messages.
+- A failed or unheld control delivery emits `notifications.envoy.exceptions.<original-topic>`. Its payload preserves `original_topic`, `event_id`, `reason`, `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind `readinessGate` (`internal/webhook/{github,slack,ghostwispr}.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 ## Operational notes
