@@ -10,7 +10,7 @@ This directory provides GitHub artifact access shared by the daemon's resync, ap
 | `github-fetch.ts` | Fetches GitHub Project v2 items for resync. |
 | `backends/github.ts` | GitHub issue-tracker parsing and project-status mutations retained for repository integrations. |
 | `backends/linear.ts` | Linear backend support retained for non-Legion consumers. |
-| `types.ts` | Shared legacy tracker data types used by the retained backend adapters. |
+| `types.ts` | Shared parsing types for the retained backend adapters. |
 
 ## Boundaries
 

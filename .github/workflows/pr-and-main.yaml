@@ -23,9 +23,6 @@ jobs:
         run: bunx biome check --error-on-warnings src/
         working-directory: packages/daemon
 
-      - name: Lint opencode-plugin
-        run: bunx biome check --error-on-warnings src/
-        working-directory: packages/opencode-plugin
 
   typecheck:
     runs-on: ubuntu-24.04
@@ -43,9 +40,6 @@ jobs:
         run: bunx tsc --noEmit
         working-directory: packages/daemon
 
-      - name: Typecheck opencode-plugin
-        run: bunx tsc --noEmit
-        working-directory: packages/opencode-plugin
 
   test:
     runs-on: ubuntu-24.04
@@ -63,6 +57,3 @@ jobs:
         run: bun test
         working-directory: packages/daemon
 
-      - name: Test opencode-plugin
-        run: bun test --path-ignore-patterns '**/omo-replacement-matrix*'
-        working-directory: packages/opencode-plugin

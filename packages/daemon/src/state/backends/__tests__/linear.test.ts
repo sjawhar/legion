@@ -9,14 +9,14 @@ describe("LinearTracker.parseIssues", () => {
       {
         identifier: "ENG-21",
         state: { name: "In Progress" },
-        labels: { nodes: [{ name: "worker-done" }] },
+        labels: { nodes: [{ name: "legion-child" }] },
       },
     ];
     const result = tracker.parseIssues(issues);
     expect(result).toHaveLength(1);
     expect(result[0].issueId).toBe("ENG-21");
     expect(result[0].status).toBe("In Progress");
-    expect(result[0].hasWorkerDone).toBe(true);
+    expect(result[0].labels).toEqual(["legion-child"]);
   });
 
   it("normalizes status (In Review -> Needs Review)", () => {
@@ -85,7 +85,7 @@ describe("LinearTracker.parseIssues", () => {
       {
         identifier: "ENG-1",
         state: { name: "Needs Review" },
-        labels: { nodes: [{ name: "worker-done" }] },
+        labels: { nodes: [{ name: "legion-child" }] },
         attachments: [{ url: "https://github.com/owner/repo/pull/123" }],
       },
     ];
@@ -119,13 +119,13 @@ describe("LinearTracker.parseIssues edge cases", () => {
         identifier: "ENG-21",
         state: { name: "Todo" },
         labels: {
-          nodes: [{ name: "worker-done" }, {} as { name: string }, { name: "urgent" }],
+          nodes: [{ name: "legion-child" }, {} as { name: string }, { name: "urgent" }],
         },
       },
     ];
     const result = tracker.parseIssues(issues);
     expect(result).toHaveLength(1);
-    expect(result[0].labels).toEqual(["worker-done", "urgent"]);
+    expect(result[0].labels).toEqual(["legion-child", "urgent"]);
   });
 
   it("handles attachments with invalid URLs", () => {

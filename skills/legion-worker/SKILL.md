@@ -56,10 +56,10 @@ shared operation log. If a mistake reaches that point, stop and send the owning 
 
 ## Phase work
 
-Follow the phase-specific instructions and the repository's normal engineering workflow.
-Keep the assigned issue's acceptance criteria as the test target. The architect is responsible
-for decomposition, design-gate discipline, scheduling waves, integration ownership, and any
-human conversation; do not replace those responsibilities with labels or a local status model.
+Follow the repository's normal engineering workflow and the assigned issue's acceptance criteria.
+The dispatch output schema defines the phase artifact and completion evidence. Do not replace
+architect-owned decomposition, gate discipline, scheduling, or human communication with labels
+or a local status model.
 
 Every commit carries the session attribution trailer:
 

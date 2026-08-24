@@ -465,7 +465,7 @@ describe("Legion HTTP API", () => {
     const rejectedLabel = await json("/legion/v1/issues/labels", {
       tree: root,
       issue: child,
-      add: ["worker-done"],
+      add: ["unknown-label"],
     });
     expect(rejectedLabel.response.status).toBe(400);
 

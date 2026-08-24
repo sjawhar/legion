@@ -39,7 +39,7 @@ Returns: title, description, status, labels, comments, attachments.
 linear_linear(action="update", id="ABC-123", state="Done")
 linear_linear(action="update", id="ABC-123", priority=1)
 linear_linear(action="update", id="ABC-123", assignee="me")
-linear_linear(action="update", id="ABC-123", labels=["worker-done", "existing-label"])
+linear_linear(action="update", id="ABC-123", labels=["legion-backlog", "existing-label"])
 ```
 
 **Labels array replaces all labels.** Fetch current labels first, then append.

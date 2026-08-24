@@ -40,7 +40,7 @@ describe("LinearTracker.transitionIssue", () => {
 describe("LinearTracker.removeLabel", () => {
   it("throws not-implemented error", async () => {
     const tracker = new LinearTracker();
-    await expect(tracker.removeLabel({ issueId: "ENG-42" }, "worker-done")).rejects.toThrow(
+    await expect(tracker.removeLabel({ issueId: "ENG-42" }, "unknown-label")).rejects.toThrow(
       "not implemented"
     );
   });
