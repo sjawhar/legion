@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -349,12 +350,14 @@ func (c *Client) Publish(item contracts.Envelope) error {
 	if err := c.ensureConn(); err != nil {
 		return err
 	}
-	_, err = c.js.Publish(item.Topic, data)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = c.js.Publish(item.Topic, data, nats.Context(ctx))
 	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 		if err := c.ensureConn(); err != nil {
 			return err
 		}
-		_, err = c.js.Publish(item.Topic, data)
+		_, err = c.js.Publish(item.Topic, data, nats.Context(ctx))
 	}
 	return err
 }

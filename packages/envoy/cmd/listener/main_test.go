@@ -328,6 +328,61 @@ func setupPublishTestClient(t *testing.T) *bus.Client {
 	return client
 }
 
+func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
+	client := setupPublishTestClient(t)
+	info, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	originalConfig := info.Config
+	unboundConfig := originalConfig
+	unboundConfig.Subjects = []string{"notifications.bound.>"}
+	if _, err := client.JS().UpdateStream(&unboundConfig); err != nil {
+		t.Fatalf("remove publish subject binding: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := client.JS().UpdateStream(&originalConfig); err != nil {
+			t.Errorf("restore stream subject bindings: %v", err)
+		}
+	})
+
+	noAck, err := client.Conn.Subscribe("notifications.unbound", func(*natsgo.Msg) {})
+	if err != nil {
+		t.Fatalf("subscribe to publish subject without sending an ack: %v", err)
+	}
+	t.Cleanup(func() { _ = noAck.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush no-ack subscription: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	server := httptest.NewServer(publishHandler(&state))
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/messages/publish", strings.NewReader(`{"topic":"notifications.unbound","message":"ping","source":"agent"}`))
+	if err != nil {
+		t.Fatalf("create publish request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	started := time.Now()
+	response, err := server.Client().Do(request)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("publish request did not return before deadline: %v", err)
+	}
+	defer response.Body.Close()
+	if elapsed > 5*time.Second+500*time.Millisecond {
+		t.Fatalf("publish response took %s, want a bounded response within 5s", elapsed)
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode < http.StatusInternalServerError {
+		t.Fatalf("publish status = %d, want 200 or 5xx", response.StatusCode)
+	}
+}
+
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	client := setupPublishTestClient(t)
 	var state atomic.Pointer[listenerDeps]
