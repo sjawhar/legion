@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, formatIssueKey, roleTopic } from "@legion/contracts";
+import { controllerToken, formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
@@ -163,10 +163,28 @@ describe("startDaemon", () => {
       else process.env.XDG_STATE_HOME = originalEnvironment.XDG_STATE_HOME;
     }
   });
-  it("heals a missed board item through the event pump and logs the healed count", async () => {
+  it("heals missed board items and executes reconciled human approval wakes through the event pump", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const approvalIssue = formatIssueKey("acme", "widgets", 43);
+    const architect = roleToken(daemonConfig.project, approvalIssue, "architect");
+    state.issues[approvalIssue] = {
+      key: approvalIssue,
+      title: "Awaiting approval",
+      state: "open",
+      children: [],
+      released: true,
+      labels: ["needs-approval"],
+    };
+    state.trees[approvalIssue] = {
+      root: approvalIssue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.roles[architect] = { issue: approvalIssue, role: "architect" };
     const published: Array<{ topic: string; payload: unknown }> = [];
     const logs: string[] = [];
     const originalLog = console.log;
@@ -205,6 +223,16 @@ describe("startDaemon", () => {
                 },
                 status: "Todo",
                 labels: [],
+              },
+              {
+                content: {
+                  type: "Issue",
+                  number: 43,
+                  title: "Awaiting approval",
+                  repository: "acme/widgets",
+                },
+                status: "Todo",
+                labels: ["human-approved"],
               },
             ],
             excludedNullContentItems: 0,
@@ -246,19 +274,30 @@ describe("startDaemon", () => {
         state: "open",
         released: true,
       });
+      expect(state.issues[approvalIssue]?.labels).toEqual(["human-approved"]);
       expect(published).toEqual([
         {
           topic: roleTopic(controllerToken(daemonConfig.project)),
           payload: { type: "triage", issue, preexistingChildren: [] },
         },
         {
+          topic: roleTopic(architect),
+          payload: { type: "human-approved" },
+        },
+        {
           topic: roleTopic(controllerToken(daemonConfig.project)),
-          payload: { type: "resync", anomalies: [], healed: 1, excludedNullContentItems: 0 },
+          payload: {
+            type: "resync",
+            anomalies: [],
+            healed: 1,
+            reconciledLabels: 2,
+            excludedNullContentItems: 0,
+          },
         },
       ]);
       expect(saves).toBeGreaterThan(0);
       expect(logs).toContain(
-        "[legion] resync complete: anomalies=0 healed=1 excluded-null-content-items=0"
+        "[legion] resync complete: anomalies=0 healed=1 reconciled-labels=2 excluded-null-content-items=0"
       );
     } finally {
       await daemon?.stop();

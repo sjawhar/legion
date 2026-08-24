@@ -322,7 +322,7 @@ export async function startDaemon(
       now: deps.now,
     });
     console.log(
-      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} excluded-null-content-items=${payload.excludedNullContentItems}`
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems}`
     );
     await eventPump.publishControllerEvent(payload, {
       event_id: `resync:${randomUUID()}`,

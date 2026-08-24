@@ -411,9 +411,15 @@ function issueEvent(
   if (payload.action === "labeled" || payload.action === "unlabeled") {
     const label = stringValue(asRecord(payload.label)?.name);
     if (!label || !SURVIVING_LABELS[label]) return [];
-    if (payload.action === "labeled" && !node.labels.includes(label)) node.labels.push(label);
-    if (payload.action === "unlabeled")
-      node.labels = node.labels.filter((value) => value !== label);
+    if (payload.action === "labeled") {
+      if (node.labels.includes(label)) return [];
+      node.labels.push(label);
+      return label === "human-approved"
+        ? route(state, key, "architect", { type: "human-approved" }, envelope)
+        : [];
+    }
+    if (!node.labels.includes(label)) return [];
+    node.labels = node.labels.filter((value) => value !== label);
     return [];
   }
 

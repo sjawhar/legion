@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatIssueKey } from "@legion/contracts";
+import { formatIssueKey, roleToken } from "@legion/contracts";
 import { type LegionState, newLegionState } from "../legion-state";
 import type { Effect, EnvelopeJson } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
@@ -67,6 +67,7 @@ describe("runResync", () => {
         },
       ],
       healed: 0,
+      reconciledLabels: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -81,6 +82,7 @@ describe("runResync", () => {
       type: "resync",
       anomalies: [],
       healed: 0,
+      reconciledLabels: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -121,6 +123,66 @@ describe("runResync", () => {
       type: "resync",
       anomalies: [],
       healed: 1,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
+  });
+
+  it("reconciles a human approval label through the reducer and executes its architect wake", async () => {
+    const state = newLegionState("omp", 1);
+    recordOpenReleasedIssue(state, { labels: ["needs-approval"] });
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      heldEvents: [],
+      launchFailures: 0,
+    };
+    const architect = roleToken(state.project, issue, "architect");
+    state.roles[architect] = { issue, role: "architect" };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+
+    const event = await runResync({
+      ...resyncDeps(state, [boardIssue({ labels: ["human-approved"] })]),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
+
+    expect(state.issues[issue]?.labels).toEqual(["human-approved"]);
+    expect(dispatched).toEqual([
+      {
+        effects: [{ kind: "publish", role: architect, payload: { type: "human-approved" } }],
+        envelope: {
+          event_id: `resync:${issue}:labeled:human-approved`,
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+          payload: {
+            action: "labeled",
+            issue: { number: 42 },
+            label: { name: "human-approved" },
+            repository: { full_name: "sjawhar/legion" },
+          },
+        },
+      },
+      {
+        effects: [],
+        envelope: {
+          event_id: `resync:${issue}:unlabeled:needs-approval`,
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+          payload: {
+            action: "unlabeled",
+            issue: { number: 42 },
+            label: { name: "needs-approval" },
+            repository: { full_name: "sjawhar/legion" },
+          },
+        },
+      },
+    ]);
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 2,
       excludedNullContentItems: 0,
     });
   });
@@ -144,6 +206,7 @@ describe("runResync", () => {
         },
       ],
       healed: 0,
+      reconciledLabels: 0,
       excludedNullContentItems: 0,
     });
     expect(state.issues[issue]).toBeUndefined();
@@ -165,6 +228,7 @@ describe("runResync", () => {
         },
       ],
       healed: 1,
+      reconciledLabels: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -191,6 +255,7 @@ describe("runResync", () => {
         },
       ],
       healed: 0,
+      reconciledLabels: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -210,6 +275,7 @@ describe("runResync", () => {
       type: "resync",
       anomalies: [],
       healed: 0,
+      reconciledLabels: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -224,6 +290,7 @@ describe("runResync", () => {
       type: "resync",
       anomalies: [],
       healed: 0,
+      reconciledLabels: 0,
       excludedNullContentItems: 1,
     });
   });

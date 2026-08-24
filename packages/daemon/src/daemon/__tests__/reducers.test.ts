@@ -669,16 +669,21 @@ describe("reduceGithubEvent", () => {
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBe("approved");
   });
 
-  it("mirrors only supported labels and ignores unknown labels", () => {
+  it("mirrors supported labels, waking the architect once when a human approves", () => {
     const state = rootState();
+    const architect = roleToken(state.project, root, "architect");
     expect(
       effects(state, { action: "labeled", issue: issue(1), label: { name: "needs-approval" } })
     ).toEqual([]);
     expect(state.issues[root].labels).toEqual(["needs-approval"]);
+    expect(
+      effects(state, { action: "labeled", issue: issue(1), label: { name: "human-approved" } })
+    ).toEqual([{ kind: "publish", role: architect, payload: { type: "human-approved" } }]);
+    expect(state.issues[root].labels).toEqual(["needs-approval", "human-approved"]);
     effects(state, { action: "labeled", issue: issue(1), label: { name: "unknown-label" } });
-    expect(state.issues[root].labels).toEqual(["needs-approval"]);
+    expect(state.issues[root].labels).toEqual(["needs-approval", "human-approved"]);
     effects(state, { action: "unlabeled", issue: issue(1), label: { name: "needs-approval" } });
-    expect(state.issues[root].labels).toEqual([]);
+    expect(state.issues[root].labels).toEqual(["human-approved"]);
   });
 
   it("indexes session attribution from a legion push trailer and comment footer", () => {
