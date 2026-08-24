@@ -459,6 +459,72 @@ describe("envoy OMP extension", () => {
     expect(fixture.messages.some((message) => message.includes("role event while listener is down"))).toBe(true);
   });
 
+  test("keeps a role claimant registered after the session-staleness window when session registration is otherwise disabled", async () => {
+    delete process.env.ENVOY_REGISTER_SESSION;
+    const registrations: {
+      readonly session_id: string;
+      readonly self_subscribed: boolean;
+      readonly topics: readonly string[];
+    }[] = [];
+    const heartbeatRegistration = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_role_heartbeat",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: ["notifications.role.legion-controller"],
+        });
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly self_subscribed: boolean;
+          readonly topics: readonly string[];
+        };
+        registrations.push(body);
+        heartbeatRegistration.resolve();
+        return response({ session_id: body.session_id, machine_id: "test", dir: "/tmp", topics: body.topics });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") return response({});
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-claim-heartbeat");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_role_heartbeat"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    expect(intervals).toEqual([]);
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
+    await roleTool.execute("", { role: "legion-controller" });
+
+    expect(intervals).toHaveLength(1);
+    // This callback represents the heartbeat due after ClaimStaleAfter; a role
+    // claim must keep registration fresh even without ENVOY_REGISTER_SESSION.
+    intervals[0]?.();
+    await heartbeatRegistration.promise;
+    expect(registrations).toHaveLength(1);
+    expect(registrations[0]).toMatchObject({
+      session_id: "ses_role_heartbeat",
+      self_subscribed: true,
+      topics: ["notifications.agent.ses_role_heartbeat"],
+    });
+    await unsubscribeTool.execute("", { topics: ["notifications.role.legion-controller"] });
+    const registrationsAfterRelease = registrations.length;
+    intervals[0]?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registrations).toHaveLength(registrationsAfterRelease);
+  });
+
   test("registers an optional self-subscribed interest on session start", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {

@@ -75,6 +75,7 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionID = "";
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
+  let activeSessionContext: SessionContext | undefined;
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -217,52 +218,59 @@ export default function envoyExtension(pi: PiApi): void {
     });
   };
 
+  const registrationRequired = (): boolean =>
+    process.env.ENVOY_REGISTER_SESSION === "1" || claimedRoleTopic !== undefined;
+
+  const ensureHeartbeat = (context: SessionContext): void => {
+    if (heartbeatRegistered) return;
+    // Never let a heartbeat tick reject unhandled: OMP treats unhandled
+    // rejections as fatal (postmortem exitAfterFatal), so a registry blip
+    // would kill a live session. Warn once per outage; registration
+    // self-heals on the next successful tick.
+    let heartbeatOutageNotified = false;
+    let healing = false;
+    context.setInterval(() => {
+      if (!registrationRequired()) return;
+      // Sessions can be created lazily after session_start (a fresh TUI has no
+      // session yet), and the ID this closure registered with goes stale. Heal
+      // on drift instead of heartbeating a dead identity forever.
+      const liveSessionID = context.sessionManager.getSessionId();
+      const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
+      if (healing) return;
+      healing = true;
+      void (drifted ? establishSession(context) : registerSession())
+        .then(() => {
+          heartbeatOutageNotified = false;
+        })
+        .catch((error) => {
+          if (heartbeatOutageNotified) return;
+          heartbeatOutageNotified = true;
+          context.ui.notify(
+            `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
+            "warning",
+          );
+        })
+        .finally(() => {
+          healing = false;
+        });
+    }, defaults.heartbeatMs);
+    heartbeatRegistered = true;
+  };
+
   const establishSession = async (context: SessionContext): Promise<void> => {
     const previousTopic = sessionID === "" ? undefined : agentSubject(sessionID);
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    activeSessionContext = context;
     const currentTopic = agentSubject(sessionID);
     if (previousTopic !== undefined && previousTopic !== currentTopic) {
       closeIntentionally(previousTopic);
     }
     await ensureConnection();
     await subscribe(currentTopic);
-    if (process.env.ENVOY_REGISTER_SESSION === "1") {
+    if (registrationRequired()) {
       await registerSession();
-      if (!heartbeatRegistered) {
-        // Never let a heartbeat tick reject unhandled: OMP treats unhandled
-        // rejections as fatal (postmortem exitAfterFatal), so a registry blip
-        // would kill a live session. Warn once per outage; registration
-        // self-heals on the next successful tick.
-        let heartbeatOutageNotified = false;
-        let healing = false;
-        context.setInterval(() => {
-          // Sessions can be created lazily after session_start (a fresh TUI
-          // has no session yet), and the ID this closure registered with goes
-          // stale. Heal on drift: rebind the topic and re-register under the
-          // live ID instead of heartbeating a dead identity forever.
-          const liveSessionID = context.sessionManager.getSessionId();
-          const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
-          if (healing) return;
-          healing = true;
-          void (drifted ? establishSession(context) : registerSession())
-            .then(() => {
-              heartbeatOutageNotified = false;
-            })
-            .catch((error) => {
-              if (heartbeatOutageNotified) return;
-              heartbeatOutageNotified = true;
-              context.ui.notify(
-                `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
-                "warning",
-              );
-            })
-            .finally(() => {
-              healing = false;
-            });
-        }, defaults.heartbeatMs);
-        heartbeatRegistered = true;
-      }
+      ensureHeartbeat(context);
     }
   };
 
@@ -328,6 +336,7 @@ export default function envoyExtension(pi: PiApi): void {
       // A failed drain on shutdown is not actionable.
     } finally {
       connection = undefined;
+      activeSessionContext = undefined;
       subscriptions.clear();
       intentionallyClosed.clear();
       awaitingRetry.clear();
@@ -407,6 +416,7 @@ export default function envoyExtension(pi: PiApi): void {
           const previousTopic = claimedRoleTopic;
           await client.setRole({ sessionID, role });
           claimedRoleTopic = topic;
+          if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
           if (previousTopic !== undefined && previousTopic !== topic) {
             await client.unsubscribe({ sessionID, topics: [previousTopic] });
           }
