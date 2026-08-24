@@ -1,25 +1,9 @@
-/**
- * Async data fetching for Legion state collection.
- *
- * All I/O operations are async and can be composed with Promise.all.
- * Uses:
- * - fetch() for daemon HTTP API (worker detection)
- * - Bun.spawn for GitHub CLI (PR review state, CI status)
- * - Retry logic with exponential backoff for GitHub API calls
- *
- * Ported from Python: src/legion/state/fetch.py
- */
-
-import { LinearTracker } from "./backends/linear";
 import {
   CiStatus,
   type CiStatusLiteral,
-  type FetchedIssueData,
   type GitHubPRRef as GitHubPRRefType,
-  type LinearIssueRaw,
   MergeableStatus,
   type MergeableStatusLiteral,
-  type ParsedIssue,
   ReviewState,
   type ReviewStateLiteral,
 } from "./types";
@@ -96,68 +80,13 @@ export class GitHubAPIError extends Error {
 }
 
 // =============================================================================
-// HTTP Worker Detection
-// =============================================================================
-
-interface DaemonWorker {
-  id: string;
-  status?: string;
-}
-
-/**
- * Get live workers as {issue_id: {mode, status}} from daemon HTTP API.
- *
- * Workers are reported by the daemon's /workers endpoint.
- * Worker ID format: "ISSUE-ID-mode" (e.g., "ENG-21-implement").
- *
- * @param daemonUrl - Base URL of the daemon HTTP API
- * @returns Dict mapping issue_id (uppercase) to mode/status
- */
-export async function getLiveWorkers(
-  daemonUrl: string
-): Promise<Record<string, { mode: string; status: string }>> {
-  try {
-    const response = await fetch(`${daemonUrl}/workers`, {
-      signal: AbortSignal.timeout(5_000), // 5s — local daemon should respond fast
-    });
-    if (!response.ok) {
-      return {};
-    }
-
-    const workers = (await response.json()) as DaemonWorker[];
-    const result: Record<string, { mode: string; status: string }> = {};
-
-    for (const worker of workers) {
-      if (worker.status !== "running" && worker.status !== "starting") {
-        continue;
-      }
-
-      // Parse worker.id format: "ISSUE-ID-mode"
-      // The mode is always the last segment after the last hyphen
-      const lastDash = worker.id.lastIndexOf("-");
-      if (lastDash <= 0) continue;
-
-      const issueId = worker.id.substring(0, lastDash).toUpperCase();
-      const mode = worker.id.substring(lastDash + 1);
-      result[issueId] = { mode, status: worker.status ?? "running" };
-    }
-
-    return result;
-  } catch {
-    // Network error, daemon not running, etc.
-    return {};
-  }
-}
-
-// =============================================================================
 // GitHub PR Draft Status Fetching
 // =============================================================================
 
-/**
- * Sleep for a given number of milliseconds.
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function sleep(ms: number): Promise<void> {
+  const delay = Promise.withResolvers<void>();
+  setTimeout(delay.resolve, ms);
+  await delay.promise;
 }
 
 // =============================================================================
@@ -604,113 +533,4 @@ async function getCiStatusBatchWithOptions(
   }
 
   throw lastError;
-}
-
-// =============================================================================
-// Issue Parsing
-// =============================================================================
-
-// =============================================================================
-// Main Data Fetching
-// =============================================================================
-
-export async function enrichParsedIssues(
-  parsedIssues: ParsedIssue[],
-  daemonUrl: string,
-  runner: CommandRunner = defaultRunner,
-  runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
-): Promise<FetchedIssueData[]> {
-  const prRefsForStatus: Record<string, GitHubPRRefType> = {};
-  for (const p of parsedIssues) {
-    if (p.needsPrStatus && p.prRef !== null) {
-      prRefsForStatus[p.issueId] = p.prRef;
-    }
-  }
-
-  const ciRefsForStatus: Record<string, GitHubPRRefType> = {};
-  for (const p of parsedIssues) {
-    if (p.needsCiStatus && p.prRef !== null) {
-      ciRefsForStatus[p.issueId] = p.prRef;
-    }
-  }
-
-  let liveWorkers: Record<string, { mode: string; status: string }> = {};
-  let prReviewMap: Record<string, ReviewStateLiteral | null> = {};
-  let ciAndMergeMap: Record<string, CiAndMergeStatus> = {};
-
-  await Promise.all([
-    (async () => {
-      liveWorkers = await getLiveWorkers(daemonUrl);
-    })(),
-    (async () => {
-      if (Object.keys(prRefsForStatus).length === 0) {
-        return;
-      }
-      try {
-        prReviewMap = await getPrReviewStateBatch(prRefsForStatus, runner, runnerOptionsForOwner);
-      } catch {
-        for (const issueId of Object.keys(prRefsForStatus)) {
-          prReviewMap[issueId] = null;
-        }
-      }
-    })(),
-    (async () => {
-      if (Object.keys(ciRefsForStatus).length === 0) {
-        return;
-      }
-      try {
-        ciAndMergeMap = await getCiStatusBatch(ciRefsForStatus, runner, runnerOptionsForOwner);
-      } catch {
-        for (const issueId of Object.keys(ciRefsForStatus)) {
-          ciAndMergeMap[issueId] = { ciStatus: null, mergeableStatus: null };
-        }
-      }
-    })(),
-  ]);
-
-  return parsedIssues.map((issue) => {
-    const workerInfo = liveWorkers[issue.issueId.toUpperCase()] ?? null;
-    return {
-      issueId: issue.issueId,
-      status: issue.status,
-      labels: issue.labels,
-      hasPr: issue.hasPr,
-      prReviewState: prReviewMap[issue.issueId] ?? null,
-      ciStatus: ciAndMergeMap[issue.issueId]?.ciStatus ?? null,
-      mergeableStatus: ciAndMergeMap[issue.issueId]?.mergeableStatus ?? null,
-      hasLiveWorker: workerInfo !== null,
-      workerMode: workerInfo?.mode ?? null,
-      workerStatus: workerInfo?.status ?? null,
-      hasUserFeedback: issue.hasUserFeedback,
-      hasUserInputNeeded: issue.hasUserInputNeeded,
-      hasNeedsApproval: issue.hasNeedsApproval,
-      hasHumanApproved: issue.hasHumanApproved,
-      hasTestPassed: issue.hasTestPassed,
-      hasTestFailed: issue.hasTestFailed,
-      blockedByIds: issue.blockedByIds,
-      isBlocked: issue.isBlocked,
-      source: issue.source,
-    };
-  });
-}
-
-/**
- * Fetch all data for issues in parallel.
- *
- * All I/O operations run concurrently:
- * - Daemon HTTP API (for live workers)
- * - GitHub PR review state (fetched via gh api graphql)
- *
- * @param linearIssues - Raw issue dicts from Linear API (legacy — use enrichParsedIssues for new code)
- * @param daemonUrl - Base URL of daemon HTTP API
- * @param runner - Command runner for testing
- * @returns List of fully fetched issue data
- */
-export async function fetchAllIssueData(
-  linearIssues: LinearIssueRaw[],
-  daemonUrl: string,
-  runner: CommandRunner = defaultRunner
-): Promise<FetchedIssueData[]> {
-  const parsedIssues = new LinearTracker().parseIssues(linearIssues);
-  return enrichParsedIssues(parsedIssues, daemonUrl, runner);
 }

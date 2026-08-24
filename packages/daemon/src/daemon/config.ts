@@ -2,8 +2,7 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
-import type { LegionPaths } from "./paths";
-import { resolveLegionPaths } from "./paths";
+import { z } from "zod";
 
 export type GitHubAppRole = "implement" | "review";
 
@@ -16,33 +15,24 @@ export interface GitHubAppRoleConfig {
 export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig>>;
 
 export interface DaemonConfig {
-  daemonPort: number;
-  daemonPortExplicit: boolean;
-  legionId?: string;
-  legionDir?: string;
-  paths: LegionPaths;
-  checkIntervalMs: number;
-  resyncIntervalMs: number;
-  baseWorkerPort: number;
-  stateFilePath: string;
-  logDir: string;
-  controllerSessionId?: string;
-  controllerPrompt?: string;
-  issueBackend: "linear" | "github";
-  extraProjects?: string[];
-  runtime: "opencode" | "claude-code";
-  githubApps?: GitHubAppsConfig;
+  project: string;
+  legionId: string;
+  port: number;
   envoyUrl: string;
-  feedbackDisabled: boolean;
-  feedbackMaxBytes: number;
-  reviewerAppId?: number;
-  reviewerAppLogin?: string;
-  /** RSS threshold in bytes; serve restarts when exceeded. 0 = disabled. */
-  maxRssBytes: number;
-  /** Minimum interval between RSS checks in ms. */
-  rssCheckIntervalMs: number;
-  /** Maps worker mode to agent type for the initial prompt's AgentPartInput. */
-  modeAgents: Partial<Record<string, string>>;
+  natsUrls: string[];
+  dispatchUrl: string;
+  boardProjectIds: string[];
+  appLogins: string[];
+  admissionCap: number;
+  workerBudget: number;
+  maxRecursionDepth: number;
+  lingerHours: number;
+  ciQuietMs: number;
+  maxFixAttempts: number;
+  resyncIntervalMs: number;
+  gates: { design: "root-issues" | "off"; merge: "human" | "off" };
+  githubApps: GitHubAppsConfig;
+  stateDir: string;
 }
 
 export interface LoadedConfigFile {
@@ -63,88 +53,56 @@ export interface ResolveDaemonConfigResult {
 
 const CONFIG_ANY_KEY = Symbol("config-any-key");
 
-interface ConfigSchema {
+type ConfigSchema = {
   [key: string]: ConfigSchema | null;
   [CONFIG_ANY_KEY]?: ConfigSchema | null;
-}
+};
 type ValueSource = "cli" | "config" | "env" | "default";
 
-const BASE_DAEMON_PORT = 13370;
-const DEFAULT_CHECK_INTERVAL_MS = 60_000;
-const DEFAULT_RESYNC_INTERVAL_SECONDS = 600;
-const DEFAULT_BASE_WORKER_PORT = 13381;
-const DEFAULT_MAX_RSS_GB = 20;
-const DEFAULT_RSS_CHECK_INTERVAL_S = 60;
+const DEFAULT_PORT = 13370;
 const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-const DEFAULT_FEEDBACK_MAX_BYTES = 50 * 1024 * 1024;
-const EXTRA_PROJECT_PATTERN = /^[^/]+\/\d+$/;
-const GITHUB_APP_ROLES: GitHubAppRole[] = ["implement", "review"];
+const DEFAULT_ADMISSION_CAP = 4;
+const DEFAULT_WORKER_BUDGET = 6;
+const DEFAULT_MAX_RECURSION_DEPTH = 8;
+const DEFAULT_LINGER_HOURS = 72;
+const DEFAULT_CI_QUIET_MS = 30_000;
+const DEFAULT_MAX_FIX_ATTEMPTS = 3;
+const DEFAULT_RESYNC_INTERVAL_MS = 600_000;
+
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
-  extra_projects: null,
-  backend: null,
-  runtime: null,
-  workspace: null,
   port: null,
+  envoy_url: null,
+  nats_urls: null,
+  dispatch_url: null,
+  board_project_ids: null,
+  app_logins: null,
+  admission_cap: null,
+  worker_budget: null,
+  max_recursion_depth: null,
+  linger_hours: null,
+  ci_quiet_ms: null,
+  max_fix_attempts: null,
   resync_interval_seconds: null,
-  reviewer_app_id: null,
-  reviewer_app_login: null,
-  controller: {
-    session_id: null,
-    prompt: null,
-  },
+  state_dir: null,
+  gates: { design: null, merge: null },
   github_apps: {
     implement: {
       app_id: null,
       private_key: null,
       private_key_command: null,
-      installations: {
-        [CONFIG_ANY_KEY]: null,
-      },
+      installations: { [CONFIG_ANY_KEY]: null },
     },
     review: {
       app_id: null,
       private_key: null,
       private_key_command: null,
-      installations: {
-        [CONFIG_ANY_KEY]: null,
-      },
+      installations: { [CONFIG_ANY_KEY]: null },
     },
-  },
-  memory: {
-    max_rss_gb: null,
-    rss_check_interval_seconds: null,
-  },
-  envoy_url: null,
-  feedback: {
-    disabled: null,
-    max_bytes: null,
-  },
-  mode_agents: {
-    [CONFIG_ANY_KEY]: null,
   },
 };
 
-function parseOptionalNumber(value: string | undefined): number | undefined {
-  if (value === undefined || value === "") {
-    return undefined;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function parseOptionalBoolean(value: string | undefined): boolean | undefined {
-  if (value === undefined || value === "") {
-    return undefined;
-  }
-  if (value === "true" || value === "1") {
-    return true;
-  }
-  if (value === "false" || value === "0") {
-    return false;
-  }
-  return undefined;
-}
+const UnknownRecordSchema = z.record(z.unknown());
 
 function resolveValue<T>(
   cliValue: T | undefined,
@@ -152,215 +110,79 @@ function resolveValue<T>(
   envValue: T | undefined,
   defaultValue: T
 ): { value: T; source: ValueSource } {
-  if (cliValue !== undefined) {
-    return { value: cliValue, source: "cli" };
-  }
-  if (configValue !== undefined) {
-    return { value: configValue, source: "config" };
-  }
-  if (envValue !== undefined) {
-    return { value: envValue, source: "env" };
-  }
+  if (cliValue !== undefined) return { value: cliValue, source: "cli" };
+  if (configValue !== undefined) return { value: configValue, source: "config" };
+  if (envValue !== undefined) return { value: envValue, source: "env" };
   return { value: defaultValue, source: "default" };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readString(value: unknown, fieldPath: string): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== "string") {
-    throw new Error(`${fieldPath} must be a string`);
-  }
+function readString(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${field} must be a string`);
   return value;
 }
 
-function readStringRecord(value: unknown, fieldPath: string): Record<string, string> | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
+function readStringArray(value: unknown, field: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "string" || entry.length === 0)
+  ) {
+    throw new Error(`${field} must be an array of non-empty strings`);
   }
-  if (!isRecord(value)) {
-    throw new Error(`${fieldPath} must be a mapping`);
-  }
-
-  const result: Record<string, string> = {};
-  for (const [key, entryValue] of Object.entries(value)) {
-    if (typeof entryValue !== "string") {
-      throw new Error(`${fieldPath}.${key} must be a string`);
-    }
-    result[key] = entryValue;
-  }
-
-  return result;
+  return [...new Set(value)];
 }
 
-function executePrivateKeyCommand(command: string, fieldPath: string): string {
-  const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
-  if (result.error || result.status !== 0) {
-    const status = result.status === null ? "unknown" : String(result.status);
-    const stderr = result.stderr?.trim();
-    throw new Error(`${fieldPath} failed (exit ${status})${stderr ? `: ${stderr}` : ""}`);
-  }
-  const privateKey = result.stdout?.trim() ?? "";
-  if (!privateKey) {
-    throw new Error(`${fieldPath} produced empty output`);
-  }
-  return privateKey;
-}
-
-function readNumber(value: unknown, fieldPath: string): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
+function readNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${fieldPath} must be a number`);
+    throw new Error(`${field} must be a finite number`);
   }
   return value;
 }
 
-function readBoolean(value: unknown, fieldPath: string): boolean | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
+function readPositiveInteger(value: unknown, field: string): number | undefined {
+  const number = readNumber(value, field);
+  if (number === undefined) return undefined;
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`${field} must be a positive integer`);
   }
-  if (typeof value !== "boolean") {
-    throw new Error(`${fieldPath} must be a boolean`);
+  return number;
+}
+
+function parseEnvPositiveInteger(value: string | undefined, field: string): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`${field} must be a positive integer`);
   }
+  return number;
+}
+
+function parseCsv(value: string | undefined, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  const values = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (value.trim().length > 0 && values.length === 0) {
+    throw new Error(`${field} must contain at least one value`);
+  }
+  return [...new Set(values)];
+}
+
+function requireNonEmpty(value: string, field: string): string {
+  if (value.trim().length === 0) throw new Error(`${field} must not be empty`);
   return value;
 }
 
-function normalizeConfigPath(value: string, configDir: string): string {
-  return path.isAbsolute(value) ? value : path.resolve(configDir, value);
-}
-
-export function validateControllerPrompt(prompt: string | undefined): void {
-  if (!prompt) {
-    return;
-  }
-  if (prompt.length > 10000) {
-    throw new Error(
-      `Controller prompt exceeds maximum length of 10000 characters (got ${prompt.length})`
-    );
-  }
-  const hasControlChars = [...prompt].some((ch) => {
-    const code = ch.charCodeAt(0);
-    return (
-      (code >= 0 && code <= 8) ||
-      code === 11 ||
-      code === 12 ||
-      (code >= 14 && code <= 31) ||
-      code === 127
-    );
-  });
-  if (hasControlChars) {
-    throw new Error("Controller prompt contains invalid control characters");
-  }
-}
-
-export function validateBackend(
-  value: string | undefined,
-  sourceName: string
-): "linear" | "github" | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value !== "linear" && value !== "github") {
-    throw new Error(`${sourceName} must be 'linear' or 'github' (got: ${value})`);
+function validateUrl(value: string, field: string): string {
+  try {
+    new URL(value);
+  } catch {
+    throw new Error(`${field} must be a valid URL`);
   }
   return value;
-}
-
-export function validateRuntime(
-  value: string | undefined,
-  sourceName: string
-): "opencode" | "claude-code" | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value !== "opencode" && value !== "claude-code") {
-    throw new Error(`${sourceName} must be 'opencode' or 'claude-code' (got: ${value})`);
-  }
-  return value;
-}
-
-export function validateControllerSessionId(
-  value: string | undefined,
-  sourceName: string
-): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  if (!value.startsWith("ses_")) {
-    throw new Error(`${sourceName} must start with 'ses_' (got: ${value})`);
-  }
-  return value;
-}
-
-function parseExtraProjects(value: string | undefined): string[] | undefined {
-  if (value === undefined || value === "") {
-    return undefined;
-  }
-
-  const extraProjects: string[] = [];
-  const seen = new Set<string>();
-
-  for (const rawEntry of value.split(",")) {
-    const entry = rawEntry.trim();
-    if (!entry) {
-      continue;
-    }
-    if (!EXTRA_PROJECT_PATTERN.test(entry)) {
-      throw new Error(`LEGION_EXTRA_PROJECTS entries must match owner/number (got: ${entry})`);
-    }
-    if (!seen.has(entry)) {
-      seen.add(entry);
-      extraProjects.push(entry);
-    }
-  }
-
-  return extraProjects.length > 0 ? extraProjects : undefined;
-}
-
-function parseExtraProjectsArray(value: unknown): string[] | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (!Array.isArray(value)) {
-    throw new Error("extra_projects must be an array");
-  }
-
-  const extraProjects: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of value) {
-    if (typeof entry !== "string") {
-      throw new Error("extra_projects entries must be strings matching owner/number");
-    }
-    if (!EXTRA_PROJECT_PATTERN.test(entry)) {
-      throw new Error(`extra_projects entries must match owner/number (got: ${entry})`);
-    }
-    if (!seen.has(entry)) {
-      seen.add(entry);
-      extraProjects.push(entry);
-    }
-  }
-
-  return extraProjects.length > 0 ? extraProjects : undefined;
-}
-
-function parseMaxRssBytesFromGb(maxRssGb: number | undefined): number | undefined {
-  if (maxRssGb === undefined) {
-    return undefined;
-  }
-  return maxRssGb > 0 ? maxRssGb * 1024 * 1024 * 1024 : 0;
-}
-
-function parseRssCheckIntervalMsFromSeconds(seconds: number | undefined): number | undefined {
-  if (seconds === undefined || seconds <= 0) {
-    return undefined;
-  }
-  return seconds * 1000;
 }
 
 function collectUnknownKeys(
@@ -369,151 +191,122 @@ function collectUnknownKeys(
   pathParts: string[],
   warnings: string[]
 ): void {
-  if (!schema || !isRecord(value)) {
-    return;
-  }
-
-  for (const [key, childValue] of Object.entries(value)) {
+  const parsed = UnknownRecordSchema.safeParse(value);
+  if (!schema || !parsed.success) return;
+  for (const [key, child] of Object.entries(parsed.data)) {
     const childSchema = Object.hasOwn(schema, key) ? schema[key] : schema[CONFIG_ANY_KEY];
     if (childSchema === undefined) {
       warnings.push(`Unknown config key: ${[...pathParts, key].join(".")}`);
       continue;
     }
-    collectUnknownKeys(childValue, childSchema, [...pathParts, key], warnings);
+    collectUnknownKeys(child, childSchema, [...pathParts, key], warnings);
   }
 }
 
-function loadGitHubAppsFromFile(value: unknown): GitHubAppsConfig | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
+function readStringRecord(value: unknown, field: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = z.record(z.string()).safeParse(value);
+  if (!parsed.success) throw new Error(`${field} must be a mapping of strings`);
+  return parsed.data;
+}
+
+function executePrivateKeyCommand(command: string, field: string): string {
+  const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    const status = result.status === null ? "unknown" : String(result.status);
+    const stderr = result.stderr?.trim();
+    throw new Error(`${field} failed (exit ${status})${stderr ? `: ${stderr}` : ""}`);
   }
-  if (!isRecord(value)) {
-    throw new Error("github_apps must be a mapping");
-  }
+  const privateKey = result.stdout?.trim() ?? "";
+  if (!privateKey) throw new Error(`${field} produced empty output`);
+  return privateKey;
+}
 
-  const config: GitHubAppsConfig = {};
-  let hasAny = false;
+function loadGitHubApps(value: unknown): GitHubAppsConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsedApps = UnknownRecordSchema.safeParse(value);
+  if (!parsedApps.success) throw new Error("github_apps must be a mapping");
 
-  for (const role of GITHUB_APP_ROLES) {
-    const roleValue = value[role];
-    if (roleValue === undefined || roleValue === null) {
-      continue;
-    }
-    if (!isRecord(roleValue)) {
-      throw new Error(`github_apps.${role} must be a mapping`);
-    }
+  const apps: GitHubAppsConfig = {};
+  for (const role of ["implement", "review"] as const) {
+    const roleValue = parsedApps.data[role];
+    if (roleValue === undefined || roleValue === null) continue;
+    const parsedRole = UnknownRecordSchema.safeParse(roleValue);
+    if (!parsedRole.success) throw new Error(`github_apps.${role} must be a mapping`);
 
-    const appId = readString(roleValue.app_id, `github_apps.${role}.app_id`);
-    const privateKey = readString(roleValue.private_key, `github_apps.${role}.private_key`);
-    const privateKeyCommand = readString(
-      roleValue.private_key_command,
+    const appId = readString(parsedRole.data.app_id, `github_apps.${role}.app_id`);
+    const inlineKey = readString(parsedRole.data.private_key, `github_apps.${role}.private_key`);
+    const command = readString(
+      parsedRole.data.private_key_command,
       `github_apps.${role}.private_key_command`
     );
-    const installations =
-      readStringRecord(roleValue.installations, `github_apps.${role}.installations`) ?? {};
-    const hasInlinePrivateKey = privateKey !== undefined && privateKey !== "";
-    const hasPrivateKeyCommand = privateKeyCommand !== undefined && privateKeyCommand !== "";
-    const hasAnyField =
-      appId !== undefined ||
-      hasInlinePrivateKey ||
-      hasPrivateKeyCommand ||
-      roleValue.installations !== undefined;
-
-    if (!hasAnyField) {
-      continue;
-    }
+    const hasInlineKey = inlineKey !== undefined && inlineKey !== "";
+    const hasCommand = command !== undefined && command !== "";
     if (appId === undefined || appId === "") {
       throw new Error(`github_apps.${role} is missing required fields: app_id`);
     }
-    if (hasInlinePrivateKey === hasPrivateKeyCommand) {
+    if (hasInlineKey === hasCommand) {
       throw new Error(
         `github_apps.${role} requires exactly one of private_key or private_key_command`
       );
     }
-    let resolvedPrivateKey: string;
-    if (hasInlinePrivateKey && privateKey !== undefined) {
-      resolvedPrivateKey = privateKey;
-    } else if (privateKeyCommand !== undefined) {
-      resolvedPrivateKey = executePrivateKeyCommand(
-        privateKeyCommand,
-        `github_apps.${role}.private_key_command`
-      );
+    let privateKey: string;
+    if (inlineKey !== undefined && inlineKey !== "") {
+      privateKey = inlineKey;
+    } else if (command !== undefined && command !== "") {
+      privateKey = executePrivateKeyCommand(command, `github_apps.${role}.private_key_command`);
     } else {
-      throw new Error(
-        `github_apps.${role} requires exactly one of private_key or private_key_command`
-      );
+      throw new Error(`github_apps.${role} requires a private key source`);
     }
-
-    config[role] = {
+    apps[role] = {
       appId,
-      privateKey: resolvedPrivateKey,
-      installations,
+      privateKey,
+      installations:
+        readStringRecord(parsedRole.data.installations, `github_apps.${role}.installations`) ?? {},
     };
-    hasAny = true;
   }
-
-  return hasAny ? config : undefined;
+  return apps;
 }
 
-function maybeReadStringField(fields: Record<string, unknown>, key: string): string | undefined {
+function parseGates(value: unknown, field: string): DaemonConfig["gates"] | undefined {
+  const parsed = UnknownRecordSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field} must be a mapping`);
+  const design = readString(parsed.data.design, `${field}.design`) ?? "root-issues";
+  const merge = readString(parsed.data.merge, `${field}.merge`) ?? "human";
+  if (design !== "root-issues" && design !== "off") {
+    throw new Error(`${field}.design must be 'root-issues' or 'off'`);
+  }
+  if (merge !== "human" && merge !== "off") {
+    throw new Error(`${field}.merge must be 'human' or 'off'`);
+  }
+  return { design, merge };
+}
+
+function fileString(fields: Record<string, unknown>, key: string): string | undefined {
   const value = fields[key];
   return typeof value === "string" ? value : undefined;
 }
 
-function maybeReadNumberField(fields: Record<string, unknown>, key: string): number | undefined {
+function fileStringArray(fields: Record<string, unknown>, key: string): string[] | undefined {
+  const value = fields[key];
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? (value as string[])
+    : undefined;
+}
+
+function fileNumber(fields: Record<string, unknown>, key: string): number | undefined {
   const value = fields[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function maybeReadBooleanField(fields: Record<string, unknown>, key: string): boolean | undefined {
-  const value = fields[key];
-  return typeof value === "boolean" ? value : undefined;
+function fileGates(fields: Record<string, unknown>): DaemonConfig["gates"] | undefined {
+  const parsed = UnknownRecordSchema.safeParse(fields.gates);
+  return parsed.success ? (parsed.data as DaemonConfig["gates"]) : undefined;
 }
 
-function maybeReadStringArrayField(
-  fields: Record<string, unknown>,
-  key: string
-): string[] | undefined {
-  const value = fields[key];
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
-    ? value
-    : undefined;
-}
-
-function maybeReadIssueBackend(
-  fields: Record<string, unknown>,
-  key: string
-): "linear" | "github" | undefined {
-  const value = fields[key];
-  return value === "linear" || value === "github" ? value : undefined;
-}
-
-function maybeReadRuntime(
-  fields: Record<string, unknown>,
-  key: string
-): "opencode" | "claude-code" | undefined {
-  const value = fields[key];
-  return value === "opencode" || value === "claude-code" ? value : undefined;
-}
-
-function maybeReadGitHubApps(
-  fields: Record<string, unknown>,
-  key: string
-): GitHubAppsConfig | undefined {
-  const value = fields[key];
-  return isRecord(value) ? (value as GitHubAppsConfig) : undefined;
-}
-
-function pushEnvDeprecationWarning(
-  warnings: string[],
-  source: ValueSource,
-  env: Record<string, string | undefined>,
-  envVar: string,
-  yamlKey: string
-): void {
-  if (source === "env" && env[envVar] !== undefined) {
-    warnings.push(`${envVar} is deprecated; move this value to legion.yaml as '${yamlKey}'.`);
-  }
+function fileGitHubApps(fields: Record<string, unknown>): GitHubAppsConfig | undefined {
+  const parsed = UnknownRecordSchema.safeParse(fields.githubApps);
+  return parsed.success ? (parsed.data as GitHubAppsConfig) : undefined;
 }
 
 export function loadConfigFromFile(yamlText: string, configDir: string): LoadedConfigFile {
@@ -521,167 +314,62 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
   try {
     parsed = parse(yamlText);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid YAML config: ${message}`);
+    throw new Error(
+      `Invalid YAML config: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
-
-  if (parsed === undefined || parsed === null) {
-    return { fields: {}, warnings: [] };
-  }
-  if (!isRecord(parsed)) {
-    throw new Error("Config file root must be a mapping");
-  }
+  if (parsed === undefined || parsed === null) return { fields: {}, warnings: [] };
+  const parsedRoot = UnknownRecordSchema.safeParse(parsed);
+  if (!parsedRoot.success) throw new Error("Config file root must be a mapping");
+  const config = parsedRoot.data;
 
   const warnings: string[] = [];
-  collectUnknownKeys(parsed, CONFIG_SCHEMA, [], warnings);
-
+  collectUnknownKeys(config, CONFIG_SCHEMA, [], warnings);
   const fields: Record<string, unknown> = {};
 
-  const project = readString(parsed.project, "project");
-  if (project !== undefined) {
-    fields.legionId = project;
-  }
-
-  const workspace = readString(parsed.workspace, "workspace");
-  if (workspace !== undefined) {
-    fields.legionDir = normalizeConfigPath(workspace, configDir);
-  }
-
-  const port = readNumber(parsed.port, "port");
+  const project = readString(config.project, "project");
+  if (project !== undefined) fields.legionId = requireNonEmpty(project, "project");
+  const port = readPositiveInteger(config.port, "port");
   if (port !== undefined) {
-    fields.daemonPort = port;
+    if (port > 65535) throw new Error("port must be at most 65535");
+    fields.port = port;
   }
+  const envoyUrl = readString(config.envoy_url, "envoy_url");
+  if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
+  const natsUrls = readStringArray(config.nats_urls, "nats_urls");
+  if (natsUrls !== undefined) fields.natsUrls = natsUrls;
+  const dispatchUrl = readString(config.dispatch_url, "dispatch_url");
+  if (dispatchUrl !== undefined) fields.dispatchUrl = validateUrl(dispatchUrl, "dispatch_url");
+  const boardProjectIds = readStringArray(config.board_project_ids, "board_project_ids");
+  if (boardProjectIds !== undefined) fields.boardProjectIds = boardProjectIds;
+  const appLogins = readStringArray(config.app_logins, "app_logins");
+  if (appLogins !== undefined) fields.appLogins = appLogins;
 
-  const resyncIntervalSeconds = readNumber(
-    parsed.resync_interval_seconds,
+  for (const [fileKey, configKey] of [
+    ["admission_cap", "admissionCap"],
+    ["worker_budget", "workerBudget"],
+    ["max_recursion_depth", "maxRecursionDepth"],
+    ["linger_hours", "lingerHours"],
+    ["ci_quiet_ms", "ciQuietMs"],
+    ["max_fix_attempts", "maxFixAttempts"],
+  ] as const) {
+    const value = readPositiveInteger(config[fileKey], fileKey);
+    if (value !== undefined) fields[configKey] = value;
+  }
+  const resyncIntervalSeconds = readPositiveInteger(
+    config.resync_interval_seconds,
     "resync_interval_seconds"
   );
-  if (resyncIntervalSeconds !== undefined) {
-    if (resyncIntervalSeconds <= 0) {
-      throw new Error("resync_interval_seconds must be greater than zero");
-    }
-    fields.resyncIntervalMs = resyncIntervalSeconds * 1000;
+  if (resyncIntervalSeconds !== undefined) fields.resyncIntervalMs = resyncIntervalSeconds * 1000;
+
+  const stateDir = readString(config.state_dir, "state_dir");
+  if (stateDir !== undefined) {
+    fields.stateDir = path.isAbsolute(stateDir) ? stateDir : path.resolve(configDir, stateDir);
   }
-
-  const reviewerAppId = readNumber(parsed.reviewer_app_id, "reviewer_app_id");
-  if (reviewerAppId !== undefined) {
-    if (!Number.isInteger(reviewerAppId) || reviewerAppId <= 0) {
-      throw new Error("reviewer_app_id must be a positive integer");
-    }
-    fields.reviewerAppId = reviewerAppId;
-  }
-
-  const reviewerAppLogin = readString(parsed.reviewer_app_login, "reviewer_app_login");
-  if (reviewerAppLogin !== undefined) {
-    fields.reviewerAppLogin = reviewerAppLogin;
-  }
-
-  const backend = validateBackend(readString(parsed.backend, "backend"), "backend");
-  if (backend !== undefined) {
-    fields.issueBackend = backend;
-  }
-
-  const runtime = validateRuntime(readString(parsed.runtime, "runtime"), "runtime");
-  if (runtime !== undefined) {
-    fields.runtime = runtime;
-  }
-
-  const controller = parsed.controller;
-  if (controller !== undefined && controller !== null) {
-    if (!isRecord(controller)) {
-      throw new Error("controller must be a mapping");
-    }
-    const sessionId = validateControllerSessionId(
-      readString(controller.session_id, "controller.session_id"),
-      "controller.session_id"
-    );
-    const prompt = readString(controller.prompt, "controller.prompt");
-    validateControllerPrompt(prompt);
-
-    if (sessionId !== undefined) {
-      fields.controllerSessionId = sessionId;
-    }
-    if (prompt !== undefined) {
-      fields.controllerPrompt = prompt;
-    }
-  }
-
-  const githubApps = loadGitHubAppsFromFile(parsed.github_apps);
-  if (githubApps !== undefined) {
-    fields.githubApps = githubApps;
-  }
-
-  const memory = parsed.memory;
-  if (memory !== undefined && memory !== null) {
-    if (!isRecord(memory)) {
-      throw new Error("memory must be a mapping");
-    }
-    const maxRssGb = readNumber(memory.max_rss_gb, "memory.max_rss_gb");
-    const rssCheckIntervalSeconds = readNumber(
-      memory.rss_check_interval_seconds,
-      "memory.rss_check_interval_seconds"
-    );
-    const maxRssBytes = parseMaxRssBytesFromGb(maxRssGb);
-    const rssCheckIntervalMs = parseRssCheckIntervalMsFromSeconds(rssCheckIntervalSeconds);
-
-    if (maxRssBytes !== undefined) {
-      fields.maxRssBytes = maxRssBytes;
-    }
-    if (rssCheckIntervalMs !== undefined) {
-      fields.rssCheckIntervalMs = rssCheckIntervalMs;
-    }
-  }
-
-  const envoyUrl = readString(parsed.envoy_url, "envoy_url");
-  if (envoyUrl !== undefined) {
-    fields.envoyUrl = envoyUrl;
-  }
-
-  const feedback = parsed.feedback;
-  if (feedback !== undefined && feedback !== null) {
-    if (!isRecord(feedback)) {
-      throw new Error("feedback must be a mapping");
-    }
-    const disabled = readBoolean(feedback.disabled, "feedback.disabled");
-    const maxBytes = readNumber(feedback.max_bytes, "feedback.max_bytes");
-    if (disabled !== undefined) {
-      fields.feedbackDisabled = disabled;
-    }
-    if (maxBytes !== undefined) {
-      fields.feedbackMaxBytes = maxBytes;
-    }
-  }
-
-  const extraProjects = parseExtraProjectsArray(parsed.extra_projects);
-  const effectiveBackend = (fields.issueBackend as "linear" | "github" | undefined) ?? "linear";
-  if (extraProjects !== undefined) {
-    if (effectiveBackend !== "github") {
-      throw new Error("extra_projects requires backend: github");
-    }
-    fields.extraProjects = extraProjects;
-  }
-
-  const modeAgents = parsed.mode_agents;
-  if (modeAgents !== undefined && modeAgents !== null) {
-    if (!isRecord(modeAgents)) {
-      throw new Error("mode_agents must be a mapping");
-    }
-    const validModes = new Set(["architect", "plan", "implement", "test", "review", "merge"]);
-    const mapping: Record<string, string> = {};
-    for (const [mode, agent] of Object.entries(modeAgents)) {
-      if (!validModes.has(mode)) {
-        warnings.push(`mode_agents: unknown mode '${mode}' (valid: ${[...validModes].join(", ")})`);
-        continue;
-      }
-      const agentName = readString(agent, `mode_agents.${mode}`);
-      if (agentName !== undefined) {
-        mapping[mode] = agentName;
-      }
-    }
-    if (Object.keys(mapping).length > 0) {
-      fields.modeAgents = mapping;
-    }
-  }
+  const gates = parseGates(config.gates, "gates");
+  if (gates !== undefined) fields.gates = gates;
+  const githubApps = loadGitHubApps(config.github_apps);
+  if (githubApps !== undefined) fields.githubApps = githubApps;
 
   return { fields, warnings };
 }
@@ -690,257 +378,166 @@ export function resolveDaemonConfig(
   opts: ResolveDaemonConfigOptions = {}
 ): ResolveDaemonConfigResult {
   const env = opts.env ?? {};
-  const configFields = opts.configFile?.fields ?? {};
+  const fields = opts.configFile?.fields ?? {};
   const warnings = [...(opts.configFile?.warnings ?? [])];
 
-  const envLegionId = env.LEGION_ID || undefined;
-  const envLegionDir = env.LEGION_DIR || undefined;
-  const envDaemonPort = parseOptionalNumber(env.LEGION_DAEMON_PORT);
-  const envResyncIntervalSeconds = parseOptionalNumber(env.LEGION_RESYNC_INTERVAL_SECONDS);
-  if (envResyncIntervalSeconds !== undefined && envResyncIntervalSeconds <= 0) {
-    throw new Error("LEGION_RESYNC_INTERVAL_SECONDS must be greater than zero");
-  }
-  const envResyncIntervalMs =
-    envResyncIntervalSeconds === undefined ? undefined : envResyncIntervalSeconds * 1000;
-  const envReviewerAppId = parseOptionalNumber(env.LEGION_REVIEWER_APP_ID);
-  if (
-    envReviewerAppId !== undefined &&
-    (!Number.isInteger(envReviewerAppId) || envReviewerAppId <= 0)
-  ) {
-    throw new Error("LEGION_REVIEWER_APP_ID must be a positive integer");
-  }
-  const envReviewerAppLogin = env.LEGION_REVIEWER_APP_LOGIN || undefined;
-  const envControllerSessionId = validateControllerSessionId(
-    env.LEGION_CONTROLLER_SESSION_ID || undefined,
-    "LEGION_CONTROLLER_SESSION_ID"
-  );
-  const envControllerPrompt = env.LEGION_CONTROLLER_PROMPT || undefined;
-  validateControllerPrompt(envControllerPrompt);
-  const envIssueBackend = validateBackend(env.LEGION_ISSUE_BACKEND, "LEGION_ISSUE_BACKEND");
-  const envRuntime = validateRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME");
-  const envExtraProjects = parseExtraProjects(env.LEGION_EXTRA_PROJECTS);
-  const envMaxRssBytes = parseMaxRssBytesFromGb(parseOptionalNumber(env.OPENCODE_MAX_RSS_GB));
-  const envRssCheckIntervalMs = parseRssCheckIntervalMsFromSeconds(
-    parseOptionalNumber(env.OPENCODE_RSS_CHECK_INTERVAL)
-  );
-  const envEnvoyUrl = env.ENVOY_URL || undefined;
-  const envFeedbackDisabled = parseOptionalBoolean(env.LEGION_FEEDBACK_DISABLED);
-  const envFeedbackMaxBytes = parseOptionalNumber(env.LEGION_FEEDBACK_MAX_BYTES);
   const legionId = resolveValue(
     opts.cliOverrides?.legionId,
-    maybeReadStringField(configFields, "legionId"),
-    envLegionId,
+    fileString(fields, "legionId"),
+    env.LEGION_ID,
     undefined
   );
-  const legionDir = resolveValue(
-    opts.cliOverrides?.legionDir,
-    maybeReadStringField(configFields, "legionDir"),
-    envLegionDir,
+  if (!legionId.value || legionId.value.trim().length === 0) {
+    throw new Error("LEGION_ID is required (or set project in legion.yaml)");
+  }
+  const project = legionId.value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!project) throw new Error("LEGION_ID must include at least one alphanumeric character");
+
+  const port = resolveValue(
+    opts.cliOverrides?.port,
+    fileNumber(fields, "port"),
+    parseEnvPositiveInteger(env.LEGION_DAEMON_PORT, "LEGION_DAEMON_PORT"),
+    DEFAULT_PORT
+  );
+  if (!Number.isSafeInteger(port.value) || port.value > 65535) {
+    throw new Error("LEGION_DAEMON_PORT must be a valid TCP port");
+  }
+  const envoyUrl = resolveValue(
+    opts.cliOverrides?.envoyUrl,
+    fileString(fields, "envoyUrl"),
+    env.ENVOY_URL,
+    DEFAULT_ENVOY_URL
+  );
+  const natsUrls = resolveValue(
+    opts.cliOverrides?.natsUrls,
+    fileStringArray(fields, "natsUrls"),
+    parseCsv(env.ENVOY_NATS_URL, "ENVOY_NATS_URL"),
     undefined
   );
-  const daemonPort = resolveValue(
-    opts.cliOverrides?.daemonPort,
-    maybeReadNumberField(configFields, "daemonPort"),
-    envDaemonPort,
-    BASE_DAEMON_PORT
+  if (!natsUrls.value || natsUrls.value.length === 0) {
+    throw new Error("ENVOY_NATS_URL is required (or set nats_urls in legion.yaml)");
+  }
+  for (const url of natsUrls.value) validateUrl(url, "ENVOY_NATS_URL");
+
+  const dispatchUrl = resolveValue(
+    opts.cliOverrides?.dispatchUrl,
+    fileString(fields, "dispatchUrl"),
+    env.LEGION_DISPATCH_URL,
+    undefined
+  );
+  if (!dispatchUrl.value || dispatchUrl.value.trim().length === 0) {
+    throw new Error("LEGION_DISPATCH_URL is required (or set dispatch_url in legion.yaml)");
+  }
+
+  const boardProjectIds = resolveValue(
+    opts.cliOverrides?.boardProjectIds,
+    fileStringArray(fields, "boardProjectIds"),
+    parseCsv(env.LEGION_BOARD_PROJECT_IDS, "LEGION_BOARD_PROJECT_IDS"),
+    []
+  );
+  const appLogins = resolveValue(
+    opts.cliOverrides?.appLogins,
+    fileStringArray(fields, "appLogins"),
+    parseCsv(env.LEGION_APP_LOGINS, "LEGION_APP_LOGINS"),
+    []
+  );
+  const admissionCap = resolveValue(
+    opts.cliOverrides?.admissionCap,
+    fileNumber(fields, "admissionCap"),
+    parseEnvPositiveInteger(env.LEGION_ADMISSION_CAP, "LEGION_ADMISSION_CAP"),
+    DEFAULT_ADMISSION_CAP
+  );
+  const workerBudget = resolveValue(
+    opts.cliOverrides?.workerBudget,
+    fileNumber(fields, "workerBudget"),
+    parseEnvPositiveInteger(env.LEGION_WORKER_BUDGET, "LEGION_WORKER_BUDGET"),
+    DEFAULT_WORKER_BUDGET
+  );
+  const maxRecursionDepth = resolveValue(
+    opts.cliOverrides?.maxRecursionDepth,
+    fileNumber(fields, "maxRecursionDepth"),
+    parseEnvPositiveInteger(env.LEGION_MAX_RECURSION_DEPTH, "LEGION_MAX_RECURSION_DEPTH"),
+    DEFAULT_MAX_RECURSION_DEPTH
+  );
+  const lingerHours = resolveValue(
+    opts.cliOverrides?.lingerHours,
+    fileNumber(fields, "lingerHours"),
+    parseEnvPositiveInteger(env.LEGION_LINGER_HOURS, "LEGION_LINGER_HOURS"),
+    DEFAULT_LINGER_HOURS
+  );
+  const ciQuietMs = resolveValue(
+    opts.cliOverrides?.ciQuietMs,
+    fileNumber(fields, "ciQuietMs"),
+    parseEnvPositiveInteger(env.LEGION_CI_QUIET_MS, "LEGION_CI_QUIET_MS"),
+    DEFAULT_CI_QUIET_MS
+  );
+  const maxFixAttempts = resolveValue(
+    opts.cliOverrides?.maxFixAttempts,
+    fileNumber(fields, "maxFixAttempts"),
+    parseEnvPositiveInteger(env.LEGION_MAX_FIX_ATTEMPTS, "LEGION_MAX_FIX_ATTEMPTS"),
+    DEFAULT_MAX_FIX_ATTEMPTS
   );
   const resyncIntervalMs = resolveValue(
     opts.cliOverrides?.resyncIntervalMs,
-    maybeReadNumberField(configFields, "resyncIntervalMs"),
-    envResyncIntervalMs,
-    DEFAULT_RESYNC_INTERVAL_SECONDS * 1000
+    fileNumber(fields, "resyncIntervalMs"),
+    parseEnvPositiveInteger(env.LEGION_RESYNC_INTERVAL_SECONDS, "LEGION_RESYNC_INTERVAL_SECONDS"),
+    DEFAULT_RESYNC_INTERVAL_MS
   );
-  const reviewerAppId = resolveValue(
-    opts.cliOverrides?.reviewerAppId,
-    maybeReadNumberField(configFields, "reviewerAppId"),
-    envReviewerAppId,
-    undefined
-  );
-  const reviewerAppLogin = resolveValue(
-    opts.cliOverrides?.reviewerAppLogin,
-    maybeReadStringField(configFields, "reviewerAppLogin"),
-    envReviewerAppLogin,
-    undefined
-  );
-  const controllerSessionId = resolveValue(
-    opts.cliOverrides?.controllerSessionId,
-    maybeReadStringField(configFields, "controllerSessionId"),
-    envControllerSessionId,
-    undefined
-  );
-  const controllerPrompt = resolveValue(
-    opts.cliOverrides?.controllerPrompt,
-    maybeReadStringField(configFields, "controllerPrompt"),
-    envControllerPrompt,
-    undefined
-  );
-  const issueBackend = resolveValue<DaemonConfig["issueBackend"]>(
-    opts.cliOverrides?.issueBackend,
-    maybeReadIssueBackend(configFields, "issueBackend"),
-    envIssueBackend,
-    "linear"
-  );
-  const extraProjects = resolveValue(
-    opts.cliOverrides?.extraProjects,
-    maybeReadStringArrayField(configFields, "extraProjects"),
-    envExtraProjects,
-    undefined
-  );
-  const runtime = resolveValue<DaemonConfig["runtime"]>(
-    opts.cliOverrides?.runtime,
-    maybeReadRuntime(configFields, "runtime"),
-    envRuntime,
-    "opencode"
-  );
+
+  const lifecycleNumbers: Record<string, number> = {
+    admissionCap: admissionCap.value,
+    workerBudget: workerBudget.value,
+    maxRecursionDepth: maxRecursionDepth.value,
+    lingerHours: lingerHours.value,
+    ciQuietMs: ciQuietMs.value,
+    maxFixAttempts: maxFixAttempts.value,
+    resyncIntervalMs: resyncIntervalMs.value,
+  };
+  for (const [field, value] of Object.entries(lifecycleNumbers)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${field} must be a positive integer`);
+    }
+  }
+
+  const gates = resolveValue(opts.cliOverrides?.gates, fileGates(fields), undefined, {
+    design: "root-issues",
+    merge: "human",
+  } as const);
+  const parsedGates = parseGates(gates.value, "gates");
+  if (!parsedGates) throw new Error("gates must be configured");
   const githubApps = resolveValue(
     opts.cliOverrides?.githubApps,
-    maybeReadGitHubApps(configFields, "githubApps"),
+    fileGitHubApps(fields),
     undefined,
-    undefined
+    {}
   );
-  const maxRssBytes = resolveValue(
-    opts.cliOverrides?.maxRssBytes,
-    maybeReadNumberField(configFields, "maxRssBytes"),
-    envMaxRssBytes,
-    DEFAULT_MAX_RSS_GB * 1024 * 1024 * 1024
-  );
-  const rssCheckIntervalMs = resolveValue(
-    opts.cliOverrides?.rssCheckIntervalMs,
-    maybeReadNumberField(configFields, "rssCheckIntervalMs"),
-    envRssCheckIntervalMs,
-    DEFAULT_RSS_CHECK_INTERVAL_S * 1000
-  );
-  const envoyUrl = resolveValue(
-    opts.cliOverrides?.envoyUrl,
-    maybeReadStringField(configFields, "envoyUrl"),
-    envEnvoyUrl,
-    DEFAULT_ENVOY_URL
-  );
-  const feedbackDisabled = resolveValue(
-    opts.cliOverrides?.feedbackDisabled,
-    maybeReadBooleanField(configFields, "feedbackDisabled"),
-    envFeedbackDisabled,
-    false
-  );
-  const feedbackMaxBytes = resolveValue(
-    opts.cliOverrides?.feedbackMaxBytes,
-    maybeReadNumberField(configFields, "feedbackMaxBytes"),
-    envFeedbackMaxBytes,
-    DEFAULT_FEEDBACK_MAX_BYTES
-  );
-  if (extraProjects.value !== undefined && issueBackend.value !== "github") {
-    throw new Error("extra_projects requires backend: github");
-  }
-
-  const paths = resolveLegionPaths(env, os.homedir());
-  const stateFilePath = legionId.value
-    ? paths.forLegion(legionId.value).workersFile
-    : path.join(paths.stateDir, "daemon", "workers.json");
-  const logDir = legionId.value
-    ? paths.forLegion(legionId.value).logDir
-    : path.join(paths.stateDir, "daemon", "logs");
-
-  pushEnvDeprecationWarning(warnings, legionId.source, env, "LEGION_ID", "project");
-  pushEnvDeprecationWarning(
-    warnings,
-    extraProjects.source,
-    env,
-    "LEGION_EXTRA_PROJECTS",
-    "extra_projects"
-  );
-  pushEnvDeprecationWarning(warnings, issueBackend.source, env, "LEGION_ISSUE_BACKEND", "backend");
-  pushEnvDeprecationWarning(warnings, runtime.source, env, "LEGION_RUNTIME", "runtime");
-  pushEnvDeprecationWarning(warnings, legionDir.source, env, "LEGION_DIR", "workspace");
-  pushEnvDeprecationWarning(warnings, daemonPort.source, env, "LEGION_DAEMON_PORT", "port");
-  pushEnvDeprecationWarning(
-    warnings,
-    resyncIntervalMs.source,
-    env,
-    "LEGION_RESYNC_INTERVAL_SECONDS",
-    "resync_interval_seconds"
-  );
-  pushEnvDeprecationWarning(
-    warnings,
-    reviewerAppId.source,
-    env,
-    "LEGION_REVIEWER_APP_ID",
-    "reviewer_app_id"
-  );
-  pushEnvDeprecationWarning(
-    warnings,
-    reviewerAppLogin.source,
-    env,
-    "LEGION_REVIEWER_APP_LOGIN",
-    "reviewer_app_login"
-  );
-  if (controllerSessionId.source === "env" && env.LEGION_CONTROLLER_SESSION_ID !== undefined) {
-    warnings.push(
-      "LEGION_CONTROLLER_SESSION_ID is deprecated; pass --controller-session to 'legion start' instead."
-    );
-  }
-  pushEnvDeprecationWarning(
-    warnings,
-    controllerPrompt.source,
-    env,
-    "LEGION_CONTROLLER_PROMPT",
-    "controller.prompt"
-  );
-  pushEnvDeprecationWarning(
-    warnings,
-    maxRssBytes.source,
-    env,
-    "OPENCODE_MAX_RSS_GB",
-    "memory.max_rss_gb"
-  );
-  pushEnvDeprecationWarning(
-    warnings,
-    rssCheckIntervalMs.source,
-    env,
-    "OPENCODE_RSS_CHECK_INTERVAL",
-    "memory.rss_check_interval_seconds"
-  );
-  pushEnvDeprecationWarning(warnings, envoyUrl.source, env, "ENVOY_URL", "envoy_url");
-  pushEnvDeprecationWarning(
-    warnings,
-    feedbackDisabled.source,
-    env,
-    "LEGION_FEEDBACK_DISABLED",
-    "feedback.disabled"
-  );
-  pushEnvDeprecationWarning(
-    warnings,
-    feedbackMaxBytes.source,
-    env,
-    "LEGION_FEEDBACK_MAX_BYTES",
-    "feedback.max_bytes"
+  const stateDir = resolveValue(
+    opts.cliOverrides?.stateDir,
+    fileString(fields, "stateDir"),
+    env.LEGION_STATE_DIR,
+    path.join(os.homedir(), ".legion", project)
   );
 
   return {
     config: {
-      daemonPort: daemonPort.value,
-      daemonPortExplicit: daemonPort.source === "cli" || daemonPort.source === "config",
+      project,
       legionId: legionId.value,
-      legionDir: legionDir.value,
-      paths,
-      checkIntervalMs: DEFAULT_CHECK_INTERVAL_MS,
-      resyncIntervalMs: resyncIntervalMs.value,
-      baseWorkerPort: DEFAULT_BASE_WORKER_PORT,
-      stateFilePath,
-      logDir,
-      controllerSessionId: controllerSessionId.value,
-      controllerPrompt: controllerPrompt.value,
-      issueBackend: issueBackend.value,
-      extraProjects: extraProjects.value,
-      runtime: runtime.value,
+      port: port.value,
+      envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
+      natsUrls: natsUrls.value,
+      dispatchUrl: validateUrl(dispatchUrl.value, "LEGION_DISPATCH_URL"),
+      boardProjectIds: boardProjectIds.value,
+      appLogins: appLogins.value,
+      admissionCap: admissionCap.value,
+      workerBudget: workerBudget.value,
+      maxRecursionDepth: maxRecursionDepth.value,
+      lingerHours: lingerHours.value,
+      ciQuietMs: ciQuietMs.value,
+      maxFixAttempts: maxFixAttempts.value,
+      resyncIntervalMs: resyncIntervalMs.value * (resyncIntervalMs.source === "env" ? 1000 : 1),
+      gates: parsedGates,
       githubApps: githubApps.value,
-      envoyUrl: envoyUrl.value,
-      feedbackDisabled: feedbackDisabled.value,
-      feedbackMaxBytes: feedbackMaxBytes.value,
-      reviewerAppId: reviewerAppId.value,
-      reviewerAppLogin: reviewerAppLogin.value,
-      maxRssBytes: maxRssBytes.value,
-      rssCheckIntervalMs: rssCheckIntervalMs.value,
-      modeAgents: (configFields.modeAgents as Partial<Record<string, string>> | undefined) ?? {},
+      stateDir: stateDir.value,
     },
     warnings,
   };

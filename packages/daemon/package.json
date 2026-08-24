@@ -14,9 +14,10 @@
     "format": "bunx biome format src/ --write"
   },
   "dependencies": {
+    "@legion/contracts": "workspace:*",
     "@opencode-ai/sdk": "https://github.com/sjawhar/opencode/releases/download/v1.2.4-post.2/opencode-ai-sdk-1.2.4-post.1.tgz",
     "citty": "^0.2.0",
-    "uuid": "^9.0.0",
+    "nats": "^2.29.2",
     "yaml": "^2.8.3",
     "zod": "^3.24.4"
   },

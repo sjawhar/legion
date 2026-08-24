@@ -1,218 +1,136 @@
-import { IssueStatus, WorkerMode, type WorkerModeLiteral } from "../state/types";
-import { computeIdleAdvisories, type IdleAdvisory } from "./idle-advisory";
-import {
-  type IssueRef,
-  noPrPhaseArtifacts,
-  type PhaseArtifactBatch,
-  type PhaseArtifacts,
-  unresolvablePhaseArtifacts,
-} from "./phase-artifacts";
+import { formatIssueKey, type IssueKey } from "@legion/contracts";
+import type { DaemonConfig } from "./config";
+import type { LegionState } from "./legion-state";
 
-export type Recommendation =
-  | {
-      readonly issueId: string;
-      readonly mode: WorkerModeLiteral;
-      readonly reason: "artifact_no_live_owner";
-    }
-  | {
-      readonly issueId: string;
-      readonly mode: null;
-      readonly reason: "architect_veto";
-    }
-  | IdleAdvisory;
+export type ResyncAnomaly = {
+  kind: "zero-owner-tree" | "erroring-issue" | "missed-open" | "launch-failed";
+  issue: IssueKey;
+  detail: string;
+};
 
-export interface LiveWorker {
-  readonly sessionId?: string;
-  readonly mode?: WorkerModeLiteral;
-  readonly status?: string;
-}
-
-export type LiveWorkers = Record<string, readonly LiveWorker[]>;
-
-export interface SessionStatusObservation {
-  readonly data?: unknown;
-}
-
-export interface ResyncError {
-  readonly issueId: string;
-  readonly message: string;
-}
-
-export interface ResyncPassResult {
-  readonly recommendations: readonly Recommendation[];
-  readonly errors: readonly ResyncError[];
-}
-
-export interface ResyncControllerEvent {
-  readonly type: "legion.resync";
-  readonly recommendations: readonly Recommendation[];
-  readonly errors: readonly ResyncError[];
+export interface LegionEventPayload {
+  type: "resync";
+  anomalies: ResyncAnomaly[];
 }
 
 export interface RunResyncDeps {
-  readonly listNonTerminalIssues: () => IssueRef[];
-  readonly fetchPhaseArtifactsBatch: (refs: readonly IssueRef[]) => Promise<PhaseArtifactBatch>;
-  readonly getLiveWorkers: () => Promise<LiveWorkers>;
-  // reserved for the idle-worker advisory (U9)
-  readonly getSessionStatus: (sessionId: string) => Promise<SessionStatusObservation>;
-  readonly emitToController: (event: ResyncControllerEvent) => void | Promise<void>;
+  state: LegionState;
+  config: Pick<DaemonConfig, "resyncIntervalMs">;
+  fetchGitHubProjectItems(): Promise<{ items: Record<string, unknown>[] }>;
+  now(): number;
 }
 
-export interface ResyncInput {
-  readonly issueId: string;
-  readonly status: string;
-  readonly artifacts: PhaseArtifacts;
-  readonly liveWorkerModes: readonly WorkerModeLiteral[];
+const lastRunAt = new WeakMap<LegionState, number>();
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
-function statusFallback(status: string): WorkerModeLiteral | null {
-  // TODO(label-teardown): Remove this pre-artifact phase bridge when labels are torn out.
-  switch (status) {
-    case IssueStatus.BACKLOG:
-      return WorkerMode.ARCHITECT;
-    case IssueStatus.TODO:
-      return WorkerMode.PLAN;
-    case IssueStatus.IN_PROGRESS:
-      return WorkerMode.IMPLEMENT;
-    case IssueStatus.TESTING:
-      return WorkerMode.TEST;
-    case IssueStatus.NEEDS_REVIEW:
-      return WorkerMode.REVIEW;
-    case IssueStatus.RETRO:
-      return WorkerMode.IMPLEMENT;
-    default:
-      return null;
+function boardIssue(
+  item: Record<string, unknown>
+): { issue: IssueKey; open: boolean; erroring: boolean } | undefined {
+  const content = record(item.content);
+  if (content?.type !== "Issue") return undefined;
+  const repository = content.repository;
+  const number = content.number;
+  if (
+    typeof repository !== "string" ||
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number)
+  ) {
+    return undefined;
   }
+  const [owner, repo, ...extra] = repository.split("/");
+  if (!owner || !repo || extra.length > 0) return undefined;
+
+  const projectStatus = item.status;
+  const status = typeof projectStatus === "string" ? projectStatus.toLowerCase() : "";
+  return {
+    issue: formatIssueKey(owner, repo, number),
+    open: status !== "done" && status !== "closed",
+    erroring: status.includes("error") || status.includes("failed"),
+  };
 }
 
-function ownerFromArtifacts(
-  artifacts: PhaseArtifacts
-): WorkerModeLiteral | "architect_veto" | null | undefined {
-  if (artifacts.resolved.merged === "resolved" && artifacts.merged) return WorkerMode.IMPLEMENT;
-  if (artifacts.resolved.hasNonDraftPr !== "resolved") return null;
-  if (!artifacts.hasNonDraftPr) return undefined;
-  if (artifacts.resolved.testerCheckOnHead !== "resolved") return null;
-  if (artifacts.testerCheckOnHead === null) return WorkerMode.TEST;
-  if (artifacts.testerCheckOnHead === "failure") return WorkerMode.IMPLEMENT;
-  if (artifacts.resolved.nativeReviewOnHead !== "resolved") return null;
-  if (artifacts.nativeReviewOnHead === null) return WorkerMode.REVIEW;
-  if (artifacts.nativeReviewOnHead === "changes_requested") return WorkerMode.IMPLEMENT;
-  if (artifacts.resolved.architectCheckOnHead !== "resolved") return null;
-  if (artifacts.architectCheckOnHead === null) return WorkerMode.ARCHITECT;
-  if (artifacts.architectCheckOnHead === "failure") return "architect_veto";
-  if (artifacts.resolved.autoMergeEnabledOrMerged !== "resolved") return null;
-  return artifacts.autoMergeEnabledOrMerged ? null : WorkerMode.MERGE;
+function isBacklogged(state: LegionState, issue: IssueKey, item: Record<string, unknown>): boolean {
+  if (state.issues[issue]?.backlogMarker) return true;
+  const labels = item.labels;
+  return Array.isArray(labels) && labels.includes("legion-backlog");
 }
 
-function expectedOwner(input: ResyncInput): WorkerModeLiteral | "architect_veto" | null {
-  if (input.status === IssueStatus.DONE) return null;
-  const artifactOwner = ownerFromArtifacts(input.artifacts);
-  return artifactOwner === undefined ? statusFallback(input.status) : artifactOwner;
-}
-
-function sessionStatusType(observation: SessionStatusObservation): string {
-  const data = observation.data;
-  if (typeof data !== "object" || data === null || !("type" in data)) return "unresolvable";
-  return typeof data.type === "string" ? data.type : "unresolvable";
-}
-
-export function computeResyncRecommendations(inputs: readonly ResyncInput[]): Recommendation[] {
-  const recommendations: Recommendation[] = [];
-  for (const input of inputs) {
-    const mode = expectedOwner(input);
-    if (mode === "architect_veto") {
-      recommendations.push({ issueId: input.issueId, mode: null, reason: "architect_veto" });
-      continue;
-    }
-    if (mode && !input.liveWorkerModes.includes(mode)) {
-      recommendations.push({ issueId: input.issueId, mode, reason: "artifact_no_live_owner" });
-    }
+function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
+  const seen = new Set<IssueKey>();
+  let current: IssueKey | undefined = issue;
+  while (current && !seen.has(current)) {
+    if (state.trees[current]?.status === "active") return true;
+    seen.add(current);
+    current = state.issues[current]?.parent;
   }
-  return recommendations;
+  return false;
 }
 
-function failedArtifactBatch(refs: readonly IssueRef[], message: string): PhaseArtifactBatch {
-  const artifacts: Record<string, PhaseArtifacts> = {};
-  const errors: ResyncError[] = [];
-  for (const ref of refs) {
-    artifacts[ref.issueId] = ref.prRef ? unresolvablePhaseArtifacts() : noPrPhaseArtifacts();
-    if (ref.prRef) errors.push({ issueId: ref.issueId, message });
+/**
+ * Reads board artifacts only. The controller owns verification, dispatch, and
+ * remediation of every anomaly this pass reports.
+ */
+export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload> {
+  const now = deps.now();
+  const last = lastRunAt.get(deps.state);
+  if (last !== undefined && now - last < deps.config.resyncIntervalMs) {
+    return { type: "resync", anomalies: [] };
   }
-  return { artifacts, errors };
-}
 
-function completeArtifactBatch(
-  refs: readonly IssueRef[],
-  batch: PhaseArtifactBatch
-): PhaseArtifactBatch {
-  const artifacts: Record<string, PhaseArtifacts> = { ...batch.artifacts };
-  const errors: ResyncError[] = [...batch.errors];
-  const errorsByIssue = new Set(errors.map((error) => error.issueId));
-  for (const ref of refs) {
-    if (artifacts[ref.issueId]) continue;
-    artifacts[ref.issueId] = ref.prRef ? unresolvablePhaseArtifacts() : noPrPhaseArtifacts();
-    if (!errorsByIssue.has(ref.issueId)) {
-      errors.push({ issueId: ref.issueId, message: "Phase artifact batch omitted issue data" });
-    }
-  }
-  return { artifacts, errors };
-}
-
-async function resolveArtifactBatch(
-  refs: readonly IssueRef[],
-  deps: RunResyncDeps
-): Promise<PhaseArtifactBatch> {
-  try {
-    return completeArtifactBatch(refs, await deps.fetchPhaseArtifactsBatch(refs));
-  } catch (error) {
-    return failedArtifactBatch(
-      refs,
-      error instanceof Error ? error.message : "Phase artifact batch failed"
-    );
-  }
-}
-
-export async function runResyncPass(deps: RunResyncDeps): Promise<ResyncPassResult> {
-  const refs = deps.listNonTerminalIssues();
-  const [artifactBatch, liveWorkers] = await Promise.all([
-    resolveArtifactBatch(refs, deps),
-    deps.getLiveWorkers(),
-  ]);
-  const artifactRecommendations = computeResyncRecommendations(
-    refs.map((ref) => ({
-      issueId: ref.issueId,
-      status: ref.status,
-      artifacts: artifactBatch.artifacts[ref.issueId] ?? unresolvablePhaseArtifacts(),
-      liveWorkerModes: (liveWorkers[ref.issueId] ?? []).flatMap((worker) =>
-        worker.mode ? [worker.mode] : []
-      ),
-    }))
-  );
-  const idleAdvisoryInputs = await Promise.all(
-    refs.flatMap((ref) =>
-      (liveWorkers[ref.issueId] ?? []).map(async (worker) => {
-        if (!worker.sessionId || !worker.mode) return null;
-
-        const observation = await deps.getSessionStatus(worker.sessionId);
-        return {
-          issueId: ref.issueId,
-          mode: worker.mode,
-          sessionStatusType: sessionStatusType(observation),
-          artifacts: artifactBatch.artifacts[ref.issueId] ?? unresolvablePhaseArtifacts(),
-        };
-      })
-    )
-  );
-  const idleAdvisories = computeIdleAdvisories(
-    idleAdvisoryInputs.flatMap((input) => (input ? [input] : []))
-  );
-  const recommendations = [...artifactRecommendations, ...idleAdvisories];
-  if (recommendations.length > 0 || artifactBatch.errors.length > 0) {
-    await deps.emitToController({
-      type: "legion.resync",
-      recommendations,
-      errors: artifactBatch.errors,
+  lastRunAt.set(deps.state, now);
+  const { items } = await deps.fetchGitHubProjectItems();
+  const anomalies: ResyncAnomaly[] = [];
+  const launchFailedTrees = new Set<IssueKey>();
+  for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
+    [IssueKey, LegionState["trees"][IssueKey]]
+  >) {
+    if (tree.status !== "launch-failed" || deps.state.issues[issue]?.backlogMarker) continue;
+    launchFailedTrees.add(issue);
+    anomalies.push({
+      kind: "launch-failed",
+      issue,
+      detail: `tree launch failed ${tree.launchFailures} times`,
     });
   }
-  return { recommendations, errors: artifactBatch.errors };
+  for (const item of items) {
+    const board = boardIssue(item);
+    if (
+      !board?.open ||
+      launchFailedTrees.has(board.issue) ||
+      isBacklogged(deps.state, board.issue, item)
+    ) {
+      continue;
+    }
+
+    const issue = deps.state.issues[board.issue];
+    if (!issue) {
+      anomalies.push({
+        kind: "missed-open",
+        issue: board.issue,
+        detail: "open board issue is absent from Legion state",
+      });
+      continue;
+    }
+    if (board.erroring) {
+      anomalies.push({
+        kind: "erroring-issue",
+        issue: board.issue,
+        detail: "open board issue has an error project status",
+      });
+      continue;
+    }
+    if (issue.state === "open" && issue.released && !hasActiveTree(deps.state, board.issue)) {
+      anomalies.push({
+        kind: "zero-owner-tree",
+        issue: board.issue,
+        detail: "released open issue has no active Legion tree",
+      });
+    }
+  }
+  return { type: "resync", anomalies };
 }

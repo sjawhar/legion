@@ -71,11 +71,9 @@ export const HealthCheckResponseSchema = z
   .passthrough();
 
 export const LegionEntrySchema = z.object({
-  port: z.number(),
-  servePort: z.number(),
-  pid: z.number(),
-  servePid: z.number().optional(),
-  startedAt: z.string(),
+  port: z.number().int().min(1).max(65535),
+  pid: z.number().int().positive(),
+  startedAt: z.string().datetime(),
 });
 
 export const LegionsRegistrySchema = z.record(z.string(), LegionEntrySchema);
