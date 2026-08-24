@@ -386,6 +386,7 @@ describe("buildRoleEnv", () => {
     const baseEnv: Record<string, string> = {
       PATH: "/usr/bin",
       HOME: "/home/user",
+      XDG_STATE_HOME: "/state",
       GH_TOKEN: "personal-token",
       GITHUB_TOKEN: "another-token",
       GH_HOST: "github.com",
@@ -406,7 +407,7 @@ describe("buildRoleEnv", () => {
 
     // Role-specific values
     expect(result.GH_TOKEN).toBe("ghs_role_token");
-    expect(result.GH_CONFIG_DIR).toBe("/dev/null");
+    expect(result.GH_CONFIG_DIR).toBe("/state/legion/gh");
     expect(result.GIT_AUTHOR_NAME).toBe("legion-implement[bot]");
     expect(result.GIT_AUTHOR_EMAIL).toBe("111+legion-implement[bot]@users.noreply.github.com");
     expect(result.GIT_COMMITTER_NAME).toBe("legion-implement[bot]");

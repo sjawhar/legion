@@ -28,6 +28,20 @@ stored_board_scope() {
     printf '%s\n' "${SMOKE_BOARD_SCOPE:-}"
   fi
 }
+stored_webhook_mode() {
+  local mode_file="${smoke_dir}/webhook-mode"
+  if [[ -r "$mode_file" ]]; then
+    printf '%s\n' "$(<"$mode_file")"
+  else
+    printf '%s\n' "${SMOKE_WEBHOOK_MODE:-forward}"
+  fi
+}
+
+webhook_ingress_block_reason() {
+  printf '%s\n' \
+    'SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints 1-12 are blocked because they depend on live GitHub events; resync-driven intake still works'
+}
+
 
 
 project_slug() {
@@ -319,6 +333,17 @@ command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
+case "$(stored_webhook_mode)" in
+  none)
+    blocked "$(webhook_ingress_block_reason)"
+    ;;
+  forward)
+    ;;
+  *)
+    fail "recorded SMOKE_WEBHOOK_MODE must be forward or none"
+    ;;
+esac
+
 case "$checkpoint" in
   1 | 2 | 3 | 4)
     [[ -n "${SMOKE_PROJECT_ID:-}" ]] ||

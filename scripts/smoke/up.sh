@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly repo_root
 readonly smoke_dir="${SMOKE_DIR:-/tmp/legion-smoke}"
+readonly gh_config_dir="${smoke_dir}/gh-config"
 readonly nats_name="legion-smoke-nats"
 readonly nats_port="${NATS_PORT:-14222}"
 readonly listener_port="${ENVOY_PORT:-19020}"
@@ -32,6 +33,34 @@ require_command() {
 require_env() {
   [[ -n "${!1:-}" ]] || fail "$1 is required"
 }
+webhook_ingress_block_reason() {
+  printf '%s\n' \
+    'SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints 1-12 are blocked because they depend on live GitHub events; resync-driven intake still works'
+}
+
+resolve_webhook_mode() {
+  case "${SMOKE_WEBHOOK_MODE:-}" in
+    forward)
+      gh webhook forward --help >/dev/null 2>&1 ||
+        fail "SMOKE_WEBHOOK_MODE=forward requires gh webhook forward"
+      printf 'forward\n'
+      ;;
+    none)
+      printf 'none\n'
+      ;;
+    "")
+      if gh webhook forward --help >/dev/null 2>&1; then
+        printf 'forward\n'
+      else
+        printf 'none\n'
+      fi
+      ;;
+    *)
+      fail "SMOKE_WEBHOOK_MODE must be forward or none"
+      ;;
+  esac
+}
+
 normalize_github_webhook_secret() {
   local original_secret="$GITHUB_WEBHOOK_SECRET"
 
@@ -184,6 +213,10 @@ project_owner() {
   printf '%s\n' "${SMOKE_PROJECT%/*}"
 }
 
+repo_owner() {
+  printf '%s\n' "${SMOKE_REPO%/*}"
+}
+
 project_number() {
   printf '%s\n' "${SMOKE_PROJECT##*/}"
 }
@@ -215,13 +248,14 @@ app_jwt() {
 app_installation_token() {
   local app_id="$1"
   local private_key_variable="$2"
+  local owner="${3:-$(project_owner)}"
   local jwt
   local installation_id
 
   jwt="$(app_jwt "$app_id" "$private_key_variable")"
-  installation_id="$(env -u GH_TOKEN -u GITHUB_TOKEN gh api -H "Authorization: Bearer ${jwt}" app/installations | jq -r --arg owner "$(project_owner)" '[.[] | select(.account.login == $owner) | .id] | first // empty')"
-  [[ -n "$installation_id" ]] || fail "GitHub App ${app_id} is not installed for $(project_owner)"
-  env -u GH_TOKEN -u GITHUB_TOKEN gh api -H "Authorization: Bearer ${jwt}" -X POST "app/installations/${installation_id}/access_tokens" --jq '.token'
+  installation_id="$(env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$gh_config_dir" gh api -H "Authorization: Bearer ${jwt}" app/installations | jq -r --arg owner "$owner" '[.[] | select(.account.login == $owner) | .id] | first // empty')"
+  [[ -n "$installation_id" ]] || fail "GitHub App ${app_id} is not installed for ${owner}"
+  env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$gh_config_dir" gh api -H "Authorization: Bearer ${jwt}" -X POST "app/installations/${installation_id}/access_tokens" --jq '.token'
 }
 
 write_daemon_config() {
@@ -287,11 +321,11 @@ ensure_nats() {
     printf 'STARTED NATS container %s\n' "$nats_name"
   fi
 }
-
 ensure_labels() {
+  local token="$1"
   local label
   for label in needs-approval human-approved legion-child legion-backlog; do
-    gh label create "$label" -R "$SMOKE_REPO" --force >/dev/null
+    GH_TOKEN="$token" GH_CONFIG_DIR="$gh_config_dir" gh label create "$label" -R "$SMOKE_REPO" --force >/dev/null
   done
   printf 'GREEN sandbox labels present\n'
 }
@@ -478,6 +512,8 @@ main() {
   local board_scope
   local owner_type
   local dispatch_bearer
+  local label_bearer
+  local webhook_mode
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -491,24 +527,25 @@ main() {
 
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"
-  gh webhook forward --help >/dev/null
+  webhook_mode="$(resolve_webhook_mode)"
 
   mkdir -p "$smoke_dir" "${smoke_dir}/daemon" "${smoke_dir}/dispatch-home" \
-    "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion"
+    "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion" "$gh_config_dir"
+  printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free dispatch "$dispatch_port" "${smoke_dir}/dispatch.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
   write_dispatch_config
+  dispatch_bearer="${LEGION_DISPATCH_BEARER:-$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64)}"
   board_scope="${SMOKE_BOARD_SCOPE:-}"
   if [[ -z "$board_scope" ]]; then
-    owner_type="$(gh api "users/$(project_owner)" --jq '.type')"
+    owner_type="$(GH_TOKEN="$dispatch_bearer" GH_CONFIG_DIR="$gh_config_dir" gh api "users/$(project_owner)" --jq '.type')"
     board_scope=$([[ "$owner_type" == "Organization" ]] && printf org || printf none)
   fi
   [[ "$board_scope" == "org" || "$board_scope" == "none" ]] ||
     fail "SMOKE_BOARD_SCOPE must be org or none"
   printf '%s\n' "$board_scope" >"${smoke_dir}/board-scope"
-  dispatch_bearer="${LEGION_DISPATCH_BEARER:-$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64)}"
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener
@@ -535,32 +572,36 @@ main() {
 
   wait_for_json 'Envoy listener' "http://127.0.0.1:${listener_port}/healthz" '.status == "healthy"' "${smoke_dir}/listener.pid"
   wait_for_http 'dispatch' "http://127.0.0.1:${dispatch_port}/healthz" "${smoke_dir}/dispatch.pid"
-  if pid_is_live "${smoke_dir}/webhook-forward.pid" &&
-    [[ -r "${smoke_dir}/webhook-forward.log" && "$(<"${smoke_dir}/webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
-    printf 'REUSED webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/webhook-forward.pid")"
-  else
-    remove_recorded_forwarder_hook webhook-forward
-    start_process_group webhook-forward gh webhook forward --repo "$SMOKE_REPO" \
-      --events "$webhook_events" \
-      --secret "$GITHUB_WEBHOOK_SECRET" \
-      --url "http://127.0.0.1:${listener_port}/webhook/github"
-  fi
-  wait_for_webhook_forwarder
   assert_webhook_round_trip
-  record_forwarder_hook webhook-forward "repos/${SMOKE_REPO}/hooks"
-  if [[ "$board_scope" == "org" ]]; then
-    if pid_is_live "${smoke_dir}/board-webhook-forward.pid" &&
-      [[ -r "${smoke_dir}/board-webhook-forward.log" && "$(<"${smoke_dir}/board-webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
-      printf 'REUSED board webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/board-webhook-forward.pid")"
+  if [[ "$webhook_mode" == "forward" ]]; then
+    if pid_is_live "${smoke_dir}/webhook-forward.pid" &&
+      [[ -r "${smoke_dir}/webhook-forward.log" && "$(<"${smoke_dir}/webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
+      printf 'REUSED webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/webhook-forward.pid")"
     else
-      remove_recorded_forwarder_hook board-webhook-forward
-      start_process_group board-webhook-forward gh webhook forward --org "$(project_owner)" \
-        --events projects_v2_item \
+      remove_recorded_forwarder_hook webhook-forward
+      start_process_group webhook-forward gh webhook forward --repo "$SMOKE_REPO" \
+        --events "$webhook_events" \
         --secret "$GITHUB_WEBHOOK_SECRET" \
         --url "http://127.0.0.1:${listener_port}/webhook/github"
     fi
-    wait_for_webhook_forwarder board-webhook-forward
-    record_forwarder_hook board-webhook-forward "orgs/$(project_owner)/hooks"
+    wait_for_webhook_forwarder
+    record_forwarder_hook webhook-forward "repos/${SMOKE_REPO}/hooks"
+    if [[ "$board_scope" == "org" ]]; then
+      if pid_is_live "${smoke_dir}/board-webhook-forward.pid" &&
+        [[ -r "${smoke_dir}/board-webhook-forward.log" && "$(<"${smoke_dir}/board-webhook-forward.log")" == *"Forwarding Webhook events from GitHub..."* ]]; then
+        printf 'REUSED board webhook forwarder (pgid %s)\n' "$(<"${smoke_dir}/board-webhook-forward.pid")"
+      else
+        remove_recorded_forwarder_hook board-webhook-forward
+        start_process_group board-webhook-forward gh webhook forward --org "$(project_owner)" \
+          --events projects_v2_item \
+          --secret "$GITHUB_WEBHOOK_SECRET" \
+          --url "http://127.0.0.1:${listener_port}/webhook/github"
+      fi
+      wait_for_webhook_forwarder board-webhook-forward
+      record_forwarder_hook board-webhook-forward "orgs/$(project_owner)/hooks"
+    fi
+  else
+    printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi
 
   start_process daemon env \
@@ -576,7 +617,8 @@ main() {
 
   wait_for_json 'Legion daemon' "http://127.0.0.1:${daemon_port}/legion/v1/state" 'type == "object"' "${smoke_dir}/daemon.pid"
 
-  ensure_labels
+  label_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64 "$(repo_owner)")"
+  ensure_labels "$label_bearer"
   if [[ -z "${SMOKE_PROJECT_ID:-}" ]]; then
     printf 'SKIPPED-BLOCKED board ingress: SMOKE_PROJECT_ID is required after the sandbox Projects V2 board exists\n'
   fi

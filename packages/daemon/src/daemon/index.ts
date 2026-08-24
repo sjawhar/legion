@@ -165,7 +165,13 @@ async function verifyOmpAgentsCapability(
       "sh",
       probePath,
     ]);
-    if (result.exitCode === 0 && result.stderr.includes(OMP_AGENTS_CAPABILITY_MARKER)) return;
+    if (
+      result.exitCode === 0 &&
+      (result.stderr.includes(OMP_AGENTS_CAPABILITY_MARKER) ||
+        result.stdout.includes(OMP_AGENTS_CAPABILITY_MARKER))
+    ) {
+      return;
+    }
 
     const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
     throw new Error(

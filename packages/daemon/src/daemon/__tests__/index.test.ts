@@ -91,10 +91,12 @@ describe("startDaemon", () => {
       GH_TOKEN: process.env.GH_TOKEN,
       GITHUB_TOKEN: process.env.GITHUB_TOKEN,
       GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+      XDG_STATE_HOME: process.env.XDG_STATE_HOME,
     };
     process.env.GH_TOKEN = "personal-gh-token";
     process.env.GITHUB_TOKEN = "personal-github-token";
     process.env.GH_CONFIG_DIR = "/home/user/.config/gh";
+    process.env.XDG_STATE_HOME = "/tmp/legion-daemon-test-state";
     const commandOptions: CommandRunnerOptions[] = [];
     const runner: CommandRunner = async (_command, options) => {
       if (options) commandOptions.push(options);
@@ -146,7 +148,7 @@ describe("startDaemon", () => {
       expect(commandOptions).toHaveLength(1);
       expect(commandOptions[0]?.env).toMatchObject({
         GH_TOKEN: "ghs_board_owner_app_token",
-        GH_CONFIG_DIR: "/dev/null",
+        GH_CONFIG_DIR: "/tmp/legion-daemon-test-state/legion/gh",
       });
       expect(commandOptions[0]?.env?.GITHUB_TOKEN).toBeUndefined();
     } finally {
@@ -156,9 +158,11 @@ describe("startDaemon", () => {
       else process.env.GITHUB_TOKEN = originalEnvironment.GITHUB_TOKEN;
       if (originalEnvironment.GH_CONFIG_DIR === undefined) delete process.env.GH_CONFIG_DIR;
       else process.env.GH_CONFIG_DIR = originalEnvironment.GH_CONFIG_DIR;
+      if (originalEnvironment.XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = originalEnvironment.XDG_STATE_HOME;
     }
   });
-  it("boots the API, intake, and lifecycle timers then persists on SIGTERM", async () => {
+  it("boots the API, intake, and lifecycle timers when OMP emits its capability marker on stdout", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const nats = new FakeNats();
@@ -178,8 +182,8 @@ describe("startDaemon", () => {
           },
           createNatsTransport: async () => nats,
           runner: async () => ({
-            stdout: "[]",
-            stderr: "LEGION_OMP_AGENTS=available\n",
+            stdout: "LEGION_OMP_AGENTS=available\n",
+            stderr: "",
             exitCode: 0,
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
