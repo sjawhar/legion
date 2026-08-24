@@ -99,7 +99,7 @@ gh api graphql -f query='query {
 Add a label to an issue (additive — does not remove existing labels):
 
 ```bash
-gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
+gh issue edit $ISSUE_NUMBER --add-label "needs-approval" -R $OWNER/$REPO
 ```
 
 **Parameters:**
@@ -109,7 +109,7 @@ gh issue edit $ISSUE_NUMBER --add-label "worker-done" -R $OWNER/$REPO
 
 **Example:**
 ```bash
-gh issue edit 123 --add-label "worker-done" --add-label "reviewed" -R acme/backend
+gh issue edit 123 --add-label "needs-approval" -R acme/backend
 ```
 
 ### Remove Label
@@ -117,7 +117,7 @@ gh issue edit 123 --add-label "worker-done" --add-label "reviewed" -R acme/backe
 Remove a label from an issue:
 
 ```bash
-gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO
+gh issue edit $ISSUE_NUMBER --remove-label "needs-approval" -R $OWNER/$REPO
 ```
 
 **Parameters:**
@@ -127,7 +127,7 @@ gh issue edit $ISSUE_NUMBER --remove-label "worker-active" -R $OWNER/$REPO
 
 **Example:**
 ```bash
-gh issue edit 123 --remove-label "worker-active" -R acme/backend
+gh issue edit 123 --remove-label "legion-backlog" -R acme/backend
 ```
 
 ### Comment on Issue

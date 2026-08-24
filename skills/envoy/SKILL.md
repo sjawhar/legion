@@ -25,25 +25,44 @@ Example:
 
 - `notifications.agent.ses_2e6ca3034ffejVikSZ8mDwk0mR`
 
-### Role-based routing
+### Legion role claims
 
 - Role topic:
   - `notifications.role.<role>`
 
-Role topics route to one current live holder. `envoy_role_set(role="<role>")` transfers the
-claim using ordered last-writer-wins semantics; the listener then resolves the holder when it
-receives a role message. The role lane uses core NATS, not JetStream: a listener queue subscriber
-sends a receipt-backed request with the original role topic to the holder's
-`notifications.agent.<session_id>` subject. The OMP agent pump replies after accepting it; no
-receipt within two seconds produces a `delivery_failed` exception. A role claimant does not
-subscribe directly to the role topic, and messages are not retained, replayed, or retried for a
-future holder.
+Legion agents receive through a daemon-minted role token. Claim the role for the current
+session with `envoy_role_set(role="<role>")`; claiming transfers its holder with
+last-claim-wins semantics. A claimant does not manually subscribe to its role topic.
 
-Examples:
+Legion role tokens must satisfy `^[a-z0-9][a-z0-9_-]*$` and are unique across repositories:
 
-- `notifications.role.legion-controller` (routes to whoever holds the controller role)
-- `notifications.role.opencode-dev` (routes to the active dev session)
-- `notifications.role.legion-po` (routes to the product owner session)
+```text
+legion-<project>-controller
+legion-<project>-<enc(owner)>__<enc(repo)>-<number>-<role>
+```
+
+`<project>` matches `[a-z0-9]+`. In owner and repository components, the injective escape
+encoding is `_` → `_u`, `.` → `_d`, and `-` → `_h`; `__` separates owner from repository.
+The daemon owns the authoritative token-to-issue map and hands the token to each process.
+Do not construct a token from a partial issue reference.
+
+Claims last through the issue's post-close linger. They survive parking and worker
+re-creation; a re-claim re-points the role to the backing session. The daemon publishes to an
+issue role only while the issue is active. Inactive issue events become daemon state and later
+surface as derived catch-up, never as raw event replay.
+
+### Legion exception lane
+
+`no_holder` and `delivery_failed` on a Legion role are daemon liveness signals, not a prompt
+for a second subscriber or a manual retry. The daemon probes the process that owns the tree:
+
+1. If it is alive, the daemon sends a control-topic directive. The extension revives or
+   re-creates the backing worker in code, then the daemon re-delivers the message.
+2. If it is dead, the daemon resurrects the root process behind a generation lock and supplies
+   derived catch-up plus the shared workspace handoffs.
+
+This keeps raw delivery failures out of architect context. Controller exception wakes are
+handled by the controller's wake routing table; every other role follows the liveness path.
 
 ### GitHub
 
