@@ -39,7 +39,7 @@ stored_webhook_mode() {
 
 webhook_ingress_block_reason() {
   printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints 1-12 are blocked because they depend on live GitHub events; resync-driven intake still works'
+    'SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward'
 }
 
 
@@ -335,12 +335,16 @@ command -v grep >/dev/null 2>&1 || fail "grep is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
 case "$(stored_webhook_mode)" in
   none)
-    blocked "$(webhook_ingress_block_reason)"
+    case "$checkpoint" in
+      5 | 6 | 7 | 9 | 10 | 11)
+        blocked "$(webhook_ingress_block_reason)"
+        ;;
+    esac
     ;;
-  forward)
+  forward | envoy)
     ;;
   *)
-    fail "recorded SMOKE_WEBHOOK_MODE must be forward or none"
+    fail "recorded SMOKE_WEBHOOK_MODE must be forward, envoy, or none"
     ;;
 esac
 
@@ -348,8 +352,6 @@ case "$checkpoint" in
   1 | 2 | 3 | 4)
     [[ -n "${SMOKE_PROJECT_ID:-}" ]] ||
       blocked "SMOKE_PROJECT_ID is required after the sandbox Projects V2 board exists"
-    [[ "$(stored_board_scope)" != "none" ]] ||
-      blocked "personal Projects V2 board ingress requires an org-scoped webhook"
     ;;
   7 | 8)
     [[ "${SMOKE_BRANCH_PROTECTION:-}" == "1" ]] ||

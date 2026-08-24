@@ -405,6 +405,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await applyEffects(reduceGithubEvent(deps.state, subject, envelope, deps.config), envelope);
     }
     await deps.saveState();
+    console.log(`[legion] consumed event ${envelope.event_id} subject=${subject}`);
   };
 
   const unsubscribers = [

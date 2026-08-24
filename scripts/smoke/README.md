@@ -1,6 +1,6 @@
 # Legion smoke rig
 
-This rig runs the real NATS broker, Envoy listener (including its GitHub webhook receiver), Envoy Dispatch service, Legion daemon, and the pinned oh-my-pi binary that the daemon places in tmux windows. In `forward` webhook mode it also runs GitHub webhook forwarding. It targets a dedicated GitHub sandbox repository and Projects V2 board.
+This rig runs the real NATS broker, Envoy listener (including its GitHub webhook receiver), Envoy Dispatch service, Legion daemon, and the pinned oh-my-pi binary that the daemon places in tmux windows. It targets a dedicated GitHub sandbox repository and Projects V2 board. `forward` mode receives GitHub webhooks locally; `envoy` mode bridges the production Envoy receiver's NATS envelopes into the rig.
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ This rig runs the real NATS broker, Envoy listener (including its GitHub webhook
 gh extension install cli/gh-webhook
 ```
 
-Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenticated `gh` identity that administers `SMOKE_REPO`. `SMOKE_WEBHOOK_MODE=none` deliberately omits the forwarder and every GitHub hook registration, so the rig can boot App-only: no personal GitHub identity is used for its normal startup. Both Legion GitHub Apps must be installed on the sandbox repository.
+Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenticated `gh` identity that administers `SMOKE_REPO`. `none` omits every forwarder and GitHub hook registration. `envoy` receives production envelopes without a personal GitHub identity; the Legion Apps still require installation on the sandbox repository.
 
 `up.sh` requires these non-secret inputs:
 
@@ -18,7 +18,8 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | --- | --- | --- |
 | `SMOKE_REPO` | Dedicated repository as `<owner>/<repo>`. | Required. |
 | `SMOKE_PROJECT` | Dedicated Projects V2 board as `<owner>/<number>`. | Required. |
-| `SMOKE_WEBHOOK_MODE` | `forward` starts `gh webhook forward`; `none` omits every forwarder and GitHub hook registration. | `forward` when `gh webhook forward --help` is available; otherwise `none`. |
+| `SMOKE_WEBHOOK_MODE` | `forward` starts `gh webhook forward`; `envoy` starts the production-Envoy NATS bridge; `none` omits every ingress transport. | `forward` when `gh webhook forward --help` is available; otherwise `none`. |
+| `SMOKE_UPSTREAM_NATS` | Production NATS source for `envoy` mode. | `nats://envoy-nats.tailb86685.ts.net:4222` |
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
 | `LEGION_APP_LOGINS` | Comma-separated GitHub bot logins for both Legion Apps. | `legion-implementer[bot],legion-reviewer[bot]` |
@@ -38,9 +39,11 @@ Provide secrets with the `secrets` wrapper rather than writing a `.env` file. Th
 
 | Variable | Required for | Behavior when absent |
 | --- | --- | --- |
-| `SMOKE_WEBHOOK_MODE=forward` | Live GitHub event ingress | When `gh webhook forward --help` is unavailable, the default is `none`. Set `none` explicitly to keep a supported forwarder off. The rig prints `SKIPPED-BLOCKED`; live GitHub events do not flow to Envoy, checkpoints 1–12 are blocked, and resync-driven intake still works. |
+| `SMOKE_WEBHOOK_MODE=envoy` | Production Envoy ingress | App-only, live GitHub envelope ingress from the production Envoy receiver. It never registers a hook or calls GitHub with a personal identity. |
+| `SMOKE_WEBHOOK_MODE=forward` | Local GitHub webhook ingress | When `gh webhook forward --help` is unavailable, the default is `none`. This mode needs a user-authenticated `gh` identity. |
+| `SMOKE_WEBHOOK_MODE=none` | Deliberately no live GitHub ingress | The rig prints `SKIPPED-BLOCKED` for only checkpoints that directly require a live event. Resync-driven checkpoints 1–4 remain usable. |
 | `SMOKE_PROJECT_ID` | Board ingress | `up.sh` starts the real services with an empty board filter and prints `SKIPPED-BLOCKED`; checkpoints 1–4 exit 3 with the exact missing-Project reason. Set it to the sandbox Project V2 node ID (`PVT_…`) after the board exists. |
-| `SMOKE_BOARD_SCOPE` | Project V2 ingress transport in `forward` mode | Defaults to `org` for organization owners and starts a second org-scoped `projects_v2_item` forwarder. Set `none` for a personal board; repository hooks cannot carry that event, so checkpoints 1–4 remain blocked. |
+| `SMOKE_BOARD_SCOPE` | Project V2 ingress in `forward` mode | Defaults to `org` for organization owners and starts an org-scoped `projects_v2_item` forwarder. Set `none` for a personal board; repository hooks cannot carry that event. |
 | `SMOKE_BRANCH_PROTECTION=1` | Merge gate | `up.sh` configures branch protection and runs the reviewer-App approval measurement only when explicitly armed. This gate needs a user-authenticated `gh` identity. Without it, the rig prints `SKIPPED-BLOCKED`; checkpoints 7–8 exit 3 with the exact missing-ruleset reason. |
 
 The sandbox repository includes the 20-second `ci` check and the `.fail-me`-controlled `fail-on-demand` workflow. Both Legion Apps are installed account-wide for `sjawhar`; no per-repository install step is required.
@@ -49,16 +52,18 @@ The sandbox repository includes the 20-second `ci` check and the `.fail-me`-cont
 ## Start and stop
 
 ```sh
-export SMOKE_REPO=sjawhar/legion-smoke
+export SMOKE_REPO=trajectory-labs-pbc/legion-smoke
 export SMOKE_PROJECT=trajectory-labs-pbc/24
 export SMOKE_PROJECT_ID=PVT_kwDODfEZEs4BhWFj
-export SMOKE_WEBHOOK_MODE=none
+export SMOKE_WEBHOOK_MODE=envoy
 
 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \
   bash -c 'GITHUB_WEBHOOK_SECRET="$ENVOY_GITHUB_WEBHOOK_SECRET" exec bash scripts/smoke/up.sh'
 ```
 
 The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. In `none` mode, `up.sh` builds the Envoy listener and Dispatch binaries, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz` and Dispatch at `127.0.0.1:18766/healthz`, proves the listener accepts a locally signed GitHub `ping`, prints the explicit webhook-ingress block, then launches the daemon. The daemon, label setup, Dispatch bearer, and board resync use installation tokens minted from the GitHub Apps. In `forward` mode, the same local listener assertion runs before `gh webhook forward` and its GitHub hook registration; the rig waits for the forwarder's `Forwarding Webhook events from GitHub...` tunnel-ready signal before launching the daemon with its normal Bun command:
+
+In `envoy` mode the bridge starts only after the local daemon is healthy, then subscribes to `notifications.github.<owner>.<repo>.>` on `SMOKE_UPSTREAM_NATS` and republishes each raw NATS message onto the same subject in the rig's isolated NATS. The source chain is GitHub → the production `trajectory-s-legion` app → Sami’s Envoy receiver → production NATS → bridge → isolated rig NATS. The bridge has no upstream publish path, subscribes only to the configured repository’s literal subject prefix, and preserves the incoming NATS message rather than synthesizing a new envelope. It validates the first envelope against the daemon contract; a legacy shape logs exact missing and extra fields, marks the bridge unhealthy, and refuses to send that message to the daemon.
 
 ```sh
 bun run packages/daemon/src/cli/index.ts start <owner>/<board-number> --config /path/to/legion.yaml
@@ -73,7 +78,7 @@ To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OM
 
 Do not use `LEGION_OMP_INVOCATION=omp` as this negative test: the daemon rejects an unpinned invocation. Use the explicit `LEGION_OMP_PATH` override above.
 
-The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, `DISPATCH_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. `up.sh` refuses to start when any configured port is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time. Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats` container.
+The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, `DISPATCH_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. `up.sh` refuses to start when any configured port is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time. Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats` container. In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
 
 `SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`; GitHub rejects `projects_v2_item` on repository hooks, so Project V2 ingress remains gated by `SMOKE_PROJECT_ID`.
 
@@ -94,7 +99,7 @@ bash scripts/smoke/down.sh
 
 Keep `SMOKE_REPO` and `SMOKE_PROJECT` exported for teardown so it can close the disposable protection probe and the named tmux session.
 
-`down.sh` also succeeds in `none` mode: absent forwarder process and hook records are ignored while the listener, Dispatch, daemon, tmux session, and NATS container are stopped.
+`down.sh` also succeeds in `none` mode: absent forwarder process and hook records are ignored while the listener, Dispatch, daemon, tmux session, and NATS container are stopped. In `envoy` mode it first stops the start-time-validated bridge PID, preventing new upstream envelopes from reaching the local daemon during teardown.
 
 
 ## Checkpoints
@@ -107,7 +112,7 @@ bash scripts/smoke/checkpoints.sh <1-12>
 
 Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints infer the root issue and Legion pull request from daemon state where possible. Set the listed variable when a later exercise has more than one candidate:
 
-With a recorded `SMOKE_WEBHOOK_MODE=none`, every numbered checkpoint exits 3 with the same explicit webhook-ingress block instead of reporting a false green. The resync log remains available as the App-only intake evidence.
+With a recorded `SMOKE_WEBHOOK_MODE=none`, resync-driven checkpoints 1–4 still run. Checkpoints 5–7 and 9–11 are blocked because they directly assert pull-request, check-run, issue-comment, or issue-event delivery. `envoy` and `forward` both count as live ingress.
 
 ### Required checkpoint sequence
 

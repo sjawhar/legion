@@ -121,6 +121,15 @@ SMOKE_GH_LABEL_ENV_FILE="$gh_label_env_file" ensure_labels "app-installation-tok
   printf 'SMOKE_WEBHOOK_MODE=none must not invoke gh\n' >&2
   exit 1
 }
+: >"$gh_call_file"
+[[ "$(SMOKE_WEBHOOK_MODE=envoy SMOKE_GH_CALL_FILE="$gh_call_file" resolve_webhook_mode)" == "envoy" ]] || {
+  printf 'expected SMOKE_WEBHOOK_MODE=envoy to select the production Envoy bridge\n' >&2
+  exit 1
+}
+[[ ! -s "$gh_call_file" ]] || {
+  printf 'SMOKE_WEBHOOK_MODE=envoy must not invoke gh\n' >&2
+  exit 1
+}
 [[ "$(SMOKE_WEBHOOK_MODE=forward SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
   printf 'expected SMOKE_WEBHOOK_MODE=forward to select forward mode\n' >&2
   exit 1
@@ -133,7 +142,7 @@ fi
   printf 'expected explicit-forward availability error\n' >&2
   exit 1
 }
-[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints 1-12 are blocked because they depend on live GitHub events; resync-driven intake still works" ]] || {
+[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints that require live delivery are blocked; resync-driven checkpoints 1-4 remain usable" ]] || {
   printf 'expected exact no-webhook blocked reason\n' >&2
   exit 1
 }

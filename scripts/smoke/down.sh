@@ -125,6 +125,7 @@ stop_tmux_session() {
 }
 
 main() {
+  terminate_pid_file envoy-bridge
   terminate_process_group_file webhook-forward
   terminate_process_group_file board-webhook-forward
   remove_webhook_forwarder webhook-forward

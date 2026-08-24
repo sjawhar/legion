@@ -35,7 +35,7 @@ require_env() {
 }
 webhook_ingress_block_reason() {
   printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints 1-12 are blocked because they depend on live GitHub events; resync-driven intake still works'
+    'SMOKE_WEBHOOK_MODE=none: live GitHub events do not flow to Envoy; checkpoints that require live delivery are blocked; resync-driven checkpoints 1-4 remain usable'
 }
 
 resolve_webhook_mode() {
@@ -44,6 +44,9 @@ resolve_webhook_mode() {
       gh webhook forward --help >/dev/null 2>&1 ||
         fail "SMOKE_WEBHOOK_MODE=forward requires gh webhook forward"
       printf 'forward\n'
+      ;;
+    envoy)
+      printf 'envoy\n'
       ;;
     none)
       printf 'none\n'
@@ -56,7 +59,7 @@ resolve_webhook_mode() {
       fi
       ;;
     *)
-      fail "SMOKE_WEBHOOK_MODE must be forward or none"
+      fail "SMOKE_WEBHOOK_MODE must be forward, envoy, or none"
       ;;
   esac
 }
@@ -461,6 +464,33 @@ wait_for_webhook_forwarder() {
 
   fail "webhook forwarder did not report a tunnel-ready signal; inspect ${log_file}"
 }
+
+wait_for_envoy_bridge() {
+  local pid_file="${smoke_dir}/envoy-bridge.pid"
+  local log_file="${smoke_dir}/envoy-bridge.log"
+  local log
+  local reason
+  local attempt
+
+  for ((attempt = 1; attempt <= 60; attempt += 1)); do
+    if [[ -r "$log_file" ]]; then
+      log="$(<"$log_file")"
+      if [[ "$log" == *"BRIDGE UNHEALTHY "* ]]; then
+        reason="${log##*BRIDGE UNHEALTHY }"
+        reason="${reason%%$'\n'*}"
+        fail "Envoy bridge unhealthy: ${reason}"
+      fi
+      if [[ "$log" == *"BRIDGE READY "* ]] && pid_is_live "$pid_file"; then
+        printf 'GREEN Envoy bridge: upstream subscription is ready\n'
+        return
+      fi
+    fi
+    pid_is_live "$pid_file" || fail "Envoy bridge exited; inspect ${log_file}"
+    sleep 1
+  done
+
+  fail "Envoy bridge did not become ready; inspect ${log_file}"
+}
 assert_webhook_round_trip() {
   local payload='{"zen":"legion smoke round-trip"}'
   local signature
@@ -600,6 +630,8 @@ main() {
       wait_for_webhook_forwarder board-webhook-forward
       record_forwarder_hook board-webhook-forward "orgs/$(project_owner)/hooks"
     fi
+  elif [[ "$webhook_mode" == "envoy" ]]; then
+    printf 'GREEN webhook ingress: production Envoy NATS bridge will forward only %s\n' "$SMOKE_REPO"
   else
     printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi
@@ -616,7 +648,14 @@ main() {
     bun run "${repo_root}/packages/daemon/src/cli/index.ts" start "$SMOKE_PROJECT" --config "${smoke_dir}/legion.yaml"
 
   wait_for_json 'Legion daemon' "http://127.0.0.1:${daemon_port}/legion/v1/state" 'type == "object"' "${smoke_dir}/daemon.pid"
-
+  if [[ "$webhook_mode" == "envoy" ]]; then
+    start_process envoy-bridge env \
+      SMOKE_REPO="$SMOKE_REPO" \
+      SMOKE_RIG_NATS="$nats_url" \
+      SMOKE_UPSTREAM_NATS="${SMOKE_UPSTREAM_NATS:-}" \
+      bun run "${repo_root}/scripts/smoke/envoy-bridge.ts"
+    wait_for_envoy_bridge
+  fi
   label_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64 "$(repo_owner)")"
   ensure_labels "$label_bearer"
   if [[ -z "${SMOKE_PROJECT_ID:-}" ]]; then

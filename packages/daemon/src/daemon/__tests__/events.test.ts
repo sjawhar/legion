@@ -197,6 +197,23 @@ describe("core-NATS event pump", () => {
     ]);
     pump.stop();
   });
+
+  it("logs the subject and event ID after consuming a GitHub envelope", async () => {
+    const { state, architect } = stateForIssue();
+    const nats = new FakeNats();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    nats.emit("notifications.github.acme.widgets.issue.1.comment", envelope(issueComment()));
+    await flush();
+
+    expect(log).toHaveBeenCalledWith(
+      `[legion] consumed event event-1 subject=notifications.github.acme.widgets.issue.1.comment`
+    );
+    expect(state.roles[architect]).toBeDefined();
+    pump.stop();
+    log.mockRestore();
+  });
   it("drains a received event after its asynchronous publication completes", async () => {
     const { state, architect } = stateForIssue();
     const nats = new FakeNats();
