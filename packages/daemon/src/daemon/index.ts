@@ -318,10 +318,11 @@ export async function startDaemon(
       state,
       config,
       fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
+      applyEffects: eventPump.applyEffects,
       now: deps.now,
     });
     console.log(
-      `[legion] resync complete: anomalies=${payload.anomalies.length} excluded-null-content-items=${payload.excludedNullContentItems}`
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} excluded-null-content-items=${payload.excludedNullContentItems}`
     );
     await eventPump.publishControllerEvent(payload, {
       event_id: `resync:${randomUUID()}`,

@@ -26,7 +26,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
 | `legion-state.ts` | Strict versioned state schema and atomic persistence. |
 | `catchup.ts` | Derived overseer and worker catch-up payloads. |
-| `resync.ts` | Low-frequency board anomaly reporting for the controller. |
+| `resync.ts` | Low-frequency board convergence and residual anomaly reporting for the controller. |
 | `approval-check.ts` | Human approval status backstop for the current PR head. |
 
 ## Operational invariants

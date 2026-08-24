@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { controllerToken, formatIssueKey, roleTopic } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import type { DaemonEnvironment } from "../environment";
@@ -160,6 +161,109 @@ describe("startDaemon", () => {
       else process.env.GH_CONFIG_DIR = originalEnvironment.GH_CONFIG_DIR;
       if (originalEnvironment.XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = originalEnvironment.XDG_STATE_HOME;
+    }
+  });
+  it("heals a missed board item through the event pump and logs the healed count", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const published: Array<{ topic: string; payload: unknown }> = [];
+    const logs: string[] = [];
+    const originalLog = console.log;
+    let resync: (() => void) | undefined;
+    let resyncComplete: Promise<void> | undefined;
+    let saves = 0;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    console.log = (...values: unknown[]) => logs.push(values.join(" "));
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {
+            saves += 1;
+          },
+          createNatsTransport: async () => new FakeNats(),
+          runner: async () => ({
+            stdout: "LEGION_OMP_AGENTS=available\n",
+            stderr: "",
+            exitCode: 0,
+          }),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async (topic, payload) => {
+            published.push({ topic, payload: JSON.parse(payload) });
+          },
+          fetchGitHubProjectItems: async () => ({
+            items: [
+              {
+                content: {
+                  type: "Issue",
+                  number: 42,
+                  title: "Recovered issue",
+                  repository: "acme/widgets",
+                },
+                status: "Todo",
+                labels: [],
+              },
+            ],
+            excludedNullContentItems: 0,
+          }),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: (callback) => {
+            resync = () => {
+              resyncComplete = Promise.resolve().then(callback);
+            };
+            return 1 as never;
+          },
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      if (!resync) throw new Error("Daemon did not schedule resync");
+      resync();
+      if (!resyncComplete) throw new Error("Daemon did not start resync");
+      await resyncComplete;
+
+      const issue = formatIssueKey("acme", "widgets", 42);
+      expect(state.issues[issue]).toMatchObject({
+        key: issue,
+        title: "Recovered issue",
+        state: "open",
+        released: true,
+      });
+      expect(published).toEqual([
+        {
+          topic: roleTopic(controllerToken(daemonConfig.project)),
+          payload: { type: "triage", issue, preexistingChildren: [] },
+        },
+        {
+          topic: roleTopic(controllerToken(daemonConfig.project)),
+          payload: { type: "resync", anomalies: [], healed: 1, excludedNullContentItems: 0 },
+        },
+      ]);
+      expect(saves).toBeGreaterThan(0);
+      expect(logs).toContain(
+        "[legion] resync complete: anomalies=0 healed=1 excluded-null-content-items=0"
+      );
+    } finally {
+      await daemon?.stop();
+      console.log = originalLog;
+      await rm(stateDir, { recursive: true, force: true });
     }
   });
   it("boots the API, intake, and lifecycle timers when OMP emits its capability marker on stdout", async () => {

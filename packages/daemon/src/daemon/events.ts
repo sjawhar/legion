@@ -244,6 +244,7 @@ function exceptionInfo(
 }
 
 export interface EventPump {
+  applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   redeliverControllerEvents(): Promise<void>;
   publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void>;
   stop(): void;
@@ -351,6 +352,11 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     }
   };
 
+  const applyEffectsAndSave = async (effects: Effect[], envelope: EnvelopeJson): Promise<void> => {
+    await applyEffects(effects, envelope);
+    await deps.saveState();
+  };
+
   const publishCiEmissions = async (
     pr: PrState,
     emissions: CiEmission[],
@@ -424,6 +430,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   }, SETTLE_INTERVAL_MS);
 
   return {
+    applyEffects: applyEffectsAndSave,
     async publishControllerEvent(payload: { type: string }, envelope: EnvelopeJson): Promise<void> {
       await publishController(JSON.stringify(payload), envelope);
     },

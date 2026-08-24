@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { formatIssueKey } from "@legion/contracts";
 import { type LegionState, newLegionState } from "../legion-state";
+import type { Effect, EnvelopeJson } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
 
 const issue = formatIssueKey("sjawhar", "legion", 42);
@@ -22,8 +23,14 @@ function boardIssue(overrides: Record<string, unknown> = {}): Record<string, unk
 function resyncDeps(state: LegionState, items: Record<string, unknown>[]): RunResyncDeps {
   return {
     state,
-    config: { resyncIntervalMs: 600_000 },
+    config: {
+      resyncIntervalMs: 600_000,
+      boardProjectIds: ["PVT_board"],
+      appLogins: [],
+      maxFixAttempts: 3,
+    },
     fetchGitHubProjectItems: async () => ({ items }),
+    applyEffects: async () => {},
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
   };
 }
@@ -59,6 +66,7 @@ describe("runResync", () => {
           detail: "released open issue has no active Legion tree",
         },
       ],
+      healed: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -69,15 +77,64 @@ describe("runResync", () => {
 
     const event = await runResync(resyncDeps(state, [boardIssue()]));
 
-    expect(event).toEqual({ type: "resync", anomalies: [], excludedNullContentItems: 0 });
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      excludedNullContentItems: 0,
+    });
   });
 
-  it("reports an open board issue missing from the daemon state without dispatching it", async () => {
+  it("heals an open board issue missing from state and enqueues triage through the live event path", async () => {
     const state = newLegionState("omp", 1);
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
 
-    const event = await runResync(resyncDeps(state, [boardIssue()]));
+    const event = await runResync({
+      ...resyncDeps(state, [boardIssue()]),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
 
+    expect(state.issues[issue]).toMatchObject({
+      key: issue,
+      title: "Resync this Legion tree",
+      state: "open",
+      released: true,
+    });
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          { kind: "controller", payload: { type: "triage", issue, preexistingChildren: [] } },
+        ],
+        envelope: expect.objectContaining({
+          payload: {
+            action: "opened",
+            project: { id: "PVT_board" },
+            projects_v2_item: { content: boardIssue().content },
+            repository: { full_name: "sjawhar/legion" },
+          },
+        }),
+      },
+    ]);
     expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 1,
+      excludedNullContentItems: 0,
+    });
+  });
+
+  it("leaves a missed-open anomaly when no configured board project can drive the reducer", async () => {
+    const state = newLegionState("omp", 1);
+    const effects: Effect[][] = [];
+    const deps = resyncDeps(state, [boardIssue()]);
+    deps.config = { ...deps.config, boardProjectIds: [] };
+    deps.applyEffects = async (received) => {
+      effects.push(received);
+    };
+
+    expect(await runResync(deps)).toEqual({
       type: "resync",
       anomalies: [
         {
@@ -86,13 +143,15 @@ describe("runResync", () => {
           detail: "open board issue is absent from Legion state",
         },
       ],
+      healed: 0,
       excludedNullContentItems: 0,
     });
+    expect(state.issues[issue]).toBeUndefined();
+    expect(effects).toEqual([]);
   });
 
-  it("reports an open board issue with an error project status for controller verification", async () => {
+  it("keeps an error-status anomaly after healing its missing board issue", async () => {
     const state = newLegionState("omp", 1);
-    recordOpenReleasedIssue(state);
 
     const event = await runResync(resyncDeps(state, [boardIssue({ status: "Error" })]));
 
@@ -105,6 +164,7 @@ describe("runResync", () => {
           detail: "open board issue has an error project status",
         },
       ],
+      healed: 1,
       excludedNullContentItems: 0,
     });
   });
@@ -130,6 +190,7 @@ describe("runResync", () => {
           detail: "tree launch failed 3 times",
         },
       ],
+      healed: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -148,6 +209,7 @@ describe("runResync", () => {
     expect(await runResync(resyncDeps(state, []))).toEqual({
       type: "resync",
       anomalies: [],
+      healed: 0,
       excludedNullContentItems: 0,
     });
   });
@@ -161,6 +223,7 @@ describe("runResync", () => {
     expect(event).toEqual({
       type: "resync",
       anomalies: [],
+      healed: 0,
       excludedNullContentItems: 1,
     });
   });
