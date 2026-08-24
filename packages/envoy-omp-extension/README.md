@@ -2,7 +2,16 @@
 
 Tracked OMP extension for Envoy messaging. It shares the Envoy HTTP client, tool contract, envelope
 display data, and subject helpers with the other Legion adapters while keeping OMP's direct NATS
-subscription and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind it).
+subscriptions and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind it).
+
+Normal topic subscriptions are direct NATS subscriptions owned by this extension. A role claim is
+different: the listener arbitrates the core-NATS role lane for the current live holder, then
+forwards the envelope with its original role topic to the holder's direct agent subject. Role
+messages are live only; they are not retained for a later claimant.
+
+`envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
+registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
+temporary registration drift does not hide the extension's actual delivery state.
 
 ## Session identity
 
