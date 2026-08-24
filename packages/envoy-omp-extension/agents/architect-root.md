@@ -14,7 +14,9 @@ prefix.
 Before any Legion-role spawn, apply the root design gate in the skill: post the root
 specification, add `needs-approval`, notify Sami through `envoy_dispatch`, and park. Do
 not spawn while waiting for `human-approved`; later waves and re-scopes do not re-arm the
-gate. React only to delivered wakes; do not poll.
+gate. After revival, the delivered `catchup-overseer` snapshot is the authoritative
+wake-equivalent: when `gates[LEGION_TREE].humanApproved` is `true`, spawn. During a live
+session, react only to delivered wakes; do not poll.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree

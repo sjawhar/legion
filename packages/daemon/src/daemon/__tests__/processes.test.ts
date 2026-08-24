@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { afterAll, describe, expect, it, vi } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -233,7 +233,7 @@ describe("ProcessManager", () => {
       ["jj", "git", "fetch", "-R", repo],
       ["git", `--git-dir=${repo}/.git`, "worktree", "prune"],
       ["jj", "workspace", "add", workspace, "--name", "issue-42", "--revision", "main", "-R", repo],
-      ["jj", "bookmark", "set", "legion/issue-42"],
+      ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
       ["git", `--git-dir=${repo}/.git`, "config", "credential.helper", "!legion credential"],
       ["tmux", "has-session", "-t", "legion-omp"],
       ["tmux", "new-session", "-d", "-s", "legion-omp"],
@@ -272,7 +272,7 @@ describe("ProcessManager", () => {
       ],
     ]);
     expect(workspaceCalls).toContainEqual({
-      command: ["jj", "bookmark", "set", "legion/issue-42"],
+      command: ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
       opts: { cwd: workspace },
     });
     expect(workspaceCalls).toContainEqual({
@@ -543,6 +543,82 @@ describe("ProcessManager", () => {
 
     expect(windows).toBe(1);
     expect(state.trees[root].generation).toBe(2);
+  });
+
+  it("resumes the recorded OMP session when resurrecting a dead root", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+    await processes.resurrect(root);
+
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const extension = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
+    expect(launch?.at(-1)).toBe(
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
+    );
+  });
+
+  it("starts fresh when launching a root outside the resurrection path", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+    try {
+      await processes.spawnRoot(root);
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const extension = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
+    expect(launch?.at(-1)).toBe(
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
+    );
+  });
+
+  it("logs and starts fresh when a resurrected root's recorded OMP session is missing", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "missing-architect-session.json");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+    try {
+      await processes.resurrect(root);
+      expect(log).toHaveBeenCalledWith(
+        `[legion] resurrecting ${root} with a fresh OMP session; recorded session file is missing: ${sessionFile}`
+      );
+    } finally {
+      log.mockRestore();
+    }
+
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    const extension = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
+    expect(launch?.at(-1)).toBe(
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
+    );
   });
 
   it("releases the admission slot at linger start, then shuts down and closes its recorded tmux tree", () => {

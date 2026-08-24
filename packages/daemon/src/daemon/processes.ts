@@ -165,13 +165,13 @@ export class ProcessManager {
     await this.deps.saveState();
   }
 
-  async spawnRoot(issue: IssueKey): Promise<void> {
+  async spawnRoot(issue: IssueKey, resume = false): Promise<void> {
     const tree = this.ensureTree(issue);
     const priorGeneration = tree.generation;
     const priorLocator = tree.locator;
     tree.generation += 1;
     try {
-      await this.spawnTree(tree);
+      await this.spawnTree(tree, resume);
       tree.launchFailures = 0;
       if (this.promotionSweep?.has(issue)) this.promotionSweep = undefined;
       await this.deps.saveState();
@@ -524,7 +524,7 @@ export class ProcessManager {
     return tree;
   }
 
-  private async spawnTree(tree: TreeState): Promise<void> {
+  private async spawnTree(tree: TreeState, resume: boolean): Promise<void> {
     const name = treeName(tree.root);
     const parsedTree = parseIssueKey(tree.root);
     if (!parsedTree) throw new Error(`Invalid IssueKey: ${tree.root}`);
@@ -540,6 +540,29 @@ export class ProcessManager {
     });
     const promptPath = path.join(EXTENSION_PACKAGE, "agents", "architect-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
+    const priorSessionFile = resume ? tree.locator?.ompSessionFile : undefined;
+    let resumeArgument = "";
+    if (priorSessionFile) {
+      try {
+        await stat(priorSessionFile);
+        resumeArgument = ` --resume=${shellPath(priorSessionFile)}`;
+        console.info(
+          `[legion] resurrecting ${tree.root} by resuming OMP session ${priorSessionFile}`
+        );
+      } catch (error) {
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
+          throw error;
+        }
+        console.info(
+          `[legion] resurrecting ${tree.root} with a fresh OMP session; recorded session file is missing: ${priorSessionFile}`
+        );
+      }
+    }
     const session = `legion-${this.deps.state.project}`;
     await this.ensureTmuxSession(session);
     const generation = tree.generation;
@@ -576,7 +599,7 @@ export class ProcessManager {
       `LEGION_STATE_DIR=${this.deps.config.stateDir}`,
       "-e",
       `PATH=${this.deps.panePath}`,
-      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
+      `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     if (result.exitCode !== 0) {
       throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
@@ -666,7 +689,7 @@ export class ProcessManager {
 
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
     if ((await this.probe(treeKey)) === "alive") return;
-    await this.spawnRoot(treeKey);
+    await this.spawnRoot(treeKey, true);
   }
 
   private rootForIssue(issue: IssueKey): IssueKey | undefined {

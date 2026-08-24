@@ -69,9 +69,10 @@ truly independent is controller-actionable re-filing work, not a reason to aband
 
 Before **any** `legion-*` task spawn, including a sub-architect, obey the root design
 gate: publish the root specification, add `needs-approval`, notify Sami through
-`envoy_dispatch`, and park. Do not spawn until a wake shows that `human-approved` is
-present. Approval covers the whole tree: later waves and re-scopes do not re-arm this
-gate.
+`envoy_dispatch`, and park. Do not spawn while waiting for `human-approved`; later waves
+and re-scopes do not re-arm the gate. After revival, the delivered `catchup-overseer`
+snapshot is the authoritative wake-equivalent: when its `humanApproved` gate state is
+`true`, spawn. During a live session, react only to delivered wakes; do not poll.
 
 Create children in coherent waves, release only the wave that should now begin, and
 adjust open children when closures change the plan. Park between event-driven wakes; do
