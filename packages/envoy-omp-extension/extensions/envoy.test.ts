@@ -292,6 +292,7 @@ describe("envoy OMP extension", () => {
 
   test("envoy_role_set injects core role messages and replaces a superseded role subscription", async () => {
     let currentRoleTopic = "";
+    const unregistrations: (readonly string[])[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
@@ -317,6 +318,11 @@ describe("envoy OMP extension", () => {
             self_subscribed: true,
           },
         ]);
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        const topics = Array.isArray(body?.topics) ? body.topics.filter((topic): topic is string => typeof topic === "string") : [];
+        unregistrations.push(topics);
+        return response({});
       }
       if (url.pathname === "/v1/interests/subscribe") {
         return response({
@@ -354,6 +360,7 @@ describe("envoy OMP extension", () => {
 
     await roleTool.execute("", { role: "legion-reviewer" });
     expect(controller.active()).toBe(false);
+    expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
     const reviewer = natsState.controls.get("notifications.role.legion-reviewer");
     if (reviewer === undefined) throw new Error("replacement role topic was not subscribed");
 
