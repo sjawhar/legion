@@ -2,8 +2,8 @@ package bus
 
 import (
 	"context"
+	"net"
 	"reflect"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +35,67 @@ func (js *streamInfoJetStream) PurgeStream(_ string, opts ...nats.JSOpt) error {
 		}
 	}
 	return nil
+}
+
+func (js *streamInfoJetStream) ConsumerNames(_ string, _ ...nats.JSOpt) <-chan string {
+	names := make(chan string)
+	close(names)
+	return names
+}
+
+func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
+	accepted := make(chan net.Conn, 32)
+	urls := make([]string, 0, 2)
+	for range 2 {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				accepted <- conn
+			}
+		}()
+		urls = append(urls, "nats://"+listener.Addr().String())
+	}
+	t.Cleanup(func() {
+		for {
+			select {
+			case conn := <-accepted:
+				_ = conn.Close()
+			default:
+				return
+			}
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil)
+		if conn != nil {
+			conn.Close()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("connect unexpectedly succeeded against unresponsive servers")
+		}
+		if elapsed := time.Since(started); elapsed > 6*time.Second {
+			t.Fatalf("connect returned after %s, want the outer five-second deadline", elapsed)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("connect exceeded the outer deadline while walking NATS URLs")
+	}
 }
 
 func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testing.T) {
@@ -193,21 +254,4 @@ func TestEnsureStreamWithConfigUpdatesSubjectsWhenExistingStreamDiffers(t *testi
 	if !reflect.DeepEqual(js.config.Subjects, desiredConfig.Subjects) {
 		t.Fatalf("stream subjects = %v, want %v", js.config.Subjects, desiredConfig.Subjects)
 	}
-}
-
-func streamSubjectMatches(pattern, subject string) bool {
-	patternTokens := strings.Split(pattern, ".")
-	subjectTokens := strings.Split(subject, ".")
-	for index, patternToken := range patternTokens {
-		if patternToken == ">" {
-			return index == len(patternTokens)-1
-		}
-		if index >= len(subjectTokens) {
-			return false
-		}
-		if patternToken != "*" && patternToken != subjectTokens[index] {
-			return false
-		}
-	}
-	return len(patternTokens) == len(subjectTokens)
 }

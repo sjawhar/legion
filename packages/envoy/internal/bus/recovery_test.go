@@ -43,6 +43,14 @@ func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool)
 	t.Fatalf("timed out waiting for: %s", desc)
 }
 
+func subscribeAllNotifications(client *bus.Client, handler natsgo.MsgHandler, opts ...natsgo.SubOpt) (*natsgo.Subscription, error) {
+	subOpts := append([]natsgo.SubOpt{
+		natsgo.BindStream(bus.Stream),
+		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
+	}, opts...)
+	return client.Subscribe("", handler, subOpts...)
+}
+
 // TestSubOK_NoSubscription verifies SubOK is false when no subscription exists.
 func TestSubOK_NoSubscription(t *testing.T) {
 	_, uri := startNATS(t)
@@ -158,6 +166,50 @@ func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 	})
 }
 
+func TestCoreSubscriptionsShareQueueGroup(t *testing.T) {
+	_, uri := startNATS(t)
+	first, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect first client: %v", err)
+	}
+	defer first.Close()
+	second, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect second client: %v", err)
+	}
+	defer second.Close()
+	publisher, err := natsgo.Connect(uri)
+	if err != nil {
+		t.Fatalf("connect publisher: %v", err)
+	}
+	defer publisher.Close()
+
+	var received atomic.Int32
+	handler := func(*natsgo.Msg) { received.Add(1) }
+	const subject = "notifications.role.queue-group"
+	const queue = "envoy-listener-test-machine"
+	if _, err := first.SubscribeCore(subject, handler, queue); err != nil {
+		t.Fatalf("subscribe first core role lane: %v", err)
+	}
+	if _, err := second.SubscribeCore(subject, handler, queue); err != nil {
+		t.Fatalf("subscribe second core role lane: %v", err)
+	}
+	if err := publisher.Flush(); err != nil {
+		t.Fatalf("flush queue subscriptions: %v", err)
+	}
+	for range 3 {
+		if err := publisher.Publish(subject, []byte("queued")); err != nil {
+			t.Fatalf("publish queue test message: %v", err)
+		}
+	}
+	if err := publisher.Flush(); err != nil {
+		t.Fatalf("flush queue test messages: %v", err)
+	}
+	waitFor(t, 5*time.Second, "one queue delivery per role event", func() bool {
+		return received.Load() == 3
+	})
+}
+
 // TestSubOK_AfterSubscribe verifies SubOK is true after subscribing.
 func TestSubOK_AfterSubscribe(t *testing.T) {
 	_, uri := startNATS(t)
@@ -167,7 +219,7 @@ func TestSubOK_AfterSubscribe(t *testing.T) {
 	}
 	defer client.Close()
 
-	_, err = client.Subscribe("notifications.>", func(msg *natsgo.Msg) {
+	_, err = subscribeAllNotifications(client, func(msg *natsgo.Msg) {
 		_ = msg.Ack()
 	}, natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck())
 	if err != nil {
@@ -192,7 +244,7 @@ func TestRecovery_ClosedTriggersWithoutPublish(t *testing.T) {
 	defer client.Close()
 
 	var received atomic.Int32
-	_, err = client.Subscribe("notifications.>", func(msg *natsgo.Msg) {
+	_, err = subscribeAllNotifications(client, func(msg *natsgo.Msg) {
 		received.Add(1)
 		_ = msg.Ack()
 	}, natsgo.Durable("recovery-test"), natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck())
@@ -241,7 +293,7 @@ func TestRecovery_AtMostOneSubscription(t *testing.T) {
 	defer client.Close()
 
 	var received atomic.Int32
-	_, err = client.Subscribe("notifications.>", func(msg *natsgo.Msg) {
+	_, err = subscribeAllNotifications(client, func(msg *natsgo.Msg) {
 		received.Add(1)
 		_ = msg.Ack()
 	}, natsgo.Durable("dedup-sub-test"), natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck())
@@ -290,7 +342,7 @@ func TestRecovery_ConcurrentRecoverySerializes(t *testing.T) {
 	defer client.Close()
 
 	var received atomic.Int32
-	_, err = client.Subscribe("notifications.>", func(msg *natsgo.Msg) {
+	_, err = subscribeAllNotifications(client, func(msg *natsgo.Msg) {
 		received.Add(1)
 		_ = msg.Ack()
 	}, natsgo.Durable("concurrent-test"), natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck())

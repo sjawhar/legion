@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/sjawhar/envoy/internal/logging"
 	"log"
 	"log/slog"
 	"net"
@@ -13,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -56,11 +57,32 @@ func isValidRole(role string) bool {
 }
 
 // startListenerSubscription preserves the durable consumer so restarts resume
-// from the last ACKed message instead of skipping pending work.
+// from the last ACKed non-role message instead of skipping pending work.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
+	subjects := bus.StreamSubjects()
+	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err == nil && (info.Config.FilterSubject != "" ||
+		!slices.Equal(info.Config.FilterSubjects, subjects) ||
+		info.Config.AckPolicy != nats.AckExplicitPolicy ||
+		info.Config.AckWait != 60*time.Second ||
+		info.Config.MaxAckPending != 256 ||
+		info.Config.MaxDeliver != 20) {
+		config := info.Config
+		config.FilterSubject = ""
+		config.FilterSubjects = subjects
+		config.AckPolicy = nats.AckExplicitPolicy
+		config.AckWait = 60 * time.Second
+		config.MaxAckPending = 256
+		config.MaxDeliver = 20
+		if _, err := client.JS().UpdateConsumer(bus.Stream, &config); err != nil {
+			return nil, err
+		}
+	}
 	return client.Subscribe(
-		"notifications.>",
+		"",
 		handler,
+		nats.BindStream(bus.Stream),
+		nats.ConsumerFilterSubjects(subjects...),
 		nats.Durable(consumer),
 		nats.AckExplicit(),
 		nats.ManualAck(),
@@ -97,39 +119,50 @@ type listenerDeliveryHandlerConfig struct {
 	deliveryDuration  *metrics.Histogram
 }
 
+type deliveryMode uint8
+
+const (
+	coreDelivery deliveryMode = iota
+	durableDelivery
+)
+
 type deliveryMessage struct {
-	data         []byte
-	ack          func() error
-	nakWithDelay func(time.Duration) error
+	data []byte
+	mode deliveryMode
+	msg  *nats.Msg
 }
 
+// finalize makes core delivery's loss-on-failure semantics explicit: only a
+// durable JetStream message receives an acknowledgement or retry request.
+func (message deliveryMessage) finalize(retry bool) {
+	if message.mode != durableDelivery {
+		return
+	}
+	if retry {
+		_ = message.msg.NakWithDelay(30 * time.Second)
+		return
+	}
+	_ = message.msg.Ack()
+}
+
+// Ack finalizes a message without retrying. It keeps callers agnostic to the
+// transport while core NATS delivery remains intentionally non-durable.
 func (message deliveryMessage) Ack() error {
-	return message.ack()
-}
-
-func (message deliveryMessage) NakWithDelay(delay time.Duration) error {
-	return message.nakWithDelay(delay)
+	message.finalize(false)
+	return nil
 }
 
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
-		handler(deliveryMessage{
-			data:         msg.Data,
-			ack:          func() error { return msg.Ack() },
-			nakWithDelay: func(delay time.Duration) error { return msg.NakWithDelay(delay) },
-		})
+		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg})
 	}
 }
 
 func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
-		handler(deliveryMessage{
-			data:         msg.Data,
-			ack:          func() error { return nil },
-			nakWithDelay: func(time.Duration) error { return nil },
-		})
+		handler(deliveryMessage{data: msg.Data, mode: coreDelivery})
 	}
 }
 
@@ -181,11 +214,7 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	if err := exception.Validate(); err != nil {
 		return fmt.Errorf("validate delivery exception: %w", err)
 	}
-	publish := client.Publish
-	if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
-		publish = client.PublishCore
-	}
-	if err := publish(exception); err != nil {
+	if err := client.Publish(exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
 	}
 	return nil
@@ -196,12 +225,12 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		var item contracts.Envelope
 		if err := json.Unmarshal(message.data, &item); err != nil {
 			cfg.logger.Error("listener decode failed", slog.String("error", err.Error()))
-			_ = message.Ack()
+			message.finalize(false)
 			return
 		}
 		if err := item.Validate(); err != nil {
 			cfg.logger.Error("listener invalid envelope", slog.String("error", err.Error()))
-			_ = message.Ack()
+			message.finalize(false)
 			return
 		}
 		cfg.messagesReceived.Inc([2]string{"source", item.Source}, [2]string{"topic_prefix", metrics.TopicPrefix(item.Topic)})
@@ -278,13 +307,13 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
-				_ = message.Ack()
+				message.finalize(false)
 				return
 			}
 			if cfg.attemptCache.Seen(item.DedupeKey, sessionID) {
 				cfg.messagesDelivered.Inc([2]string{"delivery_status", "dedupe"})
 				cfg.logger.DeliveryLog(slog.LevelInfo, "listener attempt-dedupe skip", sessionID, item.Topic, item.EventID, "skipped", slog.String("dedupe_key", item.DedupeKey))
-				_ = message.Ack()
+				message.finalize(false)
 				return
 			}
 			interest, err := cfg.registry.Get(sessionID)
@@ -325,7 +354,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 						cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 						cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 						cfg.messagesNAKed.Inc()
-						_ = message.NakWithDelay(30 * time.Second)
+						message.finalize(true)
 						return
 					}
 				}
@@ -334,9 +363,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			}
 			if result.ShouldNAK {
 				cfg.messagesNAKed.Inc()
-				_ = message.NakWithDelay(30 * time.Second)
+				message.finalize(true)
 			} else {
-				_ = message.Ack()
+				message.finalize(false)
 			}
 			return
 		}
@@ -346,12 +375,12 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 				if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
 					cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 					cfg.messagesNAKed.Inc()
-					_ = message.NakWithDelay(30 * time.Second)
+					message.finalize(true)
 					return
 				}
 			}
 			cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))
-			_ = message.Ack()
+			message.finalize(false)
 			return
 		}
 		var failed bool
@@ -408,9 +437,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 		}
 		if failed {
 			cfg.messagesNAKed.Inc()
-			_ = message.NakWithDelay(30 * time.Second)
+			message.finalize(true)
 		} else {
-			_ = message.Ack()
+			message.finalize(false)
 		}
 	}
 }
@@ -553,11 +582,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		publish := d.client.Publish
-		if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
-			publish = d.client.PublishCore
-		}
-		if err := publish(item); err != nil {
+		if err := d.client.Publish(item); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1095,6 +1120,7 @@ func main() {
 
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 	healthzConsumer = consumer
+	roleQueue := "envoy-listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
@@ -1162,7 +1188,7 @@ func main() {
 	}
 	_ = sub // used by NATS internally
 
-	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig))
+	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), roleQueue)
 	if err != nil {
 		logger.Error("core role subscription failed", slog.String("error", err.Error()))
 		client.Conn.Close()

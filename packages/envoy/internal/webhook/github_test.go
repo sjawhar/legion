@@ -375,7 +375,8 @@ func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
 			if item.Topic != "notifications.github.sjawhar.legion.pr."+number+".check" {
 				t.Errorf("published[%d].Topic = %q", i, item.Topic)
 			}
-			if item.Source != "github" || item.SourceEventID != "d-ci-1" || item.DedupeKey != "ghck.d-ci-1.unit-tests" {
+			wantDedupeKey := "ghck.d-ci-1.pr." + number + ".unit-tests"
+			if item.Source != "github" || item.SourceEventID != "d-ci-1" || item.DedupeKey != wantDedupeKey {
 				t.Errorf("published[%d] has unexpected metadata: %+v", i, item)
 			}
 			if item.PayloadSummary != "check unit-tests: completed/failure @ deadbee" {

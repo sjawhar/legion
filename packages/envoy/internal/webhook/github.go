@@ -115,33 +115,16 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return
 				}
-				payload, err := json.Marshal(struct {
-					SHA        string `json:"sha"`
-					Name       string `json:"name"`
-					Status     string `json:"status"`
-					Conclusion string `json:"conclusion"`
-				}{
-					SHA:        o.SHA,
-					Name:       o.CheckName,
-					Status:     o.Status,
-					Conclusion: o.Conclusion,
+				item, err := contracts.GithubCIEnvelope(contracts.GithubCIEnvelopeInput{
+					Observation: o,
+					Delivery:    delivery,
+					EventID:     id.New(),
+					TraceID:     id.New(),
 				})
 				if err != nil {
-					log.Printf("github ci observation payload failed: %v", err)
+					log.Printf("github ci observation envelope failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return
-				}
-				sha7 := o.SHA[:min(7, len(o.SHA))]
-				item := contracts.Envelope{
-					EventID:        id.New(),
-					Source:         "github",
-					SourceEventID:  delivery,
-					Topic:          contracts.GithubSubject(o.Owner, o.Repo, "pr."+o.Number+".check"),
-					DedupeKey:      "ghck." + delivery + "." + o.CheckName,
-					IssuedAt:       contracts.NowMillis(),
-					PayloadSummary: fmt.Sprintf("check %s: %s/%s @ %s", o.CheckName, o.Status, o.Conclusion, sha7),
-					Payload:        string(payload),
-					TraceID:        id.New(),
 				}
 				if err := item.Validate(); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)

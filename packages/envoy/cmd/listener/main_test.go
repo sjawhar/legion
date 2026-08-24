@@ -1552,6 +1552,108 @@ func TestDurableConsumerRestart(t *testing.T) {
 	}
 }
 
+func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	legacyConn, err := natsgo.Connect(uri)
+	if err != nil {
+		t.Fatalf("connect legacy NATS client: %v", err)
+	}
+	legacyJS, err := legacyConn.JetStream()
+	if err != nil {
+		t.Fatalf("open legacy JetStream: %v", err)
+	}
+	if _, err := legacyJS.AddStream(&natsgo.StreamConfig{
+		Name:      bus.Stream,
+		Subjects:  []string{"notifications.>"},
+		Retention: natsgo.LimitsPolicy,
+		MaxAge:    72 * time.Hour,
+		Storage:   natsgo.FileStorage,
+		Replicas:  1,
+	}); err != nil {
+		t.Fatalf("create legacy stream: %v", err)
+	}
+	const consumer = "listener-migration"
+	legacySub, err := legacyJS.Subscribe("notifications.>", func(*natsgo.Msg) {},
+		natsgo.Durable(consumer),
+		natsgo.DeliverNew(),
+		natsgo.AckExplicit(),
+		natsgo.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("create legacy durable consumer: %v", err)
+	}
+	_ = legacySub
+	legacyConn.Close()
+
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("boot migrated listener bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	durableReceived := make(chan struct{}, 1)
+	durableSub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) {
+		durableReceived <- struct{}{}
+		_ = msg.Ack()
+	})
+	if err != nil {
+		t.Fatalf("boot migrated durable consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = durableSub.Unsubscribe() })
+	consumerInfo, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("read migrated consumer: %v", err)
+	}
+	if consumerInfo.Config.FilterSubject != "" || len(consumerInfo.Config.FilterSubjects) != len(bus.StreamSubjects()) {
+		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
+	}
+
+	roleReceived := make(chan struct{}, 1)
+	roleSub, err := client.SubscribeCore("notifications.role.migration", func(*natsgo.Msg) {
+		roleReceived <- struct{}{}
+	}, "envoy-listener-test-machine")
+	if err != nil {
+		t.Fatalf("boot migrated role lane: %v", err)
+	}
+	t.Cleanup(func() { _ = roleSub.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush migrated listener subscriptions: %v", err)
+	}
+	if _, err := client.JS().Publish("notifications.github.acme.widgets.migration", []byte("durable")); err != nil {
+		t.Fatalf("publish durable migration message: %v", err)
+	}
+	select {
+	case <-durableReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("migrated durable listener did not receive a non-role message")
+	}
+	if err := client.Publish(contracts.Envelope{
+		EventID:        "evt-listener-migration-role",
+		Source:         "agent",
+		SourceEventID:  "source-listener-migration-role",
+		Topic:          "notifications.role.migration",
+		DedupeKey:      "listener-migration-role",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "core",
+		TraceID:        "trace-listener-migration-role",
+	}); err != nil {
+		t.Fatalf("publish core role migration message: %v", err)
+	}
+	select {
+	case <-roleReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("migrated listener role lane did not receive the core message")
+	}
+}
+
 func TestDeadSessionACK(t *testing.T) {
 	client := setupPublishTestClient(t)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
@@ -1671,11 +1773,7 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 			}
 
 			// When
-			publish := harness.client.Publish
-			if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
-				publish = harness.client.PublishCore
-			}
-			if err := publish(item); err != nil {
+			if err := harness.client.Publish(item); err != nil {
 				t.Fatalf("publish control topic: %v", err)
 			}
 
@@ -2101,8 +2199,10 @@ func TestHealthzConsumerLag(t *testing.T) {
 	// Create a consumer
 	consumerName := "listener-test-machine"
 	_, err = client.Subscribe(
-		"notifications.>",
+		"",
 		func(msg *natsgo.Msg) { _ = msg.Ack() },
+		natsgo.BindStream(bus.Stream),
+		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
 		natsgo.Durable(consumerName),
 		natsgo.AckExplicit(),
 		natsgo.ManualAck(),

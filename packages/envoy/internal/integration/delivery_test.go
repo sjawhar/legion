@@ -609,19 +609,19 @@ func TestDelivery_DedupeWindowExpiry(t *testing.T) {
 func TestDelivery_MalformedEnvelope(t *testing.T) {
 	env := setupTestEnv(t)
 	port, deliveries, _, _ := mockSession(t)
-	env.registerSession("ses_healthy", port, []string{"notifications.test.*"})
+	env.registerSession("ses_healthy", port, []string{"notifications.agent.ses_healthy"})
 	env.startConsumer("test-machine")
 
 	// Publish raw invalid JSON
-	_, err := env.client.JS().Publish("notifications.test.bad", []byte("not json {{{"))
+	_, err := env.client.JS().Publish("notifications.agent.ses_healthy", []byte("not json {{{"))
 	if err != nil {
 		t.Fatalf("failed to publish invalid JSON: %v", err)
 	}
 
 	// Publish valid JSON with empty required fields
-	emptyEnv := contracts.Envelope{Topic: "notifications.test.bad"}
+	emptyEnv := contracts.Envelope{Topic: "notifications.agent.ses_healthy"}
 	emptyData, _ := json.Marshal(emptyEnv)
-	_, err = env.client.JS().Publish("notifications.test.bad", emptyData)
+	_, err = env.client.JS().Publish("notifications.agent.ses_healthy", emptyData)
 	if err != nil {
 		t.Fatalf("failed to publish empty envelope: %v", err)
 	}
@@ -629,7 +629,7 @@ func TestDelivery_MalformedEnvelope(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Verify consumer is still alive by delivering a valid message
-	publishEnvelope(env, newEnvelope("slack", "notifications.test.valid", "still alive", "dedupe-alive"))
+	publishEnvelope(env, newEnvelope("slack", "notifications.agent.ses_healthy", "still alive", "dedupe-alive"))
 	time.Sleep(2 * time.Second)
 	if count := deliveries.Load(); count != 1 {
 		t.Fatalf("expected 1 delivery (only valid message), consumer should survive malformed input, got %d", count)

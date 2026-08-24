@@ -131,6 +131,45 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 	return out
 }
 
+type GithubCIEnvelopeInput struct {
+	Observation CIObservation
+	Delivery    string
+	EventID     string
+	TraceID     string
+}
+
+// GithubCIEnvelope creates the per-PR raw CI observation envelope that feeds
+// wildcard subscribers and the CI summary reducer.
+func GithubCIEnvelope(input GithubCIEnvelopeInput) (Envelope, error) {
+	observation := input.Observation
+	payload, err := json.Marshal(struct {
+		SHA        string `json:"sha"`
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	}{
+		SHA:        observation.SHA,
+		Name:       observation.CheckName,
+		Status:     observation.Status,
+		Conclusion: observation.Conclusion,
+	})
+	if err != nil {
+		return Envelope{}, err
+	}
+	sha7 := observation.SHA[:min(7, len(observation.SHA))]
+	return Envelope{
+		EventID:        input.EventID,
+		Source:         "github",
+		SourceEventID:  input.Delivery,
+		Topic:          GithubSubject(observation.Owner, observation.Repo, "pr."+observation.Number+".check"),
+		DedupeKey:      "ghck." + input.Delivery + ".pr." + observation.Number + "." + observation.CheckName,
+		IssuedAt:       NowMillis(),
+		PayloadSummary: fmt.Sprintf("check %s: %s/%s @ %s", observation.CheckName, observation.Status, observation.Conclusion, sha7),
+		Payload:        string(payload),
+		TraceID:        input.TraceID,
+	}, nil
+}
+
 func GithubIsBotSender(body map[string]any) bool {
 	return strings.EqualFold(nestedString(body, "sender", "type"), "Bot")
 }
