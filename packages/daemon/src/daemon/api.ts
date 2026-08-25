@@ -1020,14 +1020,15 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       }
 
       if (pathname === "/legion/v1/gh-token") {
+        validateContractRequest(LegionDaemonApi.GitHubToken.request, body);
         const grant = resolveGrant(body);
         const lease = await tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
-        return Response.json({
-          token: lease.token,
-          appLogin: lease.gitIdentity.name.endsWith("[bot]")
-            ? lease.gitIdentity.name.slice(0, -"[bot]".length)
-            : lease.gitIdentity.name,
-        });
+        return Response.json(
+          validateContractResponse(LegionDaemonApi.GitHubToken.response, {
+            token: lease.token,
+            appLogin: lease.gitIdentity.name,
+          })
+        );
       }
 
       // T24 controller startup contract: POST this with the session ID from envoy_whoami

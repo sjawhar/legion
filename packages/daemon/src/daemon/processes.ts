@@ -200,6 +200,7 @@ export class ProcessManager {
         delete this.deps.state.roles[token];
       }
     }
+    this.clearTreePhases(treeKey);
     await this.deps.saveState();
   }
 
@@ -361,6 +362,7 @@ export class ProcessManager {
     tree.lingerUntil = new Date(
       this.deps.now() + this.deps.config.lingerHours * HOUR_MS
     ).toISOString();
+    this.clearTreePhases(treeKey);
     this.releaseSlot(treeKey);
     this.persist();
   }
@@ -786,6 +788,12 @@ export class ProcessManager {
       current = this.deps.state.issues[current]?.parent;
     }
     return undefined;
+  }
+
+  private clearTreePhases(treeKey: IssueKey): void {
+    for (const issue of Object.keys(this.deps.state.phases) as IssueKey[]) {
+      if (this.rootForIssue(issue) === treeKey) delete this.deps.state.phases[issue];
+    }
   }
 
   private roleBacking(issue: IssueKey, role: LegionRole): RoleBacking | undefined {

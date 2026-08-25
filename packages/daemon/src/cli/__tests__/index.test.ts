@@ -17,7 +17,7 @@ describe("legion gh", () => {
         },
         fetch: async (input, init) => {
           request = new Request(String(input), init);
-          return Response.json({ token: "scoped-token" });
+          return Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" });
         },
         spawnGh: async (args, env) => {
           spawnArgs = args;

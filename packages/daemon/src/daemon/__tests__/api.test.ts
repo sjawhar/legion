@@ -1406,7 +1406,7 @@ describe("Legion HTTP API", () => {
     });
     expect(token.body).toEqual({
       token: "minted-implement-acme",
-      appLogin: "legion-implement",
+      appLogin: "legion-implement[bot]",
     });
     expect(tokenRoles).toEqual(["implement", "implement"]);
 

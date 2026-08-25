@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
@@ -283,8 +283,12 @@ async function jjConfig(directory: string, key: string): Promise<string> {
   if (exitCode !== 0) throw new Error(`jj config get failed: ${stderr}`);
   return stdout.trim();
 }
-async function commandOutput(command: string[], cwd?: string): Promise<string> {
-  const child = Bun.spawn(command, { cwd, stdout: "pipe", stderr: "pipe" });
+async function commandOutput(
+  command: string[],
+  cwd?: string,
+  env?: NodeJS.ProcessEnv
+): Promise<string> {
+  const child = Bun.spawn(command, { cwd, env, stdout: "pipe", stderr: "pipe" });
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout as ReadableStream<Uint8Array>).text(),
@@ -292,6 +296,35 @@ async function commandOutput(command: string[], cwd?: string): Promise<string> {
   ]);
   if (exitCode !== 0) throw new Error(`${command.join(" ")} failed: ${stderr}`);
   return stdout.trim();
+}
+
+async function createDecoyGh(): Promise<{ readonly binDir: string; readonly configDir: string }> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "legion-gh-decoy-"));
+  temporaryPaths.push(directory);
+  const binDir = path.join(directory, "bin");
+  const configDir = path.join(directory, "gh-config");
+  await mkdir(binDir);
+  await mkdir(configDir);
+  await writeFile(path.join(configDir, "hosts.yml"), "github.com:\n    user: sjawhar\n", "utf8");
+  const gh = path.join(binDir, "gh");
+  await writeFile(
+    gh,
+    `#!/bin/sh
+if [ "$GH_TOKEN" = "real-daemon-token" ]; then
+  printf '%s\n' 'legion-implementer[bot]'
+  exit 0
+fi
+if [ -f "$GH_CONFIG_DIR/hosts.yml" ]; then
+  printf '%s\n' 'sjawhar'
+  exit 0
+fi
+printf '%s\n' 'missing GitHub authentication' >&2
+exit 1
+`,
+    "utf8"
+  );
+  await chmod(gh, 0o700);
+  return { binDir, configDir };
 }
 
 async function createJjRepository(directory: string): Promise<void> {
@@ -1076,6 +1109,9 @@ describe("Legion OMP extension", () => {
       if (url.pathname === "/legion/v1/grants") {
         return Response.json({ grantId: "grant-1", expiresAt: "2026-08-24T06:00:00.000Z" });
       }
+      if (url.pathname === "/legion/v1/gh-token") {
+        return Response.json({ token: "app-token", appLogin: "legion-reviewer[bot]" });
+      }
       return Response.json({
         session_id: "ses_grant",
         machine_id: "machine",
@@ -1113,15 +1149,26 @@ describe("Legion OMP extension", () => {
     );
 
     expect(result).toEqual({
-      input: { command: "export LEGION_GRANT=grant-1\nenv | grep LEGION" },
+      input: {
+        command:
+          "export LEGION_GRANT='grant-1'\n" +
+          "export GH_TOKEN='app-token'\n" +
+          "unset GITHUB_TOKEN\n" +
+          "unset GH_HOST\n" +
+          "export GH_CONFIG_DIR='/tmp/legion-state/gh'\n" +
+          "env | grep LEGION",
+      },
     });
-    expect(requests.at(-1)).toEqual({
-      path: "/legion/v1/grants",
-      body: { tree, issue, sessionId: "ses_grant", secret: "worker-secret" },
-    });
+    expect(requests.slice(-2)).toEqual([
+      {
+        path: "/legion/v1/grants",
+        body: { tree, issue, sessionId: "ses_grant", secret: "worker-secret" },
+      },
+      { path: "/legion/v1/gh-token", body: { grantId: "grant-1" } },
+    ]);
     await sessionShutdown({}, context);
   });
-  test("refuses a worker shell when the daemon cannot mint its grant", async () => {
+  test("blocks a worker shell when its GitHub App lease is unavailable", async () => {
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
     const role = "reviewer";
@@ -1139,6 +1186,9 @@ describe("Legion OMP extension", () => {
         });
       }
       if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ grantId: "grant-lease-refused", expiresAt: "2026-08-24T06:00:00.000Z" });
+      }
+      if (url.pathname === "/legion/v1/gh-token") {
         return Response.json({ error: "token lease unavailable" }, { status: 503 });
       }
       return Response.json({
@@ -1179,7 +1229,7 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: 'POST /legion/v1/grants failed with 503: {"error":"token lease unavailable"}',
+      reason: 'POST /legion/v1/gh-token failed with 503: {"error":"token lease unavailable"}',
     });
     await sessionShutdown({}, context);
   });
@@ -1204,7 +1254,7 @@ describe("Legion OMP extension", () => {
       reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
     });
   });
-  test("uses a non-empty real daemon grant in a worker shell", async () => {
+  test("routes a worker gh call through the real daemon's app token despite ambient identity", async () => {
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
     const role = "implementer";
@@ -1298,6 +1348,7 @@ describe("Legion OMP extension", () => {
     }
     const workspace = await createJjWorkspace();
     const context = { ...sessionContext("ses_real_daemon_grant"), cwd: workspace };
+    let workerStarted = false;
     try {
       await beforeAgentStart(
         {
@@ -1307,11 +1358,12 @@ describe("Legion OMP extension", () => {
         },
         context
       );
+      workerStarted = true;
       const result = await toolCall(
         {
           toolName: "bash",
           toolCallId: "call-real-daemon-grant",
-          input: { command: "env | grep LEGION_GRANT" },
+          input: { command: "gh api user --jq .login" },
         },
         context
       );
@@ -1327,14 +1379,24 @@ describe("Legion OMP extension", () => {
         throw new Error("worker shell was not rewritten with a daemon grant");
       }
       const [grantExport] = result.input.command.split("\n", 1);
-      expect(grantExport).toMatch(/^export LEGION_GRANT=[0-9a-f-]{36}$/);
-      expect(grantExport).not.toBe("export LEGION_GRANT=");
+      expect(grantExport).toMatch(/^export LEGION_GRANT='[0-9a-f-]{36}'$/);
+      expect(grantExport).not.toBe("export LEGION_GRANT=''");
+      const decoy = await createDecoyGh();
+      expect(
+        await commandOutput(["sh", "-c", result.input.command], workspace, {
+          ...process.env,
+          PATH: `${decoy.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          GH_TOKEN: "personal-gh-token",
+          GITHUB_TOKEN: "personal-github-token",
+          GH_CONFIG_DIR: decoy.configDir,
+        })
+      ).toBe("legion-implementer[bot]");
       expect(await jjConfig(workspace, "user.name")).toBe("legion-implementer[bot]");
       expect(await jjConfig(workspace, "user.email")).toBe(
         "271566630+legion-implementer[bot]@users.noreply.github.com"
       );
-      await sessionShutdown({}, context);
     } finally {
+      if (workerStarted) await sessionShutdown({}, context);
       daemon.stop();
     }
   });
@@ -1450,7 +1512,7 @@ describe("Legion OMP extension", () => {
         throw new Error("cross-process worker shell was not rewritten with a daemon grant");
       }
       const exportLine = result.input.command.split("\n", 1)[0];
-      const match = /^export LEGION_GRANT=([0-9a-f-]{36})$/.exec(exportLine);
+      const match = /^export LEGION_GRANT='([0-9a-f-]{36})'$/.exec(exportLine);
       if (!match?.[1]) throw new Error("worker shell has no daemon-issued grant");
       return match[1];
     };
@@ -2397,7 +2459,7 @@ describe("Legion OMP extension", () => {
       context
     );
   });
-  test("holds six live worker permits through task completion, releases failed spawns, and refuses sub-architects at the depth cap", async () => {
+  test("releases worker permits when completed tasks yield, releases failed spawns, and refuses sub-architects at the depth cap", async () => {
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
     const stateDir = await createLegionWorkspaceState();
@@ -2454,12 +2516,14 @@ describe("Legion OMP extension", () => {
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     const sessionShutdown = fixture.handlers.get("session_shutdown");
     const sessionStart = fixture.handlers.get("session_start");
+    const agentEnd = fixture.handlers.get("agent_end");
     if (
       toolCall === undefined ||
       toolResult === undefined ||
       beforeAgentStart === undefined ||
       sessionShutdown === undefined ||
-      sessionStart === undefined
+      sessionStart === undefined ||
+      agentEnd === undefined
     ) {
       throw new Error("spawn lifecycle handlers were not registered");
     }
@@ -2477,6 +2541,7 @@ describe("Legion OMP extension", () => {
       const prompt = injectedTask(await toolCall(spawnCall, rootContext));
       const workerContext = { ...sessionContext(`ses_live_${index}`), cwd: workspace };
       await beforeAgentStart({ prompt }, workerContext);
+      await agentEnd({ willContinue: false }, workerContext);
       await toolResult(
         {
           ...spawnCall,
@@ -2488,11 +2553,10 @@ describe("Legion OMP extension", () => {
       return workerContext;
     };
 
-    const liveWorkers: SessionContext[] = [];
+    const completedWorkers: SessionContext[] = [];
     for (let index = 0; index < 6; index += 1) {
-      liveWorkers.push(await spawnLiveWorker(index));
+      completedWorkers.push(await spawnLiveWorker(index));
     }
-    let seventhReady = false;
     const seventh = Promise.resolve(
       toolCall(
         {
@@ -2505,18 +2569,8 @@ describe("Legion OMP extension", () => {
         },
         rootContext
       )
-    ).then((result: unknown) => {
-      seventhReady = true;
-      return result;
-    });
-    await Promise.resolve();
-    expect(seventhReady).toBeFalse();
-
-    const [firstWorker, ...remainingWorkers] = liveWorkers;
-    if (!firstWorker) throw new Error("expected one live worker");
-    await sessionShutdown({}, firstWorker);
-    const seventhResult = await seventh;
-    expect(injectedTask(seventhResult)).toContain('spawnToken="spawn-capability-7"');
+    );
+    expect(injectedTask(await seventh)).toContain('spawnToken="spawn-capability-7"');
     await toolResult(
       {
         toolName: "task",
@@ -2531,7 +2585,7 @@ describe("Legion OMP extension", () => {
       rootContext
     );
     await Promise.all(
-      remainingWorkers.map((workerContext) => sessionShutdown({}, workerContext))
+      completedWorkers.map((workerContext) => sessionShutdown({}, workerContext))
     );
 
     process.env.LEGION_WORKER_BUDGET = "1";

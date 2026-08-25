@@ -236,6 +236,7 @@ type PiApi = {
     event:
       | "session_start"
       | "before_agent_start"
+      | "agent_end"
       | "tool_call"
       | "tool_result"
       | "session_shutdown",
@@ -255,6 +256,20 @@ function requiredEnvironment(env: NodeJS.ProcessEnv, key: string): string {
   const value = env[key];
   if (!value) throw new Error(`${key} is required for Legion`);
   return value;
+}
+
+function shellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function workerGhEnvironment(grantId: string, token: string, stateDir: string): string {
+  return [
+    `export LEGION_GRANT=${shellLiteral(grantId)}`,
+    `export GH_TOKEN=${shellLiteral(token)}`,
+    "unset GITHUB_TOKEN",
+    "unset GH_HOST",
+    `export GH_CONFIG_DIR=${shellLiteral(path.join(stateDir, "gh"))}`,
+  ].join("\n");
 }
 
 function requiredControllerCapability(env: NodeJS.ProcessEnv): string {
@@ -989,10 +1004,15 @@ export default function legionExtension(pi: PiApi): void {
         sessionId: sessionID,
         secret: worker.secret,
       });
+      const githubToken = await roleDaemon().githubToken({ grantId: grant.grantId });
       return {
         input: {
           ...toolCall.input,
-          command: `export LEGION_GRANT=${grant.grantId}\n${toolCall.input.command}`,
+          command: `${workerGhEnvironment(
+            grant.grantId,
+            githubToken.token,
+            requiredEnvironment(process.env, "LEGION_STATE_DIR")
+          )}\n${toolCall.input.command}`,
         },
       };
     } catch (error) {
@@ -1004,6 +1024,16 @@ export default function legionExtension(pi: PiApi): void {
     const pending = pendingLegionSpawns.get(result.toolCallId);
     if (!pending || !result.isError) return;
     for (const spawn of [...pending]) releasePendingLegionSpawn(spawn);
+  });
+
+  pi.on("agent_end", async (event, context) => {
+    const willContinue =
+      typeof event === "object" &&
+      event !== null &&
+      "willContinue" in event &&
+      event.willContinue === true;
+    if (willContinue) return;
+    releaseWorkerBudgetPermit(context.sessionManager.getSessionId());
   });
 
   pi.on("session_shutdown", async (_event, context) => {

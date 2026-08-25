@@ -3,9 +3,13 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HANDOFF_PHASES, type HandoffPhase, isHandoffPhase } from "@legion/contracts";
+import {
+  HANDOFF_PHASES,
+  type HandoffPhase,
+  isHandoffPhase,
+  LegionDaemonApi,
+} from "@legion/contracts";
 import { defineCommand, runMain } from "citty";
-import { z } from "zod";
 import {
   type DaemonConfig,
   type LoadedConfigFile,
@@ -41,9 +45,6 @@ export class CliError extends Error {
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-
-const GhTokenResponseSchema = z.object({ token: z.string().min(1) });
-
 interface GhCommandDeps {
   env: NodeJS.ProcessEnv;
   fetch: Fetch;
@@ -92,7 +93,7 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (!response.ok) {
     throw new CliError(`Unable to redeem LEGION_GRANT (${response.status})`);
   }
-  const payload = GhTokenResponseSchema.safeParse(await response.json());
+  const payload = LegionDaemonApi.GitHubToken.response.safeParse(await response.json());
   if (!payload.success) {
     throw new CliError("Daemon returned an invalid GitHub credential response");
   }

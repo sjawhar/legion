@@ -887,7 +887,7 @@ describe("ProcessManager", () => {
     );
   });
 
-  it("releases the admission slot at linger start, then shuts down and closes its recorded tmux tree", async () => {
+  it("clears completed-tree phases and releases its admission slot at linger start, then shuts down its recorded tmux tree", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.admission.active.push(root);
@@ -895,6 +895,17 @@ describe("ProcessManager", () => {
       issue: root,
       role: "architect",
     };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      state: "closed",
+      parent: root,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.phases[root] = { phase: "merger", sessionId: "ses_root_merger" };
+    state.phases[child] = { phase: "reviewer", sessionId: "ses_child_reviewer" };
     const { manager: processes, commands, publications } = manager(state);
 
     processes.beginLinger(root);
@@ -904,11 +915,15 @@ describe("ProcessManager", () => {
       lingerUntil: "2026-08-24T02:00:00.000Z",
     });
     expect(state.admission).toEqual({ cap: 1, active: [], queue: [] });
+    expect(state.phases[root]).toBeUndefined();
+    expect(state.phases[child]).toBeUndefined();
 
     await processes.expireLinger(root);
 
     expect(state.trees[root].status).toBe("closed");
     expect(state.roles[roleToken("omp", root, "architect")]).toBeUndefined();
+    expect(state.phases[root]).toBeUndefined();
+    expect(state.phases[child]).toBeUndefined();
     expect(publications).toEqual([]);
     expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
   });

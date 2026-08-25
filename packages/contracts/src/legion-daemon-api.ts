@@ -167,6 +167,10 @@ export const LegionDaemonApi = {
     }),
     response: z.object({ grantId: nonEmptyString, expiresAt: nonEmptyString }),
   },
+  GitHubToken: {
+    request: z.object({ grantId: nonEmptyString }),
+    response: z.object({ token: nonEmptyString, appLogin: z.string().endsWith("[bot]") }),
+  },
 } as const;
 
 type InputOf<T extends z.ZodType> = z.input<T>;
@@ -203,6 +207,8 @@ export type AdmissionResponse = OutputOf<typeof LegionDaemonApi.Admission.respon
 export type BacklogInput = InputOf<typeof LegionDaemonApi.Backlog.request>;
 export type GrantInput = InputOf<typeof LegionDaemonApi.Grant.request>;
 export type GrantResponse = OutputOf<typeof LegionDaemonApi.Grant.response>;
+export type GitHubTokenInput = InputOf<typeof LegionDaemonApi.GitHubToken.request>;
+export type GitHubTokenResponse = OutputOf<typeof LegionDaemonApi.GitHubToken.response>;
 export type ProvisioningCredentialInput = InputOf<
   typeof LegionDaemonApi.ProvisioningCredential.request
 >;

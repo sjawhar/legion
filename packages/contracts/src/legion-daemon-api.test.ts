@@ -39,3 +39,22 @@ test("requires a transcript-derived agent id to establish a root architect capab
     }).success
   ).toBeTrue();
 });
+
+test("requires a grant and bot login to redeem a GitHub App token", () => {
+  expect(LegionDaemonApi.GitHubToken.request.safeParse({}).success).toBeFalse();
+  expect(
+    LegionDaemonApi.GitHubToken.response.safeParse({ token: "app-token" }).success
+  ).toBeFalse();
+  expect(
+    LegionDaemonApi.GitHubToken.response.safeParse({
+      token: "human-token",
+      appLogin: "sjawhar",
+    }).success
+  ).toBeFalse();
+  expect(
+    LegionDaemonApi.GitHubToken.response.safeParse({
+      token: "app-token",
+      appLogin: "legion-implementer[bot]",
+    }).success
+  ).toBeTrue();
+});

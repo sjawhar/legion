@@ -8,6 +8,8 @@ import {
   type DispatchThreadInput,
   type DispatchThreadResponse,
   type EscalateInput,
+  type GitHubTokenInput,
+  type GitHubTokenResponse,
   type GrantInput,
   type GrantResponse,
   type IssueCloseInput,
@@ -60,6 +62,7 @@ export interface LegionDaemonClient {
   readonly backlog: (input: BacklogInput) => Promise<void>;
   readonly processExit: (input: ProcessExitInput) => Promise<void>;
   readonly grant: (input: GrantInput) => Promise<GrantResponse>;
+  readonly githubToken: (input: GitHubTokenInput) => Promise<GitHubTokenResponse>;
   readonly workerSession: (input: WorkerSessionInput) => Promise<WorkerSessionResponse>;
 }
 
@@ -213,5 +216,7 @@ export function createLegionDaemonClient(
     processExit: (input) =>
       noContent("/legion/v1/process/exit", input, LegionDaemonApi.ProcessExit.response),
     grant: (input) => post("/legion/v1/grants", input, LegionDaemonApi.Grant.response),
+    githubToken: (input) =>
+      post("/legion/v1/gh-token", input, LegionDaemonApi.GitHubToken.response),
   };
 }
