@@ -652,37 +652,21 @@ export class ProcessManager {
   ): Promise<string> {
     const sessionExists =
       (await this.deps.run(["tmux", "has-session", "-t", session])).exitCode === 0;
-    const command = sessionExists
-      ? [
-          "tmux",
-          "new-window",
-          "-P",
-          "-F",
-          "#{window_id}",
-          "-t",
-          session,
-          "-n",
-          name,
-          ...environmentAndCommand,
-        ]
-      : [
-          "tmux",
-          "new-session",
-          "-d",
-          "-s",
-          session,
-          "-n",
-          name,
-          "-P",
-          "-F",
-          "#{window_id}",
-          ...environmentAndCommand,
-        ];
-    const result = await this.deps.run(command);
-    if (result.exitCode !== 0) {
-      throw new Error(`tmux ${command[1]} failed (exit ${result.exitCode}): ${result.stdout}`);
-    }
+    const bootstrapWindow = "__legion_bootstrap";
     if (!sessionExists) {
+      const create = await this.deps.run([
+        "tmux",
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-n",
+        bootstrapWindow,
+        "sleep 3600",
+      ]);
+      if (create.exitCode !== 0) {
+        throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
+      }
       const marker = await this.deps.run([
         "tmux",
         "set-option",
@@ -695,9 +679,39 @@ export class ProcessManager {
         throw new Error(`tmux ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`);
       }
     }
+
+    const command = [
+      "tmux",
+      "new-window",
+      "-P",
+      "-F",
+      "#{window_id}",
+      "-t",
+      session,
+      "-n",
+      name,
+      ...environmentAndCommand,
+    ];
+    const result = await this.deps.run(command);
+    if (!sessionExists) {
+      const cleanup = await this.deps.run([
+        "tmux",
+        "kill-window",
+        "-t",
+        `${session}:${bootstrapWindow}`,
+      ]);
+      if (cleanup.exitCode !== 0) {
+        throw new Error(
+          `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`
+        );
+      }
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
+    }
     const tmuxWindowId = result.stdout.trim();
     if (!/^@\d+$/.test(tmuxWindowId)) {
-      throw new Error(`tmux ${command[1]} did not report a window id: ${result.stdout}`);
+      throw new Error(`tmux new-window did not report a window id: ${result.stdout}`);
     }
     return tmuxWindowId;
   }

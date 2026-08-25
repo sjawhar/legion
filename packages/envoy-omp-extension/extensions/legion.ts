@@ -32,6 +32,10 @@ export function classifySession(
   agentName: string | undefined,
   taskDepth: number
 ): LegionSessionKind {
+  if (env.LEGION_CONTROLLER !== undefined && env.LEGION_TREE !== undefined) {
+    throw new Error("Legion session has both controller and tree launch markers");
+  }
+
   if (env.LEGION_CONTROLLER === "1") return { kind: "controller" };
 
   if (taskDepth === 0 && env.LEGION_TREE) {

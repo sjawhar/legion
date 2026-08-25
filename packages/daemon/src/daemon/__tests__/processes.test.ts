@@ -179,6 +179,19 @@ function manager(
   };
 }
 
+function tmuxWindowEnvironment(command: readonly string[]): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (let index = 0; index < command.length; index += 1) {
+    if (command[index] !== "-e") continue;
+    const assignment = command[index + 1];
+    if (!assignment) throw new Error("tmux -e is missing an environment assignment");
+    const separator = assignment.indexOf("=");
+    if (separator === -1) throw new Error(`tmux environment assignment is invalid: ${assignment}`);
+    environment[assignment.slice(0, separator)] = assignment.slice(separator + 1);
+  }
+  return environment;
+}
+
 afterAll(async () => {
   await Promise.all(tempDirs.map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -263,17 +276,18 @@ describe("ProcessManager", () => {
       ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
       ["git", `--git-dir=${repo}/.git`, "config", "credential.helper", "!legion credential"],
       ["tmux", "has-session", "-t", "legion-omp"],
+      ["tmux", "new-session", "-d", "-s", "legion-omp", "-n", "__legion_bootstrap", "sleep 3600"],
+      ["tmux", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
       [
         "tmux",
-        "new-session",
-        "-d",
-        "-s",
-        "legion-omp",
-        "-n",
-        "sjawhar__legion-42",
+        "new-window",
         "-P",
         "-F",
         "#{window_id}",
+        "-t",
+        "legion-omp",
+        "-n",
+        "sjawhar__legion-42",
         "-e",
         "LEGION_TREE=sjawhar/legion#42",
         "-e",
@@ -302,7 +316,7 @@ describe("ProcessManager", () => {
         "PATH=/full/bin:/usr/bin",
         `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
       ],
-      ["tmux", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
+      ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
     ]);
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
@@ -317,6 +331,55 @@ describe("ProcessManager", () => {
           LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
         },
       },
+    });
+  });
+  it("launches controller and root windows with disjoint exact environments", async () => {
+    const stateDir = await temporaryDir();
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") {
+          return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        }
+        if (command[1] === "new-session") sessionExists = true;
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+
+    const windows = commands.filter((command) => command[1] === "new-window");
+    expect(windows).toHaveLength(2);
+    const controllerWindow = windows[0];
+    const rootWindow = windows[1];
+    if (!controllerWindow || !rootWindow) throw new Error("missing Legion tmux windows");
+
+    expect(tmuxWindowEnvironment(controllerWindow)).toEqual({
+      LEGION_CONTROLLER: "1",
+      LEGION_CONTROLLER_SECRET: "controller-secret",
+      LEGION_DAEMON_URL: "http://127.0.0.1:13999",
+      LEGION_PROJECT: "omp",
+      ENVOY_NATS_URL: "nats://127.0.0.1:4222",
+      ENVOY_URL: "http://127.0.0.1:9020",
+      PATH: "/full/bin:/usr/bin",
+    });
+    expect(tmuxWindowEnvironment(rootWindow)).toEqual({
+      LEGION_TREE: root,
+      LEGION_ROOT_WORKSPACE: path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42"),
+      LEGION_GENERATION: "1",
+      LEGION_BOOT_TOKEN: "boot-token",
+      LEGION_DAEMON_URL: "http://127.0.0.1:13999",
+      LEGION_PROJECT: "omp",
+      ENVOY_NATS_URL: "nats://127.0.0.1:4222",
+      ENVOY_URL: "http://127.0.0.1:9020",
+      LEGION_CONTROL_SUBJECT: "legion.ctl.sjawhar-legion-42.1",
+      LEGION_WORKER_BUDGET: "5",
+      LEGION_MAX_RECURSION_DEPTH: "8",
+      LEGION_STATE_DIR: stateDir,
+      PATH: "/full/bin:/usr/bin",
     });
   });
   it("gives collision-prone issue paths distinct escaped cosmetic window names", async () => {
@@ -447,9 +510,7 @@ describe("ProcessManager", () => {
     const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     const controllerDir = path.join(stateDir, "controller");
     const extensionDir = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
-    const windows = commands.filter(
-      (command) => command[1] === "new-window" || command[1] === "new-session"
-    );
+    const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
       `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
       `cd ${controllerDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/controller-root.md)"`,

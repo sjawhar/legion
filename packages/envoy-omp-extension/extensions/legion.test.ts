@@ -325,6 +325,20 @@ describe("Legion OMP extension", () => {
     expect(classifySession({}, "legion-architect", 0)).toEqual({ kind: "not-legion" });
     expect(classifySession({}, "scout", 1)).toEqual({ kind: "not-legion" });
   });
+  test("rejects a session launched with both controller and tree markers", () => {
+    expect(() =>
+      classifySession(
+        {
+          LEGION_CONTROLLER: "1",
+          LEGION_CONTROLLER_SECRET: "controller-secret",
+          LEGION_TREE: "owner/repo#42",
+          LEGION_ROOT_WORKSPACE: "/tmp/legion-workspace",
+        },
+        undefined,
+        0
+      )
+    ).toThrow("both controller and tree launch markers");
+  });
   test("restores root liveness from session_start when the host omits task depth", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const tree = "owner/repo#42";
