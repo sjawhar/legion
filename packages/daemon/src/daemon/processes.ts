@@ -591,6 +591,8 @@ export class ProcessManager {
       "-e",
       `LEGION_TREE=${tree.root}`,
       "-e",
+      `LEGION_ROOT_WORKSPACE=${workspace.workspaceDir}`,
+      "-e",
       `LEGION_GENERATION=${generation}`,
       "-e",
       `LEGION_BOOT_TOKEN=${bootToken}`,

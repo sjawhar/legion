@@ -120,6 +120,7 @@ const environmentKeys = [
   "LEGION_BOOT_TOKEN",
   "LEGION_PROJECT",
   "LEGION_TREE",
+  "LEGION_ROOT_WORKSPACE",
   "LEGION_WORKER_BUDGET",
   "LEGION_MAX_RECURSION_DEPTH",
   "LEGION_STATE_DIR",
@@ -135,6 +136,7 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
   LEGION_BOOT_TOKEN: process.env.LEGION_BOOT_TOKEN,
   LEGION_PROJECT: process.env.LEGION_PROJECT,
   LEGION_TREE: process.env.LEGION_TREE,
+  LEGION_ROOT_WORKSPACE: process.env.LEGION_ROOT_WORKSPACE,
   LEGION_WORKER_BUDGET: process.env.LEGION_WORKER_BUDGET,
   LEGION_MAX_RECURSION_DEPTH: process.env.LEGION_MAX_RECURSION_DEPTH,
   LEGION_STATE_DIR: process.env.LEGION_STATE_DIR,
@@ -333,6 +335,7 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_BOOT_TOKEN = "boot-before-agent-start";
     process.env.LEGION_PROJECT = "omp";
     process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROOT_WORKSPACE = "/tmp/legion-workspace";
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
@@ -388,6 +391,46 @@ describe("Legion OMP extension", () => {
         body: { tree, sessionId: "ses_root", secret: "root-secret" },
       },
     ]);
+  });
+  test("does not bootstrap a spawned worker from session_start", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "owner/repo#42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "worker-bootstrap-guard";
+    process.env.LEGION_PROJECT = "omp";
+    process.env.LEGION_ROOT_WORKSPACE = "/tmp/legion-root";
+    process.env.LEGION_TREE = tree;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      return Response.json({
+        session_id: "ses_worker",
+        machine_id: "machine",
+        dir: "/tmp/legion-worker",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi({ omitAgents: true });
+    const { taskDepth: _taskDepth, ...session } = sessionContext("ses_worker");
+    const context = { ...session, cwd: "/tmp/legion-worker" };
+
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
+    await sessionStart({}, context);
+
+    expect(requests).toEqual([]);
   });
   test("registers the root process before claiming its role and agent delivery subject", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];

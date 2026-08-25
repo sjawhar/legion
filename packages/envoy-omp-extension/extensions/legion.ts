@@ -260,6 +260,11 @@ function generation(env: NodeJS.ProcessEnv): number {
   if (!Number.isSafeInteger(value)) throw new Error("LEGION_GENERATION must be an integer");
   return value;
 }
+function isRootSession(env: NodeJS.ProcessEnv, context: SessionContext): boolean {
+  const rootWorkspace = env.LEGION_ROOT_WORKSPACE;
+  return rootWorkspace ? context.cwd === rootWorkspace : context.taskDepth === 0;
+}
+
 
 function parseWorkerSpawn(
   prompt: string,
@@ -720,7 +725,7 @@ export default function legionExtension(pi: PiApi): void {
       }
       return;
     }
-    await bootstrapRoot(context);
+    if (isRootSession(process.env, context)) await bootstrapRoot(context);
   });
 
   pi.on("before_agent_start", async (event, context) => {

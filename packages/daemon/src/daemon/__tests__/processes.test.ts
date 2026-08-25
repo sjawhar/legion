@@ -260,6 +260,8 @@ describe("ProcessManager", () => {
         "-e",
         "LEGION_TREE=sjawhar/legion#42",
         "-e",
+        `LEGION_ROOT_WORKSPACE=${workspace}`,
+        "-e",
         "LEGION_GENERATION=1",
         "-e",
         "LEGION_BOOT_TOKEN=boot-token",
