@@ -141,8 +141,12 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   legionExtension(legionPi);
   envoyExtension(envoyPi as never);
   const sessionStart = handlers.get("session_start")?.[0];
-  if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
+  const beforeAgentStart = handlers.get("before_agent_start")?.[0];
+  if (sessionStart === undefined || beforeAgentStart === undefined) {
+    throw new Error("Legion lifecycle handlers were not registered");
+  }
   await sessionStart({}, context);
+  await beforeAgentStart({ prompt: "Start the root architect" }, context);
 
   expect(intervals).toHaveLength(1);
   expect(registrations).toHaveLength(1);

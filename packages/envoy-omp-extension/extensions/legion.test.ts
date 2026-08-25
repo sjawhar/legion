@@ -94,7 +94,7 @@ type TestPi = {
     readonly unknown: () => ZodProperty;
     readonly discriminatedUnion: (key: string, options: readonly unknown[]) => unknown;
   };
-  readonly agents: ExtensionAgentsApi;
+  readonly agents?: ExtensionAgentsApi;
   readonly sendMessage: (message: { readonly type: string }) => void;
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
@@ -154,7 +154,7 @@ afterEach(async () => {
   );
 });
 
-function createPi(options: { readonly agents?: ExtensionAgentsApi } = {}): {
+function createPi(options: { readonly agents?: ExtensionAgentsApi; readonly omitAgents?: boolean } = {}): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
@@ -211,6 +211,7 @@ function createPi(options: { readonly agents?: ExtensionAgentsApi } = {}): {
     },
     registerCommand: (name, command) => commands.push({ name, ...command }),
   };
+  if (options.omitAgents) Reflect.deleteProperty(pi, "agents");
   envoyExtension(pi as never);
   return { commands, handlers, tools, sentMessages, activeTools, pi };
 }
@@ -218,6 +219,7 @@ function createPi(options: { readonly agents?: ExtensionAgentsApi } = {}): {
 function sessionContext(sessionID: string, sessionFile = "/tmp/session.jsonl"): SessionContext {
   return {
     cwd: "/tmp/legion-workspace",
+    taskDepth: 0,
     sessionManager: {
       getSessionId: () => sessionID,
       getSessionFile: () => sessionFile,
@@ -320,6 +322,59 @@ describe("Legion OMP extension", () => {
     expect(classifySession({}, "legion-architect", 1)).toEqual({ kind: "sub-architect" });
     expect(classifySession({}, "legion-architect", 0)).toEqual({ kind: "not-legion" });
     expect(classifySession({}, "scout", 1)).toEqual({ kind: "not-legion" });
+  });
+  test("defers root bootstrap until a prompt identifies the session as non-worker", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "owner/repo#42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-before-agent-start";
+    process.env.LEGION_PROJECT = "omp";
+    process.env.LEGION_TREE = tree;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      return Response.json({
+        session_id: "ses_root",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi({ omitAgents: true });
+    const { taskDepth: _taskDepth, ...context } = sessionContext("ses_root");
+
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const beforeAgentStart = fixture.handlers.get("before_agent_start");
+    if (sessionStart === undefined || beforeAgentStart === undefined) {
+      throw new Error("Legion lifecycle handlers were not registered");
+    }
+    await sessionStart({}, context);
+    expect(requests).toEqual([]);
+
+    await beforeAgentStart({ prompt: "Start the root architect" }, context);
+
+    expect(requests[0]).toEqual({
+      path: "/legion/v1/process/started",
+      body: {
+        tree,
+        generation: 3,
+        bootToken: "boot-before-agent-start",
+        rootSessionId: "ses_root",
+        ompSessionFile: "/tmp/session.jsonl",
+      },
+    });
   });
   test("registers the root process before claiming its role and agent delivery subject", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
@@ -810,7 +865,7 @@ describe("Legion OMP extension", () => {
       },
     ]);
   });
-  test("injects a fresh daemon grant before a worker git push", async () => {
+  test("injects a fresh daemon grant into every worker shell", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
@@ -864,13 +919,13 @@ describe("Legion OMP extension", () => {
       {
         toolName: "bash",
         toolCallId: "call-1",
-        input: { command: "git push origin feature/legion" },
+        input: { command: "env | grep LEGION" },
       },
       context
     );
 
     expect(result).toEqual({
-      input: { command: "export LEGION_GRANT=grant-1\ngit push origin feature/legion" },
+      input: { command: "export LEGION_GRANT=grant-1\nenv | grep LEGION" },
     });
     expect(requests.at(-1)).toEqual({
       path: "/legion/v1/grants",
@@ -1509,12 +1564,6 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
     expect(fixture.tools.find((tool) => tool.name === "envoy_dispatch")).toBeUndefined();
   });
-  test("fails at load when OMP lacks the required agent revival API", () => {
-    const fixture = createPi();
-    const pi = { ...fixture.pi, agents: undefined } as unknown as TestPi;
-
-    expect(() => legionExtension(pi)).toThrow("pi.agents is required for Legion");
-  });
   test("revives a worker in code, then acknowledges without sending an architect message", async () => {
     const ensured: { readonly agentId: string; readonly parentSessionFile: string }[] = [];
     const fixture = createPi({
@@ -1667,7 +1716,7 @@ describe("Legion OMP extension", () => {
       body: { tree, generation: 3, sessionId: "ses_architect", secret: "root-secret" },
     });
   });
-  test("injects a daemon-minted Legion spawn capability into a named worker task", async () => {
+  test("injects a daemon-minted Legion spawn capability into a named batch worker task", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
@@ -1705,7 +1754,7 @@ describe("Legion OMP extension", () => {
         topics: [rootToken],
       });
     }) as typeof fetch;
-    const fixture = createPi();
+    const fixture = createPi({ omitAgents: true });
     const context = sessionContext("ses_architect");
 
     legionExtension(fixture.pi);
@@ -1721,8 +1770,13 @@ describe("Legion OMP extension", () => {
         toolName: "task",
         toolCallId: "spawn-reviewer",
         input: {
-          agent: "legion-reviewer",
-          task: `Legion-Issue: ${issue}\nReview the implementation`,
+          context: "Review the implementation",
+          tasks: [
+            {
+              agent: "legion-reviewer",
+              task: `Legion-Issue: ${issue}\nReview the implementation`,
+            },
+          ],
         },
       },
       context,
@@ -1740,11 +1794,16 @@ describe("Legion OMP extension", () => {
     });
     expect(result).toEqual({
       input: {
-        agent: "legion-reviewer",
-        task:
-          `Legion-Issue: ${issue}\nReview the implementation\n\n` +
-          `<legion-spawn issue="${issue}" role="reviewer" token="${token}" tree="${tree}" ` +
-          `spawnToken="spawn-capability" workspace="${workspace}"/>`,
+        context: "Review the implementation",
+        tasks: [
+          {
+            agent: "legion-reviewer",
+            task:
+              `Legion-Issue: ${issue}\nReview the implementation\n\n` +
+              `<legion-spawn issue="${issue}" role="reviewer" token="${token}" tree="${tree}" ` +
+              `spawnToken="spawn-capability" workspace="${workspace}"/>`,
+          },
+        ],
       },
     });
     await toolResult(
@@ -1752,8 +1811,13 @@ describe("Legion OMP extension", () => {
         toolName: "task",
         toolCallId: "spawn-reviewer",
         input: {
-          agent: "legion-reviewer",
-          task: `Legion-Issue: ${issue}\nReview the implementation`,
+          context: "Review the implementation",
+          tasks: [
+            {
+              agent: "legion-reviewer",
+              task: `Legion-Issue: ${issue}\nReview the implementation`,
+            },
+          ],
         },
         details: {},
         isError: true,
