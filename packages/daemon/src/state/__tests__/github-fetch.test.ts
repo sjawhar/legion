@@ -6,702 +6,731 @@ import { describe, expect, it, spyOn } from "bun:test";
 import type { CommandRunner } from "../fetch";
 import { fetchGitHubProjectItems } from "../github-fetch";
 
-const testRunnerOptionsForOwner = async () => ({ env: { GH_TOKEN: "ghs_test_token" } });
+const testRunnerOptionsForOwner = async () => ({
+	env: { GH_TOKEN: "ghs_test_token" },
+});
 
 describe("fetchGitHubProjectItems", () => {
-  it("passes owner-scoped runner options to the GraphQL command runner", async () => {
-    // Given a board read whose owner resolves to a GitHub App token.
-    const runner: CommandRunner = async (_command, options) => {
-      expect(options).toMatchObject({ env: { GH_TOKEN: "ghs_owner_token" } });
-      return {
-        stdout: JSON.stringify({
-          data: {
-            organization: {
-              projectV2: {
-                items: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
-              },
-            },
-          },
-        }),
-        stderr: "",
-        exitCode: 0,
-      };
-    };
-    const runnerOptionsForOwner = async (owner: string) => {
-      expect(owner).toBe("testorg");
-      return { env: { GH_TOKEN: "ghs_owner_token" } };
-    };
+	it("passes owner-scoped runner options to the GraphQL command runner", async () => {
+		// Given a board read whose owner resolves to a GitHub App token.
+		const runner: CommandRunner = async (_command, options) => {
+			expect(options).toMatchObject({ env: { GH_TOKEN: "ghs_owner_token" } });
+			return {
+				stdout: JSON.stringify({
+					data: {
+						organization: {
+							projectV2: {
+								items: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [],
+								},
+							},
+						},
+					},
+				}),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
+		const runnerOptionsForOwner = async (owner: string) => {
+			expect(owner).toBe("testorg");
+			return { env: { GH_TOKEN: "ghs_owner_token" } };
+		};
 
-    // When the project items fetch runs its GraphQL query.
-    await fetchGitHubProjectItems("testorg", 1, runner, runnerOptionsForOwner);
+		// When the project items fetch runs its GraphQL query.
+		await fetchGitHubProjectItems("testorg", 1, runner, runnerOptionsForOwner);
 
-    // Then the runner receives the token-scoped process environment.
-    expect.assertions(2);
-  });
+		// Then the runner receives the token-scoped process environment.
+		expect.assertions(2);
+	});
 
-  it("successfully fetches from organization", async () => {
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      expect(cmd).toContain("graphql");
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
-      expect(queryArg).toContain("organization(login:");
+	it("successfully fetches from organization", async () => {
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			expect(cmd).toContain("graphql");
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
+			expect(queryArg).toContain("organization(login:");
 
-      return {
-        stdout: JSON.stringify({
-          data: {
-            organization: {
-              projectV2: {
-                items: {
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                  nodes: [
-                    {
-                      id: "item1",
-                      fieldValueByName: { name: "Todo" },
-                      labels: { labels: { nodes: [{ name: "bug" }] } },
-                      content: {
-                        __typename: "Issue",
-                        number: 42,
-                        title: "Test Issue",
-                        url: "https://github.com/owner/repo/issues/42",
-                        repository: { nameWithOwner: "owner/repo" },
-                        linkedPullRequests: { nodes: [] },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          },
-        }),
-        stderr: "",
-        exitCode: 0,
-      };
-    };
+			return {
+				stdout: JSON.stringify({
+					data: {
+						organization: {
+							projectV2: {
+								items: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [
+										{
+											id: "item1",
+											fieldValueByName: { name: "Todo" },
+											labels: { labels: { nodes: [{ name: "bug" }] } },
+											content: {
+												__typename: "Issue",
+												number: 42,
+												title: "Test Issue",
+												url: "https://github.com/owner/repo/issues/42",
+												repository: { nameWithOwner: "owner/repo" },
+												linkedPullRequests: { nodes: [] },
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				}),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
 
-    const result = await fetchGitHubProjectItems(
-      "testorg",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"testorg",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0]).toMatchObject({
-      id: "item1",
-      status: "Todo",
-      content: {
-        type: "Issue",
-        number: 42,
-        title: "Test Issue",
-      },
-    });
-  });
+		expect(result.items).toHaveLength(1);
+		expect(result.items[0]).toMatchObject({
+			id: "item1",
+			status: "Todo",
+			content: {
+				type: "Issue",
+				number: 42,
+				title: "Test Issue",
+			},
+		});
+	});
 
-  it("paginates organization project items and returns all pages", async () => {
-    let callCount = 0;
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      callCount++;
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
-      expect(queryArg).toContain("organization(login:");
+	it("paginates organization project items and returns all pages", async () => {
+		let callCount = 0;
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			callCount++;
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
+			expect(queryArg).toContain("organization(login:");
 
-      if (callCount === 1) {
-        expect(cmd).not.toContain("after=");
-        return {
-          stdout: JSON.stringify({
-            data: {
-              organization: {
-                projectV2: {
-                  items: {
-                    pageInfo: { hasNextPage: true, endCursor: "cursor1" },
-                    nodes: [
-                      {
-                        id: "item1",
-                        fieldValueByName: { name: "Todo" },
-                        labels: { labels: { nodes: [] } },
-                        content: {
-                          __typename: "Issue",
-                          number: 1,
-                          title: "Issue 1",
-                          url: "https://github.com/testorg/repo/issues/1",
-                          repository: { nameWithOwner: "testorg/repo" },
-                          linkedPullRequests: { nodes: [] },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
+			if (callCount === 1) {
+				expect(cmd).not.toContain("after=");
+				return {
+					stdout: JSON.stringify({
+						data: {
+							organization: {
+								projectV2: {
+									items: {
+										pageInfo: { hasNextPage: true, endCursor: "cursor1" },
+										nodes: [
+											{
+												id: "item1",
+												fieldValueByName: { name: "Todo" },
+												labels: { labels: { nodes: [] } },
+												content: {
+													__typename: "Issue",
+													number: 1,
+													title: "Issue 1",
+													url: "https://github.com/testorg/repo/issues/1",
+													repository: { nameWithOwner: "testorg/repo" },
+													linkedPullRequests: { nodes: [] },
+												},
+											},
+										],
+									},
+								},
+							},
+						},
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
 
-      expect(cmd).toContain("after=cursor1");
-      return {
-        stdout: JSON.stringify({
-          data: {
-            organization: {
-              projectV2: {
-                items: {
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                  nodes: [
-                    {
-                      id: "item2",
-                      fieldValueByName: { name: "In Progress" },
-                      labels: { labels: { nodes: [] } },
-                      content: {
-                        __typename: "Issue",
-                        number: 2,
-                        title: "Issue 2",
-                        url: "https://github.com/testorg/repo/issues/2",
-                        repository: { nameWithOwner: "testorg/repo" },
-                        linkedPullRequests: { nodes: [] },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          },
-        }),
-        stderr: "",
-        exitCode: 0,
-      };
-    };
+			expect(cmd).toContain("after=cursor1");
+			return {
+				stdout: JSON.stringify({
+					data: {
+						organization: {
+							projectV2: {
+								items: {
+									pageInfo: { hasNextPage: false, endCursor: null },
+									nodes: [
+										{
+											id: "item2",
+											fieldValueByName: { name: "In Progress" },
+											labels: { labels: { nodes: [] } },
+											content: {
+												__typename: "Issue",
+												number: 2,
+												title: "Issue 2",
+												url: "https://github.com/testorg/repo/issues/2",
+												repository: { nameWithOwner: "testorg/repo" },
+												linkedPullRequests: { nodes: [] },
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				}),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
 
-    const result = await fetchGitHubProjectItems(
-      "testorg",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
-    expect(callCount).toBe(2);
-    expect(result.items).toHaveLength(2);
-    expect((result.items[0].content as { number: number }).number).toBe(1);
-    expect((result.items[1].content as { number: number }).number).toBe(2);
-  });
+		const result = await fetchGitHubProjectItems(
+			"testorg",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
+		expect(callCount).toBe(2);
+		expect(result.items).toHaveLength(2);
+		expect((result.items[0].content as { number: number }).number).toBe(1);
+		expect((result.items[1].content as { number: number }).number).toBe(2);
+	});
 
-  it("falls back to user query when organization query returns access error", async () => {
-    let callCount = 0;
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      callCount++;
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
+	it("falls back to user query when organization query returns access error", async () => {
+		let callCount = 0;
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			callCount++;
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
 
-      if (callCount === 1) {
-        // First call should be organization query
-        expect(queryArg).toContain("organization(login:");
+			if (callCount === 1) {
+				// First call should be organization query
+				expect(queryArg).toContain("organization(login:");
 
-        return {
-          stdout: JSON.stringify({
-            errors: [{ message: "Could not resolve to an Organization with the name 'testuser'" }],
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      } else {
-        // Second call should be user query
-        expect(queryArg).toContain("user(login:");
+				return {
+					stdout: JSON.stringify({
+						errors: [
+							{
+								message:
+									"Could not resolve to an Organization with the name 'testuser'",
+							},
+						],
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			} else {
+				// Second call should be user query
+				expect(queryArg).toContain("user(login:");
 
-        return {
-          stdout: JSON.stringify({
-            data: {
-              user: {
-                projectV2: {
-                  items: {
-                    pageInfo: { hasNextPage: false, endCursor: null },
-                    nodes: [
-                      {
-                        id: "item2",
-                        fieldValueByName: { name: "In Progress" },
-                        labels: { labels: { nodes: [] } },
-                        content: {
-                          __typename: "Issue",
-                          number: 43,
-                          title: "User Issue",
-                          url: "https://github.com/testuser/repo/issues/43",
-                          repository: { nameWithOwner: "testuser/repo" },
-                          linkedPullRequests: { nodes: [] },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
-    };
+				return {
+					stdout: JSON.stringify({
+						data: {
+							user: {
+								projectV2: {
+									items: {
+										pageInfo: { hasNextPage: false, endCursor: null },
+										nodes: [
+											{
+												id: "item2",
+												fieldValueByName: { name: "In Progress" },
+												labels: { labels: { nodes: [] } },
+												content: {
+													__typename: "Issue",
+													number: 43,
+													title: "User Issue",
+													url: "https://github.com/testuser/repo/issues/43",
+													repository: { nameWithOwner: "testuser/repo" },
+													linkedPullRequests: { nodes: [] },
+												},
+											},
+										],
+									},
+								},
+							},
+						},
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+		};
 
-    const result = await fetchGitHubProjectItems(
-      "testuser",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"testuser",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(callCount).toBe(2);
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0]).toMatchObject({
-      id: "item2",
-      status: "In Progress",
-      content: {
-        type: "Issue",
-        number: 43,
-        title: "User Issue",
-      },
-    });
-  });
+		expect(callCount).toBe(2);
+		expect(result.items).toHaveLength(1);
+		expect(result.items[0]).toMatchObject({
+			id: "item2",
+			status: "In Progress",
+			content: {
+				type: "Issue",
+				number: 43,
+				title: "User Issue",
+			},
+		});
+	});
 
-  it("falls back to user query when organization query fails with exception", async () => {
-    let callCount = 0;
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      callCount++;
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
+	it("falls back to user query when organization query fails with exception", async () => {
+		let callCount = 0;
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			callCount++;
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
 
-      if (callCount === 1) {
-        // First call should be organization query and fail
-        expect(queryArg).toContain("organization(login:");
-        throw new Error("GitHub GraphQL query failed (exit 1): Forbidden");
-      } else {
-        // Second call should be user query
-        expect(queryArg).toContain("user(login:");
+			if (callCount === 1) {
+				// First call should be organization query and fail
+				expect(queryArg).toContain("organization(login:");
+				throw new Error("GitHub GraphQL query failed (exit 1): Forbidden");
+			} else {
+				// Second call should be user query
+				expect(queryArg).toContain("user(login:");
 
-        return {
-          stdout: JSON.stringify({
-            data: {
-              user: {
-                projectV2: {
-                  items: {
-                    pageInfo: { hasNextPage: false, endCursor: null },
-                    nodes: [],
-                  },
-                },
-              },
-            },
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
-    };
+				return {
+					stdout: JSON.stringify({
+						data: {
+							user: {
+								projectV2: {
+									items: {
+										pageInfo: { hasNextPage: false, endCursor: null },
+										nodes: [],
+									},
+								},
+							},
+						},
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+		};
 
-    const result = await fetchGitHubProjectItems(
-      "testuser",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"testuser",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(callCount).toBe(2);
-    expect(result.items).toHaveLength(0);
-  });
+		expect(callCount).toBe(2);
+		expect(result.items).toHaveLength(0);
+	});
 
-  it("continues using user query for pagination after fallback", async () => {
-    let callCount = 0;
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      callCount++;
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
+	it("continues using user query for pagination after fallback", async () => {
+		let callCount = 0;
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			callCount++;
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
 
-      if (callCount === 1) {
-        // First call - organization query fails
-        expect(queryArg).toContain("organization(login:");
+			if (callCount === 1) {
+				// First call - organization query fails
+				expect(queryArg).toContain("organization(login:");
 
-        return {
-          stdout: JSON.stringify({
-            errors: [{ message: "Could not resolve to an Organization" }],
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      } else if (callCount === 2) {
-        // Second call - user query with first page
-        expect(queryArg).toContain("user(login:");
-        expect(cmd).not.toContain("after=");
+				return {
+					stdout: JSON.stringify({
+						errors: [{ message: "Could not resolve to an Organization" }],
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			} else if (callCount === 2) {
+				// Second call - user query with first page
+				expect(queryArg).toContain("user(login:");
+				expect(cmd).not.toContain("after=");
 
-        return {
-          stdout: JSON.stringify({
-            data: {
-              user: {
-                projectV2: {
-                  items: {
-                    pageInfo: { hasNextPage: true, endCursor: "cursor1" },
-                    nodes: [
-                      {
-                        id: "item1",
-                        fieldValueByName: { name: "Todo" },
-                        labels: { labels: { nodes: [] } },
-                        content: {
-                          __typename: "Issue",
-                          number: 1,
-                          title: "Issue 1",
-                          url: "https://github.com/testuser/repo/issues/1",
-                          repository: { nameWithOwner: "testuser/repo" },
-                          linkedPullRequests: { nodes: [] },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      } else {
-        // Third call - user query with second page
-        expect(queryArg).toContain("user(login:");
-        expect(cmd).toContain("after=cursor1");
+				return {
+					stdout: JSON.stringify({
+						data: {
+							user: {
+								projectV2: {
+									items: {
+										pageInfo: { hasNextPage: true, endCursor: "cursor1" },
+										nodes: [
+											{
+												id: "item1",
+												fieldValueByName: { name: "Todo" },
+												labels: { labels: { nodes: [] } },
+												content: {
+													__typename: "Issue",
+													number: 1,
+													title: "Issue 1",
+													url: "https://github.com/testuser/repo/issues/1",
+													repository: { nameWithOwner: "testuser/repo" },
+													linkedPullRequests: { nodes: [] },
+												},
+											},
+										],
+									},
+								},
+							},
+						},
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			} else {
+				// Third call - user query with second page
+				expect(queryArg).toContain("user(login:");
+				expect(cmd).toContain("after=cursor1");
 
-        return {
-          stdout: JSON.stringify({
-            data: {
-              user: {
-                projectV2: {
-                  items: {
-                    pageInfo: { hasNextPage: false, endCursor: null },
-                    nodes: [
-                      {
-                        id: "item2",
-                        fieldValueByName: { name: "Done" },
-                        labels: { labels: { nodes: [] } },
-                        content: {
-                          __typename: "Issue",
-                          number: 2,
-                          title: "Issue 2",
-                          url: "https://github.com/testuser/repo/issues/2",
-                          repository: { nameWithOwner: "testuser/repo" },
-                          linkedPullRequests: { nodes: [] },
-                        },
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
-    };
+				return {
+					stdout: JSON.stringify({
+						data: {
+							user: {
+								projectV2: {
+									items: {
+										pageInfo: { hasNextPage: false, endCursor: null },
+										nodes: [
+											{
+												id: "item2",
+												fieldValueByName: { name: "Done" },
+												labels: { labels: { nodes: [] } },
+												content: {
+													__typename: "Issue",
+													number: 2,
+													title: "Issue 2",
+													url: "https://github.com/testuser/repo/issues/2",
+													repository: { nameWithOwner: "testuser/repo" },
+													linkedPullRequests: { nodes: [] },
+												},
+											},
+										],
+									},
+								},
+							},
+						},
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+		};
 
-    const result = await fetchGitHubProjectItems(
-      "testuser",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"testuser",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(callCount).toBe(3);
-    expect(result.items).toHaveLength(2);
-    expect((result.items[0].content as { number: number }).number).toBe(1);
-    expect((result.items[1].content as { number: number }).number).toBe(2);
-  });
+		expect(callCount).toBe(3);
+		expect(result.items).toHaveLength(2);
+		expect((result.items[0].content as { number: number }).number).toBe(1);
+		expect((result.items[1].content as { number: number }).number).toBe(2);
+	});
 
-  it("throws when pageInfo hasNextPage is true but endCursor is null", async () => {
-    let callCount = 0;
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      callCount++;
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
-      expect(queryArg).toContain("organization(login:");
+	it("throws when pageInfo hasNextPage is true but endCursor is null", async () => {
+		let callCount = 0;
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			callCount++;
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
+			expect(queryArg).toContain("organization(login:");
 
-      return {
-        stdout: JSON.stringify({
-          data: {
-            organization: {
-              projectV2: {
-                items: {
-                  pageInfo: { hasNextPage: true, endCursor: null },
-                  nodes: [
-                    {
-                      id: "item1",
-                      fieldValueByName: { name: "Todo" },
-                      labels: { labels: { nodes: [] } },
-                      content: {
-                        __typename: "Issue",
-                        number: 1,
-                        title: "Issue 1",
-                        url: "https://github.com/testorg/repo/issues/1",
-                        repository: { nameWithOwner: "testorg/repo" },
-                        linkedPullRequests: { nodes: [] },
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-          },
-        }),
-        stderr: "",
-        exitCode: 0,
-      };
-    };
+			return {
+				stdout: JSON.stringify({
+					data: {
+						organization: {
+							projectV2: {
+								items: {
+									pageInfo: { hasNextPage: true, endCursor: null },
+									nodes: [
+										{
+											id: "item1",
+											fieldValueByName: { name: "Todo" },
+											labels: { labels: { nodes: [] } },
+											content: {
+												__typename: "Issue",
+												number: 1,
+												title: "Issue 1",
+												url: "https://github.com/testorg/repo/issues/1",
+												repository: { nameWithOwner: "testorg/repo" },
+												linkedPullRequests: { nodes: [] },
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				}),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
 
-    try {
-      await fetchGitHubProjectItems("testorg", 1, mockRunner, testRunnerOptionsForOwner);
-      throw new Error("Expected fetchGitHubProjectItems to throw");
-    } catch (error) {
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toContain(
-        "GraphQL pagination error: hasNextPage=true but endCursor is null"
-      );
-    }
-    expect(callCount).toBe(1);
-  });
+		try {
+			await fetchGitHubProjectItems(
+				"testorg",
+				1,
+				mockRunner,
+				testRunnerOptionsForOwner,
+			);
+			throw new Error("Expected fetchGitHubProjectItems to throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain(
+				"GraphQL pagination error: hasNextPage=true but endCursor is null",
+			);
+		}
+		expect(callCount).toBe(1);
+	});
 
-  it("throws error when both organization and user queries fail", async () => {
-    let callCount = 0;
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      callCount++;
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
+	it("throws error when both organization and user queries fail", async () => {
+		let callCount = 0;
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			callCount++;
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
 
-      if (callCount === 1) {
-        expect(queryArg).toContain("organization(login:");
-        throw new Error("GitHub GraphQL query failed (exit 1): Forbidden");
-      } else {
-        expect(queryArg).toContain("user(login:");
+			if (callCount === 1) {
+				expect(queryArg).toContain("organization(login:");
+				throw new Error("GitHub GraphQL query failed (exit 1): Forbidden");
+			} else {
+				expect(queryArg).toContain("user(login:");
 
-        return {
-          stdout: JSON.stringify({
-            errors: [{ message: "User not found" }],
-          }),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
-    };
+				return {
+					stdout: JSON.stringify({
+						errors: [{ message: "User not found" }],
+					}),
+					stderr: "",
+					exitCode: 0,
+				};
+			}
+		};
 
-    try {
-      await fetchGitHubProjectItems("nonexistent", 1, mockRunner, testRunnerOptionsForOwner);
-      throw new Error("Expected fetchGitHubProjectItems to throw");
-    } catch (error) {
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toContain("GraphQL errors: User not found");
-    }
+		try {
+			await fetchGitHubProjectItems(
+				"nonexistent",
+				1,
+				mockRunner,
+				testRunnerOptionsForOwner,
+			);
+			throw new Error("Expected fetchGitHubProjectItems to throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain(
+				"GraphQL errors: User not found",
+			);
+		}
 
-    expect(callCount).toBe(2);
-  });
+		expect(callCount).toBe(2);
+	});
 
-  it("throws error when organization query has non-access related errors", async () => {
-    const mockRunner: CommandRunner = async (cmd: string[]) => {
-      const queryArg = cmd.find((arg) => arg.startsWith("query="));
-      expect(queryArg).toContain("organization(login:");
+	it("throws error when organization query has non-access related errors", async () => {
+		const mockRunner: CommandRunner = async (cmd: string[]) => {
+			const queryArg = cmd.find((arg) => arg.startsWith("query="));
+			expect(queryArg).toContain("organization(login:");
 
-      return {
-        stdout: JSON.stringify({
-          errors: [{ message: "Rate limit exceeded" }],
-        }),
-        stderr: "",
-        exitCode: 0,
-      };
-    };
+			return {
+				stdout: JSON.stringify({
+					errors: [{ message: "Rate limit exceeded" }],
+				}),
+				stderr: "",
+				exitCode: 0,
+			};
+		};
 
-    try {
-      await fetchGitHubProjectItems("testorg", 1, mockRunner, testRunnerOptionsForOwner);
-      throw new Error("Expected fetchGitHubProjectItems to throw");
-    } catch (error) {
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toContain("GraphQL errors: Rate limit exceeded");
-    }
-  });
+		try {
+			await fetchGitHubProjectItems(
+				"testorg",
+				1,
+				mockRunner,
+				testRunnerOptionsForOwner,
+			);
+			throw new Error("Expected fetchGitHubProjectItems to throw");
+		} catch (error) {
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain(
+				"GraphQL errors: Rate limit exceeded",
+			);
+		}
+	});
 
-  it("includes only open blocker refs for issue content", async () => {
-    const mockRunner: CommandRunner = async () => ({
-      stdout: JSON.stringify({
-        data: {
-          organization: {
-            projectV2: {
-              items: {
-                pageInfo: { hasNextPage: false, endCursor: null },
-                nodes: [
-                  {
-                    id: "item-blocked",
-                    fieldValueByName: { name: "In Progress" },
-                    labels: { labels: { nodes: [] } },
-                    content: {
-                      __typename: "Issue",
-                      number: 42,
-                      title: "Blocked Issue",
-                      url: "https://github.com/sjawhar/legion/issues/42",
-                      repository: { nameWithOwner: "sjawhar/legion" },
-                      issueDependenciesSummary: { blockedBy: 2 },
-                      blockedBy: {
-                        nodes: [
-                          {
-                            number: 110,
-                            state: "OPEN",
-                            repository: { nameWithOwner: "sjawhar/legion" },
-                          },
-                          {
-                            number: 112,
-                            state: "CLOSED",
-                            repository: { nameWithOwner: "sjawhar/legion" },
-                          },
-                        ],
-                      },
-                      linkedPullRequests: { nodes: [] },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-        },
-      }),
-      stderr: "",
-      exitCode: 0,
-    });
+	it("includes only open blocker refs for issue content", async () => {
+		const mockRunner: CommandRunner = async () => ({
+			stdout: JSON.stringify({
+				data: {
+					organization: {
+						projectV2: {
+							items: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [
+									{
+										id: "item-blocked",
+										fieldValueByName: { name: "In Progress" },
+										labels: { labels: { nodes: [] } },
+										content: {
+											__typename: "Issue",
+											number: 42,
+											title: "Blocked Issue",
+											url: "https://github.com/sjawhar/legion/issues/42",
+											repository: { nameWithOwner: "sjawhar/legion" },
+											issueDependenciesSummary: { blockedBy: 2 },
+											blockedBy: {
+												nodes: [
+													{
+														number: 110,
+														state: "OPEN",
+														repository: { nameWithOwner: "sjawhar/legion" },
+													},
+													{
+														number: 112,
+														state: "CLOSED",
+														repository: { nameWithOwner: "sjawhar/legion" },
+													},
+												],
+											},
+											linkedPullRequests: { nodes: [] },
+										},
+									},
+								],
+							},
+						},
+					},
+				},
+			}),
+			stderr: "",
+			exitCode: 0,
+		});
 
-    const result = await fetchGitHubProjectItems(
-      "sjawhar",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"sjawhar",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0]).toMatchObject({
-      blockerRefs: [{ number: 110, repository: "sjawhar/legion" }],
-    });
-    expect(result.items[0].blockerRefs as unknown[]).toHaveLength(1);
-  });
+		expect(result.items).toHaveLength(1);
+		expect(result.items[0]).toMatchObject({
+			blockerRefs: [{ number: 110, repository: "sjawhar/legion" }],
+		});
+		expect(result.items[0].blockerRefs as unknown[]).toHaveLength(1);
+	});
 
-  it("returns an empty blockerRefs array when blockedBy is null", async () => {
-    const mockRunner: CommandRunner = async () => ({
-      stdout: JSON.stringify({
-        data: {
-          organization: {
-            projectV2: {
-              items: {
-                pageInfo: { hasNextPage: false, endCursor: null },
-                nodes: [
-                  {
-                    id: "item-unblocked",
-                    fieldValueByName: { name: "Todo" },
-                    labels: { labels: { nodes: [] } },
-                    content: {
-                      __typename: "Issue",
-                      number: 43,
-                      title: "Unblocked Issue",
-                      url: "https://github.com/sjawhar/legion/issues/43",
-                      repository: { nameWithOwner: "sjawhar/legion" },
-                      issueDependenciesSummary: { blockedBy: 0 },
-                      blockedBy: null,
-                      linkedPullRequests: { nodes: [] },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-        },
-      }),
-      stderr: "",
-      exitCode: 0,
-    });
+	it("returns an empty blockerRefs array when blockedBy is null", async () => {
+		const mockRunner: CommandRunner = async () => ({
+			stdout: JSON.stringify({
+				data: {
+					organization: {
+						projectV2: {
+							items: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [
+									{
+										id: "item-unblocked",
+										fieldValueByName: { name: "Todo" },
+										labels: { labels: { nodes: [] } },
+										content: {
+											__typename: "Issue",
+											number: 43,
+											title: "Unblocked Issue",
+											url: "https://github.com/sjawhar/legion/issues/43",
+											repository: { nameWithOwner: "sjawhar/legion" },
+											issueDependenciesSummary: { blockedBy: 0 },
+											blockedBy: null,
+											linkedPullRequests: { nodes: [] },
+										},
+									},
+								],
+							},
+						},
+					},
+				},
+			}),
+			stderr: "",
+			exitCode: 0,
+		});
 
-    const result = await fetchGitHubProjectItems(
-      "sjawhar",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"sjawhar",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0]).toMatchObject({ blockerRefs: [] });
-  });
+		expect(result.items).toHaveLength(1);
+		expect(result.items[0]).toMatchObject({ blockerRefs: [] });
+	});
 
-  it("returns an empty blockerRefs array for pull request items", async () => {
-    const mockRunner: CommandRunner = async () => ({
-      stdout: JSON.stringify({
-        data: {
-          organization: {
-            projectV2: {
-              items: {
-                pageInfo: { hasNextPage: false, endCursor: null },
-                nodes: [
-                  {
-                    id: "item-pr",
-                    fieldValueByName: { name: "Done" },
-                    labels: { labels: { nodes: [] } },
-                    content: {
-                      __typename: "PullRequest",
-                      number: 44,
-                      title: "Blocked PR",
-                      url: "https://github.com/sjawhar/legion/pull/44",
-                      repository: { nameWithOwner: "sjawhar/legion" },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-        },
-      }),
-      stderr: "",
-      exitCode: 0,
-    });
+	it("returns an empty blockerRefs array for pull request items", async () => {
+		const mockRunner: CommandRunner = async () => ({
+			stdout: JSON.stringify({
+				data: {
+					organization: {
+						projectV2: {
+							items: {
+								pageInfo: { hasNextPage: false, endCursor: null },
+								nodes: [
+									{
+										id: "item-pr",
+										fieldValueByName: { name: "Done" },
+										labels: { labels: { nodes: [] } },
+										content: {
+											__typename: "PullRequest",
+											number: 44,
+											title: "Blocked PR",
+											url: "https://github.com/sjawhar/legion/pull/44",
+											repository: { nameWithOwner: "sjawhar/legion" },
+										},
+									},
+								],
+							},
+						},
+					},
+				},
+			}),
+			stderr: "",
+			exitCode: 0,
+		});
 
-    const result = await fetchGitHubProjectItems(
-      "sjawhar",
-      1,
-      mockRunner,
-      testRunnerOptionsForOwner
-    );
+		const result = await fetchGitHubProjectItems(
+			"sjawhar",
+			1,
+			mockRunner,
+			testRunnerOptionsForOwner,
+		);
 
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0]).toMatchObject({
-      blockerRefs: [],
-      content: { type: "PullRequest", number: 44 },
-    });
-  });
-  it("warns and excludes a board item whose content is hidden by the board token", async () => {
-    const warning = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const result = await fetchGitHubProjectItems(
-        "trajectory-labs-pbc",
-        7,
-        async () => ({
-          stdout: JSON.stringify({
-            data: {
-              organization: {
-                projectV2: {
-                  items: {
-                    pageInfo: { hasNextPage: false, endCursor: null },
-                    nodes: [
-                      {
-                        id: "PVTI_cross_owner",
-                        fieldValueByName: { name: "Todo" },
-                        labels: { labels: { nodes: [] } },
-                        content: null,
-                      },
-                    ],
-                  },
-                },
-              },
-            },
-          }),
-          stderr: "",
-          exitCode: 0,
-        }),
-        async () => ({ env: { GH_TOKEN: "ghs_board_token" } })
-      );
+		expect(result.items).toHaveLength(1);
+		expect(result.items[0]).toMatchObject({
+			blockerRefs: [],
+			content: { type: "PullRequest", number: 44 },
+		});
+	});
+	it("warns and excludes a board item whose content is hidden by the board token", async () => {
+		const warning = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = await fetchGitHubProjectItems(
+				"trajectory-labs-pbc",
+				7,
+				async () => ({
+					stdout: JSON.stringify({
+						data: {
+							organization: {
+								projectV2: {
+									items: {
+										pageInfo: { hasNextPage: false, endCursor: null },
+										nodes: [
+											{
+												id: "PVTI_cross_owner",
+												fieldValueByName: { name: "Todo" },
+												labels: { labels: { nodes: [] } },
+												content: null,
+											},
+										],
+									},
+								},
+							},
+						},
+					}),
+					stderr: "",
+					exitCode: 0,
+				}),
+				async () => ({ env: { GH_TOKEN: "ghs_board_token" } }),
+			);
 
-      expect(result).toEqual({ items: [], excludedNullContentItems: 1 });
-      expect(warning).toHaveBeenCalledWith(
-        JSON.stringify({
-          event: "legion.resync.cross_owner_project_item",
-          board: "trajectory-labs-pbc/7",
-          itemId: "PVTI_cross_owner",
-        })
-      );
-    } finally {
-      warning.mockRestore();
-    }
-  });
+			expect(result).toEqual({ items: [], excludedNullContentItems: 1 });
+			expect(warning).toHaveBeenCalledWith(
+				JSON.stringify({
+					event: "legion.resync.cross_owner_project_item",
+					board: "trajectory-labs-pbc/7",
+					itemId: "PVTI_cross_owner",
+				}),
+			);
+		} finally {
+			warning.mockRestore();
+		}
+	});
 });

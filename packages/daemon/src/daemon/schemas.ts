@@ -1,90 +1,90 @@
 import { z } from "zod";
 
 export const CrashHistoryEntrySchema = z.object({
-  crashCount: z.number(),
-  lastCrashAt: z.string().nullable(),
+	crashCount: z.number(),
+	lastCrashAt: z.string().nullable(),
 });
 
 export const WorkerEntrySchema = z
-  .object({
-    id: z.string(),
-    port: z.number(),
-    sessionId: z.string(),
-    workspace: z.string(),
-    startedAt: z.string(),
-    status: z.enum(["starting", "running", "stopped", "dead"]),
-    crashCount: z.number(),
-    lastCrashAt: z.string().nullable(),
-    envoyTopics: z.array(z.string()).optional(),
-    repo: z.string().optional(),
-    issueNumber: z.number().optional(),
-  })
-  .passthrough();
+	.object({
+		id: z.string(),
+		port: z.number(),
+		sessionId: z.string(),
+		workspace: z.string(),
+		startedAt: z.string(),
+		status: z.enum(["starting", "running", "stopped", "dead"]),
+		crashCount: z.number(),
+		lastCrashAt: z.string().nullable(),
+		envoyTopics: z.array(z.string()).optional(),
+		repo: z.string().optional(),
+		issueNumber: z.number().optional(),
+	})
+	.passthrough();
 
 export const ControllerStateSchema = z.object({
-  sessionId: z.string(),
-  port: z.number().optional(),
-  pid: z.number().optional(),
+	sessionId: z.string(),
+	port: z.number().optional(),
+	pid: z.number().optional(),
 });
 
 export const PersistedWorkerStateSchema = z
-  .object({
-    workers: z.record(z.string(), WorkerEntrySchema),
-    crashHistory: z.record(z.string(), CrashHistoryEntrySchema),
-    controller: ControllerStateSchema.optional(),
-  })
-  .passthrough();
+	.object({
+		workers: z.record(z.string(), WorkerEntrySchema),
+		crashHistory: z.record(z.string(), CrashHistoryEntrySchema),
+		controller: ControllerStateSchema.optional(),
+	})
+	.passthrough();
 export const LinearTeamsResponseSchema = z
-  .object({
-    data: z
-      .object({
-        teams: z
-          .object({
-            nodes: z.array(
-              z
-                .object({
-                  id: z.string(),
-                  key: z.string(),
-                  name: z.string(),
-                })
-                .passthrough()
-            ),
-          })
-          .passthrough(),
-      })
-      .nullable()
-      .optional(),
-    errors: z.array(z.object({ message: z.string() }).passthrough()).optional(),
-  })
-  .passthrough();
+	.object({
+		data: z
+			.object({
+				teams: z
+					.object({
+						nodes: z.array(
+							z
+								.object({
+									id: z.string(),
+									key: z.string(),
+									name: z.string(),
+								})
+								.passthrough(),
+						),
+					})
+					.passthrough(),
+			})
+			.nullable()
+			.optional(),
+		errors: z.array(z.object({ message: z.string() }).passthrough()).optional(),
+	})
+	.passthrough();
 
 export const SessionCreateResponseSchema = z
-  .object({
-    id: z.string(),
-  })
-  .passthrough();
+	.object({
+		id: z.string(),
+	})
+	.passthrough();
 
 export const HealthCheckResponseSchema = z
-  .object({
-    healthy: z.boolean(),
-  })
-  .passthrough();
+	.object({
+		healthy: z.boolean(),
+	})
+	.passthrough();
 
 export const LegionEntrySchema = z.object({
-  port: z.number().int().min(1).max(65535),
-  pid: z.number().int().positive(),
-  startedAt: z.string().datetime(),
+	port: z.number().int().min(1).max(65535),
+	pid: z.number().int().positive(),
+	startedAt: z.string().datetime(),
 });
 
 export const LegionsRegistrySchema = z.record(z.string(), LegionEntrySchema);
 
 export const PromotedSessionSchema = z.object({
-  sessionId: z.string(),
-  role: z.string(),
-  repo: z.string().optional(),
-  promotedAt: z.string(),
+	sessionId: z.string(),
+	role: z.string(),
+	repo: z.string().optional(),
+	promotedAt: z.string(),
 });
 
 export const PromotedSessionsFileSchema = z.object({
-  sessions: z.record(z.string(), PromotedSessionSchema),
+	sessions: z.record(z.string(), PromotedSessionSchema),
 });

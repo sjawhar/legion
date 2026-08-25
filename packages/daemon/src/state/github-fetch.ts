@@ -9,73 +9,73 @@
  */
 
 import type {
-  CommandResult,
-  CommandRunner,
-  CommandRunnerOptions,
-  OwnerCommandRunnerOptionsProvider,
+	CommandResult,
+	CommandRunner,
+	CommandRunnerOptions,
+	OwnerCommandRunnerOptionsProvider,
 } from "./fetch";
 
 interface GitHubProjectItemNode {
-  id: string;
-  fieldValueByName: {
-    name?: string;
-  } | null;
-  labels: {
-    nodes: Array<{ name: string }>;
-  };
-  content:
-    | {
-        __typename: "Issue" | "PullRequest" | "DraftIssue";
-        number?: number;
-        title?: string;
-        url?: string;
-        repository?: {
-          nameWithOwner: string;
-        };
-        issueDependenciesSummary?: {
-          blockedBy: number;
-        } | null;
-        blockedBy?: {
-          nodes: Array<{
-            number: number;
-            state: string;
-            repository: { nameWithOwner: string };
-          }>;
-        } | null;
-        linkedPullRequests?: {
-          nodes: Array<{ url: string }>;
-        } | null;
-      }
-    | Record<string, never>
-    | null;
+	id: string;
+	fieldValueByName: {
+		name?: string;
+	} | null;
+	labels: {
+		nodes: Array<{ name: string }>;
+	};
+	content:
+		| {
+				__typename: "Issue" | "PullRequest" | "DraftIssue";
+				number?: number;
+				title?: string;
+				url?: string;
+				repository?: {
+					nameWithOwner: string;
+				};
+				issueDependenciesSummary?: {
+					blockedBy: number;
+				} | null;
+				blockedBy?: {
+					nodes: Array<{
+						number: number;
+						state: string;
+						repository: { nameWithOwner: string };
+					}>;
+				} | null;
+				linkedPullRequests?: {
+					nodes: Array<{ url: string }>;
+				} | null;
+		  }
+		| Record<string, never>
+		| null;
 }
 
 interface GitHubProjectItemsPage {
-  data?: {
-    organization?: {
-      projectV2?: {
-        items: {
-          pageInfo: {
-            hasNextPage: boolean;
-            endCursor: string | null;
-          };
-          nodes: GitHubProjectItemNode[];
-        };
-      };
-    };
-    user?: {
-      projectV2?: {
-        items: {
-          pageInfo: {
-            hasNextPage: boolean;
-            endCursor: string | null;
-          };
-          nodes: GitHubProjectItemNode[];
-        };
-      };
-    };
-  };
-  errors?: Array<{ message: string }>;
+	data?: {
+		organization?: {
+			projectV2?: {
+				items: {
+					pageInfo: {
+						hasNextPage: boolean;
+						endCursor: string | null;
+					};
+					nodes: GitHubProjectItemNode[];
+				};
+			};
+		};
+		user?: {
+			projectV2?: {
+				items: {
+					pageInfo: {
+						hasNextPage: boolean;
+						endCursor: string | null;
+					};
+					nodes: GitHubProjectItemNode[];
+				};
+			};
+		};
+	};
+	errors?: Array<{ message: string }>;
 }
 
 const ITEMS_PER_PAGE = 100;
@@ -199,67 +199,73 @@ query($owner: String!, $number: Int!, $first: Int!, $after: String) {
 /**
  * Convert a GraphQL node into the shape expected by `gh project item-list --format json`.
  */
-function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown> | null {
-  const content = node.content;
-  if (!content || !("__typename" in content)) {
-    return null;
-  }
+function nodeToProjectItem(
+	node: GitHubProjectItemNode,
+): Record<string, unknown> | null {
+	const content = node.content;
+	if (!content || !("__typename" in content)) {
+		return null;
+	}
 
-  const typename = content.__typename;
+	const typename = content.__typename;
 
-  // Build content field matching gh CLI format
-  const itemContent: Record<string, unknown> = {};
-  if (typename === "Issue" || typename === "PullRequest") {
-    itemContent.type = typename;
-    itemContent.number = content.number;
-    itemContent.title = content.title;
-    itemContent.url = content.url;
-    itemContent.repository = content.repository?.nameWithOwner;
-  } else if (typename === "DraftIssue") {
-    itemContent.type = "DraftIssue";
-    itemContent.title = content.title;
-  } else {
-    return null;
-  }
+	// Build content field matching gh CLI format
+	const itemContent: Record<string, unknown> = {};
+	if (typename === "Issue" || typename === "PullRequest") {
+		itemContent.type = typename;
+		itemContent.number = content.number;
+		itemContent.title = content.title;
+		itemContent.url = content.url;
+		itemContent.repository = content.repository?.nameWithOwner;
+	} else if (typename === "DraftIssue") {
+		itemContent.type = "DraftIssue";
+		itemContent.title = content.title;
+	} else {
+		return null;
+	}
 
-  // Extract labels
-  const labelsField = node.labels as unknown;
-  let labels: string[] = [];
-  if (
-    labelsField &&
-    typeof labelsField === "object" &&
-    "labels" in (labelsField as Record<string, unknown>)
-  ) {
-    const labelsObj = (labelsField as { labels?: { nodes?: Array<{ name: string }> } }).labels;
-    labels = labelsObj?.nodes?.map((l) => l.name) ?? [];
-  }
+	// Extract labels
+	const labelsField = node.labels as unknown;
+	let labels: string[] = [];
+	if (
+		labelsField &&
+		typeof labelsField === "object" &&
+		"labels" in (labelsField as Record<string, unknown>)
+	) {
+		const labelsObj = (
+			labelsField as { labels?: { nodes?: Array<{ name: string }> } }
+		).labels;
+		labels = labelsObj?.nodes?.map((l) => l.name) ?? [];
+	}
 
-  // Extract linked PRs
-  const linkedPRs: string[] = [];
-  if (typename === "Issue" && content.linkedPullRequests?.nodes) {
-    for (const pr of content.linkedPullRequests.nodes) {
-      if (pr.url) linkedPRs.push(pr.url);
-    }
-  }
+	// Extract linked PRs
+	const linkedPRs: string[] = [];
+	if (typename === "Issue" && content.linkedPullRequests?.nodes) {
+		for (const pr of content.linkedPullRequests.nodes) {
+			if (pr.url) linkedPRs.push(pr.url);
+		}
+	}
 
-  return {
-    id: node.id,
-    content: itemContent,
-    status: node.fieldValueByName?.name ?? null,
-    labels,
-    isBlocked:
-      typename === "Issue" ? (content.issueDependenciesSummary?.blockedBy ?? 0) > 0 : false,
-    blockerRefs:
-      typename === "Issue" && content.blockedBy?.nodes
-        ? content.blockedBy.nodes
-            .filter((n) => n.state === "OPEN")
-            .map((n) => ({
-              number: n.number,
-              repository: n.repository.nameWithOwner,
-            }))
-        : [],
-    ...(linkedPRs.length > 0 ? { "linked pull requests": linkedPRs } : {}),
-  };
+	return {
+		id: node.id,
+		content: itemContent,
+		status: node.fieldValueByName?.name ?? null,
+		labels,
+		isBlocked:
+			typename === "Issue"
+				? (content.issueDependenciesSummary?.blockedBy ?? 0) > 0
+				: false,
+		blockerRefs:
+			typename === "Issue" && content.blockedBy?.nodes
+				? content.blockedBy.nodes
+						.filter((n) => n.state === "OPEN")
+						.map((n) => ({
+							number: n.number,
+							repository: n.repository.nameWithOwner,
+						}))
+				: [],
+		...(linkedPRs.length > 0 ? { "linked pull requests": linkedPRs } : {}),
+	};
 }
 
 /**
@@ -273,44 +279,48 @@ function nodeToProjectItem(node: GitHubProjectItemNode): Record<string, unknown>
  * @returns GraphQL response
  */
 async function executeGraphQLQuery(
-  query: string,
-  owner: string,
-  projectNumber: number,
-  cursor: string | null,
-  runner: CommandRunner,
-  runnerOptions: CommandRunnerOptions | undefined
+	query: string,
+	owner: string,
+	projectNumber: number,
+	cursor: string | null,
+	runner: CommandRunner,
+	runnerOptions: CommandRunnerOptions | undefined,
 ): Promise<GitHubProjectItemsPage> {
-  const cmd: string[] = [
-    "gh",
-    "api",
-    "graphql",
-    "-f",
-    `query=${query}`,
-    "-f",
-    `owner=${owner}`,
-    "-F",
-    `number=${projectNumber}`,
-    "-F",
-    `first=${ITEMS_PER_PAGE}`,
-  ];
-  if (cursor) {
-    cmd.push("-f", `after=${cursor}`);
-  }
+	const cmd: string[] = [
+		"gh",
+		"api",
+		"graphql",
+		"-f",
+		`query=${query}`,
+		"-f",
+		`owner=${owner}`,
+		"-F",
+		`number=${projectNumber}`,
+		"-F",
+		`first=${ITEMS_PER_PAGE}`,
+	];
+	if (cursor) {
+		cmd.push("-f", `after=${cursor}`);
+	}
 
-  const result: CommandResult = await runner(cmd, runnerOptions);
+	const result: CommandResult = await runner(cmd, runnerOptions);
 
-  if (result.exitCode !== 0) {
-    throw new Error(`GitHub GraphQL query failed (exit ${result.exitCode}): ${result.stderr}`);
-  }
+	if (result.exitCode !== 0) {
+		throw new Error(
+			`GitHub GraphQL query failed (exit ${result.exitCode}): ${result.stderr}`,
+		);
+	}
 
-  let response: GitHubProjectItemsPage;
-  try {
-    response = JSON.parse(result.stdout) as GitHubProjectItemsPage;
-  } catch {
-    throw new Error(`Failed to parse GraphQL response: ${result.stdout.slice(0, 200)}`);
-  }
+	let response: GitHubProjectItemsPage;
+	try {
+		response = JSON.parse(result.stdout) as GitHubProjectItemsPage;
+	} catch {
+		throw new Error(
+			`Failed to parse GraphQL response: ${result.stdout.slice(0, 200)}`,
+		);
+	}
 
-  return response;
+	return response;
 }
 
 /**
@@ -325,147 +335,156 @@ async function executeGraphQLQuery(
  * @returns Items in the same shape as `gh project item-list --format json`
  */
 export interface GitHubProjectItemsResult {
-  items: Record<string, unknown>[];
-  excludedNullContentItems: number;
+	items: Record<string, unknown>[];
+	excludedNullContentItems: number;
 }
 
 export async function fetchGitHubProjectItems(
-  owner: string,
-  projectNumber: number,
-  runner: CommandRunner,
-  runnerOptionsForOwner: OwnerCommandRunnerOptionsProvider
+	owner: string,
+	projectNumber: number,
+	runner: CommandRunner,
+	runnerOptionsForOwner: OwnerCommandRunnerOptionsProvider,
 ): Promise<GitHubProjectItemsResult> {
-  const runnerOptions = await runnerOptionsForOwner(owner);
-  const allItems: Record<string, unknown>[] = [];
-  let excludedNullContentItems = 0;
-  let cursor: string | null = null;
-  let hasNextPage = true;
-  let useUserQuery = false;
+	const runnerOptions = await runnerOptionsForOwner(owner);
+	const allItems: Record<string, unknown>[] = [];
+	let excludedNullContentItems = 0;
+	let cursor: string | null = null;
+	let hasNextPage = true;
+	let useUserQuery = false;
 
-  while (hasNextPage) {
-    // Try organization query first, fall back to user query
-    let response: GitHubProjectItemsPage;
-    let items:
-      | {
-          pageInfo: { hasNextPage: boolean; endCursor: string | null };
-          nodes: GitHubProjectItemNode[];
-        }
-      | undefined;
+	while (hasNextPage) {
+		// Try organization query first, fall back to user query
+		let response: GitHubProjectItemsPage;
+		let items:
+			| {
+					pageInfo: { hasNextPage: boolean; endCursor: string | null };
+					nodes: GitHubProjectItemNode[];
+			  }
+			| undefined;
 
-    if (!useUserQuery) {
-      try {
-        response = await executeGraphQLQuery(
-          ORG_QUERY,
-          owner,
-          projectNumber,
-          cursor,
-          runner,
-          runnerOptions
-        );
+		if (!useUserQuery) {
+			try {
+				response = await executeGraphQLQuery(
+					ORG_QUERY,
+					owner,
+					projectNumber,
+					cursor,
+					runner,
+					runnerOptions,
+				);
 
-        if (response.errors?.length) {
-          // Check if the error is about organization access
-          const hasOrgAccessError = response.errors.some(
-            (error) =>
-              error.message.includes("Could not resolve to an Organization") ||
-              error.message.includes("not a member")
-          );
+				if (response.errors?.length) {
+					// Check if the error is about organization access
+					const hasOrgAccessError = response.errors.some(
+						(error) =>
+							error.message.includes("Could not resolve to an Organization") ||
+							error.message.includes("not a member"),
+					);
 
-          if (hasOrgAccessError) {
-            // Fall back to user query
-            useUserQuery = true;
-            response = await executeGraphQLQuery(
-              USER_QUERY,
-              owner,
-              projectNumber,
-              cursor,
-              runner,
-              runnerOptions
-            );
-            items = response.data?.user?.projectV2?.items;
-          } else {
-            throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
-          }
-        } else {
-          items = response.data?.organization?.projectV2?.items;
-        }
-      } catch (error) {
-        // If organization query fails completely with access-related error, try user query
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const isAccessError =
-          errorMessage.includes("Forbidden") ||
-          errorMessage.includes("not a member") ||
-          errorMessage.includes("Could not resolve to an Organization");
+					if (hasOrgAccessError) {
+						// Fall back to user query
+						useUserQuery = true;
+						response = await executeGraphQLQuery(
+							USER_QUERY,
+							owner,
+							projectNumber,
+							cursor,
+							runner,
+							runnerOptions,
+						);
+						items = response.data?.user?.projectV2?.items;
+					} else {
+						throw new Error(
+							`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`,
+						);
+					}
+				} else {
+					items = response.data?.organization?.projectV2?.items;
+				}
+			} catch (error) {
+				// If organization query fails completely with access-related error, try user query
+				const errorMessage =
+					error instanceof Error ? error.message : String(error);
+				const isAccessError =
+					errorMessage.includes("Forbidden") ||
+					errorMessage.includes("not a member") ||
+					errorMessage.includes("Could not resolve to an Organization");
 
-        if (isAccessError) {
-          useUserQuery = true;
-          response = await executeGraphQLQuery(
-            USER_QUERY,
-            owner,
-            projectNumber,
-            cursor,
-            runner,
-            runnerOptions
-          );
+				if (isAccessError) {
+					useUserQuery = true;
+					response = await executeGraphQLQuery(
+						USER_QUERY,
+						owner,
+						projectNumber,
+						cursor,
+						runner,
+						runnerOptions,
+					);
 
-          if (response.errors?.length) {
-            throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
-          }
+					if (response.errors?.length) {
+						throw new Error(
+							`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`,
+						);
+					}
 
-          items = response.data?.user?.projectV2?.items;
-        } else {
-          // Re-throw non-access errors
-          throw error;
-        }
-      }
-    } else {
-      // Use user query
-      response = await executeGraphQLQuery(
-        USER_QUERY,
-        owner,
-        projectNumber,
-        cursor,
-        runner,
-        runnerOptions
-      );
+					items = response.data?.user?.projectV2?.items;
+				} else {
+					// Re-throw non-access errors
+					throw error;
+				}
+			}
+		} else {
+			// Use user query
+			response = await executeGraphQLQuery(
+				USER_QUERY,
+				owner,
+				projectNumber,
+				cursor,
+				runner,
+				runnerOptions,
+			);
 
-      if (response.errors?.length) {
-        throw new Error(`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`);
-      }
+			if (response.errors?.length) {
+				throw new Error(
+					`GraphQL errors: ${response.errors.map((e) => e.message).join(", ")}`,
+				);
+			}
 
-      items = response.data?.user?.projectV2?.items;
-    }
+			items = response.data?.user?.projectV2?.items;
+		}
 
-    if (!items) {
-      const queryType = useUserQuery ? "user" : "organization";
-      throw new Error(
-        `Unexpected GraphQL response structure — missing ${queryType}.projectV2.items`
-      );
-    }
+		if (!items) {
+			const queryType = useUserQuery ? "user" : "organization";
+			throw new Error(
+				`Unexpected GraphQL response structure — missing ${queryType}.projectV2.items`,
+			);
+		}
 
-    for (const node of items.nodes) {
-      if (node.content === null) {
-        excludedNullContentItems += 1;
-        console.warn(
-          JSON.stringify({
-            event: "legion.resync.cross_owner_project_item",
-            board: `${owner}/${projectNumber}`,
-            itemId: node.id,
-          })
-        );
-        continue;
-      }
-      const item = nodeToProjectItem(node);
-      if (item) allItems.push(item);
-    }
+		for (const node of items.nodes) {
+			if (node.content === null) {
+				excludedNullContentItems += 1;
+				console.warn(
+					JSON.stringify({
+						event: "legion.resync.cross_owner_project_item",
+						board: `${owner}/${projectNumber}`,
+						itemId: node.id,
+					}),
+				);
+				continue;
+			}
+			const item = nodeToProjectItem(node);
+			if (item) allItems.push(item);
+		}
 
-    hasNextPage = items.pageInfo.hasNextPage;
-    cursor = items.pageInfo.endCursor;
+		hasNextPage = items.pageInfo.hasNextPage;
+		cursor = items.pageInfo.endCursor;
 
-    if (hasNextPage && !cursor) {
-      throw new Error("GraphQL pagination error: hasNextPage=true but endCursor is null");
-    }
-  }
+		if (hasNextPage && !cursor) {
+			throw new Error(
+				"GraphQL pagination error: hasNextPage=true but endCursor is null",
+			);
+		}
+	}
 
-  return { items: allItems, excludedNullContentItems };
+	return { items: allItems, excludedNullContentItems };
 }
