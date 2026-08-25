@@ -12,7 +12,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `POST /legion/v1/process/started` | Register a root process and its architect role claim. |
 | `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
 | `POST /legion/v1/issues`, `/waves/release`, `/issues/comment`, `/issues/body`, `/issues/labels`, `/issues/close` | Scoped architect writes. |
-| `POST /legion/v1/phase`, `/role-backing`, `/grants`, `/git-credential`, `/gh-token` | Session attribution and credential grants. |
+| `POST /legion/v1/phase`, `/role-backing`, `/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Session attribution, worker-session recovery, and credential grants. |
 | `POST /legion/v1/controller/ready`, `/gates/approve`, `/admission`, `/backlog` | Controller lifecycle and control-plane actions. |
 
 ## Files

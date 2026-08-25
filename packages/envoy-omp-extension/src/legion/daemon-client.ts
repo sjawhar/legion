@@ -30,6 +30,8 @@ import {
   type SpawnTokenResponse,
   type WaveReleaseInput,
   type WaveReleaseResponse,
+  type WorkerSessionInput,
+  type WorkerSessionResponse,
 } from "@legion/contracts";
 
 type ResponseSchema<T> = { parse(value: unknown): T };
@@ -58,6 +60,7 @@ export interface LegionDaemonClient {
   readonly backlog: (input: BacklogInput) => Promise<void>;
   readonly processExit: (input: ProcessExitInput) => Promise<void>;
   readonly grant: (input: GrantInput) => Promise<GrantResponse>;
+  readonly workerSession: (input: WorkerSessionInput) => Promise<WorkerSessionResponse>;
 }
 
 export class LegionDaemonApiError extends Error {
@@ -133,6 +136,8 @@ export function createLegionDaemonClient(
     issueClose: (input) =>
       noContent("/legion/v1/issues/close", input, LegionDaemonApi.IssueClose.response),
     phase: (input) => post("/legion/v1/phase", input, LegionDaemonApi.Phase.response),
+    workerSession: (input) =>
+      post("/legion/v1/worker-session", input, LegionDaemonApi.WorkerSession.response),
     gatesApprove: (input) =>
       noContent("/legion/v1/gates/approve", input, LegionDaemonApi.GatesApprove.response),
     admission: (input) => post("/legion/v1/admission", input, LegionDaemonApi.Admission.response),

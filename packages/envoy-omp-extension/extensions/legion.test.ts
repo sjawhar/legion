@@ -1076,6 +1076,27 @@ describe("Legion OMP extension", () => {
     });
     await sessionShutdown({}, context);
   });
+  test("blocks an unregistered phase worker shell instead of using a stale spawn-time grant", async () => {
+    process.env.LEGION_TREE = "owner/repo#42";
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const toolCall = fixture.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("worker tool_call handler was not registered");
+
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-unregistered-worker",
+          input: { command: "jj git fetch" },
+        },
+        { ...sessionContext("ses_unregistered_worker"), taskDepth: 1 }
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
+    });
+  });
   test("uses a non-empty real daemon grant in a worker shell", async () => {
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
@@ -1205,6 +1226,173 @@ describe("Legion OMP extension", () => {
       expect(await jjConfig(workspace, "user.email")).toBe(
         "271566630+legion-implementer[bot]@users.noreply.github.com"
       );
+      await sessionShutdown({}, context);
+    } finally {
+      daemon.stop();
+    }
+  });
+  test("mints a fresh redeemable grant in a worker process after its spawn-time grant expires", async () => {
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const role = "implementer";
+    const sessionId = "ses_cross_process";
+    const agentId = "cross-process-worker";
+    const token = roleToken("omp", issue, role);
+    let now = 1_700_000_000_000;
+    const state = newLegionState("omp", 1);
+    state.issues[tree] = {
+      key: tree,
+      title: "Root",
+      state: "open",
+      children: [issue],
+      released: true,
+      labels: [],
+    };
+    state.issues[issue] = {
+      key: issue,
+      title: "Worker",
+      state: "open",
+      parent: tree,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[tree] = {
+      root: tree,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.roles[token] = { issue, role, sessionId, agentId };
+    const daemon = startLegionApi(
+      {
+        port: 0,
+        hostname: "127.0.0.1",
+        gates: { design: "off", merge: "off" },
+        now: () => now,
+      },
+      {
+        state,
+        tokenManager: {
+          getToken: async () => ({
+            token: "real-daemon-token",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            gitIdentity: {
+              name: "legion-implementer[bot]",
+              email: "271566630+legion-implementer[bot]@users.noreply.github.com",
+            },
+          }),
+        },
+        processManager: {
+          admit: () => "spawned",
+          releaseSlot: () => {},
+          registerRoleBacking: () => {},
+          markProcessDead: () => {},
+          closeTree: () => {},
+          markTreeReady: () => {},
+          beginLinger: () => {},
+        },
+        envoyPublish: async () => {},
+        dispatch: { url: "http://dispatch.test", bearer: "dispatch-bearer" },
+        onControllerReady: async () => {},
+        onControllerEvent: async () => {},
+      }
+    );
+    const daemonUrl = `http://127.0.0.1:${daemon.server.port}`;
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = daemonUrl;
+    process.env.LEGION_PROJECT = "omp";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROOT_WORKSPACE = "/tmp/root-workspace";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.origin === daemonUrl) return originalFetch(input, init);
+      return Response.json({
+        session_id: sessionId,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    const sessionShutdown = fixture.handlers.get("session_shutdown");
+    if (sessionStart === undefined || toolCall === undefined || sessionShutdown === undefined) {
+      daemon.stop();
+      throw new Error("worker lifecycle handlers were not registered");
+    }
+    const workspace = await createJjWorkspace();
+    const context = {
+      ...sessionContext(sessionId, `/tmp/${agentId}.jsonl`),
+      cwd: workspace,
+      taskDepth: 1,
+    };
+    const grantId = (result: unknown): string => {
+      if (
+        typeof result !== "object" ||
+        result === null ||
+        !("input" in result) ||
+        typeof result.input !== "object" ||
+        result.input === null ||
+        !("command" in result.input) ||
+        typeof result.input.command !== "string"
+      ) {
+        throw new Error("cross-process worker shell was not rewritten with a daemon grant");
+      }
+      const exportLine = result.input.command.split("\n", 1)[0];
+      const match = /^export LEGION_GRANT=([0-9a-f-]{36})$/.exec(exportLine);
+      if (!match?.[1]) throw new Error("worker shell has no daemon-issued grant");
+      return match[1];
+    };
+    try {
+      await sessionStart({}, context);
+      const initialGrant = grantId(
+        await toolCall(
+          {
+            toolName: "bash",
+            toolCallId: "cross-process-initial-grant",
+            input: { command: "jj git fetch" },
+          },
+          context
+        )
+      );
+      const initialRedemption = await originalFetch(`${daemonUrl}/legion/v1/git-credential`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grantId: initialGrant }),
+      });
+      expect(initialRedemption.status).toBe(200);
+      expect(await initialRedemption.text()).toBe("username=x-access-token\npassword=real-daemon-token");
+
+      now += 60_001;
+      const staleRedemption = await originalFetch(`${daemonUrl}/legion/v1/git-credential`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grantId: initialGrant }),
+      });
+      expect(staleRedemption.status).toBe(403);
+
+      const freshGrant = grantId(
+        await toolCall(
+          {
+            toolName: "bash",
+            toolCallId: "cross-process-fresh-grant",
+            input: { command: "jj git push" },
+          },
+          context
+        )
+      );
+      expect(freshGrant).not.toBe(initialGrant);
+      const freshRedemption = await originalFetch(`${daemonUrl}/legion/v1/git-credential`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grantId: freshGrant }),
+      });
+      expect(freshRedemption.status).toBe(200);
+      expect(await freshRedemption.text()).toBe("username=x-access-token\npassword=real-daemon-token");
       await sessionShutdown({}, context);
     } finally {
       daemon.stop();

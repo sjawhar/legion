@@ -133,6 +133,18 @@ export const LegionDaemonApi = {
       gitEmail: nonEmptyString,
     }),
   },
+  WorkerSession: {
+    request: z.object({
+      sessionId: nonEmptyString,
+      agentId: nonEmptyString,
+    }),
+    response: z.object({
+      tree: nonEmptyString,
+      issue: nonEmptyString,
+      role: legionRole,
+      secret: nonEmptyString,
+    }),
+  },
   GatesApprove: {
     request: controllerIssue,
     response: z.object({}),
@@ -183,6 +195,8 @@ export type SpawnTokenResponse = OutputOf<typeof LegionDaemonApi.SpawnToken.resp
 export type RoleBackingInput = InputOf<typeof LegionDaemonApi.RoleBacking.request>;
 export type PhaseInput = InputOf<typeof LegionDaemonApi.Phase.request>;
 export type PhaseResponse = OutputOf<typeof LegionDaemonApi.Phase.response>;
+export type WorkerSessionInput = InputOf<typeof LegionDaemonApi.WorkerSession.request>;
+export type WorkerSessionResponse = OutputOf<typeof LegionDaemonApi.WorkerSession.response>;
 export type ControllerIssueInput = InputOf<typeof LegionDaemonApi.GatesApprove.request>;
 export type AdmissionResponse = OutputOf<typeof LegionDaemonApi.Admission.response>;
 export type BacklogInput = InputOf<typeof LegionDaemonApi.Backlog.request>;

@@ -102,10 +102,18 @@ type WorkerSession = {
   readonly issue: string;
   readonly role: LegionRole;
   readonly token: string;
-  readonly spawnToken: string;
-  readonly workspace: string;
+  readonly spawnToken?: string;
   readonly secret: string;
   readonly agentId: string;
+};
+
+type WorkerSpawn = {
+  readonly tree: string;
+  readonly issue: string;
+  readonly role: LegionRole;
+  readonly token: string;
+  readonly spawnToken: string;
+  readonly workspace: string;
 };
 
 type PendingLegionSpawn = {
@@ -270,10 +278,7 @@ function isRootSession(env: NodeJS.ProcessEnv, context: SessionContext): boolean
 }
 
 
-function parseWorkerSpawn(
-  prompt: string,
-  project: string
-): Omit<WorkerSession, "agentId" | "secret"> | undefined {
+function parseWorkerSpawn(prompt: string, project: string): WorkerSpawn | undefined {
   const block = /<legion-spawn\s+([^>]*?)\/>/.exec(prompt);
   if (!block) return undefined;
 
@@ -708,8 +713,39 @@ export default function legionExtension(pi: PiApi): void {
         await claimController(context);
       return;
     }
-    const worker = workerSessions.get(sessionID);
+    let worker = workerSessions.get(sessionID);
+    if (
+      !worker &&
+      process.env.LEGION_TREE &&
+      (context.taskDepth ?? 0) > 0 &&
+      !isRootSession(process.env, context)
+    ) {
+      const agentId = workerAgentId(context);
+      const recovered = await createLegionDaemonClient(
+        requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+      ).workerSession({ sessionId: sessionID, agentId });
+      const parsedTree = parseIssueKey(recovered.tree);
+      const parsedIssue = parseIssueKey(recovered.issue);
+      if (!parsedTree || !parsedIssue)
+        throw new Error("Legion daemon returned an invalid worker session");
+      const tree = formatIssueKey(parsedTree.owner, parsedTree.repo, parsedTree.number);
+      const issue = formatIssueKey(parsedIssue.owner, parsedIssue.repo, parsedIssue.number);
+      worker = {
+        ...recovered,
+        tree,
+        issue,
+        token: roleToken(requiredEnvironment(process.env, "LEGION_PROJECT"), issue, recovered.role),
+        agentId,
+      };
+      workerSessions.set(sessionID, worker);
+      await claimRole(sessionID, worker.token, context);
+      return;
+    }
     if (worker) {
+      if (!worker.spawnToken) {
+        await claimRole(sessionID, worker.token, context);
+        return;
+      }
       const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
       try {
         await createLegionDaemonClient(
@@ -770,7 +806,15 @@ export default function legionExtension(pi: PiApi): void {
         sessionId: sessionID,
       });
       await setJjIdentity(spawn.workspace, phase.gitName, phase.gitEmail);
-      workerSessions.set(sessionID, { ...spawn, agentId, secret: phase.secret });
+      workerSessions.set(sessionID, {
+        tree: spawn.tree,
+        issue: spawn.issue,
+        role: spawn.role,
+        token: spawn.token,
+        spawnToken: spawn.spawnToken,
+        agentId,
+        secret: phase.secret,
+      });
       registerWorkerBudgetPermit(sessionID, release);
       if (spawn.role === "architect") {
         registerArchitectTools();
@@ -882,7 +926,19 @@ export default function legionExtension(pi: PiApi): void {
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
     const worker = workerSessions.get(sessionID);
-    if (!worker) return undefined;
+    if (!worker) {
+      if (
+        process.env.LEGION_TREE &&
+        process.env.LEGION_CONTROLLER !== "1" &&
+        sessionID !== rootSessionID
+      ) {
+        return {
+          block: true,
+          reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
+        };
+      }
+      return undefined;
+    }
     try {
       const grant = await createLegionDaemonClient(
         requiredEnvironment(process.env, "LEGION_DAEMON_URL")

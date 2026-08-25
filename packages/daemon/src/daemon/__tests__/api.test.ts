@@ -22,6 +22,12 @@ interface GrantResponse {
   grantId: string;
   expiresAt: string;
 }
+interface WorkerSessionResponse {
+  tree: string;
+  issue: string;
+  role: string;
+  secret: string;
+}
 
 describe("Legion HTTP API", () => {
   let api: LegionApi | undefined;
@@ -1279,7 +1285,7 @@ describe("Legion HTTP API", () => {
     expect(replay.response.status).toBe(403);
   });
 
-  it("binds grants to the daemon-registered session role, rejects wrong and expired secrets, and returns exact git credential bytes", async () => {
+  it("reissues a daemon-registered worker session capability and keeps grants short-lived", async () => {
     await start();
     const bootToken = await api?.mintBootToken(root, 3);
     if (!bootToken) throw new Error("boot nonce was not minted");
@@ -1341,6 +1347,26 @@ describe("Legion HTTP API", () => {
       gitEmail: "42+legion-implement[bot]@users.noreply.github.com",
     });
 
+    const recovered = await curlJson<WorkerSessionResponse>("/legion/v1/worker-session", {
+      sessionId: "ses_tester",
+      agentId: "agent-tester",
+    });
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toEqual({
+      tree: root,
+      issue: root,
+      role: "tester",
+      secret: expect.any(String),
+    });
+    expect(
+      (
+        await json("/legion/v1/worker-session", {
+          sessionId: "ses_tester",
+          agentId: "agent-imposter",
+        })
+      ).response.status
+    ).toBe(403);
+
     for (const secret of [undefined, "wrong-secret"]) {
       const denied = await json("/legion/v1/grants", {
         tree: root,
@@ -1355,7 +1381,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       issue: root,
       sessionId: "ses_tester",
-      secret: phase.body.secret,
+      secret: recovered.body.secret,
     });
     expect(grant.status).toBe(200);
     expect(grant.body).toEqual({

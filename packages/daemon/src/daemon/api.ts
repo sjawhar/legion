@@ -918,6 +918,43 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         );
       }
 
+      if (pathname === "/legion/v1/worker-session") {
+        const sessionId = requiredString(body, "sessionId");
+        const agentId = requiredString(body, "agentId");
+        const claim = Object.values(deps.state.roles).find(
+          (candidate) =>
+            "issue" in candidate &&
+            candidate.sessionId === sessionId &&
+            candidate.agentId === agentId
+        );
+        if (!claim || !("issue" in claim)) {
+          throw new HttpError(403, "Worker session is not registered for this agent");
+        }
+        const tree = Object.values(deps.state.trees).find((candidate) =>
+          treeContains(deps.state, candidate.root, claim.issue)
+        )?.root;
+        if (!tree) {
+          throw new HttpError(404, "Worker issue is not in an active tree");
+        }
+        const role = legionRole(claim.role);
+        const secret = randomUUID();
+        capabilities.set(sessionId, {
+          tree,
+          issue: claim.issue,
+          role,
+          secretHash: secretHash(secret),
+        });
+        validateContractRequest(LegionDaemonApi.WorkerSession.request, body);
+        return Response.json(
+          validateContractResponse(LegionDaemonApi.WorkerSession.response, {
+            tree,
+            issue: claim.issue,
+            role,
+            secret,
+          })
+        );
+      }
+
       if (pathname === "/legion/v1/role-backing") {
         const { tree, issue } = requireTreeIssue(body);
         const role = legionRole(requiredString(body, "role"));
