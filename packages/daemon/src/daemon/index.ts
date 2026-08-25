@@ -44,6 +44,7 @@ interface DaemonDependencies {
   createNatsTransport(config: DaemonConfig): Promise<NatsTransport>;
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
+  readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   fetchGitHubProjectItems(): Promise<GitHubProjectItemsResult>;
   tokenManager: Pick<TokenManager, "getToken">;
@@ -260,6 +261,7 @@ export async function startDaemon(
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
+    readProcessCmdline: deps.readProcessCmdline,
     workerCatchup: { runner, tokenManager: deps.tokenManager },
     now: deps.now,
   });

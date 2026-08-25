@@ -225,8 +225,9 @@ describe("daemon end-to-end", () => {
       let nats: NatsContainer | undefined;
       let broker: NatsConnection | undefined;
       let daemon: DaemonHandle | undefined;
-      const windows = new Set<string>();
+      const windows = new Map<string, string>();
       let tmuxSessionExists = false;
+      let nextWindowId = 1;
       const controllerSpawn = Promise.withResolvers<string[]>();
       const rootSpawn = Promise.withResolvers<string[]>();
       const rootRespawn = Promise.withResolvers<string[]>();
@@ -270,31 +271,34 @@ describe("daemon end-to-end", () => {
         if (command[1] === "has-session") {
           return { stdout: "", stderr: "", exitCode: tmuxSessionExists ? 0 : 1 };
         }
-        if (command[1] === "new-session") {
-          tmuxSessionExists = true;
-          return { stdout: "", stderr: "", exitCode: 0 };
-        }
-        if (command[1] === "new-window") {
+        if (command[1] === "new-session" || command[1] === "new-window") {
           const nameIndex = command.indexOf("-n");
           const window = command[nameIndex + 1];
           if (!window)
-            throw new Error(`tmux new-window command is missing -n: ${command.join(" ")}`);
-          windows.add(window);
+            throw new Error(`tmux ${command[1]} command is missing -n: ${command.join(" ")}`);
+          const windowId = `@${nextWindowId++}`;
+          tmuxSessionExists = true;
+          windows.set(windowId, window);
           if (window === "controller") controllerSpawn.resolve([...command]);
-          if (window === "acme-widgets-1") {
+          if (window === "acme__widgets-1") {
             rootSpawnCount += 1;
             if (rootSpawnCount === 1) rootSpawn.resolve([...command]);
             else rootRespawn.resolve([...command]);
           }
+          return { stdout: `${windowId}\n`, stderr: "", exitCode: 0 };
+        }
+        if (command[1] === "set-option") {
           return { stdout: "", stderr: "", exitCode: 0 };
         }
         if (command[1] === "list-windows") {
-          return windows.size > 0
-            ? { stdout: `${[...windows].join("\n")}\n`, stderr: "", exitCode: 0 }
+          const format = command[command.indexOf("-F") + 1];
+          const values = format === "#{window_id}" ? [...windows.keys()] : [...windows.values()];
+          return values.length > 0
+            ? { stdout: `${values.join("\n")}\n`, stderr: "", exitCode: 0 }
             : { stdout: "", stderr: "", exitCode: 1 };
         }
         if (command[1] === "list-panes") {
-          const target = command[3]?.split(":").at(-1);
+          const target = command[3];
           return target && windows.has(target)
             ? { stdout: "4242\n", stderr: "", exitCode: 0 }
             : { stdout: "", stderr: "", exitCode: 1 };
@@ -351,6 +355,7 @@ describe("daemon end-to-end", () => {
           deps: {
             resolveDaemonEnvironment: async () => DAEMON_ENVIRONMENT,
             runner,
+            readProcessCmdline: async () => "omp\0",
             envoyPublish: async (topic, payload) => {
               broker?.publish(topic, codec.encode(payload));
               await broker?.flush();
