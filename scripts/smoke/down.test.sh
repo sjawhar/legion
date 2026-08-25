@@ -8,6 +8,7 @@ temporary_dir="$(mktemp -d)"
 readonly temporary_dir
 readonly fake_bin="${temporary_dir}/bin"
 readonly smoke_dir="${temporary_dir}/smoke"
+readonly output_file="${temporary_dir}/output"
 bridge_pid=""
 
 cleanup() {
@@ -41,4 +42,39 @@ if kill -0 "$bridge_pid" 2>/dev/null; then
   exit 1
 fi
 bridge_pid=""
+
+tmux_log="${temporary_dir}/tmux.log"
+cat >"${fake_bin}/tmux" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  has-session) exit 0 ;;
+  show-option) printf 'foreign-owner\n' ;;
+  kill-session) printf 'kill-session\n' >>"${tmux_log}" ;;
+esac
+EOF
+chmod +x "${fake_bin}/tmux"
+
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
+[[ ! -e "$tmux_log" && "$(<"$output_file")" == *'refusing to kill unowned tmux session'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+cat >"${fake_bin}/tmux" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  has-session) exit 0 ;;
+  show-option) printf 'legion-omp\n' ;;
+  kill-session) printf 'kill-session\n' >>"${tmux_log}" ;;
+esac
+EOF
+chmod +x "${fake_bin}/tmux"
+
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
+[[ "$(<"$tmux_log")" == 'kill-session' ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+printf 'PASS: only kills tmux sessions carrying the Legion ownership marker\n'
 printf 'PASS: stops the Envoy bridge with a start-time-validated PID record\n'

@@ -32,10 +32,17 @@ export interface RecoveryEvent {
   original: { topic: string; payload: string; eventId: string };
 }
 
+export interface TmuxWindowLocator {
+  tmuxSession: string;
+  tmuxWindowId: string;
+  ompSessionFile?: string;
+  pid?: number;
+}
+
 export interface TreeState {
   root: IssueKey;
   generation: number;
-  locator?: { tmuxSession: string; tmuxWindow: string; ompSessionFile?: string; pid?: number };
+  locator?: TmuxWindowLocator;
   status: "queued" | "active" | "lingering" | "dead" | "launch-failed" | "closed";
   lingerUntil?: string;
   launchFailures: number;
@@ -93,10 +100,11 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 5;
+  version: 6;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
+  controllerLocator?: Pick<TmuxWindowLocator, "tmuxSession" | "tmuxWindowId">;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
@@ -174,7 +182,7 @@ const TreeStateSchema = z
     locator: z
       .object({
         tmuxSession: z.string(),
-        tmuxWindow: z.string(),
+        tmuxWindowId: z.string(),
         ompSessionFile: z.string().optional(),
         pid: z.number().int().optional(),
       })
@@ -258,12 +266,19 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(5),
+    version: z.literal(6),
     project: z
       .string()
       .refine(isLegionProjectToken, { message: "Expected valid Legion project token" }),
     issues: z.record(IssueKeySchema, IssueNodeSchema),
     trees: z.record(IssueKeySchema, TreeStateSchema),
+    controllerLocator: z
+      .object({
+        tmuxSession: z.string(),
+        tmuxWindowId: z.string(),
+      })
+      .strict()
+      .optional(),
     roles: z.record(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN), RoleClaimSchema),
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),
@@ -294,7 +309,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 5,
+    version: 6,
     project,
     issues: {},
     trees: {},
@@ -310,6 +325,23 @@ export function newLegionState(project: string, cap: number): LegionState {
   };
 }
 
+function migrateV5State(state: unknown): unknown {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
+  if (!("version" in state) || state.version !== 5) return state;
+  if (!("trees" in state) || typeof state.trees !== "object" || state.trees === null) {
+    return { ...state, version: 6 };
+  }
+
+  const trees = Object.fromEntries(
+    Object.entries(state.trees).map(([key, tree]) => {
+      if (typeof tree !== "object" || tree === null || Array.isArray(tree)) return [key, tree];
+      const { locator: _unsafeNameOnlyLocator, ...withoutLocator } = tree;
+      return [key, withoutLocator];
+    })
+  );
+  return { ...state, version: 6, trees };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -321,12 +353,12 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
-  const state: unknown = JSON.parse(raw);
+  const state = migrateV5State(JSON.parse(raw));
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 5) {
+  if (version !== 6) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

@@ -366,7 +366,7 @@ describe("startDaemon", () => {
 
       const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ version: 5, project: "acme1" });
+      expect(await response.json()).toMatchObject({ version: 6, project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
         "notifications.github.>",
         "notifications.slack.*.*.mention",

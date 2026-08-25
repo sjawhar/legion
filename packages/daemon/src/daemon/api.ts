@@ -49,6 +49,7 @@ export interface LegionApiProcessManager {
     agentId: string
   ): void | Promise<void>;
   markProcessDead(tree: IssueKey): void | Promise<void>;
+  closeTree(tree: IssueKey): void | Promise<void>;
   markControllerReady(): void | Promise<void>;
   markTreeReady(tree: IssueKey): void | Promise<void>;
   beginLinger(tree: IssueKey): void;
@@ -524,9 +525,8 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         if (!treeState || treeState.generation !== generation) {
           throw new HttpError(409, "Stale process generation");
         }
-        deps.processManager.releaseSlot(tree);
         if (deps.state.issues[tree]?.state === "closed") {
-          treeState.status = "closed";
+          await deps.processManager.closeTree(tree);
         } else {
           await deps.processManager.markProcessDead(tree);
         }

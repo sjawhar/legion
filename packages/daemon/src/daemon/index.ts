@@ -350,8 +350,15 @@ export async function startDaemon(
     const now = deps.now();
     for (const tree of Object.values(state.trees)) {
       if (tree.status !== "lingering" || !tree.lingerUntil) continue;
-      if (Date.parse(tree.lingerUntil) <= now) processManager.expireLinger(tree.root);
+      if (Date.parse(tree.lingerUntil) <= now) {
+        void processManager.expireLinger(tree.root).catch((error) => {
+          console.error(`[legion] linger cleanup failed for ${tree.root}:`, error);
+        });
+      }
     }
+    void processManager.reconcileTmuxWindows().catch((error) => {
+      console.error(`[legion] tmux reconciliation failed:`, error);
+    });
   }, LINGER_SWEEP_INTERVAL_MS);
 
   const drain = async () => {

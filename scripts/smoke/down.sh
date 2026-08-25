@@ -116,12 +116,20 @@ remove_webhook_forwarder() {
 
 stop_tmux_session() {
   local slug
+  local session
+  local owner
   [[ -n "${SMOKE_PROJECT:-}" ]] || return 0
   slug="$(project_slug)"
   [[ -n "$slug" ]] || return 0
-  tmux has-session -t "legion-${slug}" 2>/dev/null || return 0
-  tmux kill-session -t "legion-${slug}"
-  printf 'STOPPED tmux session legion-%s\n' "$slug"
+  session="legion-${slug}"
+  tmux has-session -t "$session" 2>/dev/null || return 0
+  owner="$(tmux show-option -qv -t "$session" @legion_owner 2>/dev/null || true)"
+  if [[ "$owner" != "$session" ]]; then
+    warn "refusing to kill unowned tmux session ${session}"
+    return 0
+  fi
+  tmux kill-session -t "$session"
+  printf 'STOPPED tmux session %s\n' "$session"
 }
 
 main() {

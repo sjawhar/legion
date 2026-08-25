@@ -23,7 +23,7 @@ function stateWithTree() {
     generation: 3,
     locator: {
       tmuxSession: "legion-omp-project",
-      tmuxWindow: "sjawhar-legion-42",
+      tmuxWindowId: "@42",
       ompSessionFile: "/tmp/session.json",
       pid: 1234,
     },
@@ -87,9 +87,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v5 state with a valid project and admission capacity", () => {
+  it("initializes empty v6 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 5,
+      version: 6,
       project: "omp",
       issues: {},
       trees: {},
@@ -113,6 +113,29 @@ describe("legion state", () => {
     await saveState(file, state);
 
     expect(await loadState(file, initialState)).toEqual(state);
+  });
+
+  it("migrates v5 name-only locators by clearing their unsafe identities", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v5-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const legacy = {
+      ...current,
+      version: 5,
+      trees: {
+        ...current.trees,
+        [issue]: {
+          ...current.trees[issue],
+          locator: { tmuxSession: "legion-omp-project", tmuxWindow: "sjawhar-legion-42" },
+        },
+      },
+    };
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated.version).toBe(6);
+    expect(migrated.trees[issue]?.locator).toBeUndefined();
   });
 
   it("creates the supplied initial v4 state when the file is absent", async () => {

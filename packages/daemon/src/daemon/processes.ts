@@ -1,4 +1,5 @@
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   controllerToken,
@@ -58,16 +59,30 @@ export interface ProcessManagerDeps {
   mintBootToken(tree: IssueKey, generation: number): Promise<string>;
   provisioningToken(owner: string): Promise<string>;
   statPrompt?(promptPath: string): Promise<unknown>;
+  readProcessCmdline?(pid: number): Promise<string>;
   workerCatchup: WorkerCatchupDeps;
   now(): number;
 }
 
 type RoleBacking = WorkerRoleClaim;
 
+const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
+
 function treeName(issue: IssueKey): string {
   const parsed = parseIssueKey(issue);
   if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
-  return `${parsed.owner}-${parsed.repo}-${parsed.number}`;
+  const encodeIssuePart = (part: string) => {
+    const normalized = part.toLowerCase();
+    if (!/^[a-z0-9._-]+$/.test(normalized)) {
+      throw new Error(`Invalid Legion issue token part: ${part}`);
+    }
+    return normalized.replaceAll("_", "_u").replaceAll(".", "_d").replaceAll("-", "_h");
+  };
+  const fullName = `${encodeIssuePart(parsed.owner)}__${encodeIssuePart(parsed.repo)}-${parsed.number}`;
+  if (fullName.length <= MAX_TMUX_WINDOW_NAME_LENGTH) return fullName;
+
+  const suffix = createHash("sha256").update(fullName).digest("hex").slice(0, 16);
+  return `${fullName.slice(0, MAX_TMUX_WINDOW_NAME_LENGTH - suffix.length - 1)}-${suffix}`;
 }
 
 function shellPath(value: string): string {
@@ -160,18 +175,57 @@ export class ProcessManager {
   async markProcessDead(treeKey: IssueKey, generation?: number): Promise<void> {
     const tree = this.requireTree(treeKey);
     if (tree.generation !== (generation ?? tree.generation)) return;
+    await this.removeTreeWindow(tree);
     tree.status = "dead";
     this.releaseSlot(treeKey);
     await this.deps.saveState();
   }
 
-  async spawnRoot(issue: IssueKey, resume = false): Promise<void> {
+  async closeTree(treeKey: IssueKey): Promise<void> {
+    const tree = this.requireTree(treeKey);
+    await this.removeTreeWindow(tree);
+    tree.status = "closed";
+    delete tree.lingerUntil;
+    this.releaseSlot(treeKey);
+    for (const [token, claim] of Object.entries(this.deps.state.roles)) {
+      if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
+        delete this.deps.state.roles[token];
+      }
+    }
+    await this.deps.saveState();
+  }
+
+  async reconcileTmuxWindows(): Promise<void> {
+    const session = `legion-${this.deps.state.project}`;
+    const windows = await this.deps.run([
+      "tmux",
+      "list-windows",
+      "-t",
+      session,
+      "-F",
+      "#{window_id}",
+    ]);
+    if (windows.exitCode !== 0) return;
+
+    const known = new Set(
+      [
+        ...Object.values(this.deps.state.trees).map((tree) => tree.locator?.tmuxWindowId),
+        this.deps.state.controllerLocator?.tmuxWindowId,
+      ].filter((windowId): windowId is string => windowId !== undefined)
+    );
+    for (const windowId of windows.stdout.split(/\r?\n/)) {
+      if (!/^@\d+$/.test(windowId) || known.has(windowId)) continue;
+      await this.deps.run(["tmux", "kill-window", "-t", windowId]);
+    }
+  }
+
+  async spawnRoot(issue: IssueKey, resume = false, resumeSessionFile?: string): Promise<void> {
     const tree = this.ensureTree(issue);
     const priorGeneration = tree.generation;
     const priorLocator = tree.locator;
     tree.generation += 1;
     try {
-      await this.spawnTree(tree, resume);
+      await this.spawnTree(tree, resume, resumeSessionFile);
       tree.launchFailures = 0;
       if (this.promotionSweep?.has(issue)) this.promotionSweep = undefined;
       await this.deps.saveState();
@@ -226,36 +280,13 @@ export class ProcessManager {
 
   async probe(treeKey: IssueKey): Promise<"alive" | "dead"> {
     const tree = this.deps.state.trees[treeKey];
-    if (!tree?.locator) return "dead";
+    const windowId = tree?.locator?.tmuxWindowId;
+    if (!windowId) return "dead";
 
-    const windows = await this.deps.run([
-      "tmux",
-      "list-windows",
-      "-t",
-      tree.locator.tmuxSession,
-      "-F",
-      "#{window_name}",
-    ]);
-    if (
-      windows.exitCode !== 0 ||
-      !windows.stdout.split(/\r?\n/).includes(tree.locator.tmuxWindow)
-    ) {
-      return "dead";
-    }
-
-    const panes = await this.deps.run([
-      "tmux",
-      "list-panes",
-      "-t",
-      `${tree.locator.tmuxSession}:${tree.locator.tmuxWindow}`,
-      "-F",
-      "#{pane_pid}",
-    ]);
+    const panes = await this.deps.run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_pid}"]);
     const pid = Number(panes.stdout.trim().split(/\s+/)[0]);
     if (panes.exitCode !== 0 || !Number.isSafeInteger(pid) || pid <= 0) return "dead";
-
-    const process = await this.deps.run(["kill", "-0", String(pid)]);
-    return process.exitCode === 0 ? "alive" : "dead";
+    return (await this.isOmpPane(pid)) ? "alive" : "dead";
   }
 
   async controlDirective(
@@ -333,27 +364,11 @@ export class ProcessManager {
     this.persist();
   }
 
-  expireLinger(treeKey: IssueKey): void {
-    const tree = this.requireTree(treeKey);
+  async expireLinger(treeKey: IssueKey): Promise<void> {
     void this.controlDirective(treeKey, { type: "shutdown" }).catch((error) => {
       console.error(`[legion] shutdown directive failed for ${treeKey}:`, error);
     });
-    if (tree.locator) {
-      void this.deps.run([
-        "tmux",
-        "kill-window",
-        "-t",
-        `${tree.locator.tmuxSession}:${tree.locator.tmuxWindow}`,
-      ]);
-    }
-    tree.status = "closed";
-    delete tree.lingerUntil;
-    for (const [token, claim] of Object.entries(this.deps.state.roles)) {
-      if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
-        delete this.deps.state.roles[token];
-      }
-    }
-    this.persist();
+    await this.closeTree(treeKey);
   }
 
   async handleException(exception: ExceptionInfo): Promise<void> {
@@ -524,7 +539,11 @@ export class ProcessManager {
     return tree;
   }
 
-  private async spawnTree(tree: TreeState, resume: boolean): Promise<void> {
+  private async spawnTree(
+    tree: TreeState,
+    resume: boolean,
+    resumeSessionFile?: string
+  ): Promise<void> {
     const name = treeName(tree.root);
     const parsedTree = parseIssueKey(tree.root);
     if (!parsedTree) throw new Error(`Invalid IssueKey: ${tree.root}`);
@@ -540,7 +559,9 @@ export class ProcessManager {
     });
     const promptPath = path.join(EXTENSION_PACKAGE, "agents", "architect-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
-    const priorSessionFile = resume ? tree.locator?.ompSessionFile : undefined;
+    const priorSessionFile = resume
+      ? (resumeSessionFile ?? tree.locator?.ompSessionFile)
+      : undefined;
     let resumeArgument = "";
     if (priorSessionFile) {
       try {
@@ -564,17 +585,9 @@ export class ProcessManager {
       }
     }
     const session = `legion-${this.deps.state.project}`;
-    await this.ensureTmuxSession(session);
     const generation = tree.generation;
     const bootToken = await this.deps.mintBootToken(tree.root, generation);
-    const window = name;
-    const result = await this.deps.run([
-      "tmux",
-      "new-window",
-      "-t",
-      session,
-      "-n",
-      window,
+    const tmuxWindowId = await this.openTmuxWindow(session, name, [
       "-e",
       `LEGION_TREE=${tree.root}`,
       "-e",
@@ -601,10 +614,7 @@ export class ProcessManager {
       `PATH=${this.deps.panePath}`,
       `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
-    if (result.exitCode !== 0) {
-      throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
-    }
-    tree.locator = { tmuxSession: session, tmuxWindow: window };
+    tree.locator = { tmuxSession: session, tmuxWindowId };
     tree.status = "active";
   }
 
@@ -614,14 +624,7 @@ export class ProcessManager {
     await (this.deps.statPrompt ?? stat)(promptPath);
     await this.writeOmpConfig(controllerDir, this.deps.config.maxRecursionDepth);
     const session = `legion-${this.deps.state.project}`;
-    await this.ensureTmuxSession(session);
-    const result = await this.deps.run([
-      "tmux",
-      "new-window",
-      "-t",
-      session,
-      "-n",
-      "controller",
+    const tmuxWindowId = await this.openTmuxWindow(session, "controller", [
       "-e",
       "LEGION_CONTROLLER=1",
       "-e",
@@ -638,9 +641,8 @@ export class ProcessManager {
       `PATH=${this.deps.panePath}`,
       `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
-    if (result.exitCode !== 0) {
-      throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
-    }
+    this.deps.state.controllerLocator = { tmuxSession: session, tmuxWindowId };
+    await this.deps.saveState();
   }
 
   private async writeOmpConfig(directory: string, maxRecursionDepth: number): Promise<void> {
@@ -652,44 +654,103 @@ export class ProcessManager {
     );
   }
 
-  private async ensureTmuxSession(session: string): Promise<void> {
-    const result = await this.deps.run(["tmux", "has-session", "-t", session]);
+  private async openTmuxWindow(
+    session: string,
+    name: string,
+    environmentAndCommand: string[]
+  ): Promise<string> {
+    const sessionExists =
+      (await this.deps.run(["tmux", "has-session", "-t", session])).exitCode === 0;
+    const command = sessionExists
+      ? [
+          "tmux",
+          "new-window",
+          "-P",
+          "-F",
+          "#{window_id}",
+          "-t",
+          session,
+          "-n",
+          name,
+          ...environmentAndCommand,
+        ]
+      : [
+          "tmux",
+          "new-session",
+          "-d",
+          "-s",
+          session,
+          "-n",
+          name,
+          "-P",
+          "-F",
+          "#{window_id}",
+          ...environmentAndCommand,
+        ];
+    const result = await this.deps.run(command);
     if (result.exitCode !== 0) {
-      const create = await this.deps.run(["tmux", "new-session", "-d", "-s", session]);
-      if (create.exitCode !== 0) {
-        throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
+      throw new Error(`tmux ${command[1]} failed (exit ${result.exitCode}): ${result.stdout}`);
+    }
+    if (!sessionExists) {
+      const marker = await this.deps.run([
+        "tmux",
+        "set-option",
+        "-t",
+        session,
+        "@legion_owner",
+        `legion-${this.deps.state.project}`,
+      ]);
+      if (marker.exitCode !== 0) {
+        throw new Error(`tmux ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`);
       }
+    }
+    const tmuxWindowId = result.stdout.trim();
+    if (!/^@\d+$/.test(tmuxWindowId)) {
+      throw new Error(`tmux ${command[1]} did not report a window id: ${result.stdout}`);
+    }
+    return tmuxWindowId;
+  }
+
+  private async removeTreeWindow(tree: TreeState): Promise<void> {
+    const windowId = tree.locator?.tmuxWindowId;
+    delete tree.locator;
+    if (!windowId) return;
+    await this.deps.run(["tmux", "kill-window", "-t", windowId]);
+  }
+
+  private async isOmpPane(pid: number): Promise<boolean> {
+    if ((await this.deps.run(["kill", "-0", String(pid)])).exitCode !== 0) return false;
+    try {
+      const cmdline = this.deps.readProcessCmdline
+        ? await this.deps.readProcessCmdline(pid)
+        : await readFile(`/proc/${pid}/cmdline`, "utf8");
+      return cmdline.includes("omp");
+    } catch {
+      return false;
     }
   }
 
   private async controllerAlive(): Promise<boolean> {
-    const session = `legion-${this.deps.state.project}`;
-    const windows = await this.deps.run([
-      "tmux",
-      "list-windows",
-      "-t",
-      session,
-      "-F",
-      "#{window_name}",
-    ]);
-    if (windows.exitCode !== 0 || !windows.stdout.split(/\r?\n/).includes("controller"))
-      return false;
-    const panes = await this.deps.run([
-      "tmux",
-      "list-panes",
-      "-t",
-      `${session}:controller`,
-      "-F",
-      "#{pane_pid}",
-    ]);
+    const windowId = this.deps.state.controllerLocator?.tmuxWindowId;
+    if (!windowId) return false;
+    const panes = await this.deps.run(["tmux", "list-panes", "-t", windowId, "-F", "#{pane_pid}"]);
     const pid = Number(panes.stdout.trim().split(/\s+/)[0]);
-    if (panes.exitCode !== 0 || !Number.isSafeInteger(pid) || pid <= 0) return false;
-    return (await this.deps.run(["kill", "-0", String(pid)])).exitCode === 0;
+    if (panes.exitCode !== 0 || !Number.isSafeInteger(pid) || pid <= 0) {
+      delete this.deps.state.controllerLocator;
+      return false;
+    }
+    const alive = await this.isOmpPane(pid);
+    if (!alive) delete this.deps.state.controllerLocator;
+    return alive;
   }
 
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
     if ((await this.probe(treeKey)) === "alive") return;
-    await this.spawnRoot(treeKey, true);
+    const tree = this.requireTree(treeKey);
+    const resumeSessionFile = tree.locator?.ompSessionFile;
+    await this.removeTreeWindow(tree);
+    tree.status = "dead";
+    await this.spawnRoot(treeKey, true, resumeSessionFile);
   }
 
   private rootForIssue(issue: IssueKey): IssueKey | undefined {

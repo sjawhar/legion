@@ -32,9 +32,9 @@ The localhost-only Legion API lives in `api.ts`.
 ## Operational invariants
 
 - Role lanes use core NATS; the daemon, not the broker, persists failed role delivery.
-- Root processes are tmux windows under global admission control. Phase workers are native omp subagents.
-- Process failure recovery is exception-driven. A dead root is resurrected under a generation lock; a live root receives a control directive.
-- A lingering root releases its admission slot. Expiry kills only its recorded tmux window and removes its role claims.
+- Root processes and the controller are tmux windows under global admission control. The daemon stores tmux window IDs; names are cosmetic, escaped issue labels.
+- Process failure recovery is exception-driven. A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.
+- A lingering or closed root releases its admission slot, kills its recorded window, clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
 - `DaemonConfig` supplies all lifecycle defaults: admission cap, worker budget, recursion depth, linger duration, CI quiet period, resync interval, and retry limit.
 
 ## OMP invocation and daemon tools

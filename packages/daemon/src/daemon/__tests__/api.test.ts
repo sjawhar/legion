@@ -30,6 +30,7 @@ describe("Legion HTTP API", () => {
   let publications: Array<{ topic: string; payload: string }>;
   let tokenRoles: string[];
   let releaseSlots: IssueKey[];
+  let closedTrees: IssueKey[];
   let admissions: IssueKey[];
   let backingRegistrations: Array<{
     tree: IssueKey;
@@ -47,6 +48,7 @@ describe("Legion HTTP API", () => {
     publications = [];
     tokenRoles = [];
     releaseSlots = [];
+    closedTrees = [];
     admissions = [];
     backingRegistrations = [];
     controllerReadyCalls = 0;
@@ -64,7 +66,7 @@ describe("Legion HTTP API", () => {
     state.trees[root] = {
       root,
       generation: 3,
-      locator: { tmuxSession: "legion-omp", tmuxWindow: "acme-widgets-1" },
+      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@1" },
       status: "queued",
       launchFailures: 0,
       heldEvents: [],
@@ -179,6 +181,12 @@ describe("Legion HTTP API", () => {
           if (treeState) treeState.status = "lingering";
         },
         markProcessDead: () => {},
+        closeTree: (tree) => {
+          releaseSlots.push(tree);
+          closedTrees.push(tree);
+          const treeState = state.trees[tree];
+          if (treeState) treeState.status = "closed";
+        },
         markControllerReady: () => {
           const controller = state.roles[controllerToken(state.project)];
           if (controller?.role !== "controller" || controller.sessionId !== "ses_controller") {
@@ -409,6 +417,7 @@ describe("Legion HTTP API", () => {
     expect(exited.response.status).toBe(200);
     expect(releaseSlots).toEqual([root]);
     expect(state.trees[root]?.status).toBe("closed");
+    expect(closedTrees).toEqual([root]);
   });
   it("requires a daemon-minted single-use boot nonce before root registration", async () => {
     await start();
@@ -722,7 +731,7 @@ describe("Legion HTTP API", () => {
       released: true,
       labels: ["legion-child"],
     };
-    otherTree.locator = { tmuxSession: "legion-omp", tmuxWindow: "acme-other-9" };
+    otherTree.locator = { tmuxSession: "legion-omp", tmuxWindowId: "@9" };
 
     const rootBootToken = await api?.mintBootToken(root, 3);
     const otherBootToken = await api?.mintBootToken(otherRoot, 1);
@@ -963,7 +972,7 @@ describe("Legion HTTP API", () => {
     state.trees[competingRoot] = {
       root: competingRoot,
       generation: 1,
-      locator: { tmuxSession: "legion-omp", tmuxWindow: "acme-widgets-3" },
+      locator: { tmuxSession: "legion-omp", tmuxWindowId: "@3" },
       status: "active",
       launchFailures: 0,
       heldEvents: [],

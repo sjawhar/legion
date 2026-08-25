@@ -15,11 +15,11 @@ printf 'none\n' >"${smoke_dir}/webhook-mode"
 printf 'none\n' >"${smoke_dir}/board-scope"
 cat >"${fake_bin}/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s' '{"issues":{"trajectory-labs-pbc/legion-smoke#1":{}}}'
+printf '%s' '{"issues":{"trajectory-labs-pbc/legion-smoke#1":{}},"trees":{"trajectory-labs-pbc/legion-smoke#1":{"root":"trajectory-labs-pbc/legion-smoke#1"}},"admission":{"active":["trajectory-labs-pbc/legion-smoke#1"]}}'
 EOF
 cat >"${fake_bin}/tmux" <<'EOF'
 #!/usr/bin/env bash
-printf 'controller\n'
+printf 'controller\ntrajectory_hlabs_hpbc__legion_hsmoke-1\n'
 EOF
 cat >"${fake_bin}/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -34,6 +34,17 @@ PATH="${fake_bin}:${PATH}" \
   SMOKE_PROJECT_ID="PVT_kwDODfEZEs4BhWFj" \
   bash "$checkpoints_script" 1 >"$output_file" 2>&1
 [[ "$(<"$output_file")" == *'CHECKPOINT 1 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="trajectory-labs-pbc/legion-smoke" \
+  SMOKE_PROJECT="trajectory-labs-pbc/24" \
+  SMOKE_PROJECT_ID="PVT_kwDODfEZEs4BhWFj" \
+  bash "$checkpoints_script" 2 >"$output_file" 2>&1
+[[ "$(<"$output_file")" == *'CHECKPOINT 2 OK'* ]] || {
   cat "$output_file" >&2
   exit 1
 }

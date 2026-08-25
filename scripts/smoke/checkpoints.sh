@@ -74,15 +74,52 @@ issue_number() {
 
 tree_window() {
   local key="$1"
-  key="${key//\//-}"
-  printf '%s\n' "${key//#/-}"
+  local owner="${key%%/*}"
+  local rest="${key#*/}"
+  local repo="${rest%%#*}"
+  local number="${rest#*#}"
+  local full
+  local digest
+
+  owner="${owner,,}"
+  repo="${repo,,}"
+  owner="${owner//_/_u}"
+  owner="${owner//./_d}"
+  owner="${owner//-/_h}"
+  repo="${repo//_/_u}"
+  repo="${repo//./_d}"
+  repo="${repo//-/_h}"
+  full="${owner}__${repo}-${number}"
+  if ((${#full} <= 160)); then
+    printf '%s\n' "$full"
+    return
+  fi
+  digest="$(printf '%s' "$full" | sha256sum | cut -d ' ' -f 1)"
+  printf '%s-%s\n' "${full:0:143}" "${digest:0:16}"
+}
+
+tree_window_id() {
+  state | jq -er --arg key "$1" '.trees[$key].locator.tmuxWindowId'
+}
+
+window_id() {
+  local name="$1"
+  local id
+  local window
+  local matches=()
+
+  while IFS=' ' read -r id window; do
+    [[ "$window" == "$name" ]] && matches+=("$id")
+  done < <(tmux list-windows -t "legion-$(project_slug)" -F '#{window_id} #{window_name}')
+  [[ "${#matches[@]}" == 1 ]] || fail "expected one tmux window named ${name}, found ${#matches[@]}"
+  printf '%s\n' "${matches[0]}"
 }
 
 expect_window() {
   local window="$1"
   local windows
   windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}')"
-  [[ "$windows" == *"$window"* ]] || fail "tmux window ${window} is absent"
+  grep -Fxq -- "$window" <<<"$windows" || fail "tmux window ${window} is absent"
 }
 
 smoke_pr() {
@@ -145,15 +182,16 @@ checkpoint_five() {
 }
 
 checkpoint_six() {
+  local root
   local pane
   local verdict_count
 
-  require_env SMOKE_ARCHITECT_WINDOW
+  root="$(root_key)"
   require_env SMOKE_VERDICT_FRAGMENT
   require_env SMOKE_RAW_CHECK_FRAGMENT
   state | jq -e '[.prs[] | select(.firstRedEmitted and .greenEmitted)] | length > 0' >/dev/null ||
     fail "no PR recorded both first-red and green emissions"
-  pane="$(tmux capture-pane -p -t "legion-$(project_slug):${SMOKE_ARCHITECT_WINDOW}")"
+  pane="$(tmux capture-pane -p -t "$(tree_window_id "$root")")"
   verdict_count="$(grep -Foc "$SMOKE_VERDICT_FRAGMENT" <<<"$pane")"
   [[ "$verdict_count" == "1" ]] || fail "expected one coalesced verdict, found ${verdict_count}"
   [[ "$pane" != *"$SMOKE_RAW_CHECK_FRAGMENT"* ]] || fail "architect transcript contains raw check noise"
@@ -260,7 +298,7 @@ checkpoint_ten() {
   log_offset="${SMOKE_REVIVAL_LOG_OFFSET:-${smoke_dir}/revival.log.offset}"
   [[ -r "$daemon_log" && -r "$log_offset" ]] || fail "run arm-revival immediately before the triggering comment"
   daemon_output="$(tail -c "+$(( $(<"$log_offset") + 1 ))" "$daemon_log")"
-  worker_pane="$(tmux capture-pane -p -t "legion-$(project_slug):${SMOKE_WORKER_WINDOW}")"
+  worker_pane="$(tmux capture-pane -p -t "$(window_id "$SMOKE_WORKER_WINDOW")")"
   [[ "$worker_pane" == *"$SMOKE_COMMENT_FRAGMENT"* ]] || fail "worker transcript lacks the published comment"
   after_no_holder="${daemon_output#*no_holder}"
   [[ -n "$after_no_holder" && "$after_no_holder" != "$daemon_output" ]] ||
@@ -268,7 +306,7 @@ checkpoint_ten() {
   after_probe="${after_no_holder#*probe}"
   [[ "$after_probe" != "$after_no_holder" && "$after_probe" == *revive* ]] ||
     fail "daemon log lacks ordered no_holder → probe → revive handling"
-  architect_pane="$(tmux capture-pane -p -t "legion-$(project_slug):${SMOKE_ARCHITECT_WINDOW}")"
+  architect_pane="$(tmux capture-pane -p -t "$(window_id "$SMOKE_ARCHITECT_WINDOW")")"
   [[ "$architect_pane" != *"$SMOKE_COMMENT_FRAGMENT"* ]] ||
     fail "architect consumed the worker revival comment"
   printf 'CHECKPOINT 10 OK: no_holder → probe → revive reached worker without an architect turn\n'
@@ -281,7 +319,6 @@ checkpoint_eleven() {
   local pane
 
   require_env SMOKE_RESURRECTION_ISSUE
-  require_env SMOKE_WORKER_WINDOW
   require_env SMOKE_CATCHUP_FRAGMENT
   require_env SMOKE_RESURRECTION_ROLE
   require_env SMOKE_RESURRECTION_WORKER_SESSION
@@ -295,7 +332,7 @@ checkpoint_eleven() {
   ' >/dev/null || fail "resurrection role does not map to the specified worker session"
   windows="$(tmux list-windows -t "legion-$(project_slug)" -F '#{window_name}' | jq -Rsc --arg window "$window" 'split("\n") | map(select(. == $window)) | length')"
   [[ "$windows" == "1" ]] || fail "expected one ${window} tmux window, found ${windows}"
-  pane="$(tmux capture-pane -p -t "legion-$(project_slug):${SMOKE_WORKER_WINDOW}")"
+  pane="$(tmux capture-pane -p -t "$(tree_window_id "$issue")")"
   [[ "$pane" == *"$SMOKE_RESURRECTION_WORKER_SESSION"* && "$pane" == *"$SMOKE_CATCHUP_FRAGMENT"* ]] ||
     fail "specified revived worker transcript lacks its catchup-worker payload"
   printf 'CHECKPOINT 11 OK: %s resurrected once and worker received catchup payload\n' "$issue"
@@ -308,7 +345,6 @@ checkpoint_twelve() {
   state | jq -e --arg root "$root" --arg promoted "$SMOKE_QUEUED_ISSUE" \
     '(.admission.active | index($root) == null) and (.admission.active | index($promoted) != null)' >/dev/null ||
     fail "closed tree is still active or queued issue was not promoted"
-  printf 'CHECKPOINT 12 OK: linger released the slot and %s was promoted\n' "$SMOKE_QUEUED_ISSUE"
 }
 
 if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then
@@ -332,6 +368,7 @@ require_env SMOKE_PROJECT
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
+command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
 case "$(stored_webhook_mode)" in
   none)

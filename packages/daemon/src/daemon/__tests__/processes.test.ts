@@ -61,7 +61,7 @@ function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
     generation,
     locator: {
       tmuxSession: "legion-omp",
-      tmuxWindow: "sjawhar-legion-42",
+      tmuxWindowId: "@42",
       ompSessionFile: "/state/trees/sjawhar-legion-42/.omp/session.json",
     },
     status: "active",
@@ -94,7 +94,9 @@ function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number 
 
 function manager(
   state = newLegionState("omp", 1),
-  options: Partial<ProcessManagerDeps> = {}
+  options: Partial<
+    ProcessManagerDeps & { readProcessCmdline?: (pid: number) => Promise<string> }
+  > = {}
 ): {
   manager: ProcessManager;
   state: LegionState;
@@ -126,6 +128,7 @@ function manager(
     provisioningToken: async () => "daemon-installation-token",
     statPrompt: async () => {},
     ompInvocation: "/opt/oh-my-pi/18.0.3/omp",
+    readProcessCmdline: async () => "omp\0",
     panePath: "/full/bin:/usr/bin",
     workerCatchup: {
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
@@ -154,6 +157,13 @@ function manager(
         const workspaceDir = command[3];
         if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
         await mkdir(workspaceDir, { recursive: true });
+      }
+      if (
+        command[0] === "tmux" &&
+        (command[1] === "new-window" || command[1] === "new-session") &&
+        result.stdout.trim() === ""
+      ) {
+        return { ...result, stdout: "@42\n" };
       }
       return result;
     },
@@ -236,14 +246,17 @@ describe("ProcessManager", () => {
       ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
       ["git", `--git-dir=${repo}/.git`, "config", "credential.helper", "!legion credential"],
       ["tmux", "has-session", "-t", "legion-omp"],
-      ["tmux", "new-session", "-d", "-s", "legion-omp"],
       [
         "tmux",
-        "new-window",
-        "-t",
+        "new-session",
+        "-d",
+        "-s",
         "legion-omp",
         "-n",
-        "sjawhar-legion-42",
+        "sjawhar__legion-42",
+        "-P",
+        "-F",
+        "#{window_id}",
         "-e",
         "LEGION_TREE=sjawhar/legion#42",
         "-e",
@@ -270,6 +283,7 @@ describe("ProcessManager", () => {
         "PATH=/full/bin:/usr/bin",
         `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
       ],
+      ["tmux", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
     ]);
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
@@ -286,6 +300,111 @@ describe("ProcessManager", () => {
       },
     });
   });
+  it("gives collision-prone issue paths distinct escaped cosmetic window names", async () => {
+    const stateDir = await temporaryDir();
+    const left = formatIssueKey("trajectory-labs", "pbc-legion-smoke", 1);
+    const right = formatIssueKey("trajectory-labs-pbc", "legion-smoke", 1);
+    const { manager: processes, commands } = manager(newLegionState("omp", 2), {
+      config: config(stateDir, { admissionCap: 2 }),
+    });
+
+    await processes.spawnRoot(left);
+    await processes.spawnRoot(right);
+
+    const names = commands
+      .filter((command) => command[0] === "tmux" && command.includes("-n"))
+      .map((command) => command[command.indexOf("-n") + 1]);
+    expect(names).toEqual([
+      "trajectory_hlabs__pbc_hlegion_hsmoke-1",
+      "trajectory_hlabs_hpbc__legion_hsmoke-1",
+    ]);
+  });
+
+  it("caps an escaped cosmetic window name", async () => {
+    const stateDir = await temporaryDir();
+    const issue = formatIssueKey("a".repeat(200), "b".repeat(200), 1);
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+    });
+
+    await processes.spawnRoot(issue);
+
+    const window = commands.find((command) => command[0] === "tmux" && command.includes("-n"));
+    expect(window?.[window.indexOf("-n") + 1]).toHaveLength(160);
+  });
+
+  it("records a new tmux window id and probes that id rather than its cosmetic name", async () => {
+    const stateDir = await temporaryDir();
+    const commands: string[][] = [];
+    const { manager: processes, state } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "has-session") return { stdout: "", exitCode: 0 };
+        if (command[1] === "new-window") return { stdout: "@314\n", exitCode: 0 };
+        if (command[1] === "list-panes" && command.includes("@314")) {
+          return { stdout: "12345\n", exitCode: 0 };
+        }
+        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
+        return { stdout: "sjawhar-legion-42\n", exitCode: 0 };
+      },
+    });
+
+    await processes.spawnRoot(root);
+
+    expect(state.trees[root]?.locator).toMatchObject({
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@314",
+    });
+    expect(await processes.probe(root)).toBe("alive");
+    expect(commands).toContainEqual(["tmux", "list-panes", "-t", "@314", "-F", "#{pane_pid}"]);
+  });
+
+  it("rejects a live pane whose process command is not OMP", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root]?.locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    locator.tmuxWindowId = "@314";
+    const { manager: processes } = manager(state, {
+      readProcessCmdline: async () => "bash\0",
+      run: liveRun,
+    });
+
+    expect(await processes.probe(root)).toBe("dead");
+  });
+
+  it("kills only tmux windows unowned by a tree or controller locator", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.controllerLocator = { tmuxSession: "legion-omp", tmuxWindowId: "@43" };
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      run: async (command) => {
+        commands.push(command);
+        if (command[1] === "list-windows") return { stdout: "@42\n@43\n@99\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.reconcileTmuxWindows();
+
+    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@99"]);
+  });
+
+  it("kills and clears a dead tree's tmux locator", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
+    state.admission.active.push(root);
+    const { manager: processes, commands } = manager(state);
+
+    await processes.markProcessDead(root);
+
+    expect(state.trees[root]?.locator).toBeUndefined();
+    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
+  });
+
   it("passes the packaged extension root to OMP discovery for root and controller windows", async () => {
     const stateDir = await temporaryDir();
     const ompInvocation = "/opt/oh-my-pi/18.0.3/omp";
@@ -306,7 +425,9 @@ describe("ProcessManager", () => {
     const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     const controllerDir = path.join(stateDir, "controller");
     const extensionDir = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
-    const windows = commands.filter((command) => command[1] === "new-window");
+    const windows = commands.filter(
+      (command) => command[1] === "new-window" || command[1] === "new-session"
+    );
     expect(windows.map((command) => command.at(-1))).toEqual([
       `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
       `cd ${controllerDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/controller-root.md)"`,
@@ -621,7 +742,7 @@ describe("ProcessManager", () => {
     );
   });
 
-  it("releases the admission slot at linger start, then shuts down and closes its recorded tmux tree", () => {
+  it("releases the admission slot at linger start, then shuts down and closes its recorded tmux tree", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.admission.active.push(root);
@@ -636,12 +757,12 @@ describe("ProcessManager", () => {
     });
     expect(state.admission).toEqual({ cap: 1, active: [], queue: [] });
 
-    processes.expireLinger(root);
+    await processes.expireLinger(root);
 
     expect(state.trees[root].status).toBe("closed");
     expect(state.roles[roleToken("omp", root, "architect")]).toBeUndefined();
     expect(publications).toEqual([]);
-    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "legion-omp:sjawhar-legion-42"]);
+    expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@42"]);
   });
 
   it("requests control directives on the sanitized tree generation topic", async () => {
@@ -859,6 +980,7 @@ describe("ProcessManager", () => {
     await processes.markControllerReady();
 
     expect(commands.filter((command) => command[1] === "new-window")).toHaveLength(1);
+    expect(state.controllerLocator).toEqual({ tmuxSession: "legion-omp", tmuxWindowId: "@42" });
     expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
   });
 
@@ -1212,18 +1334,67 @@ describe("ProcessManager", () => {
     });
   });
 
-  // Requires a real tmux installation to exercise pane lifecycle.
+  // Requires a real tmux installation to prove window IDs survive cosmetic-name collisions.
   it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
-    "probes a real tmux pane as alive, detects its death, and resurrects it once",
+    "probes its live root through its window id when a duplicate cosmetic name exists",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `smoke${Date.now()}`;
+      const project = `duplicate${Date.now()}`;
       const state = newLegionState(project, 1);
       const session = `legion-${project}`;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
-          command[1] === "new-window" ? [...command.slice(0, -1), "sleep 999"] : command;
+          command[1] === "new-window" || (command[1] === "new-session" && command.includes("-n"))
+            ? [...command.slice(0, -1), "sleep 999"]
+            : command;
+        const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stdout: `${stdout}${stderr}`, exitCode };
+      };
+      const { manager: processes } = manager(state, {
+        config: config(stateDir, { legionId: project }),
+        readProcessCmdline: async () => "omp\0",
+        run: commandRunner,
+      });
+
+      try {
+        await processes.spawnRoot(root);
+        await commandRunner([
+          "tmux",
+          "new-window",
+          "-t",
+          session,
+          "-n",
+          "sjawhar-legion-42",
+          "sleep 999",
+        ]);
+
+        expect(await processes.probe(root)).toBe("alive");
+      } finally {
+        await commandRunner(["tmux", "kill-session", "-t", session]);
+      }
+    }
+  );
+
+  // Requires a real tmux installation to ensure session creation has no leftover shell window.
+  it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
+    "creates the first live root without a default bash window",
+    async () => {
+      const stateDir = await temporaryDir();
+      const project = `defaultwindow${Date.now()}`;
+      const state = newLegionState(project, 1);
+      const session = `legion-${project}`;
+      const commandRunner = async (command: string[]) => {
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        const actual =
+          command[1] === "new-window" || (command[1] === "new-session" && command.includes("-n"))
+            ? [...command.slice(0, -1), "sleep 999"]
+            : command;
         const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
         const [stdout, stderr, exitCode] = await Promise.all([
           new Response(child.stdout).text(),
@@ -1239,13 +1410,61 @@ describe("ProcessManager", () => {
 
       try {
         await processes.spawnRoot(root);
+        const windows = await commandRunner([
+          "tmux",
+          "list-windows",
+          "-t",
+          session,
+          "-F",
+          "#{window_name}",
+        ]);
+
+        expect(windows.stdout.split(/\r?\n/)).not.toContain("bash");
+      } finally {
+        await commandRunner(["tmux", "kill-session", "-t", session]);
+      }
+    }
+  );
+
+  // Requires a real tmux installation to exercise pane lifecycle.
+  it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
+    "probes a real tmux pane as alive, detects its death, and resurrects it once",
+    async () => {
+      const stateDir = await temporaryDir();
+      const project = `smoke${Date.now()}`;
+      const state = newLegionState(project, 1);
+      const session = `legion-${project}`;
+      const commandRunner = async (command: string[]) => {
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        const actual =
+          command[1] === "new-window" || (command[1] === "new-session" && command.includes("-n"))
+            ? [...command.slice(0, -1), "sleep 999"]
+            : command;
+        const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stdout: `${stdout}${stderr}`, exitCode };
+      };
+      const { manager: processes } = manager(state, {
+        config: config(stateDir, { legionId: project }),
+        readProcessCmdline: async () => "omp\0",
+        run: commandRunner,
+      });
+
+      try {
+        await processes.spawnRoot(root);
         expect(await processes.probe(root)).toBe("alive");
-        await commandRunner(["tmux", "kill-pane", "-t", `${session}:sjawhar-legion-42`]);
+        const firstWindowId = state.trees[root]?.locator?.tmuxWindowId;
+        if (!firstWindowId) throw new Error("live root is missing its tmux window id");
+        await commandRunner(["tmux", "kill-pane", "-t", firstWindowId]);
         expect(await processes.probe(root)).toBe("dead");
         await Promise.all([processes.resurrect(root), processes.resurrect(root)]);
         expect(await processes.probe(root)).toBe("alive");
         expect((await commandRunner(["tmux", "list-windows", "-t", session])).stdout).toContain(
-          "sjawhar-legion-42"
+          "sjawhar__legion-42"
         );
       } finally {
         await commandRunner(["tmux", "kill-session", "-t", session]);
