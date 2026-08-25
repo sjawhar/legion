@@ -329,7 +329,7 @@ async function setJjIdentity(cwd: string, gitName: string, gitEmail: string): Pr
     ["user.name", gitName],
     ["user.email", gitEmail],
   ] as const) {
-    const child = Bun.spawn(["jj", "config", "set", "--repo", key, value], {
+    const child = Bun.spawn(["jj", "config", "set", "--repo", key, JSON.stringify(value)], {
       cwd,
       stdout: "ignore",
       stderr: "pipe",

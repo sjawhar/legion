@@ -302,6 +302,9 @@ describe("daemon end-to-end", () => {
           }
           return { stdout: `${windowId}\n`, stderr: "", exitCode: 0 };
         }
+        if (command[1] === "kill-window") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
         if (command[1] === "set-option") {
           return { stdout: "", stderr: "", exitCode: 0 };
         }
@@ -526,6 +529,32 @@ describe("daemon end-to-end", () => {
           sessionId: "child-worker-session",
           spawnToken: workerSpawnToken,
         });
+        const phase = await post(`${daemonUrl}/legion/v1/phase`, {
+          tree: root,
+          issue: child,
+          phase: "implementer",
+          sessionId: "child-worker-session",
+          spawnToken: workerSpawnToken,
+        });
+        const workerPhase = (await phase.json()) as {
+          secret: string;
+          gitName: string;
+          gitEmail: string;
+        };
+        expect(workerPhase).toEqual({
+          secret: expect.any(String),
+          gitName: "legion-implement[bot]",
+          gitEmail: "42+legion-implement[bot]@users.noreply.github.com",
+        });
+        const grant = await post(`${daemonUrl}/legion/v1/grants`, {
+          tree: root,
+          issue: child,
+          sessionId: "child-worker-session",
+          secret: workerPhase.secret,
+        });
+        const workerGrant = (await grant.json()) as { grantId: string; expiresAt: string };
+        expect(workerGrant.grantId).toMatch(/^[0-9a-f-]{36}$/);
+        expect(workerGrant.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
         await post(`${daemonUrl}/legion/v1/waves/release`, {
           tree: root,
           children: [child],

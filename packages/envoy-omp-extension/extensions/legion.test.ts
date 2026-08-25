@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
+import { startLegionApi } from "../../daemon/src/daemon/api";
+import { newLegionState } from "../../daemon/src/daemon/legion-state";
 
 mock.module("nats", () => ({
   connect: async () => ({
@@ -1002,6 +1005,202 @@ describe("Legion OMP extension", () => {
       body: { tree, issue, sessionId: "ses_grant", secret: "worker-secret" },
     });
     await sessionShutdown({}, context);
+  });
+  test("refuses a worker shell when the daemon cannot mint its grant", async () => {
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const role = "reviewer";
+    const token = roleToken("omp", issue, role);
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_PROJECT = "omp";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/phase") {
+        return Response.json({
+          secret: "worker-secret",
+          gitName: "Legion Reviewer",
+          gitEmail: "reviewer@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ error: "token lease unavailable" }, { status: 503 });
+      }
+      return Response.json({
+        session_id: "ses_grant_refused",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+
+    legionExtension(fixture.pi);
+    const beforeAgentStart = fixture.handlers.get("before_agent_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    const sessionShutdown = fixture.handlers.get("session_shutdown");
+    if (beforeAgentStart === undefined || toolCall === undefined || sessionShutdown === undefined) {
+      throw new Error("worker lifecycle handlers were not registered");
+    }
+    const workspace = await createJjWorkspace();
+    const context = { ...sessionContext("ses_grant_refused"), cwd: workspace };
+    await beforeAgentStart(
+      {
+        prompt:
+          `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
+          `workspace="${workspace}"/>`,
+      },
+      context
+    );
+
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-grant-refused",
+          input: { command: "env | grep LEGION" },
+        },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: 'POST /legion/v1/grants failed with 503: {"error":"token lease unavailable"}',
+    });
+    await sessionShutdown({}, context);
+  });
+  test("uses a non-empty real daemon grant in a worker shell", async () => {
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const role = "implementer";
+    const token = roleToken("omp", issue, role);
+    const spawnToken = "worker-spawn-capability";
+    const state = newLegionState("omp", 1);
+    state.issues[tree] = {
+      key: tree,
+      title: "Root",
+      state: "open",
+      children: [issue],
+      released: true,
+      labels: [],
+    };
+    state.issues[issue] = {
+      key: issue,
+      title: "Worker",
+      state: "open",
+      parent: tree,
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[tree] = {
+      root: tree,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.spawnCapabilities[createHash("sha256").update(spawnToken).digest("hex")] = {
+      tree,
+      issue,
+      role,
+    };
+    const daemon = startLegionApi(
+      {
+        port: 0,
+        hostname: "127.0.0.1",
+        gates: { design: "off", merge: "off" },
+      },
+      {
+        state,
+        tokenManager: {
+          getToken: async () => ({
+            token: "real-daemon-token",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            gitIdentity: {
+              name: "legion-implementer[bot]",
+              email: "271566630+legion-implementer[bot]@users.noreply.github.com",
+            },
+          }),
+        },
+        processManager: {
+          admit: () => "spawned",
+          releaseSlot: () => {},
+          registerRoleBacking: () => {},
+          markProcessDead: () => {},
+          closeTree: () => {},
+          markTreeReady: () => {},
+          beginLinger: () => {},
+        },
+        envoyPublish: async () => {},
+        dispatch: { url: "http://dispatch.test", bearer: "dispatch-bearer" },
+        onControllerReady: async () => {},
+        onControllerEvent: async () => {},
+      }
+    );
+    const daemonUrl = `http://127.0.0.1:${daemon.server.port}`;
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = daemonUrl;
+    process.env.LEGION_PROJECT = "omp";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.origin === daemonUrl) return originalFetch(input, init);
+      return Response.json({
+        session_id: "ses_real_daemon_grant",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const beforeAgentStart = fixture.handlers.get("before_agent_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    const sessionShutdown = fixture.handlers.get("session_shutdown");
+    if (beforeAgentStart === undefined || toolCall === undefined || sessionShutdown === undefined) {
+      daemon.stop();
+      throw new Error("worker lifecycle handlers were not registered");
+    }
+    const workspace = await createJjWorkspace();
+    const context = { ...sessionContext("ses_real_daemon_grant"), cwd: workspace };
+    try {
+      await beforeAgentStart(
+        {
+          prompt:
+            `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
+            `spawnToken="${spawnToken}" workspace="${workspace}"/>`,
+        },
+        context
+      );
+      const result = await toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-real-daemon-grant",
+          input: { command: "env | grep LEGION_GRANT" },
+        },
+        context
+      );
+      if (
+        typeof result !== "object" ||
+        result === null ||
+        !("input" in result) ||
+        typeof result.input !== "object" ||
+        result.input === null ||
+        !("command" in result.input) ||
+        typeof result.input.command !== "string"
+      ) {
+        throw new Error("worker shell was not rewritten with a daemon grant");
+      }
+      const [grantExport] = result.input.command.split("\n", 1);
+      expect(grantExport).toMatch(/^export LEGION_GRANT=[0-9a-f-]{36}$/);
+      expect(grantExport).not.toBe("export LEGION_GRANT=");
+      expect(await jjConfig(workspace, "user.name")).toBe("legion-implementer[bot]");
+      expect(await jjConfig(workspace, "user.email")).toBe(
+        "271566630+legion-implementer[bot]@users.noreply.github.com"
+      );
+      await sessionShutdown({}, context);
+    } finally {
+      daemon.stop();
+    }
   });
   test("parks a worker by deleting its interest and releasing its worker-budget permit", async () => {
     const deletedSessions: string[] = [];
