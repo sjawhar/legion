@@ -720,7 +720,7 @@ export default function legionExtension(pi: PiApi): void {
       }
       return;
     }
-    if (context.taskDepth === 0) await bootstrapRoot(context);
+    await bootstrapRoot(context);
   });
 
   pi.on("before_agent_start", async (event, context) => {

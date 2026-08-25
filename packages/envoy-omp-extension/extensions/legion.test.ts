@@ -323,7 +323,7 @@ describe("Legion OMP extension", () => {
     expect(classifySession({}, "legion-architect", 0)).toEqual({ kind: "not-legion" });
     expect(classifySession({}, "scout", 1)).toEqual({ kind: "not-legion" });
   });
-  test("defers root bootstrap until a prompt identifies the session as non-worker", async () => {
+  test("restores root liveness from session_start when the host omits task depth", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const tree = "owner/repo#42";
     const token = roleToken("omp", tree, "architect");
@@ -356,25 +356,38 @@ describe("Legion OMP extension", () => {
 
     legionExtension(fixture.pi);
     const sessionStart = fixture.handlers.get("session_start");
-    const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    if (sessionStart === undefined || beforeAgentStart === undefined) {
-      throw new Error("Legion lifecycle handlers were not registered");
-    }
+    if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
     await sessionStart({}, context);
-    expect(requests).toEqual([]);
 
-    await beforeAgentStart({ prompt: "Start the root architect" }, context);
-
-    expect(requests[0]).toEqual({
-      path: "/legion/v1/process/started",
-      body: {
-        tree,
-        generation: 3,
-        bootToken: "boot-before-agent-start",
-        rootSessionId: "ses_root",
-        ompSessionFile: "/tmp/session.jsonl",
+    expect(requests).toEqual([
+      {
+        path: "/legion/v1/process/started",
+        body: {
+          tree,
+          generation: 3,
+          bootToken: "boot-before-agent-start",
+          rootSessionId: "ses_root",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
-    });
+      { path: "/v1/roles/set", body: { session_id: "ses_root", role: token } },
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_root",
+          dir: "/tmp/legion-workspace",
+          topics: [agentSubject("ses_root")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
+      {
+        path: "/legion/v1/process/ready",
+        body: { tree, sessionId: "ses_root", secret: "root-secret" },
+      },
+    ]);
   });
   test("registers the root process before claiming its role and agent delivery subject", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
