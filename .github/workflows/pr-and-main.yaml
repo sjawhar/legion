@@ -53,6 +53,7 @@ jobs:
       - name: Install daemon live-test tools
         env:
           MISE_VERSION: v2026.8.12
+          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl https://mise.run | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
