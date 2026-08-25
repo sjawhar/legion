@@ -21,17 +21,18 @@ The localhost-only Legion API lives in `api.ts`.
 | --- | --- |
 | `index.ts` | Boots state, core-NATS intake, process manager, API, resync, linger expiry, and signal persistence. |
 | `config.ts` | Validates file and environment lifecycle configuration. |
-| `events.ts` | Routes raw webhook envelopes through pure reducers and executes publication, linger, probe, and approval effects. |
-| `processes.ts` | Admission, tmux root/controller spawning, exception recovery, resurrection, and linger. |
+| `events.ts` | Routes raw webhook envelopes through pure reducers, executes effects, and persists unacknowledged role delivery for redelivery. |
+| `processes.ts` | Admission, tmux root/controller spawning, worker exception recovery, resurrection, and linger. |
 | `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
 | `legion-state.ts` | Strict versioned state schema and atomic persistence. |
 | `catchup.ts` | Derived overseer and worker catch-up payloads. |
-| `resync.ts` | Low-frequency board convergence and residual anomaly reporting for the controller. |
+| `resync.ts` | Low-frequency board convergence, re-emitted triage for unadmitted tracked roots, and residual anomaly reporting. |
 | `approval-check.ts` | Human approval status backstop for the current PR head. |
 
 ## Operational invariants
 
 - Role lanes use core NATS; the daemon, not the broker, persists failed role delivery.
+- Controller delivery exceptions enter durable `controllerHeldEvents` before replacement is requested; `/controller/ready` redelivers each held event and removes it only after Envoy acknowledges publication.
 - Root processes and the controller are tmux windows under global admission control. The daemon stores tmux window IDs; names are cosmetic, escaped issue labels.
 - Process failure recovery is exception-driven. A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.
 - A lingering or closed root releases its admission slot, kills its recorded window, clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
