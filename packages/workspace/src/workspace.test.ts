@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { formatIssueKey } from "@legion/contracts";
@@ -49,6 +49,9 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 const STOCK_JJ = ["mise", "x", "github:jj-vcs/jj@0.44.0", "--", "jj"];
+const credentialHelper =
+  "!/opt/legion/bin/bun /opt/legion/packages/daemon/src/cli/index.ts credential";
+const SYSTEM_GIT = "/usr/bin/git";
 
 async function runCommand(command: string[], options?: RunCall["opts"]): Promise<RunResult> {
   const child = Bun.spawn(command, {
@@ -63,6 +66,54 @@ async function runCommand(command: string[], options?: RunCall["opts"]): Promise
     child.exited,
   ]);
   return { exitCode, stdout, stderr };
+}
+async function fillCredential(
+  gitDir: string,
+  env: Readonly<Record<string, string>>
+): Promise<RunResult> {
+  const child = Bun.spawn(
+    [
+      "sh",
+      "-c",
+      `printf 'protocol=https\\nhost=github.com\\n\\n' | ${SYSTEM_GIT} --git-dir="$1" credential fill`,
+      "sh",
+      gitDir,
+    ],
+    {
+      env: { ...process.env, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+function credentialConfigCommands(gitDir: string, helper: string): string[][] {
+  return [
+    ["git", `--git-dir=${gitDir}`, "config", "--replace-all", "credential.helper", ""],
+    ["git", `--git-dir=${gitDir}`, "config", "--add", "credential.helper", helper],
+    [
+      "git",
+      `--git-dir=${gitDir}`,
+      "config",
+      "--replace-all",
+      "credential.https://github.com.helper",
+      "",
+    ],
+    [
+      "git",
+      `--git-dir=${gitDir}`,
+      "config",
+      "--add",
+      "credential.https://github.com.helper",
+      helper,
+    ],
+    ["git", `--git-dir=${gitDir}`, "config", "credential.interactive", "false"],
+  ];
 }
 
 describe("provisionIssueWorkspace", () => {
@@ -79,6 +130,7 @@ describe("provisionIssueWorkspace", () => {
       extensionPackage,
       stateDir,
       provisioningToken: async () => "installation-token",
+      credentialHelper,
       run: async (cmd, opts) => {
         calls.push({ cmd, opts });
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
@@ -114,13 +166,7 @@ describe("provisionIssueWorkspace", () => {
         repoCloneDir,
       ],
       ["jj", "bookmark", "set", bookmark, "--allow-backwards"],
-      [
-        "git",
-        `--git-dir=${repoCloneDir}/.git`,
-        "config",
-        "credential.helper",
-        "!legion credential",
-      ],
+      ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
     ]);
     expect(
       calls.flatMap(({ cmd }) => cmd).some((argument) => argument.startsWith("user."))
@@ -143,6 +189,7 @@ describe("provisionIssueWorkspace", () => {
       extensionPackage,
       stateDir,
       provisioningToken: async () => "installation-token",
+      credentialHelper,
       run: async (cmd) => {
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           expect(existsSync(path.dirname(workspaceDir))).toBeTrue();
@@ -171,6 +218,7 @@ describe("provisionIssueWorkspace", () => {
       extensionPackage,
       stateDir,
       provisioningToken: async () => "installation-token",
+      credentialHelper,
       run: async (cmd) => {
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -188,7 +236,84 @@ describe("provisionIssueWorkspace", () => {
       "credential.helper",
     ]);
     expect(credential.exitCode).toBe(0);
-    expect(credential.stdout.trim()).toBe("!legion credential");
+    expect(credential.stdout.trim()).toBe(credentialHelper);
+  });
+  test("runs the supplied pinned credential helper instead of a PATH Legion and fails loudly", async () => {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const helperDir = await temporaryDirectory();
+    const issue = formatIssueKey("acme", "widgets", 42);
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "issue-42");
+    const gitDir = path.join(repoCloneDir, ".git");
+    const runtime = path.join(helperDir, "bun");
+    const cli = path.join(helperDir, "legion-cli.ts");
+    const decoy = path.join(helperDir, "legion");
+    const decoyMarker = path.join(helperDir, "decoy-ran");
+    const pinnedHelper = `!${runtime} ${cli} credential`;
+    await writeFile(
+      runtime,
+      `#!/bin/sh
+if [ "$1" != "${cli}" ] || [ "$2" != "credential" ] || [ "$3" != "get" ]; then
+  printf '%s\n' "unexpected pinned helper invocation: $*" >&2
+  exit 86
+fi
+if [ "\${LEGION_HELPER_FAIL:-}" = "1" ]; then
+  printf '%s\n' "pinned helper failed" >&2
+  exit 87
+fi
+printf '%s\n' "username=x-access-token" "password=bot-token"
+`
+    );
+    await writeFile(decoy, `#!/bin/sh\ntouch "$LEGION_DECOY_MARKER"\nexit 88\n`);
+    await chmod(runtime, 0o700);
+    await chmod(decoy, 0o700);
+    await mkdir(repoCloneDir, { recursive: true });
+    expect((await runCommand([SYSTEM_GIT, "init", "--bare", gitDir])).exitCode).toBe(0);
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+    await provisionIssueWorkspace(issue, {
+      extensionPackage,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      credentialHelper: pinnedHelper,
+      run: (cmd, opts) =>
+        cmd[0] === "git"
+          ? runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts)
+          : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+
+    const configured = await runCommand([
+      SYSTEM_GIT,
+      `--git-dir=${gitDir}`,
+      "config",
+      "--get",
+      "credential.helper",
+    ]);
+    expect(configured.stdout.trim()).toBe(pinnedHelper);
+
+    const helperEnv = {
+      PATH: `${helperDir}:${process.env.PATH ?? ""}`,
+      LEGION_DECOY_MARKER: decoyMarker,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      HOME: helperDir,
+      XDG_CONFIG_HOME: helperDir,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_COUNT: "0",
+    };
+    const credential = await fillCredential(gitDir, helperEnv);
+    expect(credential.exitCode).toBe(0);
+    expect(credential.stdout).toContain("username=x-access-token\npassword=bot-token\n");
+    expect(existsSync(decoyMarker)).toBeFalse();
+
+    const failedCredential = await fillCredential(gitDir, {
+      ...helperEnv,
+      LEGION_HELPER_FAIL: "1",
+    });
+    expect(failedCredential.exitCode).not.toBe(0);
+    expect(failedCredential.stderr).toContain("pinned helper failed");
   });
 
   test("does not add a second workspace when an issue is reactivated", async () => {
@@ -204,6 +329,7 @@ describe("provisionIssueWorkspace", () => {
       extensionPackage,
       stateDir,
       provisioningToken: async () => "installation-token",
+      credentialHelper,
       run: async (cmd: string[], opts?: RunCall["opts"]) => {
         calls.push({ cmd, opts });
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
@@ -228,13 +354,7 @@ describe("provisionIssueWorkspace", () => {
       ["jj", "workspace", "update-stale"],
       ["jj", "git", "fetch", "-R", repoCloneDir],
       ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
-      [
-        "git",
-        `--git-dir=${repoCloneDir}/.git`,
-        "config",
-        "credential.helper",
-        "!legion credential",
-      ],
+      ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
     ]);
   });
 
@@ -261,6 +381,7 @@ describe("provisionIssueWorkspace", () => {
         extensionPackage,
         stateDir,
         provisioningToken: async () => "installation-token",
+        credentialHelper,
         run: (cmd: string[], opts?: RunCall["opts"]) =>
           runCommand(cmd[0] === "jj" ? [...command, ...cmd.slice(1)] : cmd, opts),
       };
@@ -331,6 +452,7 @@ describe("provisionIssueWorkspace", () => {
         extensionPackage,
         stateDir,
         provisioningToken: async () => "installation-token",
+        credentialHelper,
         run: async (cmd, opts) => {
           calls.push({ cmd, opts });
           if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
@@ -386,7 +508,7 @@ describe("provisionIssueWorkspace", () => {
         repoCloneDir,
       ],
       ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
-      ["git", `--git-dir=${gitDir}`, "config", "credential.helper", "!legion credential"],
+      ...credentialConfigCommands(gitDir, credentialHelper),
     ]);
   });
 
@@ -401,6 +523,7 @@ describe("provisionIssueWorkspace", () => {
         extensionPackage,
         stateDir,
         provisioningToken: async () => "installation-token",
+        credentialHelper,
         run: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       })
     ).rejects.toThrow(`Incomplete Jujutsu clone at ${repoCloneDir}`);

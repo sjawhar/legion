@@ -547,6 +547,7 @@ export default function legionExtension(pi: PiApi): void {
     const provision = provisionIssueWorkspace(issue, {
       extensionPackage: path.resolve(import.meta.dir, ".."),
       stateDir: workspaceStateDir,
+      credentialHelper: requiredEnvironment(process.env, "LEGION_CREDENTIAL_HELPER"),
       provisioningToken: async () =>
         (
           await createLegionDaemonClient(

@@ -13,15 +13,12 @@ const MODE_TO_ROLE: Record<string, GitHubAppRole> = {
   plan: "review",
 };
 
-const ROLE_TO_APP_NAME: Record<GitHubAppRole, string> = {
-  implement: "legion-implement",
-  review: "legion-review",
-};
-
 /** Token refresh window — regenerate when within 5 minutes of expiry */
 const REFRESH_WINDOW_MS = 5 * 60 * 1000;
 const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
 const INSTALLATIONS_PER_PAGE = 100;
+const GITHUB_APP_URL = "https://api.github.com/app";
+const GITHUB_USERS_URL = "https://api.github.com/users";
 
 export type GitHubFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -38,6 +35,45 @@ export function getGitIdentity(appId: string, appName: string): { name: string; 
     name: `${appName}[bot]`,
     email: `${appId}+${appName}[bot]@users.noreply.github.com`,
   };
+}
+
+async function fetchGitIdentity(
+  jwt: string,
+  fetchFn: GitHubFetch
+): Promise<{ name: string; email: string }> {
+  const appResponse = await fetchFn(GITHUB_APP_URL, {
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "legion-daemon",
+    },
+  });
+  if (!appResponse.ok) {
+    throw new Error(`GitHub App identity lookup failed (${appResponse.status})`);
+  }
+  const app: unknown = await appResponse.json();
+  if (!isRecord(app) || typeof app.slug !== "string" || app.slug.length === 0) {
+    throw new Error("GitHub App identity lookup returned an invalid app slug");
+  }
+
+  const botLogin = `${app.slug}[bot]`;
+  const botResponse = await fetchFn(`${GITHUB_USERS_URL}/${encodeURIComponent(botLogin)}`, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "legion-daemon",
+    },
+  });
+  if (!botResponse.ok) {
+    throw new Error(`GitHub App bot identity lookup failed (${botResponse.status})`);
+  }
+  const bot: unknown = await botResponse.json();
+  if (
+    !isRecord(bot) ||
+    (typeof bot.id !== "string" && (typeof bot.id !== "number" || !Number.isFinite(bot.id)))
+  ) {
+    throw new Error("GitHub App bot identity lookup returned an invalid bot user id");
+  }
+  return getGitIdentity(String(bot.id), app.slug);
 }
 
 export async function exchangeToken(
@@ -111,6 +147,11 @@ export class TokenManager {
   private readonly installationCache = new Map<GitHubAppRole, Map<string, string>>();
   private readonly missingInstallationCache = new Map<GitHubAppRole, Set<string>>();
   private readonly fetchFn: GitHubFetch;
+  private readonly gitIdentityCache = new Map<string, { name: string; email: string }>();
+  private readonly pendingGitIdentities = new Map<
+    string,
+    Promise<{ name: string; email: string }>
+  >();
 
   constructor(
     private readonly config: GitHubAppsConfig,
@@ -188,16 +229,16 @@ export class TokenManager {
   }
 
   private async generateToken(
-    role: GitHubAppRole,
+    _role: GitHubAppRole,
     roleConfig: GitHubAppRoleConfig,
     installationId: string,
     cacheKey: string
   ): Promise<CachedToken> {
     const jwt = await generateJwt(roleConfig.appId, roleConfig.privateKey);
-    const { token, expiresAt } = await exchangeToken(jwt, installationId, this.fetchFn);
-
-    const appName = ROLE_TO_APP_NAME[role];
-    const gitIdentity = getGitIdentity(roleConfig.appId, appName);
+    const [{ token, expiresAt }, gitIdentity] = await Promise.all([
+      exchangeToken(jwt, installationId, this.fetchFn),
+      this.gitIdentity(roleConfig.appId, jwt),
+    ]);
     const result: CachedToken = {
       token,
       expiresAt: new Date(expiresAt),
@@ -206,6 +247,24 @@ export class TokenManager {
 
     this.cache.set(cacheKey, result);
     return result;
+  }
+
+  private async gitIdentity(appId: string, jwt: string): Promise<{ name: string; email: string }> {
+    const cached = this.gitIdentityCache.get(appId);
+    if (cached) return cached;
+
+    const pending = this.pendingGitIdentities.get(appId);
+    if (pending) return await pending;
+
+    const lookup = fetchGitIdentity(jwt, this.fetchFn);
+    this.pendingGitIdentities.set(appId, lookup);
+    try {
+      const identity = await lookup;
+      this.gitIdentityCache.set(appId, identity);
+      return identity;
+    } finally {
+      this.pendingGitIdentities.delete(appId);
+    }
   }
 
   private async resolveInstallationId(

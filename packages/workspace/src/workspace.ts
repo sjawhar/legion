@@ -23,6 +23,7 @@ export interface WorkspaceCommandOptions {
 export interface ProvisionIssueWorkspaceDeps {
   readonly run: (cmd: string[], opts?: WorkspaceCommandOptions) => Promise<RunResult>;
   readonly provisioningToken: () => Promise<string>;
+  readonly credentialHelper: string;
   readonly extensionPackage: string;
   readonly stateDir: string;
   readonly maxRecursionDepth?: number;
@@ -56,7 +57,6 @@ async function runChecked(
   if (result.exitCode !== 0) throw commandFailure(result, cmd);
 }
 
-const CREDENTIAL_HELPER = "!legion credential";
 const PROVISIONING_TOKEN_ENV = "LEGION_PROVISIONING_TOKEN";
 const PROVISIONING_ASKPASS_SCRIPT = `#!/bin/sh
 case "$1" in
@@ -236,8 +236,40 @@ export async function provisionIssueWorkspace(
     "git",
     `--git-dir=${gitDir}`,
     "config",
+    "--replace-all",
     "credential.helper",
-    CREDENTIAL_HELPER,
+    "",
+  ]);
+  await runChecked(deps, [
+    "git",
+    `--git-dir=${gitDir}`,
+    "config",
+    "--add",
+    "credential.helper",
+    deps.credentialHelper,
+  ]);
+  await runChecked(deps, [
+    "git",
+    `--git-dir=${gitDir}`,
+    "config",
+    "--replace-all",
+    "credential.https://github.com.helper",
+    "",
+  ]);
+  await runChecked(deps, [
+    "git",
+    `--git-dir=${gitDir}`,
+    "config",
+    "--add",
+    "credential.https://github.com.helper",
+    deps.credentialHelper,
+  ]);
+  await runChecked(deps, [
+    "git",
+    `--git-dir=${gitDir}`,
+    "config",
+    "credential.interactive",
+    "false",
   ]);
   await writeOmpConfig(
     workspaceDir,

@@ -22,6 +22,10 @@ const NATS_CONNECT_TIMEOUT_MS = 1_000;
 const E2E_TEST_TIMEOUT_MS = NATS_READY_TIMEOUT_MS + 5_000;
 
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+const PINNED_CREDENTIAL_HELPER = `!${process.execPath} ${path.resolve(
+  import.meta.dir,
+  "../../cli/index.ts"
+)} credential`;
 
 const DAEMON_ENVIRONMENT: DaemonEnvironment = {
   commands: {
@@ -246,6 +250,7 @@ describe("daemon end-to-end", () => {
       let controlSubscription: Subscription | undefined;
       let rolePump: Promise<void> | undefined;
       let controlPump: Promise<void> | undefined;
+      const configuredCredentialHelpers: string[][] = [];
 
       const runner = async (command: string[]): Promise<CommandResult> => {
         if (command[0] === "sh") {
@@ -267,6 +272,14 @@ describe("daemon end-to-end", () => {
           const workspaceDir = command[3];
           if (!workspaceDir) throw new Error("Fake Jujutsu workspace is missing its destination");
           await mkdir(workspaceDir, { recursive: true });
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        if (
+          command[0] === "/tools/git" &&
+          command[2] === "config" &&
+          command.includes("credential.helper")
+        ) {
+          configuredCredentialHelpers.push([...command]);
           return { stdout: "", stderr: "", exitCode: 0 };
         }
         if (command[0] === "/tools/jj" || command[0] === "/tools/git") {
@@ -387,8 +400,8 @@ describe("daemon end-to-end", () => {
                 token: "test-token",
                 expiresAt: "2099-01-01T00:00:00.000Z",
                 gitIdentity: {
-                  name: "legion-implement[bot]",
-                  email: "42+legion-implement[bot]@users.noreply.github.com",
+                  name: "legion-implementer[bot]",
+                  email: "271566630+legion-implementer[bot]@users.noreply.github.com",
                 },
               }),
             },
@@ -460,6 +473,15 @@ describe("daemon end-to-end", () => {
         const rootSpawnArgv = await rootSpawn.promise;
         expect(rootSpawnArgv).toContain(`LEGION_DAEMON_URL=http://127.0.0.1:${daemonPort}`);
         expect(rootSpawnArgv).toContain(`ENVOY_NATS_URL=${nats.url}`);
+        expect(rootSpawnArgv).toContain(`LEGION_CREDENTIAL_HELPER=${PINNED_CREDENTIAL_HELPER}`);
+        expect(configuredCredentialHelpers).toContainEqual([
+          "/tools/git",
+          `--git-dir=${path.join(stateDir, "repos", "github.com", "acme", "widgets", ".git")}`,
+          "config",
+          "--add",
+          "credential.helper",
+          PINNED_CREDENTIAL_HELPER,
+        ]);
 
         const rootSessionFile = path.join(
           stateDir,
@@ -543,8 +565,8 @@ describe("daemon end-to-end", () => {
         };
         expect(workerPhase).toEqual({
           secret: expect.any(String),
-          gitName: "legion-implement[bot]",
-          gitEmail: "42+legion-implement[bot]@users.noreply.github.com",
+          gitName: "legion-implementer[bot]",
+          gitEmail: "271566630+legion-implementer[bot]@users.noreply.github.com",
         });
         const grant = await post(`${daemonUrl}/legion/v1/grants`, {
           tree: root,

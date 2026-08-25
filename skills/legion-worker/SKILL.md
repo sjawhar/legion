@@ -116,9 +116,9 @@ cd -- "<workspace>" && \
   jj -R "<workspace>" git push --bookmark legion/issue-<n> --allow-new
 ```
 
-The provisioned issue workspace configures `credential.helper = !legion credential`, so
-`jj -R "<workspace>" git push` authenticates transparently through the same session
-capability. Never handle a token.
+The provisioned issue workspace configures `credential.helper` with the daemon's absolute
+credential command, so `jj -R "<workspace>" git push` authenticates transparently through the
+same session capability. Never handle a token.
 
 Then create the pull request with the `github` tool's `pr_create` operation. The credential
 helper and `legion gh` provide the GitHub identity; never export, fetch, or replace a token.

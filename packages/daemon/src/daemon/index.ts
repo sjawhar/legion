@@ -20,7 +20,7 @@ import {
 import { type EventPump, type EventPumpDeps, startEventPump } from "./events";
 import { buildRoleEnv, TokenManager } from "./github-apps";
 import { loadState, saveState } from "./legion-state";
-import { ProcessManager, type ProcessManagerDeps } from "./processes";
+import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
 import { runResync } from "./resync";
 
 const LINGER_SWEEP_INTERVAL_MS = 60_000;
@@ -257,6 +257,7 @@ export async function startDaemon(
     config,
     ompInvocation: environment.ompInvocation,
     panePath: environment.paneEnv.PATH,
+    credentialHelper: daemonCredentialHelper(),
     run: runner,
     natsPublish: (subject, data) => nats.publish(subject, data),
     natsRequest: (subject, data) => nats.request(subject, data),

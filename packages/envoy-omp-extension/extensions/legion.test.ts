@@ -112,6 +112,10 @@ type TestPi = {
 type Handler = (event: unknown, context: SessionContext) => Promise<unknown> | unknown;
 
 const originalFetch = globalThis.fetch;
+const TEST_CREDENTIAL_HELPER = `!${process.execPath} ${path.resolve(
+  import.meta.dir,
+  "../../daemon/src/cli/index.ts"
+)} credential`;
 const environmentKeys = [
   "ENVOY_NATS_URL",
   "ENVOY_REGISTER_SESSION",
@@ -127,6 +131,7 @@ const environmentKeys = [
   "LEGION_WORKER_BUDGET",
   "LEGION_MAX_RECURSION_DEPTH",
   "LEGION_STATE_DIR",
+  "LEGION_CREDENTIAL_HELPER",
 ] as const;
 const originalEnvironment: Record<(typeof environmentKeys)[number], string | undefined> = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
@@ -143,6 +148,7 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
   LEGION_WORKER_BUDGET: process.env.LEGION_WORKER_BUDGET,
   LEGION_MAX_RECURSION_DEPTH: process.env.LEGION_MAX_RECURSION_DEPTH,
   LEGION_STATE_DIR: process.env.LEGION_STATE_DIR,
+  LEGION_CREDENTIAL_HELPER: process.env.LEGION_CREDENTIAL_HELPER,
 };
 
 const temporaryPaths: string[] = [];
@@ -301,6 +307,7 @@ async function createLegionWorkspaceState(): Promise<string> {
   await commandOutput(["git", "init", "--bare", remote]);
   await createJjRepository(repo);
   await commandOutput(["git", "remote", "add", "origin", remote], repo);
+  process.env.LEGION_CREDENTIAL_HELPER = TEST_CREDENTIAL_HELPER;
   return stateDir;
 }
 
@@ -545,6 +552,7 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_TREE = tree;
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     process.env.LEGION_STATE_DIR = stateDir;
+    process.env.LEGION_CREDENTIAL_HELPER = TEST_CREDENTIAL_HELPER;
     globalThis.fetch = (async (input, _init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/legion/v1/process/started") {
@@ -610,7 +618,7 @@ describe("Legion OMP extension", () => {
       },
     });
     expect(await jjBookmarks(workspace)).toContain("legion/issue-43");
-    expect(await gitConfig(repo, "credential.helper")).toBe("!legion credential");
+    expect(await gitConfig(repo, "credential.helper")).toBe(TEST_CREDENTIAL_HELPER);
     expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toContain(
       "maxRecursionDepth: 8"
     );

@@ -21,6 +21,7 @@ const HOUR_MS = 60 * 60 * 1000;
 
 const MAX_LAUNCH_FAILURES = 3;
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../envoy-omp-extension");
+const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
 type Redelivery = { topic: string; payload: string; eventId: string };
 
@@ -49,6 +50,7 @@ export interface ProcessManagerDeps {
   config: DaemonConfig;
   ompInvocation: string;
   panePath: string;
+  credentialHelper: string;
   run(
     cmd: string[],
     options?: CommandRunnerOptions
@@ -87,6 +89,15 @@ function treeName(issue: IssueKey): string {
 
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
+}
+export function daemonCredentialHelper(
+  runtime = process.execPath,
+  entrypoint = DAEMON_CLI_ENTRYPOINT
+): string {
+  if (!path.isAbsolute(runtime) || !path.isAbsolute(entrypoint)) {
+    throw new Error("Legion credential helper requires absolute runtime and CLI paths");
+  }
+  return `!${shellPath(runtime)} ${shellPath(entrypoint)} credential`;
 }
 function controlReplyType(raw: string): "ack" | "nack" {
   const payload: unknown = JSON.parse(raw);
@@ -541,6 +552,7 @@ export class ProcessManager {
       stateDir: this.deps.config.stateDir,
       maxRecursionDepth: this.deps.config.maxRecursionDepth,
       provisioningToken: async () => await this.deps.provisioningToken(parsedTree.owner),
+      credentialHelper: this.deps.credentialHelper,
       run: async (command, options) => {
         const result = await this.deps.run(command, options);
         return { ...result, stderr: result.stderr ?? "" };
@@ -601,6 +613,12 @@ export class ProcessManager {
       `LEGION_MAX_RECURSION_DEPTH=${this.deps.config.maxRecursionDepth}`,
       "-e",
       `LEGION_STATE_DIR=${this.deps.config.stateDir}`,
+      "-e",
+      `LEGION_CREDENTIAL_HELPER=${this.deps.credentialHelper}`,
+      "-e",
+      "GIT_CONFIG_COUNT=0",
+      "-e",
+      "GIT_TERMINAL_PROMPT=0",
       "-e",
       `PATH=${this.deps.panePath}`,
       `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
