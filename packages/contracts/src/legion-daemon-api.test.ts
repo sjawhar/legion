@@ -21,3 +21,21 @@ test("requires a spawn token to activate a Legion phase", () => {
     }).success
   ).toBeTrue();
 });
+
+test("requires a transcript-derived agent id to establish a root architect capability", () => {
+  const processStarted = {
+    tree: "acme/widgets#1",
+    generation: 1,
+    rootSessionId: "ses_root",
+    bootToken: "boot-capability",
+    ompSessionFile: "/tmp/root.jsonl",
+  };
+
+  expect(LegionDaemonApi.ProcessStarted.request.safeParse(processStarted).success).toBeFalse();
+  expect(
+    LegionDaemonApi.ProcessStarted.request.safeParse({
+      ...processStarted,
+      agentId: "root",
+    }).success
+  ).toBeTrue();
+});

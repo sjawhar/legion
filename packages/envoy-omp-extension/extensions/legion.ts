@@ -80,7 +80,7 @@ type ToolCallEventResult = {
   readonly reason?: string;
   readonly input?: Record<string, unknown>;
 };
-type RootBootstrap = { readonly role: string; readonly secret: string };
+type RootBootstrap = { readonly role: string; readonly secret: string; readonly agentId: string };
 
 const workerBudgetPermits = new Map<string, () => void>();
 
@@ -532,6 +532,7 @@ export default function legionExtension(pi: PiApi): void {
   let rootSessionID: string | undefined;
   let rootArchitectRole: string | undefined;
   let rootSecret: string | undefined;
+  let rootAgentId: string | undefined;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let controlConnection: NatsConnection | undefined;
@@ -539,6 +540,51 @@ export default function legionExtension(pi: PiApi): void {
   const controlCodec = StringCodec();
   let workspaceStateDir: string | undefined;
   const workspaceProvisions = new Map<IssueKey, Promise<WorkspaceSpec>>();
+  const roleDaemon = () => {
+    return createLegionDaemonClient(
+      requiredEnvironment(process.env, "LEGION_DAEMON_URL"),
+      fetch,
+      {
+        agentId: (sessionId) => {
+          if (sessionId === rootSessionID) {
+            if (rootAgentId === undefined) {
+              throw new Error("Legion root architect has no transcript-derived agent id");
+            }
+            return rootAgentId;
+          }
+          const worker = workerSessions.get(sessionId);
+          if (worker === undefined) {
+            throw new Error(`Legion session ${sessionId} has no registered role backing`);
+          }
+          return worker.agentId;
+        },
+        onRecovered: (sessionId, recovered) => {
+          if (sessionId === rootSessionID) {
+            const tree = requiredEnvironment(process.env, "LEGION_TREE");
+            if (
+              recovered.tree !== tree ||
+              recovered.issue !== tree ||
+              recovered.role !== "architect"
+            ) {
+              throw new Error("Daemon recovered a capability for a different root architect role");
+            }
+            rootSecret = recovered.secret;
+            return;
+          }
+          const worker = workerSessions.get(sessionId);
+          if (
+            worker === undefined ||
+            recovered.tree !== worker.tree ||
+            recovered.issue !== worker.issue ||
+            recovered.role !== worker.role
+          ) {
+            throw new Error("Daemon recovered a capability for a different Legion worker role");
+          }
+          workerSessions.set(sessionId, { ...worker, secret: recovered.secret });
+        },
+      }
+    );
+  };
   const provisionWorkspace = async (
     issue: IssueKey,
     capability: { readonly tree: string; readonly sessionId: string; readonly secret: string }
@@ -555,9 +601,7 @@ export default function legionExtension(pi: PiApi): void {
       credentialHelper: requiredEnvironment(process.env, "LEGION_CREDENTIAL_HELPER"),
       provisioningToken: async () =>
         (
-          await createLegionDaemonClient(
-            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-          ).provisioningCredential({
+          await roleDaemon().provisioningCredential({
             tree: capability.tree,
             issue,
             sessionId: capability.sessionId,
@@ -667,6 +711,7 @@ export default function legionExtension(pi: PiApi): void {
     if (rootBootstraps.has(bootToken)) return;
     const sessionFile = context.sessionManager.getSessionFile();
     if (!sessionFile) throw new Error("Legion root session must be persisted");
+    const agentId = workerAgentId(context);
 
     const bootstrap = (async (): Promise<RootBootstrap> => {
       const started = await createLegionDaemonClient(
@@ -676,12 +721,13 @@ export default function legionExtension(pi: PiApi): void {
         generation: generation(process.env),
         bootToken,
         rootSessionId: sessionID,
+        agentId,
         ompSessionFile: sessionFile,
       });
       workspaceStateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
       const role = started.roleTokens.architect;
       if (!role) throw new Error("Legion daemon did not return an architect role token");
-      return { role, secret: started.secret };
+      return { role, secret: started.secret, agentId };
     })();
     rootBootstraps.set(bootToken, bootstrap);
     try {
@@ -689,11 +735,10 @@ export default function legionExtension(pi: PiApi): void {
       rootSessionID = sessionID;
       rootArchitectRole = root.role;
       rootSecret = root.secret;
+      rootAgentId = root.agentId;
       await claimRole(sessionID, root.role, context);
       await startControlSubscription();
-      await createLegionDaemonClient(
-        requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-      ).processReady({
+      await roleDaemon().processReady({
         tree,
         sessionId: sessionID,
         secret: root.secret,
@@ -873,9 +918,7 @@ export default function legionExtension(pi: PiApi): void {
         const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
         try {
           const token = roleToken(requiredEnvironment(process.env, "LEGION_PROJECT"), issue, role);
-          const spawn = await createLegionDaemonClient(
-            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-          ).spawnToken({
+          const spawn = await roleDaemon().spawnToken({
             tree,
             issue,
             role,
@@ -940,9 +983,7 @@ export default function legionExtension(pi: PiApi): void {
       return undefined;
     }
     try {
-      const grant = await createLegionDaemonClient(
-        requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-      ).grant({
+      const grant = await roleDaemon().grant({
         tree: worker.tree,
         issue: worker.issue,
         sessionId: sessionID,
@@ -970,9 +1011,7 @@ export default function legionExtension(pi: PiApi): void {
     if (sessionID === rootSessionID && process.env.LEGION_TREE) {
       try {
         const architect = architectSession(context);
-        await createLegionDaemonClient(
-          requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-        ).processExit({
+        await roleDaemon().processExit({
           tree: architect.tree,
           generation: generation(process.env),
           sessionId: sessionID,
@@ -1033,9 +1072,7 @@ export default function legionExtension(pi: PiApi): void {
       execute: async (_id, parameters, _signal, _onUpdate, context) => {
         try {
           const architect = architectSession(context);
-          const daemon = createLegionDaemonClient(
-            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-          );
+          const daemon = roleDaemon();
           const stringInput = (name: string): string => {
             const value = parameters[name];
             if (typeof value !== "string")
@@ -1195,9 +1232,7 @@ export default function legionExtension(pi: PiApi): void {
           } else {
             throw new Error("envoy_dispatch urgency must be low, med, high, or blocking");
           }
-          const result = await createLegionDaemonClient(
-            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-          ).dispatchThread({
+          const result = await roleDaemon().dispatchThread({
             tree: architect.tree,
             issue: architect.issue,
             role: architect.role,

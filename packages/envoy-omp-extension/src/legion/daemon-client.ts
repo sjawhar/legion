@@ -74,13 +74,56 @@ export class LegionDaemonApiError extends Error {
   }
 }
 
+export interface LegionSessionRecovery {
+  readonly agentId: (sessionId: string) => string;
+  readonly onRecovered?: (sessionId: string, session: WorkerSessionResponse) => void;
+}
+
+function isInvalidSessionSecret(error: unknown): error is LegionDaemonApiError {
+  if (!(error instanceof LegionDaemonApiError) || error.status !== 403) return false;
+  try {
+    const body: unknown = JSON.parse(error.responseBody);
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      "error" in body &&
+      body.error === "Invalid session secret"
+    );
+  } catch {
+    return error.responseBody === "Invalid session secret";
+  }
+}
+
+function sessionCapability(
+  body: object
+): { readonly sessionId: string; readonly secret: string } | undefined {
+  const candidate = body as { readonly sessionId?: unknown; readonly secret?: unknown };
+  if (
+    typeof candidate.sessionId !== "string" ||
+    candidate.sessionId.length === 0 ||
+    typeof candidate.secret !== "string" ||
+    candidate.secret.length === 0
+  ) {
+    return undefined;
+  }
+  return { sessionId: candidate.sessionId, secret: candidate.secret };
+}
+
+const WORKER_SESSION_PATH = "/legion/v1/worker-session";
+
+
 export function createLegionDaemonClient(
   baseUrl: string,
-  fetchFn: typeof fetch = fetch
+  fetchFn: typeof fetch = fetch,
+  recovery?: LegionSessionRecovery
 ): LegionDaemonClient {
   const endpoint = baseUrl.replace(/\/+$/, "");
 
-  const post = async <T>(path: string, body: object, schema: ResponseSchema<T>): Promise<T> => {
+  const postOnce = async <T>(
+    path: string,
+    body: object,
+    schema: ResponseSchema<T>
+  ): Promise<T> => {
     const response = await fetchFn(`${endpoint}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -89,6 +132,31 @@ export function createLegionDaemonClient(
     const responseBody = await response.text();
     if (!response.ok) throw new LegionDaemonApiError("POST", path, response.status, responseBody);
     return schema.parse(JSON.parse(responseBody));
+  };
+  const post = async <T>(path: string, body: object, schema: ResponseSchema<T>): Promise<T> => {
+    try {
+      return await postOnce(path, body, schema);
+    } catch (error) {
+      const capability = sessionCapability(body);
+      if (
+        path === WORKER_SESSION_PATH ||
+        recovery === undefined ||
+        capability === undefined ||
+        !isInvalidSessionSecret(error)
+      ) {
+        throw error;
+      }
+      const recovered = await postOnce(
+        WORKER_SESSION_PATH,
+        {
+          sessionId: capability.sessionId,
+          agentId: recovery.agentId(capability.sessionId),
+        },
+        LegionDaemonApi.WorkerSession.response
+      );
+      recovery.onRecovered?.(capability.sessionId, recovered);
+      return await postOnce(path, { ...body, secret: recovered.secret }, schema);
+    }
   };
   const get = async <T>(path: string, schema: ResponseSchema<T>): Promise<T> => {
     const response = await fetchFn(`${endpoint}${path}`);

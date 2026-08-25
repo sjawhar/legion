@@ -29,6 +29,7 @@ export const LegionDaemonApi = {
       tree: nonEmptyString,
       generation: z.number().int(),
       rootSessionId: nonEmptyString,
+      agentId: nonEmptyString,
       bootToken: nonEmptyString,
       ompSessionFile: nonEmptyString,
     }),

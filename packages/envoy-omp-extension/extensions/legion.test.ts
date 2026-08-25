@@ -394,6 +394,7 @@ describe("Legion OMP extension", () => {
           generation: 3,
           bootToken: "boot-before-agent-start",
           rootSessionId: "ses_root",
+          agentId: "session",
           ompSessionFile: "/tmp/session.jsonl",
         },
       },
@@ -413,6 +414,111 @@ describe("Legion OMP extension", () => {
       {
         path: "/legion/v1/process/ready",
         body: { tree, sessionId: "ses_root", secret: "root-secret" },
+      },
+    ]);
+  });
+  test("recovers a live root architect command after the daemon loses its capability map", async () => {
+    const requests: { readonly path: string; readonly body: Record<string, unknown> | undefined }[] = [];
+    const tree = "owner/repo#42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "root-recovery";
+    process.env.LEGION_PROJECT = "omp";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROOT_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body =
+        init?.body == null ? undefined : (JSON.parse(init.body.toString()) as Record<string, unknown>);
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/process/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/worker-session") {
+        return Response.json({
+          tree,
+          issue: tree,
+          role: "architect",
+          secret: "recovered-root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/issues/comment") {
+        if (body?.secret === "root-secret") {
+          return Response.json({ error: "Invalid session secret" }, { status: 403 });
+        }
+        return Response.json({ commentId: 4, url: "https://github.test/comment/4" });
+      }
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
+    const context = sessionContext("ses_root", "/tmp/root-transcript.jsonl");
+    await sessionStart({}, context);
+    const legionTool = fixture.tools.find((tool) => tool.name === "legion");
+    if (legionTool === undefined) throw new Error("Legion root tool was not registered");
+    const result = await legionTool.execute(
+      "call-root-recovery",
+      { op: "comment", issue: tree, body: "daemon restart recovery" },
+      undefined,
+      undefined,
+      context
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(requests.filter((request) => request.path.startsWith("/legion/"))).toEqual([
+      {
+        path: "/legion/v1/process/started",
+        body: {
+          tree,
+          generation: 3,
+          bootToken: "root-recovery",
+          rootSessionId: "ses_root",
+          agentId: "root-transcript",
+          ompSessionFile: "/tmp/root-transcript.jsonl",
+        },
+      },
+      {
+        path: "/legion/v1/process/ready",
+        body: { tree, sessionId: "ses_root", secret: "root-secret" },
+      },
+      {
+        path: "/legion/v1/issues/comment",
+        body: {
+          tree,
+          sessionId: "ses_root",
+          secret: "root-secret",
+          issue: tree,
+          body: "daemon restart recovery",
+        },
+      },
+      {
+        path: "/legion/v1/worker-session",
+        body: { sessionId: "ses_root", agentId: "root-transcript" },
+      },
+      {
+        path: "/legion/v1/issues/comment",
+        body: {
+          tree,
+          sessionId: "ses_root",
+          secret: "recovered-root-secret",
+          issue: tree,
+          body: "daemon restart recovery",
+        },
       },
     ]);
   });
@@ -500,6 +606,7 @@ describe("Legion OMP extension", () => {
           generation: 3,
           bootToken: "boot-root-registration",
           rootSessionId: "ses_root",
+          agentId: "session",
           ompSessionFile: "/tmp/session.jsonl",
         },
       },

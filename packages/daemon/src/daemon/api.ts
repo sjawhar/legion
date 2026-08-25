@@ -470,6 +470,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         }
         bootTokens.delete(bootToken);
         const rootSessionId = requiredString(body, "rootSessionId");
+        const agentId = requiredString(body, "agentId");
         const ompSessionFile = requiredString(body, "ompSessionFile");
         if (!treeState.locator) {
           throw new Error(`Tree ${tree} is missing its process locator`);
@@ -488,6 +489,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           issue: tree,
           role: "architect",
           sessionId: rootSessionId,
+          agentId,
         };
         const secret = randomUUID();
         capabilities.set(rootSessionId, {

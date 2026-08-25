@@ -382,12 +382,12 @@ describe("daemon end-to-end", () => {
         })();
         await broker.flush();
 
-        daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), {
+        const daemonOptions = {
           deps: {
             resolveDaemonEnvironment: async () => DAEMON_ENVIRONMENT,
             runner,
             readProcessCmdline: async () => "omp\0",
-            envoyPublish: async (topic, payload) => {
+            envoyPublish: async (topic: string, payload: string) => {
               broker?.publish(topic, codec.encode(payload));
               await broker?.flush();
             },
@@ -407,7 +407,8 @@ describe("daemon end-to-end", () => {
             },
             onSignal: () => {},
           },
-        });
+        };
+        daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
         await daemon.ready();
         const rootTopic = "notifications.github.acme.widgets.issue.1";
         broker.publish(
@@ -501,6 +502,7 @@ describe("daemon end-to-end", () => {
           generation: 1,
           bootToken: rootBootToken,
           rootSessionId: "root-session",
+          agentId: "root-session",
           ompSessionFile: rootSessionFile,
         });
         const rootStarted = (await started.json()) as {
@@ -577,6 +579,84 @@ describe("daemon end-to-end", () => {
         const workerGrant = (await grant.json()) as { grantId: string; expiresAt: string };
         expect(workerGrant.grantId).toMatch(/^[0-9a-f-]{36}$/);
         expect(workerGrant.expiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+        await daemon.stop();
+        daemon = await startDaemon(config(stateDir, daemonPort, nats.url, project), daemonOptions);
+        await daemon.ready();
+
+        const staleArchitect = await fetch(`${daemonUrl}/legion/v1/spawn-token`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tree: root,
+            issue: child,
+            role: "reviewer",
+            ...architect,
+          }),
+        });
+        expect(staleArchitect.status).toBe(403);
+        const rootRecovery = await post(`${daemonUrl}/legion/v1/worker-session`, {
+          sessionId: architect.sessionId,
+          agentId: "root-session",
+        });
+        const recoveredRoot = (await rootRecovery.json()) as {
+          tree: string;
+          issue: string;
+          role: string;
+          secret: string;
+        };
+        expect(recoveredRoot).toEqual({
+          tree: root,
+          issue: root,
+          role: "architect",
+          secret: expect.any(String),
+        });
+        architect.secret = recoveredRoot.secret;
+        const reauthorizedArchitect = await post(`${daemonUrl}/legion/v1/spawn-token`, {
+          tree: root,
+          issue: child,
+          role: "reviewer",
+          ...architect,
+        });
+        expect(await reauthorizedArchitect.json()).toEqual({ spawnToken: expect.any(String) });
+
+        const staleWorker = await fetch(`${daemonUrl}/legion/v1/grants`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tree: root,
+            issue: child,
+            sessionId: "child-worker-session",
+            secret: workerPhase.secret,
+          }),
+        });
+        expect(staleWorker.status).toBe(403);
+        const workerRecovery = await post(`${daemonUrl}/legion/v1/worker-session`, {
+          sessionId: "child-worker-session",
+          agentId: "child-worker",
+        });
+        const recoveredWorker = (await workerRecovery.json()) as {
+          tree: string;
+          issue: string;
+          role: string;
+          secret: string;
+        };
+        expect(recoveredWorker).toEqual({
+          tree: root,
+          issue: child,
+          role: "implementer",
+          secret: expect.any(String),
+        });
+        const reauthorizedWorker = await post(`${daemonUrl}/legion/v1/grants`, {
+          tree: root,
+          issue: child,
+          sessionId: "child-worker-session",
+          secret: recoveredWorker.secret,
+        });
+        expect(await reauthorizedWorker.json()).toEqual({
+          grantId: expect.any(String),
+          expiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        });
+
         await post(`${daemonUrl}/legion/v1/waves/release`, {
           tree: root,
           children: [child],

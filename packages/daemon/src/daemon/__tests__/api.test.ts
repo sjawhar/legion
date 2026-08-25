@@ -311,6 +311,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_root",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
@@ -431,6 +432,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       generation: 3,
       rootSessionId: "ses_root",
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     };
 
@@ -476,6 +478,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_root",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
 
@@ -501,6 +504,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_root",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
@@ -747,6 +751,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_root_architect",
       bootToken: rootBootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
     const otherStarted = await json<{ secret: string }>("/legion/v1/process/started", {
@@ -754,6 +759,7 @@ describe("Legion HTTP API", () => {
       generation: 1,
       rootSessionId: "ses_other_architect",
       bootToken: otherBootToken,
+      agentId: "other-root-agent",
       ompSessionFile: "/tmp/other.json",
     });
     expect(rootStarted.response.status).toBe(200);
@@ -911,6 +917,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_architect",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
@@ -1037,6 +1044,7 @@ describe("Legion HTTP API", () => {
         generation: 3,
         rootSessionId: "ses_dispatch_root",
         bootToken: rootBootToken,
+        agentId: "root-agent",
         ompSessionFile: "/tmp/root.json",
       });
       expect(rootStarted.response.status).toBe(200);
@@ -1068,6 +1076,7 @@ describe("Legion HTTP API", () => {
         generation: 1,
         rootSessionId: "ses_dispatch_competing",
         bootToken: competingBootToken,
+        agentId: "competing-root-agent",
         ompSessionFile: "/tmp/competing.json",
       });
       expect(competingStarted.response.status).toBe(200);
@@ -1106,6 +1115,7 @@ describe("Legion HTTP API", () => {
         generation: 3,
         rootSessionId: "ses_architect",
         bootToken,
+        agentId: "root-agent",
         ompSessionFile: "/tmp/root.json",
       });
       expect(started.response.status).toBe(200);
@@ -1244,6 +1254,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_architect",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
@@ -1294,6 +1305,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_architect",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
     expect(started.response.status).toBe(200);
@@ -1410,6 +1422,49 @@ describe("Legion HTTP API", () => {
     });
     expect(expired.response.status).toBe(403);
   });
+  it("restores a root architect capability from durable transcript backing after a daemon restart", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      agentId: "root-transcript",
+      bootToken,
+      ompSessionFile: "/tmp/root-transcript.jsonl",
+    });
+    expect(started.response.status).toBe(200);
+
+    api?.stop();
+    await start({ state });
+    const stale = await json("/legion/v1/process/ready", {
+      tree: root,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+    });
+    expect(stale.response.status).toBe(403);
+    const recovered = await json<WorkerSessionResponse>("/legion/v1/worker-session", {
+      sessionId: "ses_root",
+      agentId: "root-transcript",
+    });
+    expect(recovered.response.status).toBe(200);
+    expect(recovered.body).toEqual({
+      tree: root,
+      issue: root,
+      role: "architect",
+      secret: expect.any(String),
+    });
+    expect(
+      (
+        await json("/legion/v1/process/ready", {
+          tree: root,
+          sessionId: "ses_root",
+          secret: recovered.body.secret,
+        })
+      ).response.status
+    ).toBe(200);
+  });
   it("attributes a daemon-initiated root close and begins linger without waiting for GitHub", async () => {
     await start({
       runner: async (command) => {
@@ -1434,6 +1489,7 @@ describe("Legion HTTP API", () => {
       generation: 3,
       rootSessionId: "ses_root",
       bootToken,
+      agentId: "root-agent",
       ompSessionFile: "/tmp/root.json",
     });
 
