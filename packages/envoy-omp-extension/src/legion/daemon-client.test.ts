@@ -97,7 +97,7 @@ test("recovers an invalid Legion session secret once before retrying the origina
       return Response.json({ grantId: "grant-1", expiresAt: "2026-08-25T00:00:00.000Z" });
     }) as typeof fetch,
     {
-      agentId: () => "worker-transcript",
+      recoveryToken: () => "spawn-capability",
       onRecovered: (sessionId, session) => recovered.push(`${sessionId}:${session.secret}`),
     }
   );
@@ -122,7 +122,7 @@ test("recovers an invalid Legion session secret once before retrying the origina
     },
     {
       path: "/legion/v1/worker-session",
-      body: { sessionId: "ses_worker", agentId: "worker-transcript" },
+      body: { sessionId: "ses_worker", recoveryToken: "spawn-capability" },
     },
     {
       path: "/legion/v1/grants",
@@ -152,7 +152,7 @@ test("leaves a revoked Legion role loudly forbidden without retrying the origina
       }
       return Response.json({ error: "Invalid session secret" }, { status: 403 });
     }) as typeof fetch,
-    { agentId: () => "revoked-transcript" }
+    { recoveryToken: () => "revoked-capability" }
   );
 
   await expect(

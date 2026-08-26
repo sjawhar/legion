@@ -81,7 +81,7 @@ export class LegionDaemonApiError extends Error {
 }
 
 export interface LegionSessionRecovery {
-  readonly agentId: (sessionId: string) => string;
+  readonly recoveryToken: (sessionId: string) => string;
   readonly onRecovered?: (sessionId: string, session: WorkerSessionResponse) => void;
 }
 
@@ -156,7 +156,7 @@ export function createLegionDaemonClient(
         WORKER_SESSION_PATH,
         {
           sessionId: capability.sessionId,
-          agentId: recovery.agentId(capability.sessionId),
+          recoveryToken: recovery.recoveryToken(capability.sessionId),
         },
         LegionDaemonApi.WorkerSession.response
       );

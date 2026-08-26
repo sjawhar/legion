@@ -543,7 +543,7 @@ describe("Legion OMP extension", () => {
       },
       {
         path: "/legion/v1/worker-session",
-        body: { sessionId: "ses_root", agentId: "root-transcript" },
+        body: { sessionId: "ses_root", recoveryToken: "root-recovery" },
       },
       {
         path: "/legion/v1/issues/comment",
@@ -1167,6 +1167,36 @@ describe("Legion OMP extension", () => {
       },
     ]);
   });
+  test("rejects a Legion spawn block without a daemon-issued recovery token before side effects", async () => {
+    const requests: string[] = [];
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const token = roleToken("omp", issue, "reviewer");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_PROJECT = "omp";
+    globalThis.fetch = (async (input) => {
+      requests.push(new URL(input.toString()).pathname);
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const beforeAgentStart = fixture.handlers.get("before_agent_start");
+    if (beforeAgentStart === undefined)
+      throw new Error("before_agent_start handler was not registered");
+
+    await expect(
+      beforeAgentStart(
+        {
+          prompt:
+            `<legion-spawn issue="${issue}" role="reviewer" token="${token}" tree="${tree}" ` +
+            `workspace="/tmp/legion-workspace"/>`,
+        },
+        { ...sessionContext("ses_missing_recovery_token"), taskDepth: 1 }
+      )
+    ).rejects.toThrow("Legion spawn block is missing daemon-issued recovery token");
+    expect(requests).toEqual([]);
+  });
   test("injects a fresh daemon grant into every worker shell", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const tree = "owner/repo#42";
@@ -1215,7 +1245,7 @@ describe("Legion OMP extension", () => {
       {
         prompt:
           `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
-          `workspace="${workspace}"/>`,
+          `spawnToken="grant-spawn-capability" workspace="${workspace}"/>`,
       },
       context
     );
@@ -1291,7 +1321,7 @@ describe("Legion OMP extension", () => {
       {
         prompt:
           `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
-          `workspace="${workspace}"/>`,
+          `spawnToken="grant-refused-spawn-capability" workspace="${workspace}"/>`,
       },
       context
     );
@@ -1497,13 +1527,14 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       daemon.stop();
     }
   });
-  test("mints a fresh redeemable grant in a worker process after its spawn-time grant expires", async () => {
+  test("mints a fresh redeemable grant in a spawned worker session after its spawn-time grant expires", async () => {
     const tree = "owner/repo#42";
     const issue = "owner/repo#43";
     const role = "implementer";
     const sessionId = "ses_cross_process";
     const agentId = "cross-process-worker";
     const token = roleToken("omp", issue, role);
+    const spawnToken = "cross-process-spawn-capability";
     let now = 1_700_000_000_000;
     const state = newLegionState("omp", 1);
     state.issues[tree] = {
@@ -1531,6 +1562,11 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       heldEvents: [],
     };
     state.roles[token] = { issue, role, sessionId, agentId };
+    state.spawnCapabilities[createHash("sha256").update(spawnToken).digest("hex")] = {
+      tree,
+      issue,
+      role,
+    };
     const daemon = startLegionApi(
       {
         port: 0,
@@ -1584,9 +1620,15 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
     const fixture = createPi();
     legionExtension(fixture.pi);
     const sessionStart = fixture.handlers.get("session_start");
+    const beforeAgentStart = fixture.handlers.get("before_agent_start");
     const toolCall = fixture.handlers.get("tool_call");
     const sessionShutdown = fixture.handlers.get("session_shutdown");
-    if (sessionStart === undefined || toolCall === undefined || sessionShutdown === undefined) {
+    if (
+      sessionStart === undefined ||
+      beforeAgentStart === undefined ||
+      toolCall === undefined ||
+      sessionShutdown === undefined
+    ) {
       daemon.stop();
       throw new Error("worker lifecycle handlers were not registered");
     }
@@ -1613,6 +1655,14 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       if (!match?.[1]) throw new Error("worker shell has no daemon-issued grant");
       return match[1];
     };
+    await beforeAgentStart(
+      {
+        prompt:
+          `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
+          `spawnToken="${spawnToken}" workspace="${workspace}"/>`,
+      },
+      context
+    );
     try {
       await sessionStart({}, context);
       const initialGrant = grantId(
@@ -1707,7 +1757,7 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       {
         prompt:
           `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
-          `workspace="${workspace}"/>`,
+          `spawnToken="park-spawn-capability" workspace="${workspace}"/>`,
       },
       context
     );
@@ -1757,7 +1807,7 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       {
         prompt:
           `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
-          `workspace="${workspace}"/>`,
+          `spawnToken="revived-spawn-capability" workspace="${workspace}"/>`,
       },
       context
     );
@@ -1773,7 +1823,7 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
           role,
           agentId: "session",
           sessionId: "ses_revived",
-          spawnToken: token,
+          spawnToken: "revived-spawn-capability",
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_revived", role: token } },
@@ -1957,6 +2007,9 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
         });
       }
       if (url.pathname === "/legion/v1/grants") {
+        if (body?.secret === "initial-worker-secret") {
+          return Response.json({ error: "Invalid session secret" }, { status: 403 });
+        }
         return Response.json({ grantId: "revived-grant", expiresAt: "2026-08-26T01:00:00.000Z" });
       }
       return Response.json({
@@ -2035,9 +2088,15 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       },
     });
     expect(JSON.stringify(grant)).not.toContain("revived-token");
-    expect(requests.filter((request) => request.path === "/legion/v1/worker-session")).toHaveLength(
-      0
-    );
+    expect(requests.filter((request) => request.path === "/legion/v1/worker-session")).toEqual([
+      {
+        path: "/legion/v1/worker-session",
+        body: {
+          sessionId: initialSessionID,
+          recoveryToken: "initial-spawn-capability",
+        },
+      },
+    ]);
 
     await revivedAgentEnd({}, workerContext);
     const successorContext = {
