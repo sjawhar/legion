@@ -22,17 +22,30 @@ export function reduceCheck(pr: PrState, observation: CheckObservation, now: num
   pr.lastEventAt = now;
 }
 
-export function settle(pr: PrState, now: number, quietMs: number): CiEmission[] {
+export function settle(
+  pr: PrState,
+  now: number,
+  quietMs: number,
+  mode: "eager"
+): Array<Extract<CiEmission, { type: "ci-first-red" }>>;
+export function settle(pr: PrState, now: number, quietMs: number, mode?: "settled"): CiEmission[];
+export function settle(
+  pr: PrState,
+  now: number,
+  quietMs: number,
+  mode: "eager" | "settled" = "settled"
+): CiEmission[] {
   const failing = failingChecks(pr);
 
   if (failing.length > 0 && !pr.firstRedEmitted) {
     pr.firstRedEmitted = true;
     return [{ type: "ci-first-red", check: failing[0], sha: pr.headSha }];
   }
+  if (mode === "eager") return [];
 
   if (now - pr.lastEventAt < quietMs) return [];
 
-  if (failing.length > 0 && !pr.settledRedEmitted) {
+  if (failing.length > 0 && allChecksCompleted(pr) && !pr.settledRedEmitted) {
     pr.settledRedEmitted = true;
     return [{ type: "ci-settled-red", failing, sha: pr.headSha }];
   }
@@ -59,6 +72,11 @@ function isFailingCheck(check: { status: string; conclusion: string | null }): b
     check.conclusion !== "neutral" &&
     check.conclusion !== "skipped"
   );
+}
+
+function allChecksCompleted(pr: PrState): boolean {
+  const checks = Object.values(pr.checks);
+  return checks.length > 0 && checks.every((check) => check.status === "completed");
 }
 
 function allChecksCompletedWithoutFailure(pr: PrState): boolean {

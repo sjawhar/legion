@@ -385,7 +385,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     if (!pr) return;
     const now = Date.now();
     reduceCheck(pr, input.observation, now);
-    await publishCiEmissions(pr, settle(pr, now, 0), envelope);
+    await publishCiEmissions(pr, settle(pr, now, deps.config.ciQuietMs, "eager"), envelope);
   };
 
   const settleChecks = async (): Promise<void> => {
