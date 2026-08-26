@@ -38,7 +38,10 @@ describe("formatConsolidationReportHuman", () => {
 describe("formatConsolidationReportJson", () => {
   it("formats structured JSON", () => {
     const formatted = formatConsolidationReportJson(report);
-    const parsed = JSON.parse(formatted) as { legionId: string; warnings: string[] };
+    const parsed = JSON.parse(formatted) as {
+      legionId: string;
+      warnings: string[];
+    };
 
     expect(parsed.legionId).toBe("trajectory-labs/240");
     expect(parsed.warnings).toEqual(["index warning"]);

@@ -1,51 +1,51 @@
 # Daemon Module
 
-HTTP server + shared `opencode serve` instance. One long-lived serve process handles all worker and controller sessions. Exposes REST API for the controller skill.
+The daemon is Legion's durable coordinator. It consumes webhook envelopes from core NATS, persists `LegionState`, publishes derived role events through Envoy, and owns the tmux root-process lifecycle.
 
-## HTTP API (server.ts)
+## HTTP API
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/health` | `{status, uptime, workerCount}` |
-| `GET` | `/workers` | List all `WorkerEntry[]` (controller NOT included — tracked separately) |
-| `POST` | `/workers` | Create session on shared serve — `{issueId, mode, workspace}` → `{id, port, sessionId}` |
-| `GET` | `/workers/:id` | Single worker details |
-| `PATCH` | `/workers/:id` | Update status (`running`, `dead`) |
-| `DELETE` | `/workers/:id` | Remove tracking (session goes idle naturally) |
-| `GET` | `/workers/:id/status` | Proxy to worker's OpenCode `/session/status` |
-| `POST` | `/workers/prune` | Bulk-remove workers + crash history by issue ID — `{issueIds: string[]}` → `{pruned, crashHistoryPruned}` |
-| `POST` | `/shutdown` | Graceful shutdown — stop shared serve, persist state |
-| `POST` | `/restart` | Graceful restart — stop daemon but keep serve alive for session continuity |
-| `GET` | `/dashboard` | Aggregated worker summary grouped by repo+issue, with activity, stats, and recent events |
-| `GET` | `/dashboard/ui` | Single-page HTML dashboard — fetches `/dashboard` JSON, auto-refreshes 30s, responsive |
-| `GET`    | `/state/track`          | List tracked issue IDs — `{trackedIssues: string[]}` |
-| `POST`   | `/state/track`          | Manually track an issue — `{issueId}` → `{tracked: true}` |
-| `DELETE` | `/state/track/:issueId` | Manually untrack an issue → `{untracked: true}` |
-| `GET`    | `/state/materialized`   | Tracked issues from cache + new-issues accumulator (resets on read) — `{issues, titles, newIssues}` |
+The localhost-only Legion API lives in `api.ts`.
 
-**Worker ID format:** `{issueId}-{mode}` lowercase (e.g., `eng-21-implement`)
-
-**Controller:** The controller is NOT listed in `/workers` responses. It runs as a session on the shared serve, tracked separately in the state file's `controller` field.
+| Surface | Purpose |
+| --- | --- |
+| `GET /legion/v1/state` | Read redacted durable Legion state. |
+| `POST /legion/v1/process/started` | Register a root process with transcript-derived architect role backing. |
+| `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
+| `POST /legion/v1/issues`, `/waves/release`, `/issues/comment`, `/issues/body`, `/issues/labels`, `/issues/close` | Scoped architect writes. |
+| `POST /legion/v1/phase`, `/role-backing`, `/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Session attribution, durable architect and worker capability recovery, and credential grants. |
+| `POST /legion/v1/controller/ready`, `/gates/approve`, `/admission`, `/backlog` | Controller lifecycle and control-plane actions. |
 
 ## Files
 
 | File | Responsibility |
-|------|---------------|
-| `index.ts` | Daemon lifecycle: `startDaemon()`, shared serve startup, health tick loop, signal handlers. Controller creates a session on shared serve. Uses DI via `DaemonDependencies` interface for testability. |
-| `server.ts` | HTTP routing, request validation, in-memory worker map. `POST /workers` creates session on shared serve (instant). `DELETE /workers` removes tracking only. |
-| `dashboard-ui.ts` | `getDashboardHtml()` — single-page HTML/CSS/JS dashboard served at `/dashboard/ui`. No framework; inline styles and vanilla JS. |
-| `serve-manager.ts` | `spawnSharedServe()` — runs one `opencode serve`. `waitForHealthy()` — polls readiness. `createSession()` — creates session on shared serve. `stopServe()` — graceful shutdown. `healthCheck()` — `/global/health`. |
-| `config.ts` | `DaemonConfig` interface, `loadConfig()` reads env vars. Defaults: daemon port 13370, shared serve port 13381 (`baseWorkerPort`), check interval 60s. **Controller mode:** `LEGION_CONTROLLER_SESSION_ID` env var (optional, must start with `ses_` if set, hard fails on invalid format). |
-| `state-file.ts` | `readStateFile()` / `writeStateFile()` — atomic JSON persistence to `~/.legion/{legionId}/workers.json`. Includes `controller?: ControllerState` field for controller lifecycle. Legacy `controller-controller` worker entries are stripped on read. |
-| `ports.ts` | `isPortFree()` utility only. `PortAllocator` removed — all workers share one port. |
-| `repo-manager.ts` | Repo clone management: `ensureRepoClone()`, `ensureWorkspace()`, `startBackgroundFetch()`, `fetchAllTrackedRepos()`, `cleanupWorkspace()`, `verifyBranchPushed()`. |
+| --- | --- |
+| `index.ts` | Boots state, core-NATS intake, process manager, API, resync, linger expiry, and signal persistence. |
+| `config.ts` | Validates file and environment lifecycle configuration. |
+| `events.ts` | Routes raw webhook envelopes through pure reducers, executes effects, and persists unacknowledged role delivery for redelivery. |
+| `processes.ts` | Admission, tmux root/controller spawning, worker exception recovery, resurrection, and linger. |
+| `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
+| `legion-state.ts` | Strict versioned state schema and atomic persistence. |
+| `catchup.ts` | Derived overseer and worker catch-up payloads. |
+| `resync.ts` | Low-frequency board convergence, re-emitted triage for unadmitted tracked roots, and residual anomaly reporting. |
+| `approval-check.ts` | Human approval status backstop for the current PR head. |
 
-## Key Patterns
+## Operational invariants
 
-- **Shared serve** — one `opencode serve` process serves all sessions. Spawned on daemon startup, shared by workers and controller.
-- **DI in `startDaemon()`** — all deps passed via `overrides` param, enabling unit tests without spawning real processes
-- **Health tick** — every 60s, checks shared serve health. On failure: restart serve, re-create sessions for active workers.
-- **State persistence** — worker map persisted to disk, sessions re-created on daemon restart using deterministic IDs.
-- **Session IDs** — deterministic UUIDv5 from `computeSessionId(legionId, issueId, mode)`, enables idempotent session creation.
-- **Controller lifecycle** — runs as session on shared serve. For external mode, daemon stores session ID without spawning.
-- **Repo clone freshness** — implement dispatches do a blocking `jj git fetch` before workspace creation. Other modes fetch non-blocking after workspace creation. Done issue cleanup triggers a background fetch. Daemon startup warms all tracked clones via `fetchAllTrackedRepos()`.
+- Role lanes use core NATS; the daemon, not the broker, persists failed role delivery.
+- Controller delivery exceptions enter durable `controllerHeldEvents` before replacement is requested; `/controller/ready` redelivers each held event and removes it only after Envoy acknowledges publication.
+- Root processes and the controller are tmux windows under global admission control. The daemon stores tmux window IDs; names are cosmetic, escaped issue labels.
+- Process failure recovery is exception-driven. A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.
+- A lingering or closed root releases its admission slot, kills its recorded window, clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
+- `DaemonConfig` supplies all lifecycle defaults: admission cap, worker budget, recursion depth, linger duration, CI quiet period, resync interval, and retry limit.
+
+## OMP invocation and daemon tools
+
+Set `omp_invocation` in `legion.yaml` or `LEGION_OMP_INVOCATION` to the required `mise x <tool> -- omp` command that launches the root architect and controller. The default is:
+
+```sh
+mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp
+```
+
+Launch the daemon normally with `bun run ...`, not inside that scoped `mise x` command. At startup it obtains the complete `mise env --json` environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and uses `mise where` to turn the default invocation into the pinned OMP binary path. All daemon subprocesses use those absolute paths; root and controller panes receive the complete `PATH` and execute that same OMP path.
+
+Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.

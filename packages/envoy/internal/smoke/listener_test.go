@@ -51,9 +51,10 @@ func TestSmoke(t *testing.T) {
 		}),
 		network.WithNetwork([]string{"listener"}, net),
 		testcontainers.WithEnv(map[string]string{
-			"NATS_URLS":        "nats://nats:4222",
-			"ENVOY_MACHINE_ID": "smoke-test",
-			"PORT":             "9020",
+			"NATS_URLS":         "nats://nats:4222",
+			"ENVOY_LISTEN_HOST": "0.0.0.0",
+			"ENVOY_MACHINE_ID":  "smoke-test",
+			"PORT":              "9020",
 		}),
 		testcontainers.WithExposedPorts("9020/tcp"),
 		testcontainers.WithWaitStrategy(

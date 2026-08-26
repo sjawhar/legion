@@ -91,7 +91,7 @@ func TestMergeForClaim_NonDriverTakesOverStaleDriver(t *testing.T) {
 	// A driving claim that has not been refreshed within the staleness window is
 	// assumed gone (process exited), so a remaining holder may take the route
 	// rather than leaving the session unreachable.
-	cur := SessionEntry{Port: 100, Driving: true, UpdatedAt: claimNow - int64(claimStaleAfter/time.Millisecond) - 1}
+	cur := SessionEntry{Port: 100, Driving: true, UpdatedAt: claimNow - int64(ClaimStaleAfter/time.Millisecond) - 1}
 	next := SessionEntry{Port: 200, Driving: false}
 
 	got, err := mergeForClaim(cur, nil, next, claimNow)

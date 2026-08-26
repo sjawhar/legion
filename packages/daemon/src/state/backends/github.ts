@@ -1,3 +1,8 @@
+import type {
+  CommandRunner,
+  CommandRunnerOptions,
+  OwnerCommandRunnerOptionsProvider,
+} from "../fetch";
 import {
   createParsedIssue,
   GitHubPRRef,
@@ -88,30 +93,16 @@ export function parseIssueIdParts(issueId: string): {
   return { owner, repo, number };
 }
 
-export async function runGhCommand(args: string[]): Promise<string> {
-  const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
-  const killTimeout = setTimeout(() => {
-    try {
-      proc.kill();
-    } catch {
-      // Process may have already exited
-    }
-  }, 30_000);
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  clearTimeout(killTimeout);
+export async function runGhCommand(
+  args: string[],
+  runner: CommandRunner,
+  runnerOptions: CommandRunnerOptions
+): Promise<string> {
+  const { stdout, stderr, exitCode } = await runner(["gh", ...args], runnerOptions);
   if (exitCode !== 0) {
     throw new Error(`gh ${args[0]} failed (exit ${exitCode}): ${stderr.trim()}`);
   }
   return stdout;
-}
-
-async function runGraphQL(query: string): Promise<Record<string, unknown>> {
-  const stdout = await runGhCommand(["api", "graphql", "-f", `query=${query}`]);
-  return JSON.parse(stdout);
 }
 
 /** Exported for GraphQL schema validation tests. */
@@ -161,7 +152,13 @@ export function buildStatusMutation(
     }`;
 }
 
+export interface GitHubTrackerDeps {
+  runner: CommandRunner;
+  runnerOptionsForOwner: OwnerCommandRunnerOptionsProvider;
+}
+
 export class GitHubTracker implements IssueTracker {
+  constructor(private readonly github?: GitHubTrackerDeps) {}
   parseIssues(raw: unknown): ParsedIssue[] {
     const items = extractItems(raw);
     const parsed: ParsedIssue[] = [];
@@ -245,6 +242,17 @@ export class GitHubTracker implements IssueTracker {
     return parsed;
   }
 
+  private async gh(owner: string, args: string[]): Promise<string> {
+    if (!this.github) {
+      throw new Error("GitHubTracker requires owner-scoped GitHub App runner options");
+    }
+    return runGhCommand(args, this.github.runner, await this.github.runnerOptionsForOwner(owner));
+  }
+
+  private async graphql(owner: string, query: string): Promise<Record<string, unknown>> {
+    return JSON.parse(await this.gh(owner, ["api", "graphql", "-f", `query=${query}`]));
+  }
+
   /**
    * Resolve owner/repo/number from an IssueMutationTarget.
    * Prefers source (canonical) over issueId parsing (lossy for hyphenated owners).
@@ -266,7 +274,7 @@ export class GitHubTracker implements IssueTracker {
 
   async removeLabel(target: IssueMutationTarget, label: string): Promise<void> {
     const { owner, repo, number } = this.resolveTarget(target);
-    await runGhCommand([
+    await this.gh(owner, [
       "issue",
       "edit",
       number,
@@ -282,7 +290,10 @@ export class GitHubTracker implements IssueTracker {
     const issueNum = Number(number);
 
     // Step 1: Query the project item ID, project ID, Status field ID, and option IDs
-    const queryResult = await runGraphQL(buildProjectStatusFieldQuery(owner, repo, issueNum));
+    const queryResult = await this.graphql(
+      owner,
+      buildProjectStatusFieldQuery(owner, repo, issueNum)
+    );
 
     const data = queryResult?.data as Record<string, unknown> | undefined;
     const repository = data?.repository as Record<string, unknown> | undefined;
@@ -317,6 +328,9 @@ export class GitHubTracker implements IssueTracker {
     }
 
     // Step 2: Mutation to update the status
-    await runGraphQL(buildStatusMutation(projectId, item.id as string, fieldId, targetOption.id));
+    await this.graphql(
+      owner,
+      buildStatusMutation(projectId, item.id as string, fieldId, targetOption.id)
+    );
   }
 }

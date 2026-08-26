@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import type { HandoffMessage, HandoffPhase, PhaseHandoff } from "@legion/contracts";
 import {
   HANDOFF_PHASES,
   HANDOFF_SCHEMA_VERSION,
@@ -18,8 +19,7 @@ import {
   PHASE_FILE_NAMES,
   validateHandoffMessage,
   validatePhaseHandoff,
-} from "./schema";
-import type { HandoffMessage, HandoffPhase, PhaseHandoff } from "./types";
+} from "@legion/contracts";
 
 function ensureDir(dir: string): void {
   mkdirSync(dir, { recursive: true });

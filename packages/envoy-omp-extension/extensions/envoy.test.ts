@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { decode } from "@toon-format/toon";
 import { z } from "zod";
 
 type ToolResult = {
@@ -47,11 +48,15 @@ type TestPi = {
 
 type Subscription = {
   readonly unsubscribe: () => void;
-  readonly [Symbol.asyncIterator]: () => AsyncIterator<{ readonly subject: string; readonly data: Uint8Array }>;
+  readonly [Symbol.asyncIterator]: () => AsyncIterator<{
+    readonly subject: string;
+    readonly data: Uint8Array;
+    readonly reply: string;
+  }>;
 };
 
 type SubscriptionControls = {
-  readonly push: (data: string) => void;
+  readonly push: (data: string, reply?: string) => void;
   readonly end: () => void;
   readonly fail: (error: Error) => void;
   readonly active: () => boolean;
@@ -60,10 +65,13 @@ type SubscriptionControls = {
 const natsState = {
   subscriptions: new Map<string, Subscription>(),
   controls: new Map<string, SubscriptionControls>(),
+  controlsByTopic: new Map<string, SubscriptionControls[]>(),
+  published: [] as { readonly subject: string; readonly data: Uint8Array | undefined }[],
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
 };
+
 
 const clipboardState = {
   copiedSessionIDs: [] as string[],
@@ -80,11 +88,12 @@ mock.module("nats", () => ({
     return {
       isClosed: () => false,
       drain: async () => {
-        if (natsState.drainHangs) await new Promise(() => undefined);
+        if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
       },
+      publish: (subject: string, data?: Uint8Array) => natsState.published.push({ subject, data }),
       subscribe: (topic: string) => {
         let active = true;
-        const queue: { readonly subject: string; readonly data: Uint8Array }[] = [];
+        const queue: { readonly subject: string; readonly data: Uint8Array; readonly reply: string }[] = [];
         let wake: (() => void) | undefined;
         let ended = false;
         let failure: Error | undefined;
@@ -93,8 +102,8 @@ mock.module("nats", () => ({
           wake = undefined;
         };
         const controls = {
-          push: (data: string) => {
-            queue.push({ subject: topic, data: new TextEncoder().encode(data) });
+          push: (data: string, reply = "") => {
+            queue.push({ subject: topic, data: new TextEncoder().encode(data), reply });
             notify();
           },
           end: () => {
@@ -108,6 +117,9 @@ mock.module("nats", () => ({
           active: () => active,
         };
         natsState.controls.set(topic, controls);
+        const controlsForTopic = natsState.controlsByTopic.get(topic);
+        if (controlsForTopic === undefined) natsState.controlsByTopic.set(topic, [controls]);
+        else controlsForTopic.push(controls);
         const subscription: Subscription = {
           unsubscribe: () => {
             active = false;
@@ -118,15 +130,17 @@ mock.module("nats", () => ({
             notify();
           },
           [Symbol.asyncIterator]: () => ({
-            next: async (): Promise<IteratorResult<{ readonly subject: string; readonly data: Uint8Array }>> => {
+            next: async (): Promise<
+              IteratorResult<{ readonly subject: string; readonly data: Uint8Array; readonly reply: string }>
+            > => {
               for (;;) {
                 if (failure) throw failure;
                 if (!active || ended) return { done: true, value: undefined };
                 const item = queue.shift();
                 if (item) return { done: false, value: item };
-                await new Promise<void>((resolve) => {
-                  wake = resolve;
-                });
+                const pending = Promise.withResolvers<void>();
+                wake = pending.resolve;
+                await pending.promise;
               }
             },
           }),
@@ -158,15 +172,17 @@ afterEach(() => {
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   globalThis.fetch = originalFetch;
-  natsState.connectedNames.length = 0;
-  natsState.subscriptions.clear();
-  natsState.controls.clear();
-  natsState.failConnects = 0;
-  natsState.drainHangs = false;
   delete process.env.ENVOY_REGISTER_SESSION;
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+  natsState.connectedNames.length = 0;
+  natsState.published.length = 0;
+  natsState.subscriptions.clear();
+  natsState.controls.clear();
+  natsState.controlsByTopic.clear();
+  natsState.failConnects = 0;
+  natsState.drainHangs = false;
 });
 
 function createPi(options: { readonly clipboardError?: Error } = {}) {
@@ -202,6 +218,19 @@ function commandContext(notifications: string[]): CommandContext {
   return { ui: { notify: (message) => notifications.push(message) } };
 }
 
+function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string) {
+  return JSON.stringify({
+    event_id: `evt-${dedupeKey}`,
+    source: "envoy",
+    source_event_id: `source-${dedupeKey}`,
+    topic: `notifications.role.${role}`,
+    dedupe_key: `envoy.role.forward.${dedupeKey}`,
+    issued_at: 1,
+    payload_summary: summary,
+    trace_id: `trace-${dedupeKey}`,
+  });
+}
+
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
@@ -235,6 +264,10 @@ describe("envoy OMP extension", () => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       requests.push({ path: url.pathname, body });
+      if (url.pathname === "/v1/roles/set") {
+        const role = typeof body?.role === "string" ? body.role : "";
+        return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [`notifications.role.${role}`] });
+      }
       if (url.pathname === "/v1/sessions") return response([]);
       if (url.pathname === "/v1/interests/ses_omp") return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [] });
       return response({
@@ -285,6 +318,325 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("injects a structured envelope payload as a TOON block that round-trips to the payload", async () => {
+    const payload = {
+      failed: [
+        { check: "typecheck", conclusion: "failure" },
+        { check: "unit", conclusion: "failure" },
+      ],
+      kind: "ci_summary",
+      number: 42,
+    };
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?toon-structured-payload");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-toon-structured",
+        source: "envoy",
+        source_event_id: "source-toon-structured",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "envoy.agent.toon-structured",
+        issued_at: 1,
+        payload_summary: "CI failures",
+        payload: JSON.stringify(payload),
+        trace_id: "trace-toon-structured",
+      }),
+    );
+    await injected.promise;
+
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("structured delivery was not injected");
+    const prefix = "[ENVOY notifications.agent.ses_omp]\n";
+    expect(content.startsWith(prefix)).toBe(true);
+    expect(decode(content.slice(prefix.length))).toEqual(payload);
+  });
+
+  test("injects a non-JSON envelope payload as raw text without serializing its envelope", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?toon-plain-text-payload");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-toon-plain-text",
+        source: "envoy",
+        source_event_id: "source-toon-plain-text",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "envoy.agent.toon-plain-text",
+        issued_at: 1,
+        payload_summary: "plain text",
+        payload: "plain-text payload",
+        trace_id: "trace-toon-plain-text",
+      }),
+    );
+    await injected.promise;
+
+    expect(fixture.messages).toEqual(["[ENVOY notifications.agent.ses_omp]\nplain-text payload"]);
+  });
+
+  test("injects malformed envelope JSON as raw text", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?toon-malformed-envelope");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push("{this is not JSON");
+    await injected.promise;
+
+    expect(fixture.messages).toEqual(["[ENVOY notifications.agent.ses_omp]\n{this is not JSON"]);
+  });
+
+  test("injects a role event forwarded to the claimed agent subject with original role-topic framing", async () => {
+    let currentRoleTopic = "";
+    const requests: string[] = [];
+    const unregistrations: (readonly string[])[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      requests.push(url.pathname);
+      if (url.pathname === "/v1/roles/set") {
+        const role = typeof body?.role === "string" ? body.role : "";
+        currentRoleTopic = `notifications.role.${role}`;
+        return response({
+          session_id: "ses_role_a",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [currentRoleTopic],
+        });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        const topics = Array.isArray(body?.topics) ? body.topics.filter((topic): topic is string => typeof topic === "string") : [];
+        unregistrations.push(topics);
+        return response({});
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-agent-delivery");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
+    await roleTool.execute("", { role: "legion-controller" });
+
+    expect(natsState.controls.get(currentRoleTopic)).toBeUndefined();
+    const agent = natsState.controls.get("notifications.agent.ses_role_a");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(forwardedRoleEnvelope("legion-controller", "role message", "role-agent-delivery"));
+    await injected.promise;
+    const roleDelivery = fixture.messages[0];
+    if (roleDelivery === undefined) throw new Error("role delivery was not injected");
+    const rolePrefix = "[ENVOY notifications.role.legion-controller]\n";
+    expect(roleDelivery.startsWith(rolePrefix)).toBe(true);
+    expect(decode(roleDelivery.slice(rolePrefix.length))).toEqual({ summary: "role message" });
+    expect(requests).not.toContain("/v1/sessions");
+
+    await roleTool.execute("", { role: "legion-reviewer" });
+    expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
+    await unsubscribeTool.execute("", { topics: ["notifications.role.legion-reviewer"] });
+    expect(unregistrations).toEqual([
+      ["notifications.role.legion-controller"],
+      ["notifications.role.legion-reviewer"],
+    ]);
+  });
+
+  test("injects a post-takeover forwarded role event into B only", async () => {
+    const role = "legion-controller";
+    const roleTopic = `notifications.role.${role}`;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        const holder = typeof body?.session_id === "string" ? body.session_id : "";
+        return response({
+          session_id: holder,
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [roleTopic],
+        });
+      }
+      return response({});
+    };
+    const { default: envoyExtensionA } = await import("./envoy.ts?role-agent-takeover-a");
+    const fixtureA = createPi();
+    envoyExtensionA(fixtureA.pi);
+    await fixtureA.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
+    const roleToolA = fixtureA.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleToolA === undefined) throw new Error("role tool was not registered for session A");
+    await roleToolA.execute("", { role });
+
+    const { default: envoyExtensionB } = await import("./envoy.ts?role-agent-takeover-b");
+    const fixtureB = createPi();
+    const injectedB = Promise.withResolvers<void>();
+    envoyExtensionB({
+      ...fixtureB.pi,
+      sendMessage: (message, options) => {
+        fixtureB.pi.sendMessage(message, options);
+        injectedB.resolve();
+      },
+    });
+    await fixtureB.handlers.get("session_start")?.({}, sessionContext("ses_role_b"));
+    const roleToolB = fixtureB.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleToolB === undefined) throw new Error("role tool was not registered for session B");
+    await roleToolB.execute("", { role });
+
+    expect(natsState.controls.get(roleTopic)).toBeUndefined();
+    const agentB = natsState.controls.get("notifications.agent.ses_role_b");
+    if (agentB === undefined) throw new Error("B agent subject was not subscribed");
+    agentB.push(forwardedRoleEnvelope(role, "post-takeover role event", "role-agent-takeover"));
+    await injectedB.promise;
+    expect(fixtureA.messages.some((message) => message.includes("post-takeover role event"))).toBe(false);
+    const takeoverDelivery = fixtureB.messages[0];
+    if (takeoverDelivery === undefined) throw new Error("takeover delivery was not injected");
+    const takeoverPrefix = "[ENVOY notifications.role.legion-controller]\n";
+    expect(takeoverDelivery.startsWith(takeoverPrefix)).toBe(true);
+    expect(decode(takeoverDelivery.slice(takeoverPrefix.length))).toEqual({ summary: "post-takeover role event" });
+  });
+
+  test("keeps forwarded role delivery live while the listener HTTP API is unavailable", async () => {
+    const role = "legion-controller";
+    let listenerAvailable = true;
+    globalThis.fetch = async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_role_a",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      if (!listenerAvailable) throw new Error("listener API unavailable");
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-agent-listener-down");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+    await roleTool.execute("", { role });
+
+    const agent = natsState.controls.get("notifications.agent.ses_role_a");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    listenerAvailable = false;
+    agent.push(forwardedRoleEnvelope(role, "role event while listener is down", "role-agent-listener-down"));
+    await injected.promise;
+    expect(fixture.messages.some((message) => message.includes("role event while listener is down"))).toBe(true);
+  });
+
+  test("keeps a role claimant registered after the session-staleness window when session registration is otherwise disabled", async () => {
+    delete process.env.ENVOY_REGISTER_SESSION;
+    const registrations: {
+      readonly session_id: string;
+      readonly self_subscribed: boolean;
+      readonly topics: readonly string[];
+    }[] = [];
+    const heartbeatRegistration = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_role_heartbeat",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: ["notifications.role.legion-controller"],
+        });
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly self_subscribed: boolean;
+          readonly topics: readonly string[];
+        };
+        registrations.push(body);
+        heartbeatRegistration.resolve();
+        return response({ session_id: body.session_id, machine_id: "test", dir: "/tmp", topics: body.topics });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") return response({});
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-claim-heartbeat");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_role_heartbeat"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    expect(intervals).toEqual([]);
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
+    await roleTool.execute("", { role: "legion-controller" });
+
+    expect(intervals).toHaveLength(1);
+    // This callback represents the heartbeat due after ClaimStaleAfter; a role
+    // claim must keep registration fresh even without ENVOY_REGISTER_SESSION.
+    intervals[0]?.();
+    await heartbeatRegistration.promise;
+    expect(registrations).toHaveLength(1);
+    expect(registrations[0]).toMatchObject({
+      session_id: "ses_role_heartbeat",
+      self_subscribed: true,
+      topics: ["notifications.agent.ses_role_heartbeat"],
+    });
+    await unsubscribeTool.execute("", { topics: ["notifications.role.legion-controller"] });
+    const registrationsAfterRelease = registrations.length;
+    intervals[0]?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registrations).toHaveLength(registrationsAfterRelease);
+  });
+
   test("registers an optional self-subscribed interest on session start", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {
@@ -314,6 +666,117 @@ describe("envoy OMP extension", () => {
       },
     });
     delete process.env.ENVOY_REGISTER_SESSION;
+  });
+
+  test("keeps registry registration aligned with live subscriptions", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    const registrations: { readonly topics: readonly string[] }[] = [];
+    const unregistrations: (readonly string[])[] = [];
+    const registryTopics = new Set<string>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly dir: string;
+          readonly topics: readonly string[];
+        };
+        registrations.push(body);
+        for (const topic of body.topics) registryTopics.add(topic);
+        return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: [...registryTopics] });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly topics: readonly string[] };
+        unregistrations.push(body.topics);
+        for (const topic of body.topics) registryTopics.delete(topic);
+        return response({});
+      }
+      if (url.pathname === "/v1/interests/ses_registry") {
+        return response({
+          session_id: "ses_registry",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [...registryTopics],
+        });
+      }
+      return response({ session_id: "ses_registry", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?live-registration");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_registry"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    const listTool = fixture.tools.find((tool) => tool.name === "envoy_list");
+    if (subscribeTool === undefined || unsubscribeTool === undefined || listTool === undefined) {
+      throw new Error("subscription tools were not registered");
+    }
+
+    const topic = "notifications.github.o.r.pr.>";
+    await subscribeTool.execute("", { topics: [topic] });
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+
+    for (const tick of intervals) tick();
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+
+    await unsubscribeTool.execute("", { topics: [topic] });
+    expect(unregistrations).toEqual([[topic]]);
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry"]);
+    const result = await listTool.execute("", {});
+    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+      topics: ["notifications.agent.ses_registry"],
+    });
+    expect(result.details.interests).toEqual([{ topic: "notifications.agent.ses_registry", source: "both" }]);
+  });
+
+  test("merges locally live subscriptions into envoy_list before the next heartbeat", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly dir: string;
+          readonly topics: readonly string[];
+        };
+        return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: body.topics });
+      }
+      if (url.pathname === "/v1/interests/ses_list") {
+        return response({
+          session_id: "ses_list",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: ["notifications.agent.ses_list", "notifications.registry-only"],
+        });
+      }
+      return response({ session_id: "ses_list", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?list-live-subscriptions");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_list"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const listTool = fixture.tools.find((tool) => tool.name === "envoy_list");
+    if (subscribeTool === undefined || listTool === undefined) throw new Error("subscription tools were not registered");
+
+    await subscribeTool.execute("", { topics: ["notifications.live-only"] });
+    const result = await listTool.execute("", {});
+
+    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+      topics: ["notifications.agent.ses_list", "notifications.registry-only", "notifications.live-only"],
+    });
+    expect(result.details.interests).toEqual([
+      { topic: "notifications.agent.ses_list", source: "both" },
+      { topic: "notifications.registry-only", source: "registry" },
+      { topic: "notifications.live-only", source: "live" },
+    ]);
   });
 
   test("reports the active session directory through envoy_whoami", async () => {
@@ -511,6 +974,57 @@ describe("envoy OMP extension", () => {
     expect(fixture.messages.some((m) => m.includes("published after the tool said it was unsubscribed"))).toBe(false);
   });
 
+  test("envoy_unsubscribe deregisters a topic while its pump waits to retry", async () => {
+    const unregistrations: (readonly string[])[] = [];
+    const retryScheduled = Promise.withResolvers<void>();
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((_: () => void) => {
+      retryScheduled.resolve();
+      return undefined as never;
+    }) as typeof setTimeout;
+    try {
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+        if (url.pathname === "/v1/interests/unsubscribe") {
+          const topics = Array.isArray(body?.topics) ? body.topics.filter((topic): topic is string => typeof topic === "string") : [];
+          unregistrations.push(topics);
+          return response({});
+        }
+        if (url.pathname === "/v1/interests/subscribe") {
+          return response({
+            session_id: "ses_awaiting_retry",
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            topics: body?.topics ?? [],
+          });
+        }
+        return response({});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?unsubscribe-awaiting-retry");
+      const fixture = createPi();
+
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_awaiting_retry"));
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+      if (subscribeTool === undefined || unsubscribeTool === undefined) throw new Error("subscription tools were not registered");
+
+      const topic = "notifications.retrying";
+      await subscribeTool.execute("", { topics: [topic] });
+      const controls = natsState.controls.get(topic);
+      if (controls === undefined) throw new Error("subscription was not created");
+      controls.end();
+      await retryScheduled.promise;
+
+      const result = await unsubscribeTool.execute("", { topics: [topic] });
+      expect(result.details.removed).toEqual([topic]);
+      expect(unregistrations).toEqual([[topic]]);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
   test("a deliberately closed topic still recovers from a genuine death once it is back", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
     globalThis.fetch = async () => response([]);
@@ -589,6 +1103,30 @@ describe("envoy OMP extension", () => {
     expect(fixture.deliveries.length).toBe(1);
     expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+  });
+
+  test("acknowledges an agent-subject request after steering injection", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?agent-receipt");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_receipt"));
+    const controls = natsState.controls.get("notifications.agent.ses_receipt");
+    if (controls === undefined) throw new Error("agent subject was not subscribed");
+
+    controls.push(forwardedRoleEnvelope("legion-controller", "receipt event", "agent-receipt"), "_INBOX.receipt");
+    await injected.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.receipt"]);
   });
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {

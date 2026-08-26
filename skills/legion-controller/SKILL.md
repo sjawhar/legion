@@ -1,1153 +1,136 @@
 ---
 name: legion-controller
-description: Use when coordinating Legion workers across issues, dispatching workers, monitoring progress, or routing triage items
+description: Use when handling Legion controller wakes for root-issue triage, backlog admission, architect escalation, resync healing, human interaction, or gate approval.
 ---
 
 # Legion Controller
 
-> **Customization:** This skill is the primary extension point for Legion's behavior.
-> The state machine provides suggested actions and raw signals. This skill decides what
-> to do with them. Modify this file to change how issues flow through the pipeline.
+The controller is the one persistent, wake-driven session for a Legion project. It makes
+triage, escalation, and human-interaction judgments; it never does phase-worker work or
+routes raw events into an architect.
 
-Persistent coordinator, woken by Envoy pushes, that dispatches and resumes workers based on issue state.
+## Start and claim the controller role
 
-## Environment
+The Legion extension claims `legion-<project>-controller` and registers controller readiness
+with the daemon during session startup. Do not handle a wake unless that startup succeeded.
 
-Required:
-- `LEGION_ID` - team/project identifier (Linear UUID or GitHub `owner/project-number`)
-- `LEGION_ISSUE_BACKEND` - issue backend: `"linear"` or `"github"`
-- `LEGION_SHORT_ID` - short ID for daemon identification
-- `LEGION_DAEMON_PORT` - daemon HTTP API port (default: 13370)
+For an interactive takeover, start OMP with `LEGION_CONTROLLER_SECRET` and
+`LEGION_DAEMON_URL` in its environment, then run:
 
-## Daemon Launch
-
-Start the daemon from the Legion packages/daemon directory.
-
-```bash
-cd ~/legion/default/packages/daemon && \
-  PATH="$HOME/opencode/default/packages/opencode/dist/opencode-linux-x64/bin:$PATH" \
-  ENVOY_URL=http://127.0.0.1:9020 \
-  bun run src/cli/index.ts start trajectory-labs-pbc/2 -b github -r opencode \
-    --controller-session $MY_SESSION_ID
+```text
+/legion-claim-controller
 ```
 
-**Key details:**
-- **`--controller-session` is required for an interactive controller** — pass the current session's ID (from `envoy_whoami`). Session IDs change across sessions, so this belongs on the CLI, not in config. Without it, the daemon spawns a separate controller session. (`LEGION_CONTROLLER_SESSION_ID` env var and `controller.session_id` in legion.yaml still work as fallbacks; the env var is deprecated.)
-- **`ENVOY_URL`** is required so spawned opencode sessions can reach Envoy
-- **`-w` is NOT needed** — worker workspaces are auto-created by `ensureWorkspace()` (see Path Architecture below)
-- Only 2 env vars needed. Everything else is CLI args (`-b github -r opencode`).
-- Expected plugin stack: `@sjawhar/oh-my-opencode@sami` and `@sjawhar/opencode-legion-envoy@0.1.0-alpha.0`
+The command resolves the project from daemon state, claims the Envoy role for the current
+session, and posts readiness before controller commands can act. It retains the environment
+capability for `legion admit`, `legion approve`, and `legion backlog`. Never pass a secret as a
+command argument or copy it into a transcript.
 
-**Path architecture (all derived from XDG conventions, not `-w`):**
-- Repo clones: `~/.local/share/legion/repos/github.com/{owner}/{repo}/`
-- Worker workspaces: `~/.local/share/legion/workspaces/{projectId}/{issueId}/` (jj workspaces linked to repo clones)
-- State/logs: `~/.local/state/legion/legions/{projectId}/`
-- Controller workspace: same as state dir
-## Core Principle
+This handshake lets the daemon redeliver held controller work. It does not turn the controller
+into a state holder: daemon state and GitHub artifacts remain authoritative.
 
-**Keep work moving forward.** Priority order:
-0. Respond to user messages (always first)
-1. Unblock in-progress work (relay user feedback)
-2. Advance completed work (process worker-done)
-3. Start new work (triage, pull from Icebox)
+## Turn discipline
 
+- **Direct user message always first.** If this turn includes a direct user message, answer
+  it before handling every other wake.
+- **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
+  poll, idle-loop, or wait for another event.
+- **Wakes are advisory.** Before any side effect, verify the current daemon state and the
+  relevant GitHub artifact. A stale or duplicate wake may cost a read, never a wrong action.
+- **Controller state is disposable.** Do not reconstruct or preserve local controller
+  bookkeeping between turns.
 
-### User Interaction Priority
+## Wake routing table
 
-At the start of each wake, check if the user has sent a direct question or new instructions.
-
-- If yes: **STOP** the current wake handling, answer the user FIRST, then resume
-- Never continue processing while an unanswered user question is pending
-- If mid-dispatch, finish the dispatch, then respond immediately
-
-This rule is about answering user questions directed AT the controller. It is distinct from Step 2 (Relay User Feedback), which relays user comments TO workers via issue labels.
-
-### Autonomy vs Approval
-
-**Principle:** Act decisively within your authority. Scale caution to blast radius.
-
-**Heuristic:** "If you are wrong, how bad is it?" Dispatching an unnecessary planner wastes tokens. Merging a broken fix breaks the pipeline for the whole team.
-
-| Operation | Autonomous? | Notes |
-|-----------|-------------|-------|
-| Rebase branches | Yes | Just do it |
-| Phase transitions | Yes | Follow the pipeline |
-| Dispatch/resume workers | Yes | That's your job |
-| Resolve merge conflicts | Yes | Don't block on conflicts |
-| Label changes | Yes | Follow label conventions |
-| Move issues between statuses | Yes | Follow the state machine |
-| Merge PR to main | **Conditional** | Auto-merge for Tier 1 PRs when `auto_merge_allowed` config is true; otherwise requires explicit user approval |
-
-**Merge approval flow:** When all Pre-Merge Gate conditions are met, check if the PR qualifies for auto-merge (see "Auto-Merge Gate" below). If it qualifies, dispatch the merger directly and add the `auto-merged` label. If it does not qualify, post a readiness comment and add `needs-approval` label. Wait for user approval before dispatching merger.
-
-The controller MUST NOT ask "should I continue?" for routine operations. Act on everything within your authority. Only escalate when:
-1. The decision is irreversible (merge to main)
-2. There is genuine stakeholder disagreement
-3. The situation is not covered by existing rules
-
-### Domain Authority Discovery
-
-When a wake requires PO notification (triage routing or dispatch), check if a `legion-po` role
-holder exists by calling `envoy_sessions` and scanning the result for a session whose `topics`
-array contains the exact string `"notifications.role.legion-po"`. Store the result as a boolean
-(`HAS_PO`) for the current wake.
-
-If `envoy_sessions` fails or no session has the `legion-po` role topic, set `HAS_PO` to
-false and skip all PO notifications for this wake. Domain authority is advisory, never
-blocking — the controller's existing logic is always the fallback.
-
-## Envoy Notifications
-
-Envoy push is the controller's primary transport — there is no polling loop. The daemon subscribes the controller session to the topics below at startup, and workers additionally send completion notifications directly to the controller session via `envoy_send` (the controller session ID is included in the dispatch prompt's ENVOY section). GitHub artifacts (labels, check runs, PR state) remain the source of truth — every wake is advisory and is verified against a fresh state pass before acting. The daemon's resync pass is the safety net for any missed push.
-
-### Subscription Policy
-
-The daemon subscribes the controller to these topics:
-
-- `notifications.legion.controller` — daemon resync reports (`{"type":"legion.resync",...}` — see the Resync Playbook below)
-- `notifications.envoy.exceptions.notifications.legion.>`, `...role.legion-controller`, and `...agent.<controller session>` — delivery exceptions for **legion control lanes only**: a legion-topic/role/controller message with no holder, or whose delivery failed (see the Exception Playbook below). The controller is deliberately NOT subscribed to the global `notifications.envoy.exceptions.>` wildcard — that would make it the dead-letter consumer for every workstream on the broker. Worker-to-worker delivery losses are healed by the resync pass instead.
-- `notifications.role.legion-controller` — role-based route to the active controller session (claimed via `POST /v1/roles/set` on daemon startup)
-- `notifications.slack.*.*.mention` — app mentions across all Slack workspaces
-- `notifications.github.*.*.mention` — @mentions across all GitHub repos
-- `notifications.github.<owner>.<repo>.pr.<number>.ci` — a **debounced, per-commit CI summary** scoped to a specific PR (subscribe per-PR when a worker is waiting on CI). One settled summary per quiet burst of check activity, not a per-`check_run` firehose; `check_suite` and un-PR'd checks are not routed.
-
-**No board-wide issue/PR subscriptions.** The controller does NOT subscribe to all issue or PR events — that would recreate noise-driven drift. Workers hear their own issue/PR events via per-dispatch subscription manifests; the controller hears phase boundaries and exceptions only. Board-level gaps are healed by the resync pass.
-
-> **Slack topic format:** Slack topics use the real `team_id` (e.g., `T09FRELLTS8`), not the human-readable workspace slug (e.g., `trajectorylabs`). The Slack receiver publishes with the actual team ID from the Slack API. If you manually subscribe to specific Slack channels, use `notifications.slack.<team_id>.<channel_id>.mention` — see the Envoy skill for full topic format reference.
-
-### CI Event Handling
-
-When a CI summary is received (via `notifications.github.<owner>.<repo>.pr.<number>.ci`), it is **one settled, per-commit summary** for PR #`<number>` — emitted after that commit's checks have been quiet for the debounce window (~5s), not a signal per individual `check_run` transition. The `PayloadSummary` is a compact JSON object `{"kind":"ci_summary","repo","number","sha","failed":{"count":N,"checks":[...]},"running":{...},"passed":{...},"queued":{...},"skipped":{...}}` — each status carries its count + full check-name list. The controller should:
-
-1. **Identify affected issues** — match the PR number from the topic to an issue with an active worker in `implement` or `test` mode
-2. **Run a focused state pass** — run `fetch-and-collect` for the affected repo to pick up the CI status change and get a fresh `suggestedAction`
-3. **Act on results** — if CI passed and a worker is waiting, advance the pipeline (e.g., move from implement to test, or test to review)
-
-**CI summaries are advisory.** Because they are debounced, a summary already reflects a burst of settled checks rather than a single transition — but they still only trigger a state pass and never bypass the normal state machine. The authoritative state comes from the state pass results, not the Envoy event payload. A commit re-emits a summary only when its check set changes, so an unchanged pipeline stays quiet.
-
-**Per-workflow visibility for non-PR runs:** if you need to react to a workflow that isn't attached to a PR (e.g. a release workflow on a tag push), subscribe to `notifications.github.<owner>.<repo>.workflow.<filename>.<action>` instead. See the [envoy skill](../envoy/SKILL.md) for the full taxonomy.
-
-## Wake-Driven Operation
-
-The controller does not poll and does not loop. It is a persistent session woken by
-Envoy pushes (delivered as user-turn notifications) and by direct user messages.
-Handle the wake, then end your turn — the next push re-invokes you. Never sleep,
-never spawn background pollers.
-
-**Wakes are advisory; artifacts are truth.** Never act on a wake payload alone —
-re-read authoritative state (the state pass below) before any side-effectful action.
-A duplicate or stale wake must cause at worst a wasted read, never a wrong action.
-
-### Wake Sources
-
-| Wake | Carrier | Payload | Response |
-|---|---|---|---|
-| Resync report | `notifications.legion.controller` | `{"type":"legion.resync","recommendations":[...],"errors":[...]}` | Resync Playbook below |
-| Worker completion | `envoy_send` to the controller session | free text naming issue + phase | State pass → route by `suggestedAction` |
-| CI summary | `notifications.github.<owner>.<repo>.pr.<n>.ci` | `ci_summary` JSON | CI Event Handling above |
-| Delivery exception | `notifications.envoy.exceptions.<original topic>` | undeliverable message + original topic | Exception Playbook below |
-| Mention | `notifications.slack.*.*.mention` / `notifications.github.*.*.mention` | mention text | Answer, or route to the owning issue's worker |
-| User message | direct | — | Always first — before any other processing |
-
-### The State Pass
-
-On any wake that implies pipeline state may have changed, run steps 1–8 below for
-the affected issues. A resync wake covers the whole board; a single-PR wake can
-scope to that issue's repo. These are the same steps the old polling loop ran —
-triggered by wakes instead of a timer.
-
-### Resync Playbook
-
-The daemon runs a read-only, artifact-driven resync pass at startup and on a
-low-frequency timer (~10 min) and pushes the result to `notifications.legion.controller`.
-It is the universal healer: missed webhooks, zero-owner issues, and stalls all
-surface here. Route each recommendation by `reason`:
-
-| `reason` | Meaning | Controller action |
+| Wake | Content | Controller action |
 |---|---|---|
-| `artifact_no_live_owner` (`mode` set) | Issue has the phase artifact that makes `mode` the expected next owner, but no live worker | Verify via state pass, then dispatch `mode`. Deterministic session IDs mean dispatch re-attaches if the session still lives — safe. |
-| `architect_veto` (`mode` null) | `architect` check run = failure on the issue's PR | Read the architect's veto comment, then classify: implementer rework / planner rework / new child issue / human escalation |
-| `idle_missing_phase_artifact` (`mode` set) | Worker session went idle without producing its expected phase artifact | ADVISORY ONLY. Message the worker via `envoy_send` and wait for a response (2-min timeout) before any action. Never auto-abort — Role Boundary rules apply unchanged |
+| New issue added to the project board (webhook: issue opened / project item added; resync heals misses) | issue ref + triage context (incl. pre-existing children) | Triage: spawn root process via daemon admission, or park in the daemon-state backlog |
+| Backlog eligibility | slot freed / priority change | Reconsider parked items; deliberately-backlogged issues carry a marker so resync doesn't re-flag them |
+| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; human Q&A never routes here — architects open dispatch threads |
+| Resync report | artifact-driven anomaly list (zero-owner trees, erroring issues) | Verify against fresh state, then dispatch/heal |
+| Mention | Slack/GitHub @mention text | Answer, or route to the owning issue's architect role |
+| Approval interpretation | ambiguous human comment on a gated issue | Decide whether it's an approval; if so, apply `human-approved` via the daemon |
+| Direct user message | — | Always first |
 
-- **`errors` non-empty**: the daemon could not resolve artifacts for those issues
-  (API/auth failure). Do not dispatch for erroring issues. If the same issues error
-  across consecutive resyncs, investigate daemon auth/connectivity.
-- **Every push means a delta**: the daemon suppresses pushes for unchanged resync
-  results, so receiving one means something changed — or the daemon restarted
-  (suppression memory resets). If you do see an identical repeat, no-op it in one line.
-- **Many recommendations**: apply the priority order (unblock in-progress → advance
-  completed → start new) and the 10-worker capacity cap. It is fine to act on a
-  subset — the next resync re-surfaces the rest.
+## New issue triage
 
-### Exception Playbook
+1. Read `legion state --json`, then inspect the reported GitHub issue with `gh issue view`.
+   Verify the issue is on this project board, is eligible for a root process, and whether it
+   has pre-existing children. GitHub and daemon state, not the wake text, decide triage.
+2. If it should run now, admit the root issue:
 
-A message on a **legion control lane** (a `legion.*` topic, the `legion-controller`
-role, or the controller's own agent topic) with no holder — or whose delivery
-failed — arrives on `notifications.envoy.exceptions.<original topic>` instead of
-being silently dropped. Exceptions for other workstreams' traffic do not reach the
-controller by design. On receipt:
-
-1. Identify the intended recipient from the original topic.
-2. Check `envoy_sessions` for the holder.
-3. Message meant for the controller (role or agent lane) → re-claim the role if unheld, then process the embedded message normally.
-4. Dead-worker losses do not arrive here — the resync pass surfaces them as `artifact_no_live_owner` within its timer interval.
-5. Unclear → investigate before acting; never guess a recipient.
-
-### Turn-End Discipline
-
-- One wake = one turn. Process everything the wake implies, update the todo state
-  (step 8), then END your response. Do not idle-loop, sleep, or poll for "one more check".
-- Never block on long waits — anything worth waiting for will push a wake when it happens.
-  If nothing pushes, the daemon's resync timer guarantees a periodic wake; there is no
-  gap that polling would cover.
-
-**Responses are for the human.** Keep responses conversational and scannable:
-- Summarize worker status in tables, not raw JSON
-- Always end status updates with "Needs your attention" and "Autonomous" sections
-- Never dump raw `curl` output or JSON into the transcript
-
-### Compaction-Proof Critical Context
-
-The following MUST survive compaction (include verbatim in any compaction summary):
-- Daemon port and serve port
-- Controller session ID
-- Project board identifier and correct org/repo names for all tracked PRs
-- A pointer to this skill's Wake Sources table
-
-### 1. Fetch Issues
-
-```bash
-# Derive OWNER from LEGION_ID for GitHub backend (still used for non-issue-scoped operations)
-# LEGION_ID format for GitHub: "owner/project-number"
-if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
-  OWNER="${LEGION_ID%%/*}"
-fi
-
-# GitHub: the daemon fetches all project items internally from primary + extra boards
-# (LEGION_EXTRA_PROJECTS), deduplicates by canonical identity, and runs them through
-# the state machine in one call.
-# Linear: fetch issues first, then pass to the state machine in step 3.
-if [ "$LEGION_ISSUE_BACKEND" = "github" ]; then
-  COLLECTED=$(curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/fetch-and-collect \
-    -H 'Content-Type: application/json' \
-    -d '{"backend": "github"}')
-else
-  ISSUES_JSON=$(linear_linear(action="search", query={"team": "$LEGION_ID"}))
-fi
-
-ACTIVE_WORKERS=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq 'length')
-```
-
-**CRITICAL (Linear only):** Pass `ISSUES_JSON` directly to the state endpoint in step 3 without modification. Do NOT reconstruct, filter, or hand-craft the issue JSON. The state machine's parser handles the raw Linear format.
-
-For GitHub, the daemon's `fetch-and-collect` endpoint handles fetching and state collection internally — no raw issue JSON is involved.
-
-### 2. Relay User Feedback
-
-When both `user-input-needed` AND `user-feedback-given` labels present:
-1. Remove both labels
-2. **Resume** (not spawn) worker session with prompt to check issue comments
-
-### 3. Process worker-done
-
-Analyze via daemon:
-```bash
-# For GitHub, COLLECTED was already set by fetch-and-collect in step 1.
-# For Linear, pipe issues to the state machine now.
-if [ "$LEGION_ISSUE_BACKEND" != "github" ]; then
-  COLLECTED=$(echo "$ISSUES_JSON" | jq -Rs --arg backend "$LEGION_ISSUE_BACKEND" \
-    '{"backend": $backend, "issues": (. | fromjson)}' | \
-    curl -s -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect \
-    -H 'Content-Type: application/json' --data @-)
-fi
-```
-
-The state endpoint returns JSON with both `suggestedAction` and raw signals:
-- `hasLiveWorker`, `workerMode`, `workerStatus` — worker state
-- `hasPr`, `prReviewState` — PR and review state
-- `ciStatus`, `mergeableStatus` — CI and merge conflict state
-- `hasUserFeedback` — user interaction state
-Use `suggestedAction` as the primary guide, but consult raw signals when the suggestion
-is `skip`. The state machine returns `skip` conservatively — the controller should reason
-about what to do:
-
-| suggestedAction | Signals | Controller should... |
-|-----------------|---------|---------------------|
-| `skip` | `hasPr: true`, status: In Progress, `hasLiveWorker: true` | Live implementer still working on PR; wait for it to finish |
-| `skip` | `workerStatus: "dead"` | Dead worker blocking progress; clean up and re-evaluate |
-| `retry_pr_check` | `prReviewState: null` | GitHub API flaked; try again next iteration |
-| `resume_implementer_for_changes` (conflict) | `mergeableStatus: "conflicting"` | PR has conflicts; resume implementer to rebase and resolve |
-
-### Routing by Action Intent
-
-The state machine returns a `suggestedAction`. Route by prefix:
-
-| Prefix | Intent | Controller action |
-|--------|--------|-------------------|
-| `dispatch_` | Spawn a new worker | `POST /workers` with mode from `ACTION_TO_MODE` |
-| `transition_to_` | Move issue to new status | Update issue status (Linear: `linear_linear(action="update", ...)`, GitHub: `gh api graphql` for status field) |
-| `resume_` | Send prompt to existing worker | Find worker by sessionId, send prompt |
-| `relay_` | Forward information | Relay user feedback to worker |
-| `add_` | Add label | Add the specified label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --add-label`) |
-| `remove_` | Remove label + retry | Remove label (Linear: `linear_linear(action="update", ...)`, GitHub: `gh issue edit --remove-label`), then re-evaluate |
-| `retry_` | Wait | Do nothing now; the next wake or resync re-surfaces it |
-| `rebase_` | *(removed — conflicts route to `resume_implementer_for_changes`)* | N/A |
-| `skip` | No action needed | Check raw signals for edge cases (see signals table below) |
-| `investigate_` | Anomaly detected | Log warning, inspect issue state manually |
-
-This routing is stable across code changes. New action types automatically route
-correctly if they follow the naming convention.
-
-At the top of the per-issue action-handling loop, extract canonical GitHub source metadata
-from `COLLECTED` exactly once and reuse it for **all** repo-scoped operations:
-
-```bash
-# Extract canonical repo for this issue from collect response
-SOURCE_OWNER=$(echo "$COLLECTED" | jq -r ".issues.\"$ISSUE_IDENTIFIER\".source.owner // empty")
-SOURCE_REPO=$(echo "$COLLECTED" | jq -r ".issues.\"$ISSUE_IDENTIFIER\".source.repo // empty")
-ISSUE_NUMBER=$(echo "$COLLECTED" | jq -r ".issues.\"$ISSUE_IDENTIFIER\".source.number // empty")
-ISSUE_REPO="${SOURCE_OWNER}/${SOURCE_REPO}"
-
-# Skip issue if source metadata is missing (shouldn't happen for GitHub issues)
-if [ -z "$SOURCE_OWNER" ] || [ -z "$SOURCE_REPO" ]; then
-  echo "[controller] WARNING: source metadata missing for $ISSUE_IDENTIFIER — skipping"
-  continue
-fi
-```
-
-Do **not** reconstruct owner/repo from `$ISSUE_IDENTIFIER`, and do **not** fall back to
-LEGION_ID-derived repo values for issue-scoped GitHub operations. Use `$ISSUE_REPO` (or `$SOURCE_OWNER` /
-`$SOURCE_REPO` when separate values are required) everywhere inside the loop.
-
-**Handling `investigate_no_pr`:** Worker marked done but no PR exists. Likely causes:
-1. Worker crashed before creating PR
-2. PR creation failed silently
-3. Issue moved to wrong status manually
-4. PR wasn't linked to issue (Linear attachment or GitHub linked PR)
-
-**Action:** Investigate, then consider moving back to In Progress and re-dispatching implementer. May also just wait and check again next iteration.
-
-**`retry_pr_check`:** The GitHub API couldn't determine PR review state. Do nothing for this wake —
-don't dispatch a worker, don't transition status. The next wake or resync will re-run the state pass
-which will retry the GitHub API call. If this persists across multiple resyncs, investigate the
-GitHub API connectivity.
-
-**`resume_implementer_for_changes` (conflict):** The PR has merge conflicts. The state machine returns
-`resume_implementer_for_changes` — the controller must resume the implementer worker to rebase and
-resolve conflicts. The controller MUST NOT call the GitHub update-branch API or push directly.
-The implementer's merge workflow already contains rebase logic for post-approval conflicts.
-
-### Implement → Testing → Review Handoff
-
-The implementer adds `worker-done` when finished:
-1. Implementer opens a PR, verifies CI passes, adds `worker-done`, and exits
-2. State machine sees: In Progress + `worker-done` → `transition_to_testing`
-3. Controller transitions issue to Testing status
-4. Controller runs the quality gate (below)
-5. If quality gate passes: dispatch tester
-6. If quality gate fails: move back to In Progress, dispatch fresh implementer with failure output
-
-After the tester runs:
-- **Test passed** (`test-passed` label): Controller removes `worker-done` and `test-passed` labels, transitions to Needs Review, dispatches reviewer (no additional quality gate needed)
-- **Test failed** (`test-failed` label): Controller removes `test-failed` and `worker-done` labels, transitions back to In Progress, resumes implementer session with test failure report from the PR comment
-
-### Review → Re-implementation → Testing Loop
-
-When the reviewer requests changes, the implementer's fixes **must go through testing again**:
-
-1. Reviewer requests changes via `gh pr review --request-changes`, adds `worker-done`
-2. State machine: `resume_implementer_for_changes`
-3. Controller **transitions issue to In Progress**, removes `worker-done`
-4. Controller resumes the implementer session with "Address PR review comments"
-5. Implementer fixes, pushes, adds `worker-done`
-6. State machine: In Progress + `worker-done` → `transition_to_testing`
-7. Tester verifies the fixes
-8. If tester passes → Needs Review → reviewer runs again
-
-**Critical:** The controller MUST transition to In Progress before resuming the implementer. If the issue stays in Needs Review and the implementer adds `worker-done`, the state machine will see `changes_requested + worker-done` and suggest `resume_implementer_for_changes` again (infinite loop).
-
-### Architect-Review Checkpoint (Post-Plan, Opt-In)
-
-**Trigger:** `architect-continuity` label on issue. When present, the controller intercepts
-the planner-done → In Progress transition and resumes the original architect session for plan review.
-
-**Why resume, not re-dispatch:** The architect session persists in OpenCode's SQLite with full
-context (original spec analysis, architectural decisions). Resuming preserves this context.
-`legion dispatch` handles both cases: reuses existing session (409 Duplicate → success) or
-creates fresh if the session was lost.
-
-**Flow when `transition_to_in_progress` is suggested and `architect-continuity` label is present:**
-
-1. **Check for verdict label** (arch-review-approved / arch-review-changes):
-   - If `arch-review-approved`: clean up label, proceed with normal `transition_to_in_progress`
-   - If `arch-review-changes`: route to planner feedback (see step 3 below)
-   - If neither: this is a fresh planner completion — proceed to step 2
-
-2. **Resume architect for plan review:**
    ```bash
-   # Clean up planner signals
-   gh issue edit $ISSUE_NUMBER \
-     --remove-label "worker-done" \
-     --add-label "worker-active" \
-     -R $ISSUE_REPO
-
-   # Dispatch architect with review prompt (reuses existing session if alive)
-   legion dispatch "$ISSUE_IDENTIFIER" architect \
-     --repo "$ISSUE_REPO" \
-     --prompt "Invoke the /legion-worker skill for architect mode. You are being resumed to review the implementation plan for $ISSUE_IDENTIFIER.
-
-   Read the latest issue comments to find the planner's output. Compare it against your original architectural spec (the issue body and your architect handoff).
-
-   Assess:
-   1. Does the plan address all acceptance criteria from the spec?
-   2. Are there architectural concerns, spec misalignment, or missing components?
-   3. Are the planner's assumptions reasonable?
-
-   Post your review as an issue comment with a clear APPROVED or CHANGES NEEDED verdict.
-
-   If APPROVED — add labels: arch-review-approved, worker-done. Remove label: worker-active.
-   If CHANGES NEEDED — post specific items to address. Add labels: arch-review-changes, worker-done. Remove label: worker-active.
-
-   (github backend, repo: $ISSUE_REPO)"
+   legion admit <issue>
    ```
 
-3. **Handle architect verdict — changes requested:**
-   When `transition_to_in_progress` + `architect-continuity` + `arch-review-changes`:
+3. If it should deliberately wait, record a durable reason instead of leaving it unowned:
+
    ```bash
-   # Clean up verdict + signal labels
-   gh issue edit $ISSUE_NUMBER \
-     --remove-label "arch-review-changes" \
-     --remove-label "worker-done" \
-     --add-label "worker-active" \
-     -R $ISSUE_REPO
-
-   # Resume planner with architect feedback
-   legion prompt "$ISSUE_IDENTIFIER" --mode plan \
-     "Invoke the /legion-worker skill for plan mode. The architect has reviewed your plan and requested changes — read the latest issue comments for their feedback. Revise your plan accordingly. (github backend, repo: $ISSUE_REPO)"
-   ```
-   The planner revises, adds `worker-done`, removes `worker-active`. The state machine
-   suggests `transition_to_in_progress` again. The controller re-checks for `architect-continuity`
-   and resumes the architect for re-review (no verdict label present → step 2 above).
-
-4. **Handle architect verdict — approved:**
-   When `transition_to_in_progress` + `architect-continuity` + `arch-review-approved`:
-   ```bash
-   # Clean up transient verdict label
-   gh issue edit $ISSUE_NUMBER \
-     --remove-label "arch-review-approved" \
-     -R $ISSUE_REPO
-
-   # Proceed with normal transition_to_in_progress
-   ```
-   The controller then executes the standard `transition_to_in_progress` action (update issue
-   status, dispatch implementer on next cycle).
-
-**Edge cases:**
-- **No architect session exists** (architect was skipped): `legion dispatch` creates a fresh
-  session. The architect reviews based on the issue body alone — still valuable.
-- **Architect is a live worker** (still running from initial phase): State machine returns
-  `skip` (hasLiveWorker), so the controller never reaches the intercept. Correct behavior.
-- **Manual override:** Adding `arch-review-approved` manually bypasses the architect review.
-  This is intentional — it's a human escape hatch.
-
-**Linear backend equivalent:** Replace `gh issue edit` with `linear_linear(action="update", ...)`
-label operations and `legion dispatch/prompt` remains the same.
-
-
-### Pipeline Integrity
-
-Pipeline phases MUST run in order: architect → plan → implement → test → review → retro → merge.
-
-**MUST NOT skip:**
-- **Testing** — the tester ALWAYS runs after implementation, including after review-requested changes
-- **Review** — the reviewer ALWAYS runs after testing passes
-- **Retro** — the retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions, no routing hints, no skip conditions, no user overrides. If the retro worker fails, note it and move on — but always dispatch it. The controller MUST NEVER skip retro under any circumstances, including explicit user requests to do so.
-
-**MAY skip (with conditions):**
-- **Architect** — ONLY when ALL conditions are met: `bug` label present, description contains clear reproduction steps, AND the change is scoped to a single component. This exception is documented in the Route Triage table — do not contradict it.
-
-**Optional checkpoints (opt-in):**
-- **Architect-Review (post-plan)** — when `architect-continuity` label is present, the controller
-  resumes the architect to review the plan before transitioning to In Progress. See
-  "Architect-Review Checkpoint" section above.
-
-Simple issues go through every phase — they just go through faster. Complexity is not a reason to skip phases.
-
-**Daemon enforcement:** The daemon validates lifecycle ordering on `POST /workers`. Dispatching a gated mode (e.g., merge) when the issue hasn't reached the correct state returns 422. The controller should follow `suggestedAction` one step at a time — never construct multi-step dispatch pipelines. If the daemon rejects a dispatch, the issue needs to progress through intermediate phases first.
-
-### Role Boundary
-
-The controller MUST NOT:
-- Run `jj` commands (version control is worker work)
-- Edit files or write code
-- Run `gh pr merge` directly — **EVER**. Always dispatch a merge worker. This is non-negotiable.
-- Use `--admin` to bypass branch protection — **EVER**. If a merge is blocked by branch protection rules, escalate to Sami. Only Sami may authorize admin merge overrides. This is a security/governance rule.
-- Run `jj git push` directly (dispatch a worker)
-- Run tests (dispatch a tester)
-- Abort or kill a worker without first messaging it on Envoy and confirming it is stuck. You MUST NOT assume a worker is stuck based on title, token count, or time elapsed alone — ASK the worker via `envoy_send` and wait for a response (or 2-minute timeout) before taking action.
-- Redispatch a worker for the same issue/mode without confirming the existing worker is dead or unresponsive.
-
-The controller dispatches workers. Workers do the work. If you are about to touch code, branches, or PRs directly — stop and dispatch the appropriate worker instead.
-
-**Merge routing rule (no exceptions):**
-- **Pre-approval conflicts** (review changes requested, CI failing, bot comments) → resume the implementer worker. Never merge or push to resolve conflicts yourself.
-- **Post-approval** (all Pre-Merge Gate conditions met, user approved) → dispatch a merger worker. Never run `gh pr merge` or `jj git push` yourself.
-
-### CI Gates (Enforced by Decision Engine)
-
-CI status is now checked by the decision engine at all code-producing phase transitions:
-- **In Progress → Testing** (implementer done)
-- **Testing → Needs Review** (tester done)
-- **Needs Review → Retro** (reviewer done)
-
-The decision engine emits `resume_implementer_for_ci_failure`, `retry_ci_check`, or
-`investigate_no_pr` when appropriate. The controller does NOT need to independently
-verify CI before dispatching — the state machine handles it.
-
-**Controller remediation for CI-related actions:**
-
-| Action | From Status | Controller Response |
-|--------|-------------|---------------------|
-| `resume_implementer_for_ci_failure` | In Progress | Remove `worker-done` label, resume implementer with CI failure output. Status stays In Progress. |
-| `resume_implementer_for_ci_failure` | Testing | Remove `worker-done` and `test-passed` labels, move issue back to In Progress, resume implementer with CI failure output. |
-| `resume_implementer_for_ci_failure` | Needs Review | Same as existing behavior — resume implementer with CI failure output. |
-| `retry_ci_check` | In Progress / Testing | Wait and re-check (same as existing Needs Review behavior). |
-| `investigate_no_pr` | In Progress / Testing | Same handling as Needs Review — investigate missing PR. |
-
-**CI is the implementer's responsibility.** The implement workflow requires passing CI before
-signaling completion. If CI is failing when the decision engine evaluates an issue, the
-implementer didn't finish — the engine emits the appropriate resume action.
-
-### Pre-Merge Gate
-
-### PR Closing-Keyword Fallback (Controller Safety Net)
-
-Before requesting merge approval (or dispatching merger), the controller must verify the PR body
-contains the dispatched issue's closing keyword. If missing, patch the PR body automatically.
-
-```bash
-PR_BODY=$(gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO)
-
-# Accept standard auto-close keyword variants for the dispatched issue
-if ! echo "$PR_BODY" | grep -Eiq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"; then
-  UPDATED_PR_BODY="$(cat <<EOF
-$PR_BODY
-
-Closes #$ISSUE_NUMBER
-EOF
-)"
-  gh pr edit "$LEGION_ISSUE_ID" --body "$UPDATED_PR_BODY" -R $ISSUE_REPO
-fi
-
-# Verify after edit (must pass before merge approval flow continues)
-gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO | grep -Eq "(Closes|Fixes|Resolves) #$ISSUE_NUMBER"
-```
-
-If this check/edit fails, do not proceed to merge approval. Re-dispatch implementer to repair PR
-metadata and push a follow-up update.
-
-Before requesting merge approval, verify ALL conditions:
-
-| # | Condition | Verification |
-|---|-----------|-------------|
-| 1 | PR body includes a closing keyword for dispatched issue | `gh pr view "$LEGION_ISSUE_ID" --json body -q .body -R $ISSUE_REPO \| grep -Eq "(Closes\|Fixes\|Resolves) #$ISSUE_NUMBER"` |
-| 2 | CI checks green (not pending, not failed) | `gh pr checks "$LEGION_ISSUE_ID" -R $ISSUE_REPO` — all checks must show ✓ |
-| 3 | PR has an approving review | `gh pr view "$LEGION_ISSUE_ID" --json latestReviews --jq '.latestReviews[0].state' -R $ISSUE_REPO` returns `APPROVED` |
-| 4 | `test-passed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep test-passed` |
-| 5 | Issue has been through retro | Check retro handoff: `legion handoff read --phase retro --workspace "$WORKSPACE_PATH" 2>/dev/null` or verify issue transitioned through Retro status |
-| 6 | No `user-input-needed` label present | `gh issue view $ISSUE_NUMBER --json labels -q '.labels[].name' -R $ISSUE_REPO \| grep -v user-input-needed` — must NOT match |
-| 7 | PR is mergeable (not CONFLICTING or UNKNOWN) | `gh pr view "$LEGION_ISSUE_ID" --json mergeable --jq '.mergeable' -R $ISSUE_REPO` returns `MERGEABLE` |
-
-**Mergeability gate (condition 7) — handling by state:**
-
-| `mergeable` value | Action |
-|-------------------|--------|
-| `MERGEABLE` | Proceed with approval flow |
-| `CONFLICTING` | Resume the implementer: `legion prompt "$ISSUE_IDENTIFIER" --mode implement "...PR has merge conflicts. Rebase onto main and resolve conflicts."`. Do NOT call the GitHub update-branch API directly. |
-| `UNKNOWN` / null / API failure | Defer to a later wake. Do NOT add `needs-approval`. |
-
-**Resolving PR number:** `PR_NUMBER=$(gh pr view "$LEGION_ISSUE_ID" --json number --jq '.number' -R $ISSUE_REPO)`
-
-If ANY condition fails, do NOT request merge approval. Fix the failing condition first.
-
-**When all conditions pass:** Check if the PR qualifies for auto-merge (see below). If it qualifies, dispatch the merger directly. Otherwise, post a readiness comment to the issue and add the `needs-approval` label. Wait for user approval before dispatching the merger.
-
-### Auto-Merge Gate (Tier 1)
-
-**Prerequisite:** The repo config must have `merge.auto_merge_allowed: true`. If this config key is absent or false, ALL PRs require human approval (existing behavior).
-
-When all 7 Pre-Merge Gate conditions pass AND `auto_merge_allowed` is true, check if the PR qualifies for autonomous merge. ALL of the following must be true:
-
-| # | Condition | Verification |
-|---|-----------|-------------|
-| 1 | PR is not a draft | `gh pr view "$LEGION_ISSUE_ID" --json isDraft --jq '.isDraft' -R $ISSUE_REPO` returns `false` |
-| 2 | No `user-input-needed` label | Already checked in Pre-Merge Gate condition 6 |
-| 3 | Smoke test compliance verified | Test handoff data includes smoke test evidence: `legion handoff read --phase test --workspace "$WORKSPACE_PATH" 2>/dev/null \| jq '.testSuiteResults'` must contain non-empty results beyond just "lint" and "typecheck" |
-| 4 | Change is small | `gh pr view "$LEGION_ISSUE_ID" --json additions,deletions,changedFiles --jq '{additions,deletions,changedFiles}' -R $ISSUE_REPO` — total additions+deletions ≤ 100 AND changedFiles ≤ 2 |
-| 5 | No new dependencies added | `gh pr diff "$LEGION_ISSUE_ID" -R $ISSUE_REPO -- '*/package.json' \| grep -E '^\+\s+".+":\s*"' \| wc -l` returns 0 — no new package entries added within dependency blocks in any package.json file |
-| 6 | No infrastructure changes | Changed files do NOT include: `Dockerfile`, `docker-compose`, `.github/workflows/`, `pulumi/`, terraform files |
-| 7 | Change type is safe | Issue labels include at least one of: `bug`, `fix`, `docs`, `config`, `skill`, `chore`. Does NOT have labels: `feature`, `breaking`, `security`, `infra` |
-
-**When ALL auto-merge conditions pass:**
-
-1. Post a comment to the issue:
-   ```bash
-   gh issue comment $ISSUE_NUMBER --body "🤖 **Auto-merge eligible.** All pre-merge and Tier 1 conditions met. Dispatching merger autonomously.
-
-   **Auto-merge criteria met:**
-   - CI green ✓
-   - Reviewer approved ✓
-   - Smoke test evidence present ✓
-   - Small change (≤100 lines, ≤2 files) ✓
-   - No new dependencies ✓
-   - No infrastructure changes ✓
-   - Safe change type ✓
-
-   Rollback available via: \`legion rollback $LEGION_ISSUE_ID\`" -R $OWNER/$REPO
+   legion backlog <issue> --marker <reason>
    ```
 
-2. Add the `auto-merged` label:
-   ```bash
-   gh issue edit $ISSUE_NUMBER --add-label "auto-merged" -R $OWNER/$REPO
-   ```
+   The marker is required: it distinguishes intentional backlog from a missed wake during
+   resync. Do not triage a system-created child as a root issue.
 
-3. Dispatch the merger directly (same as when `human-approved` is present):
-   ```bash
-   legion advance $ISSUE_IDENTIFIER --stage merge
-   ```
+## Backlog eligibility
 
-**When ANY auto-merge condition fails:** Fall back to the standard approval flow — post a readiness comment and add `needs-approval`. Include which auto-merge conditions failed in the comment so the user knows why it wasn't auto-merged.
+When a slot frees or priority changes, use `legion state --json` and the current issue
+artifact to reconsider marked backlog entries. Admit the selected root with `legion admit
+<issue>`. Keep an item backlogged only with a current, explicit marker; changing the marker
+is a deliberate controller decision, not a no-op.
 
-**Rollback safety net:** If an auto-merged PR causes issues (next worker on the same repo fails within 30 minutes of the auto-merge), the controller should flag the auto-merged PR for human review by posting a warning comment on the original issue.
+## Architect escalation
 
-### Post-Merge Monitoring
+Only decide controller-actionable escalations: re-filing independent work, capacity, and
+cross-tree conflicts. Architects handle ordinary human Q&A through their own dispatch
+threads.
 
-If an issue remains in Retro after the merger exits, verify PR merge status:
-```bash
-gh pr view "$LEGION_ISSUE_ID" --json state,merged -R $ISSUE_REPO
-```
+For an independence judgment, verify the child and its parent against GitHub and current
+daemon state. If the work belongs in an independent root:
 
-If the PR is merged but the issue isn't closed, close it explicitly:
-```bash
-gh issue close $ISSUE_NUMBER -R $ISSUE_REPO
-```
+1. File a **fresh root issue** with `gh`, carrying the necessary context.
+2. Close the child and leave a pointer to the new root issue.
+3. Admit or deliberately backlog the new root through the normal triage procedure.
 
-This handles edge cases where GitHub's auto-close on merge didn't fire or the issue isn't linked to the PR. The `transition_to_done` action type exists in the state machine for this purpose.
+Never promote a child in place. Resolve capacity and cross-tree conflicts from verified
+state, routing design decisions back to the owning architect when they are not controller
+judgments.
 
-### 4. Route Triage
+## Resync report
 
-**Be ambitious. Prioritize user value. Keep work moving.**
+Treat a resync report as an anomaly list, not an instruction. For every zero-owner tree or
+erroring issue it names, verify `legion state --json` and the current GitHub artifact first.
+Then heal the verified condition: admit an eligible root, restore a deliberately backlogged
+marker, or use the applicable daemon control path. Do not act on erroring or stale entries
+until their source artifact explains the anomaly.
 
-No issue is "too big" for Legion — that's what the architect phase is for. Large or complex
-issues go to Backlog where the architect breaks them down. Only route to Icebox if the issue
-is genuinely unclear (missing context, ambiguous requirements, needs user clarification).
+## Mentions
 
-Controller routes Triage issues directly (no worker needed):
+Read the mention and its artifact. Answer it when it asks the controller for triage or
+human-facing information. Otherwise resolve the authoritative owning architect role and
+route the verified context with `envoy_publish`. Do not route raw event traffic or invent a
+role token from a partial issue reference.
 
-| Assessment | Route To |
-|------------|----------|
-| Urgent AND clear requirements | Todo (dispatch planner) |
-| Bug label + clear reproduction steps + no architectural uncertainty | Todo (skip architect — dispatch planner directly) |
-| Clear requirements, any size | Backlog (architect breaks down if large) |
-| Ambiguous or missing context | Icebox (needs clarification) |
+## Approval interpretation
 
-The skip-architect rule only applies when ALL conditions are met: `bug` label present,
-description contains clear reproduction steps, and the change is scoped to a single
-component. When in doubt, route to Backlog.
-
-**PO notification:** If `HAS_PO` is true, after making the triage routing decision, notify:
-
-```
-envoy_publish(topic="notifications.role.legion-po", message="Triage: routing $ISSUE_IDENTIFIER to [Icebox|Backlog|Todo]. Override via issue comment.")
-```
-
-Replace `[Icebox|Backlog|Todo]` with the actual routing decision. Proceed immediately — do not
-wait for a response. If `envoy_publish` fails, continue immediately — Envoy is advisory and the
-controller's normal flow remains the source of truth. If the PO disagrees, they comment on the
-issue, which the controller picks up via feedback relay (Step 2) on a subsequent wake.
-
-### 5. Pull from Icebox
-
-**If active workers < 10:**
-1. Check for Icebox items that have been clarified: look for `user-feedback-given` label OR new comments added since the issue was moved to Icebox
-2. If no clarified items exist, skip — leave Icebox items until users respond
-3. Move the oldest clarified item to Backlog
-4. Dispatch architect
-
-### 6. Cleanup Done (MUST run on every state pass)
-
-**This step MUST execute on every full state pass** (every resync wake at minimum). Iterate over ALL Done issues from the collected
-state that still have worker entries in the daemon. The daemon auto-cleans Done issues during
-state collection (Layer 1), and this controller sweep is the **backup safety net** (Layer 2) that catches stragglers — issues where the daemon
-auto-cleanup didn't fire (e.g., issue was closed manually, daemon restarted between collect cycles).
-
-For each Done issue that has worker entries (check the `/workers` response):
-
-1. Remove workspace:
-```bash
-# Use ANY worker ID for the issue — all modes share the same workspace
-curl -s -X DELETE "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/workspace" \
-  -H 'Content-Type: application/json' \
-  -d '{"repo": "'"$ISSUE_REPO"'"}'
-```
-
-2. Prune all worker entries and crash history for the issue:
-```bash
-curl -s -X POST "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/prune" \
-  -H 'Content-Type: application/json' \
-  -d '{"issueIds": ["'"$ISSUE_ID"'"]}'
-```
-
-Both calls are idempotent. The prune call removes all worker modes for the issue, their crash
-history, and the dispatch validation cache. If the daemon auto-cleanup already handled this issue,
-both calls are no-ops.
-
-**Do NOT skip this step** even if the daemon auto-cleanup is active — the three layers are
-defense-in-depth against disk exhaustion.
-
-### 7. Write Heartbeat
+For an ambiguous human comment on a gated issue, verify the current issue, gate state, and
+comment's meaning. If it is Sami's approval, apply the daemon transition:
 
 ```bash
-The daemon handles heartbeat writing automatically. No manual heartbeat step needed.
+legion approve <issue>
 ```
 
-### 8. Update To-Do List
-
-Maintain in context:
-```markdown
-## Controller State
-**Active workers:** [count] / 10 max
-### Priority Queue
-- [ENG-XX] description
-### In Progress
-- [ENG-YY] mode - worker running
-### Blocked
-- [ENG-ZZ] user-input-needed
-```
-
-### 9. End Turn
-
-All steps done for this wake: update the todo state, give the human a short status if
-anything changed, and end your response. The next Envoy push or user message re-invokes
-you. The daemon's resync timer guarantees a periodic wake even when nothing else pushes —
-see **Wake-Driven Operation** above.
-
-## Dispatch vs Resume
-
-## Repo-Specific Configuration (`.legion/config.yml`)
-
-Repos can define Legion behavior in `.legion/config.yml` (committed in repo root). Worker workflows read this file at startup and apply recognized keys.
-
-Controller behavior with repo config:
-- Do not duplicate repo-specific rules in every dispatch prompt
-- Assume workers will self-configure from `.legion/config.yml`
-- If needed for diagnostics, query config from the worker workspace (via worker context) and compare against observed behavior
-
-Supported schema and key precedence are documented at:
-- @../legion-worker/references/config.md
-
-### Backend in Prompts
-
-Workers must know which backend they're on. The controller always includes the backend
-in dispatch and resume prompts so workers don't need to check environment variables.
-
-Build the backend suffix from `LEGION_ISSUE_BACKEND` and (for GitHub) the per-issue source
-metadata extracted from `COLLECTED` in the action loop:
-
-- **GitHub:** `(github backend, repo: $ISSUE_REPO)` — use the canonical `IssueState.source`
-  owner/repo for the current issue; do not parse repo identity from `$ISSUE_IDENTIFIER`
-- **Linear:** `(linear backend)`
-
-### GitHub App Credentials (Worker Identity)
-
-When GitHub App credentials are configured on the daemon, each worker mode maps to a
-specific role identity. The daemon **automatically injects** role-specific credentials
-into each worker's env during `POST /workers` — the controller does not need to fetch
-or pass credentials manually.
-
-**Mode-to-role mapping (handled by daemon):**
-
-| Mode | Role | App Name |
-|------|------|----------|
-| `implement`, `merge` | `impl` | `legion-impl` |
-| `review`, `test`, `architect`, `plan` | `review` | `legion-review` |
-
-**How it works:**
-1. Controller dispatches worker normally (no credential handling needed)
-2. Daemon's `POST /workers` automatically:
-   - Maps mode → role
-   - Generates a fresh installation token for that role
-   - Stores `GH_TOKEN`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*` in worker's env
-3. Worker startup sequence fetches env from `GET /workers/{id}/env`
-4. Worker uses role-specific identity for all `gh` and `jj` operations
-
-**Important constraints:**
-- Never call `gh auth login`, `git config --global`, or write to `~/.config/gh/` or `~/.gitconfig`
-- Credential injection is automatic — no `--env` flag needed for credentials
-- If credentials are not configured for a role, workers use ambient credentials
-- Tokens expire after ~1 hour; the daemon refreshes automatically
-- Workers on separate role serves cannot access other roles' credentials (process isolation)
-- Private key paths are scrubbed from all serve environments
-
-### Dispatch (New Worker)
-
-**Always use skill invocation (`/skill-name`), not file paths.** Workers load skills via the
-skill system. Pointing them at file paths bypasses skill loading and risks the worker not
-getting the full skill content.
-
-**PO notification:** If `HAS_PO` is true, notify before dispatching:
-
-```
-envoy_publish(topic="notifications.role.legion-po", message="Dispatching $MODE worker for $ISSUE_IDENTIFIER in $ISSUE_REPO. Override via issue comment.")
-```
-
-Dispatch proceeds immediately — do not wait for a response. If `envoy_publish` fails, continue
-immediately — Envoy is advisory and the controller's normal flow remains the source of truth.
-
-```bash
-# GitHub example:
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --repo "$ISSUE_REPO" \
-  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (github backend, repo: $ISSUE_REPO). Before starting, check for project-specific skills that may be relevant to this work."
-
-# Linear example:
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --prompt "Invoke the /legion-worker skill for $MODE mode for $ISSUE_IDENTIFIER (linear backend). Before starting, check for project-specific skills that may be relevant to this work."
-```
-
-The `dispatch` command handles: workspace creation (jj workspace add), daemon API call (POST /workers), initial prompt, and prints worker info.
-
-For custom prompts, still include the backend suffix:
-```bash
-legion dispatch "$ISSUE_IDENTIFIER" "$MODE" \
-  --repo "$ISSUE_REPO" \
-  --prompt "Custom instructions here (github backend, repo: $ISSUE_REPO)"
-```
-
-**Note:** The daemon also supports auto-resolving repo from `issueStateCache` when `--repo` is
-omitted. This is a **fallback for manual CLI callers** — the controller MUST always pass `--repo`
-explicitly because it has the freshest data from the collect response. Do not rely on daemon
-auto-resolve for controller dispatches.
-
-### Resume (Prompt Existing Worker)
-
-```bash
-# User feedback relay (GitHub):
-legion prompt "$ISSUE_IDENTIFIER" \
-  "Invoke the /legion-worker skill. Check issue comments for user feedback. (github backend, repo: $ISSUE_REPO)"
-
-# PR changes requested — tell them to invoke the skill, not give step-by-step fix instructions:
-legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Invoke the /legion-worker skill for implement mode. CI is failing on your PR — check the failures and fix. (github backend, repo: $ISSUE_REPO)"
-```
-
-If multiple workers exist for the same issue (different modes), specify mode with `--mode`.
-
-Use resume for: user feedback relay, PR changes requested, retro after review approval.
-
-### Advance (Preferred for Normal Flow)
-
-`legion advance` is a high-level command that reads `suggestedAction` from the daemon's
-state cache and executes it — dispatching workers, transitioning issue status, or resuming
-workers as appropriate. It replaces manual dispatch + transition sequences for normal flow:
-
-```bash
-# Advance an issue to its next stage (reads suggestedAction from daemon cache)
-legion advance "$ISSUE_IDENTIFIER"
-
-# Force a specific stage (equivalent to dispatch --force)
-legion advance "$ISSUE_IDENTIFIER" --stage implement
-
-# See what would happen without doing it
-legion advance "$ISSUE_IDENTIFIER" --dry-run
-```
-
-**`advance` handles:**
-- `dispatch_*` actions → dispatches worker with correct mode and prompt
-- `transition_to_*` actions → updates issue status in tracker + removes `worker-done` label
-- `resume_*` actions → dispatches worker with appropriate resume prompt
-- `skip`/`investigate`/`retry` → returns actionable message without executing
-
-**When to use `advance` vs manual `dispatch`:**
-- Use `advance` for normal lifecycle progression (it handles the full action mapping)
-- Use `dispatch` directly when you need custom prompts, env vars, or workspace overrides
-
-### Retro
-
-**The retro phase is MANDATORY. Every issue that passes review gets a retro. No exceptions.**
-
-Retro is triggered by resuming the **implement worker's existing session** — this preserves the implementer's full context. The retro skill handles spawning a fresh subagent for an outside perspective.
-
-Always dispatch retro after review approval. Do not check routing hints, `skipRetro` flags, or any other conditions — retro runs unconditionally.
-
-**Use skill invocation for retro too:**
-
-```bash
-# GitHub:
-legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Invoke the /legion-retro skill. (github backend, repo: $ISSUE_REPO)"
-
-# Linear:
-legion prompt "$ISSUE_IDENTIFIER" --mode implement \
-  "Invoke the /legion-retro skill. (linear backend)"
-```
-
-**If the implement worker died** (action `dispatch_implementer_for_retro`), a fresh worker is dispatched in `implement` mode. This loses the implementer's perspective — both retro analyses will be from a fresh viewpoint.
-
-**ADAPTIVE ROUTING GUARDRAILS — MUST NEVER BE SKIPPED:**
-- Testing phase CANNOT be skipped — tester ALWAYS runs
-- Retro phase CANNOT be skipped — retro ALWAYS runs after review approval
-- Routing hints are ADVISORY — labels, PR state, daemon state remain authoritative
-- When hints are missing/corrupt: fall back to full pipeline
-- When multiple hints conflict: fall back to full pipeline
-
-## Worker Inspection
-
-The daemon is the controller's interface to workers. Use the daemon API, not direct port access.
-
-```bash
-# List all workers
-curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq '.[] | {id, status, port, sessionId}'
-
-# Check worker status (busy/idle)
-curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$WORKER_ID/status | jq '.'
-```
-
-The state machine reports `hasLiveWorker`, `workerMode`, and `workerStatus` for each issue.
-
-### Session ID Source of Truth
-
-**`GET /workers` is the ONLY reliable source for session IDs.** Never parse session IDs
-from dispatch output, truncated logs, or cached values. The dispatch response may be
-truncated or ambiguous — always verify against the daemon's worker list.
-
-```bash
-# CORRECT: Get exact session ID from daemon
-SESSION_ID=$(curl -s http://127.0.0.1:$LEGION_DAEMON_PORT/workers | jq -r '.[] | select(.id == "'$WORKER_ID'") | .sessionId')
-
-# WRONG: Parse from dispatch output (may be truncated)
-# SESSION_ID=$(echo "$DISPATCH_OUTPUT" | grep -o 'ses_[a-zA-Z0-9]*')
-```
-
-**After every dispatch, verify the session ID from `GET /workers` before monitoring.**
-Monitoring the wrong session ID leads to false "dead worker" reports — the worker may
-be alive and productive while you abort and redispatch based on a non-existent session.
-
-### Worker Health Assessment
-
-To determine if a worker is healthy, stuck, or dead:
-
-1. **Get exact session ID** from `GET /workers` (not from dispatch output)
-2. **Read the transcript** — check the last assistant message content, not just message count
-3. **Check last assistant output type**:
-   - Has text or tool calls → alive (may be slow)
-   - EMPTY (0-length response) → dead session (serve bug). Abort and redispatch.
-   - NO_ASST (no assistant messages at all) → session never started. Abort and redispatch.
-4. **"Flat message count" is ambiguous** — it can mean:
-   - Worker is DONE and idle (check transcript for "idle" / "complete" text)
-   - Worker is in a long tool call (check last tool state)
-   - Worker is dead (check for EMPTY last response)
-   - You are monitoring the WRONG session ID
-
-**Never assume a worker is stuck based on message count alone.** Always read the transcript.
-
-### Prompt Delivery to Busy Sessions
-
-`prompt_async` to a busy session is **silently dropped** (OpenCode Runner bug). The prompt
-is queued as a user message but the model loop never processes it. This means:
-
-- **Never nudge busy workers** — the nudge won't be seen
-- **Wait for idle, then prompt** — or abort and redispatch
-- **+1 message after nudge does NOT mean the worker responded** — it's just your queued prompt
-Use these signals — don't independently verify worker liveness.
-
-### Session Versioning (Escape Hatch Only)
-
-Session IDs are **deterministic** — `computeSessionId(teamId, issueId, mode)` uses UUID v5.
-Same inputs always produce the same session ID. If the serve still has that session in
-memory, re-dispatching with the same issue ID and mode re-attaches to the existing session
-(the serve returns 409 DuplicateIDError, which the daemon treats as "reuse").
-
-**This is by design — session reuse preserves the worker's full context.** A worker that has
-been reading code, making changes, and iterating on review feedback carries all that context
-in its session. Re-dispatching without a version increment reconnects to that session, so
-the worker continues where it left off.
-
-The `--version` flag on `legion dispatch` exists **only as an escape hatch** for unrecoverable
-sessions — e.g., the session is corrupted, the serve crashed and lost the session, or the
-workspace was deleted and recreated. **Do NOT increment versions during normal pipeline
-operation.** Each version increment creates a completely fresh session that has zero context
-about the issue, the codebase changes, or prior work.
-
-**NEVER do this:**
-```bash
-# WRONG: Incrementing version on every dispatch throws away all worker context
-legion dispatch issue-123 implement --version 1 --prompt "Fix review feedback"
-# Later...
-legion dispatch issue-123 implement --version 2 --prompt "Fix CI"
-# Later...
-legion dispatch issue-123 implement --version 3 --prompt "Fix more things"
-```
-
-**Do this instead:**
-```bash
-# CORRECT: Same version (or no version) = worker resumes with full context
-legion dispatch issue-123 implement --prompt "Fix review feedback"
-# Later...
-legion dispatch issue-123 implement --prompt "Fix CI"  # Same session, worker remembers everything
-```
-
-A context-less worker is dangerous — it doesn't understand the branch topology, prior
-changes, or conventions established during earlier work. This can lead to destructive
-actions like force-pushing to the wrong branch.
-### Don't Delete a Workspace While Workers May Resume
-
-**A worker whose workspace has been deleted cannot respond to prompts.** Every tool call
-fails because the working directory no longer exists. The session appears "busy" but
-produces no output — it looks like the worker is stalled, but the root cause is the
-missing workspace.
-
-This applies to both active workers AND idle workers you might want to resume later
-(e.g., for retro). Only delete workspaces during Cleanup Done (step 6) — after the
-issue is fully complete and no further prompts will be sent.
-
-## Observability Rules
-
-### 1. Trust the state machine
-
-The state machine checks worker liveness, PR status, labels, and review state. Use
-`fetch-and-collect` (GitHub) or POST issue data to `/state/collect` (Linear) and route
-by `suggestedAction`. Don't independently check PRs, ports, or process status — that's
-the state machine's job.
-
-For the full observability architecture and failure case studies, see `docs/solutions/daemon/controller-observability.md`.
-
-### 2. Never reconstruct state machine input
-
-For GitHub, call `fetch-and-collect` — the daemon fetches project items internally via
-paginated GraphQL. For Linear, pass tracker output directly to `/state/collect`. Never
-hand-craft JSON, filter issues, or inject your own assumptions about labels or status.
-
-### 3. Fresh data on every wake
-
-Fetch issues from the tracker when handling a wake. Don't carry labels, statuses, or
-worker state between wakes — they go stale.
-
-### 4. One PR per issue
-
-Each issue gets its own workspace, its own branch (named after the issue ID), and its
-own PR. Do not accumulate changes from multiple issues into a single PR — this makes
-it impossible to track what's merged.
-
-## Labels
-
-| Label | Meaning |
-|-------|---------|
-| `worker-done` | Worker finished phase, controller acts |
-| `worker-active` | Worker dispatched and running |
-| `user-input-needed` | Blocked on human, controller skips |
-| `user-feedback-given` | Human responded, controller resumes |
-| `needs-approval` | Waiting for human approval (architect output or merge readiness) |
-| `human-approved` | Human approved, controller advances to planner |
-| `test-passed` | Tester verified behavior, controller advances to Needs Review |
-| `test-failed` | Tester found issues, controller returns to implementer |
-
-### Label Batching Pattern
-
-Combine multiple label changes on the same issue into a single `gh issue edit` call to reduce GitHub API calls:
-
-**Instead of multiple calls:**
-```bash
-gh issue edit $ISSUE_NUMBER --remove-label "worker-done" -R $ISSUE_REPO
-gh issue edit $ISSUE_NUMBER --remove-label "test-passed" -R $ISSUE_REPO
-```
-
-**Use a single batched call:**
-```bash
-gh issue edit $ISSUE_NUMBER \
-  --remove-label "worker-done" \
-  --remove-label "test-passed" \
-  -R $ISSUE_REPO
-```
-
-**Combined add + remove:**
-```bash
-# Remove worker-done and test-passed, add nothing (clean up after test pass → needs review)
-gh issue edit $ISSUE_NUMBER \
-  --remove-label "worker-done" \
-  --remove-label "test-passed" \
-  -R $ISSUE_REPO
-
-# Remove worker-done and worker-active, add nothing (after processing)
-gh issue edit $ISSUE_NUMBER \
-  --remove-label "worker-done" \
-  --remove-label "worker-active" \
-  -R $ISSUE_REPO
-```
-
-**When dispatching a worker, combine worker-active:**
-```bash
-# Add worker-active in same call as status update where possible
-gh issue edit $ISSUE_NUMBER --add-label "worker-active" -R $ISSUE_REPO
-```
-
-This reduces GitHub API calls from N individual calls to 1 batched call per label group.
-
-## Red Flags — STOP and Verify
-
-If you catch yourself thinking any of these, STOP. You're about to make a mistake.
-
-| Thought | What to do instead |
-|---------|--------------------|
-| "Let me construct the JSON for the state machine" | Use `fetch-and-collect` (GitHub) or POST tracker output to `/state/collect` (Linear) — no hand-crafting |
-| "I know the label/status from last iteration" | Fetch fresh from the tracker. State goes stale between iterations. |
-| "The changes are lost" | Check open PRs (`gh pr list`), worker workspaces (daemon API), and issue comments before concluding anything is lost. Do NOT run `jj` — dispatch a worker to check version control. |
-| "I'll give the worker specific instructions" | State the mode, issue ID, and backend. Invoke the skill. Let the workflow guide the worker. |
-| "Let me check the worker's port directly" | Use the daemon API (`/workers`, `/workers/:id/status`). The state machine reports liveness. |
-| "I'll accumulate these changes into the existing PR" | One issue = one workspace = one branch = one PR. |
-| "This issue is too big/complex" | No issue is too big. That's what the architect phase is for. Route to Backlog. |
-| "The worker is busy, I'll wait" | Check the transcript. If the worker received prompts but produced no response, the workspace may have been deleted. A worker cannot function without its workspace. |
-| "CI can be fixed later" | CI is the implementer's responsibility. If CI is failing, the implementer isn't done — re-dispatch. |
-| "This worker keeps failing, let me increment the version" | **NEVER increment `--version` during normal operation.** Version increments destroy all worker context. Re-dispatch without version — the worker resumes with full context of prior work. Version is an escape hatch for unrecoverable sessions only. |
-| "Let me skip planning, the issue is simple enough" | STOP. Every phase runs. No exceptions. |
-| "Testing isn't needed, it's a trivial change" | STOP. The tester ALWAYS runs. |
-| "Let me skip retro, the PR is clean" | STOP. Retro is MANDATORY. Always dispatch retro after review approval. |
-| "Let me just merge this PR directly" | STOP. Dispatch a merge worker. |
-| "I'll rebase and push this fix" | STOP. Dispatch an implementer. |
-| "I'll run the tests myself" | STOP. Dispatch a tester. |
-| "Let me quickly edit this file" | STOP. You're doing worker work. Dispatch the appropriate worker. |
-| "This worker is dead — 0 messages" | STOP. Verify session ID from `GET /workers` first. You may be checking the wrong session. |
-| "Worker is stuck — flat message count" | Read the transcript. Flat can mean done, slow, or wrong session ID. Check last assistant message content. |
-| "I'll nudge the busy worker" | STOP. `prompt_async` to busy sessions is silently dropped. Wait for idle or abort/redispatch. |
-| "This worker looks stuck, I'll abort and redispatch" | STOP. Message the worker on Envoy first. Check message count. Only abort after confirmed stuck or timeout. |
-| "Let me run tl run / Docker / tests myself" | STOP. You're doing worker work. Dispatch the appropriate worker. |
-
-## Common Mistakes
-
-| Mistake | Correction |
-|---------|------------|
-| Spawn new worker for user feedback | **Resume** existing session via HTTP API |
-| Skip Icebox when capacity exists | Pull oldest Icebox item if workers < 10 |
-| Plan Triage items directly | Route first (to Icebox/Backlog/Todo), then workers act |
-| Exit after processing all issues | End your turn after each wake — do not spawn pollers or idle-loop. Envoy pushes re-invoke you (see Wake-Driven Operation) |
-| Process issue with live worker | Skip it - worker is already handling |
-| Give workers step-by-step fix instructions | Invoke the skill. State the mode, issue ID, and backend only. |
-| Forget to remove `worker-done` after processing | Always remove `worker-done` label after acting on it. |
-| Classify issues as "too big" | Route to Backlog for architect breakdown. No issue is too big for Legion. |
-| Advance pipeline with CI failing | Re-dispatch implementer with CI failure output. Don't dispatch reviewer until CI passes. |
-| Delete a workspace to "reset" a worker | **Never delete a workspace while the worker might be resumed.** A deleted workspace silently kills the worker — prompts arrive but every tool call fails. Only delete during Cleanup Done. |
-| Increment `--version` on every dispatch | **Never increment version during normal pipeline operation.** Each increment creates a fresh session with zero context. A context-less worker is dangerous — it can push to wrong branches, overwrite work, or break the repo. Only use `--version` when a session is truly unrecoverable (serve crash, corrupted session). |
-| Running `jj`, `gh pr merge`, or editing files | Controllers dispatch workers. Never touch code/branches/PRs directly. |
-| Skipping phases because "it's simple" | Every phase runs. Simple issues just go through faster. |
-| Checking wrong session ID (truncated from output) | **Always get session IDs from `GET /workers`**, never from dispatch output. Truncated IDs cause false "dead worker" reports. |
-| Nudging busy workers via `prompt_async` | Prompts to busy sessions are silently dropped. Wait for idle or abort/redispatch. |
-| Aborting workers without reading transcript | Read the last assistant message first. "Flat" can mean done, slow, or wrong session ID — not just stuck. |
-| Running sandboxes, Docker, tests, or `tl run` | Controller dispatches workers. Never run evaluation tools directly. |
-
-## Status Flow
-
-```
-Triage ─┬─► Icebox ─► Backlog ─► Todo ─► In Progress ─► Testing ─► Needs Review ─► Retro ─► Done
-        ├─► Backlog ──────────────┘           │                        │
-        └─► Todo ─────────────────────────────┴────────────────────────┘
-```
+This applies `human-approved` and clears `needs-approval` atomically. It is not a generic
+label-edit operation. The design gate remains skill-enforced by the architect, and the
+merge gate remains config-armed until Sami approves the final reviewed head.
+
+## Label vocabulary
+
+Use only the project labels below, with their stated ownership:
+
+| Label | Applied by | Removed by | Meaning |
+|---|---|---|---|
+| `needs-approval` | architect | controller/Sami when applying `human-approved` | design gate armed, awaiting Sami |
+| `human-approved` | Sami or controller | Sami | design gate open |
+| `legion-child` | daemon | never | system-created child |
+| `legion-backlog` | controller | controller | deliberately unowned root |

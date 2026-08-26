@@ -23,9 +23,6 @@ jobs:
         run: bunx biome check --error-on-warnings src/
         working-directory: packages/daemon
 
-      - name: Lint opencode-plugin
-        run: bunx biome check --error-on-warnings src/
-        working-directory: packages/opencode-plugin
 
   typecheck:
     runs-on: ubuntu-24.04
@@ -43,9 +40,6 @@ jobs:
         run: bunx tsc --noEmit
         working-directory: packages/daemon
 
-      - name: Typecheck opencode-plugin
-        run: bunx tsc --noEmit
-        working-directory: packages/opencode-plugin
 
   test:
     runs-on: ubuntu-24.04
@@ -56,13 +50,34 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
+      - name: Install daemon live-test tools
+        env:
+          MISE_VERSION: v2026.8.12
+          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
+
+      - name: Verify daemon live-test tools
+        run: |
+          command -v git
+          command -v gh
+          command -v tmux
+          mise env --json
+          jj --version
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Pre-pull daemon E2E NATS image
+        run: docker pull nats:2.10
 
       - name: Test daemon
         run: bun test
         working-directory: packages/daemon
+        env:
+          LEGION_E2E: "1"
+          LEGION_TMUX_LIVE: "1"
 
-      - name: Test opencode-plugin
-        run: bun test --path-ignore-patterns '**/omo-replacement-matrix*'
-        working-directory: packages/opencode-plugin

@@ -47,7 +47,7 @@ func githubSenderField(payload map[string]any, field string) string {
 
 // CIRecorder folds a single check_run observation into the per-commit CI state.
 // The listener's cistore.Store satisfies this interface; the debounced summary
-// is emitted separately by the summary loop, so the handler never publishes CI.
+// is emitted separately after the handler publishes the raw observation.
 type CIRecorder interface {
 	Record(owner, repo, number, sha, checkName, status, conclusion string) error
 }
@@ -112,6 +112,26 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				}
 				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.Status, o.Conclusion); err != nil {
 					log.Printf("github ci record failed: %v", err)
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				item, err := contracts.GithubCIEnvelope(contracts.GithubCIEnvelopeInput{
+					Observation: o,
+					Delivery:    delivery,
+					EventID:     id.New(),
+					TraceID:     id.New(),
+				})
+				if err != nil {
+					log.Printf("github ci observation envelope failed: %v", err)
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				if err := item.Validate(); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := publisher.Publish(item); err != nil {
+					log.Printf("github ci observation publish failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return
 				}

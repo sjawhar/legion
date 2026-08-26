@@ -12,9 +12,6 @@ export interface LegionPaths {
 
 export interface LegionInstancePaths {
   legionStateDir: string;
-  workersFile: string;
-  promotedFile: string;
-  feedbackFile: string;
   logDir: string;
   workspacesDir: string;
 }
@@ -57,9 +54,6 @@ export function resolveLegionPaths(
       }
       return {
         legionStateDir,
-        workersFile: path.join(legionStateDir, "workers.json"),
-        promotedFile: path.join(legionStateDir, "promoted.json"),
-        feedbackFile: path.join(legionStateDir, "feedback.jsonl"),
         logDir: path.join(legionStateDir, "logs"),
         workspacesDir: path.join(workspacesDir, projectId),
       };

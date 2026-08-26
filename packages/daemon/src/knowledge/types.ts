@@ -1,7 +1,5 @@
+import { HANDOFF_PHASES, type HandoffPhase } from "@legion/contracts";
 import { z } from "zod";
-
-import { HANDOFF_PHASES } from "../handoff/schema";
-import type { HandoffPhase } from "../handoff/types";
 
 export const KNOWLEDGE_SCHEMA_VERSION = 1 as const;
 
@@ -10,7 +8,6 @@ export const KNOWLEDGE_NON_ARCHITECT_PHASES = [
   "implement",
   "test",
   "review",
-  "retro",
 ] as const satisfies readonly HandoffPhase[];
 
 const isoTimestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
@@ -25,7 +22,6 @@ const learningFeedbackPhaseShape = {
   plan: LearningFeedbackPhaseSchema.optional(),
   implement: LearningFeedbackPhaseSchema.optional(),
   review: LearningFeedbackPhaseSchema.optional(),
-  retro: LearningFeedbackPhaseSchema.optional(),
   test: LearningFeedbackPhaseSchema.optional(),
 } satisfies Record<HandoffPhase, z.ZodOptional<typeof LearningFeedbackPhaseSchema>>;
 

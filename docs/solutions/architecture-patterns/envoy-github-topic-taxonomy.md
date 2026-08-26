@@ -1,15 +1,7 @@
 # Envoy GitHub Topic Taxonomy
 
-How Envoy maps GitHub webhook events to NATS topics, and how to subscribe narrowly without consuming a repo-wide firehose.
-
-## Problem
-
-The original GitHub topic shapes had two firehoses:
-
-- `notifications.github.<owner>.<repo>.push` — every push to every branch and tag, undifferentiated. Subscribers had to client-side filter on the `ref` payload field, which means receiving (and paying for the routing of) noise they would immediately discard.
-- `notifications.github.<owner>.<repo>.ci` — every `check_run`/`check_suite` event not attached to a PR. Vercel previews, skipped jobs, scheduled workflow runs, and other non-PR CI activity all landed here. The daemon auto-subscribed controllers to this on first worker dispatch per repo, and the noise was bad enough that auto-subscription was removed in #377 (see [envoy-auto-subscription-patterns](../daemon/envoy-auto-subscription-patterns.md)). After that PR, the topic had no active subscribers.
-
-There was also no topic family at all for `workflow_run` events — agents that wanted to react to "CI is starting on main" had no clean subscription target.
+Envoy maps GitHub webhook events to NATS topics so consumers can subscribe to the resource and
+event shape they need without consuming unrelated repository traffic.
 
 ## Topic shapes
 
@@ -20,8 +12,9 @@ There was also no topic family at all for `workflow_run` events — agents that 
 | Push to other refs (e.g. `refs/pull/.../merge`) | **dropped** — no envelope emitted |
 | `workflow_run` | `notifications.github.<o>.<r>.workflow.<filename_sanitized>.<action>` |
 | `workflow_run` with missing `path` field | **dropped** — no envelope emitted |
-| `check_run`/`check_suite` attached to a PR | `notifications.github.<o>.<r>.pr.<number>.ci` (unchanged) |
-| `check_run`/`check_suite` not attached to a PR | **dropped** — no envelope emitted |
+| PR-associated `check_run` | `notifications.github.<o>.<r>.pr.<number>.check` — immediate raw per-check observation |
+| CI summary after the debounce window | `notifications.github.<o>.<r>.pr.<number>.ci` — per-commit aggregate |
+| `check_suite`, or `check_run` without an associated PR | **dropped** — no envelope emitted |
 
 Where:
 - `branch_sanitized` / `tag_sanitized` — branch or tag name with dots replaced by underscores. Slashes are preserved (NATS doesn't treat `/` as special), so `feat/foo` stays as `feat/foo`.
@@ -54,22 +47,20 @@ envoy_subscribe(["notifications.github.sjawhar.legion.workflow.ci_yml.in_progres
 # React to any workflow completing across the repo
 envoy_subscribe(["notifications.github.sjawhar.legion.workflow.*.completed"])
 
-# Watch CI for a specific PR (unchanged from before)
+# Watch immediate state changes for each CI check on a PR
+envoy_subscribe(["notifications.github.sjawhar.legion.pr.9880.check"])
+
+# Watch the debounced CI summary for a PR
 envoy_subscribe(["notifications.github.sjawhar.legion.pr.9880.ci"])
 ```
 
 Note NATS wildcard semantics: `*` matches exactly one token, `>` matches one or more remaining tokens. Use `>` for "everything under this prefix" and `*` for "exactly one segment here, then this suffix".
 
-## What was deferred
+## Routing exclusions
 
-- **`workflow_job` events** — fired per individual job within a workflow run (one event per matrix cell × 3 lifecycle states). Roughly 10× the volume of `workflow_run`. Skipped to keep the initial change focused; revisit if a use case appears for job-level granularity (e.g. "is the lint job specifically stuck?").
-- **`release`, `deployment`, `deployment_status`, `package` events** — currently fall through to the default kind. Add per-event topic shapes when there's a concrete consumer.
-- **Sanitization collision disambiguation** — the `.` → `_` transform is one-way. If two real filenames collide (`release.yml` and `release_yml`), subscribers must inspect the envelope payload to disambiguate. No structural escape (e.g. `__` for literal underscore) was added; not worth the complexity for the unlikely collision.
-
-## Breaking changes
-
-- Flat `notifications.github.<o>.<r>.push` is no longer emitted. Subscribers must move to `notifications.github.<o>.<r>.push.>` for the equivalent firehose, or to a specific branch/tag for narrow filtering.
-- Bare `notifications.github.<o>.<r>.ci` is no longer emitted. There were no active subscribers in Legion at the time of the change (confirmed via grep + the auto-subscription removal in #377). External consumers subscribing to that exact topic would need to switch to `notifications.github.<o>.<r>.workflow.<filename>.<action>` if they want non-PR CI visibility.
+- `workflow_job` events are not routed; use `workflow_run` for workflow-level state.
+- `release`, `deployment`, `deployment_status`, and `package` events use no specialized topic in this taxonomy.
+- A `.` → `_` subject-segment transform is lossy, so consumers that need an exact branch or workflow identifier inspect the envelope payload.
 
 ## Where to look
 
@@ -78,14 +69,8 @@ Note NATS wildcard semantics: `*` matches exactly one token, `>` matches one or 
 | TS subject helpers (source of truth) | `packages/contracts/src/subject.ts` |
 | TS subject tests | `packages/contracts/src/envelope.test.ts` |
 | Go subject helpers (generated mirror) | `packages/envoy/internal/contracts/generated.go` (via `packages/contracts/scripts/gen-go.ts`) |
-| Push/workflow_run routing | `packages/envoy/internal/contracts/normalize.go` (`githubTopic`, `githubPushRefSegments`, `githubWorkflowFilename`) |
+| Push/workflow routing and CI envelopes | `packages/envoy/internal/contracts/normalize.go` (`githubTopic`, `githubPushRefSegments`, `githubWorkflowFilename`, `GithubCIEnvelope`) |
 | Drop policy for un-routable events | `packages/envoy/internal/contracts/normalize.go` (`GithubEnvelopes`) |
-| Subscription docs | `.opencode/skills/envoy/SKILL.md` |
-| Controller behavior | `.opencode/skills/legion-controller/SKILL.md` (CI Event Handling section) |
+| CI aggregation | `packages/envoy/internal/cistore/` |
+| Subscription docs | `skills/envoy/SKILL.md` |
 
-## Verified in production
-
-Branch-tip build was deployed to the Fargate listener on 2026-05-16 (image
-`ghcr.io/sjawhar/legion/envoy@sha256:f6fa1d9c...`, branch-build tag `pr-607-bf0988a`).
-Subscriber sessions on the on-prem fleet receive the new topic shapes from real
-GitHub webhook traffic — no synthetic injection needed.

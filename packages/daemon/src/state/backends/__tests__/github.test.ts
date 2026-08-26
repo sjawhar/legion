@@ -20,13 +20,12 @@ function makeItem(overrides: Record<string, unknown> = {}) {
 
 describe("GitHubTracker.parseIssues", () => {
   it("parses a basic item from gh project item-list --format json", () => {
-    const raw = { items: [makeItem({ labels: ["worker-active"] })] };
+    const raw = { items: [makeItem({ labels: ["legion-child"] })] };
     const result = tracker.parseIssues(raw);
     expect(result).toHaveLength(1);
     expect(result[0].issueId).toBe("acme-widgets-42");
     expect(result[0].status).toBe("In Progress");
-    expect(result[0].labels).toEqual(["worker-active"]);
-    expect(result[0].hasWorkerActive).toBe(true);
+    expect(result[0].labels).toEqual(["legion-child"]);
     expect(result[0].source).toEqual({
       owner: "acme",
       repo: "widgets",
@@ -55,7 +54,11 @@ describe("GitHubTracker.parseIssues", () => {
   it("skips non-issue items (DraftIssue, PullRequest)", () => {
     const raw = {
       items: [
-        { id: "PVTI_draft", content: { title: "A draft", type: "DraftIssue" }, status: "Todo" },
+        {
+          id: "PVTI_draft",
+          content: { title: "A draft", type: "DraftIssue" },
+          status: "Todo",
+        },
         {
           id: "PVTI_pr",
           content: { number: 65, repository: "acme/auth", type: "PullRequest" },
@@ -132,7 +135,6 @@ describe("GitHubTracker.parseIssues", () => {
     expect(result[0].prRef?.owner).toBe("acme");
     expect(result[0].prRef?.repo).toBe("widgets");
     expect(result[0].prRef?.number).toBe(479);
-    expect(result[0].hasPr).toBe(true);
   });
 
   it("extracts PR refs with case-variant key names", () => {
@@ -155,7 +157,6 @@ describe("GitHubTracker.parseIssues", () => {
     const raw = { items: [makeItem()] };
     const result = tracker.parseIssues(raw);
     expect(result[0].prRef).toBeNull();
-    expect(result[0].hasPr).toBe(false);
   });
 
   it("skips items with null elements in array", () => {
@@ -164,7 +165,9 @@ describe("GitHubTracker.parseIssues", () => {
   });
 
   it("skips items with missing content field", () => {
-    const result = tracker.parseIssues({ items: [{ id: "PVTI_abc", status: "Todo" }] });
+    const result = tracker.parseIssues({
+      items: [{ id: "PVTI_abc", status: "Todo" }],
+    });
     expect(result).toEqual([]);
   });
 
@@ -241,7 +244,9 @@ describe("GitHubTracker.parseIssues", () => {
   });
 
   it("keeps blockedByIds empty when blockerRefs is an empty array", () => {
-    const result = tracker.parseIssues({ items: [makeItem({ blockerRefs: [] })] });
+    const result = tracker.parseIssues({
+      items: [makeItem({ blockerRefs: [] })],
+    });
 
     expect(result[0].blockedByIds).toEqual([]);
     expect(result[0].isBlocked).toBe(false);

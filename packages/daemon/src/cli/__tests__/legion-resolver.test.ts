@@ -225,7 +225,11 @@ describe("resolveLegionId", () => {
             teams: {
               nodes: [
                 { id: "fetched-uuid-1234", key: "LEG", name: "Legion Team" },
-                { id: "fetched-uuid-5678", key: "ENG", name: "Engineering Team" },
+                {
+                  id: "fetched-uuid-5678",
+                  key: "ENG",
+                  name: "Engineering Team",
+                },
               ],
             },
           },

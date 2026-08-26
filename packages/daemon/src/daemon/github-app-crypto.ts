@@ -13,7 +13,10 @@ function toPkcs8Pem(privateKeyPem: string): string {
   if (privateKeyPem.includes("BEGIN PRIVATE KEY")) {
     return privateKeyPem;
   }
-  const pkcs8 = createPrivateKey(privateKeyPem).export({ type: "pkcs8", format: "pem" });
+  const pkcs8 = createPrivateKey(privateKeyPem).export({
+    type: "pkcs8",
+    format: "pem",
+  });
   if (typeof pkcs8 !== "string") {
     throw new Error("Expected PKCS#8 private key PEM output");
   }

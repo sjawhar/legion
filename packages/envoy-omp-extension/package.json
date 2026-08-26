@@ -2,11 +2,8 @@
   "name": "@legion/envoy-omp-extension",
   "version": "0.1.0",
   "type": "module",
-  "exports": {
-    "./envoy": {
-      "types": "./extensions/envoy.ts",
-      "default": "./dist/envoy.js"
-    }
+  "omp": {
+    "extensions": ["extensions/envoy.ts", "extensions/legion.ts"]
   },
   "scripts": {
     "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent",
@@ -17,6 +14,8 @@
   "dependencies": {
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
+    "@toon-format/toon": "^4.1.1",
+    "@legion/workspace": "workspace:*",
     "nats": "^2.29.2"
   },
   "devDependencies": {

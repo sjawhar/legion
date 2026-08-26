@@ -7,7 +7,7 @@
   },
   "version": "0.16.1",
   "type": "module",
-  "description": "Autonomous development swarm using OpenCode agents",
+  "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
   "workspaces": [
     "packages/contracts",
@@ -17,7 +17,7 @@
     "packages/envoy-plugin",
     "packages/envoy-claude-plugin",
     "packages/dispatch",
-    "packages/opencode-plugin"
+    "packages/workspace"
   ],
   "dependencies": {
     "nats": "^2.29.2",

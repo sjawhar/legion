@@ -28,7 +28,7 @@ describe("handoff ledger", () => {
     writePhaseHandoff(workspaceDir, "plan", {
       concerns: ["need test parallelism"],
       independentTasks: 2,
-      routingHints: { complexity: "small", skipRetro: false },
+      routingHints: { complexity: "small" },
       taskCount: 4,
       workflowRecommendation: "dispatch-parallel-workers",
     });
@@ -255,67 +255,6 @@ describe("handoff ledger", () => {
       "utf-8"
     );
     expect(readPhaseHandoff(workspaceDir, "test")).toBeNull();
-  });
-
-  it("migrates plan handoff learningsUsed to learningsInjected (backward compat)", async () => {
-    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
-
-    ensureLegionDir(workspaceDir);
-    const legionDir = getLegionDir(workspaceDir);
-
-    // Write old-style plan handoff with learningsUsed
-    await writeFile(
-      path.join(legionDir, "plan.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        phase: "plan",
-        completed: new Date().toISOString(),
-        taskCount: 3,
-        learningsUsed: ["state/race-conditions.md", "daemon/controller-lifecycle-separation.md"],
-      }),
-      "utf-8"
-    );
-
-    const handoff = readPhaseHandoff(workspaceDir, "plan");
-    expect(handoff).not.toBeNull();
-    expect(handoff?.phase).toBe("plan");
-    if (handoff?.phase === "plan") {
-      // learningsUsed should be migrated to learningsInjected
-      expect(handoff.learningsInjected).toEqual([
-        "state/race-conditions.md",
-        "daemon/controller-lifecycle-separation.md",
-      ]);
-      // learningsUsed should be removed from the output
-      expect("learningsUsed" in handoff).toBe(false);
-    }
-  });
-
-  it("preserves learningsInjected when both learningsUsed and learningsInjected exist in plan", async () => {
-    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
-
-    ensureLegionDir(workspaceDir);
-    const legionDir = getLegionDir(workspaceDir);
-
-    // Write plan handoff with both fields — learningsInjected takes precedence
-    await writeFile(
-      path.join(legionDir, "plan.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        phase: "plan",
-        completed: new Date().toISOString(),
-        taskCount: 2,
-        learningsUsed: ["old/learning.md"],
-        learningsInjected: ["new/learning.md"],
-      }),
-      "utf-8"
-    );
-
-    const handoff = readPhaseHandoff(workspaceDir, "plan");
-    expect(handoff).not.toBeNull();
-    if (handoff?.phase === "plan") {
-      // Existing learningsInjected should be preserved, not overwritten by learningsUsed
-      expect(handoff.learningsInjected).toEqual(["new/learning.md"]);
-    }
   });
 
   it("validates handoff data with learningsInjected and learningsHelpful for each phase", async () => {

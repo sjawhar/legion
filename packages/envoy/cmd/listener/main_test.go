@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -317,15 +318,385 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 	}
 }
 
-func setupPublishTestClient(t *testing.T) *bus.Client {
+func setupPublishTestClient(t *testing.T, options ...bus.ConnectOption) *bus.Client {
 	t.Helper()
-	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	options = append([]bus.ConnectOption{bus.WithReplicas(1)}, options...)
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, options...)
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(func() { client.Conn.Close() })
 	resetListenerTestState(t, client.Conn)
 	return client
+}
+
+type listenerAcknowledgementClock struct {
+	mu        sync.Mutex
+	elapsed   time.Duration
+	deadlines []listenerAcknowledgementDeadline
+}
+
+type listenerAcknowledgementDeadline struct {
+	at     time.Duration
+	cancel context.CancelFunc
+}
+
+func (clock *listenerAcknowledgementClock) WithTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	clock.mu.Lock()
+	clock.deadlines = append(clock.deadlines, listenerAcknowledgementDeadline{
+		at:     clock.elapsed + timeout,
+		cancel: cancel,
+	})
+	clock.mu.Unlock()
+	return ctx, cancel
+}
+
+func (clock *listenerAcknowledgementClock) Advance(elapsed time.Duration) bool {
+	clock.mu.Lock()
+	clock.elapsed += elapsed
+	var due []context.CancelFunc
+	remaining := clock.deadlines[:0]
+	for _, deadline := range clock.deadlines {
+		if deadline.at <= clock.elapsed {
+			due = append(due, deadline.cancel)
+			continue
+		}
+		remaining = append(remaining, deadline)
+	}
+	clock.deadlines = remaining
+	clock.mu.Unlock()
+
+	for _, cancel := range due {
+		cancel()
+	}
+	return len(due) > 0
+}
+
+func (clock *listenerAcknowledgementClock) CancelAll() {
+	clock.mu.Lock()
+	deadlines := clock.deadlines
+	clock.deadlines = nil
+	clock.mu.Unlock()
+
+	for _, deadline := range deadlines {
+		deadline.cancel()
+	}
+}
+
+func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
+	clock := &listenerAcknowledgementClock{}
+	client := setupPublishTestClient(t, bus.WithPublishAcknowledgementClock(clock))
+	info, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	originalConfig := info.Config
+	unboundConfig := originalConfig
+	unboundConfig.Subjects = []string{"notifications.bound.>"}
+	if _, err := client.JS().UpdateStream(&unboundConfig); err != nil {
+		t.Fatalf("remove publish subject binding: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := client.JS().UpdateStream(&originalConfig); err != nil {
+			t.Errorf("restore stream subject bindings: %v", err)
+		}
+	})
+
+	published := make(chan struct{}, 1)
+	noAck, err := client.Conn.Subscribe("notifications.unbound", func(*natsgo.Msg) {
+		published <- struct{}{}
+	})
+	if err != nil {
+		t.Fatalf("subscribe to publish subject without sending an ack: %v", err)
+	}
+	t.Cleanup(func() { _ = noAck.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush no-ack subscription: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	response := make(chan *httptest.ResponseRecorder, 1)
+	t.Cleanup(clock.CancelAll)
+	go func() {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.unbound","message":"ping","source":"agent"}`))
+		request.Header.Set("Content-Type", "application/json")
+		publishHandler(&state).ServeHTTP(recorder, request)
+		response <- recorder
+	}()
+
+	select {
+	case <-published:
+		if !clock.Advance(5 * time.Second) {
+			t.Fatal("publish acknowledgement deadline exceeded 5s")
+		}
+	case <-t.Context().Done():
+		t.Fatal("publish did not reach the acknowledgement wait")
+	}
+
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusOK && recorder.Code < http.StatusInternalServerError {
+			t.Fatalf("publish status = %d, want 200 or 5xx", recorder.Code)
+		}
+	case <-t.Context().Done():
+		t.Fatal("publish handler did not return when its acknowledgement deadline expired")
+	}
+}
+
+func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "legion-delivery"
+	roleTopic := contracts.RoleTopicPrefix + role
+	if _, err := harness.registry.SetRole("ses_role_a", "test-machine", role); err != nil {
+		t.Fatalf("claim role for A: %v", err)
+	}
+	// Set B as the KV value that the core handler must resolve. This models a
+	// publish that races the handover: the single listener chooses one current
+	// owner, rather than relying on two holders to observe the change first.
+	claimState := atomic.Pointer[listenerDeps]{}
+	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register role B: %v", err)
+	}
+
+	claimRecorder := httptest.NewRecorder()
+	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role_b","role":"legion-delivery"}`))
+	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	if claimRecorder.Code != http.StatusOK {
+		t.Fatalf("claim registered role B: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
+	}
+
+	probeA, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_a"))
+	if err != nil {
+		t.Fatalf("subscribe A agent subject: %v", err)
+	}
+	t.Cleanup(func() { _ = probeA.Unsubscribe() })
+	probeB, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_b"))
+	if err != nil {
+		t.Fatalf("subscribe B agent subject: %v", err)
+	}
+	t.Cleanup(func() { _ = probeB.Unsubscribe() })
+	receiptResponder, err := harness.client.Conn.Subscribe(contracts.AgentSubject("ses_role_b"), func(message *natsgo.Msg) {
+		if message.Reply != "" {
+			_ = message.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe B receipt responder: %v", err)
+	}
+	t.Cleanup(func() { _ = receiptResponder.Unsubscribe() })
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe to core role lane: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscriptions: %v", err)
+	}
+	if harness.client.SubOK() {
+		t.Fatal("role lane should not create a JetStream consumer")
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client})
+	handler := publishHandler(&state)
+	publishRole := func(topic, source string) contracts.Envelope {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"role event","source":"`+source+`"}`))
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("publish role topic %q: status = %d, body = %s", topic, recorder.Code, recorder.Body.String())
+		}
+		var item contracts.Envelope
+		if err := json.NewDecoder(recorder.Body).Decode(&item); err != nil {
+			t.Fatalf("decode published role envelope: %v", err)
+		}
+		return item
+	}
+
+	item := publishRole(roleTopic, "agent")
+	forwardedMessage, err := probeB.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read forwarded role event for B: %v", err)
+	}
+	if forwardedMessage.Subject != contracts.AgentSubject("ses_role_b") {
+		t.Fatalf("forwarded subject = %q, want B agent subject", forwardedMessage.Subject)
+	}
+	var forwarded contracts.Envelope
+	if err := json.Unmarshal(forwardedMessage.Data, &forwarded); err != nil {
+		t.Fatalf("decode forwarded role envelope: %v", err)
+	}
+	if forwarded.Topic != roleTopic {
+		t.Fatalf("forwarded envelope topic = %q, want original role topic %q", forwarded.Topic, roleTopic)
+	}
+	if forwarded.EventID != item.EventID {
+		t.Fatalf("forwarded event id = %q, want %q", forwarded.EventID, item.EventID)
+	}
+	if forwarded.Source != item.Source {
+		t.Fatalf("forwarded source = %q, want original source %q", forwarded.Source, item.Source)
+	}
+	if !strings.HasPrefix(forwarded.DedupeKey, "envoy.role.forward.") {
+		t.Fatalf("forwarded dedupe key = %q, want arbiter prefix", forwarded.DedupeKey)
+	}
+	if _, err := probeA.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("A received a post-takeover role event: %v", err)
+	}
+	if _, err := probeB.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("B received duplicate forwarded role event: %v", err)
+	}
+
+	deadRole := "legion-dead-holder"
+	deadTopic := contracts.RoleTopicPrefix + deadRole
+	if _, err := harness.registry.SetRole("ses_role_dead", "test-machine", deadRole); err != nil {
+		t.Fatalf("claim dead holder role: %v", err)
+	}
+	deadProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + deadTopic)
+	if err != nil {
+		t.Fatalf("subscribe dead-holder exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = deadProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush dead-holder exception subscription: %v", err)
+	}
+	dead := publishRole(deadTopic, "agent")
+	assertDeliveryException(t, deadProbe, dead, "delivery_failed")
+
+	externalEnvoy := publishRole(roleTopic, "envoy")
+	externalMessage, err := probeB.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read externally sourced envoy role event for B: %v", err)
+	}
+	var externalForwarded contracts.Envelope
+	if err := json.Unmarshal(externalMessage.Data, &externalForwarded); err != nil {
+		t.Fatalf("decode externally sourced forwarded envelope: %v", err)
+	}
+	if externalForwarded.Source != "envoy" {
+		t.Fatalf("externally sourced forwarded source = %q, want envoy", externalForwarded.Source)
+	}
+	if externalForwarded.EventID != externalEnvoy.EventID {
+		t.Fatalf("externally sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalEnvoy.EventID)
+	}
+
+	unclaimedTopic := contracts.RoleTopicPrefix + "legion-no-holder"
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + unclaimedTopic)
+	if err != nil {
+		t.Fatalf("subscribe to core exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception subscription: %v", err)
+	}
+	unclaimed := publishRole(unclaimedTopic, "agent")
+	assertDeliveryException(t, exceptionProbe, unclaimed, "no_holder")
+
+	info, err := harness.client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read notification stream: %v", err)
+	}
+	if info.State.Msgs != 2 {
+		t.Fatalf("agent-subject role forwards were captured %d times, want two", info.State.Msgs)
+	}
+}
+
+func TestPublishHandler_RoleNoHolderExceptionPreservesPayload(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	roleTopic := contracts.RoleTopicPrefix + "payload-no-holder"
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role arbiter: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscriptions: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client})
+	payload := `{"kind":"role-event","number":42}`
+	requestBody, err := json.Marshal(map[string]string{
+		"topic":   roleTopic,
+		"message": "structured role event",
+		"payload": payload,
+		"source":  "agent",
+	})
+	if err != nil {
+		t.Fatalf("marshal structured role request: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(string(requestBody)))
+	publishHandler(&state).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("publish role payload: status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var published contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+		t.Fatalf("decode published envelope: %v", err)
+	}
+
+	if published.Payload != payload {
+		t.Fatalf("published payload = %q, want %q", published.Payload, payload)
+	}
+	assertDeliveryException(t, exceptionProbe, published, "no_holder")
+}
+func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	role := "fresh-deaf-holder"
+	roleTopic := contracts.RoleTopicPrefix + role
+	var claimState atomic.Pointer[listenerDeps]
+	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	if err := harness.sessions.Put("ses_deaf", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register deaf holder: %v", err)
+	}
+
+	claimRecorder := httptest.NewRecorder()
+	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_deaf","role":"`+role+`"}`))
+	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	if claimRecorder.Code != http.StatusOK {
+		t.Fatalf("claim deaf holder: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
+	}
+
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role arbiter: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscriptions: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","source":"agent"}`))
+	publishHandler(&state).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var published contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+		t.Fatalf("decode published envelope: %v", err)
+	}
+	assertDeliveryException(t, exceptionProbe, published, "delivery_failed")
 }
 
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
@@ -341,12 +712,12 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	}{
 		{
 			name:       "defaults to agent when source omitted",
-			body:       `{"topic":"notifications.test.foo","message":"hello"}`,
+			body:       `{"topic":"notifications.github.acme.widgets.source","message":"hello"}`,
 			wantSource: "agent",
 		},
 		{
 			name:       "defaults to agent when source empty",
-			body:       `{"source":"","topic":"notifications.test.foo","message":"hello"}`,
+			body:       `{"source":"","topic":"notifications.github.acme.widgets.source","message":"hello"}`,
 			wantSource: "agent",
 		},
 		{
@@ -481,10 +852,14 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 }
 
 func TestRoleSetHandler_SetsRole(t *testing.T) {
-	registry := setupAdminTestRegistry(t, nil)
+	registry, sessions := setupSessionsTest(t, nil, nil)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry})
+	state.Store(&listenerDeps{registry: registry, sessions: sessions})
 	handler := roleSetHandler(&state, "test-machine")
+	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register role session: %v", err)
+	}
+
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role","role":"legion-controller"}`))
@@ -515,6 +890,30 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 	}
 	if len(persisted.Topics) != 1 || persisted.Topics[0] != "notifications.role.legion-controller" {
 		t.Fatalf("expected persisted role topic, got %v", persisted.Topics)
+	}
+
+	registered, err := sessions.Get("ses_role")
+	if err != nil {
+		t.Fatalf("registered role session missing after claim: %v", err)
+	}
+	if !registered.SelfSubscribed {
+		t.Fatal("role claim session registration is not self-subscribed")
+	}
+	firstUpdatedAt := registered.UpdatedAt
+	time.Sleep(time.Millisecond)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role","role":"legion-controller"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected re-claim 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	refreshed, err := sessions.Get("ses_role")
+	if err != nil {
+		t.Fatalf("read re-claimed session: %v", err)
+	}
+	if refreshed.UpdatedAt <= firstUpdatedAt {
+		t.Fatalf("re-claim did not refresh session heartbeat: first=%d refreshed=%d", firstUpdatedAt, refreshed.UpdatedAt)
 	}
 }
 
@@ -1052,7 +1451,7 @@ func TestIdempotencyKey_Publish(t *testing.T) {
 
 	// Test: same idempotency_key produces same DedupeKey
 	rr1 := httptest.NewRecorder()
-	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello","idempotency_key":"publish-xyz"}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.publish","message":"hello","idempotency_key":"publish-xyz"}`))
 	req1.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr1, req1)
 
@@ -1065,7 +1464,7 @@ func TestIdempotencyKey_Publish(t *testing.T) {
 	}
 
 	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello","idempotency_key":"publish-xyz"}`))
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.publish","message":"hello","idempotency_key":"publish-xyz"}`))
 	req2.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr2, req2)
 
@@ -1093,7 +1492,7 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 
 	// Test: no idempotency_key produces different DedupeKeys (existing behavior)
 	rr1 := httptest.NewRecorder()
-	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello"}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.backwards","message":"hello"}`))
 	req1.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr1, req1)
 
@@ -1106,7 +1505,7 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 	}
 
 	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.test.foo","message":"hello"}`))
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.github.acme.widgets.backwards","message":"hello"}`))
 	req2.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rr2, req2)
 
@@ -1169,7 +1568,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		EventID:        "evt-restart-1",
 		Source:         "test",
 		SourceEventID:  "src-restart-1",
-		Topic:          "notifications.test.restart",
+		Topic:          "notifications.github.acme.widgets.restart",
 		DedupeKey:      "dedupe-restart-1",
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "first",
@@ -1197,12 +1596,24 @@ func TestDurableConsumerRestart(t *testing.T) {
 	}
 
 	firstListener.Close()
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
+		if infoErr == nil && !info.PushBound {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	info, infoErr := publisher.JS().ConsumerInfo(bus.Stream, consumer)
+	if infoErr != nil || info.PushBound {
+		t.Fatalf("durable consumer remained push-bound after listener close: info=%+v error=%v", info, infoErr)
+	}
 
 	second := contracts.Envelope{
 		EventID:        "evt-restart-2",
 		Source:         "test",
 		SourceEventID:  "src-restart-2",
-		Topic:          "notifications.test.restart",
+		Topic:          "notifications.github.acme.widgets.restart",
 		DedupeKey:      "dedupe-restart-2",
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "second",
@@ -1212,7 +1623,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		EventID:        "evt-restart-3",
 		Source:         "test",
 		SourceEventID:  "src-restart-3",
-		Topic:          "notifications.test.restart",
+		Topic:          "notifications.github.acme.widgets.restart",
 		DedupeKey:      "dedupe-restart-3",
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "third",
@@ -1253,6 +1664,105 @@ func TestDurableConsumerRestart(t *testing.T) {
 	mu.Unlock()
 	if len(got) != 3 {
 		t.Fatalf("expected durable consumer to resume pending messages after restart, got %d deliveries: %v", len(got), got)
+	}
+}
+
+func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	legacyConn := testnats.Connect(t, uri)
+	legacyJS, err := legacyConn.JetStream()
+	if err != nil {
+		t.Fatalf("open legacy JetStream: %v", err)
+	}
+	if _, err := legacyJS.AddStream(&natsgo.StreamConfig{
+		Name:      bus.Stream,
+		Subjects:  []string{"notifications.>"},
+		Retention: natsgo.LimitsPolicy,
+		MaxAge:    72 * time.Hour,
+		Storage:   natsgo.FileStorage,
+		Replicas:  1,
+	}); err != nil {
+		t.Fatalf("create legacy stream: %v", err)
+	}
+	const consumer = "listener-migration"
+	legacySub, err := legacyJS.Subscribe("notifications.>", func(*natsgo.Msg) {},
+		natsgo.Durable(consumer),
+		natsgo.DeliverNew(),
+		natsgo.AckExplicit(),
+		natsgo.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("create legacy durable consumer: %v", err)
+	}
+	_ = legacySub
+	legacyConn.Close()
+
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("boot migrated listener bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	durableReceived := make(chan struct{}, 1)
+	durableSub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) {
+		durableReceived <- struct{}{}
+		_ = msg.Ack()
+	})
+	if err != nil {
+		t.Fatalf("boot migrated durable consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = durableSub.Unsubscribe() })
+	consumerInfo, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("read migrated consumer: %v", err)
+	}
+	if consumerInfo.Config.FilterSubject != "" || len(consumerInfo.Config.FilterSubjects) != len(bus.StreamSubjects()) {
+		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
+	}
+
+	roleReceived := make(chan struct{}, 1)
+	roleSub, err := client.SubscribeCore("notifications.role.migration", func(*natsgo.Msg) {
+		roleReceived <- struct{}{}
+	}, "envoy-listener-test-machine")
+	if err != nil {
+		t.Fatalf("boot migrated role lane: %v", err)
+	}
+	t.Cleanup(func() { _ = roleSub.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush migrated listener subscriptions: %v", err)
+	}
+	if _, err := client.JS().Publish("notifications.github.acme.widgets.migration", []byte("durable")); err != nil {
+		t.Fatalf("publish durable migration message: %v", err)
+	}
+	select {
+	case <-durableReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("migrated durable listener did not receive a non-role message")
+	}
+	if err := client.Publish(contracts.Envelope{
+		EventID:        "evt-listener-migration-role",
+		Source:         "agent",
+		SourceEventID:  "source-listener-migration-role",
+		Topic:          "notifications.role.migration",
+		DedupeKey:      "listener-migration-role",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "core",
+		TraceID:        "trace-listener-migration-role",
+	}); err != nil {
+		t.Fatalf("publish core role migration message: %v", err)
+	}
+	select {
+	case <-roleReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("migrated listener role lane did not receive the core message")
 	}
 }
 
@@ -1302,6 +1812,41 @@ func TestIsControlTopic(t *testing.T) {
 	}
 }
 
+func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const controller = "legion-controller"
+	if _, err := harness.registry.SetRole("ses_role", "test-machine", controller); err != nil {
+		t.Fatalf("claim controller role: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_role", "test-machine", "legion-reviewer"); err != nil {
+		t.Fatalf("claim reviewer role: %v", err)
+	}
+	controllerTopic := contracts.RoleTopicPrefix + controller
+	if err := harness.registry.Remove("ses_role", []string{controllerTopic}); err != nil {
+		t.Fatalf("release controller role: %v", err)
+	}
+
+	item := listenerTestEnvelope(controllerTopic, "released-controller-role")
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + controllerTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	sub, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe core role handler: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush subscriptions: %v", err)
+	}
+
+	if err := harness.client.PublishCore(item); err != nil {
+		t.Fatalf("publish released controller role: %v", err)
+	}
+	assertDeliveryException(t, probe, item, "no_holder")
+}
+
 func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1316,18 +1861,28 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 			// Given
 			harness := newListenerDeliveryHarness(t, nil)
 			item := listenerTestEnvelope(tc.topic, "dedupe-no-holder-"+tc.name)
+			item.Payload = `{"reason":"no_holder"}`
+			item.SourceSession = "ses_source_" + tc.name
 			exceptionTopic := "notifications.envoy.exceptions." + tc.topic
 			probe, err := harness.client.Conn.SubscribeSync(exceptionTopic)
 			if err != nil {
 				t.Fatalf("subscribe exception probe: %v", err)
 			}
 			t.Cleanup(func() { _ = probe.Unsubscribe() })
-			consumer := "listener-no-holder-" + id.New()
-			sub, err := startListenerSubscription(harness.client, consumer, harness.handler)
+			var sub *natsgo.Subscription
+			if strings.HasPrefix(item.Topic, contracts.RoleTopicPrefix) {
+				sub, err = harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+			} else {
+				consumer := "listener-no-holder-" + id.New()
+				sub, err = startListenerSubscription(harness.client, consumer, harness.handler)
+			}
 			if err != nil {
 				t.Fatalf("start listener subscription: %v", err)
 			}
 			t.Cleanup(func() { _ = sub.Unsubscribe() })
+			if err := harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush listener subscription: %v", err)
+			}
 
 			// When
 			if err := harness.client.Publish(item); err != nil {
@@ -1389,6 +1944,8 @@ func TestListenerDeliveryHandler_RetriesFailedDelivery(t *testing.T) {
 		return nil, errors.New("prompt_async unavailable")
 	}))
 	item := listenerTestEnvelope(contracts.AgentSubject("ses_retry"), "dedupe-retry")
+	item.Payload = `{"reason":"delivery_failed"}`
+	item.SourceSession = "ses_source_delivery_failed"
 	harness.registerTarget(t, "ses_retry", item.Topic)
 	data := marshalListenerEnvelope(t, item)
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -1572,11 +2129,12 @@ func TestListenerDeliveryHandler_FailedDeliveryOnExceptionTopic_NoException(t *t
 }
 
 type listenerDeliveryHarness struct {
-	client   *bus.Client
-	registry *store.Registry
-	sessions *session.SessionRegistry
-	metrics  *metrics.Registry
-	handler  natsgo.MsgHandler
+	client      *bus.Client
+	registry    *store.Registry
+	sessions    *session.SessionRegistry
+	metrics     *metrics.Registry
+	handler     natsgo.MsgHandler
+	coreHandler natsgo.MsgHandler
 }
 
 func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
@@ -1603,25 +2161,27 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		deliverer.HTTPClient = &http.Client{Transport: transport}
 	}
 	met := metrics.New()
+	deliveryConfig := listenerDeliveryHandlerConfig{
+		client:            client,
+		registry:          registry,
+		sessions:          sessions,
+		machineID:         "test-machine",
+		deliverer:         &deliverer,
+		dedupeCache:       dedupeCache,
+		attemptCache:      attemptCache,
+		logger:            logging.New("test"),
+		messagesReceived:  met.NewCounter("test_messages_received", "test"),
+		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
+		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
+		deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
+	}
 	return listenerDeliveryHarness{
-		client:   client,
-		registry: registry,
-		sessions: sessions,
-		metrics:  met,
-		handler: listenerDeliveryHandler(listenerDeliveryHandlerConfig{
-			client:            client,
-			registry:          registry,
-			sessions:          sessions,
-			machineID:         "test-machine",
-			deliverer:         &deliverer,
-			dedupeCache:       dedupeCache,
-			attemptCache:      attemptCache,
-			logger:            logging.New("test"),
-			messagesReceived:  met.NewCounter("test_messages_received", "test"),
-			messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
-			messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
-			deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
-		}),
+		client:      client,
+		registry:    registry,
+		sessions:    sessions,
+		metrics:     met,
+		handler:     jetStreamDeliveryHandler(deliveryConfig),
+		coreHandler: coreNATSDeliveryHandler(deliveryConfig),
 	}
 }
 
@@ -1697,21 +2257,43 @@ func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original 
 		EventID        string `json:"event_id"`
 		Reason         string `json:"reason"`
 		PayloadSummary string `json:"payload_summary"`
+		Payload        string `json:"payload"`
+		DedupeKey      string `json:"dedupe_key"`
+		Source         string `json:"source"`
+		SourceSession  string `json:"source_session"`
 	}
 	if err := json.Unmarshal([]byte(exception.Payload), &payload); err != nil {
 		t.Fatalf("decode exception payload: %v", err)
 	}
-	if payload.OriginalTopic != original.Topic || payload.EventID != original.EventID || payload.Reason != reason || payload.PayloadSummary != original.PayloadSummary {
-		t.Fatalf("unexpected exception payload: %+v", payload)
+	if payload.OriginalTopic != original.Topic {
+		t.Fatalf("exception original topic = %q, want %q", payload.OriginalTopic, original.Topic)
+	}
+	if payload.EventID != original.EventID {
+		t.Fatalf("exception event ID = %q, want %q", payload.EventID, original.EventID)
+	}
+	if payload.Reason != reason {
+		t.Fatalf("exception reason = %q, want %q", payload.Reason, reason)
+	}
+	if payload.PayloadSummary != original.PayloadSummary {
+		t.Fatalf("exception payload summary = %q, want %q", payload.PayloadSummary, original.PayloadSummary)
+	}
+	if payload.Payload != original.Payload {
+		t.Fatalf("exception payload = %q, want %q", payload.Payload, original.Payload)
+	}
+	if payload.DedupeKey != original.DedupeKey {
+		t.Fatalf("exception dedupe key = %q, want %q", payload.DedupeKey, original.DedupeKey)
+	}
+	if payload.Source != original.Source {
+		t.Fatalf("exception source = %q, want %q", payload.Source, original.Source)
+	}
+	if payload.SourceSession != original.SourceSession {
+		t.Fatalf("exception source session = %q, want %q", payload.SourceSession, original.SourceSession)
 	}
 }
 
 func TestHealthzConsumerLag(t *testing.T) {
 	natsURI := sharedListenerTestNATSURI(t)
-	conn, err := natsgo.Connect(natsURI)
-	if err != nil {
-		t.Fatalf("failed to connect to NATS: %v", err)
-	}
+	conn := testnats.Connect(t, natsURI)
 	defer conn.Close()
 
 	resetListenerTestState(t, conn)
@@ -1725,9 +2307,12 @@ func TestHealthzConsumerLag(t *testing.T) {
 
 	// Create a consumer
 	consumerName := "listener-test-machine"
+	_ = client.JS().DeleteConsumer(bus.Stream, consumerName)
 	_, err = client.Subscribe(
-		"notifications.>",
+		"",
 		func(msg *natsgo.Msg) { _ = msg.Ack() },
+		natsgo.BindStream(bus.Stream),
+		natsgo.ConsumerFilterSubjects(bus.StreamSubjects()...),
 		natsgo.Durable(consumerName),
 		natsgo.AckExplicit(),
 		natsgo.ManualAck(),
@@ -1735,6 +2320,7 @@ func TestHealthzConsumerLag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
+	defer func() { _ = client.JS().DeleteConsumer(bus.Stream, consumerName) }()
 
 	// Get consumer info to verify it exists and has the expected fields
 	consumerInfo, err := client.JS().ConsumerInfo(bus.Stream, consumerName)

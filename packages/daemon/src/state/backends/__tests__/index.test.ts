@@ -22,7 +22,12 @@ describe("getBackend", () => {
   it("github backend skips non-Issue content types", () => {
     const backend = getBackend("github");
     const result = backend.parseIssues([
-      { id: "PVTI_1", content: { type: "DraftIssue" }, status: "Todo", labels: [] },
+      {
+        id: "PVTI_1",
+        content: { type: "DraftIssue" },
+        status: "Todo",
+        labels: [],
+      },
     ]);
     expect(result).toEqual([]);
   });

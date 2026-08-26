@@ -8,8 +8,12 @@
  * so the existing GitHub backend parser can consume them directly.
  */
 
-import type { CommandResult, CommandRunner, CommandRunnerOptions } from "./fetch";
-import { defaultRunner } from "./fetch";
+import type {
+  CommandResult,
+  CommandRunner,
+  CommandRunnerOptions,
+  OwnerCommandRunnerOptionsProvider,
+} from "./fetch";
 
 interface GitHubProjectItemNode {
   id: string;
@@ -42,7 +46,8 @@ interface GitHubProjectItemNode {
           nodes: Array<{ url: string }>;
         } | null;
       }
-    | Record<string, never>;
+    | Record<string, never>
+    | null;
 }
 
 interface GitHubProjectItemsPage {
@@ -315,17 +320,24 @@ async function executeGraphQLQuery(
  * user is not a member of the organization.
  *
  * @param owner - GitHub organization or user
- * @param projectNumber - Project number (from the URL)
- * @param runner - Command runner (for testing)
+ * @param runner - Command runner
+ * @param runnerOptionsForOwner - GitHub App subprocess options for the board owner
  * @returns Items in the same shape as `gh project item-list --format json`
  */
+export interface GitHubProjectItemsResult {
+  items: Record<string, unknown>[];
+  excludedNullContentItems: number;
+}
+
 export async function fetchGitHubProjectItems(
   owner: string,
   projectNumber: number,
-  runner: CommandRunner = defaultRunner,
-  runnerOptions?: CommandRunnerOptions
-): Promise<{ items: Record<string, unknown>[] }> {
+  runner: CommandRunner,
+  runnerOptionsForOwner: OwnerCommandRunnerOptionsProvider
+): Promise<GitHubProjectItemsResult> {
+  const runnerOptions = await runnerOptionsForOwner(owner);
   const allItems: Record<string, unknown>[] = [];
+  let excludedNullContentItems = 0;
   let cursor: string | null = null;
   let hasNextPage = true;
   let useUserQuery = false;
@@ -432,10 +444,19 @@ export async function fetchGitHubProjectItems(
     }
 
     for (const node of items.nodes) {
-      const item = nodeToProjectItem(node);
-      if (item) {
-        allItems.push(item);
+      if (node.content === null) {
+        excludedNullContentItems += 1;
+        console.warn(
+          JSON.stringify({
+            event: "legion.resync.cross_owner_project_item",
+            board: `${owner}/${projectNumber}`,
+            itemId: node.id,
+          })
+        );
+        continue;
       }
+      const item = nodeToProjectItem(node);
+      if (item) allItems.push(item);
     }
 
     hasNextPage = items.pageInfo.hasNextPage;
@@ -446,5 +467,5 @@ export async function fetchGitHubProjectItems(
     }
   }
 
-  return { items: allItems };
+  return { items: allItems, excludedNullContentItems };
 }

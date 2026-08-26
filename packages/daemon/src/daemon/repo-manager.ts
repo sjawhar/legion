@@ -237,7 +237,10 @@ export async function startBackgroundFetch(
 export async function fetchAllTrackedRepos(
   paths: LegionPaths,
   deps: RepoManagerDeps = defaultDeps
-): Promise<{ fetched: string[]; errors: Array<{ repo: string; error: string }> }> {
+): Promise<{
+  fetched: string[];
+  errors: Array<{ repo: string; error: string }>;
+}> {
   const listDir = deps.listDir ?? defaultDeps.listDir;
   if (!listDir) {
     return { fetched: [], errors: [] };

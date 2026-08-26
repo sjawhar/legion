@@ -3,8 +3,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { buildSchema, parse, validate } from "graphql";
-import type { IssueRef } from "../daemon/phase-artifacts";
-import { fetchPhaseArtifactsBatch } from "../daemon/phase-artifacts";
 import { buildProjectStatusFieldQuery, buildStatusMutation } from "../state/backends/github";
 import type { CommandResult, CommandRunner } from "../state/fetch";
 import { getCiStatusBatch, getPrReviewStateBatch } from "../state/fetch";
@@ -66,54 +64,28 @@ describe("daemon GraphQL queries validate against GitHub's published schema", ()
     );
   });
 
-  it("phase-artifacts batch query is schema-valid", async () => {
-    const refs: IssueRef[] = [
-      {
-        issueId: "acme-api-42",
-        status: "In Progress",
-        source: { owner: "acme", repo: "api", number: 42 },
-        prRef: { owner: "acme", repo: "api", number: 101 },
-      },
-    ];
-    const { runner, queries } = captureRunner(() =>
-      ok({
-        data: {
-          repo0: {
-            pr0: {
-              isDraft: false,
-              headRefOid: "sha",
-              merged: false,
-              autoMergeRequest: null,
-              latestReviews: { nodes: [] },
-              commits: { nodes: [] },
-            },
-          },
-        },
-      })
-    );
-    await fetchPhaseArtifactsBatch(refs, {
-      reviewerAppId: 42,
-      reviewerAppLogin: "legion-reviewer[bot]",
-      runner,
-    });
-    expect(queries).toHaveLength(1);
-    expectValidQuery(queries[0] as string, "phase-artifacts");
-  });
-
   it("project items ORG and USER queries are schema-valid", async () => {
     const org = captureRunner(() =>
       ok({ data: { organization: { projectV2: { items: emptyPage } } } })
     );
-    await fetchGitHubProjectItems("acme", 2, org.runner);
+    await fetchGitHubProjectItems("acme", 2, org.runner, async () => ({
+      env: { GH_TOKEN: "ghs_schema_test" },
+    }));
 
     const user = captureRunner((call) =>
       call === 1
         ? ok({
-            errors: [{ message: "Could not resolve to an Organization with the login of 'acme'." }],
+            errors: [
+              {
+                message: "Could not resolve to an Organization with the login of 'acme'.",
+              },
+            ],
           })
         : ok({ data: { user: { projectV2: { items: emptyPage } } } })
     );
-    await fetchGitHubProjectItems("acme", 2, user.runner);
+    await fetchGitHubProjectItems("acme", 2, user.runner, async () => ({
+      env: { GH_TOKEN: "ghs_schema_test" },
+    }));
 
     const captured = [...org.queries, ...user.queries];
     expect(captured.length).toBeGreaterThanOrEqual(3);

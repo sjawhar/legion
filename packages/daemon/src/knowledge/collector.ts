@@ -1,10 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-
+import { HANDOFF_PHASES, LEGION_DIR_NAME, type PhaseHandoff } from "@legion/contracts";
 import { resolveLegionPaths } from "../daemon/paths";
 import { readAllHandoffs } from "../handoff/ledger";
-import { HANDOFF_PHASES, LEGION_DIR_NAME } from "../handoff/schema";
-import type { PhaseHandoff } from "../handoff/types";
 import {
   type CollectedIssueFeedback,
   type LearningFeedbackPhase,
@@ -116,7 +114,10 @@ async function readLearningFeedbackLog(
 
 async function scanForWorkspaceDirs(rootDir: string): Promise<string[]> {
   try {
-    const entries = await readdir(rootDir, { encoding: "utf8", withFileTypes: true });
+    const entries = await readdir(rootDir, {
+      encoding: "utf8",
+      withFileTypes: true,
+    });
     const workspaceDirs: string[] = [];
 
     for (const entry of entries) {

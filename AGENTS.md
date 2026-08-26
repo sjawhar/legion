@@ -1,29 +1,25 @@
 # Legion
 
-Autonomous development swarm using OpenCode agents. Workers implement issues in isolated jj workspaces, coordinated by a controller daemon. Supports Linear and GitHub Issues (via Projects V2) as backends.
+Autonomous development swarm using Oh My Pi agents. Root processes own issue trees, and the Legion daemon supplies durable state, credentials, and event routing.
 
 ## Architecture
 
-The state machine provides **deterministic defaults + raw signals**. The controller skill
-**decides whether to follow or override** them. Users customize behavior by modifying the
-controller skill, not the TypeScript.
+Legion is event-driven. The daemon derives role and gate state from GitHub artifacts, records
+root-process session locators, and publishes only the verdict changes each role needs. Root
+processes run in tmux; phase workers are native Oh My Pi subagents in the issue workspace.
 
-- **TypeScript daemon** — thin substrate: spawns processes, tracks health, computes
-  deterministic session IDs, collects signals from issue tracker/GitHub PRs/workers, suggests actions.
-  The suggestions are testable defaults, not policy.
-- **Controller skill** — the customization point: reads suggested actions + raw signals,
-  executes transitions, runs quality gates, handles edge cases. Users who want different
-  workflows edit this file.
-- **Worker skills** — execute specific workflow phases (architect, plan, implement, test, review,
-  merge). Retro runs via `/legion-retro` on the implement worker session.
-
-Skills invoke TypeScript via: HTTP API (`/workers`, `/state/collect`), and environment variables (controller only). Workers receive all context via dispatch prompts. TypeScript never calls skills directly.
+- **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
+  credential grants, resync, recovery, and human-gate backstops.
+- **OMP extension** — injects the Legion tool and event delivery into active OMP sessions, provisions
+  issue workspaces, and enforces phase-worker admission and recursion limits.
+- **Skills** — guide the architect and sequential phase workers. Durable `.legion/<phase>.json`
+  handoffs are the recovery source of truth.
 
 ## Tech Stack
 
 - **TypeScript** on **Bun** runtime
 - **citty** for CLI, **Bun.serve** for HTTP daemon
-- **@opencode-ai/sdk** for programmatic OpenCode interaction
+- **Oh My Pi extension** for Legion tools, role delivery, workspace provisioning, and phase workers
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
 - **jj (Jujutsu)** for version control, **Linear** or **GitHub Issues** for issue tracking
 
@@ -33,7 +29,7 @@ Skills invoke TypeScript via: HTTP API (`/workers`, `/state/collect`), and envir
 bun install                   # Setup
 bunx biome check src/         # Lint
 bunx tsc --noEmit             # Type check
-bun test                      # Test (640 tests)
+bun test                      # Test
 ```
 
 ```bash
@@ -59,19 +55,15 @@ legion handoff write|read|message    # Workers: write/read structured handoff da
 
 | Task                   | Location                                      | Notes                                     |
 | ---------------------- | --------------------------------------------- | ----------------------------------------- |
-| Add CLI command        | `packages/daemon/src/cli/index.ts`            | citty `defineCommand` pattern             |
-| Change HTTP API        | `packages/daemon/src/daemon/server.ts`        | See @packages/daemon/src/daemon/AGENTS.md |
-| Change state machine   | `packages/daemon/src/state/decision.ts`       | See @packages/daemon/src/state/AGENTS.md  |
-| Add worker workflow    | `skills/legion-worker/workflows/`             | See @skills/AGENTS.md                     |
-| Change controller loop | `skills/legion-controller/SKILL.md`           | See @skills/AGENTS.md                     |
-| Modify issue types     | `packages/daemon/src/state/types.ts`          | Shared by daemon + state                  |
-| Worker process mgmt    | `packages/daemon/src/daemon/serve-manager.ts` | Spawns `opencode serve`                   |
-| Port allocation        | `packages/daemon/src/daemon/ports.ts`         | Sequential from base 13381                |
-| Handoff ledger         | `.legion/` on issue branch                    | Per-phase JSON files written by workers   |
-| Envoy event routing    | `packages/envoy/`                             | See @packages/envoy/AGENTS.md             |
-| Shared event contracts | `packages/contracts/`                         | See @packages/contracts/AGENTS.md         |
-| Envoy OpenCode bridge  | `packages/envoy-plugin/`                      | See @packages/envoy-plugin/AGENTS.md      |
-| Envoy OMP adapter      | `packages/envoy-omp-extension/`               | See @packages/envoy-omp-extension/AGENTS.md |
+| Add CLI command        | `packages/daemon/src/cli/index.ts`            | citty `defineCommand` pattern                  |
+| Change Legion API      | `packages/daemon/src/daemon/api.ts`            | See @packages/daemon/src/daemon/AGENTS.md      |
+| Change daemon state    | `packages/daemon/src/daemon/legion-state.ts`   | See @packages/daemon/src/state/AGENTS.md       |
+| Add phase guidance     | `skills/legion-worker/SKILL.md`                | See @skills/AGENTS.md                          |
+| Change architect loop  | `skills/legion-architect/SKILL.md`             | See @skills/AGENTS.md                          |
+| Handoff ledger         | `.legion/` on issue branch                     | Committed phase output                          |
+| Envoy event routing    | `packages/envoy/`                              | See @packages/envoy/AGENTS.md                  |
+| Shared event contracts | `packages/contracts/`                          | See @packages/contracts/AGENTS.md               |
+| Envoy OMP adapter      | `packages/envoy-omp-extension/`                | See @packages/envoy-omp-extension/AGENTS.md    |
 
 ## Conventions
 
@@ -94,12 +86,13 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
          └──────────────────────────────┘
                     (urgent + clear)
 
-**Worker modes:** architect → plan → implement → test → review → merge
-**Retro:** invoked by resuming the implement worker session with `/legion-retro`
+**Phase roles:** architect → plan → implement → test → review → merge
+**Retro:** runs after reviewer cleanup and before human approval.
 
-**Labels:** `worker-done`, `worker-active`, `user-input-needed`, `user-feedback-given`, `test-passed`, `test-failed`
+**Labels:** `needs-approval`, `human-approved`, `legion-child`, `legion-backlog`
 
-**Review signaling:** Native GitHub review API (not labels) — `gh pr review --approve` = approved, `gh pr review --request-changes` = changes requested.
+**Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
+the phase-verdict artifacts. No lifecycle labels carry worker state.
 
 **Testing gate:** Behavioral testing is mandatory after every implementation phase — both fresh implementation AND review-requested changes go through the tester before reaching the reviewer.
 

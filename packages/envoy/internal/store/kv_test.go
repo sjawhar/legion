@@ -9,6 +9,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -270,7 +271,6 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	}
 }
 
-
 // --- Integration Tests (testcontainers NATS) ---
 
 func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
@@ -285,11 +285,9 @@ func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 		ctr.Terminate(ctx)
 		t.Fatalf("failed to get NATS URI: %v", err)
 	}
-	conn, err := natsgo.Connect(uri)
-	if err != nil {
-		ctr.Terminate(ctx)
-		t.Fatalf("failed to connect: %v", err)
-	}
+
+	conn := testnats.Connect(t, uri)
+
 	cleanup := func() {
 		conn.Close()
 		ctr.Terminate(ctx)
@@ -456,11 +454,7 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 		ctr.Terminate(ctx)
 		t.Fatalf("failed to get URI: %v", err)
 	}
-	conn, err := natsgo.Connect(uri)
-	if err != nil {
-		ctr.Terminate(ctx)
-		t.Fatalf("failed to connect: %v", err)
-	}
+	conn := testnats.Connect(t, uri)
 	// Safety net: double-close and double-terminate are no-ops
 	t.Cleanup(func() {
 		conn.Close()
@@ -855,6 +849,26 @@ func TestSetRole_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	if _, err := reg.SetRole("ses_role", "m1", "legion-controller"); err != nil {
+		t.Fatalf("SetRole controller: %v", err)
+	}
+	if _, err := reg.SetRole("ses_role", "m1", "legion-reviewer"); err != nil {
+		t.Fatalf("SetRole reviewer: %v", err)
+	}
+	if err := reg.Remove("ses_role", []string{"notifications.role.legion-controller"}); err != nil {
+		t.Fatalf("Remove controller role: %v", err)
+	}
+
+	if _, err := reg.roleKV.Get("legion-controller"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("controller role holder still exists: %v", err)
+	}
+}
+
 func TestSetRole_OldHolderMissing(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -957,7 +971,6 @@ func TestReaperGraceWindow(t *testing.T) {
 		t.Fatalf("ses_recent should still exist within grace window: %v", err)
 	}
 }
-
 
 func TestPing_HealthyConnReturnsNil(t *testing.T) {
 	conn, cleanup := connectNATS(t)

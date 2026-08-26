@@ -15,7 +15,11 @@ import {
 describe("parseIssueRepo", () => {
   it("parses explicit owner/repo", () => {
     const result = parseIssueRepo("acme/widgets");
-    expect(result).toEqual({ host: "github.com", owner: "acme", repo: "widgets" });
+    expect(result).toEqual({
+      host: "github.com",
+      owner: "acme",
+      repo: "widgets",
+    });
   });
 
   it("returns null for invalid repo string", () => {

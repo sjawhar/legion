@@ -1,1134 +1,468 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { CodebaseIndexManager } from "../index/manager";
+import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
+import { connect, StringCodec, type Subscription } from "nats";
+import type { CommandRunner } from "../state/fetch";
+import { defaultRunner } from "../state/fetch";
+import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state/github-fetch";
+import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
+import { setApprovalStatus } from "./approval-check";
+import { overseerCatchup } from "./catchup";
+import { type DaemonConfig, type GitHubAppRole, loadConfig } from "./config";
 import {
-  CODEBASE_INDEX_VERSION,
-  type CodebaseIndex,
-  createEmptyCodebaseIndexResponse,
-} from "../index/types";
-import { computeControllerSessionId } from "../state/types";
-import { type DaemonConfig, resolveDaemonConfig, validateControllerPrompt } from "./config";
-import { FeedbackLogger, FileFeedbackWriter } from "./feedback";
-import { TokenManager } from "./github-apps";
-import {
-  allocatePort,
-  cleanupStaleServes,
-  readLegionsRegistry,
-  removeLegionEntry,
-  writeLegionEntry,
-} from "./legions-registry";
-import { fetchPhaseArtifactsBatch, type IssueRef } from "./phase-artifacts";
-import { isPortFree } from "./ports";
-import { demoteSession, listPromotedSessions, readPromotedSessions } from "./promoted-sessions";
-import { fetchAllTrackedRepos } from "./repo-manager";
-import {
-  runResyncPass as defaultRunResyncPass,
-  type LiveWorkers,
-  type RunResyncDeps,
-} from "./resync";
-import { readProcessRssBytes } from "./rss-monitor";
-import { createAdapter } from "./runtime";
-import type { RuntimeAdapter, RuntimeStartOptions } from "./runtime/types";
-import { publishToController, startServer, subscribeWorkerToEnvoy } from "./server";
-import { type ControllerState, readStateFile, writeStateFile } from "./state-file";
-import {
-  registerGauges,
-  registerSignals,
-  start as startMemoryTelemetry,
-  stop as stopMemoryTelemetry,
-} from "./telemetry";
+  createDaemonRunner,
+  type DaemonEnvironment,
+  type ResolveDaemonEnvironmentDeps,
+  resolveDaemonEnvironment,
+} from "./environment";
+import { type EventPump, type EventPumpDeps, startEventPump } from "./events";
+import { buildRoleEnv, TokenManager } from "./github-apps";
+import { loadState, saveState } from "./legion-state";
+import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
+import { runResync } from "./resync";
 
-type ServerHandle = ReturnType<typeof startServer>;
-type StartServerDependency = (
-  ...args: Parameters<typeof startServer>
-) => Pick<ServerHandle, "server" | "stop"> &
-  Partial<
-    Pick<
-      ServerHandle,
-      | "fetchAndProcessState"
-      | "cleanupDeadWorkers"
-      | "refreshResyncIssueRefs"
-      | "listNonTerminalIssues"
-      | "getLiveWorkers"
-    >
-  >;
+const LINGER_SWEEP_INTERVAL_MS = 60_000;
+const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
+const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) {
+  process.stderr.write(pi.agents ? "LEGION_OMP_AGENTS=available\\n" : "LEGION_OMP_AGENTS=missing\\n");
+}
+`;
 
-interface DaemonDependencies {
-  adapter: RuntimeAdapter;
-  startServer: StartServerDependency;
-  readStateFile: typeof readStateFile;
-  writeStateFile: typeof writeStateFile;
-  fetch: typeof fetch;
-  setTimeout: typeof setTimeout;
-  clearTimeout: typeof clearTimeout;
-  runResyncPass: typeof defaultRunResyncPass;
+export interface NatsTransport {
+  subscribe(subject: string, callback: (subject: string, data: string) => void): () => void;
+  publish(subject: string, data: string): void;
+  request(subject: string, data: string): Promise<string>;
+  ready(): Promise<void>;
+  close(): Promise<void>;
 }
 
-interface DaemonStartOptions {
-  readLegionsRegistry?: typeof readLegionsRegistry;
-  cleanupStaleServes?: typeof cleanupStaleServes;
-  allocatePort?: typeof allocatePort;
-  writeLegionEntry?: typeof writeLegionEntry;
-  removeLegionEntry?: typeof removeLegionEntry;
-  daemonPortExplicit?: boolean;
+interface DaemonDependencies {
+  loadState: typeof loadState;
+  saveState: typeof saveState;
+  createNatsTransport(config: DaemonConfig): Promise<NatsTransport>;
+  runner: CommandRunner;
+  statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
+  readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
+  envoyPublish(topic: string, payloadJson: string): Promise<void>;
+  fetchGitHubProjectItems(): Promise<GitHubProjectItemsResult>;
+  tokenManager: Pick<TokenManager, "getToken">;
+  resolveDaemonEnvironment(
+    ompInvocation: string,
+    deps: ResolveDaemonEnvironmentDeps
+  ): Promise<DaemonEnvironment>;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(timer: unknown): void;
+  setInterval(callback: () => void, delayMs: number): unknown;
+  clearInterval(timer: unknown): void;
+  onSignal(signal: NodeJS.Signals, listener: () => void): void;
+  exit(code: number): void;
+  now(): number;
+}
+
+export interface DaemonStartOptions {
   deps?: Partial<DaemonDependencies>;
 }
 
 export interface DaemonHandle {
-  server: ServerHandle["server"];
-  stop: () => Promise<void>;
+  server: LegionApi["server"];
   config: DaemonConfig;
+  ready(): Promise<void>;
+  drain(): Promise<void>;
+  stop(): Promise<void>;
 }
 
-function resolveCodebaseIndexPath(config: DaemonConfig, legionId: string): string {
-  return path.join(config.paths.forLegion(legionId).legionStateDir, "index.json");
+function projectBoard(legionId: string): { owner: string; number: number } {
+  const [owner, numberText, ...extra] = legionId.split("/");
+  const number = Number(numberText);
+  if (!owner || extra.length > 0 || !Number.isSafeInteger(number) || number <= 0) {
+    throw new Error(`LEGION_ID must match owner/number (got: ${legionId})`);
+  }
+  return { owner, number };
 }
 
-interface RuntimeIndexManager {
-  initialize: () => Promise<CodebaseIndex>;
-  incrementalUpdate: () => Promise<CodebaseIndex>;
-  rebuild: () => Promise<CodebaseIndex>;
-  getResponse: () => ReturnType<typeof createEmptyCodebaseIndexResponse> | CodebaseIndex;
-}
-
-function createNoopIndexManager(): RuntimeIndexManager {
-  const emptyIndex: CodebaseIndex = {
-    version: CODEBASE_INDEX_VERSION,
-    dependencyGraph: {},
-    apiSurface: {},
-    testMapping: {
-      sourceToTests: {},
-      testToSources: {},
-    },
-    hotspots: [],
-    metadata: {
-      generatedAt: new Date(0).toISOString(),
-      rootDir: "",
-      fileCount: 0,
-      mtimes: {},
-    },
-  };
-
-  return {
-    initialize: async () => emptyIndex,
-    incrementalUpdate: async () => emptyIndex,
-    rebuild: async () => emptyIndex,
-    getResponse: () => createEmptyCodebaseIndexResponse(),
-  };
-}
-
-function resolveDependencies(
+async function resolveConfiguredAppLogins(
   config: DaemonConfig,
-  overrides?: Partial<DaemonDependencies>
-): DaemonDependencies {
-  const defaultAdapter = createAdapter(config.runtime, {
-    port: config.baseWorkerPort,
-    shortId: config.legionId ?? "default",
+  tokenManager: Pick<TokenManager, "getToken">,
+  owner: string
+): Promise<string[]> {
+  const roles = Object.keys(config.githubApps) as GitHubAppRole[];
+  if (config.gates.merge === "human" && roles.length === 0) {
+    throw new Error("gates.merge=human requires at least one configured GitHub App login");
+  }
+  const logins = await Promise.all(
+    roles.map(async (role) => (await tokenManager.getToken(role, owner)).gitIdentity.name)
+  );
+  if (config.gates.merge === "human" && logins.some((login) => login.length === 0)) {
+    throw new Error("gates.merge=human requires at least one configured GitHub App login");
+  }
+  return [...new Set(logins)];
+}
+
+export function createBoardProjectItemsFetcher(
+  board: { owner: string; number: number },
+  tokenManager: Pick<TokenManager, "getToken">,
+  runner: CommandRunner = defaultRunner
+): () => Promise<GitHubProjectItemsResult> {
+  return () =>
+    fetchGitHubProjectItems(board.owner, board.number, runner, async (owner) => {
+      const lease = await tokenManager.getToken("implement", owner);
+      return {
+        env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
+      };
+    });
+}
+
+async function createNatsTransport(config: DaemonConfig): Promise<NatsTransport> {
+  const connection = await connect({
+    servers: config.natsUrls,
+    name: `legion-daemon-${config.project}`,
+    reconnect: true,
+    maxReconnectAttempts: -1,
+    reconnectTimeWait: 2_000,
   });
+  const codec = StringCodec();
+  const subscriptions = new Set<Subscription>();
+
   return {
-    adapter: overrides?.adapter ?? defaultAdapter,
-    startServer: overrides?.startServer ?? startServer,
-    readStateFile: overrides?.readStateFile ?? readStateFile,
-    writeStateFile: overrides?.writeStateFile ?? writeStateFile,
-    fetch: overrides?.fetch ?? globalThis.fetch,
-    setTimeout: overrides?.setTimeout ?? setTimeout,
-    clearTimeout: overrides?.clearTimeout ?? clearTimeout,
-    runResyncPass: overrides?.runResyncPass ?? defaultRunResyncPass,
+    subscribe(subject, callback) {
+      const subscription = connection.subscribe(subject);
+      subscriptions.add(subscription);
+      void (async () => {
+        for await (const message of subscription) {
+          callback(message.subject, codec.decode(message.data));
+        }
+      })();
+      return () => {
+        subscriptions.delete(subscription);
+        subscription.unsubscribe();
+      };
+    },
+    publish(subject, data) {
+      connection.publish(subject, codec.encode(data));
+    },
+    async request(subject, data) {
+      const reply = await connection.request(subject, codec.encode(data), {
+        timeout: 10_000,
+      });
+      return codec.decode(reply.data);
+    },
+    ready() {
+      return connection.flush();
+    },
+    async close() {
+      for (const subscription of subscriptions) subscription.unsubscribe();
+      subscriptions.clear();
+      await connection.drain();
+    },
   };
 }
 
-async function sendPromptWithRetry(
-  adapter: RuntimeAdapter,
-  sessionId: string,
-  text: string,
-  deps: { setTimeout: typeof globalThis.setTimeout }
+async function publishToEnvoy(
+  config: DaemonConfig,
+  topic: string,
+  payloadJson: string
 ): Promise<void> {
-  let lastError: Error = new Error("All retry attempts failed");
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await adapter.sendPrompt(sessionId, text);
-      return;
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      if (attempt < 2) {
-        await new Promise((resolve) => deps.setTimeout(resolve, 100 * 2 ** attempt));
-      }
-    }
+  const response = await fetch(`${config.envoyUrl}/v1/messages/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic, message: payloadJson, payload: payloadJson }),
+  });
+  if (!response.ok) {
+    throw new Error(`Envoy publish to ${topic} failed with status ${response.status}`);
   }
-  throw lastError;
 }
-
-async function subscribeControllerToEnvoy(sessionId: string, envoyUrl: string) {
-  if (!envoyUrl) return;
+async function verifyOmpAgentsCapability(
+  ompInvocation: string,
+  runner: CommandRunner
+): Promise<void> {
+  const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-omp-probe-"));
+  const probePath = path.join(probeDir, "probe.mjs");
   try {
-    const roleRes = await fetch(`${envoyUrl}/v1/roles/set`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: sessionId,
-        role: "legion-controller",
-      }),
-    });
-    if (!roleRes.ok) {
-      console.warn(`Envoy role set returned ${roleRes.status} (non-fatal)`);
-    } else {
-      console.log(`Controller claimed role legion-controller: session=${sessionId}`);
+    await writeFile(probePath, OMP_AGENTS_CAPABILITY_PROBE, "utf8");
+    const result = await runner([
+      "sh",
+      "-c",
+      `${ompInvocation} models --no-extensions --extension "$1" --json >/dev/null`,
+      "sh",
+      probePath,
+    ]);
+    if (
+      result.exitCode === 0 &&
+      (result.stderr.includes(OMP_AGENTS_CAPABILITY_MARKER) ||
+        result.stdout.includes(OMP_AGENTS_CAPABILITY_MARKER))
+    ) {
+      return;
     }
-  } catch (err) {
-    console.warn(`Envoy role set failed (non-fatal): ${err}`);
+
+    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    throw new Error(
+      `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
+    );
+  } finally {
+    await rm(probeDir, { recursive: true, force: true });
   }
-  fetch(`${envoyUrl}/v1/interests/subscribe`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: sessionId,
-      topics: [
-        "notifications.legion.controller",
-        // Exception lane, scoped to legion control traffic only. A global
-        // "notifications.envoy.exceptions.>" wildcard would make the controller the
-        // dead-letter consumer for every workstream on the broker.
-        "notifications.envoy.exceptions.notifications.legion.>",
-        "notifications.envoy.exceptions.notifications.role.legion-controller",
-        `notifications.envoy.exceptions.notifications.agent.${sessionId}`,
-        "notifications.slack.*.*.mention",
-        "notifications.github.*.*.mention",
-      ],
-    }),
-  })
-    .then((res) => {
-      if (!res.ok) {
-        console.warn(`Envoy subscribe returned ${res.status} (non-fatal)`);
-        return;
-      }
-      console.log(`Controller subscribed to Envoy mentions: session=${sessionId}`);
-    })
-    .catch((err) => {
-      console.warn(`Envoy subscribe failed (non-fatal): ${err}`);
-    });
 }
 
-function unsubscribeFromEnvoy(sessionId: string, envoyUrl: string) {
-  if (!envoyUrl) return;
-  fetch(`${envoyUrl}/v1/interests/unsubscribe`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, topics: [] }),
-  }).catch(() => {});
-}
-
-function buildServeEnv(config: DaemonConfig): Record<string, string> {
-  const legionId = config.legionId ?? "";
-  const env: Record<string, string> = {
-    LEGION_ID: legionId,
-    LEGION_ISSUE_BACKEND: config.issueBackend,
-    LEGION_SHORT_ID: legionId.slice(0, 8),
-    LEGION_DAEMON_PORT: String(config.daemonPort),
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({
-      plugin: ["@sjawhar/opencode-legion@latest", "@sjawhar/opencode-legion-envoy@latest"],
-    }),
+function defaultDependencies(config: DaemonConfig): DaemonDependencies {
+  const board = projectBoard(config.legionId);
+  const tokenManager = new TokenManager(config.githubApps);
+  return {
+    loadState,
+    saveState,
+    createNatsTransport,
+    runner: defaultRunner,
+    resolveDaemonEnvironment,
+    statPrompt: stat,
+    envoyPublish: (topic, payloadJson) => publishToEnvoy(config, topic, payloadJson),
+    fetchGitHubProjectItems: createBoardProjectItemsFetcher(board, tokenManager),
+    tokenManager,
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (timer) => clearTimeout(timer as number),
+    setInterval: (callback, delayMs) => setInterval(callback, delayMs),
+    clearInterval: (timer) => clearInterval(timer as number),
+    onSignal: (signal, listener) => {
+      process.on(signal, listener);
+    },
+    exit: (code) => {
+      process.exit(code);
+    },
+    now: Date.now,
   };
-  if (config.envoyUrl) {
-    env.ENVOY_URL = config.envoyUrl;
-  }
-  if (config.feedbackDisabled) {
-    env.LEGION_FEEDBACK_DISABLED = "true";
-  }
-  if (config.feedbackMaxBytes) {
-    env.LEGION_FEEDBACK_MAX_BYTES = String(config.feedbackMaxBytes);
-  }
-  if (config.controllerSessionId) {
-    env.LEGION_CONTROLLER_SESSION_ID = config.controllerSessionId;
-  }
-  return env;
 }
 
 export async function startDaemon(
-  inputConfig: DaemonConfig,
-  opts: DaemonStartOptions = {}
+  config: DaemonConfig,
+  options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
-  const {
-    readLegionsRegistry: readLegionsRegistryOverride,
-    cleanupStaleServes: cleanupStaleServesOverride,
-    allocatePort: allocatePortOverride,
-    writeLegionEntry: writeLegionEntryOverride,
-    removeLegionEntry: removeLegionEntryOverride,
-    daemonPortExplicit,
-    deps,
-  } = opts;
-
-  const readLegionsRegistryFn = readLegionsRegistryOverride ?? readLegionsRegistry;
-  const cleanupStaleServesFn = cleanupStaleServesOverride ?? cleanupStaleServes;
-  const allocatePortFn = allocatePortOverride ?? allocatePort;
-  const writeLegionEntryFn = writeLegionEntryOverride ?? writeLegionEntry;
-  const removeLegionEntryFn = removeLegionEntryOverride ?? removeLegionEntry;
-
-  let config = inputConfig;
-  const legionId = config.legionId;
-  if (!legionId) {
-    throw new Error("Missing legionId for daemon");
-  }
-  validateControllerPrompt(config.controllerPrompt);
-  mkdirSync(config.logDir, { recursive: true });
-
-  const registry = await readLegionsRegistryFn(config.paths.legionsFile);
-
-  // Clean up stale serve processes from previous daemon runs before allocating ports.
-  // This prevents orphaned serves from holding SQLite locks and occupying ports.
-  // If the serve is still healthy (e.g. after `legion restart`), it's preserved.
-  const { preservedServePid, preservedServePort } = await cleanupStaleServesFn(
-    config.paths.legionsFile,
-    legionId
-  );
-
-  const { daemonPort: allocatedDaemonPort, servePort } = allocatePortFn(registry);
-
-  const daemonPortIsExplicit = daemonPortExplicit ?? config.daemonPortExplicit;
-  let actualDaemonPort = daemonPortIsExplicit ? config.daemonPort : allocatedDaemonPort;
-  if (daemonPortIsExplicit) {
-    if (!(await isPortFree(actualDaemonPort))) {
-      throw new Error(`Daemon port ${actualDaemonPort} is unavailable`);
-    }
-  } else {
-    while (!(await isPortFree(actualDaemonPort))) {
-      actualDaemonPort++;
-    }
-  }
-
-  // If a healthy serve was preserved from a previous daemon, reuse its port.
-  // Otherwise, allocate a new one.
-  let actualServePort = preservedServePort ?? servePort;
-  if (!preservedServePort) {
-    while (!(await isPortFree(actualServePort))) {
-      actualServePort++;
-    }
-  }
-
-  config = {
-    ...config,
-    daemonPort: actualDaemonPort,
-    baseWorkerPort: actualServePort,
-  };
-
-  const resolvedDeps = resolveDependencies(config, deps);
-
-  let feedbackLogger: FeedbackLogger | undefined;
-  if (!config.feedbackDisabled) {
-    const feedbackPath = config.paths.forLegion(legionId).feedbackFile;
-    mkdirSync(path.dirname(feedbackPath), { recursive: true });
-    const writer = new FileFeedbackWriter(feedbackPath, config.feedbackMaxBytes);
-    feedbackLogger = new FeedbackLogger(writer, legionId);
-  }
-
-  const sharedServePort = config.baseWorkerPort;
-  const startedAt = Date.now();
-  let healthTicks = 0;
-  let sharedServeRestarts = 0;
-  let controllerRecreates = 0;
-  let indexInitializations = 0;
-  let indexIncrementalUpdates = 0;
-  let rssRestarts = 0;
-  let lastRssCheckAt = 0;
-  let controllerState: ControllerState | undefined;
-
-  registerSignals();
-  startMemoryTelemetry();
-  const releaseDaemonGauges = registerGauges("daemon-index", () => ({
-    daemon_port: config.daemonPort,
-    daemon_shared_serve_port: sharedServePort,
-    daemon_health_ticks: healthTicks,
-    daemon_shared_restarts: sharedServeRestarts,
-    daemon_controller_recreates: controllerRecreates,
-    daemon_index_initializations: indexInitializations,
-    daemon_index_incrementals: indexIncrementalUpdates,
-    daemon_controller_present: controllerState ? 1 : 0,
-    daemon_rss_restarts: rssRestarts,
-  }));
-  const controllerWorkspace = config.paths.forLegion(legionId).legionStateDir;
-  const hasIndexRoot = !!config.legionDir && existsSync(config.legionDir);
-  if (config.legionDir && !hasIndexRoot) {
-    console.warn(`Codebase index skipped: LEGION_DIR does not exist (${config.legionDir})`);
-  }
-
-  const indexManager: RuntimeIndexManager =
-    hasIndexRoot && config.legionDir
-      ? new CodebaseIndexManager(config.legionDir, resolveCodebaseIndexPath(config, legionId), {
-          warn: (message) => console.warn(message),
-        })
-      : createNoopIndexManager();
-
-  // Configure the adapter with start opts for lazy serve startup.
-  const serveStartOpts: RuntimeStartOptions = {
-    env: buildServeEnv(config),
-    workspace: controllerWorkspace,
-    logDir: config.logDir,
-  };
-  const adapterWithExtras = resolvedDeps.adapter as {
-    configure?: (opts: RuntimeStartOptions) => void;
-    adoptServe?: (pid: number) => void;
-  };
-  adapterWithExtras.configure?.(serveStartOpts);
-
-  // If a healthy serve was preserved from a previous daemon (e.g. `legion restart`),
-  // adopt it so the adapter tracks its PID for health checks and future stop().
-  if (preservedServePid) {
-    adapterWithExtras.adoptServe?.(preservedServePid);
-    console.log(
-      `Adopted preserved serve process (PID ${preservedServePid}, port ${sharedServePort})`
+  const board = projectBoard(config.legionId);
+  const deps = { ...defaultDependencies(config), ...options.deps };
+  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, board.owner);
+  const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
+    run: deps.runner,
+  });
+  const runner = createDaemonRunner(environment, deps.runner);
+  await verifyOmpAgentsCapability(environment.ompInvocation, runner);
+  await deps.tokenManager.getToken("implement", board.owner);
+  const stateFile = path.join(config.stateDir, "state.json");
+  const state = await deps.loadState(stateFile, {
+    project: config.project,
+    cap: config.admissionCap,
+  });
+  state.admission.cap = config.admissionCap;
+  let saving: Promise<void> | undefined;
+  const save = () => {
+    const write = saving
+      ? saving.catch(() => {}).then(() => deps.saveState(stateFile, state))
+      : deps.saveState(stateFile, state);
+    saving = write;
+    void write.then(
+      () => {
+        if (saving === write) saving = undefined;
+      },
+      () => {
+        if (saving === write) saving = undefined;
+      }
     );
-  }
-
-  let tokenManager: TokenManager | undefined;
-  if (config.githubApps) {
-    tokenManager = new TokenManager(config.githubApps);
-  } else if (config.issueBackend === "github") {
-    console.warn(
-      "daemon GitHub reads using ambient gh auth; configure github_apps for owner-keyed tokens"
-    );
-  }
-
-  const preState = await resolvedDeps.readStateFile(config.stateFilePath);
-  controllerState = preState.controller;
-
-  // Prune dead/stopped workers from state file on startup
-  const activeWorkers: Record<string, (typeof preState.workers)[string]> = {};
-  let pruned = 0;
-  for (const [id, entry] of Object.entries(preState.workers)) {
-    if (entry.status === "dead" || entry.status === "stopped") {
-      pruned++;
-      continue;
-    }
-    activeWorkers[id] = entry;
-  }
-  if (pruned > 0) {
-    console.log(`Pruned ${pruned} dead/stopped workers from state file`);
-    await resolvedDeps.writeStateFile(config.stateFilePath, {
-      ...preState,
-      workers: activeWorkers,
-    });
-  }
-
-  // Start serve eagerly if there are active workers or an internal controller that needs it.
-  // Otherwise, defer — ensureRunning() in the adapter starts it on first POST /workers.
-  const workerEntries = Object.values(activeWorkers);
-  const hasInternalController = !config.controllerSessionId;
-  const needsServeNow = workerEntries.length > 0 || hasInternalController;
-
-  if (needsServeNow) {
-    const existingHealthy = await resolvedDeps.adapter.healthy();
-    if (!existingHealthy) {
-      await resolvedDeps.adapter.start(serveStartOpts);
-    }
-    console.log(`Shared serve running on port ${sharedServePort}`);
-  } else {
-    console.log(`Shared serve deferred — will start on first worker creation`);
-  }
-
-  if (workerEntries.length > 0) {
-    console.log(`Recreating ${workerEntries.length} active worker sessions...`);
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < workerEntries.length; i += BATCH_SIZE) {
-      const batch = workerEntries.slice(i, i + BATCH_SIZE);
-      await Promise.allSettled(
-        batch.map(async (entry) => {
-          try {
-            const actualId = await resolvedDeps.adapter.createSession(
-              entry.sessionId,
-              entry.workspace
-            );
-            if (actualId !== entry.sessionId) {
-              console.warn(
-                `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
-              );
-            }
-          } catch (error) {
-            console.error(`Failed to re-create session for ${entry.id}: ${error}`);
-          }
-        })
-      );
-    }
-  }
-
-  // Re-claim Envoy roles for promoted sessions that are still alive.
-  // Runs after serve is up so sessionExists() works.
-  if (config.envoyUrl) {
-    try {
-      const promotedFile = config.paths.forLegion(legionId).promotedFile;
-      const promotedData = await readPromotedSessions(promotedFile);
-      const entries = listPromotedSessions(promotedData);
-      for (const entry of entries) {
-        let alive: boolean;
-        try {
-          alive = await resolvedDeps.adapter.sessionExists(entry.sessionId);
-        } catch {
-          alive = false;
-        }
-        if (alive) {
-          try {
-            const roleRes = await fetch(`${config.envoyUrl}/v1/roles/set`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                session_id: entry.sessionId,
-                role: entry.role,
-              }),
-            });
-            if (!roleRes.ok) {
-              console.warn(
-                `[startup] Envoy role reclaim for ${entry.sessionId} (role="${entry.role}") returned ${roleRes.status} (non-fatal)`
-              );
-            } else {
-              console.log(
-                `[startup] Reclaimed Envoy role "${entry.role}" for session ${entry.sessionId}`
-              );
-            }
-          } catch (err) {
-            console.warn(
-              `[startup] Envoy role reclaim failed for ${entry.sessionId}: ${err} (non-fatal)`
-            );
-          }
-        } else {
-          console.warn(
-            `[startup] Promoted session ${entry.sessionId} (role="${entry.role}") no longer alive, auto-demoting`
-          );
-          await demoteSession(promotedFile, entry.sessionId);
-        }
-      }
-    } catch (promotedErr) {
-      console.warn(
-        `[startup] Promoted session role reclaim failed (non-fatal): ${promotedErr instanceof Error ? promotedErr.message : String(promotedErr)}`
-      );
-    }
-  }
-
-  // Warm up all tracked repo clones — non-blocking, best-effort.
-  // Runs in the background so it doesn't delay daemon startup.
-  fetchAllTrackedRepos(config.paths).then(
-    ({ fetched, errors }) => {
-      if (fetched.length > 0) {
-        console.log(`[startup] Fetched ${fetched.length} repo clone(s): ${fetched.join(", ")}`);
-      }
-      for (const { repo, error } of errors) {
-        console.warn(`[startup] Repo fetch failed for ${repo}: ${error}`);
-      }
-    },
-    (err) => {
-      console.warn(
-        `[startup] fetchAllTrackedRepos failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  );
-
-  if (hasIndexRoot) {
-    const startedIndexBuildAt = Date.now();
-    await indexManager.initialize();
-    indexInitializations += 1;
-    console.log(`Codebase index ready in ${Date.now() - startedIndexBuildAt}ms`);
-  }
-
-  let shuttingDown = false;
-  let healthTickTimeout: ReturnType<typeof setTimeout> | null = null;
-  let resyncPassTimeout: ReturnType<typeof setTimeout> | null = null;
-  let stopServer: () => void = () => {};
-
-  /**
-   * Shut down the daemon.
-   * @param exitAfter — call process.exit(0) after cleanup
-   * @param keepServe — if true, skip stopping the serve process (for graceful restart)
-   */
-  const shutdown = async (exitAfter = false, keepServe = false) => {
-    if (shuttingDown) {
-      return;
-    }
-    shuttingDown = true;
-
-    if (healthTickTimeout) {
-      resolvedDeps.clearTimeout(healthTickTimeout);
-      healthTickTimeout = null;
-    }
-    if (resyncPassTimeout) {
-      resolvedDeps.clearTimeout(resyncPassTimeout);
-      resyncPassTimeout = null;
-    }
-
-    if (feedbackLogger) {
-      try {
-        await feedbackLogger.flush();
-      } catch (error) {
-        console.error(`[feedback] Flush on shutdown failed: ${error}`);
-      }
-    }
-
-    if (!keepServe) {
-      try {
-        await removeLegionEntryFn(config.paths.legionsFile, legionId);
-      } catch {}
-    }
-
-    if (!keepServe) {
-      await resolvedDeps.adapter.stop();
-    } else {
-      console.log("[restart] Keeping serve process alive for daemon restart");
-    }
-
-    controllerState = undefined;
-    const state = await resolvedDeps.readStateFile(config.stateFilePath);
-    await resolvedDeps.writeStateFile(config.stateFilePath, {
-      workers: state.workers,
-      crashHistory: state.crashHistory,
-      controller: undefined,
-    });
-    releaseDaemonGauges();
-    stopMemoryTelemetry();
-    clearInterval(keepalive);
-    stopServer();
-    if (exitAfter) {
-      process.exit(0);
-    }
+    return write;
   };
+  const nats = await deps.createNatsTransport(config);
+  let api: LegionApi;
 
-  let server: ServerHandle["server"];
-  let stop: ServerHandle["stop"];
-  let fetchAndProcessState: ServerHandle["fetchAndProcessState"];
-  let cleanupDeadWorkers: ServerHandle["cleanupDeadWorkers"];
-  let refreshResyncIssueRefs: (() => Promise<void>) | undefined;
-  let listNonTerminalIssues: (() => IssueRef[]) | undefined;
-  let getLiveWorkers: (() => Promise<LiveWorkers>) | undefined;
-  let bindAttempts = 0;
-
-  while (true) {
-    try {
-      const serverHandle = resolvedDeps.startServer({
-        port: config.daemonPort,
-        hostname: "127.0.0.1",
-        legionId,
-        projectId: legionId,
-        legionDir: config.legionDir,
-        paths: config.paths,
-        adapter: resolvedDeps.adapter,
-        stateFilePath: config.stateFilePath,
-        logDir: config.logDir,
-        runtime: config.runtime,
-        extraProjects: config.extraProjects,
-        tmuxSession:
-          config.runtime === "claude-code" && config.legionId
-            ? `legion-${config.legionId}`
-            : undefined,
-        getControllerState: () => controllerState,
-        tokenManager,
-        indexManager,
-        feedbackLogger,
-        envoyUrl: config.envoyUrl,
-        issueBackend: config.issueBackend,
-        modeAgents: config.modeAgents,
-        shutdownFn: async () => {
-          resolvedDeps.setTimeout(async () => {
-            await shutdown(true);
-          }, 100);
-        },
-        restartFn: async () => {
-          resolvedDeps.setTimeout(async () => {
-            await shutdown(true, true);
-          }, 100);
-        },
-      });
-      server = serverHandle.server;
-      stop = serverHandle.stop;
-      fetchAndProcessState = serverHandle.fetchAndProcessState ?? (async () => {});
-      cleanupDeadWorkers = serverHandle.cleanupDeadWorkers ?? (async () => {});
-      refreshResyncIssueRefs = serverHandle.refreshResyncIssueRefs;
-      listNonTerminalIssues = serverHandle.listNonTerminalIssues;
-      getLiveWorkers = serverHandle.getLiveWorkers;
-      break;
-    } catch (error) {
-      const err = error as NodeJS.ErrnoException;
-      bindAttempts++;
-      if (daemonPortIsExplicit || err.code !== "EADDRINUSE" || bindAttempts >= 5) {
-        throw error;
-      }
-      config = { ...config, daemonPort: config.daemonPort + 1 };
-    }
-  }
-
-  stopServer = stop;
-
-  const servePid = resolvedDeps.adapter.getServePid();
-  await writeLegionEntryFn(config.paths.legionsFile, legionId, {
-    port: config.daemonPort,
-    servePort: sharedServePort,
-    pid: process.pid,
-    ...(servePid > 0 ? { servePid } : {}),
-    startedAt: new Date().toISOString(),
+  const processManager = new ProcessManager({
+    state,
+    saveState: save,
+    config,
+    ompInvocation: environment.ompInvocation,
+    panePath: environment.paneEnv.PATH,
+    credentialHelper: daemonCredentialHelper(),
+    run: runner,
+    natsPublish: (subject, data) => nats.publish(subject, data),
+    natsRequest: (subject, data) => nats.request(subject, data),
+    mintControllerCapability: async () => api.mintControllerCapability(),
+    mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),
+    provisioningToken: async (owner) =>
+      (await deps.tokenManager.getToken("implement", owner)).token,
+    statPrompt: deps.statPrompt,
+    readProcessCmdline: deps.readProcessCmdline,
+    workerCatchup: { runner, tokenManager: deps.tokenManager },
+    now: deps.now,
   });
 
-  const existingController = controllerState;
-
-  if (config.controllerSessionId) {
-    if (existingController && existingController.sessionId !== config.controllerSessionId) {
-      if (existingController.port) {
-        const oldAlive = await resolvedDeps.adapter.healthy();
-        if (oldAlive) {
-          throw new Error(
-            `Another controller is running (session=${existingController.sessionId})`
-          );
-        }
-      }
-    }
-    // Unsubscribe old controller from Envoy if session ID changed
-    if (existingController && existingController.sessionId !== config.controllerSessionId) {
-      unsubscribeFromEnvoy(existingController.sessionId, config.envoyUrl);
-    }
-    console.log(`External controller: session=${config.controllerSessionId}`);
-    controllerState = { sessionId: config.controllerSessionId };
-    subscribeControllerToEnvoy(config.controllerSessionId, config.envoyUrl);
-  } else {
-    const requestedSessionId = computeControllerSessionId(legionId);
-    let actualSessionId: string | undefined;
-    try {
-      actualSessionId = await resolvedDeps.adapter.createSession(
-        requestedSessionId,
-        controllerWorkspace
-      );
-      controllerState = { sessionId: actualSessionId, port: sharedServePort };
-    } catch (error) {
-      console.error(`Failed to create controller session: ${error}`);
-    }
-
-    if (controllerState && actualSessionId) {
-      const initialPrompt = config.controllerPrompt
-        ? `/legion-controller\n\n${config.controllerPrompt}`
-        : "/legion-controller";
-      try {
-        await sendPromptWithRetry(
-          resolvedDeps.adapter,
-          actualSessionId,
-          initialPrompt,
-          resolvedDeps
-        );
-        console.log(`Controller started: session=${actualSessionId} port=${sharedServePort}`);
-        subscribeControllerToEnvoy(actualSessionId, config.envoyUrl);
-      } catch (error) {
-        console.error(`Controller session created but prompt failed: ${error}`);
-        console.error("Health loop will retry on next tick.");
-      }
-    }
-  }
-
-  // Track consecutive liveness misses per worker for failure threshold.
-  // Workers are only reaped after LIVENESS_FAILURE_THRESHOLD consecutive misses.
-  // Resets when a worker's session is found alive.
-  const consecutiveLivenessMisses = new Map<string, number>();
-
-  const scheduleHealthTick = () => {
-    healthTickTimeout = resolvedDeps.setTimeout(async () => {
-      try {
-        healthTicks += 1;
-        const serveHealthy = await resolvedDeps.adapter.healthy();
-
-        // Determine if the shared serve needs a restart and why.
-        let restartReason: string | null = null;
-        let stopBeforeRestart = false;
-
-        if (!serveHealthy) {
-          // Only restart if something needs it (active workers or internal controller).
-          // With external controller + 0 workers, let the serve stay down.
-          const state = await resolvedDeps.readStateFile(config.stateFilePath);
-          const liveWorkers = Object.values(state.workers).filter(
-            (e) => e.status !== "dead" && e.status !== "stopped"
-          );
-          if (liveWorkers.length > 0 || hasInternalController) {
-            restartReason = "unhealthy";
-          }
-        } else if (config.maxRssBytes > 0) {
-          // Serve is healthy — check RSS for bmalloc leak mitigation.
-          const now = Date.now();
-          if (now - lastRssCheckAt >= config.rssCheckIntervalMs) {
-            lastRssCheckAt = now;
-            const pid = resolvedDeps.adapter.getServePid();
-            if (pid > 0) {
-              const rssBytes = readProcessRssBytes(pid);
-              if (rssBytes !== null && rssBytes > config.maxRssBytes) {
-                const rssGb = (rssBytes / 1024 / 1024 / 1024).toFixed(2);
-                const thresholdGb = (config.maxRssBytes / 1024 / 1024 / 1024).toFixed(2);
-                restartReason = `RSS ${rssGb}GB exceeds threshold ${thresholdGb}GB`;
-                stopBeforeRestart = true;
-              }
-            }
-          }
-        }
-
-        if (restartReason) {
-          console.error(`Shared serve needs restart: ${restartReason}`);
-          try {
-            if (stopBeforeRestart) {
-              try {
-                await resolvedDeps.adapter.stop();
-              } catch {
-                // Best-effort — serve may already be dead
-              }
-            }
-            await resolvedDeps.adapter.start(serveStartOpts);
-            sharedServeRestarts += 1;
-            if (stopBeforeRestart) {
-              rssRestarts += 1;
-            }
-            console.log(`Shared serve restarted on port ${sharedServePort}`);
-
-            const state = await resolvedDeps.readStateFile(config.stateFilePath);
-            const liveWorkers = Object.values(state.workers).filter(
-              (e) => e.status !== "dead" && e.status !== "stopped"
-            );
-
-            console.log(
-              `Recreating ${liveWorkers.length} active worker sessions after serve restart...`
-            );
-            const BATCH_SIZE = 10;
-            const recreatedSessions = new Map<string, string>();
-            for (let i = 0; i < liveWorkers.length; i += BATCH_SIZE) {
-              const batch = liveWorkers.slice(i, i + BATCH_SIZE);
-              await Promise.allSettled(
-                batch.map(async (entry) => {
-                  try {
-                    const actualId = await resolvedDeps.adapter.createSession(
-                      entry.sessionId,
-                      entry.workspace
-                    );
-                    recreatedSessions.set(entry.id, actualId);
-                    if (actualId !== entry.sessionId) {
-                      console.warn(
-                        `Worker ${entry.id}: session ID changed ${entry.sessionId} -> ${actualId}`
-                      );
-                    }
-                  } catch {
-                    // Best-effort session re-creation
-                  }
-                })
-              );
-            }
-
-            // Re-subscribe workers to their envoy topics after serve restart.
-            // The envoy plugin re-initializes with only the agent topic on restart,
-            // so daemon-managed issue/PR subscriptions must be re-applied.
-            // Only re-subscribe workers whose sessions were successfully recreated,
-            // using the actual session ID returned by createSession.
-            for (const entry of liveWorkers) {
-              const actualSessionId = recreatedSessions.get(entry.id);
-              if (actualSessionId && entry.envoyTopics?.length) {
-                console.log("re-subscribing worker to envoy", {
-                  workerId: entry.id,
-                  topics: entry.envoyTopics,
-                });
-                subscribeWorkerToEnvoy(actualSessionId, entry.envoyTopics, config.envoyUrl);
-              }
-            }
-
-            if (controllerState?.port) {
-              try {
-                const actualControllerSessionId = await resolvedDeps.adapter.createSession(
-                  controllerState.sessionId,
-                  controllerWorkspace
-                );
-                if (actualControllerSessionId !== controllerState.sessionId) {
-                  console.warn(
-                    `Controller: session ID changed ${controllerState.sessionId} -> ${actualControllerSessionId}`
-                  );
-                }
-                // Unsubscribe old session ID if it changed
-                if (actualControllerSessionId !== controllerState.sessionId) {
-                  unsubscribeFromEnvoy(controllerState.sessionId, config.envoyUrl);
-                }
-                controllerState = {
-                  ...controllerState,
-                  sessionId: actualControllerSessionId,
-                  port: sharedServePort,
-                };
-                controllerRecreates += 1;
-                await sendPromptWithRetry(
-                  resolvedDeps.adapter,
-                  actualControllerSessionId,
-                  "/legion-controller",
-                  resolvedDeps
-                );
-                console.log(`Controller re-created: session=${actualControllerSessionId}`);
-              } catch (error) {
-                console.error(`Failed to re-create controller session: ${error}`);
-              }
-            }
-          } catch (error) {
-            console.error(`Failed to restart shared serve: ${error}`);
-          }
-        }
-
-        // Fetch-and-collect state + delta notification (non-blocking)
-        // Only when serve is healthy and was NOT just restarted
-        if (serveHealthy && !restartReason) {
-          try {
-            await fetchAndProcessState();
-          } catch (error) {
-            console.warn(
-              `[health-tick] fetch-and-collect failed: ${error instanceof Error ? error.message : String(error)} (non-fatal)`
-            );
-          }
-        }
-
-        // Session liveness sweep — detect workers whose serve sessions have died (AC1-AC4)
-        // Only runs when serve is healthy and was NOT just restarted (AC3)
-        if (serveHealthy && !restartReason) {
-          try {
-            const livenessState = await resolvedDeps.readStateFile(config.stateFilePath);
-            for (const worker of Object.values(livenessState.workers)) {
-              if (worker.status !== "running") continue;
-
-              // Per-worker session existence check — O(workers) not O(total sessions).
-              // Uses GET /session/{id} which is a single-row lookup, immune to pagination.
-              const workerPort = worker.port ?? resolvedDeps.adapter.getPort();
-              let sessionAlive: boolean;
-              if (workerPort === resolvedDeps.adapter.getPort()) {
-                sessionAlive = await resolvedDeps.adapter.sessionExists(worker.sessionId);
-              } else {
-                // Different port — check directly via HTTP
-                try {
-                  const res = await resolvedDeps.fetch(
-                    `http://127.0.0.1:${workerPort}/session/${worker.sessionId}`
-                  );
-                  sessionAlive = res.ok;
-                } catch {
-                  sessionAlive = false;
-                }
-              }
-
-              if (sessionAlive) {
-                // Session alive — reset consecutive miss counter
-                consecutiveLivenessMisses.delete(worker.id);
-                continue;
-              }
-
-              // Grace period — don't reap workers dispatched in the last 120s
-              // Prevents race where session isn't on serve yet during workspace setup
-              const LIVENESS_GRACE_PERIOD_MS = 120_000;
-              const startedAtMs = new Date(worker.startedAt).getTime();
-              if (Date.now() - startedAtMs < LIVENESS_GRACE_PERIOD_MS) continue;
-
-              // Consecutive failure threshold — require 3 consecutive misses before reaping
-              const LIVENESS_FAILURE_THRESHOLD = 3;
-              const misses = (consecutiveLivenessMisses.get(worker.id) ?? 0) + 1;
-              consecutiveLivenessMisses.set(worker.id, misses);
-              if (misses < LIVENESS_FAILURE_THRESHOLD) {
-                console.warn(
-                  `[liveness] Worker ${worker.id}: session missing (${misses}/${LIVENESS_FAILURE_THRESHOLD} consecutive misses)`
-                );
-                continue;
-              }
-
-              const workerMode = worker.id.split("-").pop() ?? "unknown";
-              const now = new Date().toISOString();
-              try {
-                const patchRes = await resolvedDeps.fetch(
-                  `http://127.0.0.1:${config.daemonPort}/workers/${worker.id}`,
-                  {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      status: "dead",
-                      crashCount: worker.crashCount + 1,
-                      lastCrashAt: now,
-                    }),
-                  }
-                );
-                if (patchRes.ok) {
-                  feedbackLogger?.log({
-                    event: "daemon.worker_reaped",
-                    workerId: worker.id,
-                    sessionId: worker.sessionId,
-                    mode: workerMode,
-                    serveType: "shared",
-                    reason: "session_missing",
-                  });
-                  console.warn(
-                    `[liveness] Reaped worker ${worker.id}: session ${worker.sessionId} not found in serve`
-                  );
-                } else {
-                  console.warn(
-                    `[liveness] PATCH to mark worker ${worker.id} dead returned ${patchRes.status}`
-                  );
-                }
-              } catch (patchErr) {
-                console.warn(`[liveness] Failed to mark worker ${worker.id} as dead: ${patchErr}`);
-              }
-            }
-          } catch (livenessErr) {
-            console.warn(`[liveness] Session liveness check failed (non-fatal): ${livenessErr}`);
-          }
-        }
-
-        // Clean up dead worker workspaces (non-blocking)
-        // Runs after liveness sweep so newly-reaped workers are included.
-        if (serveHealthy && !restartReason) {
-          try {
-            await cleanupDeadWorkers();
-          } catch (error) {
-            console.warn(
-              `[health-tick] dead worker cleanup failed: ${error instanceof Error ? error.message : String(error)} (non-fatal)`
-            );
-          }
-        }
-
-        // Promoted session liveness — auto-demote sessions whose serve session is dead.
-        if (serveHealthy && !restartReason) {
-          try {
-            const promotedFile = config.paths.forLegion(legionId).promotedFile;
-            const promotedData = await readPromotedSessions(promotedFile);
-            for (const [sessionId, entry] of Object.entries(promotedData.sessions)) {
-              let alive: boolean;
-              try {
-                alive = await resolvedDeps.adapter.sessionExists(sessionId);
-              } catch {
-                alive = false;
-              }
-              if (!alive) {
-                console.warn(
-                  `[promoted] Auto-demoting ${sessionId} (role="${entry.role}"): session no longer alive`
-                );
-                await demoteSession(promotedFile, sessionId);
-                feedbackLogger?.log({
-                  event: "daemon.promoted_auto_demote",
-                  sessionId,
-                  role: entry.role,
-                });
-              }
-            }
-          } catch (promotedErr) {
-            console.warn(
-              `[promoted] Liveness check failed (non-fatal): ${promotedErr instanceof Error ? promotedErr.message : String(promotedErr)}`
-            );
-          }
-        }
-
-        try {
-          await indexManager.incrementalUpdate();
-          indexIncrementalUpdates += 1;
-        } catch (error) {
-          console.error(`Failed to update codebase index incrementally: ${error}`);
-        }
-
-        const workerState = await resolvedDeps.readStateFile(config.stateFilePath);
-        feedbackLogger?.log({
-          event: "daemon.health_tick",
-          tick: healthTicks,
-          workerCount: Object.keys(workerState.workers).length,
-          serveHealthy: await resolvedDeps.adapter.healthy(),
-          uptimeS: Math.max(0, (Date.now() - startedAt) / 1000),
-          serveRestarted: sharedServeRestarts > 0,
-          sessionsRecreated: controllerRecreates,
-          rssRestarts,
-        });
-      } finally {
-        if (!shuttingDown) {
-          scheduleHealthTick();
-        }
-      }
-    }, config.checkIntervalMs);
+  const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
+    const payload = await overseerCatchup(state, tree);
+    await deps.envoyPublish(
+      roleTopic(roleToken(state.project, tree, "architect")),
+      JSON.stringify(payload)
+    );
   };
 
-  // Suppress controller pushes for unchanged resync results: a wake must mean a delta
-  // (or a daemon restart, which resets this). The pass itself still runs and logs.
-  let lastResyncEmit: string | null = null;
-
-  const buildResyncDeps = (): RunResyncDeps => {
-    const reviewerAppId = config.reviewerAppId;
-    const reviewerAppLogin = config.reviewerAppLogin;
-    if (reviewerAppId === undefined || !reviewerAppLogin) {
-      throw new Error("Resync pass requires reviewerAppId and reviewerAppLogin configuration");
-    }
-    if (!listNonTerminalIssues || !getLiveWorkers) {
-      throw new Error("Resync pass requires server issue and worker registry accessors");
-    }
-    return {
-      listNonTerminalIssues,
-      fetchPhaseArtifactsBatch: (refs) =>
-        fetchPhaseArtifactsBatch(refs, {
-          reviewerAppId,
-          reviewerAppLogin,
-          tokenManager,
-        }),
-      getLiveWorkers,
-      getSessionStatus: (sessionId) => resolvedDeps.adapter.getSessionStatus(sessionId),
-      emitToController: (event) => {
-        // The type marker distinguishes resync events from state-delta objects on the shared topic.
-        const message = JSON.stringify(event);
-        if (message === lastResyncEmit) {
-          console.log("[resync] result unchanged; controller push suppressed");
-          return;
-        }
-        lastResyncEmit = message;
-        publishToController(message, config.envoyUrl, resolvedDeps.fetch);
-      },
-    };
-  };
-
-  const runScheduledResyncPass = async (): Promise<void> => {
-    const resyncDeps = buildResyncDeps();
-    if (!refreshResyncIssueRefs) {
-      throw new Error("Resync pass requires a server issue refresh accessor");
-    }
-    await refreshResyncIssueRefs();
-    const result = await resolvedDeps.runResyncPass(resyncDeps);
-    for (const error of result.errors) {
-      console.error(`[resync] issue=${error.issueId} error=${error.message}`);
-    }
-  };
-
-  const scheduleResyncPass = () => {
-    resyncPassTimeout = resolvedDeps.setTimeout(async () => {
-      try {
-        await runScheduledResyncPass();
-      } catch (error) {
-        console.error(
-          `[resync] pass failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      } finally {
-        if (!shuttingDown) {
-          scheduleResyncPass();
-        }
-      }
-    }, config.resyncIntervalMs);
-  };
-  // Keepalive: prevent Bun's event loop from draining when the shared serve child exits.
-  // Bun.spawn links child lifecycle to parent — without this, the daemon exits when the serve does.
-  const keepalive = setInterval(() => {}, 2_147_483_647); // max 32-bit int
-
-  if (config.issueBackend === "github") {
-    scheduleResyncPass();
-    void runScheduledResyncPass().catch((error) => {
-      console.error(
-        `[resync] pass failed: ${error instanceof Error ? error.message : String(error)}`
-      );
-    });
-  } else {
-    console.log("[resync] disabled: requires github issue backend");
-  }
-  scheduleHealthTick();
-
-  const handleSignal = async () => {
-    await shutdown(true);
-  };
-
-  process.on("SIGTERM", handleSignal);
-  process.on("SIGINT", handleSignal);
-
-  return {
-    server,
-    stop: () => shutdown(false),
+  const eventDeps: EventPumpDeps = {
+    nats,
+    envoyPublish: deps.envoyPublish,
+    state,
+    saveState: save,
+    onException: (exception) => processManager.handleException(exception),
+    onLinger: async (tree) => {
+      processManager.beginLinger(tree);
+    },
+    onProbe: async (tree) => {
+      if ((await processManager.probe(tree)) === "dead") await processManager.resurrect(tree);
+    },
+    onApprovalStatus: (effect) =>
+      setApprovalStatus(effect, {
+        runner,
+        tokenManager: deps.tokenManager,
+        appLogins: config.appLogins,
+        gatesMerge: config.gates.merge,
+      }),
     config,
   };
+  const eventPump: EventPump = startEventPump(eventDeps);
+  const apiDeps: LegionApiDeps = {
+    state,
+    saveState: save,
+    runner,
+    tokenManager: deps.tokenManager,
+    processManager,
+    envoyPublish: deps.envoyPublish,
+    dispatch: { url: config.dispatchUrl, bearer: config.dispatchBearer },
+    onTreeReady: emitOverseerCatchup,
+    onControllerReady: () => eventPump.redeliverControllerEvents(),
+    onControllerEvent: (payload) =>
+      eventPump.publishControllerEvent(payload, {
+        event_id: `api-controller:${randomUUID()}`,
+        issued_at: deps.now(),
+      }),
+  };
+  api = startLegionApi(
+    {
+      port: config.port,
+      hostname: "127.0.0.1",
+      gates: config.gates,
+      appLogins: config.appLogins,
+    },
+    apiDeps
+  );
+  const ready = nats.ready();
+
+  const emitResync = async (): Promise<void> => {
+    const payload = await runResync({
+      state,
+      config,
+      fetchGitHubProjectItems: deps.fetchGitHubProjectItems,
+      applyEffects: eventPump.applyEffects,
+      now: deps.now,
+    });
+    console.log(
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems}`
+    );
+    await eventPump.publishControllerEvent(payload, {
+      event_id: `resync:${randomUUID()}`,
+      issued_at: deps.now(),
+    });
+  };
+
+  let stopped = false;
+  let resyncTimer: unknown;
+  const scheduleResync = (): void => {
+    resyncTimer = deps.setTimeout(async () => {
+      try {
+        await emitResync();
+      } catch (error) {
+        console.error(
+          `[legion] resync failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      if (!stopped) scheduleResync();
+    }, config.resyncIntervalMs);
+  };
+  scheduleResync();
+
+  const lingerTimer = deps.setInterval(() => {
+    const now = deps.now();
+    for (const tree of Object.values(state.trees)) {
+      if (tree.status !== "lingering" || !tree.lingerUntil) continue;
+      if (Date.parse(tree.lingerUntil) <= now) {
+        void processManager.expireLinger(tree.root).catch((error) => {
+          console.error(`[legion] linger cleanup failed for ${tree.root}:`, error);
+        });
+      }
+    }
+    void processManager.reconcileTmuxWindows().catch((error) => {
+      console.error(`[legion] tmux reconciliation failed:`, error);
+    });
+  }, LINGER_SWEEP_INTERVAL_MS);
+
+  const drain = async () => {
+    await eventPump.drain();
+    await saving;
+  };
+
+  const stop = async (): Promise<void> => {
+    if (stopped) return;
+    stopped = true;
+    if (resyncTimer !== undefined) deps.clearTimeout(resyncTimer);
+    deps.clearInterval(lingerTimer);
+    eventPump.stop();
+    let failure: unknown;
+    try {
+      await drain();
+    } catch (error) {
+      failure = error;
+      console.error(
+        `[legion] event drain failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      try {
+        await save();
+      } catch (error) {
+        failure ??= error;
+        console.error(
+          `[legion] final state save failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      try {
+        api.stop();
+      } catch (error) {
+        failure ??= error;
+        console.error(
+          `[legion] API shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      try {
+        await nats.close();
+      } catch (error) {
+        failure ??= error;
+        console.error(
+          `[legion] NATS shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+    if (failure) throw failure;
+  };
+  const stopForSignal = (): void => {
+    void stop()
+      .catch((error) => {
+        console.error(
+          `[legion] shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      })
+      .then(() => deps.exit(0));
+  };
+  deps.onSignal("SIGTERM", stopForSignal);
+  deps.onSignal("SIGINT", stopForSignal);
+
+  console.log(`legion daemon listening on 127.0.0.1:${api.server.port}`);
+  return { server: api.server, config, ready: () => ready, drain, stop };
 }
 
 if (import.meta.main) {
-  process.on("uncaughtException", (error) => {
-    console.error("[daemon] uncaught exception:", error);
+  void startDaemon(loadConfig()).catch((error) => {
+    console.error(
+      `[legion] daemon failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    process.exitCode = 1;
   });
-  process.on("unhandledRejection", (reason) => {
-    console.error("[daemon] unhandled rejection:", reason);
-  });
-  const { config } = resolveDaemonConfig({ env: process.env });
-  void startDaemon(config);
 }

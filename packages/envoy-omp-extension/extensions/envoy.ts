@@ -1,11 +1,11 @@
 import * as os from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject } from "@legion/contracts";
+import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { toEnvelopeDisplay } from "@legion/envoy-client/display";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
+import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -17,12 +17,15 @@ type ToolResult = {
   readonly isError?: boolean;
 };
 
-type SessionContext = {
+
+export interface EnvoySessionContext {
   readonly cwd: string;
   readonly sessionManager: { readonly getSessionId: () => string };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: { readonly notify: (message: string, level: "warning") => void };
-};
+}
+
+type SessionContext = EnvoySessionContext;
 
 type PiApi = {
   readonly zod: {
@@ -61,6 +64,50 @@ type PiApi = {
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
+
+type LegionRoleClaim = (
+  sessionID: string,
+  role: string,
+  context?: EnvoySessionContext
+) => Promise<void>;
+
+type LegionRoleClaimReady = {
+  readonly promise: Promise<LegionRoleClaim>;
+  readonly resolve: (claim: LegionRoleClaim | PromiseLike<LegionRoleClaim>) => void;
+};
+
+type LegionRoleClaimBridge = {
+  claim: LegionRoleClaim | undefined;
+  readonly ready: LegionRoleClaimReady;
+};
+
+interface GlobalLegionRoleClaimBridgeStore {
+  [key: symbol]: LegionRoleClaimBridge | undefined;
+}
+
+const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.envoy-omp-extension.role-claim-bridge");
+
+function legionRoleClaimBridge(): LegionRoleClaimBridge {
+  const store = globalThis as typeof globalThis & GlobalLegionRoleClaimBridgeStore;
+  const bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
+  if (bridge) return bridge;
+
+  const createdBridge = {
+    claim: undefined,
+    ready: Promise.withResolvers<LegionRoleClaim>(),
+  };
+  store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
+  return createdBridge;
+}
+
+export async function claimEnvoyRole(
+  sessionID: string,
+  role: string,
+  context?: EnvoySessionContext
+): Promise<void> {
+  const bridge = legionRoleClaimBridge();
+  await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
+}
 const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
 
 export default function envoyExtension(pi: PiApi): void {
@@ -73,6 +120,8 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionDirectory = "";
   let sessionID = "";
   let heartbeatRegistered = false;
+  let claimedRoleTopic: string | undefined;
+  let activeSessionContext: SessionContext | undefined;
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -90,29 +139,43 @@ export default function envoyExtension(pi: PiApi): void {
     return connection;
   };
 
-  const deliver = (subject: string, raw: string): void => {
-    let summary = raw;
-    let source = "";
+  const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
+    let payloadText = raw;
+    let displayTopic = subject;
+    let duplicate = false;
     try {
-      const display = toEnvelopeDisplay(JSON.parse(raw));
-      if (dedupeKeys.has(display.dedupeKey)) return;
-      dedupeKeys.add(display.dedupeKey);
-      if (dedupeKeys.size > 1000) {
-        const oldest = dedupeKeys.values().next();
-        if (!oldest.done) dedupeKeys.delete(oldest.value);
+      const envelope = EnvelopeSchema.parse(JSON.parse(raw));
+      duplicate = dedupeKeys.has(envelope.dedupe_key);
+      if (!duplicate) {
+        dedupeKeys.add(envelope.dedupe_key);
+        if (dedupeKeys.size > 1000) {
+          const oldest = dedupeKeys.values().next();
+          if (!oldest.done) dedupeKeys.delete(oldest.value);
+        }
+        displayTopic = envelope.topic;
+        if (envelope.payload === undefined) {
+          payloadText = encode({ summary: envelope.payload_summary });
+        } else {
+          try {
+            payloadText = encode(JSON.parse(envelope.payload));
+          } catch {
+            payloadText = envelope.payload;
+          }
+        }
       }
-      summary = display.summary;
-      source = display.sourceSessionID === undefined ? "" : ` from ${display.sourceSessionID}`;
     } catch {
-      summary = raw;
+      payloadText = raw;
     }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    pi.sendMessage(
-      { customType: "envoy-message", content: `[ENVOY message on topic "${subject}"${source}]\n${summary}`, display: true },
-      { deliverAs: "steer", triggerTurn: true },
-    );
+    if (!duplicate) {
+      pi.sendMessage(
+        { customType: "envoy-message", content: `[ENVOY ${displayTopic}]\n${payloadText}`, display: true },
+        { deliverAs: "steer", triggerTurn: true },
+      );
+    }
+    if (reply !== "" && subject === agentSubject(sessionID)) (await ensureConnection()).publish(reply);
   };
 
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
@@ -139,8 +202,9 @@ export default function envoyExtension(pi: PiApi): void {
   const closeIntentionally = (topic: string): boolean => {
     const subscription = subscriptions.get(topic);
     if (subscription === undefined) {
-      if (awaitingRetry.has(topic)) intentionallyClosed.add(topic);
-      return false;
+      if (!awaitingRetry.has(topic)) return false;
+      intentionallyClosed.add(topic);
+      return true;
     }
     intentionallyClosed.add(topic);
     subscription.unsubscribe();
@@ -148,11 +212,12 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
     try {
       for await (const message of subscription) {
         try {
-          deliver(message.subject, codec.decode(message.data));
+          await deliver(message.subject, codec.decode(message.data), message.reply ?? "");
         } catch {
           // A single failed injection (e.g. sendMessage during compaction)
           // must not tear down the subscription; drop the message and keep
@@ -203,7 +268,7 @@ export default function envoyExtension(pi: PiApi): void {
     await client.subscribe({
       sessionID,
       directory: sessionDirectory,
-      topics: [agentSubject(sessionID)],
+      topics: [...new Set([agentSubject(sessionID), ...subscriptions.keys()])],
       port: 0,
       title: "",
       driving: false,
@@ -211,54 +276,85 @@ export default function envoyExtension(pi: PiApi): void {
     });
   };
 
+  const registrationRequired = (): boolean =>
+    process.env.ENVOY_REGISTER_SESSION === "1" || claimedRoleTopic !== undefined;
+
+  const ensureHeartbeat = (context: SessionContext): void => {
+    if (heartbeatRegistered) return;
+    // Never let a heartbeat tick reject unhandled: OMP treats unhandled
+    // rejections as fatal (postmortem exitAfterFatal), so a registry blip
+    // would kill a live session. Warn once per outage; registration
+    // self-heals on the next successful tick.
+    let heartbeatOutageNotified = false;
+    let healing = false;
+    context.setInterval(() => {
+      if (!registrationRequired()) return;
+      // Sessions can be created lazily after session_start (a fresh TUI has no
+      // session yet), and the ID this closure registered with goes stale. Heal
+      // on drift instead of heartbeating a dead identity forever.
+      const liveSessionID = context.sessionManager.getSessionId();
+      const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
+      if (healing) return;
+      healing = true;
+      void (drifted ? establishSession(context) : registerSession())
+        .then(() => {
+          heartbeatOutageNotified = false;
+        })
+        .catch((error) => {
+          if (heartbeatOutageNotified) return;
+          heartbeatOutageNotified = true;
+          context.ui.notify(
+            `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
+            "warning",
+          );
+        })
+        .finally(() => {
+          healing = false;
+        });
+    }, defaults.heartbeatMs);
+    heartbeatRegistered = true;
+  };
+
   const establishSession = async (context: SessionContext): Promise<void> => {
     const previousTopic = sessionID === "" ? undefined : agentSubject(sessionID);
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    activeSessionContext = context;
     const currentTopic = agentSubject(sessionID);
     if (previousTopic !== undefined && previousTopic !== currentTopic) {
       closeIntentionally(previousTopic);
     }
     await ensureConnection();
     await subscribe(currentTopic);
-    if (process.env.ENVOY_REGISTER_SESSION === "1") {
+    if (registrationRequired()) {
       await registerSession();
-      if (!heartbeatRegistered) {
-        // Never let a heartbeat tick reject unhandled: OMP treats unhandled
-        // rejections as fatal (postmortem exitAfterFatal), so a registry blip
-        // would kill a live session. Warn once per outage; registration
-        // self-heals on the next successful tick.
-        let heartbeatOutageNotified = false;
-        let healing = false;
-        context.setInterval(() => {
-          // Sessions can be created lazily after session_start (a fresh TUI
-          // has no session yet), and the ID this closure registered with goes
-          // stale. Heal on drift: rebind the topic and re-register under the
-          // live ID instead of heartbeating a dead identity forever.
-          const liveSessionID = context.sessionManager.getSessionId();
-          const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
-          if (healing) return;
-          healing = true;
-          void (drifted ? establishSession(context) : registerSession())
-            .then(() => {
-              heartbeatOutageNotified = false;
-            })
-            .catch((error) => {
-              if (heartbeatOutageNotified) return;
-              heartbeatOutageNotified = true;
-              context.ui.notify(
-                `envoy: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat`,
-                "warning",
-              );
-            })
-            .finally(() => {
-              healing = false;
-            });
-        }, defaults.heartbeatMs);
-        heartbeatRegistered = true;
-      }
+      ensureHeartbeat(context);
     }
   };
+
+  const setEnvoyRole = async (role: string): Promise<void> => {
+    const topic = ROLE_TOPIC_PREFIX + role;
+    const previousTopic = claimedRoleTopic;
+    await client.setRole({ sessionID, role });
+    claimedRoleTopic = topic;
+    if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
+    if (previousTopic !== undefined && previousTopic !== topic) {
+      await client.unsubscribe({ sessionID, topics: [previousTopic] });
+    }
+  };
+
+  const bridge = legionRoleClaimBridge();
+  const claim: LegionRoleClaim = async (targetSessionID, role, callerContext) => {
+    const context = callerContext ?? activeSessionContext;
+    if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
+      throw new Error(`Envoy has no active session for Legion role claim: ${targetSessionID}`);
+    }
+    if (sessionID !== targetSessionID) await establishSession(context);
+    await setEnvoyRole(role);
+    await registerSession();
+  };
+  bridge.claim = claim;
+  bridge.ready.resolve(claim);
 
   pi.on("session_start", async (_event, context) => {
     if (defaults.natsUrls.length === 0) {
@@ -322,6 +418,7 @@ export default function envoyExtension(pi: PiApi): void {
       // A failed drain on shutdown is not actionable.
     } finally {
       connection = undefined;
+      activeSessionContext = undefined;
       subscriptions.clear();
       intentionallyClosed.clear();
       awaitingRetry.clear();
@@ -347,15 +444,44 @@ export default function envoyExtension(pi: PiApi): void {
           const added: string[] = [];
           const already: string[] = [];
           for (const topic of topicsFor(parameters)) (await subscribe(topic) ? added : already).push(topic);
-          return success(`Subscribed: ${added.join(", ") || "(none new)"}`, { added, already });
+          const registrationError =
+            added.length === 0 ? undefined : await registerSession().then(() => undefined, messageFor);
+          return success(`Subscribed: ${added.join(", ") || "(none new)"}`, {
+            added,
+            already,
+            ...(registrationError === undefined ? {} : { registrationError }),
+          });
         }
         case EnvoyToolOperation.unsubscribe: {
-          const targets = topicsFor(parameters, [...subscriptions.keys()]);
-          const removed = targets.filter((topic) => closeIntentionally(topic));
-          return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, { removed });
+          const targets = topicsFor(parameters, [
+            ...subscriptions.keys(),
+            ...(claimedRoleTopic === undefined ? [] : [claimedRoleTopic]),
+          ]);
+          const removed = targets.filter((topic) => closeIntentionally(topic) || topic === claimedRoleTopic);
+          if (claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic)) claimedRoleTopic = undefined;
+          const registrationError =
+            removed.length === 0
+              ? undefined
+              : await client
+                  .unsubscribe({ sessionID, topics: removed })
+                  .then(registerSession)
+                  .then(() => undefined, messageFor);
+          return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
+            removed,
+            ...(registrationError === undefined ? {} : { registrationError }),
+          });
         }
-        case EnvoyToolOperation.listInterests:
-          return success(JSON.stringify(await client.getInterest(sessionID), null, 2));
+        case EnvoyToolOperation.listInterests: {
+          const registry = await client.getInterest(sessionID);
+          const interests = new Map<string, "registry" | "live" | "both">();
+          for (const topic of registry.topics) interests.set(topic, subscriptions.has(topic) ? "both" : "registry");
+          for (const topic of subscriptions.keys()) {
+            if (!interests.has(topic)) interests.set(topic, "live");
+          }
+          return success(JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2), {
+            interests: [...interests].map(([topic, source]) => ({ topic, source })),
+          });
+        }
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "target_session");
           await client.send({ sourceSessionID: sessionID, targetSessionID, message: stringFor(parameters, "message") });
@@ -368,7 +494,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
-          await client.setRole({ sessionID, role });
+          await setEnvoyRole(role);
           return success(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.whoami: {

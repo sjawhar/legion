@@ -1,73 +1,37 @@
 # Skills Layer
 
-OpenCode skills that orchestrate the autonomous development loop. These are markdown files loaded by OpenCode agents — they contain instructions, not code.
-
-## How Skills Invoke TypeScript
-
-| Interface | Direction | Example |
-|-----------|-----------|---------|
-| HTTP API | Controller → Daemon | `curl -X POST http://127.0.0.1:$LEGION_DAEMON_PORT/state/collect` |
-| Piped CLI (legacy) | Controller → State | `echo $JSON \| bun run packages/daemon/src/state/cli.ts --team-id X` — being replaced by `POST /state/collect` |
-| Env vars | Daemon → Controller | `LEGION_ID`, `LEGION_DAEMON_PORT`, etc. |
-| Prompt context | Controller → Worker | Issue ID, mode, backend passed in dispatch/resume prompt text |
-| Issue backend | Worker → Linear/GitHub | `linear_linear(action="get"\|"update"\|"comment"\|"create"\|"search")` or `gh issue view/edit/comment` |
+Legion skills guide the architect and its sequential phase workers in a shared issue workspace.
+They are Markdown instructions loaded by Oh My Pi sessions; the daemon and OMP extension own
+event intake, process lifecycle, credentials, and role delivery.
 
 ## Structure
 
 ```
 skills/
-├── github/
-│   └── SKILL.md          # GitHub CLI skill (embedded) — issue + PR operations
-├── linear/
-│   └── SKILL.md          # Linear MCP (embedded) — single tool, action dispatch
-├── legion-controller/
-│   └── SKILL.md          # Persistent loop: fetch → decide → dispatch → sleep 30s
-├── legion-retro/
-│   └── SKILL.md          # Dual-perspective retrospective → docs/solutions/
-├── legion-oracle/
-│   └── SKILL.md          # Research institutional knowledge before escalating to human
-└── legion-worker/
-    ├── SKILL.md           # Router: reads mode, delegates to workflow
-    ├── workflows/
-    │   ├── architect.md   # Break down vague issues into spec-ready sub-issues
-    │   ├── plan.md        # Create executable implementation plans (with review iterations)
-    │   ├── implement.md   # TDD-driven coding, PR creation
-    │   ├── test.md        # Behavioral testing against running infrastructure
-    │   ├── review.md      # Deep PR review with line-level comments
-    │   └── merge.md       # Merge PR, handle CI, cleanup workspace
-    └── references/
-        ├── github-labels.md  # GitHub label conventions (add/remove)
-        └── linear-labels.md  # Linear label conventions and MCP update patterns
+├── github/              # GitHub issue and pull-request operations
+├── linear/              # Linear adapter instructions
+├── legion-architect/    # Tree ownership, decomposition, gates, and scheduling
+├── legion-controller/   # Derived-verdict control-plane operation
+├── legion-oracle/       # Repository-grounded research
+├── legion-retro/        # Post-review retrospective
+└── legion-worker/       # Sequential architect, plan, implement, test, and review phases
 ```
 
-## Environment Variables
+## Phase workers
 
-Process-level env vars inherited by the shared serve process. These configure the **controller** —
-workers receive all context (issue ID, mode, backend) via the dispatch prompt, not env vars.
+The extension supplies a phase worker with its issue, workspace, role token, and structured
+output schema. The worker claims its supplied role, works only on its phase artifact, and
+returns that schema to the architect. It writes the same phase-specific payload to
+`.legion/<phase>.json`, verifies it exists, and commits the handoff before reporting completion.
+The committed predecessor handoff wins after revival or re-creation.
 
-| Variable | Set By | Used By | Purpose |
-|----------|--------|---------|---------|
-| `LEGION_ID` | CLI/daemon | Controller | Team/project identifier (Linear UUID or GitHub `owner/project-number`) |
-| `LEGION_DIR` | CLI/daemon | Controller | Default jj workspace path |
-| `LEGION_SHORT_ID` | CLI/daemon | Controller | Instance ID for heartbeat |
-| `LEGION_DAEMON_PORT` | Daemon | Controller | HTTP API port (default 13370) |
-| `LEGION_ISSUE_BACKEND` | CLI/daemon | Controller | Issue backend (`linear` or `github`) |
+Workers do not run a controller loop, mutate lifecycle labels, or create human dispatch threads.
+When an issue needs a product, scope, cross-phase, or human decision, they send the owning
+architect the verified observation and decision needed through hub.
 
-All sessions on the shared serve share the same process environment. The controller includes
-backend and issue identity in every dispatch/resume prompt so workers are self-contained.
+## Durable artifacts
 
-## Worker Lifecycle (SKILL.md)
-
-1. **Start**: `jj git fetch && jj rebase -d main && jj new`
-2. **Work**: Execute workflow for the assigned mode
-3. **Block**: If stuck, try `/legion-oracle` first. If still stuck: push, post issue comment, add `user-input-needed`, remove `worker-active`, exit
-4. **Done**: `jj git push`, add `worker-done` (most modes), remove `worker-active`
-
-**Handoff Data**: Workers emit structured handoff data at phase boundaries using `legion handoff write`. Subsequent workers read this data using `legion handoff read`. Data is stored in `.legion/` on the issue's branch (per-phase JSON files: architect.json, plan.json, implement.json, test.json, review.json, retro.json).
-
-## Dispatch vs Resume
-
-- **Dispatch** = `POST /workers` → new session on shared serve (idempotent, deterministic session ID)
-- **Resume** = `POST /session/{id}/prompt_async` on shared serve
-
-Resume is used for: user feedback relay, PR changes requested, retro via `/legion-retro` after review.
+Phase handoffs are committed in lifecycle order: architect, plan, implement, test, and review.
+The reviewer removes `.legion/` as its final commit; retro records its learning in
+`docs/solutions/` and writes no handoff. GitHub comments and reviews carry the required Legion
+footer so the daemon can attribute artifacts to their worker session.

@@ -117,18 +117,26 @@ describe("exchangeToken", () => {
       expect(headers["User-Agent"]).toBe("legion-daemon");
 
       return new Response(
-        JSON.stringify({ token: "ghs_abc", expires_at: "2099-01-01T00:00:00Z" }),
+        JSON.stringify({
+          token: "ghs_abc",
+          expires_at: "2099-01-01T00:00:00Z",
+        }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
 
     const result = await exchangeToken("jwt-token", "42", fetchFn);
-    expect(result).toEqual({ token: "ghs_abc", expiresAt: "2099-01-01T00:00:00Z" });
+    expect(result).toEqual({
+      token: "ghs_abc",
+      expiresAt: "2099-01-01T00:00:00Z",
+    });
   });
 
   it("throws descriptive error on non-2xx response", async () => {
     const fetchFn = mock(async () => {
-      return new Response(JSON.stringify({ message: "forbidden" }), { status: 403 });
+      return new Response(JSON.stringify({ message: "forbidden" }), {
+        status: 403,
+      });
     }) as unknown as typeof fetch;
 
     expect(async () => {
@@ -155,6 +163,63 @@ describe("TokenManager", () => {
     expect(manager.getConfiguredRoles()).toEqual(["implement"]);
   });
 
+  it("stamps each role with its GitHub App slug-derived bot login and user id", async () => {
+    const { privatePem } = await generateTestKeyPair();
+    const apps = {
+      "111": { slug: "legion-implementer", botId: "271566630" },
+      "333": { slug: "legion-reviewer", botId: "271566631" },
+    };
+    const fetchFn = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+      if (url.pathname === "/app") {
+        const jwt = headers.get("Authorization")?.slice("Bearer ".length);
+        if (!jwt) throw new Error("GET /app did not receive the App JWT");
+        const { iss } = JSON.parse(decodeBase64Url(jwt.split(".")[1] ?? "").toString("utf8")) as {
+          iss: string;
+        };
+        return Response.json({ slug: apps[iss as keyof typeof apps].slug });
+      }
+      if (url.pathname.startsWith("/users/")) {
+        const slug = decodeURIComponent(url.pathname.slice("/users/".length)).replace(
+          /\[bot\]$/,
+          ""
+        );
+        const app = Object.values(apps).find((candidate) => candidate.slug === slug);
+        if (!app) throw new Error(`Unexpected bot lookup: ${url.pathname}`);
+        return Response.json({ id: app.botId });
+      }
+      const installationId = url.pathname.match(
+        /^\/app\/installations\/(\d+)\/access_tokens$/
+      )?.[1];
+      if (!installationId) throw new Error(`Unexpected GitHub request: ${url.pathname}`);
+      return Response.json(
+        { token: `ghs_${installationId}`, expires_at: "2099-01-01T00:00:00Z" },
+        { status: 201 }
+      );
+    }) as unknown as typeof fetch;
+    const manager = new TokenManager(
+      {
+        implement: { appId: "111", privateKey: privatePem, installations: { acme: "222" } },
+        review: { appId: "333", privateKey: privatePem, installations: { acme: "444" } },
+      },
+      { fetchFn }
+    );
+
+    await expect(manager.getToken("implement", "acme")).resolves.toMatchObject({
+      gitIdentity: {
+        name: "legion-implementer[bot]",
+        email: "271566630+legion-implementer[bot]@users.noreply.github.com",
+      },
+    });
+    await expect(manager.getToken("review", "acme")).resolves.toMatchObject({
+      gitIdentity: {
+        name: "legion-reviewer[bot]",
+        email: "271566631+legion-reviewer[bot]@users.noreply.github.com",
+      },
+    });
+  });
+
   it("throws for unconfigured role", async () => {
     const manager = new TokenManager(implementConfig);
     expect(async () => {
@@ -166,7 +231,9 @@ describe("TokenManager", () => {
     // Given an App with no configured installation and an empty installation API response.
     const { privatePem } = await generateTestKeyPair();
     const manager = new TokenManager(
-      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      {
+        implement: { appId: "111", privateKey: privatePem, installations: {} },
+      },
       {
         fetchFn: async () =>
           new Response(JSON.stringify([]), {
@@ -190,7 +257,9 @@ describe("TokenManager", () => {
     const { privatePem } = await generateTestKeyPair();
     let discoveryCalls = 0;
     const manager = new TokenManager(
-      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      {
+        implement: { appId: "111", privateKey: privatePem, installations: {} },
+      },
       {
         fetchFn: async () => {
           discoveryCalls += 1;
@@ -221,8 +290,14 @@ describe("TokenManager", () => {
     let tokenExchanges = 0;
     const fetchFn = mock(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
+      if (url.pathname === "/app") return Response.json({ slug: "legion-implementer" });
+      if (url.pathname === "/users/legion-implementer%5Bbot%5D") {
+        return Response.json({ id: 271566630 });
+      }
       if (url.pathname === "/app/installations") {
-        expect(init?.headers).toMatchObject({ Authorization: expect.stringMatching(/^Bearer /) });
+        expect(init?.headers).toMatchObject({
+          Authorization: expect.stringMatching(/^Bearer /),
+        });
         const page = Number(url.searchParams.get("page"));
         installationPages.push(page);
         const installations =
@@ -241,12 +316,17 @@ describe("TokenManager", () => {
       tokenExchanges += 1;
       expect(url.pathname).toBe("/app/installations/222/access_tokens");
       return new Response(
-        JSON.stringify({ token: "ghs_discovered", expires_at: "2099-01-01T00:00:00Z" }),
+        JSON.stringify({
+          token: "ghs_discovered",
+          expires_at: "2099-01-01T00:00:00Z",
+        }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
     const manager = new TokenManager(
-      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      {
+        implement: { appId: "111", privateKey: privatePem, installations: {} },
+      },
       { fetchFn }
     );
 
@@ -267,6 +347,10 @@ describe("TokenManager", () => {
     let discoveryCalls = 0;
     const fetchFn = mock(async (input: string | URL | Request) => {
       const url = new URL(String(input));
+      if (url.pathname === "/app") return Response.json({ slug: "legion-implementer" });
+      if (url.pathname === "/users/legion-implementer%5Bbot%5D") {
+        return Response.json({ id: 271566630 });
+      }
       if (url.pathname === "/app/installations") {
         discoveryCalls += 1;
         const login = discoveryCalls === 1 ? "acme" : "beta";
@@ -278,12 +362,17 @@ describe("TokenManager", () => {
       }
       const installationId = url.pathname.split("/")[3];
       return new Response(
-        JSON.stringify({ token: `ghs_${installationId}`, expires_at: "2099-01-01T00:00:00Z" }),
+        JSON.stringify({
+          token: `ghs_${installationId}`,
+          expires_at: "2099-01-01T00:00:00Z",
+        }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
     const manager = new TokenManager(
-      { implement: { appId: "111", privateKey: privatePem, installations: {} } },
+      {
+        implement: { appId: "111", privateKey: privatePem, installations: {} },
+      },
       { fetchFn }
     );
 
@@ -302,11 +391,19 @@ describe("TokenManager", () => {
     let fetchCalls = 0;
 
     const fetchFn = mock(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/app") return Response.json({ slug: "legion-implementer" });
+      if (url.pathname === "/users/legion-implementer%5Bbot%5D") {
+        return Response.json({ id: 271566630 });
+      }
       fetchCalls++;
-      const installationId = String(input).match(/installations\/(.+)\/access_tokens$/)?.[1];
+      const installationId = url.pathname.match(/installations\/(.+)\/access_tokens$/)?.[1];
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       return new Response(
-        JSON.stringify({ token: `ghs_${installationId}_${fetchCalls}`, expires_at: expiresAt }),
+        JSON.stringify({
+          token: `ghs_${installationId}_${fetchCalls}`,
+          expires_at: expiresAt,
+        }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
@@ -327,7 +424,7 @@ describe("TokenManager", () => {
 
     const first = await manager.getToken("implement", "acme");
     expect(first.token).toBe("ghs_222_1");
-    expect(first.gitIdentity.name).toBe("legion-implement[bot]");
+    expect(first.gitIdentity.name).toBe("legion-implementer[bot]");
 
     // Second call should return cached token
     const second = await manager.getToken("implement", "acme");
@@ -344,12 +441,20 @@ describe("TokenManager", () => {
     let fetchCalls = 0;
 
     const fetchFn = mock(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/app") return Response.json({ slug: "legion-implementer" });
+      if (url.pathname === "/users/legion-implementer%5Bbot%5D") {
+        return Response.json({ id: 271566630 });
+      }
       fetchCalls++;
       await new Promise((resolve) => setTimeout(resolve, 50));
-      const installationId = String(input).match(/installations\/(.+)\/access_tokens$/)?.[1];
+      const installationId = url.pathname.match(/installations\/(.+)\/access_tokens$/)?.[1];
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       return new Response(
-        JSON.stringify({ token: `ghs_${installationId}_${fetchCalls}`, expires_at: expiresAt }),
+        JSON.stringify({
+          token: `ghs_${installationId}_${fetchCalls}`,
+          expires_at: expiresAt,
+        }),
         { status: 201, headers: { "content-type": "application/json" } }
       );
     }) as unknown as typeof fetch;
@@ -386,6 +491,7 @@ describe("buildRoleEnv", () => {
     const baseEnv: Record<string, string> = {
       PATH: "/usr/bin",
       HOME: "/home/user",
+      XDG_STATE_HOME: "/state",
       GH_TOKEN: "personal-token",
       GITHUB_TOKEN: "another-token",
       GH_HOST: "github.com",
@@ -406,7 +512,7 @@ describe("buildRoleEnv", () => {
 
     // Role-specific values
     expect(result.GH_TOKEN).toBe("ghs_role_token");
-    expect(result.GH_CONFIG_DIR).toBe("/dev/null");
+    expect(result.GH_CONFIG_DIR).toBe("/state/legion/gh");
     expect(result.GIT_AUTHOR_NAME).toBe("legion-implement[bot]");
     expect(result.GIT_AUTHOR_EMAIL).toBe("111+legion-implement[bot]@users.noreply.github.com");
     expect(result.GIT_COMMITTER_NAME).toBe("legion-implement[bot]");

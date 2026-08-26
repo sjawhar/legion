@@ -1,519 +1,375 @@
-import { describe, expect, it, mock } from "bun:test";
-import { IssueStatus, WorkerMode, type WorkerModeLiteral } from "../../state/types";
-import {
-  type IssueRef,
-  noPrPhaseArtifacts,
-  type PhaseArtifactBatch,
-  type PhaseArtifacts,
-} from "../phase-artifacts";
-import {
-  computeResyncRecommendations,
-  type Recommendation,
-  type ResyncInput,
-  type RunResyncDeps,
-  runResyncPass,
-} from "../resync";
+import { describe, expect, it } from "bun:test";
+import { formatIssueKey, roleToken } from "@legion/contracts";
+import { type LegionState, newLegionState } from "../legion-state";
+import type { Effect, EnvelopeJson } from "../reducers";
+import { type RunResyncDeps, runResync } from "../resync";
 
-// allow: SIZE_OK — binding keeps the resync unit and integration matrices in this file.
+const issue = formatIssueKey("sjawhar", "legion", 42);
 
-const issueRef: IssueRef = {
-  issueId: "acme-api-42",
-  status: IssueStatus.IN_PROGRESS,
-  source: { owner: "acme", repo: "api", number: 42 },
-  prRef: { owner: "acme", repo: "api", number: 101 },
-};
-
-function artifacts(overrides: Partial<PhaseArtifacts> = {}): PhaseArtifacts {
-  return { ...noPrPhaseArtifacts(), ...overrides };
-}
-
-function resolvedArtifacts(): PhaseArtifacts["resolved"] {
+function boardIssue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    ...artifacts().resolved,
-    headSha: "resolved",
-    testerCheckOnHead: "resolved",
-    architectCheckOnHead: "resolved",
-    nativeReviewOnHead: "resolved",
-    autoMergeEnabledOrMerged: "resolved",
-  };
-}
-
-function resyncDeps(overrides: Partial<RunResyncDeps> = {}): RunResyncDeps {
-  return {
-    listNonTerminalIssues: () => [issueRef],
-    fetchPhaseArtifactsBatch: async () => ({
-      artifacts: { [issueRef.issueId]: artifacts() },
-      errors: [],
-    }),
-    getLiveWorkers: async () => ({}),
-    getSessionStatus: async () => ({ data: undefined }),
-    emitToController: () => {},
+    content: {
+      type: "Issue",
+      number: 42,
+      title: "Resync this Legion tree",
+      repository: "sjawhar/legion",
+    },
+    status: "Todo",
+    labels: [],
     ...overrides,
   };
 }
 
-function resyncInput(overrides: Partial<ResyncInput> = {}): ResyncInput {
+function resyncDeps(state: LegionState, items: Record<string, unknown>[]): RunResyncDeps {
   return {
-    issueId: issueRef.issueId,
-    status: IssueStatus.IN_PROGRESS,
-    artifacts: artifacts(),
-    liveWorkerModes: [],
+    state,
+    config: {
+      resyncIntervalMs: 600_000,
+      boardProjectIds: ["PVT_board"],
+      appLogins: [],
+      maxFixAttempts: 3,
+    },
+    fetchGitHubProjectItems: async () => ({ items }),
+    applyEffects: async () => {},
+    now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+  };
+}
+
+function recordOpenReleasedIssue(
+  state: LegionState,
+  overrides: Partial<LegionState["issues"][typeof issue]> = {}
+): void {
+  state.issues[issue] = {
+    key: issue,
+    title: "Resync this Legion tree",
+    state: "open",
+    children: [],
+    released: true,
+    labels: [],
     ...overrides,
   };
 }
 
-function recommendation(
-  mode: WorkerModeLiteral,
-  reason: "artifact_no_live_owner" | "idle_missing_phase_artifact"
-): Recommendation {
-  return { issueId: issueRef.issueId, mode, reason };
-}
+describe("runResync", () => {
+  it("reports one zero-owner-tree anomaly for an unmarked released open issue with no active tree", async () => {
+    const state = newLegionState("omp", 1);
+    recordOpenReleasedIssue(state);
 
-const noOwnerRecommendation = [recommendation(WorkerMode.IMPLEMENT, "artifact_no_live_owner")];
-const architectVetoRecommendation: readonly Recommendation[] = [
-  { issueId: issueRef.issueId, mode: null, reason: "architect_veto" },
-];
+    const event = await runResync(resyncDeps(state, [boardIssue()]));
 
-function resyncEvent(
-  recommendations: readonly Recommendation[],
-  errors: readonly { issueId: string; message: string }[]
-) {
-  return { type: "legion.resync", recommendations, errors };
-}
-
-function prArtifactsWithArchitectCheck(
-  architectCheckOnHead: PhaseArtifacts["architectCheckOnHead"]
-): PhaseArtifacts {
-  return artifacts({
-    hasNonDraftPr: true,
-    headSha: "head",
-    testerCheckOnHead: "success",
-    nativeReviewOnHead: "approved",
-    architectCheckOnHead,
-    resolved: resolvedArtifacts(),
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [
+        {
+          kind: "zero-owner-tree",
+          issue,
+          detail: "released open issue has no active Legion tree",
+        },
+      ],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
   });
-}
+  it("reports and re-emits triage for an unadmitted tracked open issue without a tree", async () => {
+    const state = newLegionState("omp", 1);
+    recordOpenReleasedIssue(state, { released: false });
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
 
-describe("computeResyncRecommendations", () => {
-  const cases = [
-    {
-      name: "recommends a tester when a ready PR has no tester verdict or live owner",
-      input: {
-        artifacts: artifacts({
-          hasNonDraftPr: true,
-          headSha: "head",
-          resolved: resolvedArtifacts(),
-        }),
+    const first = await runResync({
+      ...resyncDeps(state, [boardIssue()]),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
       },
-      expected: [recommendation(WorkerMode.TEST, "artifact_no_live_owner")],
-    },
-    {
-      name: "does not recommend an owner that is already live",
-      input: {
-        artifacts: artifacts({
-          hasNonDraftPr: true,
-          headSha: "head",
-          resolved: resolvedArtifacts(),
-        }),
-        liveWorkerModes: [WorkerMode.TEST],
-      },
-      expected: [],
-    },
-    {
-      name: "does not recommend work for terminal issues",
-      input: { status: IssueStatus.DONE },
-      expected: [],
-    },
-    {
-      name: "does not recommend work while native auto-merge is waiting",
-      input: {
-        status: IssueStatus.NEEDS_REVIEW,
-        artifacts: artifacts({
-          hasNonDraftPr: true,
-          headSha: "head",
-          testerCheckOnHead: "success",
-          nativeReviewOnHead: "approved",
-          architectCheckOnHead: "success",
-          autoMergeEnabledOrMerged: true,
-          resolved: resolvedArtifacts(),
-        }),
-      },
-      expected: [],
-    },
-  ];
-
-  for (const testCase of cases) {
-    it(testCase.name, () => {
-      expect(computeResyncRecommendations([resyncInput(testCase.input)])).toEqual(
-        testCase.expected
-      );
     });
-  }
-});
 
-describe("runResyncPass", () => {
-  const idleAdvisoryCases = [
-    {
-      name: "emits an idle advisory when a live implementer has no pull request",
-      artifacts: artifacts(),
-      mode: WorkerMode.IMPLEMENT,
-      status: IssueStatus.IN_PROGRESS,
-      sessionStatus: { data: { type: "idle" } },
-      expected: [recommendation(WorkerMode.IMPLEMENT, "idle_missing_phase_artifact")],
-    },
-    {
-      name: "does not emit an idle advisory when a live implementer is busy",
-      artifacts: artifacts(),
-      mode: WorkerMode.IMPLEMENT,
-      status: IssueStatus.IN_PROGRESS,
-      sessionStatus: { data: { type: "busy" } },
-      expected: [],
-    },
-    {
-      name: "does not emit an idle advisory when a live implementer has a pull request",
-      artifacts: artifacts({ hasNonDraftPr: true }),
-      mode: WorkerMode.IMPLEMENT,
-      status: IssueStatus.IN_PROGRESS,
-      sessionStatus: { data: { type: "idle" } },
-      expected: [],
-    },
-    {
-      name: "does not emit an idle advisory for a live planner",
-      artifacts: artifacts(),
-      mode: WorkerMode.PLAN,
-      status: IssueStatus.TODO,
-      sessionStatus: { data: { type: "idle" } },
-      expected: [],
-    },
-    {
-      name: "does not emit an idle advisory when the session status is unresolvable",
-      artifacts: artifacts(),
-      mode: WorkerMode.IMPLEMENT,
-      status: IssueStatus.IN_PROGRESS,
-      sessionStatus: { data: undefined },
-      expected: [],
-    },
-  ];
-
-  for (const testCase of idleAdvisoryCases) {
-    it(testCase.name, async () => {
-      // Given a live worker and its already-fetched phase artifacts.
-      const emitToController = mock(() => {});
-      const getSessionStatus = mock(async () => testCase.sessionStatus);
-      const deps = resyncDeps({
-        listNonTerminalIssues: () => [{ ...issueRef, status: testCase.status }],
-        fetchPhaseArtifactsBatch: async () => ({
-          artifacts: { [issueRef.issueId]: testCase.artifacts },
-          errors: [],
-        }),
-        getLiveWorkers: async () => ({
-          [issueRef.issueId]: [
-            {
-              sessionId: "ses-worker",
-              mode: testCase.mode,
-              status: "running",
-            },
-          ],
-        }),
-        getSessionStatus,
-        emitToController,
-      });
-
-      // When the resync pass observes the worker session.
-      const result = await runResyncPass(deps);
-
-      // Then it emits only the expected advisory recommendation.
-      expect(getSessionStatus).toHaveBeenCalledWith("ses-worker");
-      expect(result.recommendations).toEqual(testCase.expected);
-      if (testCase.expected.length > 0) {
-        expect(emitToController).toHaveBeenCalledWith(resyncEvent(testCase.expected, []));
-      } else {
-        expect(emitToController).not.toHaveBeenCalled();
-      }
+    expect(first).toEqual({
+      type: "resync",
+      anomalies: [
+        {
+          kind: "untriaged-open",
+          issue,
+          detail: "tracked open issue has no Legion tree or admission entry",
+        },
+      ],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
     });
-  }
-
-  it("emits a tester recommendation when only a stale implementer is live", async () => {
-    // Given a ready pull request, but only its earlier implementer is still tracked.
-    const testerArtifacts = artifacts({
-      hasNonDraftPr: true,
-      headSha: "head",
-      resolved: resolvedArtifacts(),
-    });
-    const deps = resyncDeps({
-      fetchPhaseArtifactsBatch: async () => ({
-        artifacts: { [issueRef.issueId]: testerArtifacts },
-        errors: [],
-      }),
-      getLiveWorkers: async () => ({
-        [issueRef.issueId]: [
-          { sessionId: "ses-implement", mode: WorkerMode.IMPLEMENT, status: "running" },
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "controller",
+            payload: { type: "triage", issue, preexistingChildren: [] },
+          },
         ],
-      }),
-      getSessionStatus: async () => ({ data: { type: "busy" } }),
-    });
-
-    // When resync determines the missing phase owner.
-    const result = await runResyncPass(deps);
-
-    // Then the stale implementer does not suppress the required tester.
-    expect(result.recommendations).toEqual([
-      recommendation(WorkerMode.TEST, "artifact_no_live_owner"),
+        envelope: {
+          event_id: `resync:${issue}:triage`,
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      },
     ]);
-  });
 
-  it("suppresses a tester recommendation when the expected tester is live", async () => {
-    // Given a ready pull request whose expected tester is still active.
-    const getSessionStatus = mock(async () => ({ data: { type: "busy" } }));
-    const deps = resyncDeps({
-      fetchPhaseArtifactsBatch: async () => ({
-        artifacts: {
-          [issueRef.issueId]: artifacts({
-            hasNonDraftPr: true,
-            headSha: "head",
-            resolved: resolvedArtifacts(),
-          }),
-        },
-        errors: [],
-      }),
-      getLiveWorkers: async () => ({
-        [issueRef.issueId]: [{ sessionId: "ses-test", mode: WorkerMode.TEST, status: "running" }],
-      }),
-      getSessionStatus,
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    dispatched.length = 0;
+
+    const second = await runResync({
+      ...resyncDeps(state, [boardIssue()]),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+      now: () => Date.parse("2026-08-24T00:10:00.000Z"),
     });
 
-    // When resync checks the active tester.
-    const result = await runResyncPass(deps);
-
-    // Then it preserves the no-duplicate recommendation behavior and observes that tester.
-    expect(result.recommendations).toEqual([]);
-    expect(getSessionStatus).toHaveBeenCalledWith("ses-test");
+    expect(second).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
+    expect(dispatched).toEqual([]);
   });
 
-  for (const testCase of [
-    { name: "without a live worker", liveWorkerModes: [] },
-    { name: "with a live architect", liveWorkerModes: [WorkerMode.ARCHITECT] },
-  ] satisfies readonly {
-    readonly name: string;
-    readonly liveWorkerModes: readonly WorkerModeLiteral[];
-  }[]) {
-    it(`emits one architect veto recommendation ${testCase.name}`, async () => {
-      // Given a resolved architect gate failure after all earlier gates have passed.
-      const emitToController = mock(() => {});
-      const deps = resyncDeps({
-        fetchPhaseArtifactsBatch: async () => ({
-          artifacts: { [issueRef.issueId]: prArtifactsWithArchitectCheck("failure") },
-          errors: [],
-        }),
-        getLiveWorkers: async () => ({
-          [issueRef.issueId]: testCase.liveWorkerModes.map((mode) => ({
-            sessionId: "ses-architect",
-            mode,
-            status: "running",
-          })),
-        }),
-        getSessionStatus: async () => ({ data: { type: "busy" } }),
-        emitToController,
-      });
+  it("suppresses every anomaly for a deliberately backlogged issue", async () => {
+    const state = newLegionState("omp", 1);
+    recordOpenReleasedIssue(state, { backlogMarker: "waiting for maintainer" });
 
-      // When the universal repair pass observes the missed architect veto.
-      const result = await runResyncPass(deps);
+    const event = await runResync(resyncDeps(state, [boardIssue()]));
 
-      // Then the controller receives only the veto judgment, not a worker-owner recommendation.
-      expect(result.recommendations).toEqual(architectVetoRecommendation);
-      expect(emitToController).toHaveBeenCalledTimes(1);
-      expect(emitToController).toHaveBeenCalledWith(resyncEvent(architectVetoRecommendation, []));
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
     });
-  }
-
-  it("does not emit an architect veto when the architect check succeeds", async () => {
-    // Given a successful architect check and auto-merge enabled on a ready pull request.
-    const emitToController = mock(() => {});
-    const deps = resyncDeps({
-      fetchPhaseArtifactsBatch: async () => ({
-        artifacts: {
-          [issueRef.issueId]: artifacts({
-            ...prArtifactsWithArchitectCheck("success"),
-            autoMergeEnabledOrMerged: true,
-          }),
-        },
-        errors: [],
-      }),
-      emitToController,
-    });
-
-    // When the resync pass evaluates the completed gates.
-    const result = await runResyncPass(deps);
-
-    // Then it preserves the existing no-recommendation outcome.
-    expect(result.recommendations).toEqual([]);
-    expect(emitToController).not.toHaveBeenCalled();
   });
 
-  it("evaluates each live worker for one issue against its own phase artifact", async () => {
-    // Given an idle implementer with a pull request and an idle tester without its verdict.
-    const getSessionStatus = mock(async () => ({ data: { type: "idle" } }));
-    const deps = resyncDeps({
-      fetchPhaseArtifactsBatch: async () => ({
-        artifacts: {
-          [issueRef.issueId]: artifacts({
-            hasNonDraftPr: true,
-            headSha: "head",
-            resolved: resolvedArtifacts(),
-          }),
-        },
-        errors: [],
-      }),
-      getLiveWorkers: async () => ({
-        [issueRef.issueId]: [
-          { sessionId: "ses-implement", mode: WorkerMode.IMPLEMENT, status: "running" },
-          { sessionId: "ses-test", mode: WorkerMode.TEST, status: "running" },
+  it("heals an open board issue missing from state and enqueues triage through the live event path", async () => {
+    const state = newLegionState("omp", 1);
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+
+    const event = await runResync({
+      ...resyncDeps(state, [boardIssue()]),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
+
+    expect(state.issues[issue]).toMatchObject({
+      key: issue,
+      title: "Resync this Legion tree",
+      state: "open",
+      released: true,
+    });
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "controller",
+            payload: { type: "triage", issue, preexistingChildren: [] },
+          },
         ],
-      }),
-      getSessionStatus,
-    });
-
-    // When resync inspects every live worker for the issue.
-    const result = await runResyncPass(deps);
-
-    // Then only the tester receives an idle advisory.
-    expect(result.recommendations).toEqual([
-      recommendation(WorkerMode.TEST, "idle_missing_phase_artifact"),
+        envelope: expect.objectContaining({
+          payload: {
+            action: "opened",
+            project: { id: "PVT_board" },
+            projects_v2_item: { content: boardIssue().content },
+            repository: { full_name: "sjawhar/legion" },
+          },
+        }),
+      },
     ]);
-    expect(getSessionStatus).toHaveBeenCalledTimes(2);
-    expect(getSessionStatus).toHaveBeenCalledWith("ses-implement");
-    expect(getSessionStatus).toHaveBeenCalledWith("ses-test");
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 1,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
   });
 
-  it("isolates a failed issue and surfaces its artifact error", async () => {
-    const failedRef: IssueRef = {
-      ...issueRef,
-      issueId: "acme-api-43",
-      prRef: { owner: "acme", repo: "api", number: 102 },
+  it("reconciles a human approval label through the reducer and executes its architect wake", async () => {
+    const state = newLegionState("omp", 1);
+    recordOpenReleasedIssue(state, { labels: ["needs-approval"] });
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      heldEvents: [],
+      launchFailures: 0,
     };
-    const emitToController = mock(() => {});
-    const fetchPhaseArtifactsBatch = mock(
-      async (): Promise<PhaseArtifactBatch> => ({
-        artifacts: {
-          [issueRef.issueId]: artifacts(),
-          [failedRef.issueId]: artifacts({
-            resolved: {
-              ...artifacts().resolved,
-              hasNonDraftPr: "unresolvable",
-              merged: "unresolvable",
-            },
-          }),
+    const architect = roleToken(state.project, issue, "architect");
+    state.roles[architect] = { issue, role: "architect" };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+
+    const event = await runResync({
+      ...resyncDeps(state, [boardIssue({ labels: ["human-approved"] })]),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
+
+    expect(state.issues[issue]?.labels).toEqual(["human-approved"]);
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "publish",
+            role: architect,
+            payload: { type: "human-approved" },
+          },
+        ],
+        envelope: {
+          event_id: `resync:${issue}:labeled:human-approved`,
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+          payload: {
+            action: "labeled",
+            issue: { number: 42 },
+            label: { name: "human-approved" },
+            repository: { full_name: "sjawhar/legion" },
+          },
         },
-        errors: [{ issueId: failedRef.issueId, message: "GitHub response omitted PR alias" }],
-      })
-    );
-    const deps = resyncDeps({
-      listNonTerminalIssues: () => [issueRef, failedRef],
-      fetchPhaseArtifactsBatch,
-      emitToController,
-    });
-
-    const result = await runResyncPass(deps);
-
-    expect(fetchPhaseArtifactsBatch).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({
-      recommendations: noOwnerRecommendation,
-      errors: [{ issueId: failedRef.issueId, message: "GitHub response omitted PR alias" }],
-    });
-    expect(emitToController).toHaveBeenCalledWith(
-      resyncEvent(noOwnerRecommendation, [
-        { issueId: failedRef.issueId, message: "GitHub response omitted PR alias" },
-      ])
-    );
-  });
-
-  it("degrades a failed artifact batch into per-issue unresolvable errors", async () => {
-    const secondRef: IssueRef = {
-      ...issueRef,
-      issueId: "acme-api-43",
-      prRef: { owner: "acme", repo: "api", number: 102 },
-    };
-    const deps = resyncDeps({
-      listNonTerminalIssues: () => [issueRef, secondRef],
-      fetchPhaseArtifactsBatch: async () => {
-        throw new Error("GitHub unavailable");
       },
-      emitToController: mock(() => {}),
-    });
-
-    const result = await runResyncPass(deps);
-
-    expect(result.recommendations).toEqual([]);
-    expect(result.errors).toEqual([
-      { issueId: issueRef.issueId, message: "GitHub unavailable" },
-      { issueId: secondRef.issueId, message: "GitHub unavailable" },
+      {
+        effects: [],
+        envelope: {
+          event_id: `resync:${issue}:unlabeled:needs-approval`,
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+          payload: {
+            action: "unlabeled",
+            issue: { number: 42 },
+            label: { name: "needs-approval" },
+            repository: { full_name: "sjawhar/legion" },
+          },
+        },
+      },
     ]);
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 2,
+      excludedNullContentItems: 0,
+    });
   });
 
-  it("does not wake the controller for an empty pass", async () => {
-    // Given no non-terminal issues and no artifact errors.
-    const emitToController = mock(() => {});
-    const deps = resyncDeps({
-      listNonTerminalIssues: () => [],
-      fetchPhaseArtifactsBatch: async () => ({ artifacts: {}, errors: [] }),
-      emitToController,
-    });
-
-    // When the resync pass finds no repair work.
-    const result = await runResyncPass(deps);
-
-    // Then it returns an empty result without waking the controller.
-    expect(result).toEqual({ recommendations: [], errors: [] });
-    expect(emitToController).not.toHaveBeenCalled();
-  });
-
-  it("wakes the controller when an errors-only pass degrades artifact resolution", async () => {
-    // Given an artifact batch failure for an otherwise non-actionable pull request.
-    const emitToController = mock(() => {});
-    const deps = resyncDeps({
-      fetchPhaseArtifactsBatch: async () => {
-        throw new Error("GitHub unavailable");
-      },
-      emitToController,
-    });
-
-    // When the resync pass degrades the failed artifact read into an error.
-    const result = await runResyncPass(deps);
-
-    // Then it surfaces the error and still wakes the controller with no recommendations.
-    expect(result).toEqual({
-      recommendations: [],
-      errors: [{ issueId: issueRef.issueId, message: "GitHub unavailable" }],
-    });
-    expect(emitToController).toHaveBeenCalledWith(
-      resyncEvent([], [{ issueId: issueRef.issueId, message: "GitHub unavailable" }])
-    );
-  });
-
-  it("emits recommendations but calls no injected write or worker-mutation methods", async () => {
-    const writeStateFile = mock(() => {});
-    const transitionIssue = mock(() => {});
-    const removeLabel = mock(() => {});
-    const createSession = mock(() => {});
-    const deleteSession = mock(() => {});
-    const emitToController = mock(() => {});
-
-    const deps = {
-      ...resyncDeps({ emitToController }),
-      writeStateFile,
-      transitionIssue,
-      removeLabel,
-      createSession,
-      deleteSession,
+  it("leaves a missed-open anomaly when no configured board project can drive the reducer", async () => {
+    const state = newLegionState("omp", 1);
+    const effects: Effect[][] = [];
+    const deps = resyncDeps(state, [boardIssue()]);
+    deps.config = { ...deps.config, boardProjectIds: [] };
+    deps.applyEffects = async (received) => {
+      effects.push(received);
     };
 
-    await runResyncPass(deps);
+    expect(await runResync(deps)).toEqual({
+      type: "resync",
+      anomalies: [
+        {
+          kind: "missed-open",
+          issue,
+          detail: "open board issue is absent from Legion state",
+        },
+      ],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
+    expect(state.issues[issue]).toBeUndefined();
+    expect(effects).toEqual([]);
+  });
 
-    expect(emitToController).toHaveBeenCalledWith(resyncEvent(noOwnerRecommendation, []));
-    expect(writeStateFile).not.toHaveBeenCalled();
-    expect(transitionIssue).not.toHaveBeenCalled();
-    expect(removeLabel).not.toHaveBeenCalled();
-    expect(createSession).not.toHaveBeenCalled();
-    expect(deleteSession).not.toHaveBeenCalled();
+  it("keeps an error-status anomaly after healing its missing board issue", async () => {
+    const state = newLegionState("omp", 1);
+
+    const event = await runResync(resyncDeps(state, [boardIssue({ status: "Error" })]));
+
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [
+        {
+          kind: "erroring-issue",
+          issue,
+          detail: "open board issue has an error project status",
+        },
+      ],
+      healed: 1,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
+  });
+
+  it("surfaces a launch-failed tree even when the board refresh has no matching item", async () => {
+    const state = newLegionState("omp", 1);
+    state.trees[issue] = {
+      root: issue,
+      generation: 7,
+      status: "launch-failed",
+      launchFailures: 3,
+      heldEvents: [],
+    };
+
+    const event = await runResync(resyncDeps(state, []));
+
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [
+        {
+          kind: "launch-failed",
+          issue,
+          detail: "tree launch failed 3 times",
+        },
+      ],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
+  });
+
+  it("suppresses a deliberately backlogged launch-failed tree", async () => {
+    const state = newLegionState("omp", 1);
+    recordOpenReleasedIssue(state, { backlogMarker: "waiting for maintainer" });
+    state.trees[issue] = {
+      root: issue,
+      generation: 7,
+      status: "launch-failed",
+      launchFailures: 3,
+      heldEvents: [],
+    };
+
+    expect(await runResync(resyncDeps(state, []))).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    });
+  });
+  it("completes the resync while reporting board items excluded for null content", async () => {
+    const state = newLegionState("omp", 1);
+    const event = await runResync({
+      ...resyncDeps(state, []),
+      fetchGitHubProjectItems: async () => ({
+        items: [],
+        excludedNullContentItems: 1,
+      }),
+    });
+
+    expect(event).toEqual({
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 1,
+    });
   });
 });

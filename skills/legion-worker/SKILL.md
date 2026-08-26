@@ -1,274 +1,176 @@
 ---
 name: legion-worker
-description: Use when dispatched by Legion controller to work on an issue in a jj workspace
+description: Use when dispatched as an architect, plan, implement, test, or review phase worker in a Legion issue workspace.
 ---
 
-# Legion Worker
+# Legion Phase Worker
 
-Router skill for Legion issue work. Dispatched by controller with a mode parameter.
+You are one phase in a shared issue workspace, not a dispatcher or pipeline coordinator. The
+architect owns the tree; phases use the same jj workspace sequentially. Complete the phase
+assigned in the prompt, return its structured output to the architect, and leave the durable
+copy that the next phase can trust.
 
-## Context from Prompt
+## Identity, scope, and role
 
-The controller dispatches you with a prompt that includes your **issue ID**, **mode**, and **backend**:
+The dispatch supplies the issue, phase, daemon-minted role token, workspace, and task
+`outputSchema`. At startup, claim that role with `envoy_role_set`; never construct a role
+token from an issue name. A claim survives parking, and a revived or re-created worker claims
+its own role again.
 
-- **GitHub:** `/legion-worker implement mode for acme-widgets-42 (github backend, repo: acme/widgets)`
-- **Linear:** `/legion-worker plan mode for ENG-21 (linear backend)`
+Read the current issue and its acceptance criteria before changing the workspace. Work only
+on this phase's artifact. You may use ordinary scouts, reviewers, and oracle subagents for
+phase work; never spawn legion-role workers or open human dispatch threads. Escalate a product,
+scope, cross-phase, or human decision to the owning architect through hub, with the verified
+facts and the decision needed.
 
-Extract these values from the prompt. For GitHub issues, also derive the **owner**, **repo**,
-and **issue number** from the issue ID (format: `owner-repo-number`).
+## Workspace and handoff precedence
 
-Throughout this skill and its workflows, `$LEGION_ISSUE_ID`, `$ISSUE_NUMBER`, `$OWNER`, and
-`$REPO` are **placeholders** — substitute the values you extracted from your prompt context.
-Use the **backend** from your prompt to choose GitHub CLI or Linear MCP commands.
+The `workspace` attribute in your `<legion-spawn>` block is the authoritative issue
+workspace. Before reading repository files or handoffs, you **MUST** bind to that exact
+path with:
 
-## Essential Rules
+```bash
+cd -- "<workspace>" && jj -R "<workspace>" status
+```
 
-1. **Read issue first**
-   - **GitHub:** `gh issue view $ISSUE_NUMBER --json title,body,labels,comments,state -R $OWNER/$REPO`
-   - **Linear:** `linear_linear(action="get", id="$LEGION_ISSUE_ID")`
-2. **Use jj, not git** - changes auto-tracked (see jj safety rules below)
-3. **Only the implementer creates branches** - the implement workflow creates the branch and
-   opens the PR. Reviewers, retro, and closers push to the existing branch. Never create new
-   branches or bookmarks in review, retro, or merge workflows.
-   **Exception:** The retro workflow has a recovery fallback for when the tracked branch is
-   lost — it may re-create the bookmark in that narrow case. See the retro SKILL.md for details.
-4. **Signal completion (MOST IMPORTANT)** — before you stop for ANY reason, you MUST: push your work, unsubscribe from explicit Envoy topics (see Exiting), add `worker-done` label, remove `worker-active` label. If you skip this, the issue silently stalls. Create a todo for this at session start (see Required Startup Todos below).
-4.5. **Write handoff data before signaling.** Each workflow has a handoff write step — you MUST complete it and confirm `.legion/$MODE.json` exists before adding `worker-done`. If the file is missing, stop, diagnose the failure (for example: `legion` missing from `PATH` or wrong `--workspace`), and do not signal completion until the failure is fixed or explicitly documented in your exit comment.
-5. **Clean up on exit** - remove `worker-active` label when exiting (done or blocked)
-6. **Notify the controller via Envoy** — after adding `worker-done`, send exactly one completion notification so the controller doesn't have to wait for its next polling cycle. Use `envoy_publish(topic="notifications.role.legion-controller", message="Worker done: <issue> <mode> <outcome>")`. If `envoy_publish` fails, that's fine — the label is the source of truth.
-7. **Never stall on subagents** — when spawning background tasks (cross-family review, Oracle, spec compliance, etc.), always set `timeout_seconds` (typically 180s). If the subagent times out or fails, skip that step and continue with the workflow. Your primary obligation is to complete the workflow and signal `worker-done`. Subagent steps are quality improvements, not hard prerequisites — the downstream human/bot review is the authoritative quality gate.
-8. **Never block bash with long-running commands** — any command expected to take >60 seconds (builds, deploys, serves, eval runs, smoke tests) MUST run in a tmux session. Workers that block their bash session get killed by tool timeouts.
-   ```bash
-   # Run long command in background tmux session
-   tmux new-session -d -s <name> '<command>'
-   # Monitor progress
-   tmux capture-pane -t <name> -p | tail -20
-   # Check if still running
-   tmux has-session -t <name> 2>/dev/null && echo "running" || echo "done"
-   ```
-   Never run `bun run serve`, `pulumi up`, long test suites, or similar commands directly in bash.
-9. **Circuit breaker on repetitive tool calls** — if you've called the same tool more than 10 times consecutively with similar input, STOP and reassess your approach. You are likely in a loop. Steps: (a) describe what you're trying to achieve, (b) identify why the repeated calls aren't working, (c) try a fundamentally different approach. Transcript analysis found 3 catastrophic loop incidents (4,490 wasted tool calls) where workers repeated the same failing action hundreds of times.
+Never rely on the inherited cwd. Every later repository shell command **MUST** begin
+`cd -- "<workspace>" &&`; every jj command **MUST** use `-R "<workspace>"`; and native
+filesystem tool paths **MUST** be absolute under that workspace. Do not create an isolated
+worktree, change the workspace topology, or mix another issue's work into it. Concurrent
+issues have disjoint workspaces; phases for this issue are sequential.
 
-## Skill Discipline
+On every start, and especially after revival or re-creation, read the issue and then the
+committed predecessor handoffs in lifecycle order from `<workspace>/.legion/`:
 
-You are executing work with an approved plan. Do NOT invoke the brainstorming or writing-plans skills — your workflow has already been designed. Follow your assigned workflow file. The individual skills referenced in your workflow (TDD, subagent-driven-development, etc.) are appropriate to load and use.
+1. `architect.json`
+2. `plan.json`
+3. `implement.json`
+4. `test.json`
+5. `review.json`
+
+Read only files that precede the assigned phase. The live path returns JSON matching the task
+`outputSchema` directly to the architect. The durable path uses the **same schema** in
+`<workspace>/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
+transcript, the committed file wins: it is the copy that survived.
 
 ## jj Safety Rules
 
-- **Always `jj new` to create isolated commits.** Never `jj edit @-` to go back to a parent — this changes what `@` points to and makes `jj abandon` dangerous.
-- **Never `jj abandon` without first running `jj log`** to verify what `@` is. Abandoning the wrong commit destroys all changes on it.
-- **If you accidentally abandon the wrong commit:** `jj op restore` recovers the last operation.
-- **Before pushing, check ancestry:** `jj log -r 'ancestors(@, 5)'` — verify only your issue's commits are in the chain, not unrelated work.
+- **Always `jj -R "<workspace>" new` to create isolated commits.** Never
+  `jj -R "<workspace>" edit @-` to go back to a parent — this changes what `@` points to
+  and makes `jj abandon` dangerous.
+- **Never `jj -R "<workspace>" abandon`.** If a mistake would require abandoning work,
+  stop and send the owning architect the `jj -R "<workspace>" log` evidence.
+- **Before pushing, check ancestry:** `jj -R "<workspace>" log -r 'ancestors(@, 5)'` —
+  verify only your issue's commits are in the chain, not unrelated work.
 
-## Session Lifecycle
+**Shared operation safety:** Never run `jj op restore` in a Legion workspace. It rewrites the
+shared operation log. If a mistake reaches that point, stop and send the owning architect the
+`jj -R "<workspace>" log` evidence; recover only through the approved, path-scoped workflow.
 
-### Starting
+## Phase work
 
-Sync with main and create a fresh commit on your branch:
+Follow the repository's normal engineering workflow and the assigned issue's acceptance criteria.
+The dispatch output schema defines the phase artifact and completion evidence. Do not replace
+architect-owned decomposition, gate discipline, scheduling, or human communication with labels
+or a local status model.
+
+Every commit carries the session attribution trailer:
+
+```text
+Legion-Session: <session-id>
+```
+
+The jj configuration already supplies the phase worker's plus-addressed author and committer
+identity. Do not override Git identity configuration. The worker session receives the
+credential capability it needs; invoke GitHub through the credential helper:
 
 ```bash
-jj git fetch
-jj rebase -d main
-jj new  # Fresh commit for this session
+legion gh -- <gh args…>
 ```
 
-Orient yourself in the workspace:
-```bash
-jj-agent-status  # Shows branches, bookmark state, other agents, needs-attention items
+## GitHub comment attribution
+
+Append this exact structured footer to **every** GitHub issue comment, pull-request comment,
+and review that this phase posts. It lets the daemon index the artifact back to the session:
+
+```html
+<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->
 ```
 
-Load repo-specific config from workspace root (if present):
-
-```bash
-if [ -f .legion/config.yml ]; then cat .legion/config.yml; fi
-```
-
-Then:
-- Recognize and apply keys documented in @references/config.md
-- Echo recognized keys + effective values before workflow-specific work
-- If file is missing or malformed, proceed with defaults (no errors)
-- Ignore unknown keys
-
-Fetch per-worker environment variables from the daemon (non-blocking):
+For example:
 
 ```bash
-# Fetch and export per-worker env vars (requires LEGION_DAEMON_PORT)
-# ISSUE_ID and MODE are extracted from your dispatch prompt (see "Context from Prompt" above).
-# Example: dispatched with "implement mode for sjawhar-legion-106" → ISSUE_ID=sjawhar-legion-106, MODE=implement
-if [ -n "$LEGION_DAEMON_PORT" ]; then
-  _WORKER_ID="$(echo "${ISSUE_ID}-${MODE}" | tr '[:upper:]' '[:lower:]')"
-  _ENV_FILE=$(mktemp) && \
-    curl -fsS "http://127.0.0.1:$LEGION_DAEMON_PORT/workers/$_WORKER_ID/env" 2>/dev/null \
-    | jq -r '.env // {} | to_entries[] | "export " + .key + "=" + (.value | @sh)' \
-    > "$_ENV_FILE" && \
-    . "$_ENV_FILE"; \
-    rm -f "$_ENV_FILE"
-fi
+legion gh -- issue comment <issue-number> \
+  --body $'Verification complete.\n\n<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->' \
+  --repo <owner>/<repo>
 ```
 
-The daemon stores per-worker env vars passed via `legion dispatch --env '{"KEY":"VALUE"}'`.
-This step retrieves them so tools like `gh` and `jj` see role-specific credentials. If the
-endpoint is unavailable or returns empty, the worker proceeds with the shared process environment.
+## Implementer push and pull request
 
-Optionally read prior handoff data (advisory, non-blocking):
+Only the implementer creates the issue bookmark, pushes it, and opens the pull request. After
+its implementation commit and verification, it uses this exact branch name and push procedure:
 
 ```bash
-legion handoff read --workspace . 2>/dev/null || echo '{}'
+cd -- "<workspace>" && \
+  jj -R "<workspace>" bookmark set legion/issue-<n> && \
+  jj -R "<workspace>" git push --bookmark legion/issue-<n> --allow-new
 ```
 
-Prior phase data (from architect, plan, implement, etc.) is available in `.legion/` on this branch. Reading it is optional — individual workflow files handle phase-specific handoff reads. This note is a reminder that this data exists. Never block on missing handoff data.
+The provisioned issue workspace configures `credential.helper` with the daemon's absolute
+credential command, so `jj -R "<workspace>" git push` authenticates transparently through the
+same session capability. Never handle a token.
 
-If you're resuming after user feedback, also read the issue comments for the answer.
-If you previously created a PR, re-subscribe to PR topics: `envoy_subscribe(["notifications.github.$OWNER.$REPO.pr.$PR_NUMBER.>"])` (the daemon re-subscribes you to issue topics automatically on resume).
+Then create the pull request with the `github` tool's `pr_create` operation. The credential
+helper and `legion gh` provide the GitHub identity; never export, fetch, or replace a token.
+Other phases advance the existing branch rather than creating a replacement bookmark or PR.
 
-### Required Startup Todos
+## Completion gate: handoff write, verification, and persistence
 
-**Before starting any workflow work**, create these todos (adapt the signal todo to your mode):
+The durable handoff uses the phase-specific fields from the task's `outputSchema` only.
+`--data` must not include `schemaVersion`, `phase`, or `completed`: the CLI generates that
+envelope. Return the **full** schema through the task's structured output, including the
+generated envelope fields.
 
-1. Your workflow-specific work items (from the workflow file)
-2. A **write handoff data** todo:
-   - `Write handoff data: complete the workflow handoff write and verify .legion/$MODE.json exists before signaling completion`
-   - Keep this todo `pending` until the handoff file exists on disk
-3. A **signal completion** todo as the LAST item:
-   - `Signal completion: push changes, unsubscribe from Envoy topics, add worker-done label, remove worker-active label, notify controller via Envoy`
-   - Keep this todo `pending` until you have actually run the label commands and verified they succeeded
-   - **Do not mark this complete early** — it is your contract with the controller
-
-The signal completion todo ensures you never finish a session without updating labels.
-If you are about to stop or exit for any reason, check whether this todo is still pending — if so, do it now.
-### When Stuck — Try Oracle FIRST
-
-**Before escalating to humans**, always invoke `/legion-oracle [your question]` to search institutional knowledge (`docs/solutions/`, codebase patterns, past issue resolutions). Oracle answers 62% of questions without human help.
-
-Example: `/legion-oracle How does the controller handle cross-mode cleanup for envoyTopics?`
-
-Only proceed to the escalation flow below if oracle cannot answer or the answer is insufficient.
-
-### Blocking on User Input
-
-When you need human input that the oracle can't answer:
-
-1. Push your work: `jj git push`
-2. Post a structured escalation comment to the issue:
-
-**GitHub:**
-```
-gh issue comment $ISSUE_NUMBER --body "## Escalation
-
-**Phase:** [current mode - architect/plan/implement/review]
-**Completed:** [what work has been done so far]
-
-### Blocker
-[Specific question or decision needed — be precise]
-
-### Options Considered
-1. [Option A] — [trade-offs]
-2. [Option B] — [trade-offs]
-3. [Option C if applicable]
-
-### Context
-- **Remaining estimate:** [rough scope of remaining work after unblock]
-- **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
-- **Branch:** [current branch name if applicable]" -R $OWNER/$REPO
-```
-
-**Linear:**
-```
-linear_linear(action="comment", id=$LEGION_ISSUE_ID, body="## Escalation
-
-**Phase:** [current mode - architect/plan/implement/review]
-**Completed:** [what work has been done so far]
-
-### Blocker
-[Specific question or decision needed — be precise]
-
-### Options Considered
-1. [Option A] — [trade-offs]
-2. [Option B] — [trade-offs]
-3. [Option C if applicable]
-
-### Context
-- **Remaining estimate:** [rough scope of remaining work after unblock]
-- **Expertise needed:** [domain knowledge required to answer, e.g. 'product decision', 'API design', 'infrastructure']
-- **Branch:** [current branch name if applicable]")
-```
-
-3. Update labels: add `user-input-needed`, remove `worker-active`
-4. Notify the controller via Envoy (best-effort):
-   ```
-   envoy_publish(topic="notifications.role.legion-controller", message="Worker blocked: $ISSUE_NUMBER [current mode] needs user input")
-   ```
-   If `envoy_publish` fails, continue — the label is the source of truth.
-5. Exit immediately
-
-The controller will resume your session when the user responds.
-
-### Exiting
-
-Before pushing, verify the required handoff file exists for modes that write handoff data:
+Write the phase-specific handoff:
 
 ```bash
-if printf '%s\n' architect plan implement test review | grep -qx "$MODE"; then
-  if [ ! -f ".legion/${MODE}.json" ]; then
-    echo "FATAL: Missing required handoff file .legion/${MODE}.json"
-    echo "STOP: Do NOT push or signal worker-done. Return to the workflow handoff step and diagnose the failure."
-    echo "If the write cannot be fixed, document the failure in your exit comment before signaling completion."
-  fi
-fi
+cd -- "<workspace>" && \
+  legion handoff write --phase <p> --data '<JSON object of phase-specific fields only>'
 ```
 
-Always push before exiting:
+Then verify the durable artifact exists:
 
 ```bash
-jj git push
+test -f "<workspace>/.legion/<phase>.json"
 ```
 
-Then unsubscribe from explicit issue and PR topics (best-effort, non-blocking).
-**IMPORTANT:** Use explicit topic list, NOT empty-array unsubscribe — empty array would
-also remove `notifications.agent.{sessionId}` and create a delivery gap before daemon cleanup.
+Then commit that exact handoff file onto the issue branch:
 
+```bash
+cd -- "<workspace>" && \
+  jj -R "<workspace>" split -m "<phase>: record handoff" .legion/<phase>.json
 ```
-# Unsubscribe from issue and PR topics (substitute your actual values)
-envoy_unsubscribe([
-  "notifications.github.$OWNER.$REPO.issue.$ISSUE_NUMBER.>",
-  "notifications.github.$OWNER.$REPO.pr.$PR_NUMBER.>"    # only if a PR was created
-])
+
+If the issue bookmark exists locally, advance it and push it with the provisioned credential
+helper. `--allow-new` also publishes the locally provisioned bookmark on its first push:
+
+```bash
+cd -- "<workspace>" && \
+  jj -R "<workspace>" bookmark set legion/issue-<n> && \
+  jj -R "<workspace>" git push --bookmark legion/issue-<n> --allow-new
 ```
-If `envoy_unsubscribe` fails, continue — the daemon's `DELETE /workers` is the authoritative cleanup.
 
-Then update labels:
-- Add `worker-done` if your mode requires it (see routing table)
-- Remove `worker-active` (the controller added this when dispatching you)
+Do not report phase completion until the write, existence check, and handoff commit succeed;
+when an issue branch exists, its push is also required. This is the committed copy the next
+phase reads after revival. The reviewer later removes `.legion/` as its final commit; phase
+workers do not remove it.
 
-Then notify the controller via Envoy (best-effort, non-blocking):
-```
-envoy_publish(topic="notifications.role.legion-controller", message="Worker done: <issue-id> <mode> completed")
-```
-If `envoy_publish` fails, continue — the label is the source of truth.
+## Completion and escalation
 
-## Mode Routing
+Return the same schema as the durable handoff through the task's structured output. Do not add
+pipeline labels, run a controller loop, or notify a controller with an invented completion
+protocol. A direct worker delivery belongs to its role; overseers receive only derived
+verdicts.
 
-| Mode | Workflow | Adds `worker-done` |
-|------|----------|-------------------|
-| `architect` | @workflows/architect.md | Yes (or on children) |
-| `plan` | @workflows/plan.md | Yes |
-| `implement` | @workflows/implement.md | Yes |
-| `test` | @workflows/test.md | Yes |
-| `review` | @workflows/review.md | Yes |
-| `merge` | @workflows/merge.md | No |
-
-**Lifecycle order:** architect → plan → implement → test → review → (implement → test if changes requested) → retro → merge
-
-**Retro** is not a mode — the controller resumes the implement worker's session with `/legion-retro`, preserving full implementation context. See the `legion-retro` skill.
-
-## Review Mode Signaling
-
-Review signals outcome via native GitHub review API BEFORE `worker-done`:
-- **Approved** (`gh pr review --approve`) — no blocking issues
-- **Changes requested** (`gh pr review --request-changes`) — blocking issues found
-
-## Research Before Escalating
-
-## Reference
-
-Label conventions: @references/linear-labels.md (Linear), @references/github-labels.md (GitHub)
+When blocked, send the owning architect a concise hub message: issue, phase, verified
+observation, what you tried, and the decision required. Do not dispatch a human thread yourself.

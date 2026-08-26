@@ -1,218 +1,304 @@
-import { IssueStatus, WorkerMode, type WorkerModeLiteral } from "../state/types";
-import { computeIdleAdvisories, type IdleAdvisory } from "./idle-advisory";
-import {
-  type IssueRef,
-  noPrPhaseArtifacts,
-  type PhaseArtifactBatch,
-  type PhaseArtifacts,
-  unresolvablePhaseArtifacts,
-} from "./phase-artifacts";
+import { formatIssueKey, type IssueKey } from "@legion/contracts";
+import type { DaemonConfig } from "./config";
+import type { LegionState } from "./legion-state";
+import { type Effect, type EnvelopeJson, type ReducerConfig, reduceGithubEvent } from "./reducers";
 
-export type Recommendation =
-  | {
-      readonly issueId: string;
-      readonly mode: WorkerModeLiteral;
-      readonly reason: "artifact_no_live_owner";
-    }
-  | {
-      readonly issueId: string;
-      readonly mode: null;
-      readonly reason: "architect_veto";
-    }
-  | IdleAdvisory;
+export type ResyncAnomaly = {
+  kind: "zero-owner-tree" | "erroring-issue" | "missed-open" | "untriaged-open" | "launch-failed";
+  issue: IssueKey;
+  detail: string;
+};
 
-export interface LiveWorker {
-  readonly sessionId?: string;
-  readonly mode?: WorkerModeLiteral;
-  readonly status?: string;
-}
-
-export type LiveWorkers = Record<string, readonly LiveWorker[]>;
-
-export interface SessionStatusObservation {
-  readonly data?: unknown;
-}
-
-export interface ResyncError {
-  readonly issueId: string;
-  readonly message: string;
-}
-
-export interface ResyncPassResult {
-  readonly recommendations: readonly Recommendation[];
-  readonly errors: readonly ResyncError[];
-}
-
-export interface ResyncControllerEvent {
-  readonly type: "legion.resync";
-  readonly recommendations: readonly Recommendation[];
-  readonly errors: readonly ResyncError[];
+export interface LegionEventPayload {
+  type: "resync";
+  anomalies: ResyncAnomaly[];
+  healed: number;
+  reconciledLabels: number;
+  excludedNullContentItems: number;
 }
 
 export interface RunResyncDeps {
-  readonly listNonTerminalIssues: () => IssueRef[];
-  readonly fetchPhaseArtifactsBatch: (refs: readonly IssueRef[]) => Promise<PhaseArtifactBatch>;
-  readonly getLiveWorkers: () => Promise<LiveWorkers>;
-  // reserved for the idle-worker advisory (U9)
-  readonly getSessionStatus: (sessionId: string) => Promise<SessionStatusObservation>;
-  readonly emitToController: (event: ResyncControllerEvent) => void | Promise<void>;
+  state: LegionState;
+  config: Pick<DaemonConfig, "resyncIntervalMs"> & ReducerConfig;
+  fetchGitHubProjectItems(): Promise<{
+    items: Record<string, unknown>[];
+    excludedNullContentItems?: number;
+  }>;
+  applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
+  now(): number;
 }
 
-export interface ResyncInput {
-  readonly issueId: string;
-  readonly status: string;
-  readonly artifacts: PhaseArtifacts;
-  readonly liveWorkerModes: readonly WorkerModeLiteral[];
+const lastRunAt = new WeakMap<LegionState, number>();
+const warnedMissingBoardProjectIds = new WeakSet<LegionState>();
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
-function statusFallback(status: string): WorkerModeLiteral | null {
-  // TODO(label-teardown): Remove this pre-artifact phase bridge when labels are torn out.
-  switch (status) {
-    case IssueStatus.BACKLOG:
-      return WorkerMode.ARCHITECT;
-    case IssueStatus.TODO:
-      return WorkerMode.PLAN;
-    case IssueStatus.IN_PROGRESS:
-      return WorkerMode.IMPLEMENT;
-    case IssueStatus.TESTING:
-      return WorkerMode.TEST;
-    case IssueStatus.NEEDS_REVIEW:
-      return WorkerMode.REVIEW;
-    case IssueStatus.RETRO:
-      return WorkerMode.IMPLEMENT;
-    default:
-      return null;
-  }
-}
-
-function ownerFromArtifacts(
-  artifacts: PhaseArtifacts
-): WorkerModeLiteral | "architect_veto" | null | undefined {
-  if (artifacts.resolved.merged === "resolved" && artifacts.merged) return WorkerMode.IMPLEMENT;
-  if (artifacts.resolved.hasNonDraftPr !== "resolved") return null;
-  if (!artifacts.hasNonDraftPr) return undefined;
-  if (artifacts.resolved.testerCheckOnHead !== "resolved") return null;
-  if (artifacts.testerCheckOnHead === null) return WorkerMode.TEST;
-  if (artifacts.testerCheckOnHead === "failure") return WorkerMode.IMPLEMENT;
-  if (artifacts.resolved.nativeReviewOnHead !== "resolved") return null;
-  if (artifacts.nativeReviewOnHead === null) return WorkerMode.REVIEW;
-  if (artifacts.nativeReviewOnHead === "changes_requested") return WorkerMode.IMPLEMENT;
-  if (artifacts.resolved.architectCheckOnHead !== "resolved") return null;
-  if (artifacts.architectCheckOnHead === null) return WorkerMode.ARCHITECT;
-  if (artifacts.architectCheckOnHead === "failure") return "architect_veto";
-  if (artifacts.resolved.autoMergeEnabledOrMerged !== "resolved") return null;
-  return artifacts.autoMergeEnabledOrMerged ? null : WorkerMode.MERGE;
-}
-
-function expectedOwner(input: ResyncInput): WorkerModeLiteral | "architect_veto" | null {
-  if (input.status === IssueStatus.DONE) return null;
-  const artifactOwner = ownerFromArtifacts(input.artifacts);
-  return artifactOwner === undefined ? statusFallback(input.status) : artifactOwner;
-}
-
-function sessionStatusType(observation: SessionStatusObservation): string {
-  const data = observation.data;
-  if (typeof data !== "object" || data === null || !("type" in data)) return "unresolvable";
-  return typeof data.type === "string" ? data.type : "unresolvable";
-}
-
-export function computeResyncRecommendations(inputs: readonly ResyncInput[]): Recommendation[] {
-  const recommendations: Recommendation[] = [];
-  for (const input of inputs) {
-    const mode = expectedOwner(input);
-    if (mode === "architect_veto") {
-      recommendations.push({ issueId: input.issueId, mode: null, reason: "architect_veto" });
-      continue;
+function boardIssue(item: Record<string, unknown>):
+  | {
+      issue: IssueKey;
+      repository: string;
+      number: number;
+      open: boolean;
+      erroring: boolean;
     }
-    if (mode && !input.liveWorkerModes.includes(mode)) {
-      recommendations.push({ issueId: input.issueId, mode, reason: "artifact_no_live_owner" });
-    }
+  | undefined {
+  const content = record(item.content);
+  if (content?.type !== "Issue") return undefined;
+  const repository = content.repository;
+  const number = content.number;
+  if (
+    typeof repository !== "string" ||
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number)
+  ) {
+    return undefined;
   }
-  return recommendations;
+  const [owner, repo, ...extra] = repository.split("/");
+  if (!owner || !repo || extra.length > 0) return undefined;
+
+  const projectStatus = item.status;
+  const status = typeof projectStatus === "string" ? projectStatus.toLowerCase() : "";
+  return {
+    issue: formatIssueKey(owner, repo, number),
+    repository,
+    number,
+    open: status !== "done" && status !== "closed",
+    erroring: status.includes("error") || status.includes("failed"),
+  };
 }
 
-function failedArtifactBatch(refs: readonly IssueRef[], message: string): PhaseArtifactBatch {
-  const artifacts: Record<string, PhaseArtifacts> = {};
-  const errors: ResyncError[] = [];
-  for (const ref of refs) {
-    artifacts[ref.issueId] = ref.prRef ? unresolvablePhaseArtifacts() : noPrPhaseArtifacts();
-    if (ref.prRef) errors.push({ issueId: ref.issueId, message });
-  }
-  return { artifacts, errors };
+function isBacklogged(state: LegionState, issue: IssueKey, item: Record<string, unknown>): boolean {
+  if (state.issues[issue]?.backlogMarker) return true;
+  const labels = item.labels;
+  return Array.isArray(labels) && labels.includes("legion-backlog");
 }
 
-function completeArtifactBatch(
-  refs: readonly IssueRef[],
-  batch: PhaseArtifactBatch
-): PhaseArtifactBatch {
-  const artifacts: Record<string, PhaseArtifacts> = { ...batch.artifacts };
-  const errors: ResyncError[] = [...batch.errors];
-  const errorsByIssue = new Set(errors.map((error) => error.issueId));
-  for (const ref of refs) {
-    if (artifacts[ref.issueId]) continue;
-    artifacts[ref.issueId] = ref.prRef ? unresolvablePhaseArtifacts() : noPrPhaseArtifacts();
-    if (!errorsByIssue.has(ref.issueId)) {
-      errors.push({ issueId: ref.issueId, message: "Phase artifact batch omitted issue data" });
-    }
-  }
-  return { artifacts, errors };
+function boardLabels(item: Record<string, unknown>): Set<string> | undefined {
+  if (!Array.isArray(item.labels)) return undefined;
+  return new Set(item.labels.filter((label): label is string => typeof label === "string"));
 }
 
-async function resolveArtifactBatch(
-  refs: readonly IssueRef[],
-  deps: RunResyncDeps
-): Promise<PhaseArtifactBatch> {
-  try {
-    return completeArtifactBatch(refs, await deps.fetchPhaseArtifactsBatch(refs));
-  } catch (error) {
-    return failedArtifactBatch(
-      refs,
-      error instanceof Error ? error.message : "Phase artifact batch failed"
+function labeledBoardIssue(
+  board: { issue: IssueKey; repository: string; number: number },
+  action: "labeled" | "unlabeled",
+  label: string,
+  now: number
+): EnvelopeJson {
+  return {
+    event_id: `resync:${board.issue}:${action}:${label}`,
+    issued_at: now,
+    payload: {
+      action,
+      issue: { number: board.number },
+      label: { name: label },
+      repository: { full_name: board.repository },
+    },
+  };
+}
+
+function openedBoardIssue(
+  item: Record<string, unknown>,
+  issue: IssueKey,
+  projectId: string | undefined,
+  now: number
+): EnvelopeJson | undefined {
+  const content = record(item.content);
+  const repository = content?.repository;
+  if (!content || typeof repository !== "string" || !projectId) return undefined;
+
+  // This is reducer input reconstructed from the board GitHub just fetched, not an external webhook.
+  return {
+    event_id: `resync:${issue}`,
+    issued_at: now,
+    payload: {
+      action: "opened",
+      project: { id: projectId },
+      projects_v2_item: { content },
+      repository: { full_name: repository },
+    },
+  };
+}
+
+function hasTree(state: LegionState, issue: IssueKey): boolean {
+  const seen = new Set<IssueKey>();
+  let current: IssueKey | undefined = issue;
+  while (current && !seen.has(current)) {
+    if (state.trees[current]) return true;
+    seen.add(current);
+    current = state.issues[current]?.parent;
+  }
+  return false;
+}
+
+function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
+  const seen = new Set<IssueKey>();
+  let current: IssueKey | undefined = issue;
+  while (current && !seen.has(current)) {
+    if (state.trees[current]?.status === "active") return true;
+    seen.add(current);
+    current = state.issues[current]?.parent;
+  }
+  return false;
+}
+
+/**
+ * Reads board artifacts and mechanically converges missed-open items and
+ * label drift through the same reducer and effect executor that processes
+ * live board events.
+ */
+export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload> {
+  const now = deps.now();
+  const last = lastRunAt.get(deps.state);
+  if (last !== undefined && now - last < deps.config.resyncIntervalMs) {
+    return {
+      type: "resync",
+      anomalies: [],
+      healed: 0,
+      reconciledLabels: 0,
+      excludedNullContentItems: 0,
+    };
+  }
+
+  lastRunAt.set(deps.state, now);
+  const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
+  if (
+    items.length > 0 &&
+    deps.config.boardProjectIds.length === 0 &&
+    !warnedMissingBoardProjectIds.has(deps.state)
+  ) {
+    warnedMissingBoardProjectIds.add(deps.state);
+    console.error(
+      "[legion] resync cannot heal board items because LEGION_BOARD_PROJECT_IDS is not configured"
     );
   }
-}
-
-export async function runResyncPass(deps: RunResyncDeps): Promise<ResyncPassResult> {
-  const refs = deps.listNonTerminalIssues();
-  const [artifactBatch, liveWorkers] = await Promise.all([
-    resolveArtifactBatch(refs, deps),
-    deps.getLiveWorkers(),
-  ]);
-  const artifactRecommendations = computeResyncRecommendations(
-    refs.map((ref) => ({
-      issueId: ref.issueId,
-      status: ref.status,
-      artifacts: artifactBatch.artifacts[ref.issueId] ?? unresolvablePhaseArtifacts(),
-      liveWorkerModes: (liveWorkers[ref.issueId] ?? []).flatMap((worker) =>
-        worker.mode ? [worker.mode] : []
-      ),
-    }))
-  );
-  const idleAdvisoryInputs = await Promise.all(
-    refs.flatMap((ref) =>
-      (liveWorkers[ref.issueId] ?? []).map(async (worker) => {
-        if (!worker.sessionId || !worker.mode) return null;
-
-        const observation = await deps.getSessionStatus(worker.sessionId);
-        return {
-          issueId: ref.issueId,
-          mode: worker.mode,
-          sessionStatusType: sessionStatusType(observation),
-          artifacts: artifactBatch.artifacts[ref.issueId] ?? unresolvablePhaseArtifacts(),
-        };
-      })
-    )
-  );
-  const idleAdvisories = computeIdleAdvisories(
-    idleAdvisoryInputs.flatMap((input) => (input ? [input] : []))
-  );
-  const recommendations = [...artifactRecommendations, ...idleAdvisories];
-  if (recommendations.length > 0 || artifactBatch.errors.length > 0) {
-    await deps.emitToController({
-      type: "legion.resync",
-      recommendations,
-      errors: artifactBatch.errors,
+  const anomalies: ResyncAnomaly[] = [];
+  let healed = 0;
+  let reconciledLabels = 0;
+  const launchFailedTrees = new Set<IssueKey>();
+  for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
+    [IssueKey, LegionState["trees"][IssueKey]]
+  >) {
+    if (tree.status !== "launch-failed" || deps.state.issues[issue]?.backlogMarker) continue;
+    launchFailedTrees.add(issue);
+    anomalies.push({
+      kind: "launch-failed",
+      issue,
+      detail: `tree launch failed ${tree.launchFailures} times`,
     });
   }
-  return { recommendations, errors: artifactBatch.errors };
+  for (const item of items) {
+    const board = boardIssue(item);
+    if (!board?.open) continue;
+
+    const issue = deps.state.issues[board.issue];
+    if (issue) {
+      const labels = boardLabels(item);
+      if (labels) {
+        for (const label of new Set([...labels, ...issue.labels])) {
+          const present = issue.labels.includes(label);
+          const expected = labels.has(label);
+          if (present === expected) continue;
+          const action = expected ? "labeled" : "unlabeled";
+          const envelope = labeledBoardIssue(board, action, label, now);
+          const effects = reduceGithubEvent(deps.state, "resync", envelope, deps.config);
+          if (issue.labels.includes(label) !== expected) continue;
+          await deps.applyEffects(effects, envelope);
+          reconciledLabels += 1;
+        }
+      }
+      if (launchFailedTrees.has(board.issue) || isBacklogged(deps.state, board.issue, item)) {
+        continue;
+      }
+      if (board.erroring) {
+        anomalies.push({
+          kind: "erroring-issue",
+          issue: board.issue,
+          detail: "open board issue has an error project status",
+        });
+        continue;
+      }
+      if (
+        issue.state === "open" &&
+        !hasTree(deps.state, board.issue) &&
+        !deps.state.admission.active.includes(board.issue) &&
+        !deps.state.admission.queue.includes(board.issue)
+      ) {
+        const envelope: EnvelopeJson = {
+          event_id: `resync:${board.issue}:triage`,
+          issued_at: now,
+        };
+        await deps.applyEffects(
+          [
+            {
+              kind: "controller",
+              payload: {
+                type: "triage",
+                issue: board.issue,
+                preexistingChildren: issue.children,
+              },
+            },
+          ],
+          envelope
+        );
+        anomalies.push(
+          issue.released
+            ? {
+                kind: "zero-owner-tree",
+                issue: board.issue,
+                detail: "released open issue has no active Legion tree",
+              }
+            : {
+                kind: "untriaged-open",
+                issue: board.issue,
+                detail: "tracked open issue has no Legion tree or admission entry",
+              }
+        );
+      } else if (
+        issue.state === "open" &&
+        issue.released &&
+        !hasActiveTree(deps.state, board.issue)
+      ) {
+        anomalies.push({
+          kind: "zero-owner-tree",
+          issue: board.issue,
+          detail: "released open issue has no active Legion tree",
+        });
+      }
+      continue;
+    }
+
+    if (launchFailedTrees.has(board.issue) || isBacklogged(deps.state, board.issue, item)) continue;
+    const envelope = openedBoardIssue(item, board.issue, deps.config.boardProjectIds[0], now);
+    if (envelope) {
+      const effects = reduceGithubEvent(deps.state, "resync", envelope, deps.config);
+      if (deps.state.issues[board.issue]) {
+        await deps.applyEffects(effects, envelope);
+        healed += 1;
+        if (board.erroring) {
+          anomalies.push({
+            kind: "erroring-issue",
+            issue: board.issue,
+            detail: "open board issue has an error project status",
+          });
+        }
+        continue;
+      }
+    }
+    anomalies.push({
+      kind: "missed-open",
+      issue: board.issue,
+      detail: "open board issue is absent from Legion state",
+    });
+  }
+  return {
+    type: "resync",
+    anomalies,
+    healed,
+    reconciledLabels,
+    excludedNullContentItems,
+  };
 }
