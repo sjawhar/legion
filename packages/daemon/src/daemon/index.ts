@@ -317,7 +317,15 @@ export async function startDaemon(
         issued_at: deps.now(),
       }),
   };
-  api = startLegionApi({ port: config.port, hostname: "127.0.0.1", gates: config.gates }, apiDeps);
+  api = startLegionApi(
+    {
+      port: config.port,
+      hostname: "127.0.0.1",
+      gates: config.gates,
+      appLogins: config.appLogins,
+    },
+    apiDeps
+  );
   const ready = nats.ready();
 
   const emitResync = async (): Promise<void> => {

@@ -108,6 +108,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     zod: {
       object: (shape: unknown) => shape,
       string: () => ({ optional: () => undefined }),
+      number: () => ({ optional: () => undefined }),
       array: () => ({ optional: () => undefined }),
       enum: () => ({ optional: () => undefined }),
       unknown: () => ({ optional: () => undefined }),

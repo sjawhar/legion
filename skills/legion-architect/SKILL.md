@@ -145,7 +145,12 @@ When the config-armed final merge gate applies, preserve this order exactly:
 1. tester green and review cycles complete;
 2. reviewer pushes the `.legion/` deletion as its final commit and approves that head;
 3. retro completes without dirtying the branch;
-4. Sami approves that same head;
+4. enter the Sami-approval step by calling
+   `legion({ op: "merge_gate", pr: <pull request number> })`. The daemon performs one
+   current GitHub review read against the pinned head. If it returns `approved: true`, the
+   approval already satisfies the gate and you immediately continue to the merger; do not
+   wait for a new wake. If it returns `approved: false`, request or retain Sami approval
+   and park for a later `pr-ready` wake. Do not poll or retry this check;
 5. `legion-merger` verifies the approved head and squash-merges without pushing.
 
 If anything changes the approved head, return to review; do not ask the merger to merge

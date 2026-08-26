@@ -732,6 +732,7 @@ describe("reduceGithubEvent", () => {
         review: {
           user: { login: "sami" },
           state: "approved",
+          commit_id: "old-sha",
           body: "Looks good",
         },
       })
@@ -816,6 +817,7 @@ describe("reduceGithubEvent", () => {
         review: {
           user: { login: "sami" },
           state: "approved",
+          commit_id: "old-sha",
           body: "Looks good",
         },
       })
@@ -838,6 +840,42 @@ describe("reduceGithubEvent", () => {
       },
     ]);
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBe("approved");
+  });
+
+  it("does not retain a review decision when the delivered review is pinned to a stale head", () => {
+    const state = rootState();
+    attachChild(state);
+    const implementer = claim(state, child, "implementer");
+    addPr(state, {
+      headSha: "current-sha",
+      checks: { tests: { status: "completed", conclusion: "success" } },
+    });
+
+    expect(
+      effects(state, {
+        action: "submitted",
+        pull_request: { number: prNumber, head: { sha: "current-sha" } },
+        review: {
+          user: { login: "sami" },
+          state: "approved",
+          commit_id: "stale-sha",
+          body: "Approved an earlier head",
+        },
+      })
+    ).toEqual([
+      {
+        kind: "publish",
+        role: implementer,
+        payload: {
+          type: "pr-review",
+          state: "approved",
+          author: "sami",
+          body: "Approved an earlier head",
+        },
+      },
+      { kind: "approval-status", repo, pr: prNumber, sha: "current-sha" },
+    ]);
+    expect(state.prs[`${repo}#${prNumber}`]?.reviewDecision).toBeUndefined();
   });
 
   it("mirrors supported labels, waking the architect once when a human approves", () => {

@@ -591,8 +591,11 @@ function review(
   const pr = state.prs[`${repo}#${number}`];
   if (!pr) return [];
   const decision = (stringValue(rawReview.state) ?? "").toLowerCase();
+  const isCurrentHead = stringValue(rawReview.commit_id) === pr.headSha;
   const prior = pr.reviewDecision;
-  if (decision === "approved" || decision === "changes_requested") pr.reviewDecision = decision;
+  if (isCurrentHead && (decision === "approved" || decision === "changes_requested")) {
+    pr.reviewDecision = decision;
+  }
   const result = route(
     state,
     pr.key,
@@ -606,7 +609,7 @@ function review(
     envelope
   );
   result.push({ kind: "approval-status", repo, pr: number, sha: pr.headSha });
-  if (decision === "approved" && prior !== "approved" && isGreen(pr)) {
+  if (isCurrentHead && decision === "approved" && prior !== "approved" && isGreen(pr)) {
     result.push(...route(state, pr.key, "architect", { type: "pr-ready", pr: number }, envelope));
   }
   return result;

@@ -92,6 +92,7 @@ type TestPi = {
   readonly zod: {
     readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
     readonly string: () => ZodProperty;
+    readonly number: () => ZodProperty;
     readonly array: (item: unknown) => ZodProperty;
     readonly enum: (values: readonly string[]) => ZodProperty;
     readonly unknown: () => ZodProperty;
@@ -195,6 +196,7 @@ function createPi(options: { readonly agents?: ExtensionAgentsApi; readonly omit
     zod: {
       object: (shape) => shape,
       string: optional,
+      number: optional,
       array: () => optional(),
       enum: () => optional(),
       unknown: () => optional(),
@@ -2251,6 +2253,8 @@ describe("Legion OMP extension", () => {
       }
       if (url.pathname === "/legion/v1/issues/labels")
         return Response.json({ labels: ["needs-approval"] });
+      if (url.pathname === "/legion/v1/merge-gate")
+        return Response.json({ approved: true, pr: 17, headSha: "approved-head" });
       if (url.pathname.startsWith("/legion/v1/")) return Response.json({});
       return Response.json({
         session_id: "ses_architect",
@@ -2274,6 +2278,19 @@ describe("Legion OMP extension", () => {
       readonly request: { readonly path: string; readonly body: unknown };
       readonly details: Record<string, unknown>;
     }[] = [
+      {
+        input: { op: "merge_gate", pr: 17 },
+        request: {
+          path: "/legion/v1/merge-gate",
+          body: {
+            tree,
+            pr: 17,
+            sessionId: "ses_architect",
+            secret: "root-secret",
+          },
+        },
+        details: { approved: true, pr: 17, headSha: "approved-head" },
+      },
       {
         input: { op: "wave_release", children: [issue] },
         request: {

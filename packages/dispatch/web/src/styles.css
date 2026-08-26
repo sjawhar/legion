@@ -182,6 +182,14 @@ select {
   border-left-color: var(--urgency-blocking);
 }
 
+.thread-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .thread-row.resolved .thread-title {
   color: var(--fg-dim);
   text-decoration: line-through;
@@ -198,15 +206,6 @@ select {
   gap: 0.45rem;
   align-items: center;
   min-width: 0;
-}
-
-.thread-title {
-  flex: 1;
-  min-width: 0;
-  font-weight: 550;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .thread-time {
@@ -380,11 +379,6 @@ select {
   position: relative;
 }
 
-.urgency-chip-wrap[data-pending] .urgency-chip {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
 .urgency-chip {
   list-style: none;
   display: inline-flex;
@@ -398,6 +392,10 @@ select {
   user-select: none;
   border: 1px solid transparent;
   transition: border-color 80ms ease;
+}
+.urgency-chip-wrap[data-pending] .urgency-chip {
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .urgency-chip::-webkit-details-marker {
@@ -607,6 +605,19 @@ select {
   gap: 0.3rem;
 }
 
+.activity-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+  padding: 0.2rem 0;
+}
+
+.activity-row strong {
+  color: var(--fg);
+  font-weight: 600;
+}
 .comment header {
   display: flex;
   gap: 0.5rem;
@@ -631,20 +642,6 @@ select {
 }
 .comment-body p:last-child {
   margin-bottom: 0;
-}
-
-.activity-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  color: var(--fg-dim);
-  font-size: 0.78rem;
-  padding: 0.2rem 0;
-}
-
-.activity-row strong {
-  color: var(--fg);
-  font-weight: 600;
 }
 
 /* ─── Reply form (compact) ───────────────────────────────────────────── */
@@ -928,11 +925,11 @@ select {
 .repo-label {
   border: 1px solid var(--line);
   border-radius: 6px;
+  font: inherit;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0.2rem 0.5rem;
   cursor: pointer;
   background: transparent;
-  font: inherit;
   font-size: 0.82rem;
   color: var(--fg-dim);
 }

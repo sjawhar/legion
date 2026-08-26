@@ -289,6 +289,7 @@ type PiApi = {
   readonly zod: {
     readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
     readonly string: () => ZodProperty;
+    readonly number: () => ZodProperty;
     readonly array: (item: unknown) => ZodProperty;
     readonly enum: (values: readonly string[]) => ZodProperty;
     readonly unknown: () => ZodProperty;
@@ -488,6 +489,7 @@ function legionToolSchema(pi: PiApi): unknown {
       "escalate",
       "request_refile",
       "issue_close",
+      "merge_gate",
     ]),
     title: z.string().optional(),
     body: z.string().optional(),
@@ -499,6 +501,7 @@ function legionToolSchema(pi: PiApi): unknown {
     context: z.unknown().optional(),
     rationale: z.string().optional(),
     comment: z.string().optional(),
+    pr: z.number().optional(),
   });
 }
 
@@ -1204,7 +1207,23 @@ export default function legionExtension(pi: PiApi): void {
               throw new Error(`${String(parameters.op)} requires ${name}`);
             return value;
           };
+          const numberInput = (name: string): number => {
+            const value = parameters[name];
+            if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+              throw new Error(`${String(parameters.op)} requires a positive integer ${name}`);
+            }
+            return value;
+          };
           switch (parameters.op) {
+            case "merge_gate":
+              return toolSuccess(
+                await daemon.mergeGate({
+                  tree: architect.tree,
+                  pr: numberInput("pr"),
+                  sessionId: context.sessionManager.getSessionId(),
+                  secret: architect.secret,
+                })
+              );
             case "issue_create": {
               const labels = parameters.labels;
               if (

@@ -14,7 +14,7 @@ const reviewsResponse = z.array(
 const SUCCESS_DESCRIPTION = "Approved by a human on the current head";
 const PENDING_DESCRIPTION = "Awaiting human approval on the current head";
 
-type ApprovalState = "success" | "pending";
+export type ApprovalState = "success" | "pending";
 
 type TokenLease = {
   token: string;
@@ -48,14 +48,10 @@ export function computeApprovalState(
     : "pending";
 }
 
-export async function setApprovalStatus(
+async function queryApprovalState(
   effect: { repo: string; pr: number; sha: string },
   deps: ApprovalCheckDeps
-): Promise<void> {
-  if (deps.gatesMerge === "off") {
-    return;
-  }
-
+): Promise<{ state: ApprovalState; env: NodeJS.ProcessEnv }> {
   const [owner, repository, ...extra] = effect.repo.split("/");
   if (!owner || !repository || extra.length > 0) {
     throw new Error(`Invalid repository: ${effect.repo}`);
@@ -74,15 +70,36 @@ export async function setApprovalStatus(
     );
   }
   const parsedReviews = reviewsResponse.parse(JSON.parse(reviewsResult.stdout));
-  const state = computeApprovalState(
-    parsedReviews.map((review) => ({
-      author: review.user.login,
-      state: review.state,
-      commitId: review.commit_id,
-    })),
-    effect.sha,
-    deps.appLogins
-  );
+  return {
+    state: computeApprovalState(
+      parsedReviews.map((review) => ({
+        author: review.user.login,
+        state: review.state,
+        commitId: review.commit_id,
+      })),
+      effect.sha,
+      deps.appLogins
+    ),
+    env,
+  };
+}
+
+export async function getApprovalState(
+  effect: { repo: string; pr: number; sha: string },
+  deps: ApprovalCheckDeps
+): Promise<ApprovalState> {
+  return (await queryApprovalState(effect, deps)).state;
+}
+
+export async function setApprovalStatus(
+  effect: { repo: string; pr: number; sha: string },
+  deps: ApprovalCheckDeps
+): Promise<void> {
+  if (deps.gatesMerge === "off") {
+    return;
+  }
+
+  const { state, env } = await queryApprovalState(effect, deps);
   const statusResult = await deps.runner(
     [
       "gh",

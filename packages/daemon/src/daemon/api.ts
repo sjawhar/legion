@@ -12,6 +12,7 @@ import {
 } from "@legion/contracts";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
+import { getApprovalState } from "./approval-check";
 import type { GitHubAppRole } from "./config";
 import { buildRoleEnv, type TokenManager } from "./github-apps";
 import type { LegionState } from "./legion-state";
@@ -32,6 +33,7 @@ export interface LegionApiConfig {
   port: number;
   hostname?: string;
   gates: { design: "root-issues" | "off"; merge: MergeGateSetting };
+  appLogins?: string[];
   now?: () => number;
 }
 
@@ -516,6 +518,44 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         await deps.processManager.markTreeReady(tree);
         validateContractRequest(LegionDaemonApi.ProcessReady.request, body);
         return Response.json(validateContractResponse(LegionDaemonApi.ProcessReady.response, {}));
+      }
+
+      if (pathname === "/legion/v1/merge-gate") {
+        const tree = requireTree(body);
+        requireArchitectCapability(body, tree);
+        if (config.gates.merge !== "human") {
+          throw new HttpError(409, "Human merge gate is disabled");
+        }
+        const number = requiredNumber(body, "pr");
+        const matchingPrs = Object.values(deps.state.prs).filter(
+          (candidate) =>
+            candidate.number === number && treeContains(deps.state, tree, candidate.key)
+        );
+        if (matchingPrs.length === 0) {
+          throw new HttpError(404, `No PR #${number} belongs to tree ${tree}`);
+        }
+        if (matchingPrs.length > 1) {
+          throw new HttpError(409, `PR #${number} is ambiguous within tree ${tree}`);
+        }
+        const pr = matchingPrs[0];
+        if (!pr) throw new Error("Matching merge-gate PR disappeared");
+        const approval = await getApprovalState(
+          { repo: pr.repo, pr: pr.number, sha: pr.headSha },
+          {
+            runner,
+            tokenManager: deps.tokenManager,
+            appLogins: config.appLogins ?? [],
+            gatesMerge: config.gates.merge,
+          }
+        );
+        validateContractRequest(LegionDaemonApi.MergeGate.request, body);
+        return Response.json(
+          validateContractResponse(LegionDaemonApi.MergeGate.response, {
+            approved: approval === "success",
+            pr: pr.number,
+            headSha: pr.headSha,
+          })
+        );
       }
 
       if (pathname === "/legion/v1/process/exit") {

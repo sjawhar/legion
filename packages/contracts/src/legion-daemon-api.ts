@@ -43,6 +43,14 @@ export const LegionDaemonApi = {
     request: architectCapability,
     response: z.object({}),
   },
+  MergeGate: {
+    request: architectCapability.extend({ pr: z.number().int().positive() }),
+    response: z.object({
+      approved: z.boolean(),
+      pr: z.number().int().positive(),
+      headSha: nonEmptyString,
+    }),
+  },
   ProcessExit: {
     request: architectCapability.extend({ generation: z.number().int() }),
     response: z.object({}),
@@ -182,6 +190,8 @@ export type ArchitectCapabilityInput = InputOf<typeof LegionDaemonApi.ProcessRea
 export type ProcessStartedInput = InputOf<typeof LegionDaemonApi.ProcessStarted.request>;
 export type ProcessStartedResponse = OutputOf<typeof LegionDaemonApi.ProcessStarted.response>;
 export type ProcessReadyInput = InputOf<typeof LegionDaemonApi.ProcessReady.request>;
+export type MergeGateInput = InputOf<typeof LegionDaemonApi.MergeGate.request>;
+export type MergeGateResponse = OutputOf<typeof LegionDaemonApi.MergeGate.response>;
 export type ProcessExitInput = InputOf<typeof LegionDaemonApi.ProcessExit.request>;
 export type IssueCreateInput = InputOf<typeof LegionDaemonApi.IssueCreate.request>;
 export type IssueCreateResponse = OutputOf<typeof LegionDaemonApi.IssueCreate.response>;

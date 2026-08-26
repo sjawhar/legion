@@ -22,8 +22,8 @@ export function envoyDefaultsFromEnvironment(environment: EnvoyEnvironment): Env
     Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
       ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
       : DEFAULT_HEARTBEAT_MS;
-  // biome-ignore lint/complexity/useLiteralKeys: index signatures require bracket access.
   const natsUrls =
+    // biome-ignore lint/complexity/useLiteralKeys: EnvoyEnvironment is an index signature.
     environment["ENVOY_NATS_URL"]
       ?.split(",")
       .map((url) => url.trim())

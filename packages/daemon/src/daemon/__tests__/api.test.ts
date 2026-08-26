@@ -6,6 +6,7 @@ import { controllerToken, formatIssueKey, type IssueKey, roleToken } from "@legi
 import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, type LegionApiFetch, startLegionApi } from "../api";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
+import { reduceGithubEvent } from "../reducers";
 
 const root = formatIssueKey("acme", "widgets", 1);
 const child = formatIssueKey("acme", "widgets", 2);
@@ -300,6 +301,109 @@ describe("Legion HTTP API", () => {
     const responseBody = JSON.parse(response.body) as T;
     return { status: response.status, body: responseBody };
   }
+
+  it("rechecks a pre-gate approval against GitHub after its delivery was already consumed", async () => {
+    state.issues[root].children.push(child);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.prs["acme/widgets#17"] = {
+      key: child,
+      repo: "acme/widgets",
+      number: 17,
+      headSha: "approved-head",
+      checks: { test: { status: "completed", conclusion: "success" } },
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: false,
+      lastEventAt: 0,
+      fixAttempts: 0,
+    };
+    state.roles[roleToken(state.project, child, "architect")] = {
+      issue: child,
+      role: "architect",
+    };
+    const approvalDelivery = reduceGithubEvent(
+      state,
+      "notifications.github.acme.widgets.pr.17.review",
+      {
+        event_id: "approved-during-retro",
+        issued_at: 1_700_000_000_000,
+        payload: {
+          action: "submitted",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 17, head: { sha: "approved-head" } },
+          review: {
+            user: { login: "sami" },
+            state: "approved",
+            commit_id: "approved-head",
+            body: "Approved while retro ran",
+          },
+        },
+      },
+      {
+        boardProjectIds: [],
+        appLogins: [],
+        maxFixAttempts: 3,
+      }
+    );
+    expect(approvalDelivery).toContainEqual({
+      kind: "publish",
+      role: roleToken(state.project, child, "architect"),
+      payload: { type: "pr-ready", pr: 17 },
+    });
+    expect(state.prs["acme/widgets#17"]?.reviewDecision).toBe("approved");
+
+    await start({
+      runner: async (command) => {
+        commands.push(command);
+        return {
+          stdout: JSON.stringify([
+            {
+              user: { login: "sami" },
+              state: "APPROVED",
+              commit_id: "approved-head",
+            },
+          ]),
+          stderr: "",
+          exitCode: 0,
+        };
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const gate = await curlJson<{ approved: boolean; pr: number; headSha: string }>(
+      "/legion/v1/merge-gate",
+      {
+        tree: root,
+        pr: 17,
+        sessionId: "ses_root",
+        secret: started.body.secret,
+      }
+    );
+
+    expect(gate).toEqual({
+      status: 200,
+      body: { approved: true, pr: 17, headSha: "approved-head" },
+    });
+    expect(commands).toEqual([["gh", "api", "repos/acme/widgets/pulls/17/reviews"]]);
+  });
 
   it("drains each held event exactly once when a child wave releases", async () => {
     await start();

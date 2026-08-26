@@ -147,13 +147,13 @@ export function createDashboardController(options: DashboardControllerOptions) {
   }
 
   function selectedDetail(): ThreadDetailInput | null {
-    if (!state.selected) return null;
-    const key = selectedKey()!;
+    const selected = state.selected;
+    if (!selected) return null;
+    const key = keyOf(selected.repo, selected.number);
     const issue = state.issues.get(key);
     if (!issue) return null;
     const thread = state.threads.find(
-      (candidate) =>
-        candidate.repo === state.selected!.repo && candidate.number === state.selected!.number
+      (candidate) => candidate.repo === selected.repo && candidate.number === selected.number
     );
     return {
       issue,
@@ -185,14 +185,17 @@ export function createDashboardController(options: DashboardControllerOptions) {
   }
 
   function selectedComments(): Comment[] {
-    const key = selectedKey()!;
+    const key = selectedKey();
+    if (!key) throw new Error("No thread selected");
     const comments = state.comments.get(key) ?? [];
     state.comments.set(key, comments);
     return comments;
   }
 
   function selectedIssue(): Issue {
-    const issue = state.issues.get(selectedKey()!);
+    const key = selectedKey();
+    if (!key) throw new Error("Selected issue is not loaded");
+    const issue = state.issues.get(key);
     if (!issue) throw new Error("Selected issue is not loaded");
     return issue;
   }
@@ -501,10 +504,10 @@ function attachDom(
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const row = target.closest<HTMLElement>("button[data-thread-number]");
-    if (row && row.dataset.threadRepo && row.dataset.threadNumber) {
-      void controller
-        .selectThread(row.dataset.threadRepo, Number(row.dataset.threadNumber))
-        .then(paint);
+    const repo = row?.dataset.threadRepo;
+    const number = row?.dataset.threadNumber;
+    if (repo && number) {
+      void controller.selectThread(repo, Number(number)).then(paint);
       return;
     }
     if (target.closest<HTMLElement>("#help-button")) {

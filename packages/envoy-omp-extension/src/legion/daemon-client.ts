@@ -18,6 +18,8 @@ import {
   type IssueTextInput,
   type LabelsInput,
   type LabelsResponse,
+  type MergeGateInput,
+  type MergeGateResponse,
   LegionDaemonApi,
   type PhaseInput,
   type PhaseResponse,
@@ -43,6 +45,7 @@ export interface LegionDaemonClient {
   readonly controllerReady: (input: ControllerReadyInput) => Promise<void>;
   readonly processStarted: (input: ProcessStartedInput) => Promise<ProcessStartedResponse>;
   readonly processReady: (input: ProcessReadyInput) => Promise<void>;
+  readonly mergeGate: (input: MergeGateInput) => Promise<MergeGateResponse>;
   readonly issueCreate: (input: IssueCreateInput) => Promise<IssueCreateResponse>;
   readonly provisioningCredential: (
     input: ProvisioningCredentialInput
@@ -184,6 +187,8 @@ export function createLegionDaemonClient(
       post("/legion/v1/process/started", input, LegionDaemonApi.ProcessStarted.response),
     processReady: (input) =>
       noContent("/legion/v1/process/ready", input, LegionDaemonApi.ProcessReady.response),
+    mergeGate: (input) =>
+      post("/legion/v1/merge-gate", input, LegionDaemonApi.MergeGate.response),
     issueCreate: (input) => post("/legion/v1/issues", input, LegionDaemonApi.IssueCreate.response),
     waveRelease: (input) =>
       post("/legion/v1/waves/release", input, LegionDaemonApi.WaveRelease.response),
