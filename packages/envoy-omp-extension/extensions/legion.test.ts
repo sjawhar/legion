@@ -1176,6 +1176,9 @@ describe("Legion OMP extension", () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     process.env.LEGION_PROJECT = "omp";
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
@@ -1189,9 +1192,6 @@ describe("Legion OMP extension", () => {
       }
       if (url.pathname === "/legion/v1/grants") {
         return Response.json({ grantId: "grant-1", expiresAt: "2026-08-24T06:00:00.000Z" });
-      }
-      if (url.pathname === "/legion/v1/gh-token") {
-        return Response.json({ token: "app-token", appLogin: "legion-reviewer[bot]" });
       }
       return Response.json({
         session_id: "ses_grant",
@@ -1233,19 +1233,19 @@ describe("Legion OMP extension", () => {
       input: {
         command:
           "export LEGION_GRANT='grant-1'\n" +
-          "export GH_TOKEN='app-token'\n" +
+          "unset GH_TOKEN\n" +
           "unset GITHUB_TOKEN\n" +
           "unset GH_HOST\n" +
-          "export GH_CONFIG_DIR='/tmp/legion-state/gh'\n" +
+          `export GH_CONFIG_DIR='${path.join(stateDir, "gh")}'\n` +
+          `export PATH='${path.join(stateDir, "worker-bin")}':$PATH\n` +
           "env | grep LEGION",
       },
     });
-    expect(requests.slice(-2)).toEqual([
+    expect(requests.slice(-1)).toEqual([
       {
         path: "/legion/v1/grants",
         body: { tree, issue, sessionId: "ses_grant", secret: "worker-secret" },
       },
-      { path: "/legion/v1/gh-token", body: { grantId: "grant-1" } },
     ]);
     await sessionShutdown({}, context);
   });
@@ -1267,10 +1267,7 @@ describe("Legion OMP extension", () => {
         });
       }
       if (url.pathname === "/legion/v1/grants") {
-        return Response.json({ grantId: "grant-lease-refused", expiresAt: "2026-08-24T06:00:00.000Z" });
-      }
-      if (url.pathname === "/legion/v1/gh-token") {
-        return Response.json({ error: "token lease unavailable" }, { status: 503 });
+        return Response.json({ error: "grant minting unavailable" }, { status: 503 });
       }
       return Response.json({
         session_id: "ses_grant_refused",
@@ -1310,7 +1307,7 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: 'POST /legion/v1/gh-token failed with 503: {"error":"token lease unavailable"}',
+      reason: 'POST /legion/v1/grants failed with 503: {"error":"grant minting unavailable"}',
     });
     await sessionShutdown({}, context);
   });
@@ -1408,6 +1405,9 @@ describe("Legion OMP extension", () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = daemonUrl;
     process.env.LEGION_PROJECT = "omp";
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       if (url.origin === daemonUrl) return originalFetch(input, init);
@@ -1462,7 +1462,23 @@ describe("Legion OMP extension", () => {
       const [grantExport] = result.input.command.split("\n", 1);
       expect(grantExport).toMatch(/^export LEGION_GRANT='[0-9a-f-]{36}'$/);
       expect(grantExport).not.toBe("export LEGION_GRANT=''");
+      expect(result.input.command).not.toContain("real-daemon-token");
+      expect(JSON.stringify({ toolName: "bash", input: result.input })).not.toContain(
+        "real-daemon-token"
+      );
       const decoy = await createDecoyGh();
+      const legion = path.join(decoy.binDir, "legion");
+      await writeFile(
+        legion,
+        `#!/bin/sh
+exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cli/index.ts")}" "$@"
+`,
+        "utf8"
+      );
+      await chmod(legion, 0o700);
+      expect(await readFile(path.join(stateDir, "worker-bin", "gh"), "utf8")).toContain(
+        'exec legion gh -- "$@"'
+      );
       expect(
         await commandOutput(["sh", "-c", result.input.command], workspace, {
           ...process.env,
@@ -1943,9 +1959,6 @@ describe("Legion OMP extension", () => {
       if (url.pathname === "/legion/v1/grants") {
         return Response.json({ grantId: "revived-grant", expiresAt: "2026-08-26T01:00:00.000Z" });
       }
-      if (url.pathname === "/legion/v1/gh-token") {
-        return Response.json({ token: "revived-token", appLogin: "legion-implementer[bot]" });
-      }
       return Response.json({
         session_id: body?.session_id,
         machine_id: "machine",
@@ -2013,13 +2026,15 @@ describe("Legion OMP extension", () => {
       input: {
         command:
           "export LEGION_GRANT='revived-grant'\n" +
-          "export GH_TOKEN='revived-token'\n" +
+          "unset GH_TOKEN\n" +
           "unset GITHUB_TOKEN\n" +
           "unset GH_HOST\n" +
           "export GH_CONFIG_DIR='/tmp/legion-state/gh'\n" +
+          "export PATH='/tmp/legion-state/worker-bin':$PATH\n" +
           "jj git push",
       },
     });
+    expect(JSON.stringify(grant)).not.toContain("revived-token");
     expect(requests.filter((request) => request.path === "/legion/v1/worker-session")).toHaveLength(
       0
     );
