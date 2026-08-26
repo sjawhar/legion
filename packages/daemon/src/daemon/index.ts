@@ -10,7 +10,7 @@ import { fetchGitHubProjectItems, type GitHubProjectItemsResult } from "../state
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { setApprovalStatus } from "./approval-check";
 import { overseerCatchup } from "./catchup";
-import { type DaemonConfig, loadConfig } from "./config";
+import { type DaemonConfig, type GitHubAppRole, loadConfig } from "./config";
 import {
   createDaemonRunner,
   type DaemonEnvironment,
@@ -80,6 +80,24 @@ function projectBoard(legionId: string): { owner: string; number: number } {
     throw new Error(`LEGION_ID must match owner/number (got: ${legionId})`);
   }
   return { owner, number };
+}
+
+async function resolveConfiguredAppLogins(
+  config: DaemonConfig,
+  tokenManager: Pick<TokenManager, "getToken">,
+  owner: string
+): Promise<string[]> {
+  const roles = Object.keys(config.githubApps) as GitHubAppRole[];
+  if (config.gates.merge === "human" && roles.length === 0) {
+    throw new Error("gates.merge=human requires at least one configured GitHub App login");
+  }
+  const logins = await Promise.all(
+    roles.map(async (role) => (await tokenManager.getToken(role, owner)).gitIdentity.name)
+  );
+  if (config.gates.merge === "human" && logins.some((login) => login.length === 0)) {
+    throw new Error("gates.merge=human requires at least one configured GitHub App login");
+  }
+  return [...new Set(logins)];
 }
 
 export function createBoardProjectItemsFetcher(
@@ -220,6 +238,7 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   const board = projectBoard(config.legionId);
   const deps = { ...defaultDependencies(config), ...options.deps };
+  config.appLogins = await resolveConfiguredAppLogins(config, deps.tokenManager, board.owner);
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
   });

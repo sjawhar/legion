@@ -201,7 +201,7 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },
-    githubApps: {},
+    githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,
   };
 }
@@ -596,7 +596,7 @@ describe("daemon end-to-end", () => {
         expect(staleArchitect.status).toBe(403);
         const rootRecovery = await post(`${daemonUrl}/legion/v1/worker-session`, {
           sessionId: architect.sessionId,
-          agentId: "root-session",
+          recoveryToken: rootBootToken,
         });
         const recoveredRoot = (await rootRecovery.json()) as {
           tree: string;
@@ -632,7 +632,7 @@ describe("daemon end-to-end", () => {
         expect(staleWorker.status).toBe(403);
         const workerRecovery = await post(`${daemonUrl}/legion/v1/worker-session`, {
           sessionId: "child-worker-session",
-          agentId: "child-worker",
+          recoveryToken: workerSpawnToken,
         });
         const recoveredWorker = (await workerRecovery.json()) as {
           tree: string;

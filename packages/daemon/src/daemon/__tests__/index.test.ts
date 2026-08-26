@@ -166,7 +166,7 @@ function config(stateDir: string): DaemonConfig {
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },
-    githubApps: {},
+    githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     stateDir,
   };
 }
@@ -437,20 +437,7 @@ describe("startDaemon", () => {
       );
       const beforeReady = await fetch(`http://127.0.0.1:${second.server.port}/legion/v1/state`);
       expect(beforeReady.status).toBe(200);
-      expect(await beforeReady.json()).toMatchObject({
-        roles: {},
-        controllerHeldEvents: [
-          {
-            role: controller,
-            payloadJson: JSON.stringify({
-              type: "triage",
-              issue: formatIssueKey("acme", "widgets", 42),
-              preexistingChildren: [],
-            }),
-            eventId: "lost-triage",
-          },
-        ],
-      });
+      expect(await beforeReady.json()).toEqual({ project: daemonConfig.project });
 
       const ready = async () =>
         fetch(`http://127.0.0.1:${second?.server.port}/legion/v1/controller/ready`, {
@@ -476,9 +463,7 @@ describe("startDaemon", () => {
       expect((await ready()).status).toBe(200);
       expect(publications).toHaveLength(1);
       const afterReady = await fetch(`http://127.0.0.1:${second.server.port}/legion/v1/state`);
-      expect(await afterReady.json()).toMatchObject({
-        controllerHeldEvents: [],
-      });
+      expect(await afterReady.json()).toEqual({ project: daemonConfig.project });
     } finally {
       await first?.stop();
       await second?.stop();
@@ -549,10 +534,7 @@ describe("startDaemon", () => {
 
       const response = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/state`);
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
-        version: 6,
-        project: "acme1",
-      });
+      expect(await response.json()).toEqual({ project: "acme1" });
       expect(nats.subscriptions.map((subscription) => subscription.subject)).toEqual([
         "notifications.github.>",
         "notifications.slack.*.*.mention",
@@ -596,6 +578,16 @@ describe("startDaemon", () => {
               };
             },
             resolveDaemonEnvironment: async () => daemonEnvironment,
+            tokenManager: {
+              getToken: async () => ({
+                token: "test-token",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implementer[bot]",
+                  email: "1+legion-implementer[bot]@users.noreply.github.com",
+                },
+              }),
+            },
             loadState: async () => {
               loadedState = true;
               return newLegionState(daemonConfig.project, daemonConfig.admissionCap);

@@ -11,17 +11,22 @@ const requiredEnv = {
 
 describe("daemon config", () => {
   it("derives the typed lifecycle config from environment", () => {
-    const config = loadConfig({
-      ...requiredEnv,
-      LEGION_DAEMON_PORT: "14000",
-      LEGION_BOARD_PROJECT_IDS: "PVT_alpha,PVT_beta",
-      LEGION_APP_LOGINS: "legion-implement[bot],legion-review[bot]",
-      LEGION_MAX_FIX_ATTEMPTS: "5",
-      LEGION_ADMISSION_CAP: "7",
-      LEGION_MAX_RECURSION_DEPTH: "11",
-      LEGION_LINGER_HOURS: "48",
-      LEGION_WORKER_BUDGET: "9",
-      LEGION_OMP_INVOCATION: "custom-omp-from-env",
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        LEGION_DAEMON_PORT: "14000",
+        LEGION_BOARD_PROJECT_IDS: "PVT_alpha,PVT_beta",
+        LEGION_APP_LOGINS: "legion-implement[bot],legion-review[bot]",
+        LEGION_MAX_FIX_ATTEMPTS: "5",
+        LEGION_ADMISSION_CAP: "7",
+        LEGION_MAX_RECURSION_DEPTH: "11",
+        LEGION_LINGER_HOURS: "48",
+        LEGION_WORKER_BUDGET: "9",
+        LEGION_OMP_INVOCATION: "custom-omp-from-env",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
     });
 
     expect(config).toMatchObject({

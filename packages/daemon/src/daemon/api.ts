@@ -94,6 +94,18 @@ interface Grant {
   expiresAt: number;
 }
 
+interface BootToken {
+  tree: IssueKey;
+  generation: number;
+  sessionId?: string;
+}
+
+interface MergeGatePrSnapshot {
+  repo: `${string}/${string}`;
+  raw: Record<string, unknown>;
+  head: { ref: string; sha: string };
+}
+
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -111,6 +123,33 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 type ContractSchema = { parse(value: unknown): unknown };
+
+const REQUEST_SCHEMAS: Record<string, ContractSchema> = {
+  "/legion/v1/process/started": LegionDaemonApi.ProcessStarted.request,
+  "/legion/v1/process/ready": LegionDaemonApi.ProcessReady.request,
+  "/legion/v1/merge-gate": LegionDaemonApi.MergeGate.request,
+  "/legion/v1/process/exit": LegionDaemonApi.ProcessExit.request,
+  "/legion/v1/spawn-token": LegionDaemonApi.SpawnToken.request,
+  "/legion/v1/issues": LegionDaemonApi.IssueCreate.request,
+  "/legion/v1/waves/release": LegionDaemonApi.WaveRelease.request,
+  "/legion/v1/issues/comment": LegionDaemonApi.Comment.request,
+  "/legion/v1/issues/body": LegionDaemonApi.PostBody.request,
+  "/legion/v1/issues/labels": LegionDaemonApi.Labels.request,
+  "/legion/v1/issues/close": LegionDaemonApi.IssueClose.request,
+  "/legion/v1/escalate": LegionDaemonApi.Escalate.request,
+  "/legion/v1/dispatch-threads": LegionDaemonApi.DispatchThread.request,
+  "/legion/v1/phase": LegionDaemonApi.Phase.request,
+  "/legion/v1/worker-session": LegionDaemonApi.WorkerSession.request,
+  "/legion/v1/role-backing": LegionDaemonApi.RoleBacking.request,
+  "/legion/v1/provisioning-credential": LegionDaemonApi.ProvisioningCredential.request,
+  "/legion/v1/grants": LegionDaemonApi.Grant.request,
+  "/legion/v1/git-credential": LegionDaemonApi.GitHubToken.request,
+  "/legion/v1/gh-token": LegionDaemonApi.GitHubToken.request,
+  "/legion/v1/controller/ready": LegionDaemonApi.ControllerReady.request,
+  "/legion/v1/gates/approve": LegionDaemonApi.GatesApprove.request,
+  "/legion/v1/admission": LegionDaemonApi.Admission.request,
+  "/legion/v1/backlog": LegionDaemonApi.Backlog.request,
+};
 
 function validateContractRequest(schema: ContractSchema, body: Record<string, unknown>): void {
   try {
@@ -252,10 +291,14 @@ function matchingHeldEvent(state: LegionState, issue: IssueKey, role: string): b
 }
 
 export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): LegionApi {
+  if (config.gates.merge === "human" && (!config.appLogins || config.appLogins.length === 0)) {
+    throw new Error("gates.merge=human requires at least one configured GitHub App login");
+  }
+
   const runner = deps.runner ?? defaultRunner;
   const now = config.now ?? Date.now;
   const capabilities = new Map<string, SessionCapability>();
-  const bootTokens = new Map<string, { tree: IssueKey; generation: number }>();
+  const bootTokens = new Map<string, BootToken>();
   const grants = new Map<string, Grant>();
   let controllerReady = false;
   const save = async (): Promise<void> => {
@@ -311,15 +354,12 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     }
     return result.stdout;
   };
-  const recoverPrForMergeGate = async (
-    tree: IssueKey,
-    number: number
-  ): Promise<LegionState["prs"][string] | undefined> => {
+  const fetchMergeGatePr = async (tree: IssueKey, number: number): Promise<MergeGatePrSnapshot> => {
     const treeIssue = parseIssueKey(tree);
     if (!treeIssue) {
       throw new Error(`Invalid issue key in Legion state: ${tree}`);
     }
-    const repo = `${treeIssue.owner}/${treeIssue.repo}` as const;
+    const repo = `${treeIssue.owner}/${treeIssue.repo}` as `${string}/${string}`;
     const raw = asRecord(
       JSON.parse(await gh(tree, ["gh", "api", `repos/${repo}/pulls/${number}`]))
     );
@@ -330,6 +370,19 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     if (typeof head.ref !== "string" || typeof head.sha !== "string") {
       throw new Error(`GitHub PR #${number} has an invalid head`);
     }
+    return { repo, raw, head: { ref: head.ref, sha: head.sha } };
+  };
+
+  const recoverPrForMergeGate = async (
+    tree: IssueKey,
+    number: number,
+    snapshot: MergeGatePrSnapshot
+  ): Promise<LegionState["prs"][string] | undefined> => {
+    const treeIssue = parseIssueKey(tree);
+    if (!treeIssue) {
+      throw new Error(`Invalid issue key in Legion state: ${tree}`);
+    }
+    const { repo, raw, head } = snapshot;
     const branchMatch = /^legion\/issue-(\d+)$/.exec(head.ref);
     let key = branchMatch
       ? formatIssueKey(treeIssue.owner, treeIssue.repo, Number(branchMatch[1]))
@@ -505,15 +558,16 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       const url = new URL(request.url);
       const pathname = url.pathname;
       if (request.method === "GET" && pathname === "/legion/v1/state") {
-        const state = structuredClone(deps.state);
-        delete state.controllerCapabilityHash;
-        const { spawnCapabilities: _spawnCapabilities, ...redacted } = state;
-        return Response.json(validateContractResponse(LegionDaemonApi.State.response, redacted));
+        return Response.json(
+          validateContractResponse(LegionDaemonApi.State.response, { project: deps.state.project })
+        );
       }
       if (request.method !== "POST") {
         throw new HttpError(404, "Not found");
       }
       const body = asRecord(await request.json());
+      const requestSchema = REQUEST_SCHEMAS[pathname];
+      if (requestSchema) validateContractRequest(requestSchema, body);
 
       if (pathname === "/legion/v1/process/started") {
         const tree = requireTree(body);
@@ -527,11 +581,11 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           throw new HttpError(403, "Invalid root boot token");
         }
         const boot = bootTokens.get(bootToken);
-        if (!boot || boot.tree !== tree || boot.generation !== generation) {
+        if (!boot || boot.tree !== tree || boot.generation !== generation || boot.sessionId) {
           throw new HttpError(403, "Invalid root boot token");
         }
-        bootTokens.delete(bootToken);
         const rootSessionId = requiredString(body, "rootSessionId");
+        boot.sessionId = rootSessionId;
         const agentId = requiredString(body, "agentId");
         const ompSessionFile = requiredString(body, "ompSessionFile");
         if (!treeState.locator) {
@@ -561,7 +615,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           secretHash: secretHash(secret),
         });
         await save();
-        validateContractRequest(LegionDaemonApi.ProcessStarted.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.ProcessStarted.response, {
             roleTokens: roles,
@@ -576,7 +629,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         requireArchitectCapability(body, tree);
         await deps.onTreeReady?.(tree);
         await deps.processManager.markTreeReady(tree);
-        validateContractRequest(LegionDaemonApi.ProcessReady.request, body);
         return Response.json(validateContractResponse(LegionDaemonApi.ProcessReady.response, {}));
       }
 
@@ -587,12 +639,13 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           throw new HttpError(409, "Human merge gate is disabled");
         }
         const number = requiredNumber(body, "pr");
+        const snapshot = await fetchMergeGatePr(tree, number);
         let matchingPrs = Object.values(deps.state.prs).filter(
           (candidate) =>
             candidate.number === number && treeContains(deps.state, tree, candidate.key)
         );
         if (matchingPrs.length === 0) {
-          const recovered = await recoverPrForMergeGate(tree, number);
+          const recovered = await recoverPrForMergeGate(tree, number, snapshot);
           if (!recovered) {
             throw new HttpError(404, `No PR #${number} belongs to tree ${tree}`);
           }
@@ -603,6 +656,29 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         }
         const pr = matchingPrs[0];
         if (!pr) throw new Error("Matching merge-gate PR disappeared");
+        if (pr.repo !== snapshot.repo) {
+          throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
+        }
+        if (pr.headSha !== snapshot.head.sha) {
+          if (
+            Object.values(pr.checks).some(
+              (check) =>
+                check.status === "completed" &&
+                check.conclusion !== "success" &&
+                check.conclusion !== "neutral" &&
+                check.conclusion !== "skipped"
+            )
+          ) {
+            pr.fixAttempts += 1;
+          }
+          pr.headSha = snapshot.head.sha;
+          pr.checks = {};
+          pr.firstRedEmitted = false;
+          pr.settledRedEmitted = false;
+          pr.greenEmitted = false;
+          delete pr.reviewDecision;
+          await save();
+        }
         const approval = await getApprovalState(
           { repo: pr.repo, pr: pr.number, sha: pr.headSha },
           {
@@ -612,7 +688,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
             gatesMerge: config.gates.merge,
           }
         );
-        validateContractRequest(LegionDaemonApi.MergeGate.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.MergeGate.response, {
             approved: approval === "success",
@@ -636,7 +711,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           await deps.processManager.markProcessDead(tree);
         }
         await save();
-        validateContractRequest(LegionDaemonApi.ProcessExit.request, body);
         return Response.json(validateContractResponse(LegionDaemonApi.ProcessExit.response, {}));
       }
 
@@ -651,7 +725,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           role,
         };
         await save();
-        validateContractRequest(LegionDaemonApi.SpawnToken.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.SpawnToken.response, {
             spawnToken,
@@ -725,7 +798,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         };
         deps.state.issues[tree]?.children.push(child);
         await save();
-        validateContractRequest(LegionDaemonApi.IssueCreate.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.IssueCreate.response, {
             issue: child,
@@ -773,7 +845,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         }
         treeState.heldEvents = retained;
         await save();
-        validateContractRequest(LegionDaemonApi.WaveRelease.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.WaveRelease.response, {
             released: children,
@@ -802,7 +873,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           throw new Error("GitHub comment create returned invalid response");
         }
         await save();
-        validateContractRequest(LegionDaemonApi.Comment.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.Comment.response, {
             commentId,
@@ -824,7 +894,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           `body=${requiredString(body, "body")}`,
         ]);
         await save();
-        validateContractRequest(LegionDaemonApi.PostBody.request, body);
         return Response.json(validateContractResponse(LegionDaemonApi.PostBody.response, {}));
       }
 
@@ -852,7 +921,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         }
         node.labels = [...new Set([...node.labels, ...add])];
         await save();
-        validateContractRequest(LegionDaemonApi.Labels.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.Labels.response, {
             labels: node.labels,
@@ -897,7 +965,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           (thread) => thread.issue !== issue
         );
         if (issue === tree) deps.processManager.beginLinger(tree);
-        validateContractRequest(LegionDaemonApi.IssueClose.request, body);
         await save();
         return Response.json(validateContractResponse(LegionDaemonApi.IssueClose.response, {}));
       }
@@ -918,7 +985,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           kind,
           context: body.context,
         };
-        validateContractRequest(LegionDaemonApi.Escalate.request, body);
         await deps.onControllerEvent(controllerEvent);
         return Response.json(validateContractResponse(LegionDaemonApi.Escalate.response, {}));
       }
@@ -969,7 +1035,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           deps.state.dispatchThreads.push(entry);
         }
         await save();
-        validateContractRequest(LegionDaemonApi.DispatchThread.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.DispatchThread.response, dispatched)
         );
@@ -1014,7 +1079,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         deps.state.attribution.push({ issue, phase, sessionId });
         const lease = await tokenForIssue(issue, appRoleForLegionRole(role));
         await save();
-        validateContractRequest(LegionDaemonApi.Phase.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.Phase.response, {
             secret,
@@ -1026,21 +1090,38 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
 
       if (pathname === "/legion/v1/worker-session") {
         const sessionId = requiredString(body, "sessionId");
-        const agentId = requiredString(body, "agentId");
-        const claim = Object.values(deps.state.roles).find(
-          (candidate) =>
-            "issue" in candidate &&
-            candidate.sessionId === sessionId &&
-            candidate.agentId === agentId
-        );
-        if (!claim || !("issue" in claim)) {
-          throw new HttpError(403, "Worker session is not registered for this agent");
-        }
-        const tree = Object.values(deps.state.trees).find((candidate) =>
-          treeContains(deps.state, candidate.root, claim.issue)
-        )?.root;
-        if (!tree) {
-          throw new HttpError(404, "Worker issue is not in an active tree");
+        const recoveryToken = requiredString(body, "recoveryToken");
+        const boot = bootTokens.get(recoveryToken);
+        const spawn = deps.state.spawnCapabilities[spawnCapabilityKey(recoveryToken)];
+        const rootClaim = boot
+          ? deps.state.roles[roleToken(deps.state.project, boot.tree, "architect")]
+          : undefined;
+        const workerClaim = spawn
+          ? Object.values(deps.state.roles).find(
+              (candidate) =>
+                "issue" in candidate &&
+                candidate.sessionId === sessionId &&
+                candidate.issue === spawn.issue &&
+                candidate.role === spawn.role
+            )
+          : undefined;
+        const claim =
+          boot?.sessionId === sessionId &&
+          rootClaim &&
+          "issue" in rootClaim &&
+          rootClaim.issue === boot.tree &&
+          rootClaim.sessionId === sessionId
+            ? rootClaim
+            : workerClaim;
+        const tree = boot?.sessionId === sessionId ? boot.tree : spawn?.tree;
+        if (
+          !claim ||
+          !("issue" in claim) ||
+          !tree ||
+          !deps.state.trees[tree] ||
+          !treeContains(deps.state, tree, claim.issue)
+        ) {
+          throw new HttpError(403, "Worker session is not bound to a daemon-issued recovery token");
         }
         const role = legionRole(claim.role);
         const secret = randomUUID();
@@ -1050,7 +1131,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           role,
           secretHash: secretHash(secret),
         });
-        validateContractRequest(LegionDaemonApi.WorkerSession.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.WorkerSession.response, {
             tree,
@@ -1083,7 +1163,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           agentId,
         };
         await deps.processManager.registerRoleBacking(tree, issue, role, agentId);
-        validateContractRequest(LegionDaemonApi.RoleBacking.request, body);
         await save();
         return Response.json(validateContractResponse(LegionDaemonApi.RoleBacking.response, {}));
       }
@@ -1092,7 +1171,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         const { tree, issue } = requireTreeIssue(body);
         requireArchitectCapability(body, tree);
         const lease = await tokenForIssue(issue, "implement");
-        validateContractRequest(LegionDaemonApi.ProvisioningCredential.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.ProvisioningCredential.response, {
             token: lease.token,
@@ -1106,7 +1184,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         const grantId = randomUUID();
         const expiresAt = now() + GRANT_TTL_MS;
         grants.set(grantId, { issue, role: capability.role, expiresAt });
-        validateContractRequest(LegionDaemonApi.Grant.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.Grant.response, {
             grantId,
@@ -1124,7 +1201,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       }
 
       if (pathname === "/legion/v1/gh-token") {
-        validateContractRequest(LegionDaemonApi.GitHubToken.request, body);
         const grant = resolveGrant(body);
         const lease = await tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
         return Response.json(
@@ -1149,7 +1225,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           controllerReady = true;
           await deps.onControllerReady();
         }
-        validateContractRequest(LegionDaemonApi.ControllerReady.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.ControllerReady.response, {})
         );
@@ -1178,7 +1253,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
             "human-approved",
           ]),
         ];
-        validateContractRequest(LegionDaemonApi.GatesApprove.request, body);
         await save();
         return Response.json(validateContractResponse(LegionDaemonApi.GatesApprove.response, {}));
       }
@@ -1191,7 +1265,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         }
         const result = deps.processManager.admit(issue);
         await save();
-        validateContractRequest(LegionDaemonApi.Admission.request, body);
         return Response.json(
           validateContractResponse(LegionDaemonApi.Admission.response, {
             result,
@@ -1218,7 +1291,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         ]);
         node.labels = [...new Set([...node.labels, "legion-backlog"])];
         node.backlogMarker = marker;
-        validateContractRequest(LegionDaemonApi.Backlog.request, body);
         await save();
         return Response.json(validateContractResponse(LegionDaemonApi.Backlog.response, {}));
       }
@@ -1251,6 +1323,12 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       }
       const bootToken = randomUUID();
       bootTokens.set(bootToken, { tree, generation });
+      deps.state.spawnCapabilities[spawnCapabilityKey(bootToken)] = {
+        tree,
+        issue: tree,
+        role: "architect",
+      };
+      await save();
       return bootToken;
     },
     mintControllerCapability: async () => {

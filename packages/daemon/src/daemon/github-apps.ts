@@ -15,6 +15,8 @@ const MODE_TO_ROLE: Record<string, GitHubAppRole> = {
 
 /** Token refresh window — regenerate when within 5 minutes of expiry */
 const REFRESH_WINDOW_MS = 5 * 60 * 1000;
+const MISSING_INSTALLATION_TTL_MS = 30_000;
+
 const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
 const INSTALLATIONS_PER_PAGE = 100;
 const GITHUB_APP_URL = "https://api.github.com/app";
@@ -145,8 +147,9 @@ export class TokenManager {
   private readonly cache = new Map<string, CachedToken>();
   private readonly pending = new Map<string, Promise<CachedToken>>();
   private readonly installationCache = new Map<GitHubAppRole, Map<string, string>>();
-  private readonly missingInstallationCache = new Map<GitHubAppRole, Set<string>>();
+  private readonly missingInstallationCache = new Map<GitHubAppRole, Map<string, number>>();
   private readonly fetchFn: GitHubFetch;
+  private readonly now: () => number;
   private readonly gitIdentityCache = new Map<string, { name: string; email: string }>();
   private readonly pendingGitIdentities = new Map<
     string,
@@ -157,9 +160,11 @@ export class TokenManager {
     private readonly config: GitHubAppsConfig,
     opts?: {
       fetchFn?: GitHubFetch;
+      now?: () => number;
     }
   ) {
     this.fetchFn = opts?.fetchFn ?? globalThis.fetch;
+    this.now = opts?.now ?? Date.now;
   }
 
   isConfigured(role: GitHubAppRole): boolean {
@@ -287,22 +292,27 @@ export class TokenManager {
       return cachedId;
     }
 
-    const missingOwners = this.missingInstallationCache.get(role) ?? new Set<string>();
+    const missingOwners = this.missingInstallationCache.get(role) ?? new Map<string, number>();
     this.missingInstallationCache.set(role, missingOwners);
-    if (missingOwners.has(ownerKey)) {
+    const missingUntil = missingOwners.get(ownerKey);
+    if (missingUntil !== undefined && missingUntil > this.now()) {
       return undefined;
     }
+    missingOwners.delete(ownerKey);
 
     await this.discoverInstallations(roleConfig, cache);
     const discoveredId = cache.get(ownerKey);
     if (discoveredId) {
+      missingOwners.delete(ownerKey);
       return discoveredId;
     }
 
     await this.discoverInstallations(roleConfig, cache);
     const refreshedId = cache.get(ownerKey);
     if (!refreshedId) {
-      missingOwners.add(ownerKey);
+      missingOwners.set(ownerKey, this.now() + MISSING_INSTALLATION_TTL_MS);
+    } else {
+      missingOwners.delete(ownerKey);
     }
     return refreshedId;
   }

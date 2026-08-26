@@ -529,6 +529,9 @@ export function resolveDaemonConfig(
     undefined,
     {}
   );
+  if (parsedGates.merge === "human" && Object.keys(githubApps.value).length === 0) {
+    throw new Error("gates.merge=human requires at least one configured GitHub App login");
+  }
   const stateDir = resolveValue(
     opts.cliOverrides?.stateDir,
     fileString(fields, "stateDir"),

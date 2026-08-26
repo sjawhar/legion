@@ -6,12 +6,12 @@ const legionRole = z.enum(LEGION_ROLES);
 const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
   message: "Required",
 });
-const architectCapability = z.object({
+const architectCapability = z.strictObject({
   tree: nonEmptyString,
   sessionId: nonEmptyString,
   secret: nonEmptyString,
 });
-const controllerIssue = z.object({
+const controllerIssue = z.strictObject({
   secret: nonEmptyString,
   issue: nonEmptyString,
 });
@@ -21,11 +21,11 @@ export const LegionDaemonApi = {
     response: z.object({ project: nonEmptyString }),
   },
   ControllerReady: {
-    request: z.object({ secret: nonEmptyString, sessionId: nonEmptyString }),
+    request: z.strictObject({ secret: nonEmptyString, sessionId: nonEmptyString }),
     response: z.object({}),
   },
   ProcessStarted: {
-    request: z.object({
+    request: z.strictObject({
       tree: nonEmptyString,
       generation: z.number().int(),
       rootSessionId: nonEmptyString,
@@ -95,7 +95,7 @@ export const LegionDaemonApi = {
     response: z.object({}),
   },
   DispatchThread: {
-    request: z.object({
+    request: z.strictObject({
       tree: nonEmptyString,
       issue: nonEmptyString,
       role: legionRole,
@@ -118,7 +118,7 @@ export const LegionDaemonApi = {
     response: z.object({ token: nonEmptyString }),
   },
   RoleBacking: {
-    request: z.object({
+    request: z.strictObject({
       tree: nonEmptyString,
       issue: nonEmptyString,
       role: legionRole,
@@ -129,7 +129,7 @@ export const LegionDaemonApi = {
     response: z.object({}),
   },
   Phase: {
-    request: z.object({
+    request: z.strictObject({
       tree: nonEmptyString,
       issue: nonEmptyString,
       phase: nonEmptyString,
@@ -143,9 +143,9 @@ export const LegionDaemonApi = {
     }),
   },
   WorkerSession: {
-    request: z.object({
+    request: z.strictObject({
       sessionId: nonEmptyString,
-      agentId: nonEmptyString,
+      recoveryToken: nonEmptyString,
     }),
     response: z.object({
       tree: nonEmptyString,
@@ -167,7 +167,7 @@ export const LegionDaemonApi = {
     response: z.object({}),
   },
   Grant: {
-    request: z.object({
+    request: z.strictObject({
       tree: nonEmptyString,
       issue: nonEmptyString,
       sessionId: nonEmptyString,
@@ -176,7 +176,7 @@ export const LegionDaemonApi = {
     response: z.object({ grantId: nonEmptyString, expiresAt: nonEmptyString }),
   },
   GitHubToken: {
-    request: z.object({ grantId: nonEmptyString }),
+    request: z.strictObject({ grantId: nonEmptyString }),
     response: z.object({ token: nonEmptyString, appLogin: z.string().endsWith("[bot]") }),
   },
 } as const;

@@ -241,6 +241,7 @@ describe("Legion HTTP API", () => {
         port: 0,
         hostname: "127.0.0.1",
         gates: options?.gates ?? { design: "root-issues", merge: "human" },
+        appLogins: ["legion-implement[bot]", "legion-review[bot]"],
         now: () => now,
       },
       deps
@@ -363,6 +364,16 @@ describe("Legion HTTP API", () => {
     await start({
       runner: async (command) => {
         commands.push(command);
+        if (command[2] === "repos/acme/widgets/pulls/17") {
+          return {
+            stdout: JSON.stringify({
+              number: 17,
+              head: { ref: "legion/issue-2", sha: "approved-head" },
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
         return {
           stdout: JSON.stringify([
             {
@@ -402,7 +413,10 @@ describe("Legion HTTP API", () => {
       status: 200,
       body: { approved: true, pr: 17, headSha: "approved-head" },
     });
-    expect(commands).toEqual([["gh", "api", "repos/acme/widgets/pulls/17/reviews"]]);
+    expect(commands).toEqual([
+      ["gh", "api", "repos/acme/widgets/pulls/17"],
+      ["gh", "api", "repos/acme/widgets/pulls/17/reviews"],
+    ]);
   });
   it("reconstructs a missed Legion PR registration from its durable branch for a merge gate", async () => {
     await start({
@@ -695,7 +709,7 @@ describe("Legion HTTP API", () => {
       tree: root,
       generation: 3,
     });
-    expect(unauthenticatedExit.response.status).toBe(403);
+    expect(unauthenticatedExit.response.status).toBe(400);
     expect(releaseSlots).toEqual([]);
     const exited = await json("/legion/v1/process/exit", {
       tree: root,
@@ -717,7 +731,7 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/root.json",
     };
 
-    expect((await json("/legion/v1/process/started", input)).response.status).toBe(403);
+    expect((await json("/legion/v1/process/started", input)).response.status).toBe(400);
     const bootToken = await api?.mintBootToken(root, 3);
     if (!bootToken) throw new Error("boot nonce was not minted");
     expect(
@@ -920,18 +934,18 @@ describe("Legion HTTP API", () => {
     const unauthenticatedGate = await json("/legion/v1/gates/approve", {
       issue: root,
     });
-    expect(unauthenticatedGate.response.status).toBe(403);
+    expect(unauthenticatedGate.response.status).toBe(400);
     const unauthenticatedAdmission = await json("/legion/v1/admission", {
       issue: root,
     });
-    expect(unauthenticatedAdmission.response.status).toBe(403);
+    expect(unauthenticatedAdmission.response.status).toBe(400);
     const unauthenticatedBacklog = await json("/legion/v1/backlog", {
       issue: root,
       marker: "needs design",
     });
-    expect(unauthenticatedBacklog.response.status).toBe(403);
+    expect(unauthenticatedBacklog.response.status).toBe(400);
     const unauthenticatedReady = await json("/legion/v1/controller/ready", {});
-    expect(unauthenticatedReady.response.status).toBe(403);
+    expect(unauthenticatedReady.response.status).toBe(400);
     const missingSessionReady = await json("/legion/v1/controller/ready", {
       secret: controllerSecret,
     });
@@ -1122,7 +1136,7 @@ describe("Legion HTTP API", () => {
     ];
 
     for (const write of lifecycleWrites) {
-      expect((await json(write.path, write.body)).response.status).toBe(403);
+      expect((await json(write.path, write.body)).response.status).toBe(400);
       expect(
         (
           await json(write.path, {
@@ -1213,7 +1227,7 @@ describe("Legion HTTP API", () => {
       urgency: "blocking",
     };
 
-    expect((await json("/legion/v1/dispatch-threads", input)).response.status).toBe(403);
+    expect((await json("/legion/v1/dispatch-threads", input)).response.status).toBe(400);
     expect(
       (
         await json("/legion/v1/dispatch-threads", {
@@ -1642,7 +1656,7 @@ describe("Legion HTTP API", () => {
 
     const recovered = await curlJson<WorkerSessionResponse>("/legion/v1/worker-session", {
       sessionId: "ses_tester",
-      agentId: "agent-tester",
+      recoveryToken: spawn.body.spawnToken,
     });
     expect(recovered.status).toBe(200);
     expect(recovered.body).toEqual({
@@ -1655,7 +1669,7 @@ describe("Legion HTTP API", () => {
       (
         await json("/legion/v1/worker-session", {
           sessionId: "ses_tester",
-          agentId: "agent-imposter",
+          recoveryToken: "not-a-daemon-issued-token",
         })
       ).response.status
     ).toBe(403);
@@ -1667,7 +1681,7 @@ describe("Legion HTTP API", () => {
         sessionId: "ses_tester",
         ...(secret === undefined ? {} : { secret }),
       });
-      expect(denied.response.status).toBe(403);
+      expect(denied.response.status).toBe(secret === undefined ? 400 : 403);
     }
 
     const grant = await curlJson<GrantResponse>("/legion/v1/grants", {
@@ -1727,7 +1741,7 @@ describe("Legion HTTP API", () => {
     expect(stale.response.status).toBe(403);
     const recovered = await json<WorkerSessionResponse>("/legion/v1/worker-session", {
       sessionId: "ses_root",
-      agentId: "root-transcript",
+      recoveryToken: bootToken,
     });
     expect(recovered.response.status).toBe(200);
     expect(recovered.body).toEqual({
