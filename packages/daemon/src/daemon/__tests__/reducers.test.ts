@@ -680,6 +680,25 @@ describe("reduceGithubEvent", () => {
       headSha: "head-sha",
     });
   });
+  it("registers a Legion PR on synchronization when its opened event was missed", () => {
+    const state = rootState();
+    attachChild(state);
+
+    expect(
+      effects(state, {
+        action: "synchronize",
+        pull_request: {
+          number: prNumber,
+          head: { ref: "legion/issue-2", sha: "recovered-head" },
+        },
+      })
+    ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "recovered-head" }]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      key: child,
+      headSha: "recovered-head",
+    });
+    expect(state.prByBranch[`${repo}@legion/issue-2`]).toBe(`${repo}#${prNumber}`);
+  });
 
   it("resets PR checks and approval state on synchronization, counts a red-head retry, and rechecks approval", () => {
     const state = rootState();

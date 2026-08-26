@@ -314,6 +314,34 @@ function issueForBranch(repo: string, branch: string): IssueKey | undefined {
   return match ? keyFor(repo, Number(match[1])) : undefined;
 }
 
+function registerPr(
+  state: LegionState,
+  repo: string,
+  number: number,
+  branch: string | undefined,
+  sha: string | undefined,
+  issuedAt: number
+): PrState | undefined {
+  const key = branch ? issueForBranch(repo, branch) : undefined;
+  if (!key || !state.issues[key] || !sha) return undefined;
+  const prKey = `${repo}#${number}`;
+  const pr: PrState = {
+    key,
+    repo: repo as `${string}/${string}`,
+    number,
+    headSha: sha,
+    checks: {},
+    firstRedEmitted: false,
+    settledRedEmitted: false,
+    greenEmitted: false,
+    lastEventAt: issuedAt,
+    fixAttempts: 0,
+  };
+  state.prs[prKey] = pr;
+  state.prByBranch[`${repo}@${branch}`] = prKey;
+  return pr;
+}
+
 function removeBranchMappings(state: LegionState, prKey: string): void {
   for (const [branch, mapped] of Object.entries(state.prByBranch)) {
     if (mapped === prKey) delete state.prByBranch[branch];
@@ -631,31 +659,21 @@ function pullRequest(
   const sha = stringValue(head?.sha);
 
   if (payload.action === "opened") {
-    const key = branch ? issueForBranch(repo, branch) : undefined;
-    if (!key || !state.issues[key] || !sha) return [];
-    state.prs[prKey] = {
-      key,
-      repo: repo as `${string}/${string}`,
-      number,
-      headSha: sha,
-      checks: {},
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: false,
-      lastEventAt: envelope.issued_at,
-      fixAttempts: 0,
-    };
-    state.prByBranch[`${repo}@${branch}`] = prKey;
+    const pr = registerPr(state, repo, number, branch, sha, envelope.issued_at);
+    if (!pr) return [];
     return route(
       state,
-      key,
+      pr.key,
       "implementer",
       { type: "pr-opened", pr: number, url: stringValue(raw.html_url) ?? "" },
       envelope
     );
   }
 
-  const pr = state.prs[prKey];
+  let pr: PrState | undefined = state.prs[prKey];
+  if (!pr && payload.action === "synchronize") {
+    pr = registerPr(state, repo, number, branch, sha, envelope.issued_at);
+  }
   if (!pr) return [];
   if (payload.action === "synchronize") {
     if (!sha) return [];

@@ -311,6 +311,66 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     }
     return result.stdout;
   };
+  const recoverPrForMergeGate = async (
+    tree: IssueKey,
+    number: number
+  ): Promise<LegionState["prs"][string] | undefined> => {
+    const treeIssue = parseIssueKey(tree);
+    if (!treeIssue) {
+      throw new Error(`Invalid issue key in Legion state: ${tree}`);
+    }
+    const repo = `${treeIssue.owner}/${treeIssue.repo}` as const;
+    const raw = asRecord(
+      JSON.parse(await gh(tree, ["gh", "api", `repos/${repo}/pulls/${number}`]))
+    );
+    if (raw.number !== number) {
+      throw new Error(`GitHub returned PR #${String(raw.number)} for requested PR #${number}`);
+    }
+    const head = asRecord(raw.head);
+    if (typeof head.ref !== "string" || typeof head.sha !== "string") {
+      throw new Error(`GitHub PR #${number} has an invalid head`);
+    }
+    const branchMatch = /^legion\/issue-(\d+)$/.exec(head.ref);
+    let key = branchMatch
+      ? formatIssueKey(treeIssue.owner, treeIssue.repo, Number(branchMatch[1]))
+      : undefined;
+    if (!key || !deps.state.issues[key] || !treeContains(deps.state, tree, key)) {
+      const closingIssues = new Set<IssueKey>();
+      if (typeof raw.body === "string") {
+        for (const match of raw.body.matchAll(
+          /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi
+        )) {
+          const candidate = formatIssueKey(treeIssue.owner, treeIssue.repo, Number(match[1]));
+          if (deps.state.issues[candidate] && treeContains(deps.state, tree, candidate)) {
+            closingIssues.add(candidate);
+          }
+        }
+      }
+      [key] = closingIssues;
+      if (closingIssues.size !== 1 || !key) return undefined;
+    }
+    const prKey = `${repo}#${number}`;
+    if (deps.state.prs[prKey]) {
+      return undefined;
+    }
+    const pr = {
+      key,
+      repo,
+      number,
+      headSha: head.sha,
+      checks: {},
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: false,
+      lastEventAt: now(),
+      fixAttempts: 0,
+    };
+    deps.state.prs[prKey] = pr;
+    deps.state.prByBranch[`${repo}@${head.ref}`] = prKey;
+    await save();
+    return pr;
+  };
+
   const dispatchThread = async (
     parent: string,
     subject: string,
@@ -527,12 +587,16 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
           throw new HttpError(409, "Human merge gate is disabled");
         }
         const number = requiredNumber(body, "pr");
-        const matchingPrs = Object.values(deps.state.prs).filter(
+        let matchingPrs = Object.values(deps.state.prs).filter(
           (candidate) =>
             candidate.number === number && treeContains(deps.state, tree, candidate.key)
         );
         if (matchingPrs.length === 0) {
-          throw new HttpError(404, `No PR #${number} belongs to tree ${tree}`);
+          const recovered = await recoverPrForMergeGate(tree, number);
+          if (!recovered) {
+            throw new HttpError(404, `No PR #${number} belongs to tree ${tree}`);
+          }
+          matchingPrs = [recovered];
         }
         if (matchingPrs.length > 1) {
           throw new HttpError(409, `PR #${number} is ambiguous within tree ${tree}`);

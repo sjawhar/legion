@@ -404,6 +404,183 @@ describe("Legion HTTP API", () => {
     });
     expect(commands).toEqual([["gh", "api", "repos/acme/widgets/pulls/17/reviews"]]);
   });
+  it("reconstructs a missed Legion PR registration from its durable branch for a merge gate", async () => {
+    await start({
+      runner: async (command) => {
+        commands.push(command);
+        if (command[2] === "repos/acme/widgets/pulls/17") {
+          return {
+            stdout: JSON.stringify({
+              number: 17,
+              body: "Closes #1",
+              head: { ref: "legion/issue-1", sha: "missed-head" },
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (command[2] === "repos/acme/widgets/pulls/17/reviews") {
+          return {
+            stdout: JSON.stringify([
+              {
+                user: { login: "sami" },
+                state: "APPROVED",
+                commit_id: "missed-head",
+              },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        throw new Error(`Unexpected GitHub command: ${command.join(" ")}`);
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const gate = await curlJson<{ approved: boolean; pr: number; headSha: string }>(
+      "/legion/v1/merge-gate",
+      {
+        tree: root,
+        pr: 17,
+        sessionId: "ses_root",
+        secret: started.body.secret,
+      }
+    );
+
+    expect(gate).toEqual({
+      status: 200,
+      body: { approved: true, pr: 17, headSha: "missed-head" },
+    });
+    expect(state.prs["acme/widgets#17"]).toMatchObject({
+      key: root,
+      repo: "acme/widgets",
+      number: 17,
+      headSha: "missed-head",
+    });
+    expect(state.prByBranch["acme/widgets@legion/issue-1"]).toBe("acme/widgets#17");
+    expect(commands).toEqual([
+      ["gh", "api", "repos/acme/widgets/pulls/17"],
+      ["gh", "api", "repos/acme/widgets/pulls/17/reviews"],
+    ]);
+  });
+  it("reconstructs a missed merge-gate registration from the PR closing issue", async () => {
+    await start({
+      runner: async (command) => {
+        commands.push(command);
+        if (command[2] === "repos/acme/widgets/pulls/19") {
+          return {
+            stdout: JSON.stringify({
+              number: 19,
+              body: "Closes #1",
+              head: { ref: "feature/recovered", sha: "body-head" },
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (command[2] === "repos/acme/widgets/pulls/19/reviews") {
+          return {
+            stdout: JSON.stringify([
+              {
+                user: { login: "sami" },
+                state: "APPROVED",
+                commit_id: "body-head",
+              },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        throw new Error(`Unexpected GitHub command: ${command.join(" ")}`);
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const gate = await curlJson<{ approved: boolean; pr: number; headSha: string }>(
+      "/legion/v1/merge-gate",
+      {
+        tree: root,
+        pr: 19,
+        sessionId: "ses_root",
+        secret: started.body.secret,
+      }
+    );
+
+    expect(gate).toEqual({
+      status: 200,
+      body: { approved: true, pr: 19, headSha: "body-head" },
+    });
+    expect(state.prs["acme/widgets#19"]?.key).toBe(root);
+    expect(commands).toEqual([
+      ["gh", "api", "repos/acme/widgets/pulls/19"],
+      ["gh", "api", "repos/acme/widgets/pulls/19/reviews"],
+    ]);
+  });
+
+  it("rejects an unrelated pull request after checking durable merge-gate linkage", async () => {
+    await start({
+      runner: async (command) => {
+        commands.push(command);
+        if (command[2] === "repos/acme/widgets/pulls/18") {
+          return {
+            stdout: JSON.stringify({
+              number: 18,
+              body: "An unrelated pull request",
+              head: { ref: "feature/unrelated", sha: "unrelated-head" },
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        throw new Error(`Unexpected GitHub command: ${command.join(" ")}`);
+      },
+    });
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+
+    const gate = await curlJson<{ error: string }>("/legion/v1/merge-gate", {
+      tree: root,
+      pr: 18,
+      sessionId: "ses_root",
+      secret: started.body.secret,
+    });
+
+    expect(gate).toEqual({
+      status: 404,
+      body: { error: "No PR #18 belongs to tree acme/widgets#1" },
+    });
+    expect(state.prs["acme/widgets#18"]).toBeUndefined();
+    expect(commands).toEqual([["gh", "api", "repos/acme/widgets/pulls/18"]]);
+  });
 
   it("drains each held event exactly once when a child wave releases", async () => {
     await start();
