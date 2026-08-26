@@ -4,6 +4,7 @@ import {
   formatIssueKey,
   type IssueKey,
   LEGION_ROLES,
+  type WorkerSessionResponse,
   type LegionRole,
   parseIssueKey,
   parseRoleToken,
@@ -82,7 +83,7 @@ type ToolCallEventResult = {
 };
 type RootBootstrap = { readonly role: string; readonly secret: string; readonly agentId: string };
 
-const workerBudgetPermits = new Map<string, () => void>();
+
 
 export function registerWorkerBudgetPermit(sessionID: string, release: () => void): void {
   if (workerBudgetPermits.has(sessionID)) {
@@ -126,22 +127,59 @@ type PendingLegionSpawn = {
   readonly release: () => void;
 };
 
-const pendingLegionSpawns = new Map<string, Set<PendingLegionSpawn>>();
-const pendingLegionSpawnsByToken = new Map<string, PendingLegionSpawn>();
-const rootBootstraps = new Map<string, Promise<RootBootstrap>>();
-let workerBudgetLimit: number | undefined;
-let workerBudgetInUse = 0;
-const workerBudgetWaiters: (() => void)[] = [];
+type WorkerRuntimeState = {
+  readonly budgetPermits: Map<string, () => void>;
+  readonly budgetAcquisitions: Map<string, Promise<void>>;
+  readonly pendingSpawns: Map<string, Set<PendingLegionSpawn>>;
+  readonly pendingSpawnsByToken: Map<string, PendingLegionSpawn>;
+  readonly rootBootstraps: Map<string, Promise<RootBootstrap>>;
+  readonly sessions: Map<string, WorkerSession>;
+  readonly budgetWaiters: (() => void)[];
+  budgetLimit: number | undefined;
+  budgetInUse: number;
+};
+
+// Task sessions load this extension through distinct module URLs, but their worker
+// reservations and role backing form one lifecycle within the OMP process.
+const workerRuntimeStateKey = Symbol.for("legion.envoy-omp-extension.worker-runtime-state");
+const sharedWorkerRuntime = globalThis as typeof globalThis & {
+  [key: symbol]: WorkerRuntimeState | undefined;
+};
+const existingWorkerRuntime = sharedWorkerRuntime[workerRuntimeStateKey];
+const workerRuntime: WorkerRuntimeState = existingWorkerRuntime ?? {
+  budgetPermits: new Map<string, () => void>(),
+  budgetAcquisitions: new Map<string, Promise<void>>(),
+  pendingSpawns: new Map<string, Set<PendingLegionSpawn>>(),
+  pendingSpawnsByToken: new Map<string, PendingLegionSpawn>(),
+  rootBootstraps: new Map<string, Promise<RootBootstrap>>(),
+  sessions: new Map<string, WorkerSession>(),
+  budgetWaiters: [],
+  budgetLimit: undefined,
+  budgetInUse: 0,
+};
+if (!existingWorkerRuntime) sharedWorkerRuntime[workerRuntimeStateKey] = workerRuntime;
+
+const workerBudgetPermits = workerRuntime.budgetPermits;
+const workerBudgetAcquisitions = workerRuntime.budgetAcquisitions;
+const pendingLegionSpawns = workerRuntime.pendingSpawns;
+const pendingLegionSpawnsByToken = workerRuntime.pendingSpawnsByToken;
+const rootBootstraps = workerRuntime.rootBootstraps;
+const workerSessions = workerRuntime.sessions;
+const workerBudgetWaiters = workerRuntime.budgetWaiters;
 
 async function acquireWorkerBudget(limit: number): Promise<() => void> {
-  if (workerBudgetLimit === undefined) workerBudgetLimit = limit;
-  if (workerBudgetLimit !== limit && workerBudgetInUse === 0 && workerBudgetWaiters.length === 0) {
-    workerBudgetLimit = limit;
+  if (workerRuntime.budgetLimit === undefined) workerRuntime.budgetLimit = limit;
+  if (
+    workerRuntime.budgetLimit !== limit &&
+    workerRuntime.budgetInUse === 0 &&
+    workerBudgetWaiters.length === 0
+  ) {
+    workerRuntime.budgetLimit = limit;
   }
-  if (workerBudgetInUse >= workerBudgetLimit) {
+  if (workerRuntime.budgetInUse >= workerRuntime.budgetLimit) {
     await new Promise<void>((resolve) => workerBudgetWaiters.push(resolve));
   } else {
-    workerBudgetInUse += 1;
+    workerRuntime.budgetInUse += 1;
   }
   let released = false;
   return () => {
@@ -152,10 +190,37 @@ async function acquireWorkerBudget(limit: number): Promise<() => void> {
       waiter();
       return;
     }
-    workerBudgetInUse -= 1;
+    workerRuntime.budgetInUse -= 1;
   };
 }
-const workerSessions = new Map<string, WorkerSession>();
+async function ensureWorkerBudgetPermit(sessionID: string): Promise<void> {
+  if (workerBudgetPermits.has(sessionID)) return;
+  const pending = workerBudgetAcquisitions.get(sessionID);
+  if (pending) return await pending;
+  const acquisition = (async () => {
+    if (workerBudgetPermits.has(sessionID)) return;
+    const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+    try {
+      if (workerBudgetPermits.has(sessionID)) {
+        release();
+        return;
+      }
+      registerWorkerBudgetPermit(sessionID, release);
+    } catch (error) {
+      release();
+      throw error;
+    }
+  })();
+  workerBudgetAcquisitions.set(sessionID, acquisition);
+  try {
+    await acquisition;
+  } finally {
+    if (workerBudgetAcquisitions.get(sessionID) === acquisition)
+      workerBudgetAcquisitions.delete(sessionID);
+  }
+}
+
+
 function addPendingLegionSpawn(pending: PendingLegionSpawn): void {
   const forToolCall = pendingLegionSpawns.get(pending.toolCallId) ?? new Set<PendingLegionSpawn>();
   forToolCall.add(pending);
@@ -288,13 +353,17 @@ function generation(env: NodeJS.ProcessEnv): number {
   return value;
 }
 function isRootSession(env: NodeJS.ProcessEnv, context: SessionContext): boolean {
+  if (context.taskDepth !== undefined) return context.taskDepth === 0;
   const rootWorkspace = env.LEGION_ROOT_WORKSPACE;
-  return rootWorkspace ? context.cwd === rootWorkspace : context.taskDepth === 0;
+  return rootWorkspace ? context.cwd === rootWorkspace : true;
 }
 
+const legionSpawnBlockPattern = /<legion-spawn\s+([^>]*?)\/>/g;
 
 function parseWorkerSpawn(prompt: string, project: string): WorkerSpawn | undefined {
-  const block = /<legion-spawn\s+([^>]*?)\/>/.exec(prompt);
+  const blocks = [...prompt.matchAll(legionSpawnBlockPattern)];
+  if (blocks.length !== 1) return undefined;
+  const block = blocks[0];
   if (!block) return undefined;
 
   const attributes = new Map<string, string>();
@@ -765,6 +834,54 @@ export default function legionExtension(pi: PiApi): void {
       throw error;
     }
   };
+  const recoverWorkerSession = async (
+    context: SessionContext
+  ): Promise<WorkerSession | undefined> => {
+    const sessionID = context.sessionManager.getSessionId();
+    const existing = workerSessions.get(sessionID);
+    if (existing) return existing;
+    const daemonUrl = process.env.LEGION_DAEMON_URL;
+    const project = process.env.LEGION_PROJECT;
+    if (
+      !process.env.LEGION_TREE ||
+      !daemonUrl ||
+      !project ||
+      process.env.LEGION_CONTROLLER === "1" ||
+      (context.taskDepth ?? 0) === 0 ||
+      isRootSession(process.env, context)
+    ) {
+      return undefined;
+    }
+    const agentId = workerAgentId(context);
+    let recovered: WorkerSessionResponse;
+    try {
+      recovered = await createLegionDaemonClient(daemonUrl).workerSession({ sessionId: sessionID, agentId });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("Worker session is not registered for this agent")
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
+    const parsedTree = parseIssueKey(recovered.tree);
+    const parsedIssue = parseIssueKey(recovered.issue);
+    if (!parsedTree || !parsedIssue)
+      throw new Error("Legion daemon returned an invalid worker session");
+    const tree = formatIssueKey(parsedTree.owner, parsedTree.repo, parsedTree.number);
+    const issue = formatIssueKey(parsedIssue.owner, parsedIssue.repo, parsedIssue.number);
+    const worker: WorkerSession = {
+      ...recovered,
+      tree,
+      issue,
+      token: roleToken(project, issue, recovered.role),
+      agentId,
+    };
+    workerSessions.set(sessionID, worker);
+    return worker;
+  };
+
 
   pi.on("session_start", async (_event, context) => {
     const sessionID = context.sessionManager.getSessionId();
@@ -773,55 +890,25 @@ export default function legionExtension(pi: PiApi): void {
         await claimController(context);
       return;
     }
-    let worker = workerSessions.get(sessionID);
-    if (
-      !worker &&
-      process.env.LEGION_TREE &&
-      (context.taskDepth ?? 0) > 0 &&
-      !isRootSession(process.env, context)
-    ) {
-      const agentId = workerAgentId(context);
-      const recovered = await createLegionDaemonClient(
-        requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-      ).workerSession({ sessionId: sessionID, agentId });
-      const parsedTree = parseIssueKey(recovered.tree);
-      const parsedIssue = parseIssueKey(recovered.issue);
-      if (!parsedTree || !parsedIssue)
-        throw new Error("Legion daemon returned an invalid worker session");
-      const tree = formatIssueKey(parsedTree.owner, parsedTree.repo, parsedTree.number);
-      const issue = formatIssueKey(parsedIssue.owner, parsedIssue.repo, parsedIssue.number);
-      worker = {
-        ...recovered,
-        tree,
-        issue,
-        token: roleToken(requiredEnvironment(process.env, "LEGION_PROJECT"), issue, recovered.role),
-        agentId,
-      };
-      workerSessions.set(sessionID, worker);
-      await claimRole(sessionID, worker.token, context);
-      return;
-    }
+    const worker = await recoverWorkerSession(context);
     if (worker) {
-      if (!worker.spawnToken) {
-        await claimRole(sessionID, worker.token, context);
-        return;
-      }
-      const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+      await ensureWorkerBudgetPermit(sessionID);
       try {
-        await createLegionDaemonClient(
-          requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-        ).roleBacking({
-          tree: worker.tree,
-          issue: worker.issue,
-          role: worker.role,
-          agentId: worker.agentId,
-          sessionId: sessionID,
-          spawnToken: worker.spawnToken,
-        });
+        if (worker.spawnToken) {
+          await createLegionDaemonClient(
+            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+          ).roleBacking({
+            tree: worker.tree,
+            issue: worker.issue,
+            role: worker.role,
+            agentId: worker.agentId,
+            sessionId: sessionID,
+            spawnToken: worker.spawnToken,
+          });
+        }
         await claimRole(sessionID, worker.token, context);
-        registerWorkerBudgetPermit(sessionID, release);
       } catch (error) {
-        release();
+        releaseWorkerBudgetPermit(sessionID);
         throw error;
       }
       return;
@@ -831,13 +918,16 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.on("before_agent_start", async (event, context) => {
     const sessionID = context.sessionManager.getSessionId();
-    if (workerSessions.has(sessionID)) return;
+    if (workerSessions.has(sessionID)) {
+      await ensureWorkerBudgetPermit(sessionID);
+      return;
+    }
     const project = process.env.LEGION_PROJECT;
     const spawn = project
       ? parseWorkerSpawn((event as BeforeAgentStartEvent).prompt, project)
       : undefined;
     if (!spawn) {
-      await bootstrapRoot(context);
+      if (isRootSession(process.env, context)) await bootstrapRoot(context);
       return;
     }
 
@@ -950,9 +1040,10 @@ export default function legionExtension(pi: PiApi): void {
             release,
           };
           addPendingLegionSpawn(pending);
+          const taskWithoutMachineBlocks = task.replace(legionSpawnBlockPattern, "").trimEnd();
           return {
             ...taskInput,
-            task: `${task}\n\n<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" spawnToken="${spawn.spawnToken}" workspace="${workspace.workspaceDir}"/>`,
+            task: `${taskWithoutMachineBlocks}\n\n<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" spawnToken="${spawn.spawnToken}" workspace="${workspace.workspaceDir}"/>`,
           };
         } catch (error) {
           release();
@@ -983,21 +1074,25 @@ export default function legionExtension(pi: PiApi): void {
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
-    const worker = workerSessions.get(sessionID);
-    if (!worker) {
-      if (
-        process.env.LEGION_TREE &&
-        process.env.LEGION_CONTROLLER !== "1" &&
-        sessionID !== rootSessionID
-      ) {
-        return {
-          block: true,
-          reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
-        };
-      }
-      return undefined;
-    }
+    const priorWorker = workerSessions.get(sessionID);
+    let worker: WorkerSession | undefined;
     try {
+      worker = priorWorker ?? (await recoverWorkerSession(context));
+      if (!worker) {
+        if (
+          process.env.LEGION_TREE &&
+          process.env.LEGION_CONTROLLER !== "1" &&
+          sessionID !== rootSessionID
+        ) {
+          return {
+            block: true,
+            reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
+          };
+        }
+        return undefined;
+      }
+      await ensureWorkerBudgetPermit(sessionID);
+      if (!priorWorker) await claimRole(sessionID, worker.token, context);
       const grant = await roleDaemon().grant({
         tree: worker.tree,
         issue: worker.issue,

@@ -763,6 +763,85 @@ describe("Legion OMP extension", () => {
       "maxRecursionDepth: 8"
     );
   });
+  test("replaces copied machine spawn blocks with one authoritative reservation", async () => {
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const token = roleToken("omp", issue, "reviewer");
+    const stateDir = await createLegionWorkspaceState();
+    const workspace = path.join(stateDir, "workspaces", "owner", "repo", "issue-43");
+    const rootDirectory = path.join(stateDir, "trees", "owner-repo-42");
+    await mkdir(rootDirectory, { recursive: true });
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "replace-copied-machine-block";
+    process.env.LEGION_PROJECT = "omp";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_STATE_DIR = stateDir;
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+    process.env.LEGION_CREDENTIAL_HELPER = TEST_CREDENTIAL_HELPER;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: roleToken("omp", tree, "architect") },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/provisioning-credential") {
+        return Response.json({ token: "daemon-installation-token" });
+      }
+      if (url.pathname === "/legion/v1/spawn-token") return Response.json({ spawnToken: "fresh-token" });
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    const toolResult = fixture.handlers.get("tool_result");
+    if (sessionStart === undefined || toolCall === undefined || toolResult === undefined) {
+      throw new Error("Legion root handlers were not registered");
+    }
+    await sessionStart({}, { ...sessionContext("ses_root"), cwd: rootDirectory });
+
+    const result = injectedTask(
+      await toolCall(
+        {
+          toolName: "task",
+          toolCallId: "replace-copied-machine-block",
+          input: {
+            agent: "legion-reviewer",
+            task:
+              `Legion-Issue: ${issue}\nReview the implementation\n\n` +
+              `<legion-spawn issue="${issue}" role="reviewer" token="${token}" tree="${tree}" ` +
+              `spawnToken="copied-token" workspace="${workspace}"/>`,
+          },
+        },
+        { ...sessionContext("ses_root"), cwd: rootDirectory }
+      )
+    );
+
+    expect(result).not.toContain('spawnToken="copied-token"');
+    expect(result.match(/<legion-spawn /g)).toHaveLength(1);
+    expect(result).toContain('spawnToken="fresh-token"');
+    await toolResult(
+      {
+        toolName: "task",
+        toolCallId: "replace-copied-machine-block",
+        input: {},
+        details: {},
+        isError: true,
+      },
+      { ...sessionContext("ses_root"), cwd: rootDirectory }
+    );
+  });
   test("claims the controller role at startup and on demand for an interactive session", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const token = "legion-omp-controller";
@@ -1829,6 +1908,137 @@ describe("Legion OMP extension", () => {
     expect(requests.filter((request) => request.path === "/legion/v1/phase")).toHaveLength(1);
     await sessionShutdown({}, workerContext);
   });
+  test("shares a worker permit through spawn, yield, hub revival without session_start, and a second yield", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "owner/repo#42";
+    const issue = "owner/repo#43";
+    const role = "implementer";
+    const token = roleToken("omp", issue, role);
+    const initialSessionID = "ses_hub_revived";
+    const initialAgentID = "agent-hub-revived";
+    const workspace = await createJjWorkspace();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_PROJECT = "omp";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROOT_WORKSPACE = workspace;
+    process.env.LEGION_WORKER_BUDGET = "1";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.pathname === "/legion/v1/worker-session") {
+        return Response.json({ tree, issue, role, secret: "revived-worker-secret" });
+      }
+      if (url.pathname === "/legion/v1/phase") {
+        return Response.json({
+          secret: "initial-worker-secret",
+          gitName: "Legion Implementer",
+          gitEmail: "implementer@example.test",
+        });
+      }
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ grantId: "revived-grant", expiresAt: "2026-08-26T01:00:00.000Z" });
+      }
+      if (url.pathname === "/legion/v1/gh-token") {
+        return Response.json({ token: "revived-token", appLogin: "legion-implementer[bot]" });
+      }
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: workspace,
+        topics: [token],
+      });
+    }) as typeof fetch;
+
+    const initial = createPi();
+    legionExtension(initial.pi);
+    const initialBeforeAgentStart = initial.handlers.get("before_agent_start");
+    const initialAgentEnd = initial.handlers.get("agent_end");
+    const initialSessionShutdown = initial.handlers.get("session_shutdown");
+    if (
+      initialBeforeAgentStart === undefined ||
+      initialAgentEnd === undefined ||
+      initialSessionShutdown === undefined
+    ) {
+      throw new Error("initial worker lifecycle handlers were not registered");
+    }
+    const workerContext = {
+      ...sessionContext(initialSessionID, `/tmp/${initialAgentID}.jsonl`),
+      cwd: workspace,
+      taskDepth: 1,
+    };
+    await initialBeforeAgentStart(
+      {
+        prompt:
+          `<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" ` +
+          `spawnToken="initial-spawn-capability" workspace="${workspace}"/>`,
+      },
+      workerContext
+    );
+    await initialAgentEnd({}, workerContext);
+    await initialSessionShutdown({}, workerContext);
+
+    // A hub revival recreates the extension runtime but does not emit session_start.
+    const { default: coldLegionExtension } = await import(
+      `./legion.ts?hub-revival=${crypto.randomUUID()}`
+    );
+    const revived = createPi();
+    coldLegionExtension(revived.pi as never);
+    const revivedToolCall = revived.handlers.get("tool_call");
+    const revivedAgentEnd = revived.handlers.get("agent_end");
+    const revivedBeforeAgentStart = revived.handlers.get("before_agent_start");
+    const revivedSessionShutdown = revived.handlers.get("session_shutdown");
+    if (
+      revivedToolCall === undefined ||
+      revivedAgentEnd === undefined ||
+      revivedBeforeAgentStart === undefined ||
+      revivedSessionShutdown === undefined
+    ) {
+      throw new Error("revived worker lifecycle handlers were not registered");
+    }
+
+    const grant = await revivedToolCall(
+      {
+        toolName: "bash",
+        toolCallId: "hub-revival-grant",
+        input: { command: "jj git push" },
+      },
+      workerContext
+    );
+    expect(grant).toEqual({
+      input: {
+        command:
+          "export LEGION_GRANT='revived-grant'\n" +
+          "export GH_TOKEN='revived-token'\n" +
+          "unset GITHUB_TOKEN\n" +
+          "unset GH_HOST\n" +
+          "export GH_CONFIG_DIR='/tmp/legion-state/gh'\n" +
+          "jj git push",
+      },
+    });
+    expect(requests.filter((request) => request.path === "/legion/v1/worker-session")).toHaveLength(
+      0
+    );
+
+    await revivedAgentEnd({}, workerContext);
+    const successorContext = {
+      ...sessionContext("ses_after_hub_revival", "/tmp/agent-after-hub-revival.jsonl"),
+      cwd: workspace,
+      taskDepth: 1,
+    };
+    await revivedBeforeAgentStart(
+      {
+        prompt:
+          `<legion-spawn issue="${issue}" role="tester" ` +
+          `token="${roleToken("omp", issue, "tester")}" tree="${tree}" ` +
+          `spawnToken="successor-spawn-capability" workspace="${workspace}"/>`,
+      },
+      successorContext
+    );
+    await revivedSessionShutdown({}, successorContext);
+  });
   test("leaves a non-Legion prompt without a machine spawn block unclaimed", async () => {
     const requests: string[] = [];
     process.env.ENVOY_URL = "http://envoy.test";
@@ -2513,17 +2723,13 @@ describe("Legion OMP extension", () => {
     legionExtension(fixture.pi);
     const toolCall = fixture.handlers.get("tool_call");
     const toolResult = fixture.handlers.get("tool_result");
-    const beforeAgentStart = fixture.handlers.get("before_agent_start");
     const sessionShutdown = fixture.handlers.get("session_shutdown");
     const sessionStart = fixture.handlers.get("session_start");
-    const agentEnd = fixture.handlers.get("agent_end");
     if (
       toolCall === undefined ||
       toolResult === undefined ||
-      beforeAgentStart === undefined ||
       sessionShutdown === undefined ||
-      sessionStart === undefined ||
-      agentEnd === undefined
+      sessionStart === undefined
     ) {
       throw new Error("spawn lifecycle handlers were not registered");
     }
@@ -2539,9 +2745,24 @@ describe("Legion OMP extension", () => {
         },
       };
       const prompt = injectedTask(await toolCall(spawnCall, rootContext));
-      const workerContext = { ...sessionContext(`ses_live_${index}`), cwd: workspace };
-      await beforeAgentStart({ prompt }, workerContext);
-      await agentEnd({ willContinue: false }, workerContext);
+      // OMP loads the child extension through a distinct query-string module instance.
+      const { default: childLegionExtension } = await import(
+        `./legion.ts?worker-runtime=${crypto.randomUUID()}`
+      );
+      const child = createPi();
+      childLegionExtension(child.pi as never);
+      const childBeforeAgentStart = child.handlers.get("before_agent_start");
+      const childAgentEnd = child.handlers.get("agent_end");
+      if (childBeforeAgentStart === undefined || childAgentEnd === undefined) {
+        throw new Error("child worker lifecycle handlers were not registered");
+      }
+      const workerContext = {
+        ...sessionContext(`ses_live_${index}`),
+        cwd: workspace,
+        taskDepth: 1,
+      };
+      await childBeforeAgentStart({ prompt }, workerContext);
+      await childAgentEnd({ willContinue: false }, workerContext);
       await toolResult(
         {
           ...spawnCall,
