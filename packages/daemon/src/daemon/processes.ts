@@ -69,6 +69,7 @@ export interface ProcessManagerDeps {
 type RoleBacking = WorkerRoleClaim;
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
+const TMUX_RECONCILIATION_GRACE_MS = 120_000;
 
 function treeName(issue: IssueKey): string {
   const parsed = parseIssueKey(issue);
@@ -206,13 +207,14 @@ export class ProcessManager {
 
   async reconcileTmuxWindows(): Promise<void> {
     const session = `legion-${this.deps.state.project}`;
+    const owner = `legion-${this.deps.state.project}`;
     const windows = await this.deps.run([
       "tmux",
       "list-windows",
       "-t",
       session,
       "-F",
-      "#{window_id}",
+      "#{window_id}\t#{@legion_owner}\t#{window_activity}",
     ]);
     if (windows.exitCode !== 0) return;
 
@@ -222,8 +224,18 @@ export class ProcessManager {
         this.deps.state.controllerLocator?.tmuxWindowId,
       ].filter((windowId): windowId is string => windowId !== undefined)
     );
-    for (const windowId of windows.stdout.split(/\r?\n/)) {
-      if (!/^@\d+$/.test(windowId) || known.has(windowId)) continue;
+    for (const line of windows.stdout.split(/\r?\n/)) {
+      const [windowId, windowOwner, activitySeconds] = line.split("\t");
+      if (!windowId || !/^@\d+$/.test(windowId) || known.has(windowId) || windowOwner !== owner) {
+        continue;
+      }
+      const activityAt = Number(activitySeconds) * 1000;
+      if (
+        !Number.isFinite(activityAt) ||
+        this.deps.now() - activityAt < TMUX_RECONCILIATION_GRACE_MS
+      ) {
+        continue;
+      }
       await this.deps.run(["tmux", "kill-window", "-t", windowId]);
     }
   }
@@ -732,6 +744,20 @@ export class ProcessManager {
     const tmuxWindowId = result.stdout.trim();
     if (!/^@\d+$/.test(tmuxWindowId)) {
       throw new Error(`tmux new-window did not report a window id: ${result.stdout}`);
+    }
+    const marker = await this.deps.run([
+      "tmux",
+      "set-option",
+      "-w",
+      "-t",
+      tmuxWindowId,
+      "@legion_owner",
+      `legion-${this.deps.state.project}`,
+    ]);
+    if (marker.exitCode !== 0) {
+      throw new Error(
+        `tmux window ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`
+      );
     }
     return tmuxWindowId;
   }

@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -721,17 +720,18 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			return
 		}
 		entry, err := d.sessions.Get(body.SessionID)
-		if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			http.Error(w, "read session registration: "+err.Error(), http.StatusServiceUnavailable)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			http.Error(w, "session is not registered", http.StatusNotFound)
 			return
 		}
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			entry = session.SessionEntry{}
+		if err != nil {
+			http.Error(w, "read session registration: "+err.Error(), http.StatusServiceUnavailable)
+			return
 		}
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
 		if err := d.sessions.Put(body.SessionID, entry); err != nil {
-			http.Error(w, "register role claimant: "+err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "refresh role claimant registration: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role)
@@ -801,7 +801,7 @@ func main() {
 	// Phase 2: Bind HTTP port deterministically in main goroutine before
 	// any NATS work begins. This guarantees /healthz is reachable as soon
 	// as Serve starts, regardless of NATS connection latency.
-	addr := ":" + strconv.Itoa(cfg.Port)
+	addr := cfg.ListenAddress()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal(err)

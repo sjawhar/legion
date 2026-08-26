@@ -351,6 +351,7 @@ describe("ProcessManager", () => {
         `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
+      ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
     ]);
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "bookmark", "set", "legion/issue-42", "--allow-backwards"],
@@ -493,7 +494,7 @@ describe("ProcessManager", () => {
     expect(await processes.probe(root)).toBe("dead");
   });
 
-  it("kills only tmux windows unowned by a tree or controller locator", async () => {
+  it("kills only stale daemon-owned windows that are not state locators", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.controllerLocator = {
@@ -501,10 +502,21 @@ describe("ProcessManager", () => {
       tmuxWindowId: "@43",
     };
     const commands: string[][] = [];
+    const activitySeconds = Date.parse("2026-08-24T00:00:00.000Z") / 1000;
     const { manager: processes } = manager(state, {
       run: async (command) => {
         commands.push(command);
-        if (command[1] === "list-windows") return { stdout: "@42\n@43\n@99\n", exitCode: 0 };
+        if (command[1] === "list-windows") {
+          return {
+            stdout: [
+              `@42\tlegion-omp\t${activitySeconds}`,
+              `@43\tlegion-omp\t${activitySeconds}`,
+              `@99\tlegion-omp\t${activitySeconds - 121}`,
+              `@100\t\t${activitySeconds - 121}`,
+            ].join("\n"),
+            exitCode: 0,
+          };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -512,6 +524,7 @@ describe("ProcessManager", () => {
     await processes.reconcileTmuxWindows();
 
     expect(commands).toContainEqual(["tmux", "kill-window", "-t", "@99"]);
+    expect(commands).not.toContainEqual(["tmux", "kill-window", "-t", "@100"]);
   });
 
   it("kills and clears a dead tree's tmux locator", async () => {

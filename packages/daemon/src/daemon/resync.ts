@@ -29,6 +29,7 @@ export interface RunResyncDeps {
 }
 
 const lastRunAt = new WeakMap<LegionState, number>();
+const warnedMissingBoardProjectIds = new WeakSet<LegionState>();
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -164,6 +165,16 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
 
   lastRunAt.set(deps.state, now);
   const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
+  if (
+    items.length > 0 &&
+    deps.config.boardProjectIds.length === 0 &&
+    !warnedMissingBoardProjectIds.has(deps.state)
+  ) {
+    warnedMissingBoardProjectIds.add(deps.state);
+    console.error(
+      "[legion] resync cannot heal board items because LEGION_BOARD_PROJECT_IDS is not configured"
+    );
+  }
   const anomalies: ResyncAnomaly[] = [];
   let healed = 0;
   let reconciledLabels = 0;

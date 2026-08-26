@@ -14,6 +14,7 @@ services:
       start_period: 5s
     environment:
       PORT: ${ENVOY_LISTENER_PORT:-9020}
+      ENVOY_LISTEN_HOST: ${ENVOY_LISTEN_HOST:-127.0.0.1}
       ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID}
       NATS_URLS: ${NATS_URLS}
       ENVOY_HOST_BRIDGE: 127.0.0.1

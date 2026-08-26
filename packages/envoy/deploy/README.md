@@ -21,6 +21,7 @@ when configured.
 | `ENVOY_MACHINE_ID` | yes | Logical machine name (used in published metadata) |
 | `NATS_URLS` | yes | Comma-separated NATS URLs (one is fine) |
 | `ENVOY_LISTENER_PORT` | no | Defaults to 9020 |
+| `ENVOY_LISTEN_HOST` | no | Bind host for the listener API; defaults to `127.0.0.1`. Set an explicit reachable address only when external access is required. |
 | `ENVOY_HOST_BRIDGE` | no | Address used to reach host services from sessions; defaults to `127.0.0.1` |
 | `ENVOY_WEBHOOKS` | no | Comma-separated providers to enable on this listener: `github`, `slack`, `ghostwispr`. Only set when this host is the ingress point for that source. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when `github` is in `ENVOY_WEBHOOKS` |

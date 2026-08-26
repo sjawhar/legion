@@ -458,11 +458,18 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	// owner, rather than relying on two holders to observe the change first.
 	claimState := atomic.Pointer[listenerDeps]{}
 	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register role B: %v", err)
+	}
+
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role_b","role":"legion-delivery"}`))
 	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
-		t.Fatalf("claim B role without prior registration: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
+		t.Fatalf("claim registered role B: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
 
 	probeA, err := harness.client.Conn.SubscribeSync(contracts.AgentSubject("ses_role_a"))
@@ -649,6 +656,13 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	roleTopic := contracts.RoleTopicPrefix + role
 	var claimState atomic.Pointer[listenerDeps]
 	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	if err := harness.sessions.Put("ses_deaf", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register deaf holder: %v", err)
+	}
+
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_deaf","role":"`+role+`"}`))
 	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
@@ -842,6 +856,10 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{registry: registry, sessions: sessions})
 	handler := roleSetHandler(&state, "test-machine")
+	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register role session: %v", err)
+	}
+
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role","role":"legion-controller"}`))
@@ -876,7 +894,7 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 
 	registered, err := sessions.Get("ses_role")
 	if err != nil {
-		t.Fatalf("role claim did not register session: %v", err)
+		t.Fatalf("registered role session missing after claim: %v", err)
 	}
 	if !registered.SelfSubscribed {
 		t.Fatal("role claim session registration is not self-subscribed")
