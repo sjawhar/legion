@@ -17,8 +17,8 @@ temporary registration drift does not hide the extension's actual delivery state
 
 ## Session identity
 
-Run `/whoami` to copy the active session ID to the clipboard (matching the `/whoami` command the
-OpenCode envoy plugin registers). OMP copies through its host clipboard API, which sends OSC 52
+Run `/whoami` to copy the active session ID to the clipboard. OMP copies through its host
+clipboard API, which sends OSC 52
 first for tmux and SSH sessions. The notification shows the session ID even if the copy fails.
 
 For tmux to accept OSC 52 clipboard writes, enable clipboard support in the tmux server:
@@ -29,12 +29,22 @@ set -g set-clipboard on
 
 ## Development install
 
-From the Legion repository root, link the tracked entry into OMP:
+This package declares two OMP extension entries in `package.json`: `extensions/envoy.ts`
+(Envoy messaging, subscriptions, and steering delivery) and `extensions/legion.ts` (the
+Legion lifecycle: root bootstrap, worker spawning, budgets, and daemon capabilities).
+Loading the package directory with OMP's `--extension` flag — as the Legion daemon does
+when it launches trees and workers — loads both.
+
+For local development of the messaging extension alone, link the entry into OMP:
 
 ```sh
 ln -sfn "$PWD/packages/envoy-omp-extension/extensions/envoy.ts" \
   ~/.omp/agent/extensions/envoy.ts
 ```
+
+The repository root `package.json` likewise loads only `extensions/envoy.ts` for dev
+sessions inside this repo: the Legion extension is meant to be loaded by the daemon with
+its environment prepared, not by ambient dev sessions.
 
 Released installs package the extension and its `nats` dependency. The symlink is only for local
 development.

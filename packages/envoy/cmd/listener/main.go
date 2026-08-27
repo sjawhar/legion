@@ -890,7 +890,7 @@ func main() {
 	// subscription on a fresh *nats.Conn, but store.Registry and
 	// session.SessionRegistry kept their KV handles bound to the original
 	// closed conn. Restart is cheap and lossless — KV state is durable, NATS
-	// retries undelivered messages, and OpenCode sessions re-register.
+	// retries undelivered messages, and agent sessions re-register.
 	go runSelfHealthWatchdog(logger, registry, sessions, ciStore, 30*time.Second, 3)
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
 	sig := make(chan os.Signal, 1)

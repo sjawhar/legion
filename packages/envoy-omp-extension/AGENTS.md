@@ -15,8 +15,9 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 
 | Task | Location | Notes |
 | --- | --- | --- |
-| OMP extension entry | `extensions/envoy.ts` | Load with OMP's `-e` flag |
-| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface |
+| OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Load the package with OMP's `--extension` flag |
+| Legion lifecycle modules | `src/legion/` | Budgets, spawn parsing, control directives, tools |
+| Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 

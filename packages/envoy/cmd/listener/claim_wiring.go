@@ -3,7 +3,7 @@ package main
 import "github.com/sjawhar/envoy/internal/session"
 
 // subscribeBody is the POST /v1/interests/subscribe payload sent by each
-// opencode process's envoy plugin, on subscribe and on every heartbeat.
+// agent session's envoy extension, on subscribe and on every heartbeat.
 type subscribeBody struct {
 	SessionID string   `json:"session_id"`
 	Dir       string   `json:"dir"`

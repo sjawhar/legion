@@ -2,7 +2,6 @@ import {
   formatIssueKey,
   type IssueKey,
   LEGION_ROLES,
-  LegionDaemonApi,
   type LegionRole,
   parseIssueKey,
 } from "@legion/contracts";
@@ -31,33 +30,6 @@ export function asRecord(value: unknown): Record<string, unknown> {
 export interface ContractSchema<T = unknown> {
   parse(value: unknown): T;
 }
-
-export const REQUEST_SCHEMAS: Record<string, ContractSchema> = {
-  "/legion/v1/process/started": LegionDaemonApi.ProcessStarted.request,
-  "/legion/v1/process/ready": LegionDaemonApi.ProcessReady.request,
-  "/legion/v1/merge-gate": LegionDaemonApi.MergeGate.request,
-  "/legion/v1/process/exit": LegionDaemonApi.ProcessExit.request,
-  "/legion/v1/spawn-token": LegionDaemonApi.SpawnToken.request,
-  "/legion/v1/issues": LegionDaemonApi.IssueCreate.request,
-  "/legion/v1/waves/release": LegionDaemonApi.WaveRelease.request,
-  "/legion/v1/issues/comment": LegionDaemonApi.Comment.request,
-  "/legion/v1/issues/body": LegionDaemonApi.PostBody.request,
-  "/legion/v1/issues/labels": LegionDaemonApi.Labels.request,
-  "/legion/v1/issues/close": LegionDaemonApi.IssueClose.request,
-  "/legion/v1/escalate": LegionDaemonApi.Escalate.request,
-  "/legion/v1/dispatch-threads": LegionDaemonApi.DispatchThread.request,
-  "/legion/v1/phase": LegionDaemonApi.Phase.request,
-  "/legion/v1/worker-session": LegionDaemonApi.WorkerSession.request,
-  "/legion/v1/role-backing": LegionDaemonApi.RoleBacking.request,
-  "/legion/v1/provisioning-credential": LegionDaemonApi.ProvisioningCredential.request,
-  "/legion/v1/grants": LegionDaemonApi.Grant.request,
-  "/legion/v1/git-credential": LegionDaemonApi.GitHubToken.request,
-  "/legion/v1/gh-token": LegionDaemonApi.GitHubToken.request,
-  "/legion/v1/controller/ready": LegionDaemonApi.ControllerReady.request,
-  "/legion/v1/gates/approve": LegionDaemonApi.GatesApprove.request,
-  "/legion/v1/admission": LegionDaemonApi.Admission.request,
-  "/legion/v1/backlog": LegionDaemonApi.Backlog.request,
-};
 
 export function validateContractRequest(
   schema: ContractSchema,

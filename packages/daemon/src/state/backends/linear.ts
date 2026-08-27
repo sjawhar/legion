@@ -125,11 +125,4 @@ export class LinearTracker implements IssueTracker {
         "are handled by the controller via Linear MCP, not by the daemon CLI."
     );
   }
-
-  async removeLabel(_target: IssueMutationTarget, _label: string): Promise<void> {
-    throw new Error(
-      "LinearTracker.removeLabel not implemented — Linear label mutations " +
-        "are handled by the controller via Linear MCP, not by the daemon CLI."
-    );
-  }
 }

@@ -8,8 +8,8 @@ import { type DispatchDeps, dispatchThread } from "./api/dispatch";
 import { GitHubService, type GitHubTokenSource } from "./api/github";
 import {
   asRecord,
+  type ContractSchema,
   HttpError,
-  REQUEST_SCHEMAS,
   validateContractRequest,
   validateContractResponse,
 } from "./api/http";
@@ -94,34 +94,83 @@ export interface LegionApi {
   stop(): void;
 }
 
-const ROUTES: Record<
-  string,
-  (ctx: RouteContext, body: Record<string, unknown>) => Promise<Response>
-> = {
-  "/legion/v1/process/started": handleProcessStarted,
-  "/legion/v1/process/ready": handleProcessReady,
-  "/legion/v1/process/exit": handleProcessExit,
-  "/legion/v1/merge-gate": handleMergeGate,
-  "/legion/v1/issues": handleIssueCreate,
-  "/legion/v1/waves/release": handleWaveRelease,
-  "/legion/v1/issues/comment": handleIssueComment,
-  "/legion/v1/issues/body": handleIssueBody,
-  "/legion/v1/issues/labels": handleIssueLabels,
-  "/legion/v1/issues/close": handleIssueClose,
-  "/legion/v1/escalate": handleEscalate,
-  "/legion/v1/dispatch-threads": handleDispatchThreads,
-  "/legion/v1/spawn-token": handleSpawnToken,
-  "/legion/v1/phase": handlePhase,
-  "/legion/v1/worker-session": handleWorkerSession,
-  "/legion/v1/role-backing": handleRoleBacking,
-  "/legion/v1/provisioning-credential": handleProvisioningCredential,
-  "/legion/v1/grants": handleGrants,
-  "/legion/v1/git-credential": handleGitCredential,
-  "/legion/v1/gh-token": handleGhToken,
-  "/legion/v1/controller/ready": handleControllerReady,
-  "/legion/v1/gates/approve": handleGatesApprove,
-  "/legion/v1/admission": handleAdmission,
-  "/legion/v1/backlog": handleBacklog,
+interface RouteEntry {
+  readonly request: ContractSchema;
+  readonly handler: (ctx: RouteContext, body: Record<string, unknown>) => Promise<Response>;
+}
+
+// Every POST route carries its request contract, so a route cannot be added
+// without schema validation running before its handler.
+const ROUTES: Record<string, RouteEntry> = {
+  "/legion/v1/process/started": {
+    request: LegionDaemonApi.ProcessStarted.request,
+    handler: handleProcessStarted,
+  },
+  "/legion/v1/process/ready": {
+    request: LegionDaemonApi.ProcessReady.request,
+    handler: handleProcessReady,
+  },
+  "/legion/v1/process/exit": {
+    request: LegionDaemonApi.ProcessExit.request,
+    handler: handleProcessExit,
+  },
+  "/legion/v1/merge-gate": { request: LegionDaemonApi.MergeGate.request, handler: handleMergeGate },
+  "/legion/v1/issues": { request: LegionDaemonApi.IssueCreate.request, handler: handleIssueCreate },
+  "/legion/v1/waves/release": {
+    request: LegionDaemonApi.WaveRelease.request,
+    handler: handleWaveRelease,
+  },
+  "/legion/v1/issues/comment": {
+    request: LegionDaemonApi.Comment.request,
+    handler: handleIssueComment,
+  },
+  "/legion/v1/issues/body": { request: LegionDaemonApi.PostBody.request, handler: handleIssueBody },
+  "/legion/v1/issues/labels": {
+    request: LegionDaemonApi.Labels.request,
+    handler: handleIssueLabels,
+  },
+  "/legion/v1/issues/close": {
+    request: LegionDaemonApi.IssueClose.request,
+    handler: handleIssueClose,
+  },
+  "/legion/v1/escalate": { request: LegionDaemonApi.Escalate.request, handler: handleEscalate },
+  "/legion/v1/dispatch-threads": {
+    request: LegionDaemonApi.DispatchThread.request,
+    handler: handleDispatchThreads,
+  },
+  "/legion/v1/spawn-token": {
+    request: LegionDaemonApi.SpawnToken.request,
+    handler: handleSpawnToken,
+  },
+  "/legion/v1/phase": { request: LegionDaemonApi.Phase.request, handler: handlePhase },
+  "/legion/v1/worker-session": {
+    request: LegionDaemonApi.WorkerSession.request,
+    handler: handleWorkerSession,
+  },
+  "/legion/v1/role-backing": {
+    request: LegionDaemonApi.RoleBacking.request,
+    handler: handleRoleBacking,
+  },
+  "/legion/v1/provisioning-credential": {
+    request: LegionDaemonApi.ProvisioningCredential.request,
+    handler: handleProvisioningCredential,
+  },
+  "/legion/v1/grants": { request: LegionDaemonApi.Grant.request, handler: handleGrants },
+  "/legion/v1/git-credential": {
+    request: LegionDaemonApi.GitHubToken.request,
+    handler: handleGitCredential,
+  },
+  "/legion/v1/gh-token": { request: LegionDaemonApi.GitHubToken.request, handler: handleGhToken },
+  "/legion/v1/controller/ready": {
+    request: LegionDaemonApi.ControllerReady.request,
+    handler: handleControllerReady,
+  },
+  "/legion/v1/gates/approve": {
+    request: LegionDaemonApi.GatesApprove.request,
+    handler: handleGatesApprove,
+  },
+  "/legion/v1/admission": { request: LegionDaemonApi.Admission.request, handler: handleAdmission },
+  "/legion/v1/backlog": { request: LegionDaemonApi.Backlog.request, handler: handleBacklog },
 };
 
 export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): LegionApi {
@@ -168,14 +217,12 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         throw new HttpError(404, "Not found");
       }
       const body = asRecord(await request.json());
-      const requestSchema = REQUEST_SCHEMAS[pathname];
-      if (requestSchema) validateContractRequest(requestSchema, body);
-
       const route = ROUTES[pathname];
       if (!route) {
         throw new HttpError(404, "Not found");
       }
-      return await route(ctx, body);
+      validateContractRequest(route.request, body);
+      return await route.handler(ctx, body);
     } catch (error) {
       if (error instanceof HttpError) {
         return Response.json({ error: error.message }, { status: error.status });

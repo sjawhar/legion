@@ -272,19 +272,6 @@ export class GitHubTracker implements IssueTracker {
     return parseIssueIdParts(target.issueId);
   }
 
-  async removeLabel(target: IssueMutationTarget, label: string): Promise<void> {
-    const { owner, repo, number } = this.resolveTarget(target);
-    await this.gh(owner, [
-      "issue",
-      "edit",
-      number,
-      "--remove-label",
-      label,
-      "-R",
-      `${owner}/${repo}`,
-    ]);
-  }
-
   async transitionIssue(target: IssueMutationTarget, newStatus: IssueStatusLiteral): Promise<void> {
     const { owner, repo, number } = this.resolveTarget(target);
     const issueNum = Number(number);

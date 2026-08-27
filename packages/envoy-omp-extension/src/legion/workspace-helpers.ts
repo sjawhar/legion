@@ -16,17 +16,6 @@ export async function setJjIdentity(cwd: string, gitName: string, gitEmail: stri
     throw new Error(`jj config set ${key} failed: ${stderr.trim()}`);
   }
 }
-export async function deleteEnvoyInterest(baseUrl: string, sessionID: string): Promise<void> {
-  const response = await fetch(`${baseUrl}/v1/interests/${encodeURIComponent(sessionID)}`, {
-    method: "DELETE",
-  });
-  const responseBody = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `DELETE /v1/interests/${sessionID} failed with ${response.status}: ${responseBody}`
-    );
-  }
-}
 
 export async function runWorkspaceCommand(
   cmd: string[],

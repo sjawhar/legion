@@ -52,12 +52,8 @@ import {
   type WorkerSession,
   workerSessions,
 } from "../src/legion/worker-budget";
-import {
-  deleteEnvoyInterest,
-  runWorkspaceCommand,
-  setJjIdentity,
-} from "../src/legion/workspace-helpers";
-import { claimEnvoyRole, type EnvoySessionContext } from "./envoy";
+import { runWorkspaceCommand, setJjIdentity } from "../src/legion/workspace-helpers";
+import { claimEnvoyRole, deleteEnvoyInterest, type EnvoySessionContext } from "./envoy";
 
 export default function legionExtension(pi: PiApi): void {
   const agents = pi.agents;
