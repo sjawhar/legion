@@ -6,6 +6,13 @@ const legionRole = z.enum(LEGION_ROLES);
 const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
   message: "Required",
 });
+
+// The daemon is the canonical enforcer of architect label policy: an architect may
+// only ever ADD these labels, never remove one. Label removal (needs-approval ->
+// human-approved on /gates/approve, legion-backlog on /backlog) is controller-only
+// and stays outside this contract.
+export const ARCHITECT_MUTABLE_LABELS = ["needs-approval"] as const;
+const architectMutableLabel = z.enum(ARCHITECT_MUTABLE_LABELS);
 const architectCapability = z.strictObject({
   tree: nonEmptyString,
   sessionId: nonEmptyString,
@@ -59,7 +66,7 @@ export const LegionDaemonApi = {
     request: architectCapability.extend({
       title: nonEmptyString,
       body: nonEmptyString,
-      labels: z.array(nonEmptyString).optional(),
+      labels: z.array(architectMutableLabel).optional(),
     }),
     response: z.object({ issue: nonEmptyString, url: nonEmptyString }),
   },
@@ -78,8 +85,7 @@ export const LegionDaemonApi = {
   Labels: {
     request: architectCapability.extend({
       issue: nonEmptyString,
-      add: z.array(nonEmptyString).optional(),
-      remove: z.array(nonEmptyString).optional(),
+      add: z.array(architectMutableLabel).optional(),
     }),
     response: z.object({ labels: z.array(nonEmptyString) }),
   },

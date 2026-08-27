@@ -2434,22 +2434,6 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
             tree,
             issue,
             add: ["needs-approval"],
-            remove: [],
-            sessionId: "ses_architect",
-            secret: "root-secret",
-          },
-        },
-        details: { labels: ["needs-approval"] },
-      },
-      {
-        input: { op: "label_remove", issue, label: "needs-approval" },
-        request: {
-          path: "/legion/v1/issues/labels",
-          body: {
-            tree,
-            issue,
-            add: [],
-            remove: ["needs-approval"],
             sessionId: "ses_architect",
             secret: "root-secret",
           },

@@ -1,4 +1,4 @@
-import type { LegionRole } from "@legion/contracts";
+import { ARCHITECT_MUTABLE_LABELS, type LegionRole } from "@legion/contracts";
 import type { LegionDaemonClient } from "./daemon-client";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "./pi-types";
 
@@ -18,12 +18,21 @@ export function toolFailure(error: unknown): ToolResult {
   return { content: [{ type: "text", text: message }], details: {}, isError: true };
 }
 
-export const LEGION_TOOL_LABELS = [
-  "needs-approval",
-  "human-approved",
-  "legion-child",
-  "legion-backlog",
-] as const;
+// pi.zod exposes only object/string/number/array/enum/unknown (no union or
+// discriminatedUnion), so per-op typing cannot be expressed as a discriminated
+// union at the schema layer. The schema stays a flat optional-fields bag; execute()
+// below enforces, per op, which fields are actually accepted.
+const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  issue_create: ["title", "body", "labels"],
+  wave_release: ["children"],
+  comment: ["issue", "body"],
+  post_spec: ["issue", "body"],
+  label_add: ["issue", "label"],
+  escalate: ["kind", "context"],
+  request_refile: ["issue", "rationale"],
+  issue_close: ["issue", "comment"],
+  merge_gate: ["pr"],
+};
 
 export function legionToolSchema(pi: PiApi): unknown {
   const z = pi.zod;
@@ -34,7 +43,6 @@ export function legionToolSchema(pi: PiApi): unknown {
       "comment",
       "post_spec",
       "label_add",
-      "label_remove",
       "escalate",
       "request_refile",
       "issue_close",
@@ -42,10 +50,10 @@ export function legionToolSchema(pi: PiApi): unknown {
     ]),
     title: z.string().optional(),
     body: z.string().optional(),
-    labels: z.array(z.enum(LEGION_TOOL_LABELS)).optional(),
+    labels: z.array(z.enum(ARCHITECT_MUTABLE_LABELS)).optional(),
     children: z.array(z.string()).optional(),
     issue: z.string().optional(),
-    label: z.enum(LEGION_TOOL_LABELS).optional(),
+    label: z.enum(ARCHITECT_MUTABLE_LABELS).optional(),
     kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
     context: z.unknown().optional(),
     rationale: z.string().optional(),
@@ -94,6 +102,15 @@ export function createLegionTool(deps: {
           }
           return value;
         };
+        const op = String(parameters.op);
+        const allowedFields = LEGION_OP_FIELDS[op];
+        if (allowedFields) {
+          for (const key of Object.keys(parameters)) {
+            if (key !== "op" && !allowedFields.includes(key)) {
+              throw new Error(`${op} does not accept field "${key}"`);
+            }
+          }
+        }
         switch (parameters.op) {
           case "merge_gate":
             return toolSuccess(
@@ -112,10 +129,12 @@ export function createLegionTool(deps: {
                 labels.some(
                   (label) =>
                     typeof label !== "string" ||
-                    !LEGION_TOOL_LABELS.includes(label as (typeof LEGION_TOOL_LABELS)[number])
+                    !ARCHITECT_MUTABLE_LABELS.includes(
+                      label as (typeof ARCHITECT_MUTABLE_LABELS)[number]
+                    )
                 ))
             ) {
-              throw new Error("issue_create labels must use surviving Legion labels");
+              throw new Error("issue_create labels must use architect-mutable Legion labels");
             }
             return toolSuccess(
               await daemon.issueCreate({
@@ -161,20 +180,21 @@ export function createLegionTool(deps: {
               body: stringInput("body"),
             });
             return toolSuccess({});
-          case "label_add":
-          case "label_remove": {
+          case "label_add": {
             const label = stringInput("label");
-            if (!LEGION_TOOL_LABELS.includes(label as (typeof LEGION_TOOL_LABELS)[number])) {
-              throw new Error("label changes must use surviving Legion labels");
+            if (
+              !ARCHITECT_MUTABLE_LABELS.includes(label as (typeof ARCHITECT_MUTABLE_LABELS)[number])
+            ) {
+              throw new Error("label changes must use architect-mutable Legion labels");
             }
+            const architectLabel = label as (typeof ARCHITECT_MUTABLE_LABELS)[number];
             return toolSuccess(
               await daemon.labels({
                 tree: architect.tree,
                 sessionId: context.sessionManager.getSessionId(),
                 secret: architect.secret,
                 issue: stringInput("issue"),
-                add: parameters.op === "label_add" ? [label] : [],
-                remove: parameters.op === "label_remove" ? [label] : [],
+                add: [architectLabel],
               })
             );
           }

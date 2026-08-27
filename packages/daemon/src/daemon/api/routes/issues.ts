@@ -1,4 +1,9 @@
-import { formatIssueKey, LegionDaemonApi, parseIssueKey } from "@legion/contracts";
+import {
+  ARCHITECT_MUTABLE_LABELS,
+  formatIssueKey,
+  LegionDaemonApi,
+  parseIssueKey,
+} from "@legion/contracts";
 import { matchingHeldEvent, type RouteContext, treeContains } from "../context";
 import { issueUrl } from "../github";
 import {
@@ -19,8 +24,16 @@ export async function handleIssueCreate(
   const title = requiredString(body, "title");
   const issueBody = requiredString(body, "body");
   const labels = optionalStrings(body, "labels");
-  if (labels.some((label) => label !== "needs-approval")) {
-    throw new HttpError(400, "Architect issue creation only accepts needs-approval");
+  if (
+    labels.some(
+      (label) =>
+        !ARCHITECT_MUTABLE_LABELS.includes(label as (typeof ARCHITECT_MUTABLE_LABELS)[number])
+    )
+  ) {
+    throw new HttpError(
+      400,
+      `Architect issue creation only accepts ${ARCHITECT_MUTABLE_LABELS.join(", ")}`
+    );
   }
   const childLabels = [...new Set([...labels, "legion-child"])];
   const parsedTree = parseIssueKey(tree);
@@ -145,9 +158,16 @@ export async function handleIssueLabels(
   const { tree, issue } = ctx.requireTreeIssue(body);
   ctx.auth.requireArchitectCapability(body, tree);
   const add = optionalStrings(body, "add");
-  const remove = optionalStrings(body, "remove");
-  if (add.some((label) => label !== "needs-approval") || remove.length > 0) {
-    throw new HttpError(400, "Architect label changes only add needs-approval");
+  if (
+    add.some(
+      (label) =>
+        !ARCHITECT_MUTABLE_LABELS.includes(label as (typeof ARCHITECT_MUTABLE_LABELS)[number])
+    )
+  ) {
+    throw new HttpError(
+      400,
+      `Architect label changes only add ${ARCHITECT_MUTABLE_LABELS.join(", ")}`
+    );
   }
   if (add.length > 0) {
     await ctx.github.gh(issue, [
