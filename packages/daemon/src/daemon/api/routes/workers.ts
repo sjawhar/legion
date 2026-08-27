@@ -5,6 +5,25 @@ import { type RouteContext, roleForSession, treeContains } from "../context";
 import { appRoleForLegionRole } from "../github";
 import { HttpError, legionRole, requiredString, validateContractResponse } from "../http";
 
+/** Rejects the request unless the supplied spawn token was minted for exactly this tree/issue/role. */
+function requireSpawnCapability(
+  ctx: RouteContext,
+  body: Record<string, unknown>,
+  expected: { tree: string; issue: string; role: string },
+  message: string
+): void {
+  const spawnToken = requiredString(body, "spawnToken");
+  const spawn = ctx.deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
+  if (
+    !spawn ||
+    spawn.tree !== expected.tree ||
+    spawn.issue !== expected.issue ||
+    spawn.role !== expected.role
+  ) {
+    throw new HttpError(403, message);
+  }
+}
+
 export async function handleSpawnToken(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -34,16 +53,12 @@ export async function handlePhase(
   const phase = requiredString(body, "phase");
   const sessionId = requiredString(body, "sessionId");
   const role = roleForSession(ctx.deps.state, issue, sessionId, phase);
-  const spawnToken = requiredString(body, "spawnToken");
-  const expectedSpawn = ctx.deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
-  if (
-    !expectedSpawn ||
-    expectedSpawn.tree !== tree ||
-    expectedSpawn.issue !== issue ||
-    expectedSpawn.role !== role
-  ) {
-    throw new HttpError(403, "Worker session is not bound to a matching daemon-issued spawn token");
-  }
+  requireSpawnCapability(
+    ctx,
+    body,
+    { tree, issue, role },
+    "Worker session is not bound to a matching daemon-issued spawn token"
+  );
   const secret = randomUUID();
   ctx.auth.setCapability(sessionId, {
     tree,
@@ -136,16 +151,12 @@ export async function handleRoleBacking(
   const role = legionRole(requiredString(body, "role"));
   const agentId = requiredString(body, "agentId");
   const sessionId = requiredString(body, "sessionId");
-  const spawnToken = requiredString(body, "spawnToken");
-  const expectedSpawn = ctx.deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
-  if (
-    !expectedSpawn ||
-    expectedSpawn.tree !== tree ||
-    expectedSpawn.issue !== issue ||
-    expectedSpawn.role !== role
-  ) {
-    throw new HttpError(403, "Unknown or mismatched Legion spawn token");
-  }
+  requireSpawnCapability(
+    ctx,
+    body,
+    { tree, issue, role },
+    "Unknown or mismatched Legion spawn token"
+  );
   ctx.deps.state.roles[roleToken(ctx.deps.state.project, issue, role)] = {
     issue,
     role,

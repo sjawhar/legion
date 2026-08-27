@@ -12,7 +12,7 @@ export async function setJjIdentity(cwd: string, gitName: string, gitEmail: stri
     });
     const exitCode = await child.exited;
     if (exitCode === 0) continue;
-    const stderr = await new Response(child.stderr as ReadableStream<Uint8Array>).text();
+    const stderr = await new Response(child.stderr).text();
     throw new Error(`jj config set ${key} failed: ${stderr.trim()}`);
   }
 }
@@ -40,8 +40,8 @@ export async function runWorkspaceCommand(
   });
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
-    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
   ]);
   return { exitCode, stdout, stderr };
 }

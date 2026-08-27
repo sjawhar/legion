@@ -13,6 +13,12 @@ const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
 // and stays outside this contract.
 export const ARCHITECT_MUTABLE_LABELS = ["needs-approval"] as const;
 const architectMutableLabel = z.enum(ARCHITECT_MUTABLE_LABELS);
+export type ArchitectMutableLabel = (typeof ARCHITECT_MUTABLE_LABELS)[number];
+
+export function isArchitectMutableLabel(value: string): value is ArchitectMutableLabel {
+  return ARCHITECT_MUTABLE_LABELS.some((label) => label === value);
+}
+
 const architectCapability = z.strictObject({
   tree: nonEmptyString,
   sessionId: nonEmptyString,
@@ -43,6 +49,13 @@ export const LegionDaemonApi = {
     response: z.object({
       roleTokens: z.record(z.string(), z.string()),
       controlSubject: nonEmptyString,
+      // Sent by the daemon on every start; optional so a client may ignore gate policy.
+      gates: z
+        .object({
+          design: z.enum(["root-issues", "off"]),
+          merge: z.enum(["human", "off"]),
+        })
+        .optional(),
       secret: nonEmptyString,
     }),
   },
@@ -211,6 +224,7 @@ export type EscalateInput = InputOf<typeof LegionDaemonApi.Escalate.request>;
 export type IssueCloseInput = InputOf<typeof LegionDaemonApi.IssueClose.request>;
 export type DispatchThreadInput = InputOf<typeof LegionDaemonApi.DispatchThread.request>;
 export type DispatchThreadResponse = OutputOf<typeof LegionDaemonApi.DispatchThread.response>;
+export type DispatchUrgency = NonNullable<DispatchThreadInput["urgency"]>;
 export type SpawnTokenInput = InputOf<typeof LegionDaemonApi.SpawnToken.request>;
 export type SpawnTokenResponse = OutputOf<typeof LegionDaemonApi.SpawnToken.response>;
 export type RoleBackingInput = InputOf<typeof LegionDaemonApi.RoleBacking.request>;

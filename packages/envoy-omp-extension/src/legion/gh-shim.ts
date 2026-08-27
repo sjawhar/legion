@@ -1,7 +1,7 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export function shellLiteral(value: string): string {
+function shellLiteral(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 

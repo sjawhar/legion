@@ -3,8 +3,8 @@ import type { RouteContext } from "../context";
 import { issueUrl } from "../github";
 import { HttpError, issueKey, requiredString, validateContractResponse } from "../http";
 
-// T24 controller startup contract: POST this with the session ID from envoy_whoami
-// immediately after boot so held events are redelivered before any work endpoint.
+// Controller sessions POST their Envoy session ID immediately after boot so
+// held events are redelivered before any work endpoint.
 export async function handleControllerReady(
   ctx: RouteContext,
   body: Record<string, unknown>

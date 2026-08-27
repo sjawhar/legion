@@ -58,3 +58,31 @@ test("requires a grant and bot login to redeem a GitHub App token", () => {
     }).success
   ).toBeTrue();
 });
+
+test("allows architects to add only daemon-approved labels", () => {
+  const request = {
+    tree: "acme/widgets#1",
+    issue: "acme/widgets#42",
+    sessionId: "ses_architect",
+    secret: "capability",
+  };
+
+  expect(
+    LegionDaemonApi.Labels.request.safeParse({
+      ...request,
+      add: ["needs-approval"],
+    }).success
+  ).toBeTrue();
+  expect(
+    LegionDaemonApi.Labels.request.safeParse({
+      ...request,
+      add: ["human-approved"],
+    }).success
+  ).toBeFalse();
+  expect(
+    LegionDaemonApi.Labels.request.safeParse({
+      ...request,
+      remove: ["needs-approval"],
+    }).success
+  ).toBeFalse();
+});

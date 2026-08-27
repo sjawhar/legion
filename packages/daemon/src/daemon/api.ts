@@ -4,8 +4,8 @@ import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
 import { CapabilityService, ControllerGate, secretHash, spawnCapabilityKey } from "./api/auth";
 import { appendFooter, type RouteContext, requireTree, requireTreeIssue } from "./api/context";
-import { dispatchThread } from "./api/dispatch";
-import { GithubService, type TokenLease } from "./api/github";
+import { type DispatchDeps, dispatchThread } from "./api/dispatch";
+import { GitHubService, type GitHubTokenSource } from "./api/github";
 import {
   asRecord,
   HttpError,
@@ -43,8 +43,6 @@ import {
   handleSpawnToken,
   handleWorkerSession,
 } from "./api/routes/workers";
-import type { GitHubAppRole } from "./config";
-import type { TokenManager } from "./github-apps";
 import type { LegionState } from "./legion-state";
 
 const GRANT_TTL_MS = 60_000;
@@ -57,10 +55,6 @@ export interface LegionApiConfig {
   gates: { design: "root-issues" | "off"; merge: MergeGateSetting };
   appLogins?: string[];
   now?: () => number;
-}
-
-export interface LegionApiTokenManager {
-  getToken(role: GitHubAppRole, owner: string): Promise<TokenLease>;
 }
 
 export interface LegionApiProcessManager {
@@ -78,19 +72,16 @@ export interface LegionApiProcessManager {
   beginLinger(tree: IssueKey): void;
 }
 
-export type LegionApiFetch = (
-  input: string | URL | Request,
-  init?: RequestInit
-) => Promise<Response>;
+export type { DispatchFetch as LegionApiFetch } from "./api/dispatch";
 
 export interface LegionApiDeps {
   state: LegionState;
   saveState?: () => Promise<void>;
   runner?: CommandRunner;
-  tokenManager: Pick<TokenManager, "getToken"> | LegionApiTokenManager;
+  tokenManager: GitHubTokenSource;
   processManager: LegionApiProcessManager;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
-  dispatch: { url: string; bearer: string; fetch?: LegionApiFetch };
+  dispatch: DispatchDeps;
   onTreeReady?(tree: IssueKey): Promise<void>;
   onControllerReady(): Promise<void>;
   onControllerEvent(payload: { type: string }): Promise<void>;
@@ -145,7 +136,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   };
   const auth = new CapabilityService(now);
   const controllerGate = new ControllerGate();
-  const github = new GithubService(deps.tokenManager, runner);
+  const github = new GitHubService(deps.tokenManager, runner);
 
   const ctx: RouteContext = {
     config,

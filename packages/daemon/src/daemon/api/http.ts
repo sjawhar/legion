@@ -23,7 +23,14 @@ export function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-export type ContractSchema = { parse(value: unknown): unknown };
+/**
+ * Structural view of a `@legion/contracts` zod schema. The daemon pins zod 3 while
+ * the contracts package is on zod 4, so schemas cross the boundary by shape; the
+ * type parameter keeps the parsed type visible to response construction.
+ */
+export interface ContractSchema<T = unknown> {
+  parse(value: unknown): T;
+}
 
 export const REQUEST_SCHEMAS: Record<string, ContractSchema> = {
   "/legion/v1/process/started": LegionDaemonApi.ProcessStarted.request,
@@ -63,7 +70,10 @@ export function validateContractRequest(
   }
 }
 
-export function validateContractResponse<T>(schema: ContractSchema, response: T): T {
+export function validateContractResponse<T>(
+  schema: ContractSchema<T>,
+  response: NoInfer<T>
+): NoInfer<T> {
   schema.parse(response);
   return response;
 }

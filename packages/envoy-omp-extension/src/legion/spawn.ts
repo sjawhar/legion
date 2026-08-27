@@ -1,5 +1,5 @@
 import path from "node:path";
-import { LEGION_ROLES, type LegionRole, parseRoleToken } from "@legion/contracts";
+import { isLegionRole, parseRoleToken } from "@legion/contracts";
 import type { SessionContext } from "./pi-types";
 import type { WorkerSpawn } from "./worker-budget";
 
@@ -30,15 +30,7 @@ export function parseWorkerSpawn(prompt: string, project: string): WorkerSpawn |
   if (!spawnToken) {
     throw new Error("Legion spawn block is missing daemon-issued recovery token");
   }
-  if (
-    !issue ||
-    !role ||
-    !token ||
-    !tree ||
-    !workspace ||
-    !LEGION_ROLES.includes(role as LegionRole)
-  )
-    return undefined;
+  if (!issue || !role || !token || !tree || !workspace || !isLegionRole(role)) return undefined;
 
   const parsedToken = parseRoleToken(project, token);
   if (

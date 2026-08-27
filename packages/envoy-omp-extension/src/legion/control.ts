@@ -1,11 +1,11 @@
-import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
+import { isLegionRole, type LegionRole } from "@legion/contracts";
 import type { ExtensionAgentsApi } from "./pi-types";
 
-export type Redelivery = {
+export interface Redelivery {
   readonly topic: string;
   readonly payload: string;
   readonly eventId: string;
-};
+}
 
 export type LegionControlDirective =
   | {
@@ -18,13 +18,13 @@ export type LegionControlDirective =
   | { readonly type: "reclaim-architect"; readonly redeliver: Redelivery }
   | { readonly type: "shutdown" };
 
-export type LegionControlActions = {
+export interface LegionControlActions {
   readonly agents?: ExtensionAgentsApi;
   readonly reclaimArchitect: () => Promise<void>;
   readonly requestShutdown: () => void;
   readonly acknowledge: () => void;
   readonly reject: (error: string) => void;
-};
+}
 
 export async function handleLegionControlDirective(
   directive: LegionControlDirective,
@@ -85,7 +85,7 @@ export function parseControlDirective(raw: string): LegionControlDirective {
     payload.type !== "revive-worker" ||
     !("role" in payload) ||
     typeof payload.role !== "string" ||
-    !LEGION_ROLES.includes(payload.role as LegionRole) ||
+    !isLegionRole(payload.role) ||
     !("agentId" in payload) ||
     typeof payload.agentId !== "string" ||
     !("parentSessionFile" in payload) ||
@@ -95,7 +95,7 @@ export function parseControlDirective(raw: string): LegionControlDirective {
   }
   return {
     type: "revive-worker",
-    role: payload.role as LegionRole,
+    role: payload.role,
     agentId: payload.agentId,
     parentSessionFile: payload.parentSessionFile,
     redeliver: redelivery(),

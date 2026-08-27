@@ -1,6 +1,8 @@
 import {
   ARCHITECT_MUTABLE_LABELS,
   formatIssueKey,
+  type IssueKey,
+  isArchitectMutableLabel,
   LegionDaemonApi,
   parseIssueKey,
 } from "@legion/contracts";
@@ -15,6 +17,30 @@ import {
   validateContractResponse,
 } from "../http";
 
+async function createIssueComment(
+  ctx: RouteContext,
+  issue: IssueKey,
+  commentBody: string
+): Promise<{ commentId: number; url: string }> {
+  const result = asRecord(
+    JSON.parse(
+      await ctx.github.gh(issue, [
+        "gh",
+        "api",
+        `${issueUrl(issue)}/comments`,
+        "-f",
+        `body=${commentBody}`,
+      ])
+    )
+  );
+  const commentId = result.id;
+  const url = result.html_url;
+  if (typeof commentId !== "number" || typeof url !== "string") {
+    throw new Error("GitHub comment create returned invalid response");
+  }
+  return { commentId, url };
+}
+
 export async function handleIssueCreate(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -24,12 +50,7 @@ export async function handleIssueCreate(
   const title = requiredString(body, "title");
   const issueBody = requiredString(body, "body");
   const labels = optionalStrings(body, "labels");
-  if (
-    labels.some(
-      (label) =>
-        !ARCHITECT_MUTABLE_LABELS.includes(label as (typeof ARCHITECT_MUTABLE_LABELS)[number])
-    )
-  ) {
+  if (labels.some((label) => !isArchitectMutableLabel(label))) {
     throw new HttpError(
       400,
       `Architect issue creation only accepts ${ARCHITECT_MUTABLE_LABELS.join(", ")}`
@@ -106,28 +127,16 @@ export async function handleIssueComment(
 ): Promise<Response> {
   const { tree, issue } = ctx.requireTreeIssue(body);
   ctx.auth.requireArchitectCapability(body, tree);
-  const commentBody = ctx.appendFooter(tree, issue, requiredString(body, "body"));
-  const result = asRecord(
-    JSON.parse(
-      await ctx.github.gh(issue, [
-        "gh",
-        "api",
-        `${issueUrl(issue)}/comments`,
-        "-f",
-        `body=${commentBody}`,
-      ])
-    )
+  const { commentId, url } = await createIssueComment(
+    ctx,
+    issue,
+    ctx.appendFooter(tree, issue, requiredString(body, "body"))
   );
-  const commentId = result.id;
-  const commentUrl = result.html_url;
-  if (typeof commentId !== "number" || typeof commentUrl !== "string") {
-    throw new Error("GitHub comment create returned invalid response");
-  }
   await ctx.save();
   return Response.json(
     validateContractResponse(LegionDaemonApi.Comment.response, {
       commentId,
-      url: commentUrl,
+      url,
     })
   );
 }
@@ -158,12 +167,7 @@ export async function handleIssueLabels(
   const { tree, issue } = ctx.requireTreeIssue(body);
   ctx.auth.requireArchitectCapability(body, tree);
   const add = optionalStrings(body, "add");
-  if (
-    add.some(
-      (label) =>
-        !ARCHITECT_MUTABLE_LABELS.includes(label as (typeof ARCHITECT_MUTABLE_LABELS)[number])
-    )
-  ) {
+  if (add.some((label) => !isArchitectMutableLabel(label))) {
     throw new HttpError(
       400,
       `Architect label changes only add ${ARCHITECT_MUTABLE_LABELS.join(", ")}`
@@ -204,23 +208,8 @@ export async function handleIssueClose(
   }
   let finalCommentRef: string | undefined;
   if (comment) {
-    const result = asRecord(
-      JSON.parse(
-        await ctx.github.gh(issue, [
-          "gh",
-          "api",
-          `${issueUrl(issue)}/comments`,
-          "-f",
-          `body=${ctx.appendFooter(tree, issue, comment)}`,
-        ])
-      )
-    );
-    const commentId = result.id;
-    const commentUrl = result.html_url;
-    if (typeof commentId !== "number" || typeof commentUrl !== "string") {
-      throw new Error("GitHub comment create returned invalid response");
-    }
-    finalCommentRef = commentUrl;
+    const created = await createIssueComment(ctx, issue, ctx.appendFooter(tree, issue, comment));
+    finalCommentRef = created.url;
   }
   await ctx.github.gh(issue, ["gh", "api", "-X", "PATCH", issueUrl(issue), "-f", "state=closed"]);
   const node = ctx.deps.state.issues[issue];
@@ -258,13 +247,12 @@ export async function handleWaveRelease(
       node.released = true;
     }
   }
-  const released = new Set(children);
   const retained = [];
   for (const held of treeState.heldEvents) {
     const matchingChild = children.find((child) =>
       matchingHeldEvent(ctx.deps.state, child, held.role)
     );
-    if (!matchingChild || !released.has(matchingChild)) {
+    if (!matchingChild) {
       retained.push(held);
       continue;
     }

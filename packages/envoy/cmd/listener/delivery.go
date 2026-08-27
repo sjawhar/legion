@@ -73,13 +73,6 @@ func (message deliveryMessage) finalize(retry bool) {
 	_ = message.msg.Ack()
 }
 
-// Ack finalizes a message without retrying. It keeps callers agnostic to the
-// transport while core NATS delivery remains intentionally non-durable.
-func (message deliveryMessage) Ack() error {
-	message.finalize(false)
-	return nil
-}
-
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
@@ -283,7 +276,7 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // failed forward is reported via a delivery exception instead of a NAK.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	role := strings.TrimPrefix(item.Topic, contracts.RoleTopicPrefix)
@@ -296,7 +289,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			},
 			exceptionReason: "delivery_failed",
 		})
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	if sessionID == "" {
@@ -307,7 +300,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			},
 			exceptionReason: "no_holder",
 		})
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	now := time.Now().UnixMilli()
@@ -321,7 +314,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			},
 			exceptionReason: "delivery_failed",
 		})
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	if item.SourceSession != "" && item.SourceSession == sessionID {
@@ -332,7 +325,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 				logger.DeliveryLog(slog.LevelInfo, "listener skip role echo", sessionID, item.Topic, item.EventID, "skipped")
 			},
 		})
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) || cfg.attemptCache.Seen(item.DedupeKey, sessionID) {
@@ -343,7 +336,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 				logger.DeliveryLog(slog.LevelInfo, "listener role dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
 			},
 		})
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
@@ -359,7 +352,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			exceptionReason: "delivery_failed",
 			clearAttempt:    true,
 		})
-		_ = message.Ack()
+		message.finalize(false)
 		return
 	}
 	applyDeliveryOutcome(cfg, item, deliveryOutcome{
@@ -370,7 +363,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		},
 		recordDedupe: true,
 	})
-	_ = message.Ack()
+	message.finalize(false)
 }
 
 // agentSubjectDelivery delivers directly to the session named by the topic

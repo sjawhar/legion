@@ -19,7 +19,7 @@ async function fetchMergeGatePr(
   if (!treeIssue) {
     throw new Error(`Invalid issue key in Legion state: ${tree}`);
   }
-  const repo = `${treeIssue.owner}/${treeIssue.repo}` as `${string}/${string}`;
+  const repo: `${string}/${string}` = `${treeIssue.owner}/${treeIssue.repo}`;
   const raw = asRecord(
     JSON.parse(await ctx.github.gh(tree, ["gh", "api", `repos/${repo}/pulls/${number}`]))
   );

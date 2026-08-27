@@ -1,19 +1,24 @@
-import { ARCHITECT_MUTABLE_LABELS, type LegionRole } from "@legion/contracts";
+import {
+  ARCHITECT_MUTABLE_LABELS,
+  type ArchitectMutableLabel,
+  isArchitectMutableLabel,
+  type LegionRole,
+} from "@legion/contracts";
 import type { LegionDaemonClient } from "./daemon-client";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "./pi-types";
 
-type ArchitectSession = {
+interface ArchitectSession {
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
   readonly secret: string;
-};
+}
 
-export function toolSuccess(details: Readonly<Record<string, unknown>>): ToolResult {
+function toolSuccess(details: Readonly<Record<string, unknown>>): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 }
 
-export function toolFailure(error: unknown): ToolResult {
+function toolFailure(error: unknown): ToolResult {
   const message = error instanceof Error ? error.message : String(error);
   return { content: [{ type: "text", text: message }], details: {}, isError: true };
 }
@@ -34,7 +39,7 @@ const LEGION_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
   merge_gate: ["pr"],
 };
 
-export function legionToolSchema(pi: PiApi): unknown {
+function legionToolSchema(pi: PiApi): unknown {
   const z = pi.zod;
   return z.object({
     op: z.enum([
@@ -62,7 +67,7 @@ export function legionToolSchema(pi: PiApi): unknown {
   });
 }
 
-export function envoyDispatchToolSchema(pi: PiApi): unknown {
+function envoyDispatchToolSchema(pi: PiApi): unknown {
   const z = pi.zod;
   return z.object({
     parent: z.string(),
@@ -89,6 +94,7 @@ export function createLegionTool(deps: {
       try {
         const architect = architectSession(context);
         const daemon = roleDaemon();
+        const sessionId = context.sessionManager.getSessionId();
         const stringInput = (name: string): string => {
           const value = parameters[name];
           if (typeof value !== "string")
@@ -117,7 +123,7 @@ export function createLegionTool(deps: {
               await daemon.mergeGate({
                 tree: architect.tree,
                 pr: numberInput("pr"),
-                sessionId: context.sessionManager.getSessionId(),
+                sessionId,
                 secret: architect.secret,
               })
             );
@@ -126,12 +132,9 @@ export function createLegionTool(deps: {
             if (
               labels !== undefined &&
               (!Array.isArray(labels) ||
-                labels.some(
-                  (label) =>
-                    typeof label !== "string" ||
-                    !ARCHITECT_MUTABLE_LABELS.includes(
-                      label as (typeof ARCHITECT_MUTABLE_LABELS)[number]
-                    )
+                !labels.every(
+                  (label: unknown): label is ArchitectMutableLabel =>
+                    typeof label === "string" && isArchitectMutableLabel(label)
                 ))
             ) {
               throw new Error("issue_create labels must use architect-mutable Legion labels");
@@ -139,7 +142,7 @@ export function createLegionTool(deps: {
             return toolSuccess(
               await daemon.issueCreate({
                 tree: architect.tree,
-                sessionId: context.sessionManager.getSessionId(),
+                sessionId,
                 secret: architect.secret,
                 title: stringInput("title"),
                 body: stringInput("body"),
@@ -149,14 +152,17 @@ export function createLegionTool(deps: {
           }
           case "wave_release": {
             const children = parameters.children;
-            if (!Array.isArray(children) || children.some((child) => typeof child !== "string")) {
+            if (
+              !Array.isArray(children) ||
+              !children.every((child: unknown): child is string => typeof child === "string")
+            ) {
               throw new Error("wave_release requires children");
             }
             return toolSuccess(
               await daemon.waveRelease({
                 tree: architect.tree,
                 children,
-                sessionId: context.sessionManager.getSessionId(),
+                sessionId,
                 secret: architect.secret,
               })
             );
@@ -165,7 +171,7 @@ export function createLegionTool(deps: {
             return toolSuccess(
               await daemon.comment({
                 tree: architect.tree,
-                sessionId: context.sessionManager.getSessionId(),
+                sessionId,
                 secret: architect.secret,
                 issue: stringInput("issue"),
                 body: stringInput("body"),
@@ -174,7 +180,7 @@ export function createLegionTool(deps: {
           case "post_spec":
             await daemon.postBody({
               tree: architect.tree,
-              sessionId: context.sessionManager.getSessionId(),
+              sessionId,
               secret: architect.secret,
               issue: stringInput("issue"),
               body: stringInput("body"),
@@ -182,19 +188,16 @@ export function createLegionTool(deps: {
             return toolSuccess({});
           case "label_add": {
             const label = stringInput("label");
-            if (
-              !ARCHITECT_MUTABLE_LABELS.includes(label as (typeof ARCHITECT_MUTABLE_LABELS)[number])
-            ) {
+            if (!isArchitectMutableLabel(label)) {
               throw new Error("label changes must use architect-mutable Legion labels");
             }
-            const architectLabel = label as (typeof ARCHITECT_MUTABLE_LABELS)[number];
             return toolSuccess(
               await daemon.labels({
                 tree: architect.tree,
-                sessionId: context.sessionManager.getSessionId(),
+                sessionId,
                 secret: architect.secret,
                 issue: stringInput("issue"),
-                add: [architectLabel],
+                add: [label],
               })
             );
           }
@@ -209,7 +212,7 @@ export function createLegionTool(deps: {
               tree: architect.tree,
               kind,
               context: parameters.context,
-              sessionId: context.sessionManager.getSessionId(),
+              sessionId,
               secret: architect.secret,
             });
             return toolSuccess({});
@@ -217,7 +220,7 @@ export function createLegionTool(deps: {
           case "request_refile":
             await daemon.escalate({
               tree: architect.tree,
-              sessionId: context.sessionManager.getSessionId(),
+              sessionId,
               secret: architect.secret,
               kind: "re-file",
               context: { issue: stringInput("issue"), rationale: stringInput("rationale") },
@@ -229,7 +232,7 @@ export function createLegionTool(deps: {
               throw new Error("issue_close comment must be a string");
             await daemon.issueClose({
               tree: architect.tree,
-              sessionId: context.sessionManager.getSessionId(),
+              sessionId,
               secret: architect.secret,
               issue: stringInput("issue"),
               ...(comment === undefined ? {} : { comment }),

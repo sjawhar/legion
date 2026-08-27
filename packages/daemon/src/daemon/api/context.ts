@@ -1,10 +1,16 @@
-import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import {
+  type DispatchUrgency,
+  type IssueKey,
+  LEGION_ROLES,
+  type LegionRole,
+  roleToken,
+} from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import type { LegionApiConfig, LegionApiDeps } from "../api";
 import type { LegionState } from "../legion-state";
 import type { CapabilityService, ControllerGate } from "./auth";
 import type { DispatchThreadResult } from "./dispatch";
-import type { GithubService } from "./github";
+import type { GitHubService } from "./github";
 import { HttpError, issueKey, legionRole } from "./http";
 
 export function treeContains(state: LegionState, tree: IssueKey, candidate: IssueKey): boolean {
@@ -98,13 +104,13 @@ export interface RouteContext {
   grantTtlMs: number;
   auth: CapabilityService;
   controllerGate: ControllerGate;
-  github: GithubService;
+  github: GitHubService;
   dispatchThread: (
     parent: string,
     subject: string,
     body: string,
     ask: unknown,
-    urgency: unknown
+    urgency: DispatchUrgency | undefined
   ) => Promise<DispatchThreadResult>;
   requireTree(body: Record<string, unknown>): IssueKey;
   requireTreeIssue(body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey };

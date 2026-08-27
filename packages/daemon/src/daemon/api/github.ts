@@ -4,13 +4,13 @@ import type { CommandRunner } from "../../state/fetch";
 import type { GitHubAppRole } from "../config";
 import { buildRoleEnv } from "../github-apps";
 
-export type TokenLease = {
+export interface TokenLease {
   token: string;
   expiresAt: string;
   gitIdentity: { name: string; email: string };
-};
+}
 
-export interface GithubTokenSource {
+export interface GitHubTokenSource {
   getToken(role: GitHubAppRole, owner: string): Promise<TokenLease>;
 }
 
@@ -27,9 +27,9 @@ export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
 }
 
 /** Fetches GitHub App tokens for an issue's repo and runs `gh` under that identity. */
-export class GithubService {
+export class GitHubService {
   constructor(
-    private readonly tokenManager: GithubTokenSource,
+    private readonly tokenManager: GitHubTokenSource,
     private readonly runner: CommandRunner
   ) {}
 

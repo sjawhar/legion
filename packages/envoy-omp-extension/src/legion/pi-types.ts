@@ -1,46 +1,48 @@
 import type { EnvoySessionContext } from "../../extensions/envoy";
 
-export type SessionContext = EnvoySessionContext & {
+export interface SessionContext extends EnvoySessionContext {
   readonly taskDepth?: number;
   readonly sessionManager: {
     readonly getSessionId: () => string;
     readonly getSessionFile: () => string | undefined;
   };
-};
+}
 
-export type BeforeAgentStartEvent = { readonly prompt: string };
-export type ToolCallEvent = {
+export interface BeforeAgentStartEvent {
+  readonly prompt: string;
+}
+export interface ToolCallEvent {
   readonly toolName: string;
   readonly toolCallId?: string;
   readonly input: Record<string, unknown>;
-};
+}
 
-export type ToolResultEvent = {
+export interface ToolResultEvent {
   readonly toolName: string;
   readonly toolCallId: string;
   readonly input: Record<string, unknown>;
   readonly details: unknown;
   readonly isError: boolean;
-};
+}
 
-export type ToolCallEventResult = {
+export interface ToolCallEventResult {
   readonly block?: boolean;
   readonly reason?: string;
   readonly input?: Record<string, unknown>;
-};
+}
 
-export type CommandContext = {
+export interface CommandContext {
   readonly cwd: string;
   readonly sessionManager: { readonly getSessionId: () => string };
-};
+}
 
-export type ToolResult = {
+export interface ToolResult {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
   readonly details: Readonly<Record<string, unknown>>;
   readonly isError?: boolean;
-};
+}
 
-export type RegisteredTool = {
+export interface RegisteredTool {
   readonly name: string;
   readonly label: string;
   readonly description: string;
@@ -53,11 +55,13 @@ export type RegisteredTool = {
     onUpdate: unknown,
     context: SessionContext
   ) => Promise<ToolResult>;
-};
+}
 
-export type ZodProperty = { readonly optional: () => unknown };
+export interface ZodProperty {
+  readonly optional: () => unknown;
+}
 
-export type ExtensionAgentsApi = {
+export interface ExtensionAgentsApi {
   readonly list: () => readonly { readonly id: string }[];
   readonly get: (agentId: string) => { readonly id: string } | undefined;
   readonly ensureLive: (
@@ -65,9 +69,9 @@ export type ExtensionAgentsApi = {
     options: { readonly parentSessionFile: string }
   ) => Promise<{ readonly id: string }>;
   readonly prompt: (agentId: string, content: string) => Promise<void>;
-};
+}
 
-export type PiApi = {
+export interface PiApi {
   readonly zod: {
     readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
     readonly string: () => ZodProperty;
@@ -98,4 +102,4 @@ export type PiApi = {
       readonly handler: (args: string, context: CommandContext) => Promise<void>;
     }
   ) => void;
-};
+}

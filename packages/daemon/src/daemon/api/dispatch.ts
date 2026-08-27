@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { DispatchUrgency } from "@legion/contracts";
 
 export type DispatchFetch = (
   input: string | URL | Request,
@@ -11,7 +12,10 @@ export interface DispatchDeps {
   fetch?: DispatchFetch;
 }
 
-export type DispatchThreadResult = { thread: number; url: string };
+export interface DispatchThreadResult {
+  thread: number;
+  url: string;
+}
 
 export async function dispatchThread(
   deps: DispatchDeps,
@@ -19,7 +23,7 @@ export async function dispatchThread(
   subject: string,
   body: string,
   ask: unknown,
-  urgency: unknown
+  urgency: DispatchUrgency | undefined
 ): Promise<DispatchThreadResult> {
   const response = await (deps.fetch ?? fetch)(`${deps.url.replace(/\/+$/, "")}/mcp`, {
     method: "POST",

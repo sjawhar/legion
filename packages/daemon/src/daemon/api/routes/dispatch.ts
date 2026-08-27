@@ -36,7 +36,7 @@ export async function handleDispatchThreads(
   if (!parsedIssue) {
     throw new Error(`Invalid issue key in Legion state: ${issue}`);
   }
-  const repo = `${parsedIssue.owner}/${parsedIssue.repo}` as `${string}/${string}`;
+  const repo: `${string}/${string}` = `${parsedIssue.owner}/${parsedIssue.repo}`;
   const existingMapping = ctx.deps.state.dispatchThreads.find(
     (entry) => entry.repo === repo && entry.thread === dispatched.thread
   );
