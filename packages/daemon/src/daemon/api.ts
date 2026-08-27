@@ -1,33 +1,55 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import {
-  controllerToken,
-  formatIssueKey,
-  type IssueKey,
-  LEGION_ROLES,
-  LegionDaemonApi,
-  type LegionRole,
-  parseIssueKey,
-  roleToken,
-  sanitizeToken,
-} from "@legion/contracts";
+import { randomUUID } from "node:crypto";
+import { type IssueKey, LegionDaemonApi, type LegionRole } from "@legion/contracts";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
-import { getApprovalState } from "./approval-check";
+import { CapabilityService, ControllerGate, secretHash, spawnCapabilityKey } from "./api/auth";
+import { appendFooter, type RouteContext, requireTree, requireTreeIssue } from "./api/context";
+import { dispatchThread } from "./api/dispatch";
+import { GithubService, type TokenLease } from "./api/github";
+import {
+  asRecord,
+  HttpError,
+  REQUEST_SCHEMAS,
+  validateContractRequest,
+  validateContractResponse,
+} from "./api/http";
+import {
+  handleAdmission,
+  handleBacklog,
+  handleControllerReady,
+  handleGatesApprove,
+} from "./api/routes/controller";
+import {
+  handleGhToken,
+  handleGitCredential,
+  handleGrants,
+  handleProvisioningCredential,
+} from "./api/routes/credentials";
+import { handleDispatchThreads } from "./api/routes/dispatch";
+import {
+  handleEscalate,
+  handleIssueBody,
+  handleIssueClose,
+  handleIssueComment,
+  handleIssueCreate,
+  handleIssueLabels,
+  handleWaveRelease,
+} from "./api/routes/issues";
+import { handleMergeGate } from "./api/routes/merge-gate";
+import { handleProcessExit, handleProcessReady, handleProcessStarted } from "./api/routes/process";
+import {
+  handlePhase,
+  handleRoleBacking,
+  handleSpawnToken,
+  handleWorkerSession,
+} from "./api/routes/workers";
 import type { GitHubAppRole } from "./config";
-import { buildRoleEnv, type TokenManager } from "./github-apps";
+import type { TokenManager } from "./github-apps";
 import type { LegionState } from "./legion-state";
 
 const GRANT_TTL_MS = 60_000;
 
-type DispatchThreadResult = { thread: number; url: string };
-
 type MergeGateSetting = "human" | "off";
-
-type TokenLease = {
-  token: string;
-  expiresAt: string;
-  gitIdentity: { name: string; email: string };
-};
 
 export interface LegionApiConfig {
   port: number;
@@ -81,214 +103,35 @@ export interface LegionApi {
   stop(): void;
 }
 
-interface SessionCapability {
-  tree: IssueKey;
-  issue: IssueKey;
-  role: LegionRole;
-  secretHash: Buffer;
-}
-
-interface Grant {
-  issue: IssueKey;
-  role: LegionRole;
-  expiresAt: number;
-}
-
-interface BootToken {
-  tree: IssueKey;
-  generation: number;
-  sessionId?: string;
-}
-
-interface MergeGatePrSnapshot {
-  repo: `${string}/${string}`;
-  raw: Record<string, unknown>;
-  head: { ref: string; sha: string };
-}
-
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string
-  ) {
-    super(message);
-  }
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new HttpError(400, "Expected a JSON object");
-  }
-  return value as Record<string, unknown>;
-}
-
-type ContractSchema = { parse(value: unknown): unknown };
-
-const REQUEST_SCHEMAS: Record<string, ContractSchema> = {
-  "/legion/v1/process/started": LegionDaemonApi.ProcessStarted.request,
-  "/legion/v1/process/ready": LegionDaemonApi.ProcessReady.request,
-  "/legion/v1/merge-gate": LegionDaemonApi.MergeGate.request,
-  "/legion/v1/process/exit": LegionDaemonApi.ProcessExit.request,
-  "/legion/v1/spawn-token": LegionDaemonApi.SpawnToken.request,
-  "/legion/v1/issues": LegionDaemonApi.IssueCreate.request,
-  "/legion/v1/waves/release": LegionDaemonApi.WaveRelease.request,
-  "/legion/v1/issues/comment": LegionDaemonApi.Comment.request,
-  "/legion/v1/issues/body": LegionDaemonApi.PostBody.request,
-  "/legion/v1/issues/labels": LegionDaemonApi.Labels.request,
-  "/legion/v1/issues/close": LegionDaemonApi.IssueClose.request,
-  "/legion/v1/escalate": LegionDaemonApi.Escalate.request,
-  "/legion/v1/dispatch-threads": LegionDaemonApi.DispatchThread.request,
-  "/legion/v1/phase": LegionDaemonApi.Phase.request,
-  "/legion/v1/worker-session": LegionDaemonApi.WorkerSession.request,
-  "/legion/v1/role-backing": LegionDaemonApi.RoleBacking.request,
-  "/legion/v1/provisioning-credential": LegionDaemonApi.ProvisioningCredential.request,
-  "/legion/v1/grants": LegionDaemonApi.Grant.request,
-  "/legion/v1/git-credential": LegionDaemonApi.GitHubToken.request,
-  "/legion/v1/gh-token": LegionDaemonApi.GitHubToken.request,
-  "/legion/v1/controller/ready": LegionDaemonApi.ControllerReady.request,
-  "/legion/v1/gates/approve": LegionDaemonApi.GatesApprove.request,
-  "/legion/v1/admission": LegionDaemonApi.Admission.request,
-  "/legion/v1/backlog": LegionDaemonApi.Backlog.request,
+const ROUTES: Record<
+  string,
+  (ctx: RouteContext, body: Record<string, unknown>) => Promise<Response>
+> = {
+  "/legion/v1/process/started": handleProcessStarted,
+  "/legion/v1/process/ready": handleProcessReady,
+  "/legion/v1/process/exit": handleProcessExit,
+  "/legion/v1/merge-gate": handleMergeGate,
+  "/legion/v1/issues": handleIssueCreate,
+  "/legion/v1/waves/release": handleWaveRelease,
+  "/legion/v1/issues/comment": handleIssueComment,
+  "/legion/v1/issues/body": handleIssueBody,
+  "/legion/v1/issues/labels": handleIssueLabels,
+  "/legion/v1/issues/close": handleIssueClose,
+  "/legion/v1/escalate": handleEscalate,
+  "/legion/v1/dispatch-threads": handleDispatchThreads,
+  "/legion/v1/spawn-token": handleSpawnToken,
+  "/legion/v1/phase": handlePhase,
+  "/legion/v1/worker-session": handleWorkerSession,
+  "/legion/v1/role-backing": handleRoleBacking,
+  "/legion/v1/provisioning-credential": handleProvisioningCredential,
+  "/legion/v1/grants": handleGrants,
+  "/legion/v1/git-credential": handleGitCredential,
+  "/legion/v1/gh-token": handleGhToken,
+  "/legion/v1/controller/ready": handleControllerReady,
+  "/legion/v1/gates/approve": handleGatesApprove,
+  "/legion/v1/admission": handleAdmission,
+  "/legion/v1/backlog": handleBacklog,
 };
-
-function validateContractRequest(schema: ContractSchema, body: Record<string, unknown>): void {
-  try {
-    schema.parse(body);
-  } catch {
-    throw new HttpError(400, "Invalid Legion daemon API request");
-  }
-}
-
-function validateContractResponse<T>(schema: ContractSchema, response: T): T {
-  schema.parse(response);
-  return response;
-}
-
-function requiredString(body: Record<string, unknown>, field: string): string {
-  const value = body[field];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new HttpError(400, `Expected non-empty string ${field}`);
-  }
-  return value;
-}
-
-function optionalStrings(body: Record<string, unknown>, field: string): string[] {
-  const value = body[field];
-  if (value === undefined) {
-    return [];
-  }
-  if (
-    !Array.isArray(value) ||
-    value.some((entry) => typeof entry !== "string" || entry.length === 0)
-  ) {
-    throw new HttpError(400, `Expected string array ${field}`);
-  }
-  return value;
-}
-
-function requiredNumber(body: Record<string, unknown>, field: string): number {
-  const value = body[field];
-  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
-    throw new HttpError(400, `Expected integer ${field}`);
-  }
-  return value;
-}
-
-function issueKey(body: Record<string, unknown>, field: string): IssueKey {
-  const value = requiredString(body, field);
-  const parsed = parseIssueKey(value);
-  if (!parsed) {
-    throw new HttpError(400, `Expected issue key ${field}`);
-  }
-  return formatIssueKey(parsed.owner, parsed.repo, parsed.number);
-}
-
-function legionRole(value: string): LegionRole {
-  const role = LEGION_ROLES.find((candidate) => candidate === value);
-  if (!role) {
-    throw new HttpError(400, `Unknown Legion role ${value}`);
-  }
-  return role;
-}
-
-function roleForSession(
-  state: LegionState,
-  issue: IssueKey,
-  sessionId: string,
-  phase: string
-): LegionRole {
-  const claim = Object.values(state.roles).find(
-    (candidate) =>
-      "issue" in candidate && candidate.issue === issue && candidate.sessionId === sessionId
-  );
-  if (!claim) {
-    throw new HttpError(403, "Session is not registered for this issue");
-  }
-  const role = legionRole(claim.role);
-  const declaredPhaseRole = LEGION_ROLES.find((candidate) => candidate === phase);
-  if (declaredPhaseRole && declaredPhaseRole !== role) {
-    throw new HttpError(403, "Session role does not match phase");
-  }
-  return role;
-}
-
-function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
-  return role === "reviewer" ? "review" : "implement";
-}
-
-function secretHash(secret: string): Buffer {
-  return createHash("sha256").update(secret).digest();
-}
-function spawnCapabilityKey(spawnToken: string): string {
-  return secretHash(spawnToken).toString("hex");
-}
-
-function equalSecret(expected: Buffer, supplied: string): boolean {
-  const actual = secretHash(supplied);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
-
-function equalSecretHash(expectedHash: string, supplied: string): boolean {
-  if (!/^[a-f0-9]{64}$/.test(expectedHash)) {
-    return false;
-  }
-  return timingSafeEqual(Buffer.from(expectedHash, "hex"), secretHash(supplied));
-}
-
-function issueUrl(issue: IssueKey): string {
-  const parsed = parseIssueKey(issue);
-  if (!parsed) {
-    throw new Error(`Invalid issue key in Legion state: ${issue}`);
-  }
-  return `repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
-}
-
-function treeContains(state: LegionState, tree: IssueKey, candidate: IssueKey): boolean {
-  const pending = [tree];
-  const visited = new Set<IssueKey>();
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (!current || visited.has(current)) {
-      continue;
-    }
-    if (current === candidate) {
-      return true;
-    }
-    visited.add(current);
-    pending.push(...(state.issues[current]?.children ?? []));
-  }
-  return false;
-}
-
-function matchingHeldEvent(state: LegionState, issue: IssueKey, role: string): boolean {
-  const claim = state.roles[role];
-  if (claim && "issue" in claim && claim.issue === issue) {
-    return true;
-  }
-  return LEGION_ROLES.some(
-    (candidateRole) => role === roleToken(state.project, issue, candidateRole)
-  );
-}
 
 export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): LegionApi {
   if (config.gates.merge === "human" && (!config.appLogins || config.appLogins.length === 0)) {
@@ -297,260 +140,28 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
 
   const runner = deps.runner ?? defaultRunner;
   const now = config.now ?? Date.now;
-  const capabilities = new Map<string, SessionCapability>();
-  const bootTokens = new Map<string, BootToken>();
-  const grants = new Map<string, Grant>();
-  let controllerReady = false;
   const save = async (): Promise<void> => {
     await deps.saveState?.();
   };
-  const requireController = async (body: Record<string, unknown>): Promise<void> => {
-    const secret = body.secret;
-    if (
-      typeof secret !== "string" ||
-      secret.length === 0 ||
-      !deps.state.controllerCapabilityHash ||
-      !equalSecretHash(deps.state.controllerCapabilityHash, secret)
-    ) {
-      throw new HttpError(403, "Invalid controller capability");
-    }
-  };
+  const auth = new CapabilityService(now);
+  const controllerGate = new ControllerGate();
+  const github = new GithubService(deps.tokenManager, runner);
 
-  const requireTree = (body: Record<string, unknown>): IssueKey => {
-    const tree = issueKey(body, "tree");
-    if (!deps.state.trees[tree] || !deps.state.issues[tree]) {
-      throw new HttpError(404, "Unknown tree");
-    }
-    return tree;
-  };
-
-  const requireTreeIssue = (body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey } => {
-    const tree = requireTree(body);
-    const issue = issueKey(body, "issue");
-    if (!deps.state.issues[issue]) {
-      throw new HttpError(404, "Unknown issue");
-    }
-    if (!treeContains(deps.state, tree, issue)) {
-      throw new HttpError(403, "Issue is outside tree");
-    }
-    return { tree, issue };
-  };
-
-  const tokenForIssue = async (issue: IssueKey, appRole: GitHubAppRole): Promise<TokenLease> => {
-    const parsed = parseIssueKey(issue);
-    if (!parsed) {
-      throw new Error(`Invalid issue key in Legion state: ${issue}`);
-    }
-    return deps.tokenManager.getToken(appRole, parsed.owner);
-  };
-
-  const gh = async (issue: IssueKey, command: string[], appRole: GitHubAppRole = "implement") => {
-    const lease = await tokenForIssue(issue, appRole);
-    const result = await runner(command, {
-      env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
-    });
-    if (result.exitCode !== 0) {
-      throw new Error(`GitHub command failed: ${result.stderr || result.stdout}`);
-    }
-    return result.stdout;
-  };
-  const fetchMergeGatePr = async (tree: IssueKey, number: number): Promise<MergeGatePrSnapshot> => {
-    const treeIssue = parseIssueKey(tree);
-    if (!treeIssue) {
-      throw new Error(`Invalid issue key in Legion state: ${tree}`);
-    }
-    const repo = `${treeIssue.owner}/${treeIssue.repo}` as `${string}/${string}`;
-    const raw = asRecord(
-      JSON.parse(await gh(tree, ["gh", "api", `repos/${repo}/pulls/${number}`]))
-    );
-    if (raw.number !== number) {
-      throw new Error(`GitHub returned PR #${String(raw.number)} for requested PR #${number}`);
-    }
-    const head = asRecord(raw.head);
-    if (typeof head.ref !== "string" || typeof head.sha !== "string") {
-      throw new Error(`GitHub PR #${number} has an invalid head`);
-    }
-    return { repo, raw, head: { ref: head.ref, sha: head.sha } };
-  };
-
-  const recoverPrForMergeGate = async (
-    tree: IssueKey,
-    number: number,
-    snapshot: MergeGatePrSnapshot
-  ): Promise<LegionState["prs"][string] | undefined> => {
-    const treeIssue = parseIssueKey(tree);
-    if (!treeIssue) {
-      throw new Error(`Invalid issue key in Legion state: ${tree}`);
-    }
-    const { repo, raw, head } = snapshot;
-    const branchMatch = /^legion\/issue-(\d+)$/.exec(head.ref);
-    let key = branchMatch
-      ? formatIssueKey(treeIssue.owner, treeIssue.repo, Number(branchMatch[1]))
-      : undefined;
-    if (!key || !deps.state.issues[key] || !treeContains(deps.state, tree, key)) {
-      const closingIssues = new Set<IssueKey>();
-      if (typeof raw.body === "string") {
-        for (const match of raw.body.matchAll(
-          /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi
-        )) {
-          const candidate = formatIssueKey(treeIssue.owner, treeIssue.repo, Number(match[1]));
-          if (deps.state.issues[candidate] && treeContains(deps.state, tree, candidate)) {
-            closingIssues.add(candidate);
-          }
-        }
-      }
-      [key] = closingIssues;
-      if (closingIssues.size !== 1 || !key) return undefined;
-    }
-    const prKey = `${repo}#${number}`;
-    if (deps.state.prs[prKey]) {
-      return undefined;
-    }
-    const pr = {
-      key,
-      repo,
-      number,
-      headSha: head.sha,
-      checks: {},
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: false,
-      lastEventAt: now(),
-      fixAttempts: 0,
-    };
-    deps.state.prs[prKey] = pr;
-    deps.state.prByBranch[`${repo}@${head.ref}`] = prKey;
-    await save();
-    return pr;
-  };
-
-  const dispatchThread = async (
-    parent: string,
-    subject: string,
-    body: string,
-    ask: unknown,
-    urgency: unknown
-  ): Promise<DispatchThreadResult> => {
-    const response = await (deps.dispatch.fetch ?? fetch)(
-      `${deps.dispatch.url.replace(/\/+$/, "")}/mcp`,
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/json, text/event-stream",
-          Authorization: `Bearer ${deps.dispatch.bearer}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: randomUUID(),
-          method: "tools/call",
-          params: {
-            name: "dispatch",
-            arguments: {
-              parent,
-              subject,
-              body,
-              ...(ask === undefined ? {} : { ask }),
-              ...(urgency === undefined ? {} : { urgency }),
-            },
-          },
-        }),
-      }
-    );
-    const responseBody = await response.text();
-    if (!response.ok) {
-      throw new Error(`Dispatch MCP request failed with ${response.status}: ${responseBody}`);
-    }
-    const payload: unknown = JSON.parse(responseBody);
-    if (typeof payload !== "object" || payload === null || !("result" in payload)) {
-      throw new Error("Dispatch MCP response is missing a result");
-    }
-    const result = payload.result;
-    if (
-      typeof result !== "object" ||
-      result === null ||
-      !("content" in result) ||
-      !Array.isArray(result.content)
-    ) {
-      throw new Error("Dispatch MCP response has invalid content");
-    }
-    const text = result.content[0];
-    if (
-      typeof text !== "object" ||
-      text === null ||
-      !("text" in text) ||
-      typeof text.text !== "string"
-    ) {
-      throw new Error("Dispatch MCP response is missing result text");
-    }
-    const dispatched: unknown = JSON.parse(text.text);
-    if (
-      typeof dispatched !== "object" ||
-      dispatched === null ||
-      !("thread" in dispatched) ||
-      typeof dispatched.thread !== "number" ||
-      !Number.isInteger(dispatched.thread) ||
-      !("url" in dispatched) ||
-      typeof dispatched.url !== "string"
-    ) {
-      throw new Error("Dispatch MCP result must contain an integer thread and URL");
-    }
-    return { thread: dispatched.thread, url: dispatched.url };
-  };
-
-  const appendFooter = (tree: IssueKey, issue: IssueKey, body: string): string => {
-    const session =
-      deps.state.roles[roleToken(deps.state.project, tree, "architect")]?.sessionId ?? "";
-    return `${body}\n\n<!-- legion: ${JSON.stringify({ session, issue })} -->`;
-  };
-
-  const resolveGrant = (body: Record<string, unknown>): Grant => {
-    const grantId = requiredString(body, "grantId");
-    const grant = grants.get(grantId);
-    if (!grant || grant.expiresAt <= now()) {
-      throw new HttpError(403, "Invalid or expired grant");
-    }
-    return grant;
-  };
-  const requireSessionCapability = (
-    body: Record<string, unknown>,
-    tree: IssueKey,
-    issue: IssueKey
-  ): SessionCapability => {
-    const sessionId = body.sessionId;
-    const suppliedSecret = body.secret;
-    if (
-      typeof sessionId !== "string" ||
-      sessionId.length === 0 ||
-      typeof suppliedSecret !== "string" ||
-      suppliedSecret.length === 0
-    ) {
-      throw new HttpError(403, "Invalid session secret");
-    }
-    const capability = capabilities.get(sessionId);
-    if (
-      !capability ||
-      capability.tree !== tree ||
-      capability.issue !== issue ||
-      !equalSecret(capability.secretHash, suppliedSecret)
-    ) {
-      throw new HttpError(403, "Invalid session secret");
-    }
-    return capability;
-  };
-
-  const requireArchitectCapability = (
-    body: Record<string, unknown>,
-    tree: IssueKey
-  ): SessionCapability => {
-    const sessionId = body.sessionId;
-    const issuedCapability =
-      typeof sessionId === "string" ? capabilities.get(sessionId) : undefined;
-    const capability = requireSessionCapability(body, tree, issuedCapability?.issue ?? tree);
-    if (capability.role !== "architect") {
-      throw new HttpError(403, "Only an architect may perform lifecycle writes");
-    }
-    return capability;
+  const ctx: RouteContext = {
+    config,
+    deps,
+    now,
+    save,
+    runner,
+    grantTtlMs: GRANT_TTL_MS,
+    auth,
+    controllerGate,
+    github,
+    dispatchThread: (parent, subject, body, ask, urgency) =>
+      dispatchThread(deps.dispatch, parent, subject, body, ask, urgency),
+    requireTree: (body) => requireTree(deps.state, body),
+    requireTreeIssue: (body) => requireTreeIssue(deps.state, body),
+    appendFooter: (tree, issue, body) => appendFooter(deps.state, tree, issue, body),
   };
 
   const handler = async (request: Request): Promise<Response> => {
@@ -569,733 +180,11 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       const requestSchema = REQUEST_SCHEMAS[pathname];
       if (requestSchema) validateContractRequest(requestSchema, body);
 
-      if (pathname === "/legion/v1/process/started") {
-        const tree = requireTree(body);
-        const generation = requiredNumber(body, "generation");
-        const treeState = deps.state.trees[tree];
-        if (!treeState || treeState.generation !== generation) {
-          throw new HttpError(409, "Stale process generation");
-        }
-        const bootToken = body.bootToken;
-        if (typeof bootToken !== "string" || bootToken.length === 0) {
-          throw new HttpError(403, "Invalid root boot token");
-        }
-        const boot = bootTokens.get(bootToken);
-        if (!boot || boot.tree !== tree || boot.generation !== generation || boot.sessionId) {
-          throw new HttpError(403, "Invalid root boot token");
-        }
-        const rootSessionId = requiredString(body, "rootSessionId");
-        boot.sessionId = rootSessionId;
-        const agentId = requiredString(body, "agentId");
-        const ompSessionFile = requiredString(body, "ompSessionFile");
-        if (!treeState.locator) {
-          throw new Error(`Tree ${tree} is missing its process locator`);
-        }
-        treeState.status = "active";
-        treeState.locator = { ...treeState.locator, ompSessionFile };
-        const roles: Record<LegionRole, string> = {
-          architect: roleToken(deps.state.project, tree, "architect"),
-          planner: roleToken(deps.state.project, tree, "planner"),
-          implementer: roleToken(deps.state.project, tree, "implementer"),
-          tester: roleToken(deps.state.project, tree, "tester"),
-          reviewer: roleToken(deps.state.project, tree, "reviewer"),
-          merger: roleToken(deps.state.project, tree, "merger"),
-        };
-        deps.state.roles[roles.architect] = {
-          issue: tree,
-          role: "architect",
-          sessionId: rootSessionId,
-          agentId,
-        };
-        const secret = randomUUID();
-        capabilities.set(rootSessionId, {
-          tree,
-          issue: tree,
-          role: "architect",
-          secretHash: secretHash(secret),
-        });
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.ProcessStarted.response, {
-            roleTokens: roles,
-            controlSubject: `legion.ctl.${sanitizeToken(tree)}.${generation}`,
-            gates: config.gates,
-            secret,
-          })
-        );
+      const route = ROUTES[pathname];
+      if (!route) {
+        throw new HttpError(404, "Not found");
       }
-      if (pathname === "/legion/v1/process/ready") {
-        const tree = requireTree(body);
-        requireArchitectCapability(body, tree);
-        await deps.onTreeReady?.(tree);
-        await deps.processManager.markTreeReady(tree);
-        return Response.json(validateContractResponse(LegionDaemonApi.ProcessReady.response, {}));
-      }
-
-      if (pathname === "/legion/v1/merge-gate") {
-        const tree = requireTree(body);
-        requireArchitectCapability(body, tree);
-        if (config.gates.merge !== "human") {
-          throw new HttpError(409, "Human merge gate is disabled");
-        }
-        const number = requiredNumber(body, "pr");
-        const snapshot = await fetchMergeGatePr(tree, number);
-        let matchingPrs = Object.values(deps.state.prs).filter(
-          (candidate) =>
-            candidate.number === number && treeContains(deps.state, tree, candidate.key)
-        );
-        if (matchingPrs.length === 0) {
-          const recovered = await recoverPrForMergeGate(tree, number, snapshot);
-          if (!recovered) {
-            throw new HttpError(404, `No PR #${number} belongs to tree ${tree}`);
-          }
-          matchingPrs = [recovered];
-        }
-        if (matchingPrs.length > 1) {
-          throw new HttpError(409, `PR #${number} is ambiguous within tree ${tree}`);
-        }
-        const pr = matchingPrs[0];
-        if (!pr) throw new Error("Matching merge-gate PR disappeared");
-        if (pr.repo !== snapshot.repo) {
-          throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
-        }
-        if (pr.headSha !== snapshot.head.sha) {
-          if (
-            Object.values(pr.checks).some(
-              (check) =>
-                check.status === "completed" &&
-                check.conclusion !== "success" &&
-                check.conclusion !== "neutral" &&
-                check.conclusion !== "skipped"
-            )
-          ) {
-            pr.fixAttempts += 1;
-          }
-          pr.headSha = snapshot.head.sha;
-          pr.checks = {};
-          pr.firstRedEmitted = false;
-          pr.settledRedEmitted = false;
-          pr.greenEmitted = false;
-          delete pr.reviewDecision;
-          await save();
-        }
-        const approval = await getApprovalState(
-          { repo: pr.repo, pr: pr.number, sha: pr.headSha },
-          {
-            runner,
-            tokenManager: deps.tokenManager,
-            appLogins: config.appLogins ?? [],
-            gatesMerge: config.gates.merge,
-          }
-        );
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.MergeGate.response, {
-            approved: approval === "success",
-            pr: pr.number,
-            headSha: pr.headSha,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/process/exit") {
-        const tree = requireTree(body);
-        requireArchitectCapability(body, tree);
-        const generation = requiredNumber(body, "generation");
-        const treeState = deps.state.trees[tree];
-        if (!treeState || treeState.generation !== generation) {
-          throw new HttpError(409, "Stale process generation");
-        }
-        if (deps.state.issues[tree]?.state === "closed") {
-          await deps.processManager.closeTree(tree);
-        } else {
-          await deps.processManager.markProcessDead(tree);
-        }
-        await save();
-        return Response.json(validateContractResponse(LegionDaemonApi.ProcessExit.response, {}));
-      }
-
-      if (pathname === "/legion/v1/spawn-token") {
-        const { tree, issue } = requireTreeIssue(body);
-        const role = legionRole(requiredString(body, "role"));
-        requireArchitectCapability(body, tree);
-        const spawnToken = randomUUID();
-        deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)] = {
-          tree,
-          issue,
-          role,
-        };
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.SpawnToken.response, {
-            spawnToken,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/issues") {
-        const tree = requireTree(body);
-        requireArchitectCapability(body, tree);
-        const title = requiredString(body, "title");
-        const issueBody = requiredString(body, "body");
-        const labels = optionalStrings(body, "labels");
-        if (labels.some((label) => label !== "needs-approval")) {
-          throw new HttpError(400, "Architect issue creation only accepts needs-approval");
-        }
-        const childLabels = [...new Set([...labels, "legion-child"])];
-        const parsedTree = parseIssueKey(tree);
-        if (!parsedTree) {
-          throw new Error(`Invalid issue key in Legion state: ${tree}`);
-        }
-        const createCommand = [
-          "gh",
-          "api",
-          `repos/${parsedTree.owner}/${parsedTree.repo}/issues`,
-          "-f",
-          `title=${title}`,
-          "-f",
-          `body=${issueBody}`,
-          ...childLabels.flatMap((label) => ["-f", `labels[]=${label}`]),
-        ];
-        const created = asRecord(JSON.parse(await gh(tree, createCommand)));
-        const number = created.number;
-        const createdUrl = created.html_url;
-        const childNodeId = created.node_id;
-        if (
-          typeof number !== "number" ||
-          !Number.isInteger(number) ||
-          typeof createdUrl !== "string" ||
-          typeof childNodeId !== "string"
-        ) {
-          throw new Error("GitHub issue create returned invalid response");
-        }
-        const child = formatIssueKey(parsedTree.owner, parsedTree.repo, number);
-        const parent = asRecord(JSON.parse(await gh(tree, ["gh", "api", issueUrl(tree)])));
-        const parentNodeId = parent.node_id;
-        if (typeof parentNodeId !== "string") {
-          throw new Error("GitHub parent issue returned invalid response");
-        }
-        const mutation =
-          "mutation($parentId: ID!, $childId: ID!) { addSubIssue(input: {issueId: $parentId, subIssueId: $childId}) { issue { id } } }";
-        await gh(tree, [
-          "gh",
-          "api",
-          "graphql",
-          "-f",
-          `query=${mutation}`,
-          "-F",
-          `parentId=${parentNodeId}`,
-          "-F",
-          `childId=${childNodeId}`,
-        ]);
-        deps.state.issues[child] = {
-          key: child,
-          title,
-          parent: tree,
-          state: "open",
-          children: [],
-          released: false,
-          labels: childLabels,
-        };
-        deps.state.issues[tree]?.children.push(child);
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.IssueCreate.response, {
-            issue: child,
-            url: createdUrl,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/waves/release") {
-        const tree = requireTree(body);
-        requireArchitectCapability(body, tree);
-        const children = optionalStrings(body, "children").map((child) =>
-          issueKey({ child }, "child")
-        );
-        for (const child of children) {
-          if (!treeContains(deps.state, tree, child)) {
-            throw new HttpError(403, "Issue is outside tree");
-          }
-        }
-        const treeState = deps.state.trees[tree];
-        if (!treeState) {
-          throw new HttpError(404, "Unknown tree");
-        }
-        for (const child of children) {
-          const node = deps.state.issues[child];
-          if (node) {
-            node.released = true;
-          }
-        }
-        const released = new Set(children);
-        const retained = [];
-        for (const held of treeState.heldEvents) {
-          const matchingChild = children.find((child) =>
-            matchingHeldEvent(deps.state, child, held.role)
-          );
-          if (!matchingChild || !released.has(matchingChild)) {
-            retained.push(held);
-            continue;
-          }
-          try {
-            await deps.envoyPublish(`notifications.role.${held.role}`, held.payloadJson);
-          } catch {
-            retained.push(held);
-          }
-        }
-        treeState.heldEvents = retained;
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.WaveRelease.response, {
-            released: children,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/issues/comment") {
-        const { tree, issue } = requireTreeIssue(body);
-        requireArchitectCapability(body, tree);
-        const commentBody = appendFooter(tree, issue, requiredString(body, "body"));
-        const result = asRecord(
-          JSON.parse(
-            await gh(issue, [
-              "gh",
-              "api",
-              `${issueUrl(issue)}/comments`,
-              "-f",
-              `body=${commentBody}`,
-            ])
-          )
-        );
-        const commentId = result.id;
-        const commentUrl = result.html_url;
-        if (typeof commentId !== "number" || typeof commentUrl !== "string") {
-          throw new Error("GitHub comment create returned invalid response");
-        }
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.Comment.response, {
-            commentId,
-            url: commentUrl,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/issues/body") {
-        const { tree, issue } = requireTreeIssue(body);
-        requireArchitectCapability(body, tree);
-        await gh(issue, [
-          "gh",
-          "api",
-          "-X",
-          "PATCH",
-          issueUrl(issue),
-          "-f",
-          `body=${requiredString(body, "body")}`,
-        ]);
-        await save();
-        return Response.json(validateContractResponse(LegionDaemonApi.PostBody.response, {}));
-      }
-
-      if (pathname === "/legion/v1/issues/labels") {
-        const { tree, issue } = requireTreeIssue(body);
-        requireArchitectCapability(body, tree);
-        const add = optionalStrings(body, "add");
-        const remove = optionalStrings(body, "remove");
-        if (add.some((label) => label !== "needs-approval") || remove.length > 0) {
-          throw new HttpError(400, "Architect label changes only add needs-approval");
-        }
-        if (add.length > 0) {
-          await gh(issue, [
-            "gh",
-            "api",
-            "-X",
-            "POST",
-            `${issueUrl(issue)}/labels`,
-            ...add.flatMap((label) => ["-f", `labels[]=${label}`]),
-          ]);
-        }
-        const node = deps.state.issues[issue];
-        if (!node) {
-          throw new HttpError(404, "Unknown issue");
-        }
-        node.labels = [...new Set([...node.labels, ...add])];
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.Labels.response, {
-            labels: node.labels,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/issues/close") {
-        const { tree, issue } = requireTreeIssue(body);
-        requireArchitectCapability(body, tree);
-        const comment = body.comment;
-        if (comment !== undefined && typeof comment !== "string") {
-          throw new HttpError(400, "Expected string comment");
-        }
-        let finalCommentRef: string | undefined;
-        if (comment) {
-          const result = asRecord(
-            JSON.parse(
-              await gh(issue, [
-                "gh",
-                "api",
-                `${issueUrl(issue)}/comments`,
-                "-f",
-                `body=${appendFooter(tree, issue, comment)}`,
-              ])
-            )
-          );
-          const commentId = result.id;
-          const commentUrl = result.html_url;
-          if (typeof commentId !== "number" || typeof commentUrl !== "string") {
-            throw new Error("GitHub comment create returned invalid response");
-          }
-          finalCommentRef = commentUrl;
-        }
-        await gh(issue, ["gh", "api", "-X", "PATCH", issueUrl(issue), "-f", "state=closed"]);
-        const node = deps.state.issues[issue];
-        if (node) {
-          node.state = "closed";
-          node.finalCommentRef = finalCommentRef;
-        }
-        deps.state.dispatchThreads = deps.state.dispatchThreads.filter(
-          (thread) => thread.issue !== issue
-        );
-        if (issue === tree) deps.processManager.beginLinger(tree);
-        await save();
-        return Response.json(validateContractResponse(LegionDaemonApi.IssueClose.response, {}));
-      }
-
-      if (pathname === "/legion/v1/escalate") {
-        const tree = requireTree(body);
-        requireArchitectCapability(body, tree);
-        const kind = requiredString(body, "kind");
-        if (kind !== "re-file" && kind !== "capacity" && kind !== "cross-tree") {
-          throw new HttpError(400, "Unknown escalation kind");
-        }
-        if (!("context" in body)) {
-          throw new HttpError(400, "Expected context");
-        }
-        const controllerEvent = {
-          type: "escalate",
-          tree,
-          kind,
-          context: body.context,
-        };
-        await deps.onControllerEvent(controllerEvent);
-        return Response.json(validateContractResponse(LegionDaemonApi.Escalate.response, {}));
-      }
-
-      if (pathname === "/legion/v1/dispatch-threads") {
-        const { tree, issue } = requireTreeIssue(body);
-        const capability = requireSessionCapability(body, tree, issue);
-        const role = legionRole(requiredString(body, "role"));
-        if (role !== capability.role) {
-          throw new HttpError(403, "Dispatch role does not match the authenticated session");
-        }
-        if (role !== "architect") {
-          throw new HttpError(403, "Only an architect may open a Dispatch thread");
-        }
-        const parent = issueKey(body, "parent");
-        if (!treeContains(deps.state, tree, parent)) {
-          throw new HttpError(403, "Dispatch parent is outside the caller tree");
-        }
-        const subject = requiredString(body, "subject");
-        const dispatchBody = requiredString(body, "body");
-        const urgency = body.urgency;
-        if (
-          urgency !== undefined &&
-          urgency !== "low" &&
-          urgency !== "med" &&
-          urgency !== "high" &&
-          urgency !== "blocking"
-        ) {
-          throw new HttpError(400, "Invalid Dispatch urgency");
-        }
-        const dispatched = await dispatchThread(parent, subject, dispatchBody, body.ask, urgency);
-        const parsedIssue = parseIssueKey(issue);
-        if (!parsedIssue) {
-          throw new Error(`Invalid issue key in Legion state: ${issue}`);
-        }
-        const repo = `${parsedIssue.owner}/${parsedIssue.repo}` as `${string}/${string}`;
-        const existingMapping = deps.state.dispatchThreads.find(
-          (entry) => entry.repo === repo && entry.thread === dispatched.thread
-        );
-        if (existingMapping && (existingMapping.tree !== tree || existingMapping.issue !== issue)) {
-          throw new HttpError(403, "Dispatch thread is already owned by another issue");
-        }
-        const entry = { repo, thread: dispatched.thread, role, issue, tree };
-        if (existingMapping) {
-          const index = deps.state.dispatchThreads.indexOf(existingMapping);
-          deps.state.dispatchThreads[index] = entry;
-        } else {
-          deps.state.dispatchThreads.push(entry);
-        }
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.DispatchThread.response, dispatched)
-        );
-      }
-
-      if (pathname === "/legion/v1/phase") {
-        const { tree, issue } = requireTreeIssue(body);
-        const phase = requiredString(body, "phase");
-        const sessionId = requiredString(body, "sessionId");
-        const role = roleForSession(deps.state, issue, sessionId, phase);
-        const spawnToken = requiredString(body, "spawnToken");
-        const expectedSpawn = deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
-        if (
-          !expectedSpawn ||
-          expectedSpawn.tree !== tree ||
-          expectedSpawn.issue !== issue ||
-          expectedSpawn.role !== role
-        ) {
-          throw new HttpError(
-            403,
-            "Worker session is not bound to a matching daemon-issued spawn token"
-          );
-        }
-        const secret = randomUUID();
-        capabilities.set(sessionId, {
-          tree,
-          issue,
-          role,
-          secretHash: secretHash(secret),
-        });
-        deps.state.phases[issue] = { phase, sessionId };
-        const token = roleToken(deps.state.project, issue, role);
-        const existing = deps.state.roles[token];
-        deps.state.roles[token] = {
-          issue,
-          role,
-          sessionId,
-          ...(existing && "issue" in existing && existing.agentId
-            ? { agentId: existing.agentId }
-            : {}),
-        };
-        deps.state.attribution.push({ issue, phase, sessionId });
-        const lease = await tokenForIssue(issue, appRoleForLegionRole(role));
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.Phase.response, {
-            secret,
-            gitName: lease.gitIdentity.name,
-            gitEmail: lease.gitIdentity.email,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/worker-session") {
-        const sessionId = requiredString(body, "sessionId");
-        const recoveryToken = requiredString(body, "recoveryToken");
-        const boot = bootTokens.get(recoveryToken);
-        const spawn = deps.state.spawnCapabilities[spawnCapabilityKey(recoveryToken)];
-        const rootClaim = boot
-          ? deps.state.roles[roleToken(deps.state.project, boot.tree, "architect")]
-          : undefined;
-        const workerClaim = spawn
-          ? Object.values(deps.state.roles).find(
-              (candidate) =>
-                "issue" in candidate &&
-                candidate.sessionId === sessionId &&
-                candidate.issue === spawn.issue &&
-                candidate.role === spawn.role
-            )
-          : undefined;
-        const claim =
-          boot?.sessionId === sessionId &&
-          rootClaim &&
-          "issue" in rootClaim &&
-          rootClaim.issue === boot.tree &&
-          rootClaim.sessionId === sessionId
-            ? rootClaim
-            : workerClaim;
-        const tree = boot?.sessionId === sessionId ? boot.tree : spawn?.tree;
-        if (
-          !claim ||
-          !("issue" in claim) ||
-          !tree ||
-          !deps.state.trees[tree] ||
-          !treeContains(deps.state, tree, claim.issue)
-        ) {
-          throw new HttpError(403, "Worker session is not bound to a daemon-issued recovery token");
-        }
-        const role = legionRole(claim.role);
-        const secret = randomUUID();
-        capabilities.set(sessionId, {
-          tree,
-          issue: claim.issue,
-          role,
-          secretHash: secretHash(secret),
-        });
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.WorkerSession.response, {
-            tree,
-            issue: claim.issue,
-            role,
-            secret,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/role-backing") {
-        const { tree, issue } = requireTreeIssue(body);
-        const role = legionRole(requiredString(body, "role"));
-        const agentId = requiredString(body, "agentId");
-        const sessionId = requiredString(body, "sessionId");
-        const spawnToken = requiredString(body, "spawnToken");
-        const expectedSpawn = deps.state.spawnCapabilities[spawnCapabilityKey(spawnToken)];
-        if (
-          !expectedSpawn ||
-          expectedSpawn.tree !== tree ||
-          expectedSpawn.issue !== issue ||
-          expectedSpawn.role !== role
-        ) {
-          throw new HttpError(403, "Unknown or mismatched Legion spawn token");
-        }
-        deps.state.roles[roleToken(deps.state.project, issue, role)] = {
-          issue,
-          role,
-          sessionId,
-          agentId,
-        };
-        await deps.processManager.registerRoleBacking(tree, issue, role, agentId);
-        await save();
-        return Response.json(validateContractResponse(LegionDaemonApi.RoleBacking.response, {}));
-      }
-
-      if (pathname === "/legion/v1/provisioning-credential") {
-        const { tree, issue } = requireTreeIssue(body);
-        requireArchitectCapability(body, tree);
-        const lease = await tokenForIssue(issue, "implement");
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.ProvisioningCredential.response, {
-            token: lease.token,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/grants") {
-        const { tree, issue } = requireTreeIssue(body);
-        const capability = requireSessionCapability(body, tree, issue);
-        const grantId = randomUUID();
-        const expiresAt = now() + GRANT_TTL_MS;
-        grants.set(grantId, { issue, role: capability.role, expiresAt });
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.Grant.response, {
-            grantId,
-            expiresAt: new Date(expiresAt).toISOString(),
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/git-credential") {
-        const grant = resolveGrant(body);
-        const lease = await tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
-        return new Response(`username=x-access-token\npassword=${lease.token}`, {
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        });
-      }
-
-      if (pathname === "/legion/v1/gh-token") {
-        const grant = resolveGrant(body);
-        const lease = await tokenForIssue(grant.issue, appRoleForLegionRole(grant.role));
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.GitHubToken.response, {
-            token: lease.token,
-            appLogin: lease.gitIdentity.name,
-          })
-        );
-      }
-
-      // T24 controller startup contract: POST this with the session ID from envoy_whoami
-      // immediately after boot so held events are redelivered before any work endpoint.
-      if (pathname === "/legion/v1/controller/ready") {
-        await requireController(body);
-        const sessionId = requiredString(body, "sessionId");
-        deps.state.roles[controllerToken(deps.state.project)] = {
-          role: "controller",
-          sessionId,
-        };
-        await save();
-        if (!controllerReady) {
-          controllerReady = true;
-          await deps.onControllerReady();
-        }
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.ControllerReady.response, {})
-        );
-      }
-
-      if (pathname === "/legion/v1/gates/approve") {
-        await requireController(body);
-        const issue = issueKey(body, "issue");
-        const node = deps.state.issues[issue];
-        if (!node) {
-          throw new HttpError(404, "Unknown issue");
-        }
-        await gh(issue, [
-          "gh",
-          "api",
-          "-X",
-          "POST",
-          `${issueUrl(issue)}/labels`,
-          "-f",
-          "labels[]=human-approved",
-        ]);
-        await gh(issue, ["gh", "api", "-X", "DELETE", `${issueUrl(issue)}/labels/needs-approval`]);
-        node.labels = [
-          ...new Set([
-            ...node.labels.filter((label) => label !== "needs-approval"),
-            "human-approved",
-          ]),
-        ];
-        await save();
-        return Response.json(validateContractResponse(LegionDaemonApi.GatesApprove.response, {}));
-      }
-
-      if (pathname === "/legion/v1/admission") {
-        await requireController(body);
-        const issue = issueKey(body, "issue");
-        if (!deps.state.issues[issue]) {
-          throw new HttpError(404, "Unknown issue");
-        }
-        const result = deps.processManager.admit(issue);
-        await save();
-        return Response.json(
-          validateContractResponse(LegionDaemonApi.Admission.response, {
-            result,
-          })
-        );
-      }
-
-      if (pathname === "/legion/v1/backlog") {
-        await requireController(body);
-        const issue = issueKey(body, "issue");
-        const marker = requiredString(body, "marker");
-        const node = deps.state.issues[issue];
-        if (!node) {
-          throw new HttpError(404, "Unknown issue");
-        }
-        await gh(issue, [
-          "gh",
-          "api",
-          "-X",
-          "POST",
-          `${issueUrl(issue)}/labels`,
-          "-f",
-          "labels[]=legion-backlog",
-        ]);
-        node.labels = [...new Set([...node.labels, "legion-backlog"])];
-        node.backlogMarker = marker;
-        await save();
-        return Response.json(validateContractResponse(LegionDaemonApi.Backlog.response, {}));
-      }
-
-      throw new HttpError(404, "Not found");
+      return await route(ctx, body);
     } catch (error) {
       if (error instanceof HttpError) {
         return Response.json({ error: error.message }, { status: error.status });
@@ -1322,7 +211,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         throw new Error(`Cannot mint boot token for stale tree generation ${tree}`);
       }
       const bootToken = randomUUID();
-      bootTokens.set(bootToken, { tree, generation });
+      auth.registerBootToken(bootToken, tree, generation);
       deps.state.spawnCapabilities[spawnCapabilityKey(bootToken)] = {
         tree,
         issue: tree,
@@ -1334,7 +223,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");
-      controllerReady = false;
+      controllerGate.reset();
       await save();
       return secret;
     },
