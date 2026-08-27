@@ -2499,6 +2499,22 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
         details: entry.details,
       });
     }
+
+    const requestCountBeforeRejectedField = requests.length;
+    expect(
+      await legion.execute(
+        "call-extra-field",
+        { op: "merge_gate", pr: 17, issue },
+        undefined,
+        undefined,
+        context
+      )
+    ).toEqual({
+      content: [{ type: "text", text: 'merge_gate does not accept field "issue"' }],
+      details: {},
+      isError: true,
+    });
+    expect(requests).toHaveLength(requestCountBeforeRejectedField);
   });
   test("withholds architect-only Legion tools until an architect session is confirmed", () => {
     const fixture = createPi();
@@ -3001,6 +3017,40 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       block: true,
       reason: "legion spawns must name their issue: Legion-Issue: owner/repo#n",
     });
+    process.env.LEGION_MAX_RECURSION_DEPTH = "NaN";
+    await expect(
+      toolCall(
+        {
+          toolName: "task",
+          toolCallId: "spawn-invalid-depth",
+          input: { agent: "legion-architect", task: `Legion-Issue: ${issue}\nDecompose this work` },
+        },
+        { ...rootContext, taskDepth: 7 }
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "LEGION_MAX_RECURSION_DEPTH must be a positive integer",
+    });
+
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+    process.env.LEGION_WORKER_BUDGET = "NaN";
+    await expect(
+      toolCall(
+        {
+          toolName: "task",
+          toolCallId: "spawn-invalid-budget",
+          input: {
+            agent: "legion-reviewer",
+            task: `Legion-Issue: ${issue}\nReview the implementation`,
+          },
+        },
+        rootContext
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "LEGION_WORKER_BUDGET must be a positive integer",
+    });
+    process.env.LEGION_WORKER_BUDGET = "6";
   });
   test("blocks code tools in a root architect session", async () => {
     const tree = "owner/repo#42";

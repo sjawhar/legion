@@ -39,6 +39,18 @@ export function requiredEnvironment(env: NodeJS.ProcessEnv, key: string): string
   return value;
 }
 
+export function positiveIntegerEnvironment(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  defaultValue: string
+): number {
+  const value = Number(env[key] ?? defaultValue);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${key} must be a positive integer`);
+  }
+  return value;
+}
+
 export function requiredControllerCapability(env: NodeJS.ProcessEnv): string {
   const secret = env.LEGION_CONTROLLER_SECRET;
   if (!secret) {

@@ -1,6 +1,7 @@
 import type { LegionRole } from "@legion/contracts";
+import { positiveIntegerEnvironment } from "./classify";
 
-export type WorkerSession = {
+export interface WorkerSession {
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
@@ -8,18 +9,18 @@ export type WorkerSession = {
   readonly spawnToken: string;
   readonly secret: string;
   readonly agentId: string;
-};
+}
 
-export type WorkerSpawn = {
+export interface WorkerSpawn {
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
   readonly token: string;
   readonly spawnToken: string;
   readonly workspace: string;
-};
+}
 
-export type PendingLegionSpawn = {
+export interface PendingLegionSpawn {
   readonly toolCallId: string;
   readonly tree: string;
   readonly issue: string;
@@ -27,11 +28,14 @@ export type PendingLegionSpawn = {
   readonly token: string;
   readonly spawnToken: string;
   readonly release: () => void;
-};
+}
 
-export type RootBootstrap = { readonly role: string; readonly secret: string };
+export interface RootBootstrap {
+  readonly role: string;
+  readonly secret: string;
+}
 
-export type WorkerRuntimeState = {
+export interface WorkerRuntimeState {
   readonly budgetPermits: Map<string, () => void>;
   readonly budgetAcquisitions: Map<string, Promise<void>>;
   readonly pendingSpawns: Map<string, Set<PendingLegionSpawn>>;
@@ -41,7 +45,7 @@ export type WorkerRuntimeState = {
   readonly budgetWaiters: (() => void)[];
   budgetLimit: number | undefined;
   budgetInUse: number;
-};
+}
 
 // Task sessions load this extension through distinct module URLs, but their worker
 // reservations and role backing form one lifecycle within the OMP process.
@@ -86,6 +90,9 @@ export function releaseWorkerBudgetPermit(sessionID: string): void {
 }
 
 export async function acquireWorkerBudget(limit: number): Promise<() => void> {
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new Error("LEGION_WORKER_BUDGET must be a positive integer");
+  }
   if (workerRuntime.budgetLimit === undefined) workerRuntime.budgetLimit = limit;
   if (
     workerRuntime.budgetLimit !== limit &&
@@ -118,7 +125,9 @@ export async function ensureWorkerBudgetPermit(sessionID: string): Promise<void>
   if (pending) return await pending;
   const acquisition = (async () => {
     if (workerBudgetPermits.has(sessionID)) return;
-    const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+    const release = await acquireWorkerBudget(
+      positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
+    );
     try {
       if (workerBudgetPermits.has(sessionID)) {
         release();

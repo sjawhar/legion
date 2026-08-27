@@ -136,15 +136,36 @@ export class CapabilityService {
  */
 export class ControllerGate {
   private ready = false;
+  private readyAttempt: Promise<void> | undefined;
+  private generation = 0;
 
   async ensureReady(onReady: () => Promise<void>): Promise<void> {
-    if (!this.ready) {
-      this.ready = true;
+    if (this.ready) return;
+    if (this.readyAttempt) {
+      await this.readyAttempt;
+      return;
+    }
+
+    const generation = this.generation;
+    const attempt = (async () => {
       await onReady();
+      if (this.generation === generation) {
+        this.ready = true;
+      }
+    })();
+    this.readyAttempt = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.readyAttempt === attempt) {
+        this.readyAttempt = undefined;
+      }
     }
   }
 
   reset(): void {
+    this.generation += 1;
     this.ready = false;
+    this.readyAttempt = undefined;
   }
 }

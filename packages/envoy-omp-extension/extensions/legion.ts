@@ -3,7 +3,7 @@ import {
   controllerToken,
   formatIssueKey,
   type IssueKey,
-  LEGION_ROLES,
+  isLegionRole,
   type LegionRole,
   parseIssueKey,
   roleToken,
@@ -14,6 +14,7 @@ import { connect, type NatsConnection, StringCodec, type Subscription } from "na
 import {
   generation,
   isRootSession,
+  positiveIntegerEnvironment,
   requiredControllerCapability,
   requiredEnvironment,
 } from "../src/legion/classify";
@@ -343,7 +344,9 @@ export default function legionExtension(pi: PiApi): void {
     const pending = pendingLegionSpawnsByToken.get(spawn.spawnToken);
     const release = pending
       ? transferPendingLegionSpawn(pending)
-      : await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+      : await acquireWorkerBudget(
+          positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
+        );
     try {
       const agentId = workerAgentId(context);
       const daemon = createLegionDaemonClient(
@@ -402,9 +405,9 @@ export default function legionExtension(pi: PiApi): void {
       ): Promise<Record<string, unknown> | undefined> => {
         const agent = taskInput.agent;
         if (typeof agent !== "string" || !agent.startsWith("legion-")) return undefined;
-        const role = agent.slice("legion-".length) as LegionRole;
+        const role = agent.slice("legion-".length);
         const task = taskInput.task;
-        if (!LEGION_ROLES.includes(role) || typeof task !== "string") return undefined;
+        if (!isLegionRole(role) || typeof task !== "string") return undefined;
         const issueText = task.split(/\r?\n/, 1)[0]?.slice("Legion-Issue: ".length);
         const parsedIssue =
           issueText && task.startsWith("Legion-Issue: ") ? parseIssueKey(issueText) : undefined;
@@ -423,13 +426,15 @@ export default function legionExtension(pi: PiApi): void {
         });
         const tree = requiredEnvironment(process.env, "LEGION_TREE");
         const depth = context.taskDepth ?? 0;
-        const maxDepth = Number(process.env.LEGION_MAX_RECURSION_DEPTH ?? "8");
+        const maxDepth = positiveIntegerEnvironment(process.env, "LEGION_MAX_RECURSION_DEPTH", "8");
         if (role === "architect" && depth + 2 > maxDepth) {
           throw new Error(
             `sub-architect at depth ${depth} would place its workers at the recursion cap (${maxDepth}); escalate to your parent architect instead`
           );
         }
-        const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+        const release = await acquireWorkerBudget(
+          positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
+        );
         try {
           const token = roleToken(requiredEnvironment(process.env, "LEGION_PROJECT"), issue, role);
           const spawn = await roleDaemon().spawnToken({
@@ -460,10 +465,13 @@ export default function legionExtension(pi: PiApi): void {
         }
       };
       try {
-        if (Array.isArray(toolCall.input.tasks)) {
+        const rawTasks: unknown[] | undefined = Array.isArray(toolCall.input.tasks)
+          ? toolCall.input.tasks
+          : undefined;
+        if (rawTasks) {
           let injected = false;
           const tasks: unknown[] = [];
-          for (const task of toolCall.input.tasks) {
+          for (const task of rawTasks) {
             if (typeof task !== "object" || task === null || Array.isArray(task)) {
               tasks.push(task);
               continue;

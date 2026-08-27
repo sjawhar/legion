@@ -118,8 +118,18 @@ jobs:
             fi
             git pull --rebase origin main
           done
-          git tag "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
-          git push origin --tags
+          tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            if [ "$(git rev-list -n 1 "${tag}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::tag ${tag} already exists on a different commit"
+              exit 1
+            fi
+            echo "Tag ${tag} already exists at HEAD; reusing it"
+          else
+            git tag "${tag}"
+            git push origin "refs/tags/${tag}"
+          fi
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
