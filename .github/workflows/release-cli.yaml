@@ -121,39 +121,25 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Commit, tag, and push
+      - name: Commit and tag
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/daemon/package.json
-          git diff --staged --quiet || git commit -m "chore: release cli v${{ needs.version.outputs.version }} [skip ci]"
-          for attempt in 1 2 3 4 5; do
-            git push origin main && break
-            if [ "$attempt" = 5 ]; then
-              echo "::error::version-bump commit lost the push race to main 5 times"
-              exit 1
-            fi
-            git pull --rebase origin main
-          done
-          tag="cli-v${{ needs.version.outputs.version }}"
-          git fetch --tags origin
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            if [ "$(git rev-list -n 1 "${tag}")" != "$(git rev-parse HEAD)" ]; then
-              echo "::error::tag ${tag} already exists on a different commit"
-              exit 1
-            fi
-            echo "Tag ${tag} already exists at HEAD; reusing it"
-          else
-            git tag "${tag}"
-            git push origin "refs/tags/${tag}"
-          fi
+          .github/scripts/release-push.sh tag packages/daemon \
+            "chore: release cli v${{ needs.version.outputs.version }} [skip ci]" \
+            "cli-v${{ needs.version.outputs.version }}"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "cli-v${{ needs.version.outputs.version }}" \
-            artifacts/*/legion-* \
-            --repo "${{ github.repository }}" \
-            --title "CLI v${{ needs.version.outputs.version }}" \
-            --generate-notes \
-            --verify-tag
+          tag="cli-v${{ needs.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it"
+          else
+            gh release create "$tag" \
+              artifacts/*/legion-* \
+              --repo "${{ github.repository }}" \
+              --title "CLI v${{ needs.version.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+      - name: Push version bump
+        run: .github/scripts/release-push.sh push-main

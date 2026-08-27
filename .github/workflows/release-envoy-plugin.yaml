@@ -39,11 +39,9 @@ jobs:
         run: |
           PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
-            # No git tag yet: the tag prefix changed in #699 and the tag-creation
-            # step is gated behind publish (which had been failing), so the seed
-            # tag was never created. Seed from the published npm version so we
-            # never recompute an already-published version (e.g. 0.1.0). Once a
-            # publish succeeds, the tag is created and this branch stops running.
+            # When no release tag exists, seed from the published npm version so
+            # an already-published version is never recomputed. Once a release
+            # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
             COMMITS=$(git log HEAD --format='%s' -- packages/envoy-plugin/ packages/contracts/)
           else
@@ -100,45 +98,38 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
-        run: npm publish --access public --provenance
+        run: |
+          if npm view "@sjawhar/opencode-legion-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          else
+            npm publish --access public --provenance
+          fi
         working-directory: packages/envoy-plugin
 
-      - name: Commit, tag, and push
+      - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/envoy-plugin/package.json
-          git diff --staged --quiet || git commit -m "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]"
-          for attempt in 1 2 3 4 5; do
-            git push origin main && break
-            if [ "$attempt" = 5 ]; then
-              echo "::error::version-bump commit lost the push race to main 5 times"
-              exit 1
-            fi
-            git pull --rebase origin main
-          done
-          tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
-          git fetch --tags origin
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            if [ "$(git rev-list -n 1 "${tag}")" != "$(git rev-parse HEAD)" ]; then
-              echo "::error::tag ${tag} already exists on a different commit"
-              exit 1
-            fi
-            echo "Tag ${tag} already exists at HEAD; reusing it"
-          else
-            git tag "${tag}"
-            git push origin "refs/tags/${tag}"
-          fi
+          .github/scripts/release-push.sh tag packages/envoy-plugin \
+            "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]" \
+            "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "opencode-legion-envoy-v${{ steps.version.outputs.version }}" \
-            packages/envoy-plugin/*.tgz \
-            --repo "${{ github.repository }}" \
-            --title "Envoy Plugin v${{ steps.version.outputs.version }}" \
-            --generate-notes \
-            --verify-tag
+          tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it"
+          else
+            gh release create "$tag" \
+              packages/envoy-plugin/*.tgz \
+              --repo "${{ github.repository }}" \
+              --title "Envoy Plugin v${{ steps.version.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Push version bump
+        if: steps.version.outputs.skip != 'true'
+        run: .github/scripts/release-push.sh push-main
