@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "type": "module",
   "omp": {
-    "extensions": ["extensions/envoy.ts", "extensions/legion.ts"]
+    "extensions": [
+      "extensions/envoy.ts",
+      "extensions/legion.ts"
+    ]
   },
   "scripts": {
-    "build": "bun build extensions/envoy.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent",
+    "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "bunx biome lint extensions/"
+    "lint": "bunx biome lint extensions/ src/"
   },
   "dependencies": {
     "@legion/contracts": "workspace:*",

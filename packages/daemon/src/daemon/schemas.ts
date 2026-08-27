@@ -77,14 +77,3 @@ export const LegionEntrySchema = z.object({
 });
 
 export const LegionsRegistrySchema = z.record(z.string(), LegionEntrySchema);
-
-export const PromotedSessionSchema = z.object({
-  sessionId: z.string(),
-  role: z.string(),
-  repo: z.string().optional(),
-  promotedAt: z.string(),
-});
-
-export const PromotedSessionsFileSchema = z.object({
-  sessions: z.record(z.string(), PromotedSessionSchema),
-});

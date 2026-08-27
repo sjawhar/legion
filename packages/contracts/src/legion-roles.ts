@@ -23,7 +23,7 @@ const ENVOY_ROLE_TOKEN = /^[a-z0-9][a-z0-9_-]*$/;
 const PROJECT_TOKEN = /^[a-z0-9]+$/;
 const ISSUE_PART = /^[a-z0-9._-]+$/;
 
-function isLegionRole(role: string): role is LegionRole {
+export function isLegionRole(role: string): role is LegionRole {
   return LEGION_ROLES.some((candidate) => candidate === role);
 }
 

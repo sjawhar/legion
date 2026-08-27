@@ -36,14 +36,6 @@ export interface IssueTracker {
    * @throws if the transition fails or is not supported.
    */
   transitionIssue?(target: IssueMutationTarget, newStatus: IssueStatusLiteral): Promise<void>;
-
-  /**
-   * Remove a label from an issue.
-   * Optional — not all backends support mutations.
-   * @param target Issue identity — prefer `source` for GitHub to avoid issueId parsing ambiguity.
-   * @throws if the removal fails or is not supported.
-   */
-  removeLabel?(target: IssueMutationTarget, label: string): Promise<void>;
 }
 
 export type BackendName = "linear" | "github";

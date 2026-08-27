@@ -108,6 +108,18 @@ export async function claimEnvoyRole(
   const bridge = legionRoleClaimBridge();
   await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
 }
+
+export async function deleteEnvoyInterest(baseUrl: string, sessionID: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/v1/interests/${encodeURIComponent(sessionID)}`, {
+    method: "DELETE",
+  });
+  const responseBody = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `DELETE /v1/interests/${sessionID} failed with ${response.status}: ${responseBody}`
+    );
+  }
+}
 const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
 
 export default function envoyExtension(pi: PiApi): void {

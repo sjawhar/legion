@@ -25,10 +25,11 @@ symptoms:
 
 ## Context
 
-The daemon maintains a default clone per repo via `ensureRepoClone`. Workers are
-created from this clone, so a stale clone means workers start with outdated code
-and waste time fetching during startup. Issue #523 added `jj git fetch` at three
-points in the lifecycle, each with a different urgency.
+The workspace provisioner maintains a default clone per repo via `ensureRepoClone`
+(`packages/workspace/src/workspace.ts`). Workers are created from this clone, so a
+stale clone means workers start with outdated code and waste time fetching during
+startup. Issue #523 added `jj git fetch` at three points in the lifecycle, each
+with a different urgency.
 
 ## Pattern: Graduated Blocking by Consequence
 

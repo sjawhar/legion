@@ -23,14 +23,13 @@
     },
     "packages/daemon": {
       "name": "legion",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "bin": {
         "legion": "src/cli/index.ts",
       },
       "dependencies": {
         "@legion/contracts": "workspace:*",
         "@legion/workspace": "workspace:*",
-        "@opencode-ai/sdk": "https://github.com/sjawhar/opencode/releases/download/v1.2.4-post.2/opencode-ai-sdk-1.2.4-post.1.tgz",
         "citty": "^0.2.0",
         "nats": "^2.29.2",
         "yaml": "^2.8.3",

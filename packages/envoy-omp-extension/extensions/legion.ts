@@ -1,637 +1,59 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   controllerToken,
   formatIssueKey,
   type IssueKey,
-  LEGION_ROLES,
+  isLegionRole,
   type LegionRole,
   parseIssueKey,
-  parseRoleToken,
   roleToken,
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import {
-  provisionIssueWorkspace,
-  type RunResult,
-  type WorkspaceCommandOptions,
-  type WorkspaceSpec,
-} from "@legion/workspace";
+import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import {
+  generation,
+  isRootSession,
+  positiveIntegerEnvironment,
+  requiredControllerCapability,
+  requiredEnvironment,
+} from "../src/legion/classify";
+import {
+  handleLegionControlDirective,
+  type LegionControlDirective,
+  parseControlDirective,
+} from "../src/legion/control";
 import { createLegionDaemonClient } from "../src/legion/daemon-client";
-import { claimEnvoyRole, type EnvoySessionContext } from "./envoy";
-
-export type LegionSessionKind =
-  | { kind: "root-architect"; tree: string }
-  | { kind: "controller" }
-  | { kind: "phase-worker"; role: LegionRole }
-  | { kind: "sub-architect" }
-  | { kind: "not-legion" };
-
-export function classifySession(
-  env: NodeJS.ProcessEnv,
-  agentName: string | undefined,
-  taskDepth: number
-): LegionSessionKind {
-  if (env.LEGION_CONTROLLER !== undefined && env.LEGION_TREE !== undefined) {
-    throw new Error("Legion session has both controller and tree launch markers");
-  }
-
-  if (env.LEGION_CONTROLLER === "1") return { kind: "controller" };
-
-  if (taskDepth === 0 && env.LEGION_TREE) {
-    return { kind: "root-architect", tree: env.LEGION_TREE };
-  }
-
-  if (agentName === "legion-architect" && taskDepth >= 1) {
-    return { kind: "sub-architect" };
-  }
-
-  const role = LEGION_ROLES.find((candidate) => agentName === `legion-${candidate}`);
-  if (role && role !== "architect") return { kind: "phase-worker", role };
-
-  return { kind: "not-legion" };
-}
-
-type SessionContext = EnvoySessionContext & {
-  readonly taskDepth?: number;
-  readonly sessionManager: {
-    readonly getSessionId: () => string;
-    readonly getSessionFile: () => string | undefined;
-  };
-};
-
-type BeforeAgentStartEvent = { readonly prompt: string };
-type ToolCallEvent = {
-  readonly toolName: string;
-  readonly toolCallId?: string;
-  readonly input: Record<string, unknown>;
-};
-
-type ToolResultEvent = {
-  readonly toolName: string;
-  readonly toolCallId: string;
-  readonly input: Record<string, unknown>;
-  readonly details: unknown;
-  readonly isError: boolean;
-};
-
-type ToolCallEventResult = {
-  readonly block?: boolean;
-  readonly reason?: string;
-  readonly input?: Record<string, unknown>;
-};
-type RootBootstrap = { readonly role: string; readonly secret: string };
-
-
-
-export function registerWorkerBudgetPermit(sessionID: string, release: () => void): void {
-  if (workerBudgetPermits.has(sessionID)) {
-    throw new Error(`Legion worker budget permit already registered for ${sessionID}`);
-  }
-  workerBudgetPermits.set(sessionID, release);
-}
-
-function releaseWorkerBudgetPermit(sessionID: string): void {
-  const release = workerBudgetPermits.get(sessionID);
-  if (!release) return;
-  workerBudgetPermits.delete(sessionID);
-  release();
-}
-type WorkerSession = {
-  readonly tree: string;
-  readonly issue: string;
-  readonly role: LegionRole;
-  readonly token: string;
-  readonly spawnToken: string;
-  readonly secret: string;
-  readonly agentId: string;
-};
-
-type WorkerSpawn = {
-  readonly tree: string;
-  readonly issue: string;
-  readonly role: LegionRole;
-  readonly token: string;
-  readonly spawnToken: string;
-  readonly workspace: string;
-};
-
-type PendingLegionSpawn = {
-  readonly toolCallId: string;
-  readonly tree: string;
-  readonly issue: string;
-  readonly role: LegionRole;
-  readonly token: string;
-  readonly spawnToken: string;
-  readonly release: () => void;
-};
-
-type WorkerRuntimeState = {
-  readonly budgetPermits: Map<string, () => void>;
-  readonly budgetAcquisitions: Map<string, Promise<void>>;
-  readonly pendingSpawns: Map<string, Set<PendingLegionSpawn>>;
-  readonly pendingSpawnsByToken: Map<string, PendingLegionSpawn>;
-  readonly rootBootstraps: Map<string, Promise<RootBootstrap>>;
-  readonly sessions: Map<string, WorkerSession>;
-  readonly budgetWaiters: (() => void)[];
-  budgetLimit: number | undefined;
-  budgetInUse: number;
-};
-
-// Task sessions load this extension through distinct module URLs, but their worker
-// reservations and role backing form one lifecycle within the OMP process.
-const workerRuntimeStateKey = Symbol.for("legion.envoy-omp-extension.worker-runtime-state");
-const sharedWorkerRuntime = globalThis as typeof globalThis & {
-  [key: symbol]: WorkerRuntimeState | undefined;
-};
-const existingWorkerRuntime = sharedWorkerRuntime[workerRuntimeStateKey];
-const workerRuntime: WorkerRuntimeState = existingWorkerRuntime ?? {
-  budgetPermits: new Map<string, () => void>(),
-  budgetAcquisitions: new Map<string, Promise<void>>(),
-  pendingSpawns: new Map<string, Set<PendingLegionSpawn>>(),
-  pendingSpawnsByToken: new Map<string, PendingLegionSpawn>(),
-  rootBootstraps: new Map<string, Promise<RootBootstrap>>(),
-  sessions: new Map<string, WorkerSession>(),
-  budgetWaiters: [],
-  budgetLimit: undefined,
-  budgetInUse: 0,
-};
-if (!existingWorkerRuntime) sharedWorkerRuntime[workerRuntimeStateKey] = workerRuntime;
-
-const workerBudgetPermits = workerRuntime.budgetPermits;
-const workerBudgetAcquisitions = workerRuntime.budgetAcquisitions;
-const pendingLegionSpawns = workerRuntime.pendingSpawns;
-const pendingLegionSpawnsByToken = workerRuntime.pendingSpawnsByToken;
-const rootBootstraps = workerRuntime.rootBootstraps;
-const workerSessions = workerRuntime.sessions;
-const workerBudgetWaiters = workerRuntime.budgetWaiters;
-
-async function acquireWorkerBudget(limit: number): Promise<() => void> {
-  if (workerRuntime.budgetLimit === undefined) workerRuntime.budgetLimit = limit;
-  if (
-    workerRuntime.budgetLimit !== limit &&
-    workerRuntime.budgetInUse === 0 &&
-    workerBudgetWaiters.length === 0
-  ) {
-    workerRuntime.budgetLimit = limit;
-  }
-  if (workerRuntime.budgetInUse >= workerRuntime.budgetLimit) {
-    await new Promise<void>((resolve) => workerBudgetWaiters.push(resolve));
-  } else {
-    workerRuntime.budgetInUse += 1;
-  }
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    const waiter = workerBudgetWaiters.shift();
-    if (waiter) {
-      waiter();
-      return;
-    }
-    workerRuntime.budgetInUse -= 1;
-  };
-}
-async function ensureWorkerBudgetPermit(sessionID: string): Promise<void> {
-  if (workerBudgetPermits.has(sessionID)) return;
-  const pending = workerBudgetAcquisitions.get(sessionID);
-  if (pending) return await pending;
-  const acquisition = (async () => {
-    if (workerBudgetPermits.has(sessionID)) return;
-    const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
-    try {
-      if (workerBudgetPermits.has(sessionID)) {
-        release();
-        return;
-      }
-      registerWorkerBudgetPermit(sessionID, release);
-    } catch (error) {
-      release();
-      throw error;
-    }
-  })();
-  workerBudgetAcquisitions.set(sessionID, acquisition);
-  try {
-    await acquisition;
-  } finally {
-    if (workerBudgetAcquisitions.get(sessionID) === acquisition)
-      workerBudgetAcquisitions.delete(sessionID);
-  }
-}
-
-
-function addPendingLegionSpawn(pending: PendingLegionSpawn): void {
-  const forToolCall = pendingLegionSpawns.get(pending.toolCallId) ?? new Set<PendingLegionSpawn>();
-  forToolCall.add(pending);
-  pendingLegionSpawns.set(pending.toolCallId, forToolCall);
-  pendingLegionSpawnsByToken.set(pending.spawnToken, pending);
-}
-
-function removePendingLegionSpawn(pending: PendingLegionSpawn): void {
-  const forToolCall = pendingLegionSpawns.get(pending.toolCallId);
-  if (forToolCall) {
-    forToolCall.delete(pending);
-    if (forToolCall.size === 0) pendingLegionSpawns.delete(pending.toolCallId);
-  }
-  pendingLegionSpawnsByToken.delete(pending.spawnToken);
-}
-
-function releasePendingLegionSpawn(pending: PendingLegionSpawn): void {
-  removePendingLegionSpawn(pending);
-  pending.release();
-}
-
-function transferPendingLegionSpawn(pending: PendingLegionSpawn): () => void {
-  removePendingLegionSpawn(pending);
-  return pending.release;
-}
-
-type CommandContext = {
-  readonly cwd: string;
-  readonly sessionManager: { readonly getSessionId: () => string };
-};
-
-type ToolResult = {
-  readonly content: readonly { readonly type: "text"; readonly text: string }[];
-  readonly details: Readonly<Record<string, unknown>>;
-  readonly isError?: boolean;
-};
-
-type RegisteredTool = {
-  readonly name: string;
-  readonly label: string;
-  readonly description: string;
-  readonly defaultInactive: boolean;
-  readonly parameters: unknown;
-  readonly execute: (
-    id: string,
-    parameters: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate: unknown,
-    context: SessionContext
-  ) => Promise<ToolResult>;
-};
-
-type ZodProperty = { readonly optional: () => unknown };
-
-type ExtensionAgentsApi = {
-  readonly list: () => readonly { readonly id: string }[];
-  readonly get: (agentId: string) => { readonly id: string } | undefined;
-  readonly ensureLive: (
-    agentId: string,
-    options: { readonly parentSessionFile: string }
-  ) => Promise<{ readonly id: string }>;
-  readonly prompt: (agentId: string, content: string) => Promise<void>;
-};
-
-type PiApi = {
-  readonly zod: {
-    readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
-    readonly string: () => ZodProperty;
-    readonly number: () => ZodProperty;
-    readonly array: (item: unknown) => ZodProperty;
-    readonly enum: (values: readonly string[]) => ZodProperty;
-    readonly unknown: () => ZodProperty;
-  };
-  readonly agents?: ExtensionAgentsApi;
-  readonly sendMessage: (message: { readonly type: string }) => void;
-  readonly getActiveTools: () => readonly string[];
-  readonly setActiveTools: (tools: string[]) => Promise<void>;
-  readonly on: (
-    event:
-      | "session_start"
-      | "before_agent_start"
-      | "agent_end"
-      | "tool_call"
-      | "tool_result"
-      | "session_shutdown",
-    handler: (event: unknown, context: SessionContext) => Promise<unknown>
-  ) => void;
-  readonly registerTool: (tool: RegisteredTool) => void;
-  readonly registerCommand: (
-    name: string,
-    command: {
-      readonly description: string;
-      readonly handler: (args: string, context: CommandContext) => Promise<void>;
-    }
-  ) => void;
-};
-
-function requiredEnvironment(env: NodeJS.ProcessEnv, key: string): string {
-  const value = env[key];
-  if (!value) throw new Error(`${key} is required for Legion`);
-  return value;
-}
-
-function shellLiteral(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-async function installWorkerGhShim(stateDir: string): Promise<string> {
-  const workerBin = path.join(stateDir, "worker-bin");
-  await mkdir(workerBin, { recursive: true, mode: 0o700 });
-  await chmod(workerBin, 0o700);
-  await writeFile(
-    path.join(workerBin, "gh"),
-    `#!/bin/sh
-PATH=\${PATH#${shellLiteral(`${workerBin}${path.delimiter}`)}}
-export PATH
-exec legion gh -- "$@"
-`,
-    { encoding: "utf8", mode: 0o700 }
-  );
-  await chmod(path.join(workerBin, "gh"), 0o700);
-  return workerBin;
-}
-
-function workerGhEnvironment(grantId: string, stateDir: string, workerBin: string): string {
-  return [
-    `export LEGION_GRANT=${shellLiteral(grantId)}`,
-    "unset GH_TOKEN",
-    "unset GITHUB_TOKEN",
-    "unset GH_HOST",
-    `export GH_CONFIG_DIR=${shellLiteral(path.join(stateDir, "gh"))}`,
-    `export PATH=${shellLiteral(workerBin)}${path.delimiter}$PATH`,
-  ].join("\n");
-}
-
-function requiredControllerCapability(env: NodeJS.ProcessEnv): string {
-  const secret = env.LEGION_CONTROLLER_SECRET;
-  if (!secret) {
-    throw new Error(
-      "LEGION_CONTROLLER_SECRET is required to claim the controller. Launch OMP with LEGION_CONTROLLER_SECRET in its environment before running /legion-claim-controller."
-    );
-  }
-  return secret;
-}
-
-function generation(env: NodeJS.ProcessEnv): number {
-  const value = Number(requiredEnvironment(env, "LEGION_GENERATION"));
-  if (!Number.isSafeInteger(value)) throw new Error("LEGION_GENERATION must be an integer");
-  return value;
-}
-function isRootSession(env: NodeJS.ProcessEnv, context: SessionContext): boolean {
-  if (context.taskDepth !== undefined) return context.taskDepth === 0;
-  const rootWorkspace = env.LEGION_ROOT_WORKSPACE;
-  return rootWorkspace ? context.cwd === rootWorkspace : true;
-}
-
-const legionSpawnBlockPattern = /<legion-spawn\s+([^>]*?)\/>/g;
-
-function parseWorkerSpawn(prompt: string, project: string): WorkerSpawn | undefined {
-  const blocks = [...prompt.matchAll(legionSpawnBlockPattern)];
-  if (blocks.length !== 1) return undefined;
-  const block = blocks[0];
-  if (!block) return undefined;
-
-  const attributes = new Map<string, string>();
-  const attributePattern = /([A-Za-z]+)="([^"]*)"/g;
-  for (const attribute of block[1].matchAll(attributePattern)) {
-    const key = attribute[1];
-    const value = attribute[2];
-    if (!key || value === undefined || attributes.has(key)) return undefined;
-    attributes.set(key, value);
-  }
-  if (block[1].replace(attributePattern, "").trim() !== "") return undefined;
-
-  const issue = attributes.get("issue");
-  const role = attributes.get("role");
-  const token = attributes.get("token");
-  const tree = attributes.get("tree");
-  const spawnToken = attributes.get("spawnToken");
-  const workspace = attributes.get("workspace");
-  if (!spawnToken) {
-    throw new Error("Legion spawn block is missing daemon-issued recovery token");
-  }
-  if (
-    !issue ||
-    !role ||
-    !token ||
-    !tree ||
-    !workspace ||
-    !LEGION_ROLES.includes(role as LegionRole)
-  )
-    return undefined;
-
-  const parsedToken = parseRoleToken(project, token);
-  if (
-    !parsedToken ||
-    "controller" in parsedToken ||
-    parsedToken.issue !== issue ||
-    parsedToken.role !== role
-  )
-    return undefined;
-  return { tree, issue, role, token, spawnToken, workspace };
-}
-function workerAgentId(context: SessionContext): string {
-  const sessionFile = context.sessionManager.getSessionFile();
-  if (!sessionFile?.endsWith(".jsonl")) {
-    throw new Error("Legion worker session must have a persisted transcript");
-  }
-  const agentId = path.basename(sessionFile, ".jsonl");
-  if (!agentId) throw new Error("Legion worker transcript has no agent id");
-  return agentId;
-}
-
-async function setJjIdentity(cwd: string, gitName: string, gitEmail: string): Promise<void> {
-  for (const [key, value] of [
-    ["user.name", gitName],
-    ["user.email", gitEmail],
-  ] as const) {
-    const child = Bun.spawn(["jj", "config", "set", "--repo", key, JSON.stringify(value)], {
-      cwd,
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    const exitCode = await child.exited;
-    if (exitCode === 0) continue;
-    const stderr = await new Response(child.stderr as ReadableStream<Uint8Array>).text();
-    throw new Error(`jj config set ${key} failed: ${stderr.trim()}`);
-  }
-}
-async function deleteEnvoyInterest(baseUrl: string, sessionID: string): Promise<void> {
-  const response = await fetch(`${baseUrl}/v1/interests/${encodeURIComponent(sessionID)}`, {
-    method: "DELETE",
-  });
-  const responseBody = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `DELETE /v1/interests/${sessionID} failed with ${response.status}: ${responseBody}`
-    );
-  }
-}
-
-async function runWorkspaceCommand(
-  cmd: string[],
-  opts?: WorkspaceCommandOptions
-): Promise<RunResult> {
-  const child = Bun.spawn(cmd, {
-    ...(opts?.cwd === undefined ? {} : { cwd: opts.cwd }),
-    ...(opts?.env === undefined ? {} : { env: { ...process.env, ...opts.env } }),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(child.stderr as ReadableStream<Uint8Array>).text(),
-  ]);
-  return { exitCode, stdout, stderr };
-}
-
-function toolSuccess(details: Readonly<Record<string, unknown>>): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(details) }], details };
-}
-
-function toolFailure(error: unknown): ToolResult {
-  const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: "text", text: message }], details: {}, isError: true };
-}
-
-const LEGION_TOOL_LABELS = [
-  "needs-approval",
-  "human-approved",
-  "legion-child",
-  "legion-backlog",
-] as const;
-
-function legionToolSchema(pi: PiApi): unknown {
-  const z = pi.zod;
-  return z.object({
-    op: z.enum([
-      "issue_create",
-      "wave_release",
-      "comment",
-      "post_spec",
-      "label_add",
-      "label_remove",
-      "escalate",
-      "request_refile",
-      "issue_close",
-      "merge_gate",
-    ]),
-    title: z.string().optional(),
-    body: z.string().optional(),
-    labels: z.array(z.enum(LEGION_TOOL_LABELS)).optional(),
-    children: z.array(z.string()).optional(),
-    issue: z.string().optional(),
-    label: z.enum(LEGION_TOOL_LABELS).optional(),
-    kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
-    context: z.unknown().optional(),
-    rationale: z.string().optional(),
-    comment: z.string().optional(),
-    pr: z.number().optional(),
-  });
-}
-
-function envoyDispatchToolSchema(pi: PiApi): unknown {
-  const z = pi.zod;
-  return z.object({
-    parent: z.string(),
-    subject: z.string(),
-    body: z.string(),
-    ask: z.array(z.unknown()).optional(),
-    urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-  });
-}
-
-type Redelivery = { readonly topic: string; readonly payload: string; readonly eventId: string };
-
-export type LegionControlDirective =
-  | {
-      readonly type: "revive-worker";
-      readonly role: LegionRole;
-      readonly agentId: string;
-      readonly parentSessionFile: string;
-      readonly redeliver: Redelivery;
-    }
-  | { readonly type: "reclaim-architect"; readonly redeliver: Redelivery }
-  | { readonly type: "shutdown" };
-
-type LegionControlActions = {
-  readonly agents?: ExtensionAgentsApi;
-  readonly reclaimArchitect: () => Promise<void>;
-  readonly requestShutdown: () => void;
-  readonly acknowledge: () => void;
-  readonly reject: (error: string) => void;
-};
-
-export async function handleLegionControlDirective(
-  directive: LegionControlDirective,
-  actions: LegionControlActions
-): Promise<void> {
-  try {
-    switch (directive.type) {
-      case "revive-worker":
-        if (!actions.agents) {
-          throw new Error("reviving Legion workers requires an OMP host with pi.agents");
-        }
-        await actions.agents.ensureLive(directive.agentId, {
-          parentSessionFile: directive.parentSessionFile,
-        });
-        break;
-      case "reclaim-architect":
-        await actions.reclaimArchitect();
-        break;
-      case "shutdown":
-        actions.requestShutdown();
-        break;
-    }
-    actions.acknowledge();
-  } catch (error) {
-    actions.reject(error instanceof Error ? error.message : String(error));
-  }
-}
-
-function parseControlDirective(raw: string): LegionControlDirective {
-  const payload: unknown = JSON.parse(raw);
-  if (typeof payload !== "object" || payload === null || !("type" in payload)) {
-    throw new Error("Legion control directive must be an object with a type");
-  }
-  const redelivery = (): Redelivery => {
-    if (
-      !("redeliver" in payload) ||
-      typeof payload.redeliver !== "object" ||
-      payload.redeliver === null ||
-      !("topic" in payload.redeliver) ||
-      typeof payload.redeliver.topic !== "string" ||
-      !("payload" in payload.redeliver) ||
-      typeof payload.redeliver.payload !== "string" ||
-      !("eventId" in payload.redeliver) ||
-      typeof payload.redeliver.eventId !== "string"
-    ) {
-      throw new Error("Legion control directive is missing redelivery metadata");
-    }
-    return {
-      topic: payload.redeliver.topic,
-      payload: payload.redeliver.payload,
-      eventId: payload.redeliver.eventId,
-    };
-  };
-  if (payload.type === "shutdown") return { type: "shutdown" };
-  if (payload.type === "reclaim-architect")
-    return { type: "reclaim-architect", redeliver: redelivery() };
-  if (
-    payload.type !== "revive-worker" ||
-    !("role" in payload) ||
-    typeof payload.role !== "string" ||
-    !LEGION_ROLES.includes(payload.role as LegionRole) ||
-    !("agentId" in payload) ||
-    typeof payload.agentId !== "string" ||
-    !("parentSessionFile" in payload) ||
-    typeof payload.parentSessionFile !== "string"
-  ) {
-    throw new Error("Invalid Legion control directive");
-  }
-  return {
-    type: "revive-worker",
-    role: payload.role as LegionRole,
-    agentId: payload.agentId,
-    parentSessionFile: payload.parentSessionFile,
-    redeliver: redelivery(),
-  };
-}
+import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
+import type {
+  BeforeAgentStartEvent,
+  CommandContext,
+  PiApi,
+  SessionContext,
+  ToolCallEvent,
+  ToolCallEventResult,
+  ToolResultEvent,
+} from "../src/legion/pi-types";
+import { legionSpawnBlockPattern, parseWorkerSpawn, workerAgentId } from "../src/legion/spawn";
+import { createEnvoyDispatchTool, createLegionTool } from "../src/legion/tools";
+import {
+  acquireWorkerBudget,
+  addPendingLegionSpawn,
+  ensureWorkerBudgetPermit,
+  type PendingLegionSpawn,
+  pendingLegionSpawns,
+  pendingLegionSpawnsByToken,
+  type RootBootstrap,
+  registerWorkerBudgetPermit,
+  releasePendingLegionSpawn,
+  releaseWorkerBudgetPermit,
+  rootBootstraps,
+  transferPendingLegionSpawn,
+  type WorkerSession,
+  workerSessions,
+} from "../src/legion/worker-budget";
+import { runWorkspaceCommand, setJjIdentity } from "../src/legion/workspace-helpers";
+import { claimEnvoyRole, deleteEnvoyInterest, type EnvoySessionContext } from "./envoy";
 
 export default function legionExtension(pi: PiApi): void {
   const agents = pi.agents;
@@ -647,46 +69,42 @@ export default function legionExtension(pi: PiApi): void {
   let workspaceStateDir: string | undefined;
   const workspaceProvisions = new Map<IssueKey, Promise<WorkspaceSpec>>();
   const roleDaemon = () => {
-    return createLegionDaemonClient(
-      requiredEnvironment(process.env, "LEGION_DAEMON_URL"),
-      fetch,
-      {
-        recoveryToken: (sessionId) => {
-          if (sessionId === rootSessionID) {
-            return requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
-          }
-          const worker = workerSessions.get(sessionId);
-          if (worker === undefined) {
-            throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
-          }
-          return worker.spawnToken;
-        },
-        onRecovered: (sessionId, recovered) => {
-          if (sessionId === rootSessionID) {
-            const tree = requiredEnvironment(process.env, "LEGION_TREE");
-            if (
-              recovered.tree !== tree ||
-              recovered.issue !== tree ||
-              recovered.role !== "architect"
-            ) {
-              throw new Error("Daemon recovered a capability for a different root architect role");
-            }
-            rootSecret = recovered.secret;
-            return;
-          }
-          const worker = workerSessions.get(sessionId);
+    return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
+      recoveryToken: (sessionId) => {
+        if (sessionId === rootSessionID) {
+          return requiredEnvironment(process.env, "LEGION_BOOT_TOKEN");
+        }
+        const worker = workerSessions.get(sessionId);
+        if (worker === undefined) {
+          throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
+        }
+        return worker.spawnToken;
+      },
+      onRecovered: (sessionId, recovered) => {
+        if (sessionId === rootSessionID) {
+          const tree = requiredEnvironment(process.env, "LEGION_TREE");
           if (
-            worker === undefined ||
-            recovered.tree !== worker.tree ||
-            recovered.issue !== worker.issue ||
-            recovered.role !== worker.role
+            recovered.tree !== tree ||
+            recovered.issue !== tree ||
+            recovered.role !== "architect"
           ) {
-            throw new Error("Daemon recovered a capability for a different Legion worker role");
+            throw new Error("Daemon recovered a capability for a different root architect role");
           }
-          workerSessions.set(sessionId, { ...worker, secret: recovered.secret });
-        },
-      }
-    );
+          rootSecret = recovered.secret;
+          return;
+        }
+        const worker = workerSessions.get(sessionId);
+        if (
+          worker === undefined ||
+          recovered.tree !== worker.tree ||
+          recovered.issue !== worker.issue ||
+          recovered.role !== worker.role
+        ) {
+          throw new Error("Daemon recovered a capability for a different Legion worker role");
+        }
+        workerSessions.set(sessionId, { ...worker, secret: recovered.secret });
+      },
+    });
   };
   const provisionWorkspace = async (
     issue: IssueKey,
@@ -873,7 +291,6 @@ export default function legionExtension(pi: PiApi): void {
     throw new Error(`Legion worker session ${sessionID} has no persisted recovery token`);
   };
 
-
   pi.on("session_start", async (_event, context) => {
     const sessionID = context.sessionManager.getSessionId();
     if (process.env.LEGION_CONTROLLER === "1") {
@@ -923,7 +340,9 @@ export default function legionExtension(pi: PiApi): void {
     const pending = pendingLegionSpawnsByToken.get(spawn.spawnToken);
     const release = pending
       ? transferPendingLegionSpawn(pending)
-      : await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+      : await acquireWorkerBudget(
+          positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
+        );
     try {
       const agentId = workerAgentId(context);
       const daemon = createLegionDaemonClient(
@@ -982,9 +401,9 @@ export default function legionExtension(pi: PiApi): void {
       ): Promise<Record<string, unknown> | undefined> => {
         const agent = taskInput.agent;
         if (typeof agent !== "string" || !agent.startsWith("legion-")) return undefined;
-        const role = agent.slice("legion-".length) as LegionRole;
+        const role = agent.slice("legion-".length);
         const task = taskInput.task;
-        if (!LEGION_ROLES.includes(role) || typeof task !== "string") return undefined;
+        if (!isLegionRole(role) || typeof task !== "string") return undefined;
         const issueText = task.split(/\r?\n/, 1)[0]?.slice("Legion-Issue: ".length);
         const parsedIssue =
           issueText && task.startsWith("Legion-Issue: ") ? parseIssueKey(issueText) : undefined;
@@ -1003,13 +422,15 @@ export default function legionExtension(pi: PiApi): void {
         });
         const tree = requiredEnvironment(process.env, "LEGION_TREE");
         const depth = context.taskDepth ?? 0;
-        const maxDepth = Number(process.env.LEGION_MAX_RECURSION_DEPTH ?? "8");
+        const maxDepth = positiveIntegerEnvironment(process.env, "LEGION_MAX_RECURSION_DEPTH", "8");
         if (role === "architect" && depth + 2 > maxDepth) {
           throw new Error(
             `sub-architect at depth ${depth} would place its workers at the recursion cap (${maxDepth}); escalate to your parent architect instead`
           );
         }
-        const release = await acquireWorkerBudget(Number(process.env.LEGION_WORKER_BUDGET ?? "6"));
+        const release = await acquireWorkerBudget(
+          positiveIntegerEnvironment(process.env, "LEGION_WORKER_BUDGET", "6")
+        );
         try {
           const token = roleToken(requiredEnvironment(process.env, "LEGION_PROJECT"), issue, role);
           const spawn = await roleDaemon().spawnToken({
@@ -1040,10 +461,13 @@ export default function legionExtension(pi: PiApi): void {
         }
       };
       try {
-        if (Array.isArray(toolCall.input.tasks)) {
+        const rawTasks: unknown[] | undefined = Array.isArray(toolCall.input.tasks)
+          ? toolCall.input.tasks
+          : undefined;
+        if (rawTasks) {
           let injected = false;
           const tasks: unknown[] = [];
-          for (const task of toolCall.input.tasks) {
+          for (const task of rawTasks) {
             if (typeof task !== "object" || task === null || Array.isArray(task)) {
               tasks.push(task);
               continue;
@@ -1174,209 +598,8 @@ export default function legionExtension(pi: PiApi): void {
   const registerArchitectTools = (): void => {
     if (architectToolsRegistered) return;
     architectToolsRegistered = true;
-    pi.registerTool({
-      name: "legion",
-      label: "legion",
-      description: "Perform a Legion lifecycle write through the Legion daemon.",
-      defaultInactive: true,
-      parameters: legionToolSchema(pi),
-      execute: async (_id, parameters, _signal, _onUpdate, context) => {
-        try {
-          const architect = architectSession(context);
-          const daemon = roleDaemon();
-          const stringInput = (name: string): string => {
-            const value = parameters[name];
-            if (typeof value !== "string")
-              throw new Error(`${String(parameters.op)} requires ${name}`);
-            return value;
-          };
-          const numberInput = (name: string): number => {
-            const value = parameters[name];
-            if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
-              throw new Error(`${String(parameters.op)} requires a positive integer ${name}`);
-            }
-            return value;
-          };
-          switch (parameters.op) {
-            case "merge_gate":
-              return toolSuccess(
-                await daemon.mergeGate({
-                  tree: architect.tree,
-                  pr: numberInput("pr"),
-                  sessionId: context.sessionManager.getSessionId(),
-                  secret: architect.secret,
-                })
-              );
-            case "issue_create": {
-              const labels = parameters.labels;
-              if (
-                labels !== undefined &&
-                (!Array.isArray(labels) ||
-                  labels.some(
-                    (label) =>
-                      typeof label !== "string" ||
-                      !LEGION_TOOL_LABELS.includes(label as (typeof LEGION_TOOL_LABELS)[number])
-                  ))
-              ) {
-                throw new Error("issue_create labels must use surviving Legion labels");
-              }
-              return toolSuccess(
-                await daemon.issueCreate({
-                  tree: architect.tree,
-                  sessionId: context.sessionManager.getSessionId(),
-                  secret: architect.secret,
-                  title: stringInput("title"),
-                  body: stringInput("body"),
-                  labels: labels ?? [],
-                })
-              );
-            }
-            case "wave_release": {
-              const children = parameters.children;
-              if (!Array.isArray(children) || children.some((child) => typeof child !== "string")) {
-                throw new Error("wave_release requires children");
-              }
-              return toolSuccess(
-                await daemon.waveRelease({
-                  tree: architect.tree,
-                  children,
-                  sessionId: context.sessionManager.getSessionId(),
-                  secret: architect.secret,
-                })
-              );
-            }
-            case "comment":
-              return toolSuccess(
-                await daemon.comment({
-                  tree: architect.tree,
-                  sessionId: context.sessionManager.getSessionId(),
-                  secret: architect.secret,
-                  issue: stringInput("issue"),
-                  body: stringInput("body"),
-                })
-              );
-            case "post_spec":
-              await daemon.postBody({
-                tree: architect.tree,
-                sessionId: context.sessionManager.getSessionId(),
-                secret: architect.secret,
-                issue: stringInput("issue"),
-                body: stringInput("body"),
-              });
-              return toolSuccess({});
-            case "label_add":
-            case "label_remove": {
-              const label = stringInput("label");
-              if (!LEGION_TOOL_LABELS.includes(label as (typeof LEGION_TOOL_LABELS)[number])) {
-                throw new Error("label changes must use surviving Legion labels");
-              }
-              return toolSuccess(
-                await daemon.labels({
-                  tree: architect.tree,
-                  sessionId: context.sessionManager.getSessionId(),
-                  secret: architect.secret,
-                  issue: stringInput("issue"),
-                  add: parameters.op === "label_add" ? [label] : [],
-                  remove: parameters.op === "label_remove" ? [label] : [],
-                })
-              );
-            }
-            case "escalate": {
-              const kind = stringInput("kind");
-              if (kind !== "re-file" && kind !== "capacity" && kind !== "cross-tree") {
-                throw new Error("Unknown Legion escalation kind");
-              }
-              if (!("context" in parameters) || parameters.context === undefined)
-                throw new Error("escalate requires context");
-              await daemon.escalate({
-                tree: architect.tree,
-                kind,
-                context: parameters.context,
-                sessionId: context.sessionManager.getSessionId(),
-                secret: architect.secret,
-              });
-              return toolSuccess({});
-            }
-            case "request_refile":
-              await daemon.escalate({
-                tree: architect.tree,
-                sessionId: context.sessionManager.getSessionId(),
-                secret: architect.secret,
-                kind: "re-file",
-                context: { issue: stringInput("issue"), rationale: stringInput("rationale") },
-              });
-              return toolSuccess({});
-            case "issue_close": {
-              const comment = parameters.comment;
-              if (comment !== undefined && typeof comment !== "string")
-                throw new Error("issue_close comment must be a string");
-              await daemon.issueClose({
-                tree: architect.tree,
-                sessionId: context.sessionManager.getSessionId(),
-                secret: architect.secret,
-                issue: stringInput("issue"),
-                ...(comment === undefined ? {} : { comment }),
-              });
-              return toolSuccess({});
-            }
-            default:
-              throw new Error(`Unsupported legion operation: ${String(parameters.op)}`);
-          }
-        } catch (error) {
-          return toolFailure(error);
-        }
-      },
-    });
-
-    pi.registerTool({
-      name: "envoy_dispatch",
-      label: "envoy_dispatch",
-      description:
-        "Open an architect-owned Dispatch thread and route replies back to this Legion role.",
-      defaultInactive: true,
-      parameters: envoyDispatchToolSchema(pi),
-      execute: async (_id, parameters, _signal, _onUpdate, context) => {
-        try {
-          const architect = architectSession(context);
-          const { parent, subject, body, ask, urgency } = parameters;
-          if (
-            typeof parent !== "string" ||
-            typeof subject !== "string" ||
-            typeof body !== "string"
-          ) {
-            throw new Error("envoy_dispatch requires parent, subject, and body");
-          }
-          let dispatchUrgency: "low" | "med" | "high" | "blocking" | undefined;
-          if (urgency === undefined) {
-            dispatchUrgency = undefined;
-          } else if (
-            urgency === "low" ||
-            urgency === "med" ||
-            urgency === "high" ||
-            urgency === "blocking"
-          ) {
-            dispatchUrgency = urgency;
-          } else {
-            throw new Error("envoy_dispatch urgency must be low, med, high, or blocking");
-          }
-          const result = await roleDaemon().dispatchThread({
-            tree: architect.tree,
-            issue: architect.issue,
-            role: architect.role,
-            sessionId: context.sessionManager.getSessionId(),
-            secret: architect.secret,
-            parent,
-            subject,
-            body,
-            ...(ask === undefined ? {} : { ask }),
-            ...(dispatchUrgency === undefined ? {} : { urgency: dispatchUrgency }),
-          });
-          return toolSuccess(result);
-        } catch (error) {
-          return toolFailure(error);
-        }
-      },
-    });
+    pi.registerTool(createLegionTool({ pi, roleDaemon, architectSession }));
+    pi.registerTool(createEnvoyDispatchTool({ pi, roleDaemon, architectSession }));
   };
 
   pi.registerCommand("legion-claim-controller", {

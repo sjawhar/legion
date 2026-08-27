@@ -112,6 +112,7 @@ describe("Legion HTTP API", () => {
     admit?: (issue: IssueKey) => "spawned" | "queued";
     dispatchFetch?: LegionApiFetch;
     onTreeReady?: (tree: IssueKey) => Promise<void>;
+    onControllerReady?: () => Promise<void>;
   }) {
     const runner =
       options?.runner ??
@@ -226,7 +227,7 @@ describe("Legion HTTP API", () => {
               },
             })),
       },
-      onControllerReady: async () => {},
+      onControllerReady: options?.onControllerReady ?? (async () => {}),
       onControllerEvent: async (payload) => {
         publications.push({
           topic: `notifications.role.${controllerToken(state.project)}`,
@@ -931,6 +932,17 @@ describe("Legion HTTP API", () => {
       { tree: root, issue: child, role: "implementer", agentId: "agent-17" },
     ]);
 
+    const provisioningCredential = await json<{ token: string }>(
+      "/legion/v1/provisioning-credential",
+      {
+        tree: root,
+        issue: child,
+        ...architect,
+      }
+    );
+    expect(provisioningCredential.response.status).toBe(200);
+    expect(provisioningCredential.body).toEqual({ token: "minted-implement-acme" });
+
     const unauthenticatedGate = await json("/legion/v1/gates/approve", {
       issue: root,
     });
@@ -1019,6 +1031,30 @@ describe("Legion HTTP API", () => {
     const stateJson = await stateResponse.text();
     expect(stateJson).not.toContain("minted-");
     expect(stateJson).not.toContain("controllerCapabilityHash");
+  });
+
+  it("retries controller startup redelivery after a failed ready callback", async () => {
+    let readyCalls = 0;
+    await start({
+      onControllerReady: async () => {
+        readyCalls += 1;
+        if (readyCalls === 1) throw new Error("redelivery failed");
+      },
+    });
+
+    const first = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_controller",
+    });
+    expect(first.response.status).toBe(500);
+    expect(first.body).toEqual({ error: "redelivery failed" });
+
+    const second = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_controller",
+    });
+    expect(second.response.status).toBe(200);
+    expect(readyCalls).toBe(2);
   });
 
   it("requires the owning architect capability for every architect lifecycle write", async () => {
