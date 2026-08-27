@@ -43,43 +43,25 @@ jobs:
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
-            COMMITS=$(git log HEAD --format='%s' -- packages/envoy-plugin/ packages/contracts/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/envoy-plugin/ packages/contracts/)
           else
             PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
-            COMMITS=$(git log "${PREV_TAG}..HEAD" --format='%s' -- packages/envoy-plugin/ packages/contracts/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/envoy-plugin/ packages/contracts/)
           fi
 
-          if [ -z "$COMMITS" ]; then
+          if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=No release published::No commits in tracked paths since ${PREV_TAG:-beginning}"
             echo "**No release published** — No commits in tracked paths since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-
-          MAJOR=false; MINOR=false; PATCH=false
-          while IFS= read -r msg; do
-            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
-              MAJOR=true
-            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
-              MINOR=true
-            elif echo "$msg" | grep -qE '^(fix|refactor|perf)(\(.+\))?:'; then
-              PATCH=true
-            fi
-          done <<< "$COMMITS"
-
-          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+          if [ "$VERSION" = "none" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
             echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          IFS='.' read -r MAJ MIN PAT <<< "$PREV_VERSION"
-          if $MAJOR; then MAJ=$((MAJ+1)); MIN=0; PAT=0
-          elif $MINOR; then MIN=$((MIN+1)); PAT=0
-          else PAT=$((PAT+1)); fi
-
-          VERSION="${MAJ}.${MIN}.${PAT}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "Bumping opencode-legion-envoy-v${PREV_VERSION} -> opencode-legion-envoy-v${VERSION}"

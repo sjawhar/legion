@@ -6,6 +6,7 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -43,49 +44,22 @@ jobs:
             exit 0
           fi
 
-          # Only consider commits that touch envoy or contracts
-          COMMITS=$(git log "${LATEST_TAG}..HEAD" --format='%s' -- packages/envoy/ packages/contracts/)
+          CURRENT="${LATEST_TAG#legion-envoy-v}"
+          CURRENT="${CURRENT%%-*}"
+          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" -- packages/envoy/ packages/contracts/)
 
-          if [ -z "$COMMITS" ]; then
+          if [ "$VERSION" = "empty" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             echo "No envoy/contracts commits since $LATEST_TAG"
             exit 0
           fi
-
-          MAJOR=false
-          MINOR=false
-          PATCH=false
-
-          while IFS= read -r msg; do
-            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
-              MAJOR=true
-            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
-              MINOR=true
-            elif echo "$msg" | grep -qE '^(fix|refactor|perf)(\(.+\))?:'; then
-              PATCH=true
-            fi
-          done <<< "$COMMITS"
-
-          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+          if [ "$VERSION" = "none" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=No release published::No version-bumping commits since $LATEST_TAG"
             echo "**No release published** — No version-bumping commits since $LATEST_TAG" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          CURRENT="${LATEST_TAG#legion-envoy-v}"
-          CURRENT="${CURRENT%%-*}"
-          IFS='.' read -r major minor patch <<< "$CURRENT"
-
-          if $MAJOR; then
-            major=$((major + 1)); minor=0; patch=0
-          elif $MINOR; then
-            minor=$((minor + 1)); patch=0
-          else
-            patch=$((patch + 1))
-          fi
-
-          VERSION="${major}.${minor}.${patch}"
           TAG="legion-envoy-v${VERSION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"

@@ -30,42 +30,24 @@ jobs:
           PREV_TAG=$(git tag -l 'cli-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             PREV_VERSION="0.0.0"
-            COMMITS=$(git log HEAD --format='%s' -- packages/daemon/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/daemon/)
           else
             PREV_VERSION="${PREV_TAG#cli-v}"
-            COMMITS=$(git log "${PREV_TAG}..HEAD" --format='%s' -- packages/daemon/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/daemon/)
           fi
 
-          if [ -z "$COMMITS" ]; then
+          if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "No commits in packages/daemon/ since ${PREV_TAG:-beginning}"
             exit 0
           fi
-
-          MAJOR=false; MINOR=false; PATCH=false
-          while IFS= read -r msg; do
-            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:' || echo "$msg" | grep -q 'BREAKING CHANGE'; then
-              MAJOR=true
-            elif echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
-              MINOR=true
-            elif echo "$msg" | grep -qE '^(fix|refactor|perf)(\(.+\))?:'; then
-              PATCH=true
-            fi
-          done <<< "$COMMITS"
-
-          if ! $MAJOR && ! $MINOR && ! $PATCH; then
+          if [ "$VERSION" = "none" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
             echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          IFS='.' read -r MAJ MIN PAT <<< "$PREV_VERSION"
-          if $MAJOR; then MAJ=$((MAJ+1)); MIN=0; PAT=0
-          elif $MINOR; then MIN=$((MIN+1)); PAT=0
-          else PAT=$((PAT+1)); fi
-
-          VERSION="${MAJ}.${MIN}.${PAT}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "Bumping cli-v${PREV_VERSION} -> cli-v${VERSION}"
