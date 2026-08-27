@@ -6,6 +6,8 @@ import * as path from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
 import { startLegionApi } from "../../daemon/src/daemon/api";
 import { newLegionState } from "../../daemon/src/daemon/legion-state";
+import { classifySession } from "../src/legion/classify";
+import { handleLegionControlDirective } from "../src/legion/control";
 
 mock.module("nats", () => ({
   connect: async () => ({
@@ -31,8 +33,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
-const { default: legionExtension, classifySession, handleLegionControlDirective } =
-  await import("./legion");
+const { default: legionExtension } = await import("./legion");
 
 type SessionContext = {
   readonly cwd: string;
@@ -166,7 +167,9 @@ afterEach(async () => {
   );
 });
 
-function createPi(options: { readonly agents?: ExtensionAgentsApi; readonly omitAgents?: boolean } = {}): {
+function createPi(
+  options: { readonly agents?: ExtensionAgentsApi; readonly omitAgents?: boolean } = {}
+): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
@@ -257,7 +260,6 @@ function injectedTask(result: unknown): string {
   }
   return result.input.task;
 }
-
 
 async function createJjWorkspace(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-"));
@@ -418,7 +420,8 @@ describe("Legion OMP extension", () => {
 
     legionExtension(fixture.pi);
     const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
+    if (sessionStart === undefined)
+      throw new Error("Legion session_start handler was not registered");
     await sessionStart({}, context);
 
     expect(requests).toEqual([
@@ -453,7 +456,10 @@ describe("Legion OMP extension", () => {
     ]);
   });
   test("recovers a live root architect command after the daemon loses its capability map", async () => {
-    const requests: { readonly path: string; readonly body: Record<string, unknown> | undefined }[] = [];
+    const requests: {
+      readonly path: string;
+      readonly body: Record<string, unknown> | undefined;
+    }[] = [];
     const tree = "owner/repo#42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
@@ -466,7 +472,9 @@ describe("Legion OMP extension", () => {
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       const body =
-        init?.body == null ? undefined : (JSON.parse(init.body.toString()) as Record<string, unknown>);
+        init?.body == null
+          ? undefined
+          : (JSON.parse(init.body.toString()) as Record<string, unknown>);
       requests.push({ path: url.pathname, body });
       if (url.pathname === "/legion/v1/process/started") {
         return Response.json({
@@ -501,7 +509,8 @@ describe("Legion OMP extension", () => {
     const fixture = createPi();
     legionExtension(fixture.pi);
     const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
+    if (sessionStart === undefined)
+      throw new Error("Legion session_start handler was not registered");
     const context = sessionContext("ses_root", "/tmp/root-transcript.jsonl");
     await sessionStart({}, context);
     const legionTool = fixture.tools.find((tool) => tool.name === "legion");
@@ -592,7 +601,8 @@ describe("Legion OMP extension", () => {
 
     legionExtension(fixture.pi);
     const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("Legion session_start handler was not registered");
+    if (sessionStart === undefined)
+      throw new Error("Legion session_start handler was not registered");
     await sessionStart({}, context);
 
     expect(requests).toEqual([]);
@@ -795,7 +805,8 @@ describe("Legion OMP extension", () => {
       if (url.pathname === "/legion/v1/provisioning-credential") {
         return Response.json({ token: "daemon-installation-token" });
       }
-      if (url.pathname === "/legion/v1/spawn-token") return Response.json({ spawnToken: "fresh-token" });
+      if (url.pathname === "/legion/v1/spawn-token")
+        return Response.json({ spawnToken: "fresh-token" });
       return Response.json({
         session_id: body?.session_id,
         machine_id: "machine",
@@ -931,7 +942,8 @@ describe("Legion OMP extension", () => {
     ]);
   });
   test("takes over the controller role through the daemon-ready handshake", async () => {
-    const requests: { readonly method: string; readonly path: string; readonly body: unknown }[] = [];
+    const requests: { readonly method: string; readonly path: string; readonly body: unknown }[] =
+      [];
     const project = "omp";
     const token = "legion-omp-controller";
     process.env.ENVOY_URL = "http://envoy.test";
@@ -971,7 +983,11 @@ describe("Legion OMP extension", () => {
 
     expect(requests).toEqual([
       { method: "GET", path: "/legion/v1/state", body: undefined },
-      { method: "POST", path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
+      {
+        method: "POST",
+        path: "/v1/roles/set",
+        body: { session_id: "ses_interactive", role: token },
+      },
       {
         method: "POST",
         path: "/v1/interests/subscribe",
@@ -1681,7 +1697,9 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
         body: JSON.stringify({ grantId: initialGrant }),
       });
       expect(initialRedemption.status).toBe(200);
-      expect(await initialRedemption.text()).toBe("username=x-access-token\npassword=real-daemon-token");
+      expect(await initialRedemption.text()).toBe(
+        "username=x-access-token\npassword=real-daemon-token"
+      );
 
       now += 60_001;
       const staleRedemption = await originalFetch(`${daemonUrl}/legion/v1/git-credential`, {
@@ -1708,7 +1726,9 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
         body: JSON.stringify({ grantId: freshGrant }),
       });
       expect(freshRedemption.status).toBe(200);
-      expect(await freshRedemption.text()).toBe("username=x-access-token\npassword=real-daemon-token");
+      expect(await freshRedemption.text()).toBe(
+        "username=x-access-token\npassword=real-daemon-token"
+      );
       await sessionShutdown({}, context);
     } finally {
       daemon.stop();
@@ -1798,7 +1818,11 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     const sessionStart = fixture.handlers.get("session_start");
     const sessionShutdown = fixture.handlers.get("session_shutdown");
-    if (beforeAgentStart === undefined || sessionStart === undefined || sessionShutdown === undefined) {
+    if (
+      beforeAgentStart === undefined ||
+      sessionStart === undefined ||
+      sessionShutdown === undefined
+    ) {
       throw new Error("worker lifecycle handlers were not registered");
     }
     const workspace = await createJjWorkspace();
@@ -1862,7 +1886,8 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
       requests.push({ path: url.pathname, body });
       if (init?.method === "DELETE") return Response.json({});
-      if (url.pathname === "/legion/v1/spawn-token") return Response.json({ spawnToken: "spawn-capability" });
+      if (url.pathname === "/legion/v1/spawn-token")
+        return Response.json({ spawnToken: "spawn-capability" });
       if (url.pathname === "/legion/v1/phase") {
         return Response.json({
           secret: "worker-secret",
@@ -2681,7 +2706,8 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       if (url.pathname === "/legion/v1/provisioning-credential") {
         return Response.json({ token: "daemon-installation-token" });
       }
-      if (url.pathname === "/legion/v1/spawn-token") return Response.json({ spawnToken: "spawn-capability" });
+      if (url.pathname === "/legion/v1/spawn-token")
+        return Response.json({ spawnToken: "spawn-capability" });
       return Response.json({
         session_id: "ses_architect",
         machine_id: "machine",
@@ -2714,7 +2740,7 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
           ],
         },
       },
-      context,
+      context
     );
 
     expect(requests.at(-1)).toEqual({
@@ -2896,9 +2922,7 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       },
       rootContext
     );
-    await Promise.all(
-      completedWorkers.map((workerContext) => sessionShutdown({}, workerContext))
-    );
+    await Promise.all(completedWorkers.map((workerContext) => sessionShutdown({}, workerContext)));
 
     process.env.LEGION_WORKER_BUDGET = "1";
     const failedSpawn = await toolCall(
