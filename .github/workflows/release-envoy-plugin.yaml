@@ -110,8 +110,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add packages/envoy-plugin/package.json
           git diff --staged --quiet || git commit -m "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]"
+          for attempt in 1 2 3 4 5; do
+            git push origin main && break
+            if [ "$attempt" = 5 ]; then
+              echo "::error::version-bump commit lost the push race to main 5 times"
+              exit 1
+            fi
+            git pull --rebase origin main
+          done
           git tag "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
-          git push origin main --tags
+          git push origin --tags
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'

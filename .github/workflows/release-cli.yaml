@@ -127,8 +127,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add packages/daemon/package.json
           git diff --staged --quiet || git commit -m "chore: release cli v${{ needs.version.outputs.version }} [skip ci]"
+          for attempt in 1 2 3 4 5; do
+            git push origin main && break
+            if [ "$attempt" = 5 ]; then
+              echo "::error::version-bump commit lost the push race to main 5 times"
+              exit 1
+            fi
+            git pull --rebase origin main
+          done
           git tag "cli-v${{ needs.version.outputs.version }}"
-          git push origin main --tags
+          git push origin --tags
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
