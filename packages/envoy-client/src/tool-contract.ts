@@ -52,7 +52,12 @@ export const envoyToolSpecs = [
     name: "envoy_send",
     description:
       "Send an Envoy agent-to-agent message directly to another session by session ID. Use this for coordination or to notify a known controller or worker session.",
-    arguments: { target_session: z.string(), message: z.string() },
+    arguments: {
+      session_id: z
+        .string()
+        .describe("Target session ID (ses_…); find it with envoy_sessions or envoy_whoami."),
+      message: z.string(),
+    },
     operation: EnvoyToolOperation.send,
     requiresSubscriptionCapability: false,
   },
