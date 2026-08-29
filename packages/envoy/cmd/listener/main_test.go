@@ -1563,6 +1563,13 @@ func TestDurableConsumerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first subscribe failed: %v", err)
 	}
+	freshInfo, err := publisher.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("read fresh consumer: %v", err)
+	}
+	if freshInfo.Config.InactiveThreshold != consumerInactiveThreshold {
+		t.Fatalf("fresh consumer inactive threshold = %v, want %v", freshInfo.Config.InactiveThreshold, consumerInactiveThreshold)
+	}
 
 	first := contracts.Envelope{
 		EventID:        "evt-restart-1",
@@ -1667,6 +1674,84 @@ func TestDurableConsumerRestart(t *testing.T) {
 	}
 }
 
+// TestDurableConsumerSurvivesUnsubscribe pins server ownership of the listener
+// durable: nats.go deletes consumers the library itself created on
+// Unsubscribe()/Drain(), and the bus reconnect recovery unsubscribes the old
+// subscription before re-subscribing. A fresh consumer must therefore be
+// created server-side and bound, so that unsubscribe never resets the cursor.
+func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(func() { client.Conn.Close() })
+
+	consumer := "listener-survives-unsubscribe"
+	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
+
+	sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("unsubscribe failed: %v", err)
+	}
+	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("consumer was deleted by unsubscribe of its own subscription: %v", err)
+	}
+	if info.Config.InactiveThreshold != consumerInactiveThreshold {
+		t.Fatalf("consumer inactive threshold = %v, want %v", info.Config.InactiveThreshold, consumerInactiveThreshold)
+	}
+
+	// The consumer must be rebindable after the unsubscribe, resuming rather
+	// than recreating.
+	resub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err != nil {
+		t.Fatalf("rebind after unsubscribe failed: %v", err)
+	}
+	_ = resub.Unsubscribe()
+}
+
+// TestBoundDurableConsumerIsNotStolen pins the rolling-deploy contract: a
+// second listener attaching to a consumer that is still push-bound by a live
+// listener must be rejected, not delete the consumer to steal the binding —
+// stealing resets the durable cursor and replays the full retention window.
+func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
+	first, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect first bus: %v", err)
+	}
+	t.Cleanup(func() { first.Conn.Close() })
+
+	consumer := "listener-not-stolen"
+	_ = first.JS().DeleteConsumer(bus.Stream, consumer)
+
+	firstSub, err := startListenerSubscription(first, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err != nil {
+		t.Fatalf("first subscribe failed: %v", err)
+	}
+	t.Cleanup(func() { _ = firstSub.Unsubscribe(); _ = first.JS().DeleteConsumer(bus.Stream, consumer) })
+
+	second, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect second bus: %v", err)
+	}
+	t.Cleanup(func() { second.Conn.Close() })
+
+	if _, err := startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
+		t.Fatal("second listener bound a consumer that was already push-bound")
+	}
+	info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("consumer disappeared after rejected second bind: %v", err)
+	}
+	if !info.PushBound {
+		t.Fatalf("first listener lost its binding after rejected second bind: %+v", info)
+	}
+}
+
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, "nats:2.10")
@@ -1726,6 +1811,9 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	}
 	if consumerInfo.Config.FilterSubject != "" || len(consumerInfo.Config.FilterSubjects) != len(bus.StreamSubjects()) {
 		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
+	}
+	if consumerInfo.Config.InactiveThreshold != consumerInactiveThreshold {
+		t.Fatalf("migrated consumer inactive threshold = %v, want %v", consumerInfo.Config.InactiveThreshold, consumerInactiveThreshold)
 	}
 
 	roleReceived := make(chan struct{}, 1)
@@ -2468,7 +2556,7 @@ func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	if err := checkSelfHealth(registry, sessions, nil); err != nil {
+	if err := checkSelfHealth(registry, sessions, nil, nil); err != nil {
 		t.Fatalf("healthy probe should not error: %v", err)
 	}
 }
@@ -2490,8 +2578,25 @@ func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
 
 	client.Conn.Close()
 
-	if err := checkSelfHealth(registry, sessions, nil); err == nil {
+	if err := checkSelfHealth(registry, sessions, nil, nil); err == nil {
 		t.Fatal("probe after conn close should return error")
+	}
+}
+
+// TestCheckSelfHealth_DurableProbeFailurePropagates pins the watchdog's role
+// in recovering from a server-side consumer deletion: bus recovery replays
+// nats.Bind, which cannot recreate a missing durable, so the probe error must
+// surface and drive the restart path.
+func TestCheckSelfHealth_DurableProbeFailurePropagates(t *testing.T) {
+	if err := checkSelfHealth(nil, nil, nil, func() error { return nil }); err != nil {
+		t.Fatalf("healthy durable probe should not error: %v", err)
+	}
+	err := checkSelfHealth(nil, nil, nil, func() error { return natsgo.ErrConsumerNotFound })
+	if err == nil {
+		t.Fatal("missing durable consumer should surface as unhealthy")
+	}
+	if !errors.Is(err, natsgo.ErrConsumerNotFound) {
+		t.Fatalf("probe error should be wrapped, got: %v", err)
 	}
 }
 
