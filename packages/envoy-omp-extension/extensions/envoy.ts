@@ -20,7 +20,11 @@ type ToolResult = {
 
 export interface EnvoySessionContext {
   readonly cwd: string;
-  readonly sessionManager: { readonly getSessionId: () => string };
+  readonly sessionManager: {
+    readonly getSessionId: () => string;
+    /** Live display title; assigned by omp after the first turn, so often undefined at session_start. */
+    readonly getSessionName?: () => string | undefined;
+  };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: { readonly notify: (message: string, level: "warning") => void };
 }
@@ -282,7 +286,9 @@ export default function envoyExtension(pi: PiApi): void {
       directory: sessionDirectory,
       topics: [...new Set([agentSubject(sessionID), ...subscriptions.keys()])],
       port: 0,
-      title: "",
+      // Read at every registration: the heartbeat re-registers, which picks up
+      // titles assigned after session_start and later renames.
+      title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
       driving: false,
       selfSubscribed: true,
     });

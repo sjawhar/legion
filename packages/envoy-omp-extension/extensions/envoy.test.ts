@@ -26,7 +26,10 @@ type RegisteredCommand = {
 
 type SessionContext = {
   readonly cwd: string;
-  readonly sessionManager: { readonly getSessionId: () => string };
+  readonly sessionManager: {
+    readonly getSessionId: () => string;
+    readonly getSessionName?: () => string | undefined;
+  };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: { readonly notify: (message: string, level: "warning") => void };
 };
@@ -665,6 +668,44 @@ describe("envoy OMP extension", () => {
         self_subscribed: true,
       },
     });
+    delete process.env.ENVOY_REGISTER_SESSION;
+  });
+
+  test("registers the session title from the host and refreshes it on heartbeat", async () => {
+    const subscribeTitles: unknown[] = [];
+    const heartbeatSubscribe = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe" && init?.body !== undefined) {
+        subscribeTitles.push(JSON.parse(init.body.toString()).title);
+        if (subscribeTitles.length === 2) heartbeatSubscribe.resolve();
+      }
+      return response({ session_id: "ses_titled", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    const { default: envoyExtension } = await import("./envoy.ts?register-title");
+    const fixture = createPi();
+    // Titles are assigned by omp after the first turn, so session_start
+    // registers before one exists; the heartbeat must pick it up later.
+    let sessionName: string | undefined;
+    const heartbeats: (() => void)[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { getSessionId: () => "ses_titled", getSessionName: () => sessionName },
+      setInterval: (callback) => {
+        heartbeats.push(callback);
+      },
+      ui: { notify: () => undefined },
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    expect(subscribeTitles).toEqual([""]);
+
+    sessionName = "fix envoy ps titles";
+    for (const tick of heartbeats) tick();
+    await heartbeatSubscribe.promise;
+    expect(subscribeTitles).toEqual(["", "fix envoy ps titles"]);
     delete process.env.ENVOY_REGISTER_SESSION;
   });
 

@@ -20,6 +20,7 @@
     "packages/workspace"
   ],
   "dependencies": {
+    "@toon-format/toon": "^4.1.1",
     "nats": "^2.29.2",
     "zod": "^4.1.8"
   }
