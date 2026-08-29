@@ -66,7 +66,7 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	}
 	text := fmt.Sprintf("%s\n%s\n\nTopic: %s\nEvent ID: %s", header, body, item.Topic, item.EventID)
 	if item.SourceSession != "" {
-		text += fmt.Sprintf("\nUse envoy_send(target_session=\"%s\", message=\"...\") to reply to this message.", item.SourceSession)
+		text += fmt.Sprintf("\nUse envoy_send(session_id=\"%s\", message=\"...\") to reply to this message.", item.SourceSession)
 	}
 	return text
 }

@@ -327,7 +327,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 			t.Errorf("notification text missing %q: %s", want, text)
 		}
 	}
-	replyInstruction := `Use envoy_send(target_session="ses_sender_123", message="...") to reply to this message.`
+	replyInstruction := `Use envoy_send(session_id="ses_sender_123", message="...") to reply to this message.`
 	if !strings.Contains(text, replyInstruction) {
 		t.Errorf("notification text missing reply instruction: %s", text)
 	}
@@ -343,7 +343,7 @@ func TestText_WithSourceSession(t *testing.T) {
 		PayloadSummary: "hello world",
 	}
 	got := deliverer.Text(item)
-	want := "[NOTIFICATION from agent (reply-to: ses_abc)]\nhello world\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-1\nUse envoy_send(target_session=\"ses_abc\", message=\"...\") to reply to this message."
+	want := "[NOTIFICATION from agent (reply-to: ses_abc)]\nhello world\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-1\nUse envoy_send(session_id=\"ses_abc\", message=\"...\") to reply to this message."
 	if got != want {
 		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
 	}
