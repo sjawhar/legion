@@ -554,7 +554,7 @@ func TestDelivery_ReplyToInBody(t *testing.T) {
 	if !contains(text, "ses_sender_xyz") {
 		t.Fatalf("text should contain source session 'ses_sender_xyz', got: %s", text)
 	}
-	replyInstruction := `Use envoy_send(target_session="ses_sender_xyz", message="...") to reply to this message.`
+	replyInstruction := `Use envoy_send(session_id="ses_sender_xyz", message="...") to reply to this message.`
 	if !contains(text, replyInstruction) {
 		t.Fatalf("text should contain exact reply instruction %q, got: %s", replyInstruction, text)
 	}
