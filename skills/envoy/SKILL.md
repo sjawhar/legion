@@ -12,7 +12,7 @@ Envoy is Legion's event-routing subsystem. It delivers Slack, GitHub, and agent-
 - `envoy_subscribe(topics)` — make the current session RECEIVE future events on those topics
 - `envoy_unsubscribe(topics?)` — stop receiving some or all topics
 - `envoy_list()` — show the union of live local and persisted registry subscriptions, with each topic marked `live`, `registry`, or `both`
-- `envoy_send(target_session, message)` — SEND a message directly to another session
+- `envoy_send(session_id, message)` — SEND a message directly to another session
 
 ## Topic formats
 
@@ -196,7 +196,7 @@ Examples:
 ### To talk directly to another agent/session
 
 1. Get the target session ID
-2. Call `envoy_send(target_session, message)`
+2. Call `envoy_send(session_id, message)`
 
 You do NOT need to subscribe in order to send or publish.
 
@@ -216,7 +216,7 @@ If you have nothing else to do, end the response. The user is not your alarm clo
 - `envoy_subscribe(topics)` — receive future events on those topics
 - `envoy_unsubscribe(topics?)` — stop receiving some or all topics
 - `envoy_list()` — show live and persisted subscriptions, marked by source
-- `envoy_send(target_session, message)` — send directly to a specific session (point-to-point)
+- `envoy_send(session_id, message)` — send directly to a specific session (point-to-point)
 - `envoy_publish(topic, message)` — publish a normal topic to matching subscribers or route a role topic to its current holder
 - `envoy_role_set(role)` — claim a named role for the current session (exactly-one-holder)
 
@@ -274,7 +274,7 @@ envoy_subscribe([
 
 ```text
 envoy_send(
-  target_session="ses_2e6ca3034ffejVikSZ8mDwk0mR",
+  session_id="ses_2e6ca3034ffejVikSZ8mDwk0mR",
   message="Please continue the smoke test"
 )
 ```

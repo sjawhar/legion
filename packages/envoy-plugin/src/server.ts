@@ -281,13 +281,13 @@ export default async (input: { serverUrl: URL }) => {
       }),
       envoy_send: tool({
         description: sendSpec.description,
-        args: { target_session: tool.schema.string(), message: tool.schema.string() },
+        args: { session_id: tool.schema.string(), message: tool.schema.string() },
         async execute(args, ctx) {
           ctx.metadata({ title: "Envoy send" });
           return JSON.stringify(
             await envoy.send({
               sourceSessionID: ctx.sessionID,
-              targetSessionID: args.target_session,
+              targetSessionID: args.session_id,
               message: args.message,
             })
           );

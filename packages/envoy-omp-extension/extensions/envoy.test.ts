@@ -294,7 +294,7 @@ describe("envoy OMP extension", () => {
     await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "controller" });
     await fixture.tools.find((tool) => tool.name === "envoy_list")?.execute("", {});
     await fixture.tools.find((tool) => tool.name === "envoy_send")?.execute("", {
-      target_session: "ses_target",
+      session_id: "ses_target",
       message: "direct",
     });
     await fixture.tools.find((tool) => tool.name === "envoy_publish")?.execute("", {

@@ -495,7 +495,7 @@ export default function envoyExtension(pi: PiApi): void {
           });
         }
         case EnvoyToolOperation.send: {
-          const targetSessionID = stringFor(parameters, "target_session");
+          const targetSessionID = stringFor(parameters, "session_id");
           await client.send({ sourceSessionID: sessionID, targetSessionID, message: stringFor(parameters, "message") });
           return success(`Sent to ${targetSessionID}`, { target: targetSessionID });
         }
@@ -536,7 +536,7 @@ function schemaFor(pi: PiApi, operation: EnvoyToolOperation): unknown {
     case EnvoyToolOperation.unsubscribe:
       return z.object({ topics: z.array(z.string()).optional() });
     case EnvoyToolOperation.send:
-      return z.object({ target_session: z.string(), message: z.string() });
+      return z.object({ session_id: z.string(), message: z.string() });
     case EnvoyToolOperation.publish:
       return z.object({ topic: z.string(), message: z.string() });
     case EnvoyToolOperation.setRole:

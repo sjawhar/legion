@@ -58,7 +58,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       const args = z.object(spec.arguments).parse(input)
       return client.send({
         sourceSessionID: sessionId,
-        targetSessionID: args.target_session,
+        targetSessionID: args.session_id,
         message: args.message,
       })
     }
