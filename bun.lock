@@ -5,6 +5,7 @@
     "": {
       "name": "legion",
       "dependencies": {
+        "@toon-format/toon": "^4.1.1",
         "nats": "^2.29.2",
         "zod": "^4.1.8",
       },
@@ -23,7 +24,7 @@
     },
     "packages/daemon": {
       "name": "legion",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "bin": {
         "legion": "src/cli/index.ts",
       },
@@ -107,7 +108,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "0.4.1",
+      "version": "0.5.2",
       "dependencies": {
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
