@@ -117,7 +117,7 @@ function controlReplyType(raw: string): "ack" | "nack" {
 export class ProcessManager {
   private readonly resurrecting = new Map<IssueKey, Promise<void>>();
   private controllerSpawn?: Promise<void>;
-  private promotionSweep?: Set<IssueKey>;
+  private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
 
   constructor(private readonly deps: ProcessManagerDeps) {}
 
@@ -149,6 +149,24 @@ export class ProcessManager {
     this.persist();
     this.startRoot(issue);
     return "spawned";
+  }
+
+  /**
+   * Converges stored admission with the configured cap, promoting queued trees
+   * until active slots fill or no eligible queued tree remains. Runs at boot
+   * because a cap raised between restarts opens slots no release event fills.
+   */
+  reconcileAdmission(): void {
+    const admission = this.deps.state.admission;
+    admission.cap = this.deps.config.admissionCap;
+    let queued = admission.queue.length;
+    while (admission.active.length < admission.cap && queued > 0) {
+      this.beginPromotionSweep();
+      // No progress means every remaining queued issue is ineligible.
+      if (admission.queue.length === queued) break;
+      queued = admission.queue.length;
+    }
+    this.persist();
   }
 
   releaseSlot(issue: IssueKey): void {
@@ -248,7 +266,8 @@ export class ProcessManager {
     try {
       await this.spawnTree(tree, resume, resumeSessionFile);
       tree.launchFailures = 0;
-      if (this.promotionSweep?.has(issue)) this.promotionSweep = undefined;
+      this.settlePromotionSpawn(issue);
+      if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
       await this.deps.saveState();
     } catch (error) {
       tree.generation = priorGeneration;
@@ -272,6 +291,7 @@ export class ProcessManager {
           this.deps.state.admission.queue.push(issue);
         }
       }
+      this.settlePromotionSpawn(issue);
       if (this.promotionSweep) this.advancePromotionSweep();
       else this.beginPromotionSweep(issue);
       await this.deps.saveState();
@@ -498,36 +518,50 @@ export class ProcessManager {
     });
   }
 
+  /** Marks a sweep-launched spawn as settled once its success or failure is known. */
+  private settlePromotionSpawn(issue: IssueKey): void {
+    const sweep = this.promotionSweep;
+    if (sweep?.attempted.has(issue) && sweep.inFlight > 0) sweep.inFlight -= 1;
+  }
+
   private beginPromotionSweep(initialFailure?: IssueKey): void {
     if (this.promotionSweep) {
       this.advancePromotionSweep();
       return;
     }
-    this.promotionSweep = new Set(initialFailure ? [initialFailure] : []);
+    this.promotionSweep = {
+      attempted: new Set(initialFailure ? [initialFailure] : []),
+      inFlight: 0,
+    };
     this.advancePromotionSweep();
   }
 
   private advancePromotionSweep(): void {
     const sweep = this.promotionSweep;
     if (!sweep) return;
-    if (this.deps.state.admission.active.length >= this.deps.state.admission.cap) {
-      this.promotionSweep = undefined;
+    const admission = this.deps.state.admission;
+    if (admission.active.length >= admission.cap) {
+      if (sweep.inFlight === 0) this.promotionSweep = undefined;
       this.persist();
       return;
     }
-    const queue = this.deps.state.admission.queue;
-    const nextIndex = queue.findIndex((candidate) => {
+    const nextIndex = admission.queue.findIndex((candidate) => {
       const tree = this.ensureTree(candidate);
-      return !sweep.has(candidate) && tree.status !== "launch-failed";
+      return (
+        !sweep.attempted.has(candidate) &&
+        tree.status === "queued" &&
+        !admission.active.includes(candidate)
+      );
     });
     if (nextIndex === -1) {
-      this.promotionSweep = undefined;
+      if (sweep.inFlight === 0) this.promotionSweep = undefined;
       this.persist();
       return;
     }
-    const [next] = queue.splice(nextIndex, 1);
-    sweep.add(next);
-    this.deps.state.admission.active.push(next);
+    const [next] = admission.queue.splice(nextIndex, 1);
+    sweep.attempted.add(next);
+    sweep.inFlight += 1;
+    admission.active.push(next);
     this.ensureTree(next).status = "active";
     this.persist();
     this.startRoot(next);

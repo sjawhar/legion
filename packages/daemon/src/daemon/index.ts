@@ -250,7 +250,6 @@ export async function startDaemon(
     project: config.project,
     cap: config.admissionCap,
   });
-  state.admission.cap = config.admissionCap;
   let saving: Promise<void> | undefined;
   const save = () => {
     const write = saving
@@ -289,6 +288,8 @@ export async function startDaemon(
     workerCatchup: { runner, tokenManager: deps.tokenManager },
     now: deps.now,
   });
+
+  processManager.reconcileAdmission();
 
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
