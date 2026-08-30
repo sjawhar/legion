@@ -1,16 +1,17 @@
-// Auto-subscription wiring for the envoy_dispatch MCP tool.
+// Auto-subscription wiring for the dispatch MCP tool, shared by the Envoy
+// adapters (OpenCode plugin tool.execute.after hook, OMP extension
+// tool_result hook).
 //
-// When an agent opens a Dispatch thread via the envoy_dispatch MCP tool, the
-// human answers by commenting on the resulting GitHub sub-issue. For the agent
-// to RECEIVE that answer, its session must be subscribed to the thread's Envoy
-// topic (notifications.github.<owner>.<repo>.issue.<thread>.>). The dispatch
-// tool is served by the Go dispatch server and has no OpenCode session context,
-// so we close the loop in the plugin (which does know the session id) from the
-// tool.execute.after hook.
+// When an agent opens a Dispatch thread, the human answers by commenting on
+// the resulting GitHub sub-issue. For the agent to RECEIVE that answer, its
+// session must be subscribed to the thread's Envoy topic
+// (notifications.github.<owner>.<repo>.issue.<thread>.>). The dispatch tool
+// is served by the stateless Go dispatch server, which has no session
+// context, so each adapter closes the loop from its own host hook.
 //
 // This module is the pure, testable core: it turns a completed tool execution
 // into the topic the calling session should subscribe to, or null when the
-// execution isn't a successful envoy_dispatch call.
+// execution isn't a successful dispatch call.
 
 // Matches a GitHub issue URL anywhere in the tool output and captures
 // owner / repo / number. The dispatch tool returns {"thread":N,"url":"…"} as

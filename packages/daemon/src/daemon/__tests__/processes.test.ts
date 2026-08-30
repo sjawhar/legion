@@ -37,8 +37,6 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     port: 13999,
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
-    dispatchUrl: "http://127.0.0.1:13380",
-    dispatchBearer: "dispatch-bearer",
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: [],
     appLogins: [],
@@ -243,7 +241,7 @@ describe("ProcessManager", () => {
       state,
       commands,
     } = manager(newLegionState("omp", 1), {
-      config: config(stateDir),
+      config: config(stateDir, { dispatchMcpUrl: "http://127.0.0.1:18766/mcp" }),
       run: async (
         command: string[],
         opts?: {
@@ -349,6 +347,8 @@ describe("ProcessManager", () => {
         "GIT_TERMINAL_PROMPT=0",
         "-e",
         "PATH=/full/bin:/usr/bin",
+        "-e",
+        "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
         `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../pi-envoy")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/agents/architect-root.md)"`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],

@@ -1,15 +1,8 @@
-import {
-  type DispatchUrgency,
-  type IssueKey,
-  LEGION_ROLES,
-  type LegionRole,
-  roleToken,
-} from "@legion/contracts";
+import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import type { LegionApiConfig, LegionApiDeps } from "../api";
 import type { LegionState } from "../legion-state";
 import type { CapabilityService, ControllerGate } from "./auth";
-import type { DispatchThreadResult } from "./dispatch";
 import type { GitHubService } from "./github";
 import { HttpError, issueKey, legionRole } from "./http";
 
@@ -105,13 +98,6 @@ export interface RouteContext {
   auth: CapabilityService;
   controllerGate: ControllerGate;
   github: GitHubService;
-  dispatchThread: (
-    parent: string,
-    subject: string,
-    body: string,
-    ask: unknown,
-    urgency: DispatchUrgency | undefined
-  ) => Promise<DispatchThreadResult>;
   requireTree(body: Record<string, unknown>): IssueKey;
   requireTreeIssue(body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey };
   appendFooter(tree: IssueKey, issue: IssueKey, body: string): string;

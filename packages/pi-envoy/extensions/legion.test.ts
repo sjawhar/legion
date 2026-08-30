@@ -1400,7 +1400,6 @@ describe("Legion OMP extension", () => {
           beginLinger: () => {},
         },
         envoyPublish: async () => {},
-        dispatch: { url: "http://dispatch.test", bearer: "dispatch-bearer" },
         onControllerReady: async () => {},
         onControllerEvent: async () => {},
       }
@@ -1570,7 +1569,6 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
           beginLinger: () => {},
         },
         envoyPublish: async () => {},
-        dispatch: { url: "http://dispatch.test", bearer: "dispatch-bearer" },
         onControllerReady: async () => {},
         onControllerEvent: async () => {},
       }
@@ -2196,31 +2194,22 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       details: { issue: "owner/repo#43", url: "https://github.test/owner/repo/issues/43" },
     });
   });
-  test("proxies architect Dispatch requests through the daemon without holding a bearer", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
+  test("registers only the Legion tool for a confirmed architect session", async () => {
     const tree = "owner/repo#42";
     const token = roleToken("omp", tree, "architect");
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
     process.env.LEGION_GENERATION = "3";
-    process.env.LEGION_BOOT_TOKEN = "boot-dispatch";
+    process.env.LEGION_BOOT_TOKEN = "boot-legion-tool";
     process.env.LEGION_PROJECT = "omp";
     process.env.LEGION_TREE = tree;
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = (async (input) => {
       const url = new URL(input.toString());
-      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-      requests.push({ path: url.pathname, body });
       if (url.pathname === "/legion/v1/process/started") {
         return Response.json({
           roleTokens: { architect: token },
           controlSubject: "legion.ctl.owner-repo-42.3",
           secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/dispatch-threads") {
-        return Response.json({
-          thread: 77,
-          url: "https://github.test/owner/repo/issues/77",
         });
       }
       return Response.json({
@@ -2231,53 +2220,16 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
       });
     }) as typeof fetch;
     const fixture = createPi();
+    const toolsBeforeLegion = fixture.tools.length;
     const context = sessionContext("ses_architect");
 
     legionExtension(fixture.pi);
     const sessionStart = fixture.handlers.get("session_start");
     if (sessionStart === undefined) throw new Error("session_start handler was not registered");
     await sessionStart({}, context);
-    const dispatch = fixture.tools.find((tool) => tool.name === "envoy_dispatch");
-    if (dispatch === undefined) throw new Error("envoy_dispatch tool was not registered");
 
-    const result = await dispatch.execute(
-      "dispatch-1",
-      {
-        parent: tree,
-        subject: "Need approval",
-        body: "Choose A or B",
-        ask: [{ question: "A?" }],
-        urgency: "blocking",
-      },
-      undefined,
-      undefined,
-      context
-    );
-
-    expect(requests.at(-1)).toEqual({
-      path: "/legion/v1/dispatch-threads",
-      body: {
-        tree,
-        issue: tree,
-        role: "architect",
-        sessionId: "ses_architect",
-        secret: "root-secret",
-        parent: tree,
-        subject: "Need approval",
-        body: "Choose A or B",
-        ask: [{ question: "A?" }],
-        urgency: "blocking",
-      },
-    });
-    expect(result).toEqual({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ thread: 77, url: "https://github.test/owner/repo/issues/77" }),
-        },
-      ],
-      details: { thread: 77, url: "https://github.test/owner/repo/issues/77" },
-    });
+    expect(fixture.tools).toHaveLength(toolsBeforeLegion + 1);
+    expect(fixture.tools.at(-1)?.name).toBe("legion");
   });
   test("maps every remaining legion operation to its daemon proxy endpoint", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
@@ -2480,7 +2432,6 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
     legionExtension(fixture.pi);
 
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
-    expect(fixture.tools.find((tool) => tool.name === "envoy_dispatch")).toBeUndefined();
   });
   test("revives a worker in code, then acknowledges without sending an architect message", async () => {
     const ensured: { readonly agentId: string; readonly parentSessionFile: string }[] = [];

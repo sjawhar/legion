@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
 )
 
-// DispatchInput captures every parameter the envoy_dispatch tool accepts.
+// DispatchInput captures every parameter the dispatch tool accepts.
 type DispatchInput struct {
 	Parent  string         `json:"parent"`
 	Subject string         `json:"subject"`

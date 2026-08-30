@@ -275,7 +275,6 @@ port: ${daemon_port}
 envoy_url: http://127.0.0.1:${listener_port}
 nats_urls:
   - ${nats_url}
-dispatch_url: http://127.0.0.1:${dispatch_port}
 board_project_ids:${board_config}
 app_logins:
 $(printf '%s\n' "$LEGION_APP_LOGINS" | tr ',' '\n' | sed 's/^/  - /')
@@ -541,7 +540,7 @@ main() {
   require_command setsid
   local board_scope
   local owner_type
-  local dispatch_bearer
+  local setup_bearer
   local label_bearer
   local webhook_mode
 
@@ -567,10 +566,10 @@ main() {
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
   write_dispatch_config
-  dispatch_bearer="${LEGION_DISPATCH_BEARER:-$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64)}"
+  setup_bearer="$(app_installation_token "$LEGION_IMPLEMENT_APP_ID" GH_AGENT_APP_PRIVATE_KEY_B64)"
   board_scope="${SMOKE_BOARD_SCOPE:-}"
   if [[ -z "$board_scope" ]]; then
-    owner_type="$(GH_TOKEN="$dispatch_bearer" GH_CONFIG_DIR="$gh_config_dir" gh api "users/$(project_owner)" --jq '.type')"
+    owner_type="$(GH_TOKEN="$setup_bearer" GH_CONFIG_DIR="$gh_config_dir" gh api "users/$(project_owner)" --jq '.type')"
     board_scope=$([[ "$owner_type" == "Organization" ]] && printf org || printf none)
   fi
   [[ "$board_scope" == "org" || "$board_scope" == "none" ]] ||
@@ -640,8 +639,7 @@ main() {
     ENVOY_NATS_URL="$nats_url" \
     ENVOY_URL="http://127.0.0.1:${listener_port}" \
     LEGION_DAEMON_PORT="$daemon_port" \
-    LEGION_DISPATCH_URL="http://127.0.0.1:${dispatch_port}" \
-    LEGION_DISPATCH_BEARER="$dispatch_bearer" \
+    DISPATCH_MCP_URL="http://127.0.0.1:${dispatch_port}/mcp" \
     LEGION_STATE_DIR="${smoke_dir}/daemon" \
     XDG_DATA_HOME="${smoke_dir}/xdg-data" \
     XDG_STATE_HOME="${smoke_dir}/xdg-state" \

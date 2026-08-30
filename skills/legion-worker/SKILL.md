@@ -19,9 +19,10 @@ its own role again.
 
 Read the current issue and its acceptance criteria before changing the workspace. Work only
 on this phase's artifact. You may use ordinary scouts, reviewers, and oracle subagents for
-phase work; never spawn legion-role workers or open human dispatch threads. Escalate a product,
-scope, cross-phase, or human decision to the owning architect through hub, with the verified
-facts and the decision needed.
+phase work; never spawn legion-role workers. Escalate a product, scope, cross-phase, or
+lifecycle decision to the owning architect through hub, with the verified facts and the
+decision needed. For a durable question that needs Sami directly, you may use the raw
+`dispatch` MCP tool yourself; replies return to your own session.
 
 ## Workspace and handoff precedence
 
@@ -171,5 +172,6 @@ pipeline labels, run a controller loop, or notify a controller with an invented 
 protocol. A direct worker delivery belongs to its role; overseers receive only derived
 verdicts.
 
-When blocked, send the owning architect a concise hub message: issue, phase, verified
-observation, what you tried, and the decision required. Do not dispatch a human thread yourself.
+When blocked on lifecycle, scope, or cross-phase matters, send the owning architect a concise
+hub message: issue, phase, verified observation, what you tried, and the decision required.
+Reach for `dispatch` yourself only for a standalone human question outside that coordination.

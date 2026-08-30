@@ -328,7 +328,6 @@ export async function startDaemon(
     tokenManager: deps.tokenManager,
     processManager,
     envoyPublish: deps.envoyPublish,
-    dispatch: { url: config.dispatchUrl, bearer: config.dispatchBearer },
     onTreeReady: emitOverseerCatchup,
     onControllerReady: () => eventPump.redeliverControllerEvents(),
     onControllerEvent: (payload) =>

@@ -23,7 +23,7 @@ This file is the **agent-facing** description of the code.
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
 | `/api/view`                                   | GET     | dsession cookie              | Return user's watched-repos                      |
 | `/api/view`                                   | PATCH   | dsession cookie              | Replace user's watched-repos list                |
-| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `envoy_dispatch` tool      |
+| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `dispatch` tool            |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist/`           |
 
@@ -117,13 +117,16 @@ must reference the same `requestId`, or retries create duplicate threads.
 
 ## Answer delivery (AC#4)
 
-The Go server is stateless and has no OpenCode session context, so it does not
-route answers itself. The envoy-plugin's `tool.execute.after` hook
-(`packages/envoy-plugin/src/dispatch-subscribe.ts`) subscribes the calling
-session to `notifications.github.<owner>.<repo>.issue.<thread>.>` after a
-successful `envoy_dispatch`. When a human replies on the thread, the envoy
-listener publishes that comment to the topic and Envoy delivers it back to the
-originating agent session.
+The Go server is stateless and has no agent session context, so it does not
+route answers itself. Each adapter closes the loop with the shared
+`@legion/envoy-client/dispatch-subscribe` helper: the OpenCode plugin's
+`tool.execute.after` hook and the OMP extension's `tool_result` hook subscribe
+the calling session to `notifications.github.<owner>.<repo>.issue.<thread>.>`
+after a successful dispatch call. When a human replies on the thread, the
+envoy listener publishes that comment to the topic and Envoy delivers it back
+to the originating agent session — including a Legion role's session, which
+survives kill/resume because Legion resurrection resumes the same OMP session
+file.
 
 ## State and credentials
 
@@ -155,7 +158,7 @@ Reads `~/.config/opencode/envoy.json` and `<cwd>/.opencode/envoy.json`
 (repo overrides user). Relevant keys:
 
 - `dispatch.defaultRepo` — optional `<owner>/<name>`, used only as the
-  fallback target for bare-number parents in the `envoy_dispatch` tool.
+  fallback target for bare-number parents in the `dispatch` tool.
   The dashboard ignores this — each user picks their own watched repos.
 - `natsUrls` — list of NATS URLs (defaults to `nats://127.0.0.1:4222`).
 

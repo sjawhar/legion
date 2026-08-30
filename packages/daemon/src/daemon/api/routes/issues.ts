@@ -217,9 +217,6 @@ export async function handleIssueClose(
     node.state = "closed";
     node.finalCommentRef = finalCommentRef;
   }
-  ctx.deps.state.dispatchThreads = ctx.deps.state.dispatchThreads.filter(
-    (thread) => thread.issue !== issue
-  );
   if (issue === tree) ctx.deps.processManager.beginLinger(tree);
   await ctx.save();
   return Response.json(validateContractResponse(LegionDaemonApi.IssueClose.response, {}));

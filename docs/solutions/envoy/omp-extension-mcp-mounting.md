@@ -65,10 +65,11 @@ Without this, "the extension should provide tool X to its sessions" dead-ends on
 runtime API and gets solved with per-machine hand-edited config files. Whether to actually
 ship a package-root `.mcp.json` is a separate security decision: it mounts for **every**
 session that loads the package. For dispatch, Legion loads `pi-envoy` for architects,
-controller, and phase workers alike, and workers must not get a raw gh-authority
-thread-creation tool — so the dispatch shim is mounted per-user instead, and it declines to
-serve in Legion environments (`LEGION_TREE`/`LEGION_CONTROLLER`) as defense in depth
-(`packages/envoy-client/src/dispatch-mcp-shim.ts`).
+controller, and phase workers alike, and the raw `dispatch` tool is served to every one
+of them deliberately — every role needs a direct channel to ask Sami a durable question,
+and the asking session gets the reply regardless of role. The shim gates on exactly one
+thing, whether dispatch is enabled (`packages/envoy-client/src/dispatch-config.ts`), not on
+the Legion environment.
 
 ## When to Apply
 
@@ -82,7 +83,8 @@ mount itself cannot discriminate.
 
 A package-root `.mcp.json` mounting the dispatch shim was verified end to end with
 `omp -p --no-extensions -e packages/pi-envoy` from a scratch directory: the `dispatch` tool
-mounted through the shim → gh bearer → HTTP `/mcp` chain with zero session-level config. It
-was then removed in favor of user-level `~/.omp/agent/mcp.json` mounting precisely because the
-package's session audience (all Legion roles) was broader than the tool's intended audience
-(humans and their interactive sessions).
+mounted through the shim → gh bearer → HTTP `/mcp` chain with zero session-level config.
+Dispatch currently mounts via user-level `~/.omp/agent/mcp.json` instead — a per-machine
+opt-in that predates the single-tool posture. Since every session that loads the package is
+now in the tool's audience and the shim self-gates on `dispatch.enabled`, a package-root
+mount is a viable simplification whenever the per-machine step becomes a burden.

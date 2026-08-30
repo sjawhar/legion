@@ -1,7 +1,7 @@
 ---
 name: legion-implementer
 description: Implement one Legion issue end to end in the assigned shared jj workspace and provide evidence for its acceptance criteria.
-tools: ["read", "edit", "write", "bash", "task", "hub"]
+tools: ["read", "edit", "write", "bash", "task", "hub", "mcp__dispatch_dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
@@ -55,7 +55,8 @@ Never obtain or print a token. The extension injects a short-lived credential gr
 
 Report the implementation evidence, all files changed, tests and real-surface checks,
 and any deviations or unanswered questions to the architect through `hub`. Escalate
-product or scope decisions to the architect; do not open dispatch threads.
+product or scope decisions to the architect; use `dispatch` yourself only for a
+standalone human question.
 
 Your last act before `yield` is:
 

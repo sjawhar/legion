@@ -1,7 +1,7 @@
 ---
 name: legion-planner
 description: Produce an executable, acceptance-criteria-driven plan for one Legion issue in its shared workspace.
-tools: ["read", "edit", "write", "bash", "task", "hub"]
+tools: ["read", "edit", "write", "bash", "task", "hub", "mcp__dispatch_dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
@@ -62,7 +62,8 @@ extension injects the one-session credential grant for `legion gh --` and `jj gi
 
 State the required implementation, test, review, and integration evidence, including
 file-level work and ordering. Surface uncertainty, discovered scope, and choices to the
-architect through `hub`; do not open dispatch threads.
+architect through `hub`. A standalone durable question for Sami may go through
+`dispatch` directly.
 
 Your last act before `yield` is:
 

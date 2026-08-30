@@ -64,18 +64,18 @@ OMP at extension files it does not contain.
 
 ## Dispatch
 
-Legion sessions use the `envoy_dispatch` tool from `extensions/legion.ts`: it routes through
-the Legion daemon's architect-only, tree-scoped `/legion/v1/dispatch-threads` endpoint, which
-also registers the thread so replies route back to the tree. The raw dispatch MCP tool is
-deliberately not served to Legion sessions — the shared shim exits without serving when it
-sees a Legion environment (`LEGION_TREE`/`LEGION_CONTROLLER`), so phase workers cannot bypass
-the architect gate with ambient GitHub authority.
-
-Interactive OMP sessions get the `dispatch` MCP tool the way OpenCode sessions do: the shared
-`@legion/envoy-client` shim mounts as a stdio MCP server, and it serves only when
-`dispatch.enabled` is true in the shared envoy.json (`~/.config/opencode/envoy.json`,
-shallow-merged with `<cwd>/.opencode/envoy.json`) or `DISPATCH_MCP_URL` is set explicitly.
-The server URL comes from `dispatch.serverUrl` (default `http://localhost:8766`).
+Every OMP session — Legion sessions included — gets the `dispatch` MCP tool the way
+OpenCode sessions do: the shared `@legion/envoy-client` shim mounts as a stdio MCP server,
+and it serves when `dispatch.enabled` is true in the shared envoy.json
+(`~/.config/opencode/envoy.json`, shallow-merged with `<cwd>/.opencode/envoy.json`) or
+`DISPATCH_MCP_URL` is set explicitly. The server URL comes from `dispatch.serverUrl`
+(default `http://localhost:8766`). Dispatch exists so headless unattended agents —
+Legion architects, planners, phase workers — can raise durable questions to the human.
+Replies route back to the asking session, which is auto-subscribed to the thread's
+GitHub topic; a Legion role's session survives kill/resume because Legion resurrection
+resumes the same OMP session file, so the reply still lands. Lifecycle and scope
+decisions still go through `hub` to the owning architect — Dispatch is for durable
+questions to the human, not for coordination between roles.
 
 Mount it in `~/.omp/agent/mcp.json` (user-wide) or `.omp/mcp.json` (per project):
 

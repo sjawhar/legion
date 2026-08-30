@@ -83,10 +83,6 @@ network. Dispatch envs:
 | `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | no | GitHub App OAuth credentials. Without them the server still starts: the dashboard responds 503 and `/mcp` works with any GitHub bearer the caller supplies. Alternatively drop an `app.json` into the `dispatch-data` volume at `/home/envoy/.local/share/dispatch/app.json`. |
 | `DISPATCH_INSECURE_COOKIE` | conditional | Session cookies are `Secure` by default, so a browser will not return them over plain HTTP. Set to any value when using the OAuth dashboard on `http://` (local/tailnet). |
 
-The Legion daemon reaches this server through its required
-`LEGION_DISPATCH_URL` (`http://127.0.0.1:8766`) and `LEGION_DISPATCH_BEARER`
-(a GitHub token; the server forwards it to GitHub per request).
-
 ## Sync to a remote host
 
 ```bash

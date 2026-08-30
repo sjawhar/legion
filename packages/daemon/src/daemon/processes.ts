@@ -669,6 +669,9 @@ export class ProcessManager {
       "GIT_TERMINAL_PROMPT=0",
       "-e",
       `PATH=${this.deps.panePath}`,
+      ...(this.deps.config.dispatchMcpUrl === undefined
+        ? []
+        : ["-e", `DISPATCH_MCP_URL=${this.deps.config.dispatchMcpUrl}`]),
       `cd ${shellPath(workspace.workspaceDir)} && ${this.deps.ompInvocation}${resumeArgument} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     tree.locator = { tmuxSession: session, tmuxWindowId };
@@ -696,6 +699,9 @@ export class ProcessManager {
       `ENVOY_URL=${this.deps.config.envoyUrl}`,
       "-e",
       `PATH=${this.deps.panePath}`,
+      ...(this.deps.config.dispatchMcpUrl === undefined
+        ? []
+        : ["-e", `DISPATCH_MCP_URL=${this.deps.config.dispatchMcpUrl}`]),
       `cd ${shellPath(controllerDir)} && ${this.deps.ompInvocation} --extension ${shellPath(EXTENSION_PACKAGE)} --append-system-prompt "$(cat ${shellPath(promptPath)})"`,
     ]);
     this.deps.state.controllerLocator = { tmuxSession: session, tmuxWindowId };

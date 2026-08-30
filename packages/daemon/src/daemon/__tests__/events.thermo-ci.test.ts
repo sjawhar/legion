@@ -49,8 +49,6 @@ function config(): DaemonConfig {
     port: 13370,
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
-    dispatchUrl: "http://127.0.0.1:13380",
-    dispatchBearer: "dispatch-bearer",
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion[bot]"],

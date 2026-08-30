@@ -113,21 +113,6 @@ export const LegionDaemonApi = {
     request: architectCapability.extend({ issue: nonEmptyString, comment: z.string().optional() }),
     response: z.object({}),
   },
-  DispatchThread: {
-    request: z.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      role: legionRole,
-      sessionId: nonEmptyString,
-      secret: nonEmptyString,
-      parent: nonEmptyString,
-      subject: nonEmptyString,
-      body: nonEmptyString,
-      ask: z.unknown().optional(),
-      urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-    }),
-    response: z.object({ thread: z.number().int(), url: nonEmptyString }),
-  },
   SpawnToken: {
     request: architectCapability.extend({ issue: nonEmptyString, role: legionRole }),
     response: z.object({ spawnToken: nonEmptyString }),
@@ -222,9 +207,6 @@ export type LabelsInput = InputOf<typeof LegionDaemonApi.Labels.request>;
 export type LabelsResponse = OutputOf<typeof LegionDaemonApi.Labels.response>;
 export type EscalateInput = InputOf<typeof LegionDaemonApi.Escalate.request>;
 export type IssueCloseInput = InputOf<typeof LegionDaemonApi.IssueClose.request>;
-export type DispatchThreadInput = InputOf<typeof LegionDaemonApi.DispatchThread.request>;
-export type DispatchThreadResponse = OutputOf<typeof LegionDaemonApi.DispatchThread.response>;
-export type DispatchUrgency = NonNullable<DispatchThreadInput["urgency"]>;
 export type SpawnTokenInput = InputOf<typeof LegionDaemonApi.SpawnToken.request>;
 export type SpawnTokenResponse = OutputOf<typeof LegionDaemonApi.SpawnToken.response>;
 export type RoleBackingInput = InputOf<typeof LegionDaemonApi.RoleBacking.request>;

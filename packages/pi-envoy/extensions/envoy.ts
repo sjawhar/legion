@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
@@ -320,6 +321,21 @@ export default function envoyExtension(pi: PiApi): void {
     heartbeatRegistered = true;
   };
 
+  const recoverRegisteredInterests = async (): Promise<void> => {
+    // Registered interests deliver only through this session's own NATS
+    // subscriptions — the listener skips push delivery for self-subscribed
+    // sessions — so a resumed process must rebuild them or stay deaf to
+    // topics it registered before it died (e.g. dispatch thread replies).
+    // Quiet on failure like rebind: a brand-new session has no registry
+    // entry, and a listener outage must not fail session start.
+    const registry = await client.getInterest(sessionID).catch(() => undefined);
+    if (registry === undefined) return;
+    for (const topic of registry.topics) {
+      if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
+      await subscribe(topic);
+    }
+  };
+
   const establishSession = async (context: SessionContext): Promise<void> => {
     const previousTopic = sessionID === "" ? undefined : agentSubject(sessionID);
     sessionDirectory = context.cwd;
@@ -331,6 +347,11 @@ export default function envoyExtension(pi: PiApi): void {
     }
     await ensureConnection();
     await subscribe(currentTopic);
+    // A resumed session (non-empty branch — the host's documented resume
+    // signal) may hold registered interests from its previous life.
+    if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
+      await recoverRegisteredInterests();
+    }
     if (registrationRequired()) {
       await registerSession();
       ensureHeartbeat(context);
@@ -447,6 +468,24 @@ export default function envoyExtension(pi: PiApi): void {
   }
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);
+
+  // The dispatch MCP tool creates a GitHub thread; the human answers by
+  // commenting on it. The Go dispatch server is stateless, so close the reply
+  // loop here: subscribe the calling session to the thread's topic and
+  // persist the interest, mirroring the OpenCode plugin's after-hook.
+  pi.on("tool_result", async (event) => {
+    if (event.isError) return;
+    const topic = dispatchSubscriptionTopic(event.toolName, JSON.stringify(event.details) ?? "");
+    if (topic === null) return;
+    try {
+      if (await subscribe(topic)) await registerSession();
+    } catch (error) {
+      activeSessionContext?.ui.notify(
+        `envoy: dispatch reply auto-subscribe failed (${messageFor(error)}); run envoy_subscribe ${topic}`,
+        "warning"
+      );
+    }
+  });
 
   async function execute(
     operation: EnvoyToolOperation,

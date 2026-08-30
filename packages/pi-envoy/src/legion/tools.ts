@@ -62,17 +62,6 @@ function legionToolSchema(pi: PiApi): unknown {
   });
 }
 
-function envoyDispatchToolSchema(pi: PiApi): unknown {
-  const z = pi.zod;
-  return z.object({
-    parent: z.string(),
-    subject: z.string(),
-    body: z.string(),
-    ask: z.array(z.unknown()).optional(),
-    urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-  });
-}
-
 export function createLegionTool(deps: {
   readonly pi: PiApi;
   readonly roleDaemon: () => LegionDaemonClient;
@@ -234,55 +223,3 @@ export function createLegionTool(deps: {
   };
 }
 
-export function createEnvoyDispatchTool(deps: {
-  readonly pi: PiApi;
-  readonly roleDaemon: () => LegionDaemonClient;
-  readonly architectSession: (context: SessionContext) => ArchitectSession;
-}): RegisteredTool {
-  const { pi, roleDaemon, architectSession } = deps;
-  return {
-    name: "envoy_dispatch",
-    label: "envoy_dispatch",
-    description:
-      "Open an architect-owned Dispatch thread and route replies back to this Legion role.",
-    defaultInactive: true,
-    parameters: envoyDispatchToolSchema(pi),
-    execute: async (_id, parameters, _signal, _onUpdate, context) => {
-      try {
-        const architect = architectSession(context);
-        const { parent, subject, body, ask, urgency } = parameters;
-        if (typeof parent !== "string" || typeof subject !== "string" || typeof body !== "string") {
-          throw new Error("envoy_dispatch requires parent, subject, and body");
-        }
-        let dispatchUrgency: "low" | "med" | "high" | "blocking" | undefined;
-        if (urgency === undefined) {
-          dispatchUrgency = undefined;
-        } else if (
-          urgency === "low" ||
-          urgency === "med" ||
-          urgency === "high" ||
-          urgency === "blocking"
-        ) {
-          dispatchUrgency = urgency;
-        } else {
-          throw new Error("envoy_dispatch urgency must be low, med, high, or blocking");
-        }
-        const result = await roleDaemon().dispatchThread({
-          tree: architect.tree,
-          issue: architect.issue,
-          role: architect.role,
-          sessionId: context.sessionManager.getSessionId(),
-          secret: architect.secret,
-          parent,
-          subject,
-          body,
-          ...(ask === undefined ? {} : { ask }),
-          ...(dispatchUrgency === undefined ? {} : { urgency: dispatchUrgency }),
-        });
-        return jsonSuccess(result);
-      } catch (error) {
-        return toolFailure(error);
-      }
-    },
-  };
-}

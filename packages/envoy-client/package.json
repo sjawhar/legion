@@ -8,6 +8,11 @@
       "bun": "./src/defaults.ts",
       "default": "./dist/defaults.js"
     },
+    "./dispatch-subscribe": {
+      "types": "./src/dispatch-subscribe.ts",
+      "bun": "./src/dispatch-subscribe.ts",
+      "default": "./dist/dispatch-subscribe.js"
+    },
     "./dispatch-mcp-bridge": {
       "types": "./src/dispatch-mcp-bridge.ts",
       "bun": "./src/dispatch-mcp-bridge.ts",
@@ -40,7 +45,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/dispatch-mcp-bridge.ts src/dispatch-mcp-shim.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/dispatch-mcp-bridge.ts src/dispatch-mcp-shim.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"

@@ -5,8 +5,6 @@ import {
   type ControllerIssueInput,
   type ControllerReadyInput,
   type DaemonStateResponse,
-  type DispatchThreadInput,
-  type DispatchThreadResponse,
   type EscalateInput,
   type GitHubTokenInput,
   type GitHubTokenResponse,
@@ -56,7 +54,6 @@ export interface LegionDaemonClient {
   readonly labels: (input: LabelsInput) => Promise<LabelsResponse>;
   readonly escalate: (input: EscalateInput) => Promise<void>;
   readonly issueClose: (input: IssueCloseInput) => Promise<void>;
-  readonly dispatchThread: (input: DispatchThreadInput) => Promise<DispatchThreadResponse>;
   readonly spawnToken: (input: SpawnTokenInput) => Promise<SpawnTokenResponse>;
   readonly roleBacking: (input: RoleBackingInput) => Promise<void>;
   readonly phase: (input: PhaseInput) => Promise<PhaseResponse>;
@@ -203,8 +200,6 @@ export function createLegionDaemonClient(
       noContent("/legion/v1/issues/body", input, LegionDaemonApi.PostBody.response),
     labels: (input) => post("/legion/v1/issues/labels", input, LegionDaemonApi.Labels.response),
     escalate: (input) => noContent("/legion/v1/escalate", input, LegionDaemonApi.Escalate.response),
-    dispatchThread: (input) =>
-      post("/legion/v1/dispatch-threads", input, LegionDaemonApi.DispatchThread.response),
     spawnToken: (input) =>
       post("/legion/v1/spawn-token", input, LegionDaemonApi.SpawnToken.response),
     roleBacking: (input) =>
