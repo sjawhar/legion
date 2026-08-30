@@ -74,11 +74,9 @@ The dispatch output schema defines the phase artifact and completion evidence. D
 architect-owned decomposition, gate discipline, scheduling, or human communication with labels
 or a local status model.
 
-Every commit carries the session attribution trailer:
-
-```text
-Legion-Session: <session-id>
-```
+Commit attribution is automatic: the Legion extension exports a `JJ_CONFIG` overlay at root
+bootstrap, so every jj commit made in the session family carries an `Omp-Session: <root-session-id>`
+trailer with no action from you. Do not add attribution trailers by hand.
 
 The jj configuration already supplies the phase worker's plus-addressed author and committer
 identity. Do not override Git identity configuration. The worker session receives the
