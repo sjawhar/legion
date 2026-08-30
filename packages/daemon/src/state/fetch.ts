@@ -151,9 +151,8 @@ export function mapMergeableState(state: string | null | undefined): MergeableSt
  * Fetch PR review state for multiple issues in a single GraphQL query.
  *
  * Queries `latestReviews(first:1)` on each PR to determine whether the most
- * recent review approved or requested changes. Replaces the previous draft-based
- * signaling — with separate GitHub Apps for impl and review roles, native
- * reviews are the canonical signal.
+ * recent review approved or requested changes. Native reviews are the canonical
+ * merge-gate signal for separate GitHub Apps on implementation and review roles.
  *
  * Batches all PRs across all repositories into one API call by default. When
  * owner-scoped runner options are supplied, queries each owner separately.

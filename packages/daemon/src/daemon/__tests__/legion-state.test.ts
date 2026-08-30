@@ -25,7 +25,6 @@ function stateWithTree() {
       tmuxSession: "legion-omp-project",
       tmuxWindowId: "@42",
       ompSessionFile: "/tmp/session.json",
-      pid: 1234,
     },
     status: "launch-failed",
     launchFailures: 3,
@@ -70,12 +69,6 @@ function stateWithTree() {
     issue,
     tree: issue,
   });
-  state.attribution.push({
-    sha: "abc123",
-    sessionId: "ses_123",
-    issue,
-    phase: "implement",
-  });
   state.phases[issue] = { phase: "implement", sessionId: "ses_123" };
   state.controllerCapabilityHash = "f".repeat(64);
   return state;
@@ -92,9 +85,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v6 state with a valid project and admission capacity", () => {
+  it("initializes empty v7 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 6,
+      version: 7,
       project: "omp",
       issues: {},
       trees: {},
@@ -104,13 +97,12 @@ describe("legion state", () => {
       prByBranch: {},
       admission: { cap: 4, active: [], queue: [] },
       dispatchThreads: [],
-      attribution: [],
       phases: {},
       controllerHeldEvents: [],
     });
   });
 
-  it("persists and reloads state without losing tree, role, PR, or attribution data", async () => {
+  it("persists and reloads state without losing tree, role, or PR data", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v2-"));
     const file = path.join(tempDir, "state.json");
     const state = stateWithTree();
@@ -141,12 +133,63 @@ describe("legion state", () => {
     await writeFile(file, JSON.stringify(legacy), "utf8");
 
     const migrated = await loadState(file, initialState);
+    const expected = stateWithTree();
+    delete expected.trees[issue].locator;
 
-    expect(migrated.version).toBe(6);
-    expect(migrated.trees[issue]?.locator).toBeUndefined();
+    expect(migrated).toEqual(expected);
   });
 
-  it("creates the supplied initial v4 state when the file is absent", async () => {
+  it("migrates v6 state by dropping attribution and locator pids", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v6-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const legacy = {
+      ...current,
+      version: 6,
+      attribution: [{ sha: "abc123", sessionId: "ses_123", issue, phase: "implement" }],
+      trees: {
+        ...current.trees,
+        [issue]: {
+          ...current.trees[issue],
+          locator: { ...current.trees[issue]?.locator, pid: 1234 },
+        },
+      },
+    };
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated).toEqual(current);
+  });
+
+  it("rejects removed v6 fields on current-version state", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-current-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const malformedStates = [
+      {
+        ...current,
+        attribution: [{ sha: "abc123", sessionId: "ses_123", issue, phase: "implement" }],
+      },
+      {
+        ...current,
+        trees: {
+          ...current.trees,
+          [issue]: {
+            ...current.trees[issue],
+            locator: { ...current.trees[issue]?.locator, pid: 1234 },
+          },
+        },
+      },
+    ];
+
+    for (const malformed of malformedStates) {
+      await writeFile(file, JSON.stringify(malformed), "utf8");
+      await expect(loadState(file, initialState)).rejects.toThrow("Invalid Legion state");
+    }
+  });
+
+  it("creates the supplied initial state when the file is absent", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v4-"));
     const init = { project: "other", cap: 2 };
 

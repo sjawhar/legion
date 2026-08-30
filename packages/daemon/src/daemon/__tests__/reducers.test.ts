@@ -930,58 +930,20 @@ describe("reduceGithubEvent", () => {
     expect(state.issues[root].labels).toEqual(["human-approved"]);
   });
 
-  it("indexes session attribution from a legion push trailer and comment footer", () => {
+  it("ignores pushes to legion issue branches", () => {
     const state = rootState();
     attachChild(state);
 
     expect(
       effects(state, {
         ref: "refs/heads/legion/issue-2",
-        commits: [{ id: "abc123", message: "Implement it\n\nLegion-Session: ses_push" }],
+        action: "labeled",
+        issue: issue(1),
+        label: { name: "human-approved" },
+        commits: [{ id: "abc123", message: "Implement it" }],
       })
     ).toEqual([]);
-    expect(state.attribution).toEqual([
-      {
-        sha: "abc123",
-        sessionId: "ses_push",
-        issue: child,
-        phase: "implement",
-      },
-    ]);
-
-    effects(state, {
-      ref: "refs/heads/legion/issue-2",
-      commits: [
-        {
-          id: "def456",
-          message: "No trailer",
-          author: { email: "implementer+ses_email@example.com" },
-        },
-      ],
-    });
-    expect(state.attribution).toContainEqual({
-      sha: "def456",
-      sessionId: "ses_email",
-      issue: child,
-      phase: "implement",
-    });
-
-    effects(state, {
-      action: "created",
-      issue: issue(2),
-      comment: {
-        id: 99,
-        user: { login: "sami" },
-        body: 'Done\n<!-- legion: {"session":"ses_comment","phase":"review"} -->',
-        html_url: "comment-url",
-      },
-    });
-    expect(state.attribution).toContainEqual({
-      commentId: 99,
-      sessionId: "ses_comment",
-      issue: child,
-      phase: "review",
-    });
+    expect(state.issues[root].labels).toEqual([]);
   });
 });
 

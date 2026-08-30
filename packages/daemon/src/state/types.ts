@@ -1,24 +1,6 @@
 /**
- * Type definitions shared by retained issue-tracker adapters.
+ * Shared GitHub state types used by PR and CI status fetching.
  */
-
-// =============================================================================
-// Status Constants and Normalization
-// =============================================================================
-
-/**
- * Canonical issue status values.
- */
-export type IssueStatusLiteral =
-  | "Triage"
-  | "Icebox"
-  | "Backlog"
-  | "Todo"
-  | "In Progress"
-  | "Testing"
-  | "Needs Review"
-  | "Retro"
-  | "Done";
 
 /**
  * CI check status for a PR.
@@ -64,93 +46,6 @@ export const ReviewState = {
 } as const;
 
 /**
- * Canonical issue status values with normalization.
- */
-export const IssueStatus = {
-  TRIAGE: "Triage" as IssueStatusLiteral,
-  ICEBOX: "Icebox" as IssueStatusLiteral,
-  BACKLOG: "Backlog" as IssueStatusLiteral,
-  TODO: "Todo" as IssueStatusLiteral,
-  IN_PROGRESS: "In Progress" as IssueStatusLiteral,
-  TESTING: "Testing" as IssueStatusLiteral,
-  NEEDS_REVIEW: "Needs Review" as IssueStatusLiteral,
-  RETRO: "Retro" as IssueStatusLiteral,
-  DONE: "Done" as IssueStatusLiteral,
-
-  /**
-   * Map status name aliases to canonical names.
-   * Case-insensitive lookup is handled by normalize() — keys here
-   * should be in their most common casing for readability.
-   */
-  ALIASES: {
-    "In Review": "Needs Review" as IssueStatusLiteral,
-    Today: "Todo" as IssueStatusLiteral,
-  } as Record<string, IssueStatusLiteral>,
-
-  /**
-   * Normalize a raw status string to canonical form.
-   *
-   * Matching is case-insensitive: "in progress", "In progress",
-   * and "IN PROGRESS" all resolve to "In Progress".
-   *
-   * Resolution order:
-   *   1. Exact match against canonical status names
-   *   2. Case-insensitive match against canonical status names
-   *   3. Case-insensitive match against ALIASES
-   *   4. Return raw value unchanged
-   *
-   * Returns empty string if raw is null.
-   */
-  normalize(raw: string | null): IssueStatusLiteral | string {
-    if (raw === null) {
-      return "";
-    }
-
-    // Fast path: exact alias match
-    const aliasHit = IssueStatus.ALIASES[raw];
-    if (aliasHit) {
-      return aliasHit;
-    }
-
-    // Case-insensitive lookup against canonical names + aliases
-    const lower = raw.toLowerCase();
-    const canonical = _lowercaseCanonicalMap.get(lower);
-    if (canonical) {
-      return canonical;
-    }
-    const aliasCanonical = _lowercaseAliasMap.get(lower);
-    if (aliasCanonical) {
-      return aliasCanonical;
-    }
-
-    return raw;
-  },
-} as const;
-
-// Pre-built lowercase lookup maps (populated after IssueStatus is defined)
-const _lowercaseCanonicalMap = new Map<string, IssueStatusLiteral>([
-  ["triage", "Triage"],
-  ["icebox", "Icebox"],
-  ["backlog", "Backlog"],
-  ["todo", "Todo"],
-  ["in progress", "In Progress"],
-  ["testing", "Testing"],
-  ["needs review", "Needs Review"],
-  ["retro", "Retro"],
-  ["done", "Done"],
-]);
-
-const _lowercaseAliasMap = new Map<string, IssueStatusLiteral>(
-  Object.entries(IssueStatus.ALIASES).map(([k, v]) => [k.toLowerCase(), v])
-);
-
-export type { LinearIssueRaw } from "./backends/linear";
-
-// =============================================================================
-// Internal Data Structures
-// =============================================================================
-
-/**
  * Parsed GitHub PR reference from URL (immutable value object).
  */
 export interface GitHubPRRef {
@@ -186,49 +81,3 @@ export const GitHubPRRef = {
     };
   },
 };
-
-/**
- * Structured source reference for an issue.
- * Preserves the full identity so API calls can target the exact issue.
- */
-export interface IssueSource {
-  owner: string;
-  repo: string;
-  number: number;
-  url: string;
-}
-
-/**
- * Parsed issue data from issue tracker API response.
- */
-export interface ParsedIssue {
-  issueId: string;
-  status: IssueStatusLiteral | string; // Canonical status or unknown raw value
-  labels: string[];
-  prRef: GitHubPRRef | null;
-  source: IssueSource | null; // Structured metadata for GitHub issues, null for Linear
-  blockedByIds: string[];
-  isBlocked: boolean;
-}
-
-/**
- * Create a ParsedIssue with computed properties.
- */
-export function createParsedIssue(
-  issueId: string,
-  status: IssueStatusLiteral | string,
-  labels: string[],
-  prRef: GitHubPRRef | null,
-  source: IssueSource | null = null,
-  blockedByIds: string[] = []
-): ParsedIssue {
-  return {
-    issueId,
-    status,
-    labels,
-    prRef,
-    source,
-    blockedByIds,
-    isBlocked: blockedByIds.length > 0,
-  };
-}

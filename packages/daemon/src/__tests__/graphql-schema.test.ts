@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { buildSchema, parse, validate } from "graphql";
-import { buildProjectStatusFieldQuery, buildStatusMutation } from "../state/backends/github";
 import type { CommandResult, CommandRunner } from "../state/fetch";
 import { getCiStatusBatch, getPrReviewStateBatch } from "../state/fetch";
 import { fetchGitHubProjectItems } from "../state/github-fetch";
@@ -111,13 +110,5 @@ describe("daemon GraphQL queries validate against GitHub's published schema", ()
     await getCiStatusBatch({ "acme-api-42": { owner: "acme", repo: "api", number: 101 } }, runner);
     expect(queries).toHaveLength(1);
     expectValidQuery(queries[0] as string, "ci-status");
-  });
-
-  it("issue-transition query and mutation are schema-valid", () => {
-    expectValidQuery(buildProjectStatusFieldQuery("acme", "api", 42), "transition-status-query");
-    expectValidQuery(
-      buildStatusMutation("PVT_x", "PVTI_x", "PVTF_x", "opt"),
-      "transition-status-mutation"
-    );
   });
 });

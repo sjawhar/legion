@@ -12,7 +12,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `POST /legion/v1/process/started` | Register a root process with transcript-derived architect role backing. |
 | `POST /legion/v1/process/exit` | Authenticated architect exit that releases an admission slot or marks its root process dead. |
 | `POST /legion/v1/issues`, `/waves/release`, `/issues/comment`, `/issues/body`, `/issues/labels`, `/issues/close` | Scoped architect writes. |
-| `POST /legion/v1/phase`, `/role-backing`, `/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Session attribution, durable architect and worker capability recovery, and credential grants. |
+| `POST /legion/v1/phase`, `/role-backing`, `/worker-session`, `/grants`, `/git-credential`, `/gh-token` | Phase claims, durable architect and worker capability recovery, and credential grants. |
 | `POST /legion/v1/controller/ready`, `/gates/approve`, `/admission`, `/backlog` | Controller lifecycle and control-plane actions. |
 
 ## Files
@@ -37,6 +37,7 @@ The localhost-only Legion API lives in `api.ts`.
 - Process failure recovery is exception-driven. A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.
 - A lingering or closed root releases its admission slot, kills its recorded window, clears its locator, and removes its role claims. The linger sweep also removes session windows not recorded by a tree or controller.
 - `DaemonConfig` supplies all lifecycle defaults: admission cap, worker budget, recursion depth, linger duration, CI quiet period, resync interval, and retry limit.
+- Boot never resurrects trees; it only reconciles admission so slots opened by a raised cap promote queued issues in order.
 
 ## OMP invocation and daemon tools
 

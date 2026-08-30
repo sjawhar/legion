@@ -36,7 +36,6 @@ export interface TmuxWindowLocator {
   tmuxSession: string;
   tmuxWindowId: string;
   ompSessionFile?: string;
-  pid?: number;
 }
 
 export interface TreeState {
@@ -72,14 +71,6 @@ export interface DispatchThread {
   tree: IssueKey;
 }
 
-export interface AttributionEntry {
-  sha?: string;
-  commentId?: number;
-  sessionId: string;
-  issue: IssueKey;
-  phase: string;
-}
-
 export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
@@ -100,7 +91,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 6;
+  version: 7;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -111,7 +102,6 @@ export interface LegionState {
   prByBranch: Record<string, string>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
   dispatchThreads: DispatchThread[];
-  attribution: AttributionEntry[];
   phases: Record<IssueKey, { phase: string; sessionId: string } | undefined>;
   controllerHeldEvents: HeldEvent[];
   controllerCapabilityHash?: string;
@@ -184,7 +174,6 @@ const TreeStateSchema = z
         tmuxSession: z.string(),
         tmuxWindowId: z.string(),
         ompSessionFile: z.string().optional(),
-        pid: z.number().int().optional(),
       })
       .strict()
       .optional(),
@@ -249,15 +238,6 @@ const DispatchThreadSchema = z
     tree: IssueKeySchema,
   })
   .strict();
-const AttributionEntrySchema = z
-  .object({
-    sha: z.string().optional(),
-    commentId: z.number().int().nonnegative().optional(),
-    sessionId: z.string(),
-    issue: IssueKeySchema,
-    phase: z.string(),
-  })
-  .strict();
 const PhaseSchema = z
   .object({
     phase: z.string(),
@@ -266,7 +246,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(6),
+    version: z.literal(7),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -291,7 +271,6 @@ const LegionStateSchema = z
       })
       .strict(),
     dispatchThreads: z.array(DispatchThreadSchema),
-    attribution: z.array(AttributionEntrySchema),
     phases: z.record(IssueKeySchema, PhaseSchema),
     controllerHeldEvents: z.array(HeldEventSchema).default([]),
     controllerCapabilityHash: z
@@ -309,7 +288,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 6,
+    version: 7,
     project,
     issues: {},
     trees: {},
@@ -319,7 +298,6 @@ export function newLegionState(project: string, cap: number): LegionState {
     prByBranch: {},
     admission: { cap, active: [], queue: [] },
     dispatchThreads: [],
-    attribution: [],
     phases: {},
     controllerHeldEvents: [],
   };
@@ -342,6 +320,27 @@ function migrateV5State(state: unknown): unknown {
   return { ...state, version: 6, trees };
 }
 
+function migrateV6State(state: unknown): unknown {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
+  if (!("version" in state) || state.version !== 6) return state;
+  const { attribution: _droppedAttribution, ...rest } = state as Record<string, unknown>;
+  if (!("trees" in rest) || typeof rest.trees !== "object" || rest.trees === null) {
+    return { ...rest, version: 7 };
+  }
+
+  const trees = Object.fromEntries(
+    Object.entries(rest.trees).map(([key, tree]) => {
+      if (typeof tree !== "object" || tree === null || Array.isArray(tree)) return [key, tree];
+      if (!("locator" in tree) || typeof tree.locator !== "object" || tree.locator === null) {
+        return [key, tree];
+      }
+      const { pid: _droppedPid, ...locator } = tree.locator as Record<string, unknown>;
+      return [key, { ...tree, locator }];
+    })
+  );
+  return { ...rest, version: 7, trees };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -353,12 +352,12 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
-  const state = migrateV5State(JSON.parse(raw));
+  const state = migrateV6State(migrateV5State(JSON.parse(raw)));
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 6) {
+  if (version !== 7) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

@@ -1,11 +1,8 @@
 /**
  * Fetch all GitHub project items using GraphQL cursor-based pagination.
  *
- * Replaces `gh project item-list --format json` which silently drops items
- * when projects have many entries (see: sjawhar/legion#82).
- *
- * Returns items in the same shape as `gh project item-list --format json`
- * so the existing GitHub backend parser can consume them directly.
+ * The returned item objects match the webhook-like shape consumed by resync reducers,
+ * including status fields, labels, linked PR URLs, and open blocker references.
  */
 
 import type {

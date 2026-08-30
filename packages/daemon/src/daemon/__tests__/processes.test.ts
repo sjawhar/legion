@@ -21,6 +21,7 @@ import {
 
 const root = formatIssueKey("sjawhar", "legion", 42);
 const child = formatIssueKey("sjawhar", "legion", 43);
+const grandchild = formatIssueKey("sjawhar", "legion", 44);
 const tempDirs: string[] = [];
 
 async function temporaryDir(): Promise<string> {
@@ -714,6 +715,130 @@ describe("ProcessManager", () => {
     } finally {
       console.error = originalConsoleError;
     }
+  });
+
+  it("promotes queued trees into slots opened by a cap raised between restarts", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.queue.push(root, child);
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 2 }),
+    });
+
+    processes.reconcileAdmission();
+
+    expect(state.admission).toEqual({ cap: 2, active: [root, child], queue: [] });
+    expect(state.trees[root]?.status).toBe("active");
+    expect(state.trees[child]?.status).toBe("active");
+  });
+
+  it("leaves launch-failed trees queued when reconciling admission capacity", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = "launch-failed";
+    state.admission.queue.push(root);
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 2 }),
+    });
+
+    processes.reconcileAdmission();
+
+    expect(state.admission).toEqual({ cap: 2, active: [], queue: [root] });
+  });
+
+  it("skips launch-failed entries while promoting eligible queued trees during admission reconciliation", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = "launch-failed";
+    state.admission.queue.push(root, child, grandchild);
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 2 }),
+    });
+
+    processes.reconcileAdmission();
+
+    expect(state.admission).toEqual({ cap: 2, active: [child, grandchild], queue: [root] });
+    expect(state.trees[root].status).toBe("launch-failed");
+    expect(state.trees[child]?.status).toBe("active");
+    expect(state.trees[grandchild]?.status).toBe("active");
+  });
+
+  it("persists a raised cap even when reconciliation has no queued trees to promote", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    let saves = 0;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 3 }),
+      saveState: async () => {
+        saves += 1;
+      },
+    });
+
+    processes.reconcileAdmission();
+
+    expect(state.admission).toEqual({ cap: 3, active: [], queue: [] });
+    expect(saves).toBeGreaterThan(0);
+  });
+
+  it("attempts each queued tree exactly once when every boot-promoted launch fails", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.queue.push(root, child, grandchild);
+    const settled = Promise.withResolvers<void>();
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 2 }),
+      saveState: async () => {
+        const failures = [root, child, grandchild].reduce(
+          (sum, issue) => sum + (state.trees[issue]?.launchFailures ?? 0),
+          0
+        );
+        if (failures === 3) settled.resolve();
+      },
+      run: async (command) =>
+        command[1] === "new-window"
+          ? { stdout: "window creation failed", exitCode: 1 }
+          : { stdout: "", exitCode: 0 },
+    });
+
+    processes.reconcileAdmission();
+    await settled.promise;
+    await Promise.resolve();
+
+    expect(state.admission.active).toEqual([]);
+    expect([...state.admission.queue].sort()).toEqual([root, child, grandchild].sort());
+    expect(state.trees[root]?.launchFailures).toBe(1);
+    expect(state.trees[child]?.launchFailures).toBe(1);
+    expect(state.trees[grandchild]?.launchFailures).toBe(1);
+  });
+
+  it("never promotes stale queue entries whose trees are not queued", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const closed = formatIssueKey("sjawhar", "legion", 45);
+    tree(state, root);
+    tree(state, child);
+    tree(state, grandchild);
+    tree(state, closed);
+    state.trees[root].status = "active";
+    state.trees[child].status = "lingering";
+    state.trees[grandchild].status = "dead";
+    state.trees[closed].status = "closed";
+    state.admission.active.push(root);
+    state.admission.queue.push(root, child, grandchild, closed);
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir, { admissionCap: 5 }),
+    });
+
+    processes.reconcileAdmission();
+
+    expect(state.admission).toEqual({
+      cap: 5,
+      active: [root],
+      queue: [root, child, grandchild, closed],
+    });
+    expect(commands).toEqual([]);
   });
 
   it("marks a tree launch-failed after its third launch failure and publishes a controller anomaly", async () => {

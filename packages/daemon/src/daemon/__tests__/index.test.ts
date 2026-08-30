@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
@@ -470,6 +470,97 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("promotes queued persisted issues before boot completes when config raises the admission cap", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = { ...config(stateDir), admissionCap: 2 };
+    const state = newLegionState(daemonConfig.project, 1);
+    const first = formatIssueKey("acme", "widgets", 42);
+    const second = formatIssueKey("acme", "widgets", 43);
+    state.admission.queue.push(first, second);
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+    const nats = new FakeNats();
+    const rootLaunches = Promise.withResolvers<void>();
+    let launchedRoots = 0;
+    let saves = 0;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {
+            saves += 1;
+          },
+          createNatsTransport: async () => nats,
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return { stdout: "LEGION_OMP_AGENTS=available\n", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "has-session") {
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/tmux") && command[1] === "new-window") {
+              if (command.some((part) => part.startsWith("LEGION_TREE="))) {
+                launchedRoots += 1;
+                if (launchedRoots === 2) rootLaunches.resolve();
+              }
+              return { stdout: `@${40 + launchedRoots}\n`, stderr: "", exitCode: 0 };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          fetchGitHubProjectItems: async () => ({
+            items: [],
+            excludedNullContentItems: 0,
+          }),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      expect(state.admission).toEqual({ cap: 2, active: [first, second], queue: [] });
+      expect(state.trees[first]?.status).toBe("active");
+      expect(state.trees[second]?.status).toBe("active");
+      expect(saves).toBeGreaterThan(0);
+      await Promise.race([
+        rootLaunches.promise,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Timed out waiting for reconciled roots to launch")),
+            1_000
+          )
+        ),
+      ]);
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("boots the API, intake, and lifecycle timers when OMP emits its capability marker on stdout", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
