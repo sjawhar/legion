@@ -151,7 +151,7 @@ describe("markers — effectiveUrgency", () => {
   });
 });
 
-import { summarizeAnswers } from "../components/ask-form";
+import { renderAskForm, summarizeAnswers } from "../components/ask-form";
 import type { QuestionInfo } from "../markers";
 
 describe("ask-form — summarizeAnswers", () => {
@@ -167,5 +167,23 @@ describe("ask-form — summarizeAnswers", () => {
     expect(out).toContain("Sanity check");
     expect(out).toContain("Did the YAML migration land cleanly?");
     expect(out).toContain("yes");
+  });
+});
+
+describe("ask-form — Go marker compatibility", () => {
+  it("renders and summarizes questions when Go omits optional header and option descriptions", () => {
+    const ask: QuestionInfo[] = [
+      {
+        question: "Proceed?",
+        options: [{ label: "yes" }],
+      },
+    ];
+
+    const html = renderAskForm({ ask, pending: false });
+    expect(html).toContain("Question 1");
+    expect(html).toContain("Proceed?");
+    expect(html).toContain(">yes<");
+    expect(html).not.toContain("ask-option-description");
+    expect(summarizeAnswers(ask, [["yes"]])).toContain("**Question 1** — Proceed?");
   });
 });

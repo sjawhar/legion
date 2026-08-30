@@ -1,9 +1,10 @@
-import type { QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
 import { escapeHtml, renderMarkdownLite, timeAgo } from "../html";
 import {
   parseAnswerMarker,
   parseMetaMarker,
   parseUrgencyMarker,
+  type QuestionAnswer,
+  type QuestionInfo,
   stripMetaMarker,
 } from "../markers";
 import type { Comment, Issue, Thread, Urgency } from "../types";

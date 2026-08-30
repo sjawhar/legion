@@ -1,6 +1,5 @@
-import type { QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
-
 import { escapeHtml } from "../html";
+import type { QuestionAnswer, QuestionInfo, QuestionOption } from "../markers";
 
 export interface AskFormInput {
   ask: QuestionInfo[];
@@ -8,10 +7,8 @@ export interface AskFormInput {
   error?: string;
 }
 
-type QuestionOption = { label: string; description?: string };
-
 function optionsFor(question: QuestionInfo): QuestionOption[] {
-  return (question.options ?? []) as QuestionOption[];
+  return question.options ?? [];
 }
 
 function renderOption(

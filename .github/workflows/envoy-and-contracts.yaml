@@ -7,7 +7,6 @@ on:
       - "packages/envoy/**"
       - "packages/contracts/**"
       - "packages/envoy-client/**"
-      - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
       - "packages/envoy-omp-extension/**"
   pull_request:
@@ -15,7 +14,6 @@ on:
       - "packages/envoy/**"
       - "packages/contracts/**"
       - "packages/envoy-client/**"
-      - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
       - "packages/envoy-omp-extension/**"
 
@@ -27,7 +25,6 @@ jobs:
       contracts: ${{ steps.filter.outputs.contracts }}
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
-      plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       envoy_omp_extension: ${{ steps.filter.outputs.envoy_omp_extension }}
     steps:
@@ -43,10 +40,6 @@ jobs:
               - 'packages/contracts/**'
             envoy:
               - 'packages/envoy/**'
-              - 'packages/contracts/**'
-            plugin:
-              - 'packages/envoy-plugin/**'
-              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             claude_plugin:
               - 'packages/envoy-claude-plugin/**'
@@ -75,28 +68,6 @@ jobs:
       - name: Build contracts
         run: bun run build
         working-directory: packages/contracts
-
-  envoy-plugin:
-    needs: changes
-    if: needs.changes.outputs.plugin == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - name: Lint envoy plugin
-        run: bun run lint
-        working-directory: packages/envoy-plugin
-      - name: Typecheck envoy plugin
-        run: bun run typecheck
-        working-directory: packages/envoy-plugin
-      - name: Pack envoy plugin
-        run: bun pm pack --destination ../../out/pr-artifacts
-        working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@v4
-        with:
-          name: opencode-legion-envoy-plugin-pr
-          path: out/pr-artifacts/*.tgz
 
   envoy-client:
     needs: changes

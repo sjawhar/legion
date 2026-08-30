@@ -1,8 +1,30 @@
-import type { QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import type { Urgency } from "./types";
 
-export type { QuestionAnswer, QuestionInfo };
+// Ask/Answer wire types shared with the Go dispatch server. Mirror
+// QuestionOption/QuestionInfo in packages/envoy/internal/dispatch/core/markers.go.
+export interface QuestionOption {
+  /** Display text (1-5 words, concise) */
+  label: string;
+  /** Optional explanation of choice. Omitted by Go when empty. */
+  description?: string;
+}
+
+export interface QuestionInfo {
+  /** Complete question */
+  question: string;
+  /** Optional short label (max 30 chars). Omitted by Go when empty. */
+  header?: string;
+  /** Available choices */
+  options: QuestionOption[];
+  /** Allow selecting multiple choices */
+  multiple?: boolean;
+  /** Wire flag from agents; the dashboard always offers custom answers. */
+  custom?: boolean;
+}
+
+/** Selected labels (or a custom string) answering one QuestionInfo. */
+export type QuestionAnswer = string[];
 
 export interface ParsedMetaMarker {
   urgency: Urgency;

@@ -17,7 +17,7 @@ import {
   parseMetaMarker,
 } from "./markers";
 import "./styles.css";
-import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
+import type { QuestionAnswer } from "./markers";
 import type { Comment, Issue, SidebarEntry, SidebarFilters, Thread, Urgency } from "./types";
 
 export interface AppApi {
