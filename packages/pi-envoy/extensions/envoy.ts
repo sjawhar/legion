@@ -89,7 +89,7 @@ interface GlobalLegionRoleClaimBridgeStore {
   [key: symbol]: LegionRoleClaimBridge | undefined;
 }
 
-const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.envoy-omp-extension.role-claim-bridge");
+const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.pi-envoy.role-claim-bridge");
 
 function legionRoleClaimBridge(): LegionRoleClaimBridge {
   const store = globalThis as typeof globalThis & GlobalLegionRoleClaimBridgeStore;

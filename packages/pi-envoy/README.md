@@ -1,6 +1,6 @@
-# OMP Envoy Extension
+# Pi Envoy Extension
 
-Tracked OMP extension for Envoy messaging. It shares the Envoy HTTP client, tool contract, envelope
+Tracked Oh My Pi extension for Envoy messaging. It shares the Envoy HTTP client, tool contract, envelope
 display data, and subject helpers with the other Legion adapters while keeping OMP's direct NATS
 subscriptions and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind it).
 
@@ -38,7 +38,7 @@ when it launches trees and workers — loads both.
 For local development of the messaging extension alone, link the entry into OMP:
 
 ```sh
-ln -sfn "$PWD/packages/envoy-omp-extension/extensions/envoy.ts" \
+ln -sfn "$PWD/packages/pi-envoy/extensions/envoy.ts" \
   ~/.omp/agent/extensions/envoy.ts
 ```
 

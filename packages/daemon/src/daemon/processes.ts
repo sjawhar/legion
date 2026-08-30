@@ -20,7 +20,7 @@ import type { LegionState, TreeState, WorkerRoleClaim } from "./legion-state";
 const HOUR_MS = 60 * 60 * 1000;
 
 const MAX_LAUNCH_FAILURES = 3;
-const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../envoy-omp-extension");
+const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
 const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
 type Redelivery = { topic: string; payload: string; eventId: string };

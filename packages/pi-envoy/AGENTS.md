@@ -1,6 +1,6 @@
-# OMP Envoy Extension
+# Pi Envoy Extension
 
-Tracked OMP adapter for Envoy messaging.
+Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 ## Overview
 

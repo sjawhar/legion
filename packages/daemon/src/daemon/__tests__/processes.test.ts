@@ -265,7 +265,7 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
 
     expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe(
-      `task:\n  maxRecursionDepth: 8\nextensions:\n  - ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}\n`
+      `task:\n  maxRecursionDepth: 8\nextensions:\n  - ${path.resolve(import.meta.dir, "../../../../pi-envoy")}\n`
     );
     expect(state.trees[root]).toMatchObject({
       generation: 1,
@@ -349,7 +349,7 @@ describe("ProcessManager", () => {
         "GIT_TERMINAL_PROMPT=0",
         "-e",
         "PATH=/full/bin:/usr/bin",
-        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../envoy-omp-extension")}/agents/architect-root.md)"`,
+        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../pi-envoy")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/agents/architect-root.md)"`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -560,7 +560,7 @@ describe("ProcessManager", () => {
 
     const workspaceDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
     const controllerDir = path.join(stateDir, "controller");
-    const extensionDir = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
       `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
@@ -959,7 +959,7 @@ describe("ProcessManager", () => {
     await processes.resurrect(root);
 
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
-    const extension = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
@@ -988,7 +988,7 @@ describe("ProcessManager", () => {
     }
 
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
-    const extension = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
@@ -1018,7 +1018,7 @@ describe("ProcessManager", () => {
     }
 
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
-    const extension = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+    const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
       `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`

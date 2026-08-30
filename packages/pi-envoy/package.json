@@ -1,5 +1,5 @@
 {
-  "name": "@legion/envoy-omp-extension",
+  "name": "@legion/pi-envoy",
   "version": "0.1.0",
   "type": "module",
   "omp": {

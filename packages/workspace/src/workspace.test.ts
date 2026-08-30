@@ -29,7 +29,7 @@ function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
 
 const temporaryDirectories: string[] = [];
 const originalMaxRecursionDepth = process.env.LEGION_MAX_RECURSION_DEPTH;
-const extensionPackage = path.resolve(import.meta.dir, "../../envoy-omp-extension");
+const extensionPackage = path.resolve(import.meta.dir, "../../pi-envoy");
 
 afterEach(async () => {
   if (originalMaxRecursionDepth === undefined) delete process.env.LEGION_MAX_RECURSION_DEPTH;
