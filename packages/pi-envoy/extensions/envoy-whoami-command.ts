@@ -1,30 +1,17 @@
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent";
-
-type CommandContext = {
-  readonly ui: { readonly notify: (message: string, level: "info" | "warning") => void };
-  // OMP command handlers receive the full extension context; the live session
-  // manager is the source of truth for the session ID. The envoy closure's
-  // cached ID is stale for sessions created lazily after session_start.
-  readonly sessionManager?: { readonly getSessionId: () => string };
-};
-
-type EnvoyWhoamiCommandApi = {
-  readonly registerCommand: (
-    name: string,
-    command: {
-      readonly description: string;
-      readonly handler: (args: string, context: CommandContext) => Promise<void>;
-    }
-  ) => void;
-};
+import type { CommandContext, PiApi } from "../src/pi-types";
 
 export function registerEnvoyWhoamiCommand(
-  api: EnvoyWhoamiCommandApi,
+  api: Pick<PiApi, "registerCommand">,
   cachedSessionID: () => string
 ): void {
   api.registerCommand("whoami", {
     description: "Copy session ID",
-    handler: async (_args, context) => {
+    handler: async (_args, context: CommandContext) => {
+      // The live session manager is the source of truth for the session ID;
+      // the envoy closure's cached ID is stale for sessions created lazily
+      // after session_start. Fall back to the cached ID when a host invokes
+      // the command without a session manager in context.
       const sessionID = context.sessionManager?.getSessionId() || cachedSessionID();
       if (sessionID === "") {
         context.ui.notify("No active session", "warning");
@@ -50,4 +37,3 @@ async function copySessionID(
     return false;
   }
 }
-

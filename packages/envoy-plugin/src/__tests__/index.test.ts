@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import * as os from "node:os";
 
 // Suppress console.error during tests
 const originalError = console.error;
@@ -72,9 +73,7 @@ describe("envoy plugin init", () => {
 describe("envoy_whoami", () => {
   it("returns session identity when Envoy is unavailable", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
-    const originalHostname = process.env.HOSTNAME;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
-    process.env.HOSTNAME = "test-machine";
 
     try {
       const pluginModule = await import("../server");
@@ -91,25 +90,21 @@ describe("envoy_whoami", () => {
 
       const parsed = JSON.parse(typeof result === "string" ? result : result.output);
       expect(parsed.session_id).toBe("ses_test_whoami");
-      expect(parsed.machine_id).toBe("test-machine");
+      expect(parsed.machine_id).toBe(os.hostname());
       expect(parsed.dir).toBe("/tmp/test-workspace");
       expect(parsed).not.toHaveProperty("topics");
       expect(parsed.port === null || typeof parsed.port === "number").toBe(true);
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
-      if (originalHostname === undefined) {
-        delete process.env.HOSTNAME;
-      } else {
-        process.env.HOSTNAME = originalHostname;
-      }
     }
   });
 
-  it("uses 'unknown' for machine_id when HOSTNAME is not set", async () => {
+  it("reports machine_id from the real hostname, not the HOSTNAME env var", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     const originalHostname = process.env.HOSTNAME;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
-    delete process.env.HOSTNAME;
+    // Same host must never report two machine IDs depending on shell env.
+    process.env.HOSTNAME = "some-other-name";
 
     try {
       const pluginModule = await import("../server");
@@ -119,13 +114,13 @@ describe("envoy_whoami", () => {
       } as never);
 
       const result = await hooks.tool.envoy_whoami.execute({}, {
-        sessionID: "ses_no_hostname",
+        sessionID: "ses_env_hostname",
         directory: "/tmp",
         metadata: mock(() => {}),
       } as never);
 
       const parsed = JSON.parse(typeof result === "string" ? result : result.output);
-      expect(parsed.machine_id).toBe("unknown");
+      expect(parsed.machine_id).toBe(os.hostname());
     } finally {
       process.env.ENVOY_URL = originalEnvoyUrl;
       if (originalHostname === undefined) {

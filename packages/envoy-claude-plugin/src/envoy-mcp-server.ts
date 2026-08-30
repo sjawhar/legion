@@ -1,4 +1,5 @@
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
+import { machineID } from "@legion/envoy-client/machine"
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { createEnvoyClient } from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
@@ -94,7 +95,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       z.object(spec.arguments).parse(input)
       return {
         session_id: sessionId,
-        machine_id: process.env["HOSTNAME"] ?? "unknown",
+        machine_id: machineID(),
         dir: process.cwd(),
       }
     case EnvoyToolOperation.listSessions: {

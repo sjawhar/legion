@@ -1,5 +1,6 @@
 import { agentSubject } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { machineID } from "@legion/envoy-client/machine";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { tool } from "@opencode-ai/plugin/tool";
@@ -325,7 +326,7 @@ export default async (input: { serverUrl: URL }) => {
           return JSON.stringify(
             {
               session_id: sessionID,
-              machine_id: process.env.HOSTNAME || "unknown",
+              machine_id: machineID(),
               port,
               dir: ctx.directory,
             },

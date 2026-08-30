@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { portFromSsOutput } from "./ss";
 
 type ExecFn = (
   command: string,
@@ -33,17 +34,9 @@ export async function resolvePort(
   // Fallback: find listening port via ss(8) by PID
   try {
     const output = await exec("ss", ["-tlnp"], { encoding: "utf-8" });
-    for (const line of output.split("\n")) {
-      if (!line.includes(`pid=${process.pid}`)) continue;
-      const parts = line.trim().split(/\s+/);
-      const local = parts[3];
-      const match = local?.match(/:(\d+)$/);
-      if (!match) continue;
-      const port = Number.parseInt(match[1], 10);
-      if (Number.isFinite(port) && port > 0) return port;
-    }
+    const port = portFromSsOutput(output, process.pid);
+    if (port !== null) return port;
   } catch {}
 
   return null;
 }
-// trigger publish

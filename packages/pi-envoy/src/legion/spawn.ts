@@ -1,6 +1,6 @@
 import path from "node:path";
 import { isLegionRole, parseRoleToken } from "@legion/contracts";
-import type { SessionContext } from "./pi-types";
+import type { SessionContext } from "../pi-types";
 import type { WorkerSpawn } from "./worker-budget";
 
 export const legionSpawnBlockPattern = /<legion-spawn\s+([^>]*?)\/>/g;

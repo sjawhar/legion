@@ -1,5 +1,5 @@
 import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
-import type { SessionContext } from "./pi-types";
+import type { SessionContext } from "../pi-types";
 
 export type LegionSessionKind =
   | { kind: "root-architect"; tree: string }

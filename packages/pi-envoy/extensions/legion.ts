@@ -9,6 +9,7 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { messageFor } from "@legion/envoy-client/errors";
 import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import {
@@ -34,7 +35,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
   ToolResultEvent,
-} from "../src/legion/pi-types";
+} from "../src/pi-types";
 import { legionSpawnBlockPattern, parseWorkerSpawn, workerAgentId } from "../src/legion/spawn";
 import { createEnvoyDispatchTool, createLegionTool } from "../src/legion/tools";
 import {
@@ -54,7 +55,7 @@ import {
   workerSessions,
 } from "../src/legion/worker-budget";
 import { runWorkspaceCommand, setJjIdentity } from "../src/legion/workspace-helpers";
-import { claimEnvoyRole, deleteEnvoyInterest, type EnvoySessionContext } from "./envoy";
+import { claimEnvoyRole, deleteEnvoyInterest } from "./envoy";
 
 export default function legionExtension(pi: PiApi): void {
   const agents = pi.agents;
@@ -141,7 +142,7 @@ export default function legionExtension(pi: PiApi): void {
   const claimRole = async (
     sessionID: string,
     role: string,
-    context?: EnvoySessionContext
+    context?: SessionContext
   ): Promise<void> => {
     await claimEnvoyRole(sessionID, role, context);
   };
@@ -197,7 +198,7 @@ export default function legionExtension(pi: PiApi): void {
               controlCodec.encode(
                 JSON.stringify({
                   type: "nack",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: messageFor(error),
                 })
               )
             );
@@ -487,7 +488,7 @@ export default function legionExtension(pi: PiApi): void {
           if (rewritten) return { input: rewritten };
         }
       } catch (error) {
-        return { block: true, reason: error instanceof Error ? error.message : String(error) };
+        return { block: true, reason: messageFor(error) };
       }
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
@@ -526,7 +527,7 @@ export default function legionExtension(pi: PiApi): void {
         },
       };
     } catch (error) {
-      return { block: true, reason: error instanceof Error ? error.message : String(error) };
+      return { block: true, reason: messageFor(error) };
     }
   });
   pi.on("tool_result", async (event) => {

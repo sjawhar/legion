@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "../log";
 import { type EnvoyConfig, EnvoyConfigSchema } from "./schema";
 
@@ -23,7 +24,7 @@ function readConfigFile(filePath: string): EnvoyConfig | null {
     }
     return parsed.data as EnvoyConfig;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = messageFor(error);
     logger.warn(`[envoy-plugin] Failed to load config at ${filePath}: ${message}`);
     return null;
   }

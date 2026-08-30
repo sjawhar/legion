@@ -1,70 +1,17 @@
-import * as os from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { messageFor } from "@legion/envoy-client/errors";
+import { machineID } from "@legion/envoy-client/machine";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import type { PiApi, SessionContext, ToolResult } from "../src/pi-types";
+import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
-type ToolParameters = Readonly<Record<string, string | readonly string[] | undefined>>;
-
-type ToolResult = {
-  readonly content: readonly { readonly type: "text"; readonly text: string }[];
-  readonly details: Readonly<Record<string, unknown>>;
-  readonly isError?: boolean;
-};
-
-
-export interface EnvoySessionContext {
-  readonly cwd: string;
-  readonly sessionManager: {
-    readonly getSessionId: () => string;
-    /** Live display title; assigned by omp after the first turn, so often undefined at session_start. */
-    readonly getSessionName?: () => string | undefined;
-  };
-  readonly setInterval: (callback: () => void, intervalMs: number) => void;
-  readonly ui: { readonly notify: (message: string, level: "warning") => void };
-}
-
-type SessionContext = EnvoySessionContext;
-
-type PiApi = {
-  readonly zod: {
-    readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
-    readonly string: () => { readonly optional: () => unknown };
-    readonly array: (item: unknown) => { readonly optional: () => unknown };
-  };
-  readonly registerTool: (tool: {
-    readonly name: string;
-    readonly label: string;
-    readonly description: string;
-    readonly parameters: unknown;
-    readonly execute: (id: string, parameters: ToolParameters) => Promise<ToolResult>;
-  }) => void;
-  readonly registerCommand: (
-    name: string,
-    command: {
-      readonly description: string;
-      readonly handler: (
-        args: string,
-        context: {
-          readonly ui: { readonly notify: (message: string, level: "info" | "warning") => void };
-        }
-      ) => Promise<void>;
-    }
-  ) => void;
-  readonly on: (
-    event: "resources_discover" | "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
-    handler: (event: unknown, context: SessionContext) => Promise<unknown>,
-  ) => void;
-  readonly sendMessage: (
-    message: { readonly customType: string; readonly content: string; readonly display: boolean },
-    options: { readonly deliverAs: "steer"; readonly triggerTurn: boolean },
-  ) => void;
-};
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
@@ -72,7 +19,7 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
 type LegionRoleClaim = (
   sessionID: string,
   role: string,
-  context?: EnvoySessionContext
+  context?: SessionContext
 ) => Promise<void>;
 
 type LegionRoleClaimReady = {
@@ -107,7 +54,7 @@ function legionRoleClaimBridge(): LegionRoleClaimBridge {
 export async function claimEnvoyRole(
   sessionID: string,
   role: string,
-  context?: EnvoySessionContext
+  context?: SessionContext
 ): Promise<void> {
   const bridge = legionRoleClaimBridge();
   await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
@@ -131,7 +78,6 @@ export default function envoyExtension(pi: PiApi): void {
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
   const dedupeKeys = new Set<string>();
-  const machineID = os.hostname();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
@@ -455,7 +401,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);
 
-  async function execute(operation: EnvoyToolOperation, parameters: ToolParameters): Promise<ToolResult> {
+  async function execute(operation: EnvoyToolOperation, parameters: Record<string, unknown>): Promise<ToolResult> {
     try {
       switch (operation) {
         case EnvoyToolOperation.subscribe: {
@@ -464,7 +410,7 @@ export default function envoyExtension(pi: PiApi): void {
           for (const topic of topicsFor(parameters)) (await subscribe(topic) ? added : already).push(topic);
           const registrationError =
             added.length === 0 ? undefined : await registerSession().then(() => undefined, messageFor);
-          return success(`Subscribed: ${added.join(", ") || "(none new)"}`, {
+          return toolSuccess(`Subscribed: ${added.join(", ") || "(none new)"}`, {
             added,
             already,
             ...(registrationError === undefined ? {} : { registrationError }),
@@ -484,7 +430,7 @@ export default function envoyExtension(pi: PiApi): void {
                   .unsubscribe({ sessionID, topics: removed })
                   .then(registerSession)
                   .then(() => undefined, messageFor);
-          return success(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
+          return toolSuccess(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
             removed,
             ...(registrationError === undefined ? {} : { registrationError }),
           });
@@ -496,27 +442,27 @@ export default function envoyExtension(pi: PiApi): void {
           for (const topic of subscriptions.keys()) {
             if (!interests.has(topic)) interests.set(topic, "live");
           }
-          return success(JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2), {
+          return toolSuccess(JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2), {
             interests: [...interests].map(([topic, source]) => ({ topic, source })),
           });
         }
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
           await client.send({ sourceSessionID: sessionID, targetSessionID, message: stringFor(parameters, "message") });
-          return success(`Sent to ${targetSessionID}`, { target: targetSessionID });
+          return toolSuccess(`Sent to ${targetSessionID}`, { target: targetSessionID });
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
           await client.publish({ sourceSessionID: sessionID, topic, message: stringFor(parameters, "message") });
-          return success(`Published to ${topic}`, { topic });
+          return toolSuccess(`Published to ${topic}`, { topic });
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
           await setEnvoyRole(role);
-          return success(`Now holding role: ${role}`, { role });
+          return toolSuccess(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.whoami: {
-          return success(JSON.stringify({ session_id: sessionID, machine_id: machineID, dir: sessionDirectory }, null, 2), {
+          return toolSuccess(JSON.stringify({ session_id: sessionID, machine_id: machineID(), dir: sessionDirectory }, null, 2), {
             sessionID,
             topics: [...subscriptions.keys()],
           });
@@ -525,11 +471,11 @@ export default function envoyExtension(pi: PiApi): void {
           const machine = parameters.machine;
           const sessions = await client.listSessions();
           const result = typeof machine === "string" ? sessions.filter((session) => session.machine_id === machine) : sessions;
-          return success(JSON.stringify(result, null, 2), { count: result.length, machine });
+          return toolSuccess(JSON.stringify(result, null, 2), { count: result.length, machine });
         }
       }
     } catch (error) {
-      return failure(messageFor(error));
+      return toolFailure(error);
     }
   }
 }
@@ -555,27 +501,16 @@ function schemaFor(pi: PiApi, operation: EnvoyToolOperation): unknown {
   }
 }
 
-function stringFor(parameters: ToolParameters, key: string): string {
+function stringFor(parameters: Record<string, unknown>, key: string): string {
   const value = parameters[key];
   if (typeof value !== "string") throw new TypeError(`${key} must be a string`);
   return value;
 }
 
-function topicsFor(parameters: ToolParameters, fallback: readonly string[] = []): readonly string[] {
+function topicsFor(parameters: Record<string, unknown>, fallback: readonly string[] = []): readonly string[] {
   const value = parameters.topics;
   if (value === undefined) return fallback;
   if (!Array.isArray(value) || value.some((topic) => typeof topic !== "string")) throw new TypeError("topics must be strings");
   return value;
 }
 
-function success(text: string, details: Readonly<Record<string, unknown>> = {}): ToolResult {
-  return { content: [{ type: "text", text }], details };
-}
-
-function failure(text: string): ToolResult {
-  return { content: [{ type: "text", text }], details: {}, isError: true };
-}
-
-function messageFor(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

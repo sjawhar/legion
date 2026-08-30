@@ -8,6 +8,14 @@ import { startLegionApi } from "../../daemon/src/daemon/api";
 import { newLegionState } from "../../daemon/src/daemon/legion-state";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
+import type {
+  CommandContext,
+  ExtensionAgentsApi,
+  PiApi,
+  RegisteredTool,
+  SessionContext,
+  ZodProperty,
+} from "../src/pi-types";
 
 mock.module("nats", () => ({
   connect: async () => ({
@@ -35,72 +43,20 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 const { default: envoyExtension } = await import("./envoy");
 const { default: legionExtension } = await import("./legion");
 
-type SessionContext = {
-  readonly cwd: string;
-  readonly taskDepth?: number;
-  readonly sessionManager: {
-    readonly getSessionId: () => string;
-    readonly getSessionFile: () => string | undefined;
-  };
-  readonly setInterval: (callback: () => void, intervalMs: number) => void;
-  readonly ui: { readonly notify: (message: string, level: "warning") => void };
-};
-
-type CommandContext = {
-  readonly cwd: string;
-  readonly sessionManager: { readonly getSessionId: () => string };
-};
-
 type RegisteredCommand = {
   readonly name: string;
   readonly description: string;
   readonly handler: (args: string, context: CommandContext) => Promise<void>;
 };
 
-type ToolResult = {
-  readonly content: readonly { readonly type: "text"; readonly text: string }[];
-  readonly details: Readonly<Record<string, unknown>>;
-  readonly isError?: boolean;
-};
-
-type RegisteredTool = {
-  readonly name: string;
-  readonly defaultInactive?: boolean;
-  readonly execute: (
-    id: string,
-    parameters: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate: unknown,
-    context: SessionContext
-  ) => Promise<ToolResult>;
-};
-
-type ZodProperty = { readonly optional: () => unknown };
-
-type TestAgent = { readonly id: string };
-
-type ExtensionAgentsApi = {
-  readonly list: () => readonly TestAgent[];
-  readonly get: (agentId: string) => TestAgent | undefined;
-  readonly ensureLive: (
-    agentId: string,
-    options: { readonly parentSessionFile: string }
-  ) => Promise<TestAgent>;
-  readonly prompt: (agentId: string, content: string) => Promise<void>;
-};
+type SentMessage = Parameters<PiApi["sendMessage"]>[0];
 
 type TestPi = {
-  readonly zod: {
-    readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
-    readonly string: () => ZodProperty;
-    readonly number: () => ZodProperty;
-    readonly array: (item: unknown) => ZodProperty;
-    readonly enum: (values: readonly string[]) => ZodProperty;
-    readonly unknown: () => ZodProperty;
+  readonly zod: PiApi["zod"] & {
     readonly discriminatedUnion: (key: string, options: readonly unknown[]) => unknown;
   };
   readonly agents?: ExtensionAgentsApi;
-  readonly sendMessage: (message: { readonly type: string }) => void;
+  readonly sendMessage: PiApi["sendMessage"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: (
@@ -173,7 +129,7 @@ function createPi(
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
-  readonly sentMessages: { readonly type: string }[];
+  readonly sentMessages: SentMessage[];
   readonly activeTools: string[];
   readonly pi: TestPi;
 } {
@@ -181,7 +137,7 @@ function createPi(
   const handlers = new Map<string, Handler>();
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
-  const sentMessages: { readonly type: string }[] = [];
+  const sentMessages: SentMessage[] = [];
   const activeTools = ["read", "task", "hub"];
   const optional = (): ZodProperty => ({ optional: () => undefined });
   const agents =
@@ -979,6 +935,7 @@ describe("Legion OMP extension", () => {
     await claimCommand.handler("", {
       cwd: "/tmp/legion-workspace",
       sessionManager: { getSessionId: () => "ses_interactive" },
+      ui: { notify: () => undefined },
     });
 
     expect(requests).toEqual([
@@ -1026,6 +983,7 @@ describe("Legion OMP extension", () => {
       claimCommand.handler("", {
         cwd: "/tmp/legion-workspace",
         sessionManager: { getSessionId: () => "ses_interactive" },
+        ui: { notify: () => undefined },
       })
     ).rejects.toThrow(
       "LEGION_CONTROLLER_SECRET is required to claim the controller. Launch OMP with LEGION_CONTROLLER_SECRET in its environment before running /legion-claim-controller."
