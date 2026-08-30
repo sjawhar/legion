@@ -91,7 +91,8 @@ legion gh -- <gh args…>
 ## GitHub comment attribution
 
 Append this exact structured footer to **every** GitHub issue comment, pull-request comment,
-and review that this phase posts. It lets the daemon index the artifact back to the session:
+and review that this phase posts. It preserves session provenance on the artifact itself so
+work stays attributable to the session that produced it:
 
 ```html
 <!-- legion: {"session":"<session-id>","phase":"<phase>"} -->

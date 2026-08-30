@@ -75,7 +75,6 @@ export async function handlePhase(
     sessionId,
     ...(existing && "issue" in existing && existing.agentId ? { agentId: existing.agentId } : {}),
   };
-  ctx.deps.state.attribution.push({ issue, phase, sessionId });
   const lease = await ctx.github.tokenForIssue(issue, appRoleForLegionRole(role));
   await ctx.save();
   return Response.json(

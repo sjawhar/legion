@@ -197,89 +197,6 @@ function addNode(
   return node;
 }
 
-function addAttribution(
-  state: LegionState,
-  entry: {
-    sha?: string;
-    commentId?: number;
-    sessionId: string;
-    issue: IssueKey;
-    phase: string;
-  }
-): void {
-  if (
-    state.attribution.some(
-      (current) =>
-        current.sha === entry.sha &&
-        current.commentId === entry.commentId &&
-        current.sessionId === entry.sessionId
-    )
-  ) {
-    return;
-  }
-  state.attribution.push(entry);
-}
-
-function footer(body: string): { sessionId: string; phase?: string } | undefined {
-  const match = /<!--\s*legion:\s*({[\s\S]*?})\s*-->/.exec(body);
-  if (!match) return undefined;
-  try {
-    const parsed = asRecord(JSON.parse(match[1]));
-    const sessionId =
-      stringValue(parsed?.session) ??
-      stringValue(parsed?.sessionId) ??
-      stringValue(parsed?.session_id);
-    return sessionId ? { sessionId, phase: stringValue(parsed?.phase) } : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function sessionForCommit(commit: JsonRecord): string | undefined {
-  const message = stringValue(commit.message) ?? "";
-  const trailer = /(?:^|\n)Legion-Session:\s*([^\s]+)/im.exec(message)?.[1];
-  if (trailer) return trailer;
-  const email =
-    stringValue(asRecord(commit.author)?.email) ?? stringValue(commit.author_email) ?? "";
-  return /\+([^@+\s]+)@/.exec(email)?.[1];
-}
-
-function indexPush(state: LegionState, payload: JsonRecord, repo: string): void {
-  const branch = /^refs\/heads\/legion\/issue-(\d+)$/.exec(stringValue(payload.ref) ?? "");
-  if (!branch) return;
-  const issue = keyFor(repo, Number(branch[1]));
-  if (!issue || !Array.isArray(payload.commits)) return;
-  for (const value of payload.commits) {
-    const commit = asRecord(value);
-    if (!commit) continue;
-    const sessionId = sessionForCommit(commit);
-    const sha = stringValue(commit.id) ?? stringValue(commit.sha);
-    if (!sessionId || !sha) continue;
-    addAttribution(state, {
-      sha,
-      sessionId,
-      issue,
-      phase: state.phases[issue]?.phase ?? "implement",
-    });
-  }
-}
-
-function indexComment(state: LegionState, payload: JsonRecord, repo: string): void {
-  const rawIssue = asRecord(payload.issue);
-  const comment = asRecord(payload.comment);
-  const number = numberValue(rawIssue?.number);
-  const parsed = footer(stringValue(comment?.body) ?? "");
-  const issue = number === undefined ? undefined : keyFor(repo, number);
-  const commentId = numberValue(comment?.id);
-  if (!parsed || !issue || commentId === undefined) return;
-  addAttribution(state, {
-    commentId,
-    sessionId: parsed.sessionId,
-    issue,
-    phase: parsed.phase ?? state.phases[issue]?.phase ?? "comment",
-  });
-}
-
 function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
   const author = stringValue(asRecord(comment.user)?.login) ?? stringValue(comment.author);
   return (
@@ -542,7 +459,6 @@ function issueComment(
   const repo = repository(payload);
   const number = numberValue(rawIssue.number);
   if (!repo || number === undefined) return [];
-  indexComment(state, payload, repo);
   if (payload.action !== "created" || filtered(comment, config)) return [];
   const author = stringValue(asRecord(comment.user)?.login) ?? "";
   const body = stringValue(comment.body) ?? "";
@@ -704,10 +620,8 @@ export function reduceGithubEvent(
   const payload = payloadFrom(envelope);
   if (!payload) return [];
   const repo = repository(payload);
-  if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) {
-    indexPush(state, payload, repo);
-    return [];
-  }
+  // Pushes to legion issue branches carry no reducer-visible state transitions.
+  if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
   return (
     ingress(state, payload, config) ??
     subIssue(state, payload, envelope) ??

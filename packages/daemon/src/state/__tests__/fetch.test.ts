@@ -1,8 +1,5 @@
 /**
- * Tests for state fetch logic.
- *
- * Originally ported from Python tests. Linear-specific parsing tests
- * have moved to backends/__tests__/linear.test.ts.
+ * Tests for GitHub status fetch helpers.
  */
 
 import { describe, expect, it } from "bun:test";
