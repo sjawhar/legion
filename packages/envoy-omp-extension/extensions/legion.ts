@@ -25,6 +25,7 @@ import {
 } from "../src/legion/control";
 import { createLegionDaemonClient } from "../src/legion/daemon-client";
 import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
+import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import type {
   BeforeAgentStartEvent,
   CommandContext,
@@ -253,6 +254,10 @@ export default function legionExtension(pi: PiApi): void {
     rootBootstraps.set(bootToken, bootstrap);
     try {
       const root = await bootstrap;
+      await exportJjSessionAttribution(
+        sessionFile,
+        requiredEnvironment(process.env, "LEGION_STATE_DIR")
+      );
       rootSessionID = sessionID;
       rootArchitectRole = root.role;
       rootSecret = root.secret;
