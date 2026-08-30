@@ -44,6 +44,49 @@ type listenerDeps struct {
 
 const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
 
+// Canonical policy for the listener's durable consumer. DeliverSubject is
+// deliberately not part of the policy: it is fixed at creation and preserved
+// for the consumer's lifetime (nats.Bind attaches to whatever subject the
+// server has persisted).
+//
+// consumerInactiveThreshold lets the server delete a machine's durable
+// consumer once its listener has been gone this long. The notification
+// stream only retains 72h of messages, so a consumer inactive longer than
+// that has already lost data and its durability protects nothing; without
+// a threshold, every decommissioned machine leaves a consumer behind
+// forever, silently accumulating pending state.
+const (
+	consumerAckWait           = 60 * time.Second
+	consumerMaxAckPending     = 256
+	consumerMaxDeliver        = 20
+	consumerInactiveThreshold = 7 * 24 * time.Hour
+)
+
+// applyListenerConsumerPolicy stamps the canonical consumer policy onto
+// config. Shared by the create and drift-correction paths so the policy has
+// exactly one definition.
+func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string) {
+	config.FilterSubject = ""
+	config.FilterSubjects = subjects
+	config.AckPolicy = nats.AckExplicitPolicy
+	config.AckWait = consumerAckWait
+	config.MaxAckPending = consumerMaxAckPending
+	config.MaxDeliver = consumerMaxDeliver
+	config.InactiveThreshold = consumerInactiveThreshold
+}
+
+// listenerConsumerPolicyDrifted reports whether a consumer's server-side
+// config diverges from the canonical policy.
+func listenerConsumerPolicyDrifted(config nats.ConsumerConfig, subjects []string) bool {
+	return config.FilterSubject != "" ||
+		!slices.Equal(config.FilterSubjects, subjects) ||
+		config.AckPolicy != nats.AckExplicitPolicy ||
+		config.AckWait != consumerAckWait ||
+		config.MaxAckPending != consumerMaxAckPending ||
+		config.MaxDeliver != consumerMaxDeliver ||
+		config.InactiveThreshold != consumerInactiveThreshold
+}
+
 var rolePattern = regexp.MustCompile(rolePatternString)
 
 func isValidRole(role string) bool {
@@ -52,22 +95,35 @@ func isValidRole(role string) bool {
 
 // startListenerSubscription preserves the durable consumer so restarts resume
 // from the last ACKed non-role message instead of skipping pending work.
+//
+// The consumer is always created server-side and then bound, never created by
+// js.Subscribe: the client library deletes consumers it created itself on
+// Unsubscribe()/Drain(), and both the bus reconnect recovery and the SIGTERM
+// drain paths trigger exactly that — silently resetting the durable cursor.
+// The config drift-correction also stamps consumerInactiveThreshold onto
+// consumers created before the threshold existed.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
 	subjects := bus.StreamSubjects()
 	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-	if err == nil && (info.Config.FilterSubject != "" ||
-		!slices.Equal(info.Config.FilterSubjects, subjects) ||
-		info.Config.AckPolicy != nats.AckExplicitPolicy ||
-		info.Config.AckWait != 60*time.Second ||
-		info.Config.MaxAckPending != 256 ||
-		info.Config.MaxDeliver != 20) {
+	switch {
+	case errors.Is(err, nats.ErrConsumerNotFound):
+		// The deliver subject is a random inbox, not a derivable name: on a
+		// shared NATS account a predictable subject would let any client
+		// hold interest on it — shadow-reading deliveries and making the
+		// consumer look push-bound so the listener could never attach.
+		config := nats.ConsumerConfig{
+			Durable:        consumer,
+			DeliverSubject: nats.NewInbox(),
+		}
+		applyListenerConsumerPolicy(&config, subjects)
+		if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
+			return nil, err
+		}
+	case err != nil:
+		return nil, err
+	case listenerConsumerPolicyDrifted(info.Config, subjects):
 		config := info.Config
-		config.FilterSubject = ""
-		config.FilterSubjects = subjects
-		config.AckPolicy = nats.AckExplicitPolicy
-		config.AckWait = 60 * time.Second
-		config.MaxAckPending = 256
-		config.MaxDeliver = 20
+		applyListenerConsumerPolicy(&config, subjects)
 		if _, err := client.JS().UpdateConsumer(bus.Stream, &config); err != nil {
 			return nil, err
 		}
@@ -75,14 +131,8 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 	return client.Subscribe(
 		"",
 		handler,
-		nats.BindStream(bus.Stream),
-		nats.ConsumerFilterSubjects(subjects...),
-		nats.Durable(consumer),
-		nats.AckExplicit(),
+		nats.Bind(bus.Stream, consumer),
 		nats.ManualAck(),
-		nats.AckWait(60*time.Second),
-		nats.MaxAckPending(256),
-		nats.MaxDeliver(20),
 	)
 }
 
@@ -91,24 +141,29 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 	return err == nil
 }
 
-// runSelfHealthWatchdog periodically pings the KV registries and self-terminates
-// after `threshold` consecutive failures. Designed for the case where the bus
-// recovery path restores the main subject subscription but the KV-bound JetStream
-// context stays broken (observed on sami after a long Tailscale write-timeout).
+// runSelfHealthWatchdog periodically pings the KV registries and the durable
+// consumer, self-terminating after `threshold` consecutive failures. Designed
+// for wedged states the bus recovery path cannot repair: a KV-bound JetStream
+// context that stays broken after reconnect (observed on sami after a long
+// Tailscale write-timeout), or a durable consumer the server garbage-collected
+// via consumerInactiveThreshold while this process was alive but unbound —
+// recovery replays nats.Bind, which cannot recreate a missing consumer, so
+// only a restart re-runs the ensure-then-bind boot path.
 //
 // Termination uses SIGTERM so the existing graceful shutdown path runs. Docker
 // `restart: unless-stopped` (on-prem) and ECS task respawn (Fargate) then bring
 // the listener back with a fresh conn.
-func runSelfHealthWatchdog(logger *logging.Logger, registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, interval time.Duration, threshold int) {
+func runSelfHealthWatchdog(logger *logging.Logger, registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, durable func() error, interval time.Duration, threshold int) {
 	terminate := func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) }
-	probe := func() error { return checkSelfHealth(registry, sessions, ci) }
+	probe := func() error { return checkSelfHealth(registry, sessions, ci, durable) }
 	runSelfHealthLoop(logger, probe, terminate, interval, threshold)
 }
 
-// checkSelfHealth pings both KV-backed registries. Returns the first error
-// encountered, or nil when all are reachable. Extracted from the watchdog loop
-// so callers (and tests) can probe the same view of health that the loop uses.
-func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store) error {
+// checkSelfHealth pings the KV-backed registries and the optional durable
+// consumer probe. Returns the first error encountered, or nil when all are
+// healthy. Extracted from the watchdog loop so callers (and tests) can probe
+// the same view of health that the loop uses.
+func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, durable func() error) error {
 	if registry != nil {
 		if err := registry.Ping(); err != nil {
 			return fmt.Errorf("interest kv: %w", err)
@@ -122,6 +177,11 @@ func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry
 	if ci != nil {
 		if err := ci.Ping(); err != nil {
 			return fmt.Errorf("ci kv: %w", err)
+		}
+	}
+	if durable != nil {
+		if err := durable(); err != nil {
+			return fmt.Errorf("durable consumer: %w", err)
 		}
 	}
 	return nil
@@ -774,9 +834,12 @@ func main() {
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
-	// Subscribe with retry — during rolling deployments, the old container may still
-	// hold the durable consumer binding. Before subscribing, check if the consumer
-	// is push-bound by a stale connection and force-delete it if so.
+	// Subscribe with retry — during rolling deployments, the old container may
+	// still hold the durable consumer binding. nats.Bind rejects a second
+	// binding ("consumer is already bound"), so retry with backoff until the
+	// old listener's delivery interest clears; never delete the consumer to
+	// steal the binding — that resets the durable cursor and replays the full
+	// retention window to every subscriber.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		registry:          registry,
@@ -794,19 +857,6 @@ func main() {
 
 	var sub *nats.Subscription
 	for attempt := 1; attempt <= 10; attempt++ {
-		// If consumer exists and is push-bound by a dead connection, delete it.
-		info, infoErr := client.JS().ConsumerInfo(bus.Stream, consumer)
-		if infoErr == nil && info.PushBound {
-			logger.Warn("consumer is push-bound by stale connection, deleting",
-				slog.String("consumer", consumer),
-				slog.Int("attempt", attempt),
-			)
-			if delErr := client.JS().DeleteConsumer(bus.Stream, consumer); delErr != nil {
-				logger.Warn("failed to delete stale consumer",
-					slog.String("error", delErr.Error()),
-				)
-			}
-		}
 		sub, err = startListenerSubscription(client, consumer, jetStreamDeliveryHandler(deliveryConfig))
 		if err == nil {
 			break
@@ -891,7 +941,17 @@ func main() {
 	// session.SessionRegistry kept their KV handles bound to the original
 	// closed conn. Restart is cheap and lossless — KV state is durable, NATS
 	// retries undelivered messages, and agent sessions re-register.
-	go runSelfHealthWatchdog(logger, registry, sessions, ciStore, 30*time.Second, 3)
+	// The durable probe only treats a definitively missing consumer as
+	// unhealthy — transient lookup failures are already covered by the KV
+	// pings — so a consumer the server garbage-collected out from under a
+	// live-but-unbound process forces the restart that recreates it.
+	durableProbe := func() error {
+		if _, err := client.JS().ConsumerInfo(bus.Stream, consumer); errors.Is(err, nats.ErrConsumerNotFound) {
+			return err
+		}
+		return nil
+	}
+	go runSelfHealthWatchdog(logger, registry, sessions, ciStore, durableProbe, 30*time.Second, 3)
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
