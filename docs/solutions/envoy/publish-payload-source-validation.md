@@ -9,7 +9,7 @@ tags:
   - plan-verification
 date: 2026-04-11
 status: active
-module: envoy-plugin
+module: envoy
 related_issues:
   - "sjawhar-legion-418"
 symptoms:

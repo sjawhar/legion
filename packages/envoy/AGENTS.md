@@ -8,7 +8,7 @@ Envoy owns transport, routing, and delivery:
 
 - ingests Slack/GitHub/Ghost Wispr/agent events
 - publishes ordinary notifications through JetStream and role lanes through core NATS
-- resolves target OpenCode sessions
+- resolves target agent sessions
 - delivers by hot `prompt_async` (ordinary events stay in JetStream for retry if session is unavailable)
 
 It does not own Legion workflow policy. The daemon/controller decides what to do; Envoy moves events to the right session.
@@ -30,7 +30,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 ## Critical conventions
 
 - `packages/contracts` is the source of truth for event contract shape; regenerate Go output from there.
-- Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
+- Keep Envoy API-level with the agent runtime (Oh My Pi). Do not add DB introspection or runtime-specific hidden coupling unless there is no API path.
 - Listener-hosted `github` / `slack` / `ghostwispr` webhook handlers must fail loudly when publishing fails. JetStream acknowledgement waits are bounded to five seconds, so ingress cannot wait indefinitely for a publish confirmation. For `/v1/messages/publish`, keep the human `message` summary separate from optional machine `payload`: they populate `payload_summary` and `payload` respectively.
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
 - `ENVOY_GHOSTWISPR_SIGNING_SECRET` is optional for trusted Ghost Wispr deployments; when unset, skip signature verification explicitly rather than half-verifying missing headers.

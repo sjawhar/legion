@@ -14,8 +14,8 @@ whole thing.
 Dispatch requires a single GitHub App that handles both:
 
 - The dashboard's **user-to-server** OAuth flow (humans signing in)
-- The agent path's **installation tokens** (bot acting on the user's behalf,
-  via the `gh-app-token` shim)
+- The agent path's **installation tokens** (the Legion daemon acting on the
+  user's behalf via `LEGION_DISPATCH_BEARER`)
 
 Create the App once at <https://github.com/settings/apps/new> with the
 settings below. Replace `https://dispatch.example` with the public origin
@@ -191,8 +191,9 @@ App's `clientSecret`.
 ## MCP per-request auth
 
 The `/mcp` endpoint authenticates **per-request** via the `Authorization:
-Bearer` header. The token is the agent's own GitHub identity (typically an
-installation token minted by `gh-app-token`); it's used verbatim for every
+Bearer` header. The token is the caller's own GitHub identity (the Legion
+daemon sends the bearer from `LEGION_DISPATCH_BEARER`, see
+`packages/daemon/src/daemon/api/dispatch.ts`); it's used verbatim for every
 GitHub call made on behalf of the tool invocation. The server never falls
 back to the dashboard user's stored token.
 

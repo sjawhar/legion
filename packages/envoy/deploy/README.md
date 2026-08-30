@@ -3,7 +3,7 @@
 Compose definition for the on-prem `envoy-listener` container. The listener is
 a stateless NATS subscriber that connects outbound to a single NATS server
 (typically reached via Tailscale on the host network) and serves
-`127.0.0.1:9020` for local OpenCode session registration and webhook ingress
+`127.0.0.1:9020` for local agent session registration and webhook ingress
 when configured.
 
 ## Layout

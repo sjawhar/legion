@@ -8,7 +8,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 )
 
-// Session routes are keyed by session ID, but opencode session state lives on
+// Session routes are keyed by session ID, but agent session state lives on
 // shared disk, so several live processes can hold the same session at once: the
 // process explicitly driving it (launched with -s <session>), plus any process
 // that merely has it loaded. Every such process heartbeats a claim. Blind

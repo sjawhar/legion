@@ -23,14 +23,9 @@ This file is the **agent-facing** description of the code.
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
 | `/api/view`                                   | GET     | dsession cookie              | Return user's watched-repos                      |
 | `/api/view`                                   | PATCH   | dsession cookie              | Replace user's watched-repos list                |
-| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `envoy_dispatch` tool      |
+| `/mcp`                                        | POST/GET | `Authorization: Bearer …`    | MCP Streamable HTTP — `envoy_dispatch` tool      |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist/`           |
-
-The legacy device-flow endpoints (`POST /auth/login`, `GET /auth/status`)
-are gone. So is `routes/setup.go` (manifest-flow bootstrap was wrong for
-this deployment shape — operators register the App by hand once, see
-README).
 
 ## Auth model
 
@@ -41,10 +36,10 @@ token:
   web-flow OAuth dance. One per GitHub login, refreshable for ~6 months
   with the App's `clientSecret`. Stored in
   `~/.local/share/dispatch/users/<login>.json`.
-- **MCP (agent)** — `ghs_…` installation tokens. The shim
-  (`packages/envoy-plugin/bin/dispatch-mcp-shim.ts`) mints them via
-  `gh-app-token` for each request; dispatch's `/mcp` extracts the bearer
-  and uses it verbatim. The server never falls back to a stored token.
+- **MCP (agent)** — the Legion daemon calls dispatch's `/mcp` directly with
+  the bearer from `LEGION_DISPATCH_BEARER`
+  (`packages/daemon/src/daemon/api/dispatch.ts`); dispatch extracts the
+  bearer and uses it verbatim. The server never falls back to a stored token.
 
 The same Envoy App serves both surfaces. Installation tokens are scoped by
 installation; user-to-server tokens are scoped by what the user authorized.
@@ -65,8 +60,8 @@ contains the event's repo. Repo is derived from the NATS subject
 events. Operators don't pre-configure which repos dispatch covers; users
 add their own from the dashboard.
 
-The NATS consumer subscribes to `notifications.github.>` (broader than the
-old single-repo subscription); filtering happens at the SSE-fanout layer.
+The NATS consumer subscribes to `notifications.github.>`; filtering happens
+at the SSE-fanout layer.
 
 ## MCP per-request auth pattern
 
@@ -85,9 +80,7 @@ See `core/parent.go` for the regex.
 ## Marker format
 
 Thread metadata travels as **YAML frontmatter** at the top of issue bodies and
-comments — not HTML comments (the original plan's HTML+base64 scheme was
-superseded; see the note atop `.omo/plans/2026-05-22-dispatch.md`). The Go
-writer (`core/markers.go`) and the dashboard reader
+comments. The Go writer (`core/markers.go`) and the dashboard reader
 (`packages/dispatch/web/src/markers.ts`) implement this identically and must
 stay byte-compatible.
 
@@ -115,15 +108,17 @@ issue body, scoped to the `dispatch-thread` label
 (`githubapi.BuildRequestIDQuery`) — the search string and the emitted marker
 must reference the same `requestId`, or retries create duplicate threads.
 
-## Answer delivery (AC#4)
+## Answer delivery
 
-The Go server is stateless and has no OpenCode session context, so it does not
-route answers itself. The envoy-plugin's `tool.execute.after` hook
-(`packages/envoy-plugin/src/dispatch-subscribe.ts`) subscribes the calling
-session to `notifications.github.<owner>.<repo>.issue.<thread>.>` after a
-successful `envoy_dispatch`. When a human replies on the thread, the envoy
-listener publishes that comment to the topic and Envoy delivers it back to the
-originating agent session.
+The Go server is stateless and has no agent session context, so it does not
+route answers itself. The Legion daemon's `/legion/v1/dispatch-threads` route
+(`packages/daemon/src/daemon/api/routes/dispatch.ts`) records each opened
+thread against its owning tree, issue, and role in `state.dispatchThreads`.
+When a human replies on the thread, the daemon's issue-comment reducer
+(`packages/daemon/src/daemon/reducers.ts`) matches the comment to the recorded
+thread and routes a `dispatch-reply` event through the owning role token. The
+role route publishes immediately when the role is live and holds the reply on
+the tree when the lane is not available.
 
 ## State and credentials
 

@@ -12,7 +12,7 @@
 ## Multi-repo hygiene
 
 - Primary implementation lives in `~/legion/default/packages/envoy`
-- If opencode or another maintained repo must change, that work stays isolated in that repo
+- If another maintained repo must change, that work stays isolated in that repo
 - Never bundle those changes into an existing `sami` octopus merge
 - Track every external-repo requirement in `docs/external-repos.md`
 

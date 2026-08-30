@@ -66,7 +66,7 @@ trap cleanup EXIT INT TERM
 echo "probe id: $TRIGGER"
 echo "topic:    $PROBE_TOPIC"
 
-# --- spawn local HTTP receiver mimicking OpenCode prompt_async ---
+# --- spawn local HTTP receiver mimicking the agent runtime's prompt_async ---
 RECEIVER_LOG="$(mktemp /tmp/probe-receiver-XXXXXX.log)"
 RECEIVER_PORT_FILE="$(mktemp /tmp/probe-port-XXXXXX)"
 
@@ -84,7 +84,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             f.write(self.path.encode() + b"\n")
             f.write(body + b"\n---\n")
             f.flush()
-        self.send_response(204)  # match real OpenCode prompt_async semantics
+        self.send_response(204)  # match real prompt_async semantics
         self.end_headers()
     def log_message(self, *a, **kw):
         pass  # quiet

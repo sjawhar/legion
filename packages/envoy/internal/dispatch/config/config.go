@@ -1,6 +1,7 @@
-// Package config loads the shared envoy.json configuration shape used by both
-// the Envoy plugin and the Dispatch server. User config (~/.config/opencode/envoy.json)
-// is shallow-merged with repo config (<cwd>/.opencode/envoy.json), with repo overriding.
+// Package config loads the envoy.json configuration for the Dispatch server.
+// User config (~/.config/opencode/envoy.json) is shallow-merged with repo
+// config (<cwd>/.opencode/envoy.json), with repo overriding. The path names
+// are a carryover from the retired OpenCode runtime; the files are still live.
 package config
 
 import (

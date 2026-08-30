@@ -33,7 +33,8 @@ changes. For backend changes see `packages/envoy/cmd/dispatch/AGENTS.md`.
 
 ## Configuration
 
-Dispatch reads the same `envoy.json` shape as the Envoy plugin.
+Dispatch reads the `envoy.json` configuration file (the path names are a
+carryover from the retired OpenCode runtime; the files are still live).
 
 - User config: `~/.config/opencode/envoy.json`
 - Repo config: `<repo>/.opencode/envoy.json`

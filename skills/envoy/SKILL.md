@@ -5,7 +5,7 @@ description: Use when subscribing sessions to Envoy topics, sending agent-to-age
 
 # Envoy
 
-Envoy is Legion's event-routing subsystem. It delivers Slack, GitHub, and agent-to-agent events to OpenCode sessions.
+Envoy is Legion's event-routing subsystem. It delivers Slack, GitHub, and agent-to-agent events to agent sessions.
 
 ## What the tools do
 
@@ -385,7 +385,7 @@ When the MCP bridge (`packages/envoy/internal/mcpbridge/envelope.go`) publishes 
 - `dedupe_key` is `source + "." + event_id` (e.g., `"whatsapp.cuid_abc123"`)
 - `payload_summary` is the actual message text from the MCP resource read (truncated to 200 chars), or fallback `"whatsapp event from <uri>"` if no text content
 - `payload_ref` and `source_event_id` are both the MCP resource notification URI
-- `source_session` is **omitted** (empty) — the MCP bridge is not an OpenCode session, so no echo-skip occurs
+- `source_session` is **omitted** (empty) — the MCP bridge is not an agent session, so no echo-skip occurs
 - `expires_at` is **omitted** — the bridge does not set message expiry
 
 ## Current Limitations (WhatsApp)
