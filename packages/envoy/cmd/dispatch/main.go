@@ -255,10 +255,15 @@ func parsePositiveInt(raw string) (int, error) {
 	}
 	return n, nil
 }
+
+// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and
+// DISPATCH_PORT. An empty host binds every interface (the containerized
+// production default); local compose deployments set 127.0.0.1.
 func listenAddress() (string, error) {
+	host := strings.TrimSpace(os.Getenv("DISPATCH_LISTEN_HOST"))
 	port := strings.TrimSpace(os.Getenv("DISPATCH_PORT"))
 	if port == "" {
-		return defaultListenAddr, nil
+		return host + defaultListenAddr, nil
 	}
 	parsed, err := parsePositiveInt(port)
 	if err != nil {
@@ -267,5 +272,5 @@ func listenAddress() (string, error) {
 	if parsed > 65535 {
 		return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
 	}
-	return ":" + port, nil
+	return host + ":" + port, nil
 }
