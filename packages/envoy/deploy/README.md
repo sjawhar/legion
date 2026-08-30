@@ -1,15 +1,20 @@
 # Deploy
 
-Compose definition for the on-prem `envoy-listener` container. The listener is
-a stateless NATS subscriber that connects outbound to a single NATS server
-(typically reached via Tailscale on the host network) and serves
-`127.0.0.1:9020` for local OpenCode session registration and webhook ingress
-when configured.
+Compose definitions for the on-prem Envoy containers: the `envoy-listener`
+NATS subscriber and the `envoy-dispatch` HTTP server. Both run on the host
+network and connect outbound to a single NATS server (typically reached via
+Tailscale). The listener serves `127.0.0.1:9020` for local OpenCode session
+registration and webhook ingress when configured; dispatch serves
+`127.0.0.1:8766` for the Dispatch SPA, GitHub OAuth, and the MCP endpoint
+that creates Dispatch threads as GitHub sub-issues.
 
 ## Layout
 
 - `compose/listener.compose.yml` — host-network listener container.
+- `compose/dispatch.compose.yml` — host-network dispatch container.
 - `scripts/up-listener.sh` — `docker compose up -d --build` for the listener.
+- `scripts/up-dispatch.sh` — builds the SPA on the host, then
+  `docker compose up -d --build` for dispatch.
 - `scripts/sync-host.sh` — rsync this package to a remote host over SSH.
 - `scripts/install-docker-debian.sh` — Docker install helper for fresh hosts.
 - `scripts/read-secret.sh` — read a secret from local SOPS-encrypted state.
@@ -52,6 +57,35 @@ export ENVOY_GITHUB_WEBHOOK_SECRET=...
 export ENVOY_SLACK_SIGNING_SECRET=...
 deploy/scripts/up-listener.sh
 ```
+
+## Bring up the dispatch server
+
+Configuration comes from the host's `~/.config/opencode/envoy.json`
+(`natsUrls` plus the `dispatch` block), mounted read-only into the container:
+
+```bash
+deploy/scripts/up-dispatch.sh
+curl http://127.0.0.1:8766/healthz
+```
+
+The SPA is built on the host (`bun run build:web` in `packages/dispatch`)
+because it lives outside this package's Docker build context; the up script
+does this on a full checkout, and accepts a prebuilt
+`packages/dispatch/web/dist` on sync-host targets.
+
+The service binds `127.0.0.1` by default even though it runs on the host
+network. Dispatch envs:
+
+| Var | Required | Notes |
+|---|---|---|
+| `DISPATCH_LISTEN_HOST` | no | Bind host; the compose service defaults it to `127.0.0.1`. Set an explicit reachable address (e.g. a Tailscale IP) only when remote access is required. |
+| `DISPATCH_PORT` | no | Defaults to 8766; the compose healthcheck tracks it |
+| `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | no | GitHub App OAuth credentials. Without them the server still starts: the dashboard responds 503 and `/mcp` works with any GitHub bearer the caller supplies. Alternatively drop an `app.json` into the `dispatch-data` volume at `/home/envoy/.local/share/dispatch/app.json`. |
+| `DISPATCH_INSECURE_COOKIE` | conditional | Session cookies are `Secure` by default, so a browser will not return them over plain HTTP. Set to any value when using the OAuth dashboard on `http://` (local/tailnet). |
+
+The Legion daemon reaches this server through its required
+`LEGION_DISPATCH_URL` (`http://127.0.0.1:8766`) and `LEGION_DISPATCH_BEARER`
+(a GitHub token; the server forwards it to GitHub per request).
 
 ## Sync to a remote host
 

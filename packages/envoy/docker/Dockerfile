@@ -10,7 +10,9 @@ COPY cmd ./cmd
 COPY internal ./internal
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
-    go build -o /out/envoy-listener ./cmd/listener
+    go build -o /out/envoy-listener ./cmd/listener \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+    go build -o /out/envoy-dispatch ./cmd/dispatch
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
@@ -19,9 +21,12 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r envoy && useradd -r -g envoy envoy
+    && groupadd -r envoy && useradd -r -g envoy envoy \
+    && mkdir -p /home/envoy/.local/share/dispatch \
+    && chown -R envoy:envoy /home/envoy
 
 COPY --from=build /out/envoy-listener /usr/local/bin/envoy-listener
+COPY --from=build /out/envoy-dispatch /usr/local/bin/envoy-dispatch
 
 
 USER envoy
