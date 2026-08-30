@@ -21,7 +21,7 @@ const NATS_READY_POLL_MS = 100;
 const NATS_CONNECT_TIMEOUT_MS = 1_000;
 const E2E_TEST_TIMEOUT_MS = NATS_READY_TIMEOUT_MS + 5_000;
 
-const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../../envoy-omp-extension");
+const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../../pi-envoy");
 const PINNED_CREDENTIAL_HELPER = `!${process.execPath} ${path.resolve(
   import.meta.dir,
   "../../cli/index.ts"

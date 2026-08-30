@@ -1,5 +1,5 @@
 import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
-import type { SessionContext } from "./pi-types";
+import type { SessionContext } from "../pi-types";
 
 export type LegionSessionKind =
   | { kind: "root-architect"; tree: string }
@@ -55,7 +55,9 @@ export function requiredControllerCapability(env: NodeJS.ProcessEnv): string {
   const secret = env.LEGION_CONTROLLER_SECRET;
   if (!secret) {
     throw new Error(
-      "LEGION_CONTROLLER_SECRET is required to claim the controller. Launch OMP with LEGION_CONTROLLER_SECRET in its environment before running /legion-claim-controller."
+      "LEGION_CONTROLLER_SECRET is required to claim the controller. " +
+        "Launch OMP with LEGION_CONTROLLER_SECRET in its environment before running " +
+        "/legion-claim-controller."
     );
   }
   return secret;

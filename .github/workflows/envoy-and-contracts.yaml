@@ -9,7 +9,7 @@ on:
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
-      - "packages/envoy-omp-extension/**"
+      - "packages/pi-envoy/**"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -17,7 +17,7 @@ on:
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
-      - "packages/envoy-omp-extension/**"
+      - "packages/pi-envoy/**"
 
 jobs:
   # Detect which packages actually changed to skip unnecessary jobs.
@@ -29,7 +29,7 @@ jobs:
       envoy: ${{ steps.filter.outputs.envoy }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
-      envoy_omp_extension: ${{ steps.filter.outputs.envoy_omp_extension }}
+      pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -51,8 +51,8 @@ jobs:
             claude_plugin:
               - 'packages/envoy-claude-plugin/**'
               - 'packages/contracts/**'
-            envoy_omp_extension:
-              - 'packages/envoy-omp-extension/**'
+            pi_envoy:
+              - 'packages/pi-envoy/**'
               - 'packages/contracts/**'
 
   contracts:
@@ -122,9 +122,9 @@ jobs:
         run: bun run build
         working-directory: packages/envoy-client
 
-  envoy-omp-extension:
+  pi-envoy:
     needs: changes
-    if: needs.changes.outputs.envoy_omp_extension == 'true'
+    if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -143,21 +143,21 @@ jobs:
           mise env --json
           jj --version
       - run: bun install --frozen-lockfile
-      - name: Build contracts for envoy-omp-extension
+      - name: Build contracts for pi-envoy
         run: bun run build
         working-directory: packages/contracts
-      - name: Lint envoy-omp-extension
+      - name: Lint pi-envoy
         run: bun run lint
-        working-directory: packages/envoy-omp-extension
-      - name: Typecheck envoy-omp-extension
+        working-directory: packages/pi-envoy
+      - name: Typecheck pi-envoy
         run: bun run typecheck
-        working-directory: packages/envoy-omp-extension
-      - name: Test envoy-omp-extension
+        working-directory: packages/pi-envoy
+      - name: Test pi-envoy
         run: bun run test
-        working-directory: packages/envoy-omp-extension
-      - name: Build envoy-omp-extension
+        working-directory: packages/pi-envoy
+      - name: Build pi-envoy
         run: bun run build
-        working-directory: packages/envoy-omp-extension
+        working-directory: packages/pi-envoy
 
   envoy-claude-plugin:
     needs: changes

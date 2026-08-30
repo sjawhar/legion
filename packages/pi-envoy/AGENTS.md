@@ -1,6 +1,6 @@
-# OMP Envoy Extension
+# Pi Envoy Extension
 
-Tracked OMP adapter for Envoy messaging.
+Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 ## Overview
 
@@ -26,4 +26,4 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 - Register schemas through the injected `pi.zod`; OMP rejects schemas built from another Zod instance.
 - Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
-- Do not alter `~/.omp` from this package. The README documents the developer symlink transition.
+- Do not alter `~/.omp` from this package. The README documents the local developer symlink.

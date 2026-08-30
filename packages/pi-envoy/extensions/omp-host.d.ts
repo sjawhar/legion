@@ -15,7 +15,4 @@ declare module "@oh-my-pi/pi-coding-agent" {
     prompt(agentId: string, content: string): Promise<void>;
   }
 
-  export interface PiApi {
-    readonly agents: ExtensionAgentsApi;
-  }
 }

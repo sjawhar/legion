@@ -9,6 +9,7 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { messageFor } from "@legion/envoy-client/errors";
 import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import {
@@ -27,14 +28,11 @@ import { createLegionDaemonClient } from "../src/legion/daemon-client";
 import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import type {
-  BeforeAgentStartEvent,
   CommandContext,
   PiApi,
   SessionContext,
-  ToolCallEvent,
   ToolCallEventResult,
-  ToolResultEvent,
-} from "../src/legion/pi-types";
+} from "../src/pi-types";
 import { legionSpawnBlockPattern, parseWorkerSpawn, workerAgentId } from "../src/legion/spawn";
 import { createEnvoyDispatchTool, createLegionTool } from "../src/legion/tools";
 import {
@@ -54,7 +52,7 @@ import {
   workerSessions,
 } from "../src/legion/worker-budget";
 import { runWorkspaceCommand, setJjIdentity } from "../src/legion/workspace-helpers";
-import { claimEnvoyRole, deleteEnvoyInterest, type EnvoySessionContext } from "./envoy";
+import { claimEnvoyRole, deleteEnvoyInterest } from "./envoy";
 
 export default function legionExtension(pi: PiApi): void {
   const agents = pi.agents;
@@ -141,7 +139,7 @@ export default function legionExtension(pi: PiApi): void {
   const claimRole = async (
     sessionID: string,
     role: string,
-    context?: EnvoySessionContext
+    context?: SessionContext
   ): Promise<void> => {
     await claimEnvoyRole(sessionID, role, context);
   };
@@ -197,7 +195,7 @@ export default function legionExtension(pi: PiApi): void {
               controlCodec.encode(
                 JSON.stringify({
                   type: "nack",
-                  error: error instanceof Error ? error.message : String(error),
+                  error: messageFor(error),
                 })
               )
             );
@@ -335,7 +333,7 @@ export default function legionExtension(pi: PiApi): void {
     }
     const project = process.env.LEGION_PROJECT;
     const spawn = project
-      ? parseWorkerSpawn((event as BeforeAgentStartEvent).prompt, project)
+      ? parseWorkerSpawn(event.prompt, project)
       : undefined;
     if (!spawn) {
       if (isRootSession(process.env, context)) await bootstrapRoot(context);
@@ -391,8 +389,7 @@ export default function legionExtension(pi: PiApi): void {
     }
   });
 
-  pi.on("tool_call", async (event, context): Promise<ToolCallEventResult | undefined> => {
-    const toolCall = event as ToolCallEvent;
+  pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     const sessionID = context.sessionManager.getSessionId();
     if (
       sessionID === rootSessionID &&
@@ -427,10 +424,15 @@ export default function legionExtension(pi: PiApi): void {
         });
         const tree = requiredEnvironment(process.env, "LEGION_TREE");
         const depth = context.taskDepth ?? 0;
-        const maxDepth = positiveIntegerEnvironment(process.env, "LEGION_MAX_RECURSION_DEPTH", "8");
+        const maxDepth = positiveIntegerEnvironment(
+          process.env,
+          "LEGION_MAX_RECURSION_DEPTH",
+          "8"
+        );
         if (role === "architect" && depth + 2 > maxDepth) {
           throw new Error(
-            `sub-architect at depth ${depth} would place its workers at the recursion cap (${maxDepth}); escalate to your parent architect instead`
+            `sub-architect at depth ${depth} would place its workers at the recursion cap ` +
+              `(${maxDepth}); escalate to your parent architect instead`
           );
         }
         const release = await acquireWorkerBudget(
@@ -456,9 +458,17 @@ export default function legionExtension(pi: PiApi): void {
           };
           addPendingLegionSpawn(pending);
           const taskWithoutMachineBlocks = task.replace(legionSpawnBlockPattern, "").trimEnd();
+          const spawnBlock = [
+            `<legion-spawn issue="${issue}"`,
+            `role="${role}"`,
+            `token="${token}"`,
+            `tree="${tree}"`,
+            `spawnToken="${spawn.spawnToken}"`,
+            `workspace="${workspace.workspaceDir}"/>`,
+          ].join(" ");
           return {
             ...taskInput,
-            task: `${taskWithoutMachineBlocks}\n\n<legion-spawn issue="${issue}" role="${role}" token="${token}" tree="${tree}" spawnToken="${spawn.spawnToken}" workspace="${workspace.workspaceDir}"/>`,
+            task: `${taskWithoutMachineBlocks}\n\n${spawnBlock}`,
           };
         } catch (error) {
           release();
@@ -487,7 +497,7 @@ export default function legionExtension(pi: PiApi): void {
           if (rewritten) return { input: rewritten };
         }
       } catch (error) {
-        return { block: true, reason: error instanceof Error ? error.message : String(error) };
+        return { block: true, reason: messageFor(error) };
       }
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
@@ -522,27 +532,24 @@ export default function legionExtension(pi: PiApi): void {
       return {
         input: {
           ...toolCall.input,
-          command: `${workerGhEnvironment(grant.grantId, stateDir, workerBin)}\n${toolCall.input.command}`,
+          command: [
+            workerGhEnvironment(grant.grantId, stateDir, workerBin),
+            toolCall.input.command,
+          ].join("\n"),
         },
       };
     } catch (error) {
-      return { block: true, reason: error instanceof Error ? error.message : String(error) };
+      return { block: true, reason: messageFor(error) };
     }
   });
-  pi.on("tool_result", async (event) => {
-    const result = event as ToolResultEvent;
+  pi.on("tool_result", async (result) => {
     const pending = pendingLegionSpawns.get(result.toolCallId);
     if (!pending || !result.isError) return;
     for (const spawn of [...pending]) releasePendingLegionSpawn(spawn);
   });
 
   pi.on("agent_end", async (event, context) => {
-    const willContinue =
-      typeof event === "object" &&
-      event !== null &&
-      "willContinue" in event &&
-      event.willContinue === true;
-    if (willContinue) return;
+    if (event.willContinue === true) return;
     releaseWorkerBudgetPermit(context.sessionManager.getSessionId());
   });
 

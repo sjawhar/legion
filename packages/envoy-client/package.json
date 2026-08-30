@@ -8,10 +8,25 @@
       "bun": "./src/defaults.ts",
       "default": "./dist/defaults.js"
     },
-    "./display": {
-      "types": "./src/display.ts",
-      "bun": "./src/display.ts",
-      "default": "./dist/display.js"
+    "./dispatch-mcp-bridge": {
+      "types": "./src/dispatch-mcp-bridge.ts",
+      "bun": "./src/dispatch-mcp-bridge.ts",
+      "default": "./dist/dispatch-mcp-bridge.js"
+    },
+    "./dispatch-mcp-shim": {
+      "types": "./src/dispatch-mcp-shim.ts",
+      "bun": "./src/dispatch-mcp-shim.ts",
+      "default": "./dist/dispatch-mcp-shim.js"
+    },
+    "./errors": {
+      "types": "./src/errors.ts",
+      "bun": "./src/errors.ts",
+      "default": "./dist/errors.js"
+    },
+    "./machine": {
+      "types": "./src/machine.ts",
+      "bun": "./src/machine.ts",
+      "default": "./dist/machine.js"
     },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
@@ -25,7 +40,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/display.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/dispatch-mcp-bridge.ts src/dispatch-mcp-shim.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"

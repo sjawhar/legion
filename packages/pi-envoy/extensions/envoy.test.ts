@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
+import { hostname } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
 
@@ -35,7 +36,9 @@ type SessionContext = {
 };
 
 type CommandContext = {
-  readonly ui: { readonly notify: (message: string, level: "info" | "warning" | "error") => void };
+  readonly ui: {
+    readonly notify: (message: string, level: "info" | "warning" | "error") => void;
+  };
 };
 
 type TestPi = {
@@ -43,8 +46,14 @@ type TestPi = {
   readonly registerTool: (tool: RegisteredTool) => void;
   readonly registerCommand: (name: string, command: Omit<RegisteredCommand, "name">) => void;
   readonly on: (
-    event: "resources_discover" | "session_start" | "session_switch" | "session_branch" | "session_tree" | "session_shutdown",
-    handler: (event: unknown, context: SessionContext) => Promise<unknown>,
+    event:
+      | "resources_discover"
+      | "session_start"
+      | "session_switch"
+      | "session_branch"
+      | "session_tree"
+      | "session_shutdown",
+    handler: (event: unknown, context: SessionContext) => Promise<unknown>
   ) => void;
   readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
 };
@@ -218,7 +227,12 @@ function sessionContext(sessionID = "ses_omp"): SessionContext {
 }
 
 function commandContext(notifications: string[]): CommandContext {
-  return { ui: { notify: (message) => notifications.push(message) } };
+  return {
+    // A host command context always carries a session manager; an empty ID is
+    // how it reports a session that has not been created yet.
+    sessionManager: { getSessionId: () => "" },
+    ui: { notify: (message) => notifications.push(message) },
+  };
 }
 
 function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string) {
@@ -321,6 +335,36 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = async (input) => {
+      requests.push(new URL(input.toString()).pathname);
+      return response([
+        {
+          session_id: "ses_other",
+          machine_id: "other-machine",
+          dir: "/tmp",
+          port: 0,
+          title: "",
+          topics: [],
+          self_subscribed: true,
+        },
+      ]);
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?invalid-session-machine");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    const sessionsTool = fixture.tools.find((tool) => tool.name === "envoy_sessions");
+    if (sessionsTool === undefined) throw new Error("envoy_sessions was not registered");
+
+    const result = await sessionsTool.execute("", { machine: 42 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toBe("machine must be a string");
+    expect(requests).toEqual([]);
+  });
+
   test("injects a structured envelope payload as a TOON block that round-trips to the payload", async () => {
     const payload = {
       failed: [
@@ -361,9 +405,14 @@ describe("envoy OMP extension", () => {
 
     const content = fixture.messages[0];
     if (content === undefined) throw new Error("structured delivery was not injected");
-    const prefix = "[ENVOY notifications.agent.ses_omp]\n";
-    expect(content.startsWith(prefix)).toBe(true);
-    expect(decode(content.slice(prefix.length))).toEqual(payload);
+    expect(decode(content)).toEqual({
+      envoy: {
+        topic: "notifications.agent.ses_omp",
+        from: "envoy",
+        summary: "CI failures",
+        message: payload,
+      },
+    });
   });
 
   test("injects a non-JSON envelope payload as raw text without serializing its envelope", async () => {
@@ -396,7 +445,96 @@ describe("envoy OMP extension", () => {
     );
     await injected.promise;
 
-    expect(fixture.messages).toEqual(["[ENVOY notifications.agent.ses_omp]\nplain-text payload"]);
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("plain-text delivery was not injected");
+    expect(decode(content)).toEqual({
+      envoy: {
+        topic: "notifications.agent.ses_omp",
+        from: "envoy",
+        summary: "plain text",
+        message: "plain-text payload",
+      },
+    });
+  });
+
+  test("names the sender and injects a reply instruction for a peer agent message", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?sender-reply-hint");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-peer-message",
+        source: "agent",
+        source_session: "ses_peer",
+        source_event_id: "source-peer-message",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "envoy.agent.peer-message",
+        issued_at: 1,
+        payload_summary: "hello from a peer",
+        trace_id: "trace-peer-message",
+      })
+    );
+    await injected.promise;
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("peer delivery was not injected");
+    expect(decode(content)).toEqual({
+      envoy: {
+        topic: "notifications.agent.ses_omp",
+        from: "agent",
+        reply_to: "ses_peer",
+        reply_with: 'envoy_send(session_id="ses_peer", message="...")',
+        summary: "hello from a peer",
+      },
+    });
+  });
+
+  test("flags a message this session sent to itself as an echo instead of a receipt", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?self-echo");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-self-echo",
+        source: "agent",
+        source_session: "ses_omp",
+        source_event_id: "source-self-echo",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "envoy.agent.self-echo",
+        issued_at: 1,
+        payload_summary: "note to self",
+        trace_id: "trace-self-echo",
+      })
+    );
+    await injected.promise;
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("echo delivery was not injected");
+    const note = decode(content) as { envoy: Record<string, unknown> };
+    expect(note.envoy.echo).toContain("your own message");
+    expect(note.envoy.echo).toContain("(ses_omp)");
+    expect(note.envoy.reply_to).toBeUndefined();
+    expect(note.envoy.reply_with).toBeUndefined();
   });
 
   test("injects malformed envelope JSON as raw text", async () => {
@@ -417,7 +555,11 @@ describe("envoy OMP extension", () => {
     agent.push("{this is not JSON");
     await injected.promise;
 
-    expect(fixture.messages).toEqual(["[ENVOY notifications.agent.ses_omp]\n{this is not JSON"]);
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("malformed delivery was not injected");
+    expect(decode(content)).toEqual({
+      envoy: { topic: "notifications.agent.ses_omp", message: "{this is not JSON" },
+    });
   });
 
   test("injects a role event forwarded to the claimed agent subject with original role-topic framing", async () => {
@@ -468,9 +610,13 @@ describe("envoy OMP extension", () => {
     await injected.promise;
     const roleDelivery = fixture.messages[0];
     if (roleDelivery === undefined) throw new Error("role delivery was not injected");
-    const rolePrefix = "[ENVOY notifications.role.legion-controller]\n";
-    expect(roleDelivery.startsWith(rolePrefix)).toBe(true);
-    expect(decode(roleDelivery.slice(rolePrefix.length))).toEqual({ summary: "role message" });
+    expect(decode(roleDelivery)).toEqual({
+      envoy: {
+        topic: "notifications.role.legion-controller",
+        from: "envoy",
+        summary: "role message",
+      },
+    });
     expect(requests).not.toContain("/v1/sessions");
 
     await roleTool.execute("", { role: "legion-reviewer" });
@@ -530,9 +676,13 @@ describe("envoy OMP extension", () => {
     expect(fixtureA.messages.some((message) => message.includes("post-takeover role event"))).toBe(false);
     const takeoverDelivery = fixtureB.messages[0];
     if (takeoverDelivery === undefined) throw new Error("takeover delivery was not injected");
-    const takeoverPrefix = "[ENVOY notifications.role.legion-controller]\n";
-    expect(takeoverDelivery.startsWith(takeoverPrefix)).toBe(true);
-    expect(decode(takeoverDelivery.slice(takeoverPrefix.length))).toEqual({ summary: "post-takeover role event" });
+    expect(decode(takeoverDelivery)).toEqual({
+      envoy: {
+        topic: "notifications.role.legion-controller",
+        from: "envoy",
+        summary: "post-takeover role event",
+      },
+    });
   });
 
   test("keeps forwarded role delivery live while the listener HTTP API is unavailable", async () => {
@@ -833,6 +983,7 @@ describe("envoy OMP extension", () => {
 
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
       session_id: "ses_whoami",
+      machine_id: hostname(),
       dir: "/tmp/envoy-omp-test",
     });
   });

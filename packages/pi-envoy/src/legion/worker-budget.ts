@@ -49,7 +49,7 @@ export interface WorkerRuntimeState {
 
 // Task sessions load this extension through distinct module URLs, but their worker
 // reservations and role backing form one lifecycle within the OMP process.
-const workerRuntimeStateKey = Symbol.for("legion.envoy-omp-extension.worker-runtime-state");
+const workerRuntimeStateKey = Symbol.for("legion.pi-envoy.worker-runtime-state");
 const sharedWorkerRuntime = globalThis as typeof globalThis & {
   [key: symbol]: WorkerRuntimeState | undefined;
 };

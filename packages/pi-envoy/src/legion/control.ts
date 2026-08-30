@@ -1,5 +1,6 @@
 import { isLegionRole, type LegionRole } from "@legion/contracts";
-import type { ExtensionAgentsApi } from "./pi-types";
+import { messageFor } from "@legion/envoy-client/errors";
+import type { ExtensionAgentsApi } from "../pi-types";
 
 export interface Redelivery {
   readonly topic: string;
@@ -49,7 +50,7 @@ export async function handleLegionControlDirective(
     }
     actions.acknowledge();
   } catch (error) {
-    actions.reject(error instanceof Error ? error.message : String(error));
+    actions.reject(messageFor(error));
   }
 }
 

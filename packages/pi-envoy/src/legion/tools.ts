@@ -5,7 +5,8 @@ import {
   type LegionRole,
 } from "@legion/contracts";
 import type { LegionDaemonClient } from "./daemon-client";
-import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "./pi-types";
+import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
+import { toolFailure, toolSuccess } from "../tool-result";
 
 interface ArchitectSession {
   readonly tree: string;
@@ -14,14 +15,8 @@ interface ArchitectSession {
   readonly secret: string;
 }
 
-function toolSuccess(details: Readonly<Record<string, unknown>>): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(details) }], details };
-}
-
-function toolFailure(error: unknown): ToolResult {
-  const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: "text", text: message }], details: {}, isError: true };
-}
+const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
+  toolSuccess(JSON.stringify(details), details);
 
 // pi.zod exposes only object/string/number/array/enum/unknown (no union or
 // discriminatedUnion), so per-op typing cannot be expressed as a discriminated
@@ -119,14 +114,12 @@ export function createLegionTool(deps: {
         }
         switch (parameters.op) {
           case "merge_gate":
-            return toolSuccess(
-              await daemon.mergeGate({
-                tree: architect.tree,
-                pr: numberInput("pr"),
-                sessionId,
-                secret: architect.secret,
-              })
-            );
+            return jsonSuccess(await daemon.mergeGate({
+              tree: architect.tree,
+              pr: numberInput("pr"),
+              sessionId,
+              secret: architect.secret,
+            }));
           case "issue_create": {
             const labels = parameters.labels;
             if (
@@ -139,16 +132,14 @@ export function createLegionTool(deps: {
             ) {
               throw new Error("issue_create labels must use architect-mutable Legion labels");
             }
-            return toolSuccess(
-              await daemon.issueCreate({
-                tree: architect.tree,
-                sessionId,
-                secret: architect.secret,
-                title: stringInput("title"),
-                body: stringInput("body"),
-                labels: labels ?? [],
-              })
-            );
+            return jsonSuccess(await daemon.issueCreate({
+              tree: architect.tree,
+              sessionId,
+              secret: architect.secret,
+              title: stringInput("title"),
+              body: stringInput("body"),
+              labels: labels ?? [],
+            }));
           }
           case "wave_release": {
             const children = parameters.children;
@@ -158,25 +149,21 @@ export function createLegionTool(deps: {
             ) {
               throw new Error("wave_release requires children");
             }
-            return toolSuccess(
-              await daemon.waveRelease({
-                tree: architect.tree,
-                children,
-                sessionId,
-                secret: architect.secret,
-              })
-            );
+            return jsonSuccess(await daemon.waveRelease({
+              tree: architect.tree,
+              children,
+              sessionId,
+              secret: architect.secret,
+            }));
           }
           case "comment":
-            return toolSuccess(
-              await daemon.comment({
-                tree: architect.tree,
-                sessionId,
-                secret: architect.secret,
-                issue: stringInput("issue"),
-                body: stringInput("body"),
-              })
-            );
+            return jsonSuccess(await daemon.comment({
+              tree: architect.tree,
+              sessionId,
+              secret: architect.secret,
+              issue: stringInput("issue"),
+              body: stringInput("body"),
+            }));
           case "post_spec":
             await daemon.postBody({
               tree: architect.tree,
@@ -185,21 +172,19 @@ export function createLegionTool(deps: {
               issue: stringInput("issue"),
               body: stringInput("body"),
             });
-            return toolSuccess({});
+            return jsonSuccess({});
           case "label_add": {
             const label = stringInput("label");
             if (!isArchitectMutableLabel(label)) {
               throw new Error("label changes must use architect-mutable Legion labels");
             }
-            return toolSuccess(
-              await daemon.labels({
-                tree: architect.tree,
-                sessionId,
-                secret: architect.secret,
-                issue: stringInput("issue"),
-                add: [label],
-              })
-            );
+            return jsonSuccess(await daemon.labels({
+              tree: architect.tree,
+              sessionId,
+              secret: architect.secret,
+              issue: stringInput("issue"),
+              add: [label],
+            }));
           }
           case "escalate": {
             const kind = stringInput("kind");
@@ -215,7 +200,7 @@ export function createLegionTool(deps: {
               sessionId,
               secret: architect.secret,
             });
-            return toolSuccess({});
+            return jsonSuccess({});
           }
           case "request_refile":
             await daemon.escalate({
@@ -225,7 +210,7 @@ export function createLegionTool(deps: {
               kind: "re-file",
               context: { issue: stringInput("issue"), rationale: stringInput("rationale") },
             });
-            return toolSuccess({});
+            return jsonSuccess({});
           case "issue_close": {
             const comment = parameters.comment;
             if (comment !== undefined && typeof comment !== "string")
@@ -237,7 +222,7 @@ export function createLegionTool(deps: {
               issue: stringInput("issue"),
               ...(comment === undefined ? {} : { comment }),
             });
-            return toolSuccess({});
+            return jsonSuccess({});
           }
           default:
             throw new Error(`Unsupported legion operation: ${String(parameters.op)}`);
@@ -294,7 +279,7 @@ export function createEnvoyDispatchTool(deps: {
           ...(ask === undefined ? {} : { ask }),
           ...(dispatchUrgency === undefined ? {} : { urgency: dispatchUrgency }),
         });
-        return toolSuccess(result);
+        return jsonSuccess(result);
       } catch (error) {
         return toolFailure(error);
       }

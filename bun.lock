@@ -24,7 +24,7 @@
     },
     "packages/daemon": {
       "name": "legion",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "bin": {
         "legion": "src/cli/index.ts",
       },
@@ -89,23 +89,6 @@
         "typescript": "^5.3.0",
       },
     },
-    "packages/envoy-omp-extension": {
-      "name": "@legion/envoy-omp-extension",
-      "version": "0.1.0",
-      "dependencies": {
-        "@legion/contracts": "workspace:*",
-        "@legion/envoy-client": "workspace:*",
-        "@legion/workspace": "workspace:*",
-        "@toon-format/toon": "^4.1.1",
-        "nats": "^2.29.2",
-      },
-      "devDependencies": {
-        "@biomejs/biome": "^2.3.14",
-        "@types/bun": "latest",
-        "typescript": "^5.3.0",
-        "zod": "^4.1.8",
-      },
-    },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
       "version": "0.5.2",
@@ -123,6 +106,23 @@
       "peerDependencies": {
         "@opentui/core": ">=0.1.92",
         "@opentui/solid": ">=0.1.92",
+      },
+    },
+    "packages/pi-envoy": {
+      "name": "@legion/pi-envoy",
+      "version": "0.1.0",
+      "dependencies": {
+        "@legion/contracts": "workspace:*",
+        "@legion/envoy-client": "workspace:*",
+        "@legion/workspace": "workspace:*",
+        "@toon-format/toon": "^4.1.1",
+        "nats": "^2.29.2",
+      },
+      "devDependencies": {
+        "@biomejs/biome": "^2.3.14",
+        "@types/bun": "latest",
+        "typescript": "^5.3.0",
+        "zod": "^4.1.8",
       },
     },
     "packages/workspace": {
@@ -275,7 +275,7 @@
 
     "@legion/envoy-client": ["@legion/envoy-client@workspace:packages/envoy-client"],
 
-    "@legion/envoy-omp-extension": ["@legion/envoy-omp-extension@workspace:packages/envoy-omp-extension"],
+    "@legion/pi-envoy": ["@legion/pi-envoy@workspace:packages/pi-envoy"],
 
     "@legion/workspace": ["@legion/workspace@workspace:packages/workspace"],
 

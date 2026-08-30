@@ -11,8 +11,11 @@
       "@legion/envoy-client/defaults": [
         "../envoy-client/src/defaults.ts"
       ],
-      "@legion/envoy-client/display": [
-        "../envoy-client/src/display.ts"
+      "@legion/envoy-client/errors": [
+        "../envoy-client/src/errors.ts"
+      ],
+      "@legion/envoy-client/machine": [
+        "../envoy-client/src/machine.ts"
       ],
       "@legion/envoy-client/tool-contract": [
         "../envoy-client/src/tool-contract.ts"
@@ -33,6 +36,6 @@
     "extensions/legion.ts",
     "extensions/legion.test.ts",
     "extensions/omp-host.d.ts",
-    "src/legion/**/*.ts"
+    "src/**/*.ts"
   ]
 }

@@ -1,5 +1,5 @@
 {
-  "name": "@legion/envoy-omp-extension",
+  "name": "@legion/pi-envoy",
   "version": "0.1.0",
   "type": "module",
   "omp": {
@@ -17,8 +17,8 @@
   "dependencies": {
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
-    "@toon-format/toon": "^4.1.1",
     "@legion/workspace": "workspace:*",
+    "@toon-format/toon": "^4.1.1",
     "nats": "^2.29.2"
   },
   "devDependencies": {
