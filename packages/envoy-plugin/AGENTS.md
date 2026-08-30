@@ -13,10 +13,10 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 | Task                | Location               | Notes                                                              |
 | ------------------- | ---------------------- | ------------------------------------------------------------------ |
 | Tool definitions    | `src/server.ts`        | `envoy_subscribe`, `envoy_unsubscribe`, `envoy_list`, `envoy_send`, `envoy_publish`, `envoy_role_set`, `envoy_whoami`, `envoy_sessions` |
-| Packaging metadata  | `package.json`         | npm identity, `exports` map, scripts                               |
-| TUI: `/whoami` + sidebar | `src/tui.tsx`     | slash command + session-id/port sidebar; loaded via the `./tui` export. Ships as `.tsx` source (no build/`dist`) — Bun transpiles it natively at load, so `@opentui/core` + `@opentui/solid` MUST be `peerDependencies` (not `devDependencies`) so the `@jsxImportSource @opentui/solid` runtime resolves in the consumer's install tree |
+| Packaging metadata  | `package.json`         | npm identity, `exports` map, scripts. Published entries point at `dist/`: `prepack` bundles `src/server.ts` and `bin/dispatch-mcp-shim.ts` (externals: `@opencode-ai/*`) so the tarball has no dependency on the unpublished `@legion/*` workspace packages, which live in `devDependencies` |
+| TUI: `/whoami` + sidebar | `src/tui.tsx`     | slash command + session-id/port sidebar; loaded via the `./tui` export. Ships as `.tsx` source (solid JSX cannot be bundled by `bun build`) — Bun transpiles it natively at load, so `@opentui/core` + `@opentui/solid` MUST be `peerDependencies` (not `devDependencies`) so the `@jsxImportSource @opentui/solid` runtime resolves in the consumer's install tree |
 | Host rollout helper | `scripts/sync-host.sh` | sync packed release tarball + shim to remote host                  |
-| Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `src/dispatch-subscribe.ts` | injects the shim wrapper in `bin/`; shared forwarding/token code lives in `@legion/envoy-client`. `tool.execute.after` auto-subscribes dispatch callers to new thread topics. |
+| Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `src/dispatch-subscribe.ts` | injects the shim: `dist/bin/dispatch-mcp-shim.js` in the packed layout, `bin/dispatch-mcp-shim.ts` in a source checkout; shared forwarding/token code lives in `@legion/envoy-client`. `tool.execute.after` auto-subscribes dispatch callers to new thread topics. |
 
 ## Critical conventions
 

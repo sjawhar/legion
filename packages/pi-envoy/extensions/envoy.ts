@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
@@ -71,7 +72,23 @@ export async function deleteEnvoyInterest(baseUrl: string, sessionID: string): P
     );
   }
 }
-const SKILLS_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills");
+function resolveSkillsDirectory(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    // Packed layout: this file is bundled to dist/envoy.js and prepack stages
+    // the repo skills/ directory beside it at dist/skills.
+    resolve(moduleDirectory, "skills"),
+    // Repo layout: this file runs from packages/pi-envoy/extensions/ and the
+    // skills live at the repo root.
+    resolve(moduleDirectory, "../../../skills"),
+  ];
+  const found = candidates.find((directory) => existsSync(directory));
+  if (!found) {
+    throw new Error(`legion skills directory not found; tried: ${candidates.join(", ")}`);
+  }
+  return found;
+}
+const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
 export default function envoyExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
