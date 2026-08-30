@@ -42,7 +42,10 @@ export default async (input: { serverUrl: URL }) => {
     if (!port && !portWarningLogged) {
       portWarningLogged = true;
       logger.error(
-        `[envoy-plugin] Could not resolve serve port: serverUrl=${input.serverUrl.href}, pid=${process.pid}`
+        [
+          `[envoy-plugin] Could not resolve serve port: serverUrl=${input.serverUrl.href},`,
+          `pid=${process.pid}`,
+        ].join(" ")
       );
     }
     if (port) {
@@ -219,10 +222,10 @@ export default async (input: { serverUrl: URL }) => {
       input: { tool: string; sessionID: string; callID: string; args: unknown },
       output: { title: string; output: string; metadata: unknown }
     ) => {
-      // Dispatch AC#4: when this session opens a Dispatch thread via the
-      // envoy_dispatch MCP tool, auto-subscribe it to the thread's GitHub topic
-      // so the human's reply is delivered back through Envoy. Best-effort — a
-      // subscribe failure must never surface to the model or fail the tool call.
+      // When this session opens a Dispatch thread via the envoy_dispatch MCP
+      // tool, auto-subscribe it to the thread's GitHub topic so the human's
+      // reply is delivered back through Envoy. Best-effort — a subscribe
+      // failure must never surface to the model or fail the tool call.
       const topic = dispatchSubscriptionTopic(input.tool, output.output);
       if (!topic) return;
       try {
@@ -235,9 +238,8 @@ export default async (input: { serverUrl: URL }) => {
           driving: true,
         });
       } catch (err) {
-        logger.warn(
-          `[envoy-plugin] dispatch auto-subscribe failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(`[envoy-plugin] dispatch auto-subscribe failed: ${message}`);
       }
     },
     // Cleanup hook (used by tests; production relies on process 'exit').

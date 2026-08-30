@@ -1,3 +1,5 @@
+import type { ExtensionAgentsApi } from "@oh-my-pi/pi-coding-agent";
+
 /**
  * Oh My Pi host surface shared by both extension entries.
  *
@@ -12,12 +14,17 @@ export interface SessionContext {
   readonly taskDepth?: number;
   readonly sessionManager: {
     readonly getSessionId: () => string;
-    /** Live display title; assigned by omp after the first turn, so often undefined at session_start. */
+    /**
+     * Live display title. OMP assigns it after the first turn, so it is often
+     * undefined at session_start.
+     */
     readonly getSessionName?: () => string | undefined;
     readonly getSessionFile: () => string | undefined;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
-  readonly ui: { readonly notify: (message: string, level: "info" | "warning") => void };
+  readonly ui: {
+    readonly notify: (message: string, level: "info" | "warning") => void;
+  };
 }
 
 export interface BeforeAgentStartEvent {
@@ -26,7 +33,7 @@ export interface BeforeAgentStartEvent {
 
 export interface ToolCallEvent {
   readonly toolName: string;
-  readonly toolCallId?: string;
+  readonly toolCallId: string;
   readonly input: Record<string, unknown>;
 }
 
@@ -38,16 +45,52 @@ export interface ToolResultEvent {
   readonly isError: boolean;
 }
 
+export interface AgentEndEvent {
+  /** Set when OMP has already scheduled a continuation, so the turn is not settling. */
+  readonly willContinue?: boolean;
+}
+
 export interface ToolCallEventResult {
   readonly block?: boolean;
   readonly reason?: string;
   readonly input?: Record<string, unknown>;
 }
 
+export interface ResourcesDiscoverResult {
+  readonly skillPaths?: readonly string[];
+}
+
+/**
+ * Payload and result type of every host event these extensions subscribe to.
+ * OMP declares `on` as one overload per event name; mirroring that here keeps a
+ * handler from reading a field its event does not carry, or from returning a
+ * result shape the host discards. Payloads no handler reads stay `unknown`.
+ */
+export interface PiEventContract {
+  readonly resources_discover: {
+    readonly event: unknown;
+    readonly result: ResourcesDiscoverResult;
+  };
+  readonly session_start: { readonly event: unknown; readonly result: undefined };
+  readonly session_switch: { readonly event: unknown; readonly result: undefined };
+  readonly session_branch: { readonly event: unknown; readonly result: undefined };
+  readonly session_tree: { readonly event: unknown; readonly result: undefined };
+  readonly session_shutdown: { readonly event: unknown; readonly result: undefined };
+  readonly before_agent_start: {
+    readonly event: BeforeAgentStartEvent;
+    readonly result: undefined;
+  };
+  readonly agent_end: { readonly event: AgentEndEvent; readonly result: undefined };
+  readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
+  readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
+}
+
 export interface CommandContext {
   readonly cwd: string;
   readonly sessionManager: { readonly getSessionId: () => string };
-  readonly ui: { readonly notify: (message: string, level: "info" | "warning") => void };
+  readonly ui: {
+    readonly notify: (message: string, level: "info" | "warning") => void;
+  };
 }
 
 export interface ToolResult {
@@ -75,15 +118,7 @@ export interface ZodProperty {
   readonly optional: () => unknown;
 }
 
-export interface ExtensionAgentsApi {
-  readonly list: () => readonly { readonly id: string }[];
-  readonly get: (agentId: string) => { readonly id: string } | undefined;
-  readonly ensureLive: (
-    agentId: string,
-    options: { readonly parentSessionFile: string }
-  ) => Promise<{ readonly id: string }>;
-  readonly prompt: (agentId: string, content: string) => Promise<void>;
-}
+export type { ExtensionAgentsApi };
 
 export interface PiApi {
   readonly zod: {
@@ -103,19 +138,12 @@ export interface PiApi {
   ) => void;
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
-  readonly on: (
-    event:
-      | "resources_discover"
-      | "session_start"
-      | "session_switch"
-      | "session_branch"
-      | "session_tree"
-      | "session_shutdown"
-      | "before_agent_start"
-      | "agent_end"
-      | "tool_call"
-      | "tool_result",
-    handler: (event: unknown, context: SessionContext) => Promise<unknown>
+  readonly on: <Event extends keyof PiEventContract>(
+    event: Event,
+    handler: (
+      event: PiEventContract[Event]["event"],
+      context: SessionContext
+    ) => Promise<PiEventContract[Event]["result"] | undefined> | Promise<void>
   ) => void;
   readonly registerTool: (tool: RegisteredTool) => void;
   readonly registerCommand: (

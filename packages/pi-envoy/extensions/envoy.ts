@@ -102,8 +102,7 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
-    let payloadText = raw;
-    let displayTopic = subject;
+    let content = "";
     let duplicate = false;
     try {
       const envelope = EnvelopeSchema.parse(JSON.parse(raw));
@@ -114,30 +113,55 @@ export default function envoyExtension(pi: PiApi): void {
           const oldest = dedupeKeys.values().next();
           if (!oldest.done) dedupeKeys.delete(oldest.value);
         }
-        displayTopic = envelope.topic;
-        if (envelope.payload === undefined) {
-          payloadText = encode({ summary: envelope.payload_summary });
-        } else {
+        let message: unknown;
+        if (envelope.payload !== undefined) {
           try {
-            payloadText = encode(JSON.parse(envelope.payload));
+            message = JSON.parse(envelope.payload);
           } catch {
-            payloadText = envelope.payload;
+            message = envelope.payload;
           }
         }
+        // One structured TOON note per delivery. The topic only names where
+        // the message was delivered — for an agent message that is the
+        // reader's own inbox topic, never the sender — so the sender is named
+        // explicitly, and a message that looped back to its own sender is
+        // flagged so it cannot pass for a delivery receipt.
+        const echo =
+          envelope.source_session !== undefined && envelope.source_session === sessionID;
+        content = encode({
+          envoy: {
+            topic: envelope.topic,
+            from: envelope.source,
+            ...(echo
+              ? {
+                  echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
+                }
+              : envelope.source_session === undefined
+                ? {}
+                : {
+                    reply_to: envelope.source_session,
+                    reply_with: `envoy_send(session_id="${envelope.source_session}", message="...")`,
+                  }),
+            summary: envelope.payload_summary,
+            ...(message === undefined ? {} : { message }),
+          },
+        });
       }
     } catch {
-      payloadText = raw;
+      content = encode({ envoy: { topic: subject, message: raw } });
     }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
     if (!duplicate) {
       pi.sendMessage(
-        { customType: "envoy-message", content: `[ENVOY ${displayTopic}]\n${payloadText}`, display: true },
-        { deliverAs: "steer", triggerTurn: true },
+        { customType: "envoy-message", content, display: true },
+        { deliverAs: "steer", triggerTurn: true }
       );
     }
-    if (reply !== "" && subject === agentSubject(sessionID)) (await ensureConnection()).publish(reply);
+    if (reply !== "" && subject === agentSubject(sessionID)) {
+      (await ensureConnection()).publish(reply);
+    }
   };
 
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
@@ -323,8 +347,11 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("session_start", async (_event, context) => {
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
-        "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled (outbound tools still work)",
-        "warning",
+        [
+          "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled",
+          "(outbound tools still work)",
+        ].join(" "),
+        "warning"
       );
       return;
     }
@@ -338,7 +365,7 @@ export default function envoyExtension(pi: PiApi): void {
     } catch (error) {
       context.ui.notify(
         `envoy: NATS unavailable (${messageFor(error)}); retrying in the background`,
-        "warning",
+        "warning"
       );
       let attempting = false;
       context.setInterval(() => {
@@ -363,7 +390,10 @@ export default function envoyExtension(pi: PiApi): void {
     } catch (error) {
       // A switch during a network outage must degrade, not fail the handler;
       // the next switch or the NATS client's own reconnect re-establishes.
-      context.ui.notify(`envoy: rebind failed (${messageFor(error)}); will recover on reconnect`, "warning");
+      context.ui.notify(
+        `envoy: rebind failed (${messageFor(error)}); will recover on reconnect`,
+        "warning"
+      );
     }
   };
 
@@ -401,15 +431,22 @@ export default function envoyExtension(pi: PiApi): void {
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);
 
-  async function execute(operation: EnvoyToolOperation, parameters: Record<string, unknown>): Promise<ToolResult> {
+  async function execute(
+    operation: EnvoyToolOperation,
+    parameters: Record<string, unknown>
+  ): Promise<ToolResult> {
     try {
       switch (operation) {
         case EnvoyToolOperation.subscribe: {
           const added: string[] = [];
           const already: string[] = [];
-          for (const topic of topicsFor(parameters)) (await subscribe(topic) ? added : already).push(topic);
+          for (const topic of topicsFor(parameters)) {
+            (await subscribe(topic) ? added : already).push(topic);
+          }
           const registrationError =
-            added.length === 0 ? undefined : await registerSession().then(() => undefined, messageFor);
+            added.length === 0
+              ? undefined
+              : await registerSession().then(() => undefined, messageFor);
           return toolSuccess(`Subscribed: ${added.join(", ") || "(none new)"}`, {
             added,
             already,
@@ -421,8 +458,12 @@ export default function envoyExtension(pi: PiApi): void {
             ...subscriptions.keys(),
             ...(claimedRoleTopic === undefined ? [] : [claimedRoleTopic]),
           ]);
-          const removed = targets.filter((topic) => closeIntentionally(topic) || topic === claimedRoleTopic);
-          if (claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic)) claimedRoleTopic = undefined;
+          const removed = targets.filter(
+            (topic) => closeIntentionally(topic) || topic === claimedRoleTopic
+          );
+          if (claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic)) {
+            claimedRoleTopic = undefined;
+          }
           const registrationError =
             removed.length === 0
               ? undefined
@@ -438,22 +479,35 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.listInterests: {
           const registry = await client.getInterest(sessionID);
           const interests = new Map<string, "registry" | "live" | "both">();
-          for (const topic of registry.topics) interests.set(topic, subscriptions.has(topic) ? "both" : "registry");
+          for (const topic of registry.topics) {
+            interests.set(topic, subscriptions.has(topic) ? "both" : "registry");
+          }
           for (const topic of subscriptions.keys()) {
             if (!interests.has(topic)) interests.set(topic, "live");
           }
-          return toolSuccess(JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2), {
-            interests: [...interests].map(([topic, source]) => ({ topic, source })),
-          });
+          return toolSuccess(
+            JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2),
+            {
+              interests: [...interests].map(([topic, source]) => ({ topic, source })),
+            }
+          );
         }
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
-          await client.send({ sourceSessionID: sessionID, targetSessionID, message: stringFor(parameters, "message") });
+          await client.send({
+            sourceSessionID: sessionID,
+            targetSessionID,
+            message: stringFor(parameters, "message"),
+          });
           return toolSuccess(`Sent to ${targetSessionID}`, { target: targetSessionID });
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
-          await client.publish({ sourceSessionID: sessionID, topic, message: stringFor(parameters, "message") });
+          await client.publish({
+            sourceSessionID: sessionID,
+            topic,
+            message: stringFor(parameters, "message"),
+          });
           return toolSuccess(`Published to ${topic}`, { topic });
         }
         case EnvoyToolOperation.setRole: {
@@ -462,15 +516,28 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.whoami: {
-          return toolSuccess(JSON.stringify({ session_id: sessionID, machine_id: machineID(), dir: sessionDirectory }, null, 2), {
-            sessionID,
-            topics: [...subscriptions.keys()],
-          });
+          return toolSuccess(
+            JSON.stringify(
+              { session_id: sessionID, machine_id: machineID(), dir: sessionDirectory },
+              null,
+              2
+            ),
+            {
+              sessionID,
+              topics: [...subscriptions.keys()],
+            }
+          );
         }
         case EnvoyToolOperation.listSessions: {
           const machine = parameters.machine;
+          if (machine !== undefined && typeof machine !== "string") {
+            throw new TypeError("machine must be a string");
+          }
           const sessions = await client.listSessions();
-          const result = typeof machine === "string" ? sessions.filter((session) => session.machine_id === machine) : sessions;
+          const result =
+            machine === undefined
+              ? sessions
+              : sessions.filter((session) => session.machine_id === machine);
           return toolSuccess(JSON.stringify(result, null, 2), { count: result.length, machine });
         }
       }
@@ -507,10 +574,17 @@ function stringFor(parameters: Record<string, unknown>, key: string): string {
   return value;
 }
 
-function topicsFor(parameters: Record<string, unknown>, fallback: readonly string[] = []): readonly string[] {
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry: unknown) => typeof entry === "string");
+}
+
+function topicsFor(
+  parameters: Record<string, unknown>,
+  fallback: readonly string[] = []
+): readonly string[] {
   const value = parameters.topics;
   if (value === undefined) return fallback;
-  if (!Array.isArray(value) || value.some((topic) => typeof topic !== "string")) throw new TypeError("topics must be strings");
+  if (!isStringArray(value)) throw new TypeError("topics must be strings");
   return value;
 }
 

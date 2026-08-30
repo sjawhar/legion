@@ -1,4 +1,4 @@
-// Auto-subscription wiring for the envoy_dispatch MCP tool (Dispatch AC#4).
+// Auto-subscription wiring for the envoy_dispatch MCP tool.
 //
 // When an agent opens a Dispatch thread via the envoy_dispatch MCP tool, the
 // human answers by commenting on the resulting GitHub sub-issue. For the agent

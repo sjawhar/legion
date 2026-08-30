@@ -5,8 +5,9 @@
  * how they discover the pid and whether they exec ss(8) sync or async.
  */
 export function portFromSsOutput(output: string, pid: number): number | null {
+  const pidPattern = new RegExp(`\\bpid=${pid}\\b`);
   for (const line of output.split("\n")) {
-    if (!line.includes(`pid=${pid}`)) continue;
+    if (!pidPattern.test(line)) continue;
     const parts = line.trim().split(/\s+/);
     const local = parts[3];
     const match = local?.match(/:(\d+)$/);

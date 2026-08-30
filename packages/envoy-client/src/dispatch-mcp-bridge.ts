@@ -1,6 +1,8 @@
-// Core forwarding logic for the local MCP shim that proxies opencode's
-// stdio MCP traffic to the remote dispatch server's Streamable HTTP /mcp,
-// minting a fresh GitHub bearer per request via the user's `gh` shim.
+// Core forwarding logic for the local dispatch MCP shim.
+//
+// The shim proxies stdio MCP traffic to the remote dispatch server's Streamable
+// HTTP /mcp endpoint. It obtains a GitHub bearer through the user's `gh` shim,
+// caches it, and refreshes before expiry or after a 401 response.
 //
 // Exposed as a library so the bridge can be unit-tested without spawning
 // a real subprocess. The CLI wrapper in bin/dispatch-mcp-shim.ts wires
@@ -8,6 +10,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { messageFor } from "./errors";
 
 const execFileAsync = promisify(execFile);
 
@@ -64,9 +67,9 @@ export const defaultGhTokenGetter: TokenGetter = async () => {
  */
 function parseSseBody(body: string): unknown {
   for (const line of body.split("\n")) {
-    const match = line.match(/^data:\s*(.+)$/);
-    if (match) {
-      return JSON.parse(match[1] as string);
+    const payload = line.match(/^data:\s*(.+)$/)?.[1];
+    if (payload !== undefined) {
+      return JSON.parse(payload);
     }
   }
   return null;
@@ -83,24 +86,19 @@ function parseSseBody(body: string): unknown {
  */
 function hasUpstreamUnauthorized(parsed: unknown): boolean {
   if (!parsed || typeof parsed !== "object") return false;
-  const obj = parsed as { error?: { message?: unknown }; result?: unknown };
-  if (
-    obj.error &&
-    typeof obj.error.message === "string" &&
-    containsUnauthorized(obj.error.message)
-  ) {
-    return true;
+  if ("error" in parsed && parsed.error && typeof parsed.error === "object") {
+    const { error } = parsed;
+    if ("message" in error && typeof error.message === "string") {
+      if (containsUnauthorized(error.message)) return true;
+    }
   }
-  const result = obj.result as { isError?: unknown; content?: unknown } | undefined;
-  if (!result || result.isError !== true || !Array.isArray(result.content)) return false;
+  if (!("result" in parsed) || !parsed.result || typeof parsed.result !== "object") return false;
+  const { result } = parsed;
+  if (!("isError" in result) || result.isError !== true) return false;
+  if (!("content" in result) || !isUnknownArray(result.content)) return false;
   for (const item of result.content) {
-    if (
-      item &&
-      typeof item === "object" &&
-      "text" in item &&
-      typeof (item as { text: unknown }).text === "string"
-    ) {
-      if (containsUnauthorized((item as { text: string }).text)) return true;
+    if (item && typeof item === "object" && "text" in item && typeof item.text === "string") {
+      if (containsUnauthorized(item.text)) return true;
     }
   }
   return false;
@@ -108,6 +106,11 @@ function hasUpstreamUnauthorized(parsed: unknown): boolean {
 
 function containsUnauthorized(msg: string): boolean {
   return /\b401\b/.test(msg) && /bad credentials|unauthorized/i.test(msg);
+}
+
+/** `Array.isArray` widens `unknown` to `any[]`; this keeps the element type honest. */
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
 }
 
 /**
@@ -119,14 +122,14 @@ function containsUnauthorized(msg: string): boolean {
  * passes a real value, and `required` already governs presence.
  */
 function normalizeSchemaUnionTypes(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(normalizeSchemaUnionTypes);
+  if (isUnknownArray(node)) return node.map(normalizeSchemaUnionTypes);
   if (!node || typeof node !== "object") return node;
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(node)) {
     result[key] = normalizeSchemaUnionTypes(value);
   }
-  if (Array.isArray(result.type)) {
-    const nonNull = result.type.filter((t) => t !== "null");
+  if (isUnknownArray(result.type)) {
+    const nonNull = result.type.filter((entry) => entry !== "null");
     if (nonNull.length === 1) {
       result.type = nonNull[0];
     } else if (nonNull.length === 0) {
@@ -151,13 +154,13 @@ function normalizeSchemaUnionTypes(node: unknown): unknown {
  */
 function normalizeToolsListResponse(response: JsonRpcResponse | null): JsonRpcResponse | null {
   if (!response || typeof response.result !== "object" || response.result === null) return response;
-  const result = response.result as { tools?: unknown };
-  if (!Array.isArray(result.tools)) return response;
-  const tools = result.tools.map((entry) => {
+  const { result } = response;
+  if (!("tools" in result) || !isUnknownArray(result.tools)) return response;
+  const tools = result.tools.map((entry: unknown) => {
     if (!entry || typeof entry !== "object") return entry;
-    const tool = entry as Record<string, unknown>;
-    if (tool.inputSchema == null || typeof tool.inputSchema !== "object") return tool;
-    return { ...tool, inputSchema: normalizeSchemaUnionTypes(tool.inputSchema) };
+    if (!("inputSchema" in entry) || entry.inputSchema == null) return entry;
+    if (typeof entry.inputSchema !== "object") return entry;
+    return { ...entry, inputSchema: normalizeSchemaUnionTypes(entry.inputSchema) };
   });
   return { ...response, result: { ...result, tools } };
 }
@@ -238,7 +241,7 @@ export function createBridge(opts: BridgeOptions): Bridge {
         body: JSON.stringify(request),
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = messageFor(err);
       return {
         kind: "err",
         response: errorResponse(request.id, -32603, `envoy-dispatch shim network error: ${msg}`),
@@ -254,13 +257,15 @@ export function createBridge(opts: BridgeOptions): Bridge {
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      const remoteError = [
+        "envoy-dispatch shim: remote",
+        response.status,
+        response.statusText,
+        body.slice(0, 200),
+      ].join(" ");
       return {
         kind: "err",
-        response: errorResponse(
-          request.id,
-          -32603,
-          `envoy-dispatch shim: remote ${response.status} ${response.statusText} ${body.slice(0, 200)}`
-        ),
+        response: errorResponse(request.id, -32603, remoteError),
       };
     }
 
@@ -288,7 +293,7 @@ export function createBridge(opts: BridgeOptions): Bridge {
         ),
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = messageFor(err);
       return {
         kind: "err",
         response: errorResponse(request.id, -32603, `envoy-dispatch shim: parse error: ${msg}`),

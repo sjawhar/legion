@@ -16,7 +16,7 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 | Packaging metadata  | `package.json`         | npm identity, `exports` map, scripts                               |
 | TUI: `/whoami` + sidebar | `src/tui.tsx`     | slash command + session-id/port sidebar; loaded via the `./tui` export. Ships as `.tsx` source (no build/`dist`) — Bun transpiles it natively at load, so `@opentui/core` + `@opentui/solid` MUST be `peerDependencies` (not `devDependencies`) so the `@jsxImportSource @opentui/solid` runtime resolves in the consumer's install tree |
 | Host rollout helper | `scripts/sync-host.sh` | sync packed release tarball + shim to remote host                  |
-| Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `src/dispatch-subscribe.ts` | injects the dispatch MCP server (shim); `tool.execute.after` auto-subscribes the caller to the new thread's topic so answers route back (Dispatch AC#4) |
+| Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `src/dispatch-subscribe.ts` | injects the shim wrapper in `bin/`; shared forwarding/token code lives in `@legion/envoy-client`. `tool.execute.after` auto-subscribes dispatch callers to new thread topics. |
 
 ## Critical conventions
 
