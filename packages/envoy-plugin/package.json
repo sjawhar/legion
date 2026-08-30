@@ -2,10 +2,13 @@
   "name": "@sjawhar/opencode-legion-envoy",
   "version": "0.6.0",
   "type": "module",
-  "main": "src/server.ts",
+  "main": "dist/src/server.js",
   "exports": {
+    ".": {
+      "import": "./dist/src/server.js"
+    },
     "./server": {
-      "import": "./src/server.ts"
+      "import": "./dist/src/server.js"
     },
     "./tui": {
       "import": "./src/tui.tsx"
@@ -15,15 +18,19 @@
     "type": "git",
     "url": "https://github.com/sjawhar/legion"
   },
-  "types": "src/server.ts",
+  "files": [
+    "dist",
+    "src",
+    "!src/**/__tests__"
+  ],
   "scripts": {
+    "build": "bun build src/server.ts bin/dispatch-mcp-shim.ts --outdir dist --target bun --format esm --external '@opencode-ai/*'",
+    "prepack": "bun run build",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"
   },
   "dependencies": {
-    "@legion/contracts": "workspace:*",
-    "@legion/envoy-client": "workspace:*",
     "@opencode-ai/plugin": "~1.14.46"
   },
   "peerDependencies": {
@@ -32,6 +39,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
+    "@legion/contracts": "workspace:*",
+    "@legion/envoy-client": "workspace:*",
     "@types/bun": "latest",
     "solid-js": "^1.9.0",
     "typescript": "^5.3.0"

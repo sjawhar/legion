@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import type { DispatchConfig } from "./config";
 
@@ -38,10 +39,20 @@ export interface BuildDispatchMcpEntryOptions {
 const DEFAULT_SERVER_URL = "http://localhost:8766";
 
 function defaultShimPath(): string {
-  // import.meta.dir resolves to this file's directory in Bun, e.g.
-  // /home/ubuntu/legion/default/packages/envoy-plugin/src — go up one
-  // level to the package root, then into bin/.
-  return path.join(import.meta.dir, "..", "bin", "dispatch-mcp-shim.ts");
+  // Source layout: this module runs from src/ and the shim wrapper lives at
+  // ../bin/dispatch-mcp-shim.ts. Packed layout: this module is bundled to
+  // dist/src/server.js and the self-contained shim bundle lives at
+  // dist/bin/dispatch-mcp-shim.js — same ../bin relationship, built artifact.
+  const packageRoot = path.join(import.meta.dir, "..");
+  const candidates = [
+    path.join(packageRoot, "bin", "dispatch-mcp-shim.js"),
+    path.join(packageRoot, "bin", "dispatch-mcp-shim.ts"),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    throw new Error(`dispatch MCP shim not found; tried: ${candidates.join(", ")}`);
+  }
+  return found;
 }
 
 /**

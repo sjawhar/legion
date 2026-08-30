@@ -1,5 +1,5 @@
 {
-  "name": "@legion/pi-envoy",
+  "name": "@sjawhar/pi-legion-envoy",
   "version": "0.1.0",
   "type": "module",
   "omp": {
@@ -8,22 +8,29 @@
       "extensions/legion.ts"
     ]
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sjawhar/legion"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent",
+    "prepack": "./scripts/prepack.sh",
+    "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome lint extensions/ src/"
   },
-  "dependencies": {
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
     "@legion/workspace": "workspace:*",
     "@toon-format/toon": "^4.1.1",
-    "nats": "^2.29.2"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.3.14",
     "@types/bun": "latest",
+    "nats": "^2.29.2",
     "typescript": "^5.3.0",
     "zod": "^4.1.8"
   }

@@ -47,8 +47,20 @@ The repository root `package.json` likewise loads only `extensions/envoy.ts` for
 sessions inside this repo: the Legion extension is meant to be loaded by the daemon with
 its environment prepared, not by ambient dev sessions.
 
-Released installs package the extension and its `nats` dependency. The symlink is only for local
-development.
+## Published package
+
+Released installs come from npm as `@sjawhar/pi-legion-envoy`. The tarball is
+self-contained: it ships only `dist/envoy.js` — bundling every dependency except the
+OMP host package — and the repo `skills/` tree staged beside it at `dist/skills` so
+`resources_discover` serves the Legion skills from the installed package. The published
+manifest exposes only `dist/envoy.js` — matching the repository root — while the
+committed manifest keeps the TypeScript entries for repo checkouts; `extensions/legion.ts`
+is daemon infrastructure and is not packed at all.
+
+`.github/workflows/release-pi-envoy.yaml` performs that manifest rewrite around
+`bun pm pack` and restores the committed file before tagging. Packing with the committed
+source manifest is refused by `scripts/prepack.sh`, because such a tarball would point
+OMP at extension files it does not contain.
 
 ## Dispatch
 
