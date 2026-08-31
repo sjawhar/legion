@@ -21,14 +21,16 @@
   "files": [
     "dist",
     "src",
-    "!src/**/__tests__"
+    "!src/**/__tests__",
+    "skills"
   ],
   "scripts": {
     "build": "bun build src/server.ts bin/dispatch-mcp-shim.ts --outdir dist --target bun --format esm --external '@opencode-ai/*'",
-    "prepack": "bun run build",
+    "prepack": "bun run build && rm -rf skills && cp -r ../../skills skills",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "bunx biome check src/"
+    "lint": "bunx biome check src/",
+    "postpack": "rm -rf skills"
   },
   "dependencies": {
     "@opencode-ai/plugin": "~1.14.46"

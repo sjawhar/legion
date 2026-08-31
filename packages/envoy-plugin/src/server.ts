@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { agentSubject } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
@@ -9,6 +12,18 @@ import { loadEnvoyConfig } from "./config";
 import { buildDispatchMcpEntry, injectEnvoyMcp } from "./dispatch-mcp";
 import { logger } from "./log";
 import { resolvePort } from "./port";
+
+const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+// Legion skills ship inside this package so OpenCode carries them without a
+// vendor checkout. OpenCode discovers skills only from fixed directories and
+// `config.skills.paths` — never from plugin package dirs — so the config hook
+// below must inject this path itself.
+//   Published tarball: dist/src/server.js → <pkg>/skills (staged at prepack).
+//   Repo checkout:     src/server.ts      → <repo>/skills.
+const skillsDirectory = [
+  path.resolve(moduleDirectory, "../../skills"),
+  path.resolve(moduleDirectory, "../../../skills"),
+].find((dir) => existsSync(dir));
 
 const [
   subscribeSpec,
@@ -139,7 +154,20 @@ export default async (input: { serverUrl: URL }) => {
   });
 
   return {
-    config: (cfg: { mcp?: Record<string, unknown> } & Record<string, unknown>) => {
+    config: (
+      cfg: { mcp?: Record<string, unknown>; skills?: { paths?: string[] } } & Record<
+        string,
+        unknown
+      >
+    ) => {
+      // Serve the bundled legion skills to every session on this serve.
+      if (skillsDirectory) {
+        cfg.skills ??= {};
+        cfg.skills.paths ??= [];
+        if (!cfg.skills.paths.includes(skillsDirectory)) {
+          cfg.skills.paths.push(skillsDirectory);
+        }
+      }
       // Inject the envoy MCP entry into the OpenCode config when
       // dispatch is enabled. Centralizing this in the plugin (instead of
       // each user's opencode.json) means:

@@ -17,6 +17,7 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 | TUI: `/whoami` + sidebar | `src/tui.tsx`     | slash command + session-id/port sidebar; loaded via the `./tui` export. Ships as `.tsx` source (solid JSX cannot be bundled by `bun build`) — Bun transpiles it natively at load, so `@opentui/core` + `@opentui/solid` MUST be `peerDependencies` (not `devDependencies`) so the `@jsxImportSource @opentui/solid` runtime resolves in the consumer's install tree |
 | Host rollout helper | `scripts/sync-host.sh` | sync packed release tarball + shim to remote host                  |
 | Dispatch MCP + auto-subscribe | `src/dispatch-mcp.ts`, `@legion/envoy-client/dispatch-subscribe` | injects the shim: `dist/bin/dispatch-mcp-shim.js` in the packed layout, `bin/dispatch-mcp-shim.ts` in a source checkout; shared forwarding/token/auto-subscribe code lives in `@legion/envoy-client`. `tool.execute.after` in `src/server.ts` auto-subscribes dispatch callers to new thread topics. |
+| Bundled legion skills | `src/server.ts` `config` hook | OpenCode never scans plugin package dirs for skills; the hook pushes the package's `skills/` onto `config.skills.paths` (staged from repo-root `skills/` at prepack, removed postpack). Repo checkouts resolve `<repo>/skills` instead. |
 
 ## Critical conventions
 
