@@ -20,6 +20,8 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
+| Dispatch MCP mount | `.mcp.json`, `bin/dispatch-mcp-shim.ts` | Package-root mount OMP discovers for every session loading the package; release rewrites args to `dist/bin/dispatch-mcp-shim.js` (see docs/solutions/envoy/omp-extension-mcp-mounting.md) |
+| Root session prompts | `roles/*.md` | Daemon `--append-system-prompt` sources; NOT OMP agents — `agents/` is scanned by OMP's agent discovery, which is why these live elsewhere |
 
 ## Critical conventions
 

@@ -77,18 +77,13 @@ resumes the same OMP session file, so the reply still lands. Lifecycle and scope
 decisions still go through `hub` to the owning architect — Dispatch is for durable
 questions to the human, not for coordination between roles.
 
-Mount it in `~/.omp/agent/mcp.json` (user-wide) or `.omp/mcp.json` (per project):
-
-```json
-{
-  "mcpServers": {
-    "dispatch": {
-      "command": "bun",
-      "args": ["<checkout>/packages/envoy-client/bin/dispatch-mcp-shim.ts"]
-    }
-  }
-}
-```
+No manual mount is needed: the package-root `.mcp.json` ships the server with the
+package, so any session that loads it (installed plugin, `--extension`, the Legion
+daemon's repo checkout) discovers `dispatch` automatically. The committed manifest
+runs `./bin/dispatch-mcp-shim.ts` from source; the release workflow points the
+published tarball at the self-contained `./dist/bin/dispatch-mcp-shim.js`. A
+same-named `dispatch` entry in `~/.omp/agent/mcp.json` would override the package
+mount — remove machine-local entries rather than maintaining both.
 
 The shim forwards newline-delimited JSON-RPC from stdin to the dispatch server's Streamable
 HTTP `/mcp` endpoint with a cached GitHub bearer from the user's `gh` shim. The

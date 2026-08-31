@@ -13,7 +13,8 @@
     "url": "https://github.com/sjawhar/legion"
   },
   "files": [
-    "dist"
+    "dist",
+    ".mcp.json"
   ],
   "scripts": {
     "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent",
