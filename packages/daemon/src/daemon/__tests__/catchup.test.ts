@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatIssueKey, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { formatIssueKey, type IssueKey } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { overseerCatchup, workerCatchup } from "../catchup";
 import { TokenManager } from "../github-apps";
@@ -271,53 +271,6 @@ describe("derived catch-up", () => {
           state: "changes_requested",
           body: "Please fix this.",
           url: "https://example.test/reviews/5",
-        },
-      ],
-    });
-  });
-
-  it("includes held dispatch-thread replies for the resumed role", async () => {
-    const { state, root } = stateForTree();
-    const role: LegionRole = "implementer";
-    const token = roleToken("omp", root, role);
-    state.dispatchThreads.push({
-      repo: "acme/widgets",
-      thread: 77,
-      role,
-      issue: root,
-      tree: root,
-    });
-    state.trees[root].heldEvents.push({
-      role: token,
-      payloadJson: JSON.stringify({
-        type: "dispatch-reply",
-        thread: 77,
-        author: "human",
-        body: "Please take another look.",
-      }),
-      heldAt: "2026-08-24T10:04:00Z",
-      eventId: "dispatch-77",
-    });
-    const { runner } = timelineRunner({
-      commits: [],
-      comments: [],
-      reviews: [],
-      reviewComments: [],
-    });
-
-    expect(
-      await workerCatchup(state, root, role, {
-        runner,
-        tokenManager: tokenManager(),
-      })
-    ).toEqual({
-      type: "catchup-worker",
-      unhandled: [
-        {
-          kind: "dispatch-reply",
-          thread: 77,
-          author: "human",
-          body: "Please take another look.",
         },
       ],
     });

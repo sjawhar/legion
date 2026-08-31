@@ -184,7 +184,7 @@ App's `clientSecret`.
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
 | `/api/view`                                   | GET     | dsession cookie              | Return current user's watched-repos              |
 | `/api/view`                                   | PATCH   | dsession cookie              | Replace user's watched-repos list                |
-| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP (`envoy_dispatch` tool)      |
+| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP (`dispatch` tool)            |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist`            |
 
@@ -196,7 +196,7 @@ installation token minted by `gh-app-token`); it's used verbatim for every
 GitHub call made on behalf of the tool invocation. The server never falls
 back to the dashboard user's stored token.
 
-The `envoy_dispatch` tool's `parent` argument accepts either form:
+The `dispatch` tool's `parent` argument accepts either form:
 
 - `42` or `42#1234567` — issue (and optional comment id) in
   `dispatch.defaultRepo`.

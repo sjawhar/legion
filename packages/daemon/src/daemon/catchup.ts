@@ -1,7 +1,7 @@
-import { type IssueKey, type LegionRole, parseIssueKey, roleToken } from "@legion/contracts";
+import { type IssueKey, type LegionRole, parseIssueKey } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
 import { buildRoleEnv, modeToRole, type TokenManager } from "./github-apps";
-import type { LegionState, PrState, TreeState } from "./legion-state";
+import type { LegionState, PrState } from "./legion-state";
 import type { LegionEventPayload } from "./reducers";
 
 type JsonRecord = Record<string, unknown>;
@@ -49,8 +49,7 @@ export type CatchupUnhandled =
       state: string;
       body: string;
       url: string;
-    }
-  | { kind: "dispatch-reply"; thread: number; author: string; body: string };
+    };
 
 export interface CatchupWorkerPayload extends LegionEventPayload {
   type: "catchup-worker";
@@ -309,57 +308,6 @@ function unhandledReviews(
   return result;
 }
 
-function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
-  let current = issue;
-  const visited = new Set<IssueKey>();
-  while (!visited.has(current)) {
-    visited.add(current);
-    const tree = state.trees[current];
-    if (tree) return tree;
-    const parent = state.issues[current]?.parent;
-    if (!parent) return undefined;
-    current = parent;
-  }
-  return undefined;
-}
-
-function dispatchReplies(
-  state: LegionState,
-  issue: IssueKey,
-  role: LegionRole
-): CatchupUnhandled[] {
-  const tree = treeFor(state, issue);
-  if (!tree) return [];
-  const parsed = parseIssueKey(issue);
-  if (!parsed) throw new Error(`Invalid IssueKey: ${issue}`);
-  const repo = `${parsed.owner}/${parsed.repo}`;
-  const token = roleToken(state.project, issue, role);
-  const registeredThreads = new Set(
-    state.dispatchThreads
-      .filter((thread) => thread.repo === repo && thread.role === role)
-      .map((thread) => thread.thread)
-  );
-  const result: CatchupUnhandled[] = [];
-  for (const held of tree.heldEvents) {
-    if (held.role !== token) continue;
-    const payload = asRecord(JSON.parse(held.payloadJson));
-    const thread = numberValue(payload?.thread);
-    const author = stringValue(payload?.author);
-    const body = stringValue(payload?.body);
-    if (
-      payload?.type !== "dispatch-reply" ||
-      thread === undefined ||
-      !registeredThreads.has(thread) ||
-      !author ||
-      body === undefined
-    ) {
-      continue;
-    }
-    result.push({ kind: "dispatch-reply", thread, author, body });
-  }
-  return result;
-}
-
 export async function workerCatchup(
   s: LegionState,
   issue: IssueKey,
@@ -444,6 +392,5 @@ export async function workerCatchup(
     const secondAt = "occurredAt" in second ? second.occurredAt : "";
     return firstAt.localeCompare(secondAt);
   });
-  unhandled.push(...dispatchReplies(s, issue, role));
   return { type: "catchup-worker", unhandled };
 }

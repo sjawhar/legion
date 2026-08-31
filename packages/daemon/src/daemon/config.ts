@@ -19,9 +19,14 @@ export interface DaemonConfig {
   legionId: string;
   port: number;
   envoyUrl: string;
+  /**
+   * Optional MCP endpoint for the dispatch shim, passed through to spawned
+   * session environments as DISPATCH_MCP_URL so agents target a specific
+   * dispatch server (the smoke rig points it at its own instance). When
+   * unset, sessions fall back to their envoy.json dispatch config.
+   */
+  dispatchMcpUrl?: string;
   natsUrls: string[];
-  dispatchUrl: string;
-  dispatchBearer: string;
   ompInvocation: string;
   boardProjectIds: string[];
   appLogins: string[];
@@ -77,7 +82,6 @@ const CONFIG_SCHEMA: ConfigSchema = {
   port: null,
   envoy_url: null,
   nats_urls: null,
-  dispatch_url: null,
   omp_invocation: null,
   board_project_ids: null,
   app_logins: null,
@@ -340,10 +344,12 @@ export function loadConfigFromFile(yamlText: string, configDir: string): LoadedC
   }
   const envoyUrl = readString(config.envoy_url, "envoy_url");
   if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
+  const dispatchMcpUrlField = readString(config.dispatch_mcp_url, "dispatch_mcp_url");
+  if (dispatchMcpUrlField !== undefined) {
+    fields.dispatchMcpUrl = validateUrl(dispatchMcpUrlField, "dispatch_mcp_url");
+  }
   const natsUrls = readStringArray(config.nats_urls, "nats_urls");
   if (natsUrls !== undefined) fields.natsUrls = natsUrls;
-  const dispatchUrl = readString(config.dispatch_url, "dispatch_url");
-  if (dispatchUrl !== undefined) fields.dispatchUrl = validateUrl(dispatchUrl, "dispatch_url");
   const ompInvocation = readString(config.omp_invocation, "omp_invocation");
   if (ompInvocation !== undefined) {
     fields.ompInvocation = requireNonEmpty(ompInvocation, "omp_invocation");
@@ -416,6 +422,12 @@ export function resolveDaemonConfig(
     env.ENVOY_URL,
     DEFAULT_ENVOY_URL
   );
+  const dispatchMcpUrl = resolveValue(
+    undefined,
+    fileString(fields, "dispatchMcpUrl"),
+    env.DISPATCH_MCP_URL,
+    undefined
+  );
   const natsUrls = resolveValue(
     opts.cliOverrides?.natsUrls,
     fileStringArray(fields, "natsUrls"),
@@ -427,19 +439,6 @@ export function resolveDaemonConfig(
   }
   for (const url of natsUrls.value) validateUrl(url, "ENVOY_NATS_URL");
 
-  const dispatchUrl = resolveValue(
-    opts.cliOverrides?.dispatchUrl,
-    fileString(fields, "dispatchUrl"),
-    env.LEGION_DISPATCH_URL,
-    undefined
-  );
-  if (!dispatchUrl.value || dispatchUrl.value.trim().length === 0) {
-    throw new Error("LEGION_DISPATCH_URL is required (or set dispatch_url in legion.yaml)");
-  }
-  const dispatchBearer = env.LEGION_DISPATCH_BEARER;
-  if (dispatchBearer === undefined) {
-    throw new Error("LEGION_DISPATCH_BEARER is required");
-  }
   const ompInvocation = resolveValue(
     opts.cliOverrides?.ompInvocation,
     fileString(fields, "ompInvocation"),
@@ -545,9 +544,11 @@ export function resolveDaemonConfig(
       legionId: legionId.value,
       port: port.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
+      dispatchMcpUrl:
+        dispatchMcpUrl.value === undefined
+          ? undefined
+          : validateUrl(dispatchMcpUrl.value, "DISPATCH_MCP_URL"),
       natsUrls: natsUrls.value,
-      dispatchUrl: validateUrl(dispatchUrl.value, "LEGION_DISPATCH_URL"),
-      dispatchBearer: requireNonEmpty(dispatchBearer, "LEGION_DISPATCH_BEARER"),
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       boardProjectIds: boardProjectIds.value,
       appLogins: appLogins.value,

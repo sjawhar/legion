@@ -335,6 +335,91 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("auto-subscribes the session to the dispatch thread topic on a successful dispatch tool result", async () => {
+    const interestRegistrations: unknown[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe" && init?.body !== undefined) {
+        interestRegistrations.push(JSON.parse(String(init.body)));
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    await fixture.handlers.get("tool_result")?.(
+      {
+        toolName: "mcp__dispatch_dispatch",
+        toolCallId: "call_1",
+        input: {},
+        details: {
+          content: [
+            { type: "text", text: '{"thread":91,"url":"https://github.com/sjawhar/legion/issues/91"}' },
+          ],
+        },
+        isError: false,
+      },
+      sessionContext(),
+    );
+
+    const topic = "notifications.github.sjawhar.legion.issue.91.>";
+    expect(natsState.controls.has(topic)).toBe(true);
+    const lastRegistration = interestRegistrations.at(-1) as { topics?: string[] } | undefined;
+    expect(lastRegistration?.topics).toContain(topic);
+  });
+
+  test("re-subscribes persisted registry interests on resumed session start, skipping role lanes", async () => {
+    globalThis.fetch = async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/ses_omp") {
+        return response({
+          session_id: "ses_omp",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [
+            "notifications.agent.ses_omp",
+            "notifications.github.sjawhar.legion.issue.91.>",
+            "notifications.role.legion-controller",
+          ],
+        });
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?interest-recovery");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    const resumed = {
+      ...sessionContext(),
+      sessionManager: { ...sessionContext().sessionManager, getBranch: () => [{}] },
+    };
+    await fixture.handlers.get("session_start")?.({}, resumed);
+    expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91.>")).toBe(true);
+    expect(natsState.controls.has("notifications.role.legion-controller")).toBe(false);
+  });
+
+  test("ignores failed and non-dispatch tool results", async () => {
+    globalThis.fetch = async () => response({});
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe-negative");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const url = '{"thread":92,"url":"https://github.com/sjawhar/legion/issues/92"}';
+    await fixture.handlers.get("tool_result")?.(
+      { toolName: "mcp__dispatch_dispatch", toolCallId: "c", input: {}, details: url, isError: true },
+      sessionContext(),
+    );
+    await fixture.handlers.get("tool_result")?.(
+      { toolName: "read", toolCallId: "c2", input: {}, details: url, isError: false },
+      sessionContext(),
+    );
+
+    expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.92.>")).toBe(false);
+  });
+
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {
     const requests: string[] = [];
     globalThis.fetch = async (input) => {

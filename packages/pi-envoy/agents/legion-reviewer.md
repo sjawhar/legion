@@ -1,7 +1,7 @@
 ---
 name: legion-reviewer
 description: Review a Legion issue for correctness, regressions, and acceptance-criteria compliance, then enforce the final review gate.
-tools: ["read", "bash", "task", "hub"]
+tools: ["read", "bash", "task", "hub", "mcp__dispatch_dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
@@ -37,7 +37,7 @@ Review the issue against its acceptance criteria, implementation, tests, and dur
 handoffs. Seek concrete correctness, security, regression, and maintainability findings.
 Use ordinary oracle, scout, reviewer, or explorer subagents if useful; never spawn a
 `legion-*` agent. Return changes requested with evidence to the architect through `hub`;
-do not open dispatch threads.
+use the raw `dispatch` tool yourself only for a standalone human question outside tree scope.
 
 ## Shared workspace and credentials
 

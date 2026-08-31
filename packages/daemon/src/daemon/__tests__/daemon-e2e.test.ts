@@ -188,8 +188,6 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     port,
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: [natsUrl],
-    dispatchUrl: "http://127.0.0.1:13380",
-    dispatchBearer: "dispatch-bearer",
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     boardProjectIds: ["PVT_board"],
     appLogins: ["legion-implement[bot]", "legion-review[bot]"],

@@ -1,7 +1,7 @@
 ---
 name: legion-tester
 description: Verify a Legion issue against its acceptance criteria and return reproducible evidence or actionable failures.
-tools: ["read", "edit", "write", "bash", "task", "hub"]
+tools: ["read", "edit", "write", "bash", "task", "hub", "mcp__dispatch_dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
@@ -58,8 +58,9 @@ tokens; the extension grants credentials only around `legion gh --` and `jj git 
 ## Completion
 
 Send a concise evidence-backed verdict to the architect through `hub`. A failure that
-requires implementation is the architect's scheduling input; do not open a dispatch
-thread or silently redefine the acceptance criteria.
+requires implementation is the architect's scheduling input; do not silently redefine
+the acceptance criteria. A standalone human question may go through `dispatch`
+directly.
 
 Your last act before `yield` is:
 

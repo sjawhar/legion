@@ -5,8 +5,6 @@ import { loadConfig, loadConfigFromFile, resolveDaemonConfig } from "../config";
 const requiredEnv = {
   LEGION_ID: "Acme/42",
   ENVOY_NATS_URL: "nats://one:4222, nats://two:4222",
-  LEGION_DISPATCH_URL: "http://127.0.0.1:13380",
-  LEGION_DISPATCH_BEARER: "dispatch-bearer",
 };
 
 describe("daemon config", () => {
@@ -35,8 +33,6 @@ describe("daemon config", () => {
       port: 14000,
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
-      dispatchUrl: "http://127.0.0.1:13380",
-      dispatchBearer: "dispatch-bearer",
       boardProjectIds: ["PVT_alpha", "PVT_beta"],
       appLogins: ["legion-implement[bot]", "legion-review[bot]"],
       maxFixAttempts: 5,
@@ -52,6 +48,33 @@ describe("daemon config", () => {
     expect(config.stateDir).toEndWith(path.join(".legion", "acme42"));
   });
 
+  it("resolves the optional dispatch MCP passthrough from the environment", () => {
+    const { config } = resolveDaemonConfig({
+      env: {
+        ...requiredEnv,
+        DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
+      },
+      cliOverrides: {
+        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      },
+    });
+    expect(config.dispatchMcpUrl).toBe("http://127.0.0.1:18766/mcp");
+  });
+
+  it("rejects an invalid dispatch MCP passthrough URL", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          DISPATCH_MCP_URL: "not a url",
+        },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow(/DISPATCH_MCP_URL/);
+  });
+
   it("loads lifecycle settings from the existing YAML loader shape", () => {
     const file = loadConfigFromFile(
       [
@@ -60,7 +83,6 @@ describe("daemon config", () => {
         "envoy_url: http://listener:9020",
         "nats_urls:",
         "  - nats://one:4222",
-        "dispatch_url: http://dispatch:13380",
         "board_project_ids:",
         "  - PVT_one",
         "app_logins:",
@@ -80,10 +102,7 @@ describe("daemon config", () => {
       ].join("\n"),
       "/tmp/legion-config"
     );
-    const { config } = resolveDaemonConfig({
-      configFile: file,
-      env: { LEGION_DISPATCH_BEARER: "dispatch-bearer" },
-    });
+    const { config } = resolveDaemonConfig({ configFile: file });
 
     expect(config).toMatchObject({
       project: "acme7",
@@ -91,8 +110,6 @@ describe("daemon config", () => {
       port: 14001,
       envoyUrl: "http://listener:9020",
       natsUrls: ["nats://one:4222"],
-      dispatchUrl: "http://dispatch:13380",
-      dispatchBearer: "dispatch-bearer",
       boardProjectIds: ["PVT_one"],
       appLogins: ["legion-implement[bot]"],
       maxFixAttempts: 4,
@@ -109,16 +126,8 @@ describe("daemon config", () => {
     expect(file.warnings).toEqual([]);
   });
 
-  it("rejects missing NATS or dispatch configuration instead of inventing a transport", () => {
-    expect(() =>
-      loadConfig({
-        LEGION_ID: "acme/7",
-        LEGION_DISPATCH_URL: "http://dispatch",
-      })
-    ).toThrow("ENVOY_NATS_URL");
-    expect(() => loadConfig({ LEGION_ID: "acme/7", ENVOY_NATS_URL: "nats://one:4222" })).toThrow(
-      "LEGION_DISPATCH_URL"
-    );
+  it("rejects missing NATS configuration instead of inventing a transport", () => {
+    expect(() => loadConfig({ LEGION_ID: "acme/7" })).toThrow("ENVOY_NATS_URL");
   });
 
   it("rejects invalid lifecycle numbers from either configuration source", () => {

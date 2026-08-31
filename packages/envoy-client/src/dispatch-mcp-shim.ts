@@ -31,25 +31,17 @@ export type DispatchShimGate =
   | { readonly serve: true; readonly remoteUrl: string };
 
 /**
- * Decide whether this process may serve the raw dispatch tool.
+ * Decide whether this process may serve the dispatch tool.
  *
- * Legion sessions never get it — phase workers are barred from opening human
- * dispatch threads, and the architect's envoy_dispatch routes through the
- * daemon, which scopes the thread to the tree and registers it for reply
- * routing. The Legion check beats even an explicit DISPATCH_MCP_URL.
- * Interactive parity comes from user-level MCP config instead.
+ * Every session gets it when dispatch is enabled — including Legion sessions:
+ * dispatch exists so headless unattended agents (architects, planners, phase
+ * workers) can raise durable questions to the human, and the asking session
+ * receives the reply.
  */
 export function dispatchShimGate(
   env: Record<string, string | undefined>,
   options: { readonly cwd?: string; readonly home?: string } = {}
 ): DispatchShimGate {
-  if (env.LEGION_TREE !== undefined || env.LEGION_CONTROLLER === "1") {
-    return {
-      serve: false,
-      reason:
-        "Legion sessions use envoy_dispatch via the daemon; not serving the raw dispatch tool",
-    };
-  }
   const remoteUrl = resolveDispatchMcpUrl(env, options);
   if (remoteUrl === null) {
     return {

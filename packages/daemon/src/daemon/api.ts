@@ -4,7 +4,7 @@ import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
 import { CapabilityService, ControllerGate, secretHash, spawnCapabilityKey } from "./api/auth";
 import { appendFooter, type RouteContext, requireTree, requireTreeIssue } from "./api/context";
-import { type DispatchDeps, dispatchThread } from "./api/dispatch";
+
 import { GitHubService, type GitHubTokenSource } from "./api/github";
 import {
   asRecord,
@@ -25,7 +25,6 @@ import {
   handleGrants,
   handleProvisioningCredential,
 } from "./api/routes/credentials";
-import { handleDispatchThreads } from "./api/routes/dispatch";
 import {
   handleEscalate,
   handleIssueBody,
@@ -72,8 +71,6 @@ export interface LegionApiProcessManager {
   beginLinger(tree: IssueKey): void;
 }
 
-export type { DispatchFetch as LegionApiFetch } from "./api/dispatch";
-
 export interface LegionApiDeps {
   state: LegionState;
   saveState?: () => Promise<void>;
@@ -81,7 +78,6 @@ export interface LegionApiDeps {
   tokenManager: GitHubTokenSource;
   processManager: LegionApiProcessManager;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
-  dispatch: DispatchDeps;
   onTreeReady?(tree: IssueKey): Promise<void>;
   onControllerReady(): Promise<void>;
   onControllerEvent(payload: { type: string }): Promise<void>;
@@ -134,10 +130,6 @@ const ROUTES: Record<string, RouteEntry> = {
     handler: handleIssueClose,
   },
   "/legion/v1/escalate": { request: LegionDaemonApi.Escalate.request, handler: handleEscalate },
-  "/legion/v1/dispatch-threads": {
-    request: LegionDaemonApi.DispatchThread.request,
-    handler: handleDispatchThreads,
-  },
   "/legion/v1/spawn-token": {
     request: LegionDaemonApi.SpawnToken.request,
     handler: handleSpawnToken,
@@ -197,8 +189,6 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     auth,
     controllerGate,
     github,
-    dispatchThread: (parent, subject, body, ask, urgency) =>
-      dispatchThread(deps.dispatch, parent, subject, body, ask, urgency),
     requireTree: (body) => requireTree(deps.state, body),
     requireTreeIssue: (body) => requireTreeIssue(deps.state, body),
     appendFooter: (tree, issue, body) => appendFooter(deps.state, tree, issue, body),

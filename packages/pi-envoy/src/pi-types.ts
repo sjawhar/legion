@@ -20,6 +20,8 @@ export interface SessionContext {
      */
     readonly getSessionName?: () => string | undefined;
     readonly getSessionFile: () => string | undefined;
+    /** Entries of the active branch; non-empty at session_start on resume. */
+    readonly getBranch?: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: {

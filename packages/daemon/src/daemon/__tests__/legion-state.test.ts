@@ -62,13 +62,6 @@ function stateWithTree() {
   };
   state.prByBranch["sjawhar/legion@legion-42"] = "sjawhar/legion#7";
   state.admission.active.push(issue);
-  state.dispatchThreads.push({
-    repo: "sjawhar/legion",
-    thread: 99,
-    role: "architect",
-    issue,
-    tree: issue,
-  });
   state.phases[issue] = { phase: "implement", sessionId: "ses_123" };
   state.controllerCapabilityHash = "f".repeat(64);
   return state;
@@ -85,9 +78,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v7 state with a valid project and admission capacity", () => {
+  it("initializes empty v8 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 7,
+      version: 8,
       project: "omp",
       issues: {},
       trees: {},
@@ -96,7 +89,6 @@ describe("legion state", () => {
       prs: {},
       prByBranch: {},
       admission: { cap: 4, active: [], queue: [] },
-      dispatchThreads: [],
       phases: {},
       controllerHeldEvents: [],
     });
@@ -160,6 +152,68 @@ describe("legion state", () => {
     const migrated = await loadState(file, initialState);
 
     expect(migrated).toEqual(current);
+  });
+  it("migrates v7 state by removing adopted dispatch threads and their held replies", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v7-"));
+    const file = path.join(tempDir, "state.json");
+    const dispatchThread = formatIssueKey("sjawhar", "legion", 99);
+    const retainedChild = formatIssueKey("sjawhar", "legion", 100);
+    const retainedHeldEvent = {
+      role: "implementer",
+      payloadJson: '{"type":"work"}',
+      heldAt: "2026-08-24T00:00:01Z",
+      eventId: "event-work",
+    };
+    const legacy = stateWithTree();
+    legacy.issues[issue].children = [dispatchThread, retainedChild];
+    legacy.issues[dispatchThread] = {
+      key: dispatchThread,
+      title: "Dispatch question",
+      state: "open",
+      parent: issue,
+      children: [],
+      released: false,
+      labels: [],
+    };
+    legacy.issues[retainedChild] = {
+      key: retainedChild,
+      title: "Retained child",
+      state: "open",
+      parent: issue,
+      children: [],
+      released: false,
+      labels: [],
+    };
+    legacy.trees[issue].heldEvents = [
+      retainedHeldEvent,
+      {
+        role: "architect",
+        payloadJson: '{"type":"dispatch-reply","body":"answer"}',
+        heldAt: "2026-08-24T00:00:02Z",
+        eventId: "event-dispatch-reply",
+      },
+    ];
+    const v7State = {
+      ...legacy,
+      version: 7,
+      dispatchThreads: [
+        {
+          repo: "sjawhar/legion",
+          thread: 99,
+          role: "architect",
+          issue,
+          tree: issue,
+        },
+      ],
+    };
+    await writeFile(file, JSON.stringify(v7State), "utf8");
+
+    const expected = stateWithTree();
+    expected.issues[issue].children = [retainedChild];
+    expected.issues[retainedChild] = legacy.issues[retainedChild];
+    expected.trees[issue].heldEvents = [retainedHeldEvent];
+
+    expect(await loadState(file, initialState)).toEqual(expected);
   });
 
   it("rejects removed v6 fields on current-version state", async () => {

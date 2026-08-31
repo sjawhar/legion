@@ -25,9 +25,10 @@ returns that schema to the architect. It writes the same phase-specific payload 
 `.legion/<phase>.json`, verifies it exists, and commits the handoff before reporting completion.
 The committed predecessor handoff wins after revival or re-creation.
 
-Workers do not run a controller loop, mutate lifecycle labels, or create human dispatch threads.
-When an issue needs a product, scope, cross-phase, or human decision, they send the owning
-architect the verified observation and decision needed through hub.
+Workers do not run a controller loop or mutate lifecycle labels. Workers coordinate
+lifecycle, scope, and cross-phase decisions with the owning architect through hub, sending
+the verified observation and decision needed. A worker may use the `dispatch` MCP tool
+directly for a durable human question; replies come back to the worker's own session.
 
 ## Durable artifacts
 

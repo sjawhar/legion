@@ -1,4 +1,4 @@
-import { formatIssueKey, type IssueKey, LEGION_ROLES, roleToken } from "@legion/contracts";
+import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
 import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
 export interface LegionEventPayload {
@@ -91,13 +91,29 @@ function labels(value: unknown): string[] {
   return result;
 }
 
+// Dispatch threads are human Q&A artifacts (GitHub sub-issues labeled by
+// dispatchLabel in packages/envoy/internal/dispatch/core/thread.go), never
+// Legion work items. Checked against the raw payload — deliberately not via
+// labels()/SURVIVING_LABELS, whose output persists into IssueNode.labels and
+// must stay within the GateLabelSchema enum in legion-state.ts.
+function isDispatchThread(rawLabels: unknown): boolean {
+  const source = Array.isArray(rawLabels) ? rawLabels : asRecord(rawLabels)?.nodes;
+  if (!Array.isArray(source)) return false;
+  return source.some((label) => {
+    const name = typeof label === "string" ? label : stringValue(asRecord(label)?.name);
+    return name === "dispatch-thread";
+  });
+}
+
 function childKeys(repo: string, raw: JsonRecord): IssueKey[] {
   const subIssues = raw.sub_issues;
   const values = Array.isArray(subIssues) ? subIssues : asRecord(subIssues)?.nodes;
   if (!Array.isArray(values)) return [];
   const result: IssueKey[] = [];
   for (const value of values) {
-    const number = numberValue(asRecord(value)?.number);
+    const record = asRecord(value);
+    if (isDispatchThread(record?.labels)) continue;
+    const number = numberValue(record?.number);
     const key = number === undefined ? undefined : keyFor(repo, number);
     if (key && !result.includes(key)) result.push(key);
   }
@@ -279,6 +295,7 @@ function ingress(
   if (!repo || number === undefined) return [];
   const key = keyFor(repo, number);
   if (!key) return [];
+  if (isDispatchThread(raw.labels)) return [];
   const currentLabels = labels(raw.labels);
   if (currentLabels.includes("legion-child") || currentLabels.includes("legion-backlog")) return [];
   const preexistingChildren = childKeys(repo, raw);
@@ -288,6 +305,7 @@ function ingress(
   if (Array.isArray(values)) {
     for (const value of values) {
       const child = asRecord(value);
+      if (isDispatchThread(child?.labels)) continue;
       const childNumber = numberValue(child?.number);
       const childKey = childNumber === undefined ? undefined : keyFor(repo, childNumber);
       if (child && childKey) addNode(state, childKey, child, false, key);
@@ -319,6 +337,8 @@ function subIssue(
   if (!parentKey || !childKey || !parent) return [];
 
   if (payload.action === "sub_issue_added") {
+    // Never adopt a dispatch thread as a child (see isDispatchThread).
+    if (isDispatchThread(rawChild.labels)) return [];
     const known = parent.children.includes(childKey);
     if (!known) parent.children.push(childKey);
     const child = state.issues[childKey] ?? addNode(state, childKey, rawChild, false, parentKey);
@@ -463,22 +483,6 @@ function issueComment(
   const author = stringValue(asRecord(comment.user)?.login) ?? "";
   const body = stringValue(comment.body) ?? "";
   const url = stringValue(comment.html_url) ?? "";
-  const dispatch = state.dispatchThreads.find(
-    (thread) => thread.repo === repo && thread.thread === number
-  );
-  if (dispatch) {
-    const dispatchRole = LEGION_ROLES.find((role) => role === dispatch.role);
-    if (!dispatchRole) {
-      throw new Error(`Invalid Legion dispatch role: ${dispatch.role}`);
-    }
-    return routeToken(
-      state,
-      dispatch.issue,
-      roleToken(state.project, dispatch.issue, dispatchRole),
-      { type: "dispatch-reply", thread: number, author, body },
-      envelope
-    );
-  }
   if (rawIssue.pull_request !== undefined) {
     const pr = state.prs[`${repo}#${number}`];
     return pr

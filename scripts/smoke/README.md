@@ -23,7 +23,6 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
 | `LEGION_APP_LOGINS` | Comma-separated GitHub bot logins for both Legion Apps. | `legion-implementer[bot],legion-reviewer[bot]` |
-| `LEGION_DISPATCH_BEARER` | Explicit installation token for daemon calls to Dispatch. | A fresh implementation-App installation token minted from `GH_AGENT_APP_PRIVATE_KEY_B64`. |
 
 It also requires these secret inputs:
 

@@ -84,7 +84,6 @@ function startApi(
       beginLinger: () => {},
     },
     envoyPublish: async () => {},
-    dispatch: { url: "http://dispatch.test", bearer: "test" },
     onControllerReady: async () => {},
     onControllerEvent: async () => {},
   };

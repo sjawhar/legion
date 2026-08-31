@@ -15,8 +15,6 @@ function daemonConfig(stateDir: string): DaemonConfig {
     port: 13999,
     envoyUrl: "http://127.0.0.1:9020",
     natsUrls: ["nats://127.0.0.1:4222"],
-    dispatchUrl: "http://127.0.0.1:13380",
-    dispatchBearer: "dispatch-bearer",
     ompInvocation: "/opt/omp",
     boardProjectIds: [],
     appLogins: [],

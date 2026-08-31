@@ -15,21 +15,19 @@ function writeUserConfig(home: string, config: unknown): void {
 }
 
 describe("dispatchShimGate", () => {
-  it("declines in a Legion tree environment even with an explicit URL", () => {
+  it("serves in a Legion tree environment so headless agents can raise questions", () => {
     const gate = dispatchShimGate(
       { LEGION_TREE: "owner/repo#1", DISPATCH_MCP_URL: "http://example.test/mcp" },
       { home: tempDir(), cwd: tempDir() }
     );
-    expect(gate).toEqual({
-      serve: false,
-      reason:
-        "Legion sessions use envoy_dispatch via the daemon; not serving the raw dispatch tool",
-    });
+    expect(gate).toEqual({ serve: true, remoteUrl: "http://example.test/mcp" });
   });
 
-  it("declines in a Legion controller environment", () => {
-    const gate = dispatchShimGate({ LEGION_CONTROLLER: "1" }, { home: tempDir(), cwd: tempDir() });
-    expect(gate.serve).toBe(false);
+  it("serves in a Legion controller environment from an enabled envoy.json", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true, serverUrl: "http://box:9999" } });
+    const gate = dispatchShimGate({ LEGION_CONTROLLER: "1" }, { home, cwd: tempDir() });
+    expect(gate).toEqual({ serve: true, remoteUrl: "http://box:9999/mcp" });
   });
 
   it("declines when dispatch is not enabled anywhere", () => {

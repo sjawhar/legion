@@ -46,7 +46,7 @@ into a state holder: daemon state and GitHub artifacts remain authoritative.
 |---|---|---|
 | New issue added to the project board (webhook: issue opened / project item added; resync heals misses) | issue ref + triage context (incl. pre-existing children) | Triage: spawn root process via daemon admission, or park in the daemon-state backlog |
 | Backlog eligibility | slot freed / priority change | Reconsider parked items; deliberately-backlogged issues carry a marker so resync doesn't re-flag them |
-| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; human Q&A never routes here — architects open dispatch threads |
+| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, erroring issues) | Verify against fresh state, then dispatch/heal |
 | Mention | Slack/GitHub @mention text | Answer, or route to the owning issue's architect role |
 | Approval interpretation | ambiguous human comment on a gated issue | Decide whether it's an approval; if so, apply `human-approved` via the daemon |
@@ -82,8 +82,8 @@ is a deliberate controller decision, not a no-op.
 ## Architect escalation
 
 Only decide controller-actionable escalations: re-filing independent work, capacity, and
-cross-tree conflicts. Architects handle ordinary human Q&A through their own dispatch
-threads.
+cross-tree conflicts. Issue-scoped human Q&A goes through `dispatch` from the owning
+architect, not the controller.
 
 For an independence judgment, verify the child and its parent against GitHub and current
 daemon state. If the work belongs in an independent root:

@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertLegionProjectToken,
+  formatIssueKey,
   type IssueKey,
   isLegionProjectToken,
   type LegionRole,
@@ -63,14 +64,6 @@ export interface PrState {
   reviewDecision?: "approved" | "changes_requested";
 }
 
-export interface DispatchThread {
-  repo: `${string}/${string}`;
-  thread: number;
-  role: string;
-  issue: IssueKey;
-  tree: IssueKey;
-}
-
 export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
@@ -91,7 +84,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 7;
+  version: 8;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -101,7 +94,6 @@ export interface LegionState {
   prs: Record<string, PrState>;
   prByBranch: Record<string, string>;
   admission: { cap: number; active: IssueKey[]; queue: IssueKey[] };
-  dispatchThreads: DispatchThread[];
   phases: Record<IssueKey, { phase: string; sessionId: string } | undefined>;
   controllerHeldEvents: HeldEvent[];
   controllerCapabilityHash?: string;
@@ -229,15 +221,6 @@ const SpawnCapabilitySchema = z
     role: z.string(),
   })
   .strict();
-const DispatchThreadSchema = z
-  .object({
-    repo: RepositorySchema,
-    thread: z.number().int().nonnegative(),
-    role: z.string(),
-    issue: IssueKeySchema,
-    tree: IssueKeySchema,
-  })
-  .strict();
 const PhaseSchema = z
   .object({
     phase: z.string(),
@@ -246,7 +229,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(7),
+    version: z.literal(8),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -270,7 +253,6 @@ const LegionStateSchema = z
         queue: z.array(IssueKeySchema),
       })
       .strict(),
-    dispatchThreads: z.array(DispatchThreadSchema),
     phases: z.record(IssueKeySchema, PhaseSchema),
     controllerHeldEvents: z.array(HeldEventSchema).default([]),
     controllerCapabilityHash: z
@@ -288,7 +270,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 7,
+    version: 8,
     project,
     issues: {},
     trees: {},
@@ -297,7 +279,6 @@ export function newLegionState(project: string, cap: number): LegionState {
     prs: {},
     prByBranch: {},
     admission: { cap, active: [], queue: [] },
-    dispatchThreads: [],
     phases: {},
     controllerHeldEvents: [],
   };
@@ -341,6 +322,77 @@ function migrateV6State(state: unknown): unknown {
   return { ...rest, version: 7, trees };
 }
 
+function recordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function dispatchThreadKey(value: unknown): IssueKey | undefined {
+  if (!recordValue(value)) return undefined;
+  const { repo, thread } = value;
+  if (typeof repo !== "string" || typeof thread !== "number" || !Number.isSafeInteger(thread)) {
+    return undefined;
+  }
+  const [owner, name, ...extra] = repo.split("/");
+  if (!owner || !name || extra.length > 0 || thread < 0) return undefined;
+  return formatIssueKey(owner, name, thread);
+}
+
+function withoutDispatchReplies(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  const retained = value.filter((held) => {
+    if (!recordValue(held)) return true;
+    return (
+      typeof held.payloadJson !== "string" || !held.payloadJson.includes('"type":"dispatch-reply"')
+    );
+  });
+  return retained.length === value.length ? value : retained;
+}
+
+function migrateV7State(state: unknown): unknown {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
+  if (!("version" in state) || state.version !== 7) return state;
+  const { dispatchThreads, ...rest } = state as Record<string, unknown>;
+  const dispatchThreadKeys = new Set<string>(
+    Array.isArray(dispatchThreads)
+      ? dispatchThreads.map(dispatchThreadKey).filter((key): key is IssueKey => key !== undefined)
+      : []
+  );
+  const issues = rest.issues;
+  const trees = rest.trees;
+  const migratedIssues = recordValue(issues)
+    ? Object.fromEntries(
+        Object.entries(issues)
+          .filter(([key]) => !dispatchThreadKeys.has(key))
+          .map(([key, node]) => {
+            if (!recordValue(node) || !Array.isArray(node.children)) return [key, node];
+            const retained = node.children.filter(
+              (child) => typeof child !== "string" || !dispatchThreadKeys.has(child)
+            );
+            return retained.length === node.children.length
+              ? [key, node]
+              : [key, { ...node, children: retained }];
+          })
+      )
+    : undefined;
+  const migratedTrees = recordValue(trees)
+    ? Object.fromEntries(
+        Object.entries(trees).map(([key, tree]) => {
+          if (!recordValue(tree)) return [key, tree];
+          const retained = withoutDispatchReplies(tree.heldEvents);
+          return retained === tree.heldEvents
+            ? [key, tree]
+            : [key, { ...tree, heldEvents: retained }];
+        })
+      )
+    : undefined;
+  return {
+    ...rest,
+    version: 8,
+    ...(migratedIssues ? { issues: migratedIssues } : {}),
+    ...(migratedTrees ? { trees: migratedTrees } : {}),
+  };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -352,12 +404,12 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
-  const state = migrateV6State(migrateV5State(JSON.parse(raw)));
+  const state = migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw))));
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 7) {
+  if (version !== 8) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

@@ -1,4 +1,4 @@
-// Package mcp serves the Streamable HTTP MCP endpoint for envoy_dispatch.
+// Package mcp serves the Streamable HTTP MCP endpoint for the dispatch tool.
 //
 // Authentication is per-request: the Authorization header is forwarded verbatim
 // to GitHub for every call made on behalf of the agent. There is no fallback
@@ -19,7 +19,7 @@ import (
 )
 
 // Server wires the per-request bearer middleware around an MCP Streamable HTTP
-// handler that exposes a single tool: envoy_dispatch.
+// handler that exposes a single tool: dispatch.
 type Server struct {
 	defaultRepo string
 	handler     http.Handler

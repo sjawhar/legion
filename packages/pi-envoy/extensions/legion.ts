@@ -34,7 +34,7 @@ import type {
   ToolCallEventResult,
 } from "../src/pi-types";
 import { legionSpawnBlockPattern, parseWorkerSpawn, workerAgentId } from "../src/legion/spawn";
-import { createEnvoyDispatchTool, createLegionTool } from "../src/legion/tools";
+import { createLegionTool } from "../src/legion/tools";
 import {
   acquireWorkerBudget,
   addPendingLegionSpawn,
@@ -611,7 +611,6 @@ export default function legionExtension(pi: PiApi): void {
     if (architectToolsRegistered) return;
     architectToolsRegistered = true;
     pi.registerTool(createLegionTool({ pi, roleDaemon, architectSession }));
-    pi.registerTool(createEnvoyDispatchTool({ pi, roleDaemon, architectSession }));
   };
 
   pi.registerCommand("legion-claim-controller", {

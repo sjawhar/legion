@@ -1,12 +1,12 @@
 import { agentSubject } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { machineID } from "@legion/envoy-client/machine";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { tool } from "@opencode-ai/plugin/tool";
 import { loadEnvoyConfig } from "./config";
 import { buildDispatchMcpEntry, injectEnvoyMcp } from "./dispatch-mcp";
-import { dispatchSubscriptionTopic } from "./dispatch-subscribe";
 import { logger } from "./log";
 import { resolvePort } from "./port";
 

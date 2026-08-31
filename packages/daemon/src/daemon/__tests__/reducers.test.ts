@@ -172,6 +172,28 @@ describe("reduceGithubEvent", () => {
     ]);
   });
 
+  it("excludes dispatch-thread children from ingress adoption", () => {
+    const state = newLegionState("omp", 4);
+    const excludedChild = formatIssueKey("acme", "widgets", 3);
+    const result = effects(state, {
+      action: "opened",
+      project: { id: "PVT_board" },
+      issue: issue(1, {
+        sub_issues: [issue(2), issue(3, { labels: ["dispatch-thread"] })],
+      }),
+    });
+
+    expect(state.issues[root]).toMatchObject({ children: [child] });
+    expect(state.issues[child]).toBeDefined();
+    expect(state.issues[excludedChild]).toBeUndefined();
+    expect(result).toEqual([
+      {
+        kind: "controller",
+        payload: { type: "triage", issue: root, preexistingChildren: [child] },
+      },
+    ]);
+  });
+
   it("creates an issue from a board item-created event", () => {
     const state = newLegionState("omp", 4);
     const result = effects(state, {
@@ -187,6 +209,19 @@ describe("reduceGithubEvent", () => {
         payload: { type: "triage", issue: root, preexistingChildren: [] },
       },
     ]);
+  });
+
+  it("does not triage a dispatch thread added to the board", () => {
+    const state = newLegionState("omp", 4);
+
+    expect(
+      effects(state, {
+        action: "created",
+        project: { id: "PVT_board" },
+        projects_v2_item: { content: issue(1, { labels: [{ name: "dispatch-thread" }] }) },
+      })
+    ).toEqual([]);
+    expect(state.issues[root]).toBeUndefined();
   });
 
   it("does not triage child or backlog issue ingress", () => {
@@ -233,6 +268,20 @@ describe("reduceGithubEvent", () => {
         sub_issue: issue(2),
       })
     ).toEqual([]);
+  });
+
+  it("never adopts a dispatch thread as a child", () => {
+    const state = rootState();
+
+    expect(
+      effects(state, {
+        action: "sub_issue_added",
+        parent_issue: issue(1),
+        sub_issue: issue(2, { labels: ["dispatch-thread"] }),
+      })
+    ).toEqual([]);
+    expect(state.issues[root].children).toEqual([]);
+    expect(state.issues[child]).toBeUndefined();
   });
 
   it("reports child closure and the zero-crossing completion edge", () => {
@@ -581,76 +630,6 @@ describe("reduceGithubEvent", () => {
       },
     ]);
     expect(effects(rootState(), payload)).toEqual([]);
-  });
-
-  it("routes registered dispatch-thread replies to their registered role", () => {
-    const state = rootState();
-    state.dispatchThreads.push({
-      repo,
-      thread: 1,
-      role: "architect",
-      issue: root,
-      tree: root,
-    });
-    const architect = roleToken(state.project, root, "architect");
-
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(1),
-        comment: {
-          user: { login: "sami" },
-          body: "Approved",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: architect,
-        payload: {
-          type: "dispatch-reply",
-          thread: 1,
-          author: "sami",
-          body: "Approved",
-        },
-      },
-    ]);
-  });
-  it("routes dispatch replies with the requesting issue and role recorded by the mapping", () => {
-    const state = rootState();
-    attachChild(state);
-    const implementer = claim(state, child, "implementer");
-    state.dispatchThreads.push({
-      repo,
-      thread: 73,
-      role: "implementer",
-      issue: child,
-      tree: root,
-    });
-
-    expect(
-      effects(state, {
-        action: "created",
-        issue: issue(73),
-        comment: {
-          user: { login: "sami" },
-          body: "Please fix it",
-          html_url: "comment-url",
-        },
-      })
-    ).toEqual([
-      {
-        kind: "publish",
-        role: implementer,
-        payload: {
-          type: "dispatch-reply",
-          thread: 73,
-          author: "sami",
-          body: "Please fix it",
-        },
-      },
-    ]);
   });
 
   it("maps legion issue branches on PR opening and notifies the implementer", () => {
