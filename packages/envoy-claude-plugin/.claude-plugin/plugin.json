@@ -1,6 +1,6 @@
 {
   "name": "claude-envoy-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Deliver Envoy messages as native Claude Code peer messages and expose Envoy MCP tools.",
   "mcpServers": "./.mcp.json",
   "experimental": {
