@@ -349,7 +349,7 @@ describe("ProcessManager", () => {
         "PATH=/full/bin:/usr/bin",
         "-e",
         "DISPATCH_MCP_URL=http://127.0.0.1:18766/mcp",
-        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../pi-envoy")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/agents/architect-root.md)"`,
+        `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${path.resolve(import.meta.dir, "../../../../pi-envoy")} --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md)"`,
       ],
       ["tmux", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -563,8 +563,8 @@ describe("ProcessManager", () => {
     const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const windows = commands.filter((command) => command[1] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/architect-root.md)"`,
-      `cd ${controllerDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/agents/controller-root.md)"`,
+      `cd ${workspaceDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)"`,
+      `cd ${controllerDir} && ${ompInvocation} --extension ${extensionDir} --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
     expect(windows.map((command) => command.includes(`PATH=${panePath}`))).toEqual([true, true]);
   });
@@ -962,7 +962,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --extension ${extension} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 
@@ -991,7 +991,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 
@@ -1021,7 +1021,7 @@ describe("ProcessManager", () => {
     const extension = path.resolve(import.meta.dir, "../../../../pi-envoy");
     const launch = commands.find((command) => command[0] === "tmux" && command[1] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/agents/architect-root.md)"`
+      `cd ${workspace} && /opt/oh-my-pi/18.0.3/omp --extension ${extension} --append-system-prompt "$(cat ${extension}/roles/architect-root.md)"`
     );
   });
 

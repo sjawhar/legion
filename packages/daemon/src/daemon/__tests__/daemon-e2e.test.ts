@@ -163,7 +163,7 @@ async function exists(target: string): Promise<boolean> {
 }
 
 async function createPromptFixtures(): Promise<() => Promise<void>> {
-  const promptDir = path.join(EXTENSION_PACKAGE, "agents");
+  const promptDir = path.join(EXTENSION_PACKAGE, "roles");
   const createdDir = !(await exists(promptDir));
   const createdFiles: string[] = [];
   await mkdir(promptDir, { recursive: true });

@@ -606,7 +606,7 @@ export class ProcessManager {
         return { ...result, stderr: result.stderr ?? "" };
       },
     });
-    const promptPath = path.join(EXTENSION_PACKAGE, "agents", "architect-root.md");
+    const promptPath = path.join(EXTENSION_PACKAGE, "roles", "architect-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
     const priorSessionFile = resume
       ? (resumeSessionFile ?? tree.locator?.ompSessionFile)
@@ -680,7 +680,7 @@ export class ProcessManager {
 
   private async spawnController(controllerSecret: string): Promise<void> {
     const controllerDir = path.join(this.deps.config.stateDir, "controller");
-    const promptPath = path.join(EXTENSION_PACKAGE, "agents", "controller-root.md");
+    const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
     await this.writeOmpConfig(controllerDir, this.deps.config.maxRecursionDepth);
     const session = `legion-${this.deps.state.project}`;

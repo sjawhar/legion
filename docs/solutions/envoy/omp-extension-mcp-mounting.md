@@ -35,24 +35,37 @@ To ship an MCP server with an extension package, put `.mcp.json` next to its `pa
 {
   "mcpServers": {
     "dispatch": {
-      "command": "bun",
-      "args": ["${OMP_PLUGIN_ROOT}/../envoy-client/bin/dispatch-mcp-shim.ts"]
+      "command": "./bin/dispatch-mcp-shim.ts"
     }
   }
 }
 ```
 
-Key mechanics (from `@oh-my-pi/pi-coding-agent` `src/discovery/omp-plugins.ts` and
-`substitute-plugin-root.ts`):
+The script needs a shebang (`#!/usr/bin/env bun`) and the executable bit; `bun build`
+preserves the shebang and npm tarballs preserve file modes.
 
-- `${OMP_PLUGIN_ROOT}` is substituted recursively in all string values, including `args`.
-- Relative `command`/`cwd` are rooted at the package directory, not the session cwd.
+Key mechanics (from `@oh-my-pi/pi-coding-agent` `src/discovery/omp-plugins.ts` and
+`src/discovery/substitute-plugin-root.ts`, verified on v18.0.10):
+
+- **`${OMP_PLUGIN_ROOT}` is NOT substituted here.** `substitutePluginRoot()` exists but the
+  `omp-plugins` MCP loader never calls it — that substitution serves the Claude marketplace
+  provider. A `${OMP_PLUGIN_ROOT}` in `args` reaches the spawn verbatim and the subprocess
+  dies instantly ("MCP subprocess closed stdout before responding" in `~/.omp/logs/`).
+- What IS rebased (`resolvePluginStdioPaths`): a path-like `command` (`./`, `../`) resolves
+  against the package root, and a relative `cwd` resolves against the package root. Bare
+  commands (`bun`, `npx`) and absolute paths pass through. **`args` are never rebased.**
+  Prefer the path-like `command` WITHOUT `cwd`: the subprocess keeps the session cwd, so
+  cwd-scoped behavior (project `envoy.json`, `gh` identity) matches a user-config mount.
+  Setting `cwd: "."` instead pins the subprocess to the package dir and silently bypasses
+  project-scoped config.
 - Servers are keyed by name (`capability/mcp.ts` `key: server => server.name`), so a
   same-named entry in native user config overrides the package-shipped one — collisions are
   safe.
 - An "extension package root" is any directory loaded via `--extension`/`-e`, `extensions:`
   settings, or an installed plugin; for a monorepo installed whole as a plugin, the root is
   the repo root, not the subpackage.
+- The provider also scans package-root `skills/`, `commands/`, `rules/`, `prompts/`,
+  `hooks/`, and `tools/` — a package can ship those the same way.
 
 Per-user gating that OpenCode did at injection time moves into the spawned server itself: the
 dispatch shim resolves its endpoint from the shared `envoy.json` (`dispatch.enabled` /
@@ -81,10 +94,12 @@ mount itself cannot discriminate.
 
 ## Examples
 
-A package-root `.mcp.json` mounting the dispatch shim was verified end to end with
-`omp -p --no-extensions -e packages/pi-envoy` from a scratch directory: the `dispatch` tool
-mounted through the shim → gh bearer → HTTP `/mcp` chain with zero session-level config.
-Dispatch currently mounts via user-level `~/.omp/agent/mcp.json` instead — a per-machine
-opt-in that predates the single-tool posture. Since every session that loads the package is
-now in the tool's audience and the shim self-gates on `dispatch.enabled`, a package-root
-mount is a viable simplification whenever the per-machine step becomes a burden.
+Dispatch mounts this way in production: `packages/pi-envoy/.mcp.json` spawns
+`bin/dispatch-mcp-shim.ts` from source in repo checkouts (the Legion daemon path) and the
+release workflow rewrites the `command` to the self-contained `dist/bin/dispatch-mcp-shim.js` for
+the npm tarball. Both forms verified on v18.0.10 with
+`omp -p --no-extensions -e <package>` from a scratch directory — `mcp__dispatch_dispatch`
+mounts with zero session-level config. Beware LLM self-reports here: a probe model once
+answered "YES" while `~/.omp/logs/` showed the mount had failed. Ground truth lives in the
+log ("MCP tool load failed, path: mcp:dispatch") and in the spawn argv (wrap `bun` in a
+logging shim on PATH to capture it).
