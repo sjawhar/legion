@@ -200,6 +200,14 @@ Examples:
 
 You do NOT need to subscribe in order to send or publish.
 
+**Session ids are not stable for the life of a conversation.** On OMP, `/fork` and `/handoff`
+re-mint the session id while the conversation continues (esc-esc rewinds also did, on omp
+18.1.0–18.1.2 only); the extension rebinds automatically and injects an `envoy` notice naming
+the previous and new ids. When that notice arrives, any id you shared earlier (an
+`envoy_whoami` result quoted in a message, an id a peer saved) is stale — re-run
+`envoy_whoami` and re-announce yourself. Never treat a whoami result from earlier in the
+transcript as current when identifying yourself to peers.
+
 ### To wait for CI, PR checks, or other async work
 
 **Don't `sleep`-poll. Don't "check back in N minutes."** Subscribe to the event and continue with productive work — the system will wake the session when the event arrives.

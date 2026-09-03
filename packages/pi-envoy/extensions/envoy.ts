@@ -10,7 +10,7 @@ import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-co
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
-import type { PiApi, SessionContext, ToolResult } from "../src/pi-types";
+import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -421,8 +421,12 @@ export default function envoyExtension(pi: PiApi): void {
     }
   });
 
-  const rebind = async (_event: unknown, context: SessionContext): Promise<void> => {
+  const rebind = async (
+    reason: SessionSwitchReason | undefined,
+    context: SessionContext
+  ): Promise<void> => {
     if (defaults.natsUrls.length === 0) return;
+    const previousID = sessionID;
     try {
       await establishSession(context);
     } catch (error) {
@@ -433,11 +437,39 @@ export default function envoyExtension(pi: PiApi): void {
         "warning"
       );
     }
+    // A branch or fork carries the transcript — and a handoff its
+    // agent-written summary — forward under a freshly minted session id. The
+    // extension tracks the change, but any identity already baked into that
+    // carried context — envoy_whoami output, ids the agent named in sent
+    // messages — silently rots, and peers who saved the old id can no longer
+    // reach this session. Tell the agent without starting a turn; the notice
+    // lands when it next runs. A "new" or "resume" switch replaces the
+    // transcript with one that matches its own id, so those stay silent.
+    if (previousID === "" || previousID === sessionID) return;
+    if (reason === "new" || reason === "resume") return;
+    pi.sendMessage(
+      {
+        customType: "envoy-message",
+        content: encode({
+          envoy: {
+            notice: "session id changed",
+            previous_session_id: previousID,
+            session_id: sessionID,
+            detail:
+              "This conversation now lives under a new session id. Any identity you shared earlier (envoy_whoami output, session ids named in messages) is stale, and peers using the old id cannot reach you. Re-run envoy_whoami before identifying yourself and re-announce the new id to peers you already introduced yourself to.",
+          },
+        }),
+        display: true,
+      },
+      { deliverAs: "steer", triggerTurn: false }
+    );
   };
 
-  pi.on("session_switch", rebind);
-  pi.on("session_branch", rebind);
-  pi.on("session_tree", rebind);
+  // Only a switch reports why the session changed; a branch or a tree
+  // navigation carries no reason at all.
+  pi.on("session_switch", (event, context) => rebind(event.reason, context));
+  pi.on("session_branch", (_event, context) => rebind(undefined, context));
+  pi.on("session_tree", (_event, context) => rebind(undefined, context));
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
