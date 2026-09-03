@@ -1195,6 +1195,117 @@ describe("envoy OMP extension", () => {
     expect(natsState.controls.get("notifications.agent.ses_after_switch")?.active()).toBe(true);
   });
 
+  test("tells the agent its identity changed when a branch re-mints the session id", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?branch-identity-notice");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_branch"));
+    await fixture.handlers.get("session_branch")?.({ previousSessionFile: "/tmp/old.jsonl" }, sessionContext("ses_after_branch"));
+
+    expect(fixture.deliveries.length).toBe(1);
+    expect(fixture.deliveries[0]?.content).toContain("ses_before_branch");
+    expect(fixture.deliveries[0]?.content).toContain("ses_after_branch");
+    // The human just rewound; an informational notice must wait for the next
+    // turn rather than starting one.
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+  });
+
+  test("tells the agent its identity changed when a fork re-mints the session id", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?fork-identity-notice");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_fork"));
+    await fixture.handlers.get("session_switch")?.({ reason: "fork" }, sessionContext("ses_after_fork"));
+
+    expect(fixture.deliveries.length).toBe(1);
+    expect(fixture.deliveries[0]?.content).toContain("ses_before_fork");
+    expect(fixture.deliveries[0]?.content).toContain("ses_after_fork");
+    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+  });
+
+  test("tells the agent its identity changed when a handoff re-mints the session id", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?handoff-identity-notice");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    // /handoff carries the agent's own words (and any identity it named)
+    // into the new session, so the stale-identity notice must fire.
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_handoff"));
+    await fixture.handlers.get("session_switch")?.({ reason: "handoff" }, sessionContext("ses_after_handoff"));
+
+    expect(fixture.deliveries.length).toBe(1);
+    expect(fixture.deliveries[0]?.content).toContain("ses_before_handoff");
+    expect(fixture.deliveries[0]?.content).toContain("ses_after_handoff");
+  });
+
+  test("stays silent about identity when a switch replaces the transcript or keeps the id", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?switch-identity-silent");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_original"));
+    // A fresh conversation ("new") and a loaded one ("resume") both carry a
+    // transcript that already matches its own id — no stale identity to flag.
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, sessionContext("ses_fresh"));
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, sessionContext("ses_loaded"));
+    // Tree navigation rebinds without changing the session id.
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, sessionContext("ses_loaded"));
+
+    expect(fixture.deliveries.length).toBe(0);
+  });
+
+  test("stays silent about identity when the session gains its first id", async () => {
+    globalThis.fetch = async () => response([]);
+    const { default: envoyExtension } = await import("./envoy.ts?first-identity-silent");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    // A fresh TUI: session_start fires before any session exists, so the
+    // transcript never carried an identity that could go stale.
+    await fixture.handlers.get("session_start")?.({}, sessionContext(""));
+    await fixture.handlers.get("session_branch")?.({ previousSessionFile: "/tmp/old.jsonl" }, sessionContext("ses_first"));
+
+    expect(fixture.deliveries.length).toBe(0);
+  });
+
+  test("a network outage during rebind does not swallow the identity notice", async () => {
+    process.env.ENVOY_REGISTER_SESSION = "1";
+    let registryDown = false;
+    globalThis.fetch = async () => {
+      if (registryDown) throw new Error("network unreachable");
+      return response({ session_id: "ses_outage_before", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?identity-notice-outage");
+    const fixture = createPi();
+    const notifications: string[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_outage_before"),
+      ui: { notify: (message) => notifications.push(message) },
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    registryDown = true;
+    await fixture.handlers.get("session_branch")?.(
+      { previousSessionFile: "/tmp/old.jsonl" },
+      { ...context, sessionManager: { getSessionId: () => "ses_outage_after" } }
+    );
+
+    // The id change is a fact about the transcript, not the network: the
+    // degraded-rebind warning and the identity notice must both land.
+    expect(notifications.some((message) => message.includes("rebind failed"))).toBe(true);
+    expect(fixture.deliveries.length).toBe(1);
+    expect(fixture.deliveries[0]?.content).toContain("ses_outage_before");
+    expect(fixture.deliveries[0]?.content).toContain("ses_outage_after");
+  });
+
   test("an in-process session switch does not resurrect the previous session's topic", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
     globalThis.fetch = async () => response([]);

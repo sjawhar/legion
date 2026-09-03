@@ -64,6 +64,14 @@ Key mechanics (from `@oh-my-pi/pi-coding-agent` `src/discovery/omp-plugins.ts` a
 - An "extension package root" is any directory loaded via `--extension`/`-e`, `extensions:`
   settings, or an installed plugin; for a monorepo installed whole as a plugin, the root is
   the repo root, not the subpackage.
+- **A repo-root `package.json` `omp.extensions` manifest is inert on its own** (verified on
+  v18.1.2): starting a session in a repo checkout does NOT load that repo's extension
+  sources. Sessions load whatever the plugin registry installed (e.g. the published
+  `@sjawhar/pi-legion-envoy` dist), so a merged pi-envoy fix reaches sessions only after an
+  npm release + plugin reinstall — or when a caller passes the source path explicitly
+  (`--extension`/`-e`, as the Legion daemon does). Verifying a fix against a live session
+  requires confirming which dist that session actually loaded. See
+  `session-id-remint-stale-transcript-identity.md` for the incident where this mattered.
 - The provider also scans package-root `skills/`, `commands/`, `rules/`, `prompts/`,
   `hooks/`, and `tools/` — a package can ship those the same way.
 

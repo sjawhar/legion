@@ -29,6 +29,17 @@ export interface SessionContext {
   };
 }
 
+/**
+ * Why OMP swapped the session under a running extension. `/new` and `/resume`
+ * install a transcript that already matches its own id; `/fork` and `/handoff`
+ * carry the current conversation into a freshly minted id.
+ */
+export type SessionSwitchReason = "new" | "resume" | "fork" | "handoff";
+
+export interface SessionSwitchEvent {
+  readonly reason: SessionSwitchReason;
+}
+
 export interface BeforeAgentStartEvent {
   readonly prompt: string;
 }
@@ -74,7 +85,7 @@ export interface PiEventContract {
     readonly result: ResourcesDiscoverResult;
   };
   readonly session_start: { readonly event: unknown; readonly result: undefined };
-  readonly session_switch: { readonly event: unknown; readonly result: undefined };
+  readonly session_switch: { readonly event: SessionSwitchEvent; readonly result: undefined };
   readonly session_branch: { readonly event: unknown; readonly result: undefined };
   readonly session_tree: { readonly event: unknown; readonly result: undefined };
   readonly session_shutdown: { readonly event: unknown; readonly result: undefined };
