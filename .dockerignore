@@ -1,0 +1,21 @@
+.git
+.jj
+**/node_modules
+**/dist
+**/build
+**/coverage
+*.log
+.env
+.env.*
+.vscode
+.idea
+**/docker-data
+tmp
+docs
+skills
+
+# Envoy: test files and deploy tooling not needed in the image.
+packages/envoy/**/*_test.go
+packages/envoy/internal/integration/
+packages/envoy/internal/smoke/
+packages/envoy/deploy/

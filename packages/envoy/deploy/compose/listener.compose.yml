@@ -1,8 +1,9 @@
 services:
   listener:
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
     build:
-      context: ../..
-      dockerfile: docker/Dockerfile
+      context: ../../../..
+      dockerfile: packages/envoy/docker/Dockerfile
     network_mode: host
     command: ["/usr/local/bin/envoy-listener"]
     restart: unless-stopped

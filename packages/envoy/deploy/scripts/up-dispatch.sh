@@ -2,13 +2,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-# The SPA lives in packages/dispatch, outside this package's Docker build
-# context. Build it here on a full checkout; a sync-host.sh target receives
-# the prebuilt dist instead of the package sources.
-if [ -f ../../dispatch/package.json ]; then
-  (cd ../../dispatch && bun run build:web)
-elif [ ! -f ../../dispatch/web/dist/index.html ]; then
-  echo "dispatch SPA dist missing: build packages/dispatch (bun run build:web) on a full checkout or sync it with sync-host.sh" >&2
-  exit 1
-fi
+# The SPA compiles into the image (bun stage in docker/Dockerfile) — no host
+# build, no bind mount. ENVOY_IMAGE_TAG is required by the compose file; a
+# local build doesn't care about its value, so default it here. To run a
+# published tag instead of building locally, set ENVOY_IMAGE_TAG and run
+# `docker compose -f compose/dispatch.compose.yml pull && docker compose -f
+# compose/dispatch.compose.yml up -d` directly.
+export ENVOY_IMAGE_TAG="${ENVOY_IMAGE_TAG:-local}"
 docker compose -f compose/dispatch.compose.yml up -d --build

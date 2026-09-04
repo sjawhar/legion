@@ -44,8 +44,10 @@ func TestSmoke(t *testing.T) {
 
 	listenerC, err := testcontainers.Run(ctx, "",
 		testcontainers.WithDockerfile(testcontainers.FromDockerfile{
-			Context:       "../../",
-			Dockerfile:    "docker/Dockerfile",
+			// The shared Dockerfile builds from the repo root: its bun stage needs
+			// the whole workspace to bake the dispatch SPA and regenerate contracts.
+			Context:       "../../../../",
+			Dockerfile:    "packages/envoy/docker/Dockerfile",
 			PrintBuildLog: true,
 			KeepImage:     true,
 		}),
