@@ -6,7 +6,7 @@
 //	/api/events       — SSE stream of NATS-forwarded GitHub events
 //	/api/github/*     — reverse proxy to GitHub REST + GraphQL (per-user token)
 //	/api/installations— enumerate the user's Envoy App installations + repos
-//	/api/view         — GET/PATCH per-user watched-repos list
+//	/api/view         — GET/PATCH per-user addressed-threads map
 //	/mcp              — MCP Streamable HTTP endpoint (per-request bearer auth)
 //	/healthz          — liveness check
 //	everything else   — SPA from packages/dispatch/web/dist (SPA fallback)
@@ -45,11 +45,6 @@ func main() {
 	if err != nil {
 		slog.Error("dispatch: load config", "error", err)
 		os.Exit(1)
-	}
-
-	defaultRepo := ""
-	if cfg.Dispatch != nil {
-		defaultRepo = cfg.Dispatch.DefaultRepo
 	}
 
 	dataDir, err := defaultDataDir()
@@ -97,12 +92,11 @@ func main() {
 	}
 
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
-		SigningKey:  signingKey,
-		WebDistDir:  webDistDir,
-		Users:       users,
-		App:         appCfg,
-		AppSource:   appSource,
-		DefaultRepo: defaultRepo,
+		SigningKey: signingKey,
+		WebDistDir: webDistDir,
+		Users:      users,
+		App:        appCfg,
+		AppSource:  appSource,
 	})
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)

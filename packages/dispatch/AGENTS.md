@@ -31,13 +31,12 @@ go run ./cmd/dispatch
 Use `bun run typecheck`, `bun run lint`, and `bun test` before reporting SPA
 changes. For backend changes see `packages/envoy/cmd/dispatch/AGENTS.md`.
 
-## Configuration
+## Discovery
 
-Dispatch reads the same `envoy.json` shape as the Envoy plugin.
-
-- User config: `~/.config/opencode/envoy.json`
-- Repo config: `<repo>/.opencode/envoy.json`
-
-Repo config overrides user config. The top-level object is shallow-merged, and
-the `dispatch` sub-object is shallow-merged so repo `dispatch` keys override
-only the matching user `dispatch` keys.
+The dashboard has no watched-repos configuration. On sign-in it fetches the
+signed-in user's Envoy App installations (`GET /api/installations`) and
+searches `is:issue is:open label:dispatch-thread` scoped to `user:<owner>`
+for every distinct installation owner (user or org) the App is installed on
+and the signer can see. A new repo under an already-installed owner needs no
+configuration; a user with zero visible installations sees an explicit error
+state instead of an empty sidebar.

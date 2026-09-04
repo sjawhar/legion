@@ -4,10 +4,10 @@ import (
 	"testing"
 )
 
-func TestBroadcastRepoMatchesWatchedSet(t *testing.T) {
+func TestBroadcastRepoMatchesOwnerSet(t *testing.T) {
 	hub := New()
-	_, matched := hub.AddClient("sjawhar", []string{"sjawhar/legion", "other/x"})
-	_, skipped := hub.AddClient("sjawhar2", []string{"other/x"})
+	_, matched := hub.AddClient("sjawhar", []string{"sjawhar", "other"})
+	_, skipped := hub.AddClient("sjawhar2", []string{"other"})
 	hub.BroadcastRepo("sjawhar/legion", Event{Type: "github_event", Data: map[string]any{"ok": true}})
 	want := "event: github_event\ndata: {\"ok\":true}\n\n"
 	if got := string(<-matched.Messages); got != want {
@@ -22,23 +22,32 @@ func TestBroadcastRepoMatchesWatchedSet(t *testing.T) {
 	}
 }
 
-func TestBroadcastRepoLowercases(t *testing.T) {
+func TestBroadcastRepoLowercasesOwner(t *testing.T) {
 	hub := New()
-	_, c := hub.AddClient("sjawhar", []string{"SJAWHAR/Legion"})
+	_, c := hub.AddClient("sjawhar", []string{"SJAWHAR"})
 	hub.BroadcastRepo("sjawhar/legion", Event{Type: "x", Data: 1})
 	if got := string(<-c.Messages); got != "event: x\ndata: 1\n\n" {
 		t.Errorf("got %q", got)
 	}
 }
 
-func TestEmptyWatchedSetReceivesNothing(t *testing.T) {
+func TestBroadcastRepoMatchesAnyRepoUnderOwner(t *testing.T) {
+	hub := New()
+	_, c := hub.AddClient("sjawhar", []string{"sjawhar"})
+	hub.BroadcastRepo("sjawhar/some-other-repo", Event{Type: "x", Data: 1})
+	if got := string(<-c.Messages); got != "event: x\ndata: 1\n\n" {
+		t.Errorf("owner-scoped client should see every repo under its owner: got %q", got)
+	}
+}
+
+func TestEmptyOwnerSetReceivesNothing(t *testing.T) {
 	hub := New()
 	_, c := hub.AddClient("sjawhar", nil)
 	hub.BroadcastRepo("sjawhar/legion", Event{Type: "x", Data: 1})
 	select {
 	case msg, ok := <-c.Messages:
 		if ok {
-			t.Errorf("empty-watched got unexpected: %q", string(msg))
+			t.Errorf("empty-owner got unexpected: %q", string(msg))
 		}
 	default:
 	}
@@ -46,7 +55,7 @@ func TestEmptyWatchedSetReceivesNothing(t *testing.T) {
 
 func TestBroadcastAllReachesEveryone(t *testing.T) {
 	hub := New()
-	_, a := hub.AddClient("sjawhar", []string{"x/y"})
+	_, a := hub.AddClient("sjawhar", []string{"x"})
 	_, b := hub.AddClient("sjawhar2", nil)
 	hub.BroadcastAll(Event{Type: "notice", Data: map[string]any{"ok": true}})
 	want := "event: notice\ndata: {\"ok\":true}\n\n"
@@ -60,7 +69,7 @@ func TestBroadcastAllReachesEveryone(t *testing.T) {
 
 func TestRemoveClient(t *testing.T) {
 	hub := New()
-	id, _ := hub.AddClient("sjawhar", []string{"x/y"})
+	id, _ := hub.AddClient("sjawhar", []string{"x"})
 	hub.RemoveClient(id)
 	hub.BroadcastRepo("x/y", Event{Type: "x", Data: nil})
 	if hub.Size() != 0 {
@@ -70,8 +79,8 @@ func TestRemoveClient(t *testing.T) {
 
 func TestDropsSlowClient(t *testing.T) {
 	hub := New()
-	_, client := hub.AddClient("sjawhar", []string{"x/y"})
-	for i := 0; i < 17; i++ {
+	_, client := hub.AddClient("sjawhar", []string{"x"})
+	for i := range 17 {
 		hub.BroadcastRepo("x/y", Event{Type: "x", Data: i})
 	}
 	dropped := false

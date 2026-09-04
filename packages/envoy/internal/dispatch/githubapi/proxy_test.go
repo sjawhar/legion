@@ -2,7 +2,6 @@ package githubapi
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -14,14 +13,19 @@ import (
 
 type fakeHTTPClient struct {
 	status int
+	body   string
 	calls  int
 }
 
 func (f *fakeHTTPClient) Do(_ *http.Request) (*http.Response, error) {
 	f.calls++
+	body := f.body
+	if body == "" {
+		body = "{}"
+	}
 	return &http.Response{
 		StatusCode: f.status,
-		Body:       io.NopCloser(strings.NewReader("{}")),
+		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     make(http.Header),
 	}, nil
 }
@@ -36,34 +40,82 @@ func accessTestConfig(client auth.HTTPClient) *ProxyConfig {
 	}
 }
 
-func TestCheckRepoAccessAllows2xx(t *testing.T) {
-	fc := &fakeHTTPClient{status: http.StatusOK}
-	if err := CheckRepoAccess(context.Background(), accessTestConfig(fc), "sjawhar", "legion"); err != nil {
-		t.Fatalf("expected nil error for 200, got %v", err)
+func TestInstallationOwnersParsesAccountLogins(t *testing.T) {
+	fc := &fakeHTTPClient{
+		status: http.StatusOK,
+		body:   `{"installations":[{"account":{"login":"sjawhar"}},{"account":{"login":"acme-org"}},{"account":null}]}`,
+	}
+	owners, err := InstallationOwners(context.Background(), accessTestConfig(fc))
+	if err != nil {
+		t.Fatalf("InstallationOwners: %v", err)
+	}
+	if len(owners) != 2 || owners[0] != "sjawhar" || owners[1] != "acme-org" {
+		t.Errorf("owners: got %v", owners)
 	}
 	if fc.calls != 1 {
 		t.Errorf("expected exactly one GitHub call, got %d", fc.calls)
 	}
 }
 
-func TestCheckRepoAccessDeniesNotFound(t *testing.T) {
-	fc := &fakeHTTPClient{status: http.StatusNotFound}
-	if err := CheckRepoAccess(context.Background(), accessTestConfig(fc), "victim", "private"); !errors.Is(err, ErrRepoForbidden) {
-		t.Fatalf("expected ErrRepoForbidden for 404, got %v", err)
-	}
-}
-
-func TestCheckRepoAccessDeniesForbidden(t *testing.T) {
+func TestInstallationOwnersErrorsOnNon200(t *testing.T) {
 	fc := &fakeHTTPClient{status: http.StatusForbidden}
-	if err := CheckRepoAccess(context.Background(), accessTestConfig(fc), "victim", "private"); !errors.Is(err, ErrRepoForbidden) {
-		t.Fatalf("expected ErrRepoForbidden for 403, got %v", err)
+	if _, err := InstallationOwners(context.Background(), accessTestConfig(fc)); err == nil {
+		t.Fatal("expected an error when GitHub does not return 200")
 	}
 }
 
-func TestCheckRepoAccessSurfacesUnexpectedStatus(t *testing.T) {
-	fc := &fakeHTTPClient{status: http.StatusInternalServerError}
-	err := CheckRepoAccess(context.Background(), accessTestConfig(fc), "sjawhar", "legion")
-	if err == nil || errors.Is(err, ErrRepoForbidden) {
-		t.Fatalf("expected a non-forbidden error for 500, got %v", err)
+type memUserStore struct{ users map[string]*auth.User }
+
+func (m *memUserStore) Read(login string) (*auth.User, error) {
+	u, ok := m.users[login]
+	if !ok {
+		return nil, nil
+	}
+	copy := *u
+	return &copy, nil
+}
+func (m *memUserStore) Write(u *auth.User) error  { m.users[u.Login] = u; return nil }
+func (m *memUserStore) Remove(login string) error { delete(m.users, login); return nil }
+
+func TestRefreshAndStoreKeepsAddressed(t *testing.T) {
+	store := &memUserStore{users: map[string]*auth.User{
+		"sjawhar": {
+			Login:     "sjawhar",
+			Tokens:    auth.Tokens{AccessToken: "old", RefreshToken: "r1"},
+			Addressed: map[string]string{"sjawhar/legion#1": "2026-09-04T00:00:00Z"},
+		},
+	}}
+	cfg := &ProxyConfig{
+		Login: "sjawhar",
+		Users: store,
+		RefreshFn: func(_ context.Context, _ *auth.Tokens) (*auth.Tokens, error) {
+			return &auth.Tokens{AccessToken: "new", RefreshToken: "r2"}, nil
+		},
+	}
+	if _, err := refreshAndStore(context.Background(), cfg, &auth.Tokens{RefreshToken: "r1"}); err != nil {
+		t.Fatalf("refreshAndStore: %v", err)
+	}
+	got := store.users["sjawhar"]
+	if got.Tokens.AccessToken != "new" {
+		t.Errorf("tokens not persisted: %+v", got.Tokens)
+	}
+	if got.Addressed["sjawhar/legion#1"] == "" {
+		t.Errorf("addressed map lost on refresh: %+v", got.Addressed)
+	}
+	if cfg.Tokens == nil || cfg.Tokens.AccessToken != "new" {
+		t.Errorf("cfg.Tokens not updated")
+	}
+}
+
+func TestRefreshAndStoreRefusesLoggedOutUser(t *testing.T) {
+	cfg := &ProxyConfig{
+		Login: "ghost",
+		Users: &memUserStore{users: map[string]*auth.User{}},
+		RefreshFn: func(_ context.Context, _ *auth.Tokens) (*auth.Tokens, error) {
+			return &auth.Tokens{AccessToken: "new"}, nil
+		},
+	}
+	if _, err := refreshAndStore(context.Background(), cfg, &auth.Tokens{}); err == nil {
+		t.Fatal("expected an error when the user record is gone")
 	}
 }

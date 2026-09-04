@@ -279,7 +279,7 @@ describe("dispatch-mcp-bridge", () => {
             description: "Create a Dispatch thread",
             inputSchema: {
               type: "object",
-              required: ["parent", "subject", "body"],
+              required: ["subject", "context", "question"],
               properties: {
                 parent: { type: "string" },
                 ask: {

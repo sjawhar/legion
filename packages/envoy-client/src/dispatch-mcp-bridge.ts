@@ -19,7 +19,8 @@ const DEFAULT_TOKEN_CACHE_TTL_MS = 50 * 60 * 1000;
 
 export interface JsonRpcRequest {
   jsonrpc: "2.0";
-  id?: string | number;
+  /** Absent or null for notifications, which get no response. */
+  id?: string | number | null;
   method: string;
   params?: unknown;
 }
@@ -128,21 +129,21 @@ function normalizeSchemaUnionTypes(node: unknown): unknown {
   for (const [key, value] of Object.entries(node)) {
     result[key] = normalizeSchemaUnionTypes(value);
   }
-  if (isUnknownArray(result.type)) {
-    const nonNull = result.type.filter((entry) => entry !== "null");
+  if (isUnknownArray(result["type"])) {
+    const nonNull = result["type"].filter((entry) => entry !== "null");
     if (nonNull.length === 1) {
-      result.type = nonNull[0];
+      result["type"] = nonNull[0];
     } else if (nonNull.length === 0) {
-      result.type = "null";
+      result["type"] = "null";
     } else {
       // Multiple non-null types: express as anyOf, carrying items into the array branch
       // so no branch is left itemless.
-      const items = result.items;
-      delete result.items;
-      result.anyOf = nonNull.map((t) =>
+      const items = result["items"];
+      delete result["items"];
+      result["anyOf"] = nonNull.map((t) =>
         t === "array" && items != null ? { type: t, items } : { type: t }
       );
-      delete result.type;
+      delete result["type"];
     }
   }
   return result;

@@ -1,12 +1,13 @@
-import type { QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
+import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
 import { escapeHtml, renderMarkdownLite, timeAgo } from "../html";
 import {
+  type MarkerQuestion,
   parseAnswerMarker,
   parseMetaMarker,
   parseUrgencyMarker,
   stripMetaMarker,
 } from "../markers";
-import type { Comment, Issue, Thread, Urgency } from "../types";
+import type { Comment, Issue, Origin, Thread, Urgency } from "../types";
 import { renderAskContext, renderAskForm } from "./ask-form";
 import { renderReplyForm } from "./reply-form";
 import { renderUrgencyControls } from "./urgency-controls";
@@ -42,7 +43,7 @@ const EMPTY_WRITE_STATE: ThreadWriteState = {
   addressedPending: false,
 };
 
-function renderComment(comment: Comment, questions: QuestionInfo[]): string {
+function renderComment(comment: Comment, questions: MarkerQuestion[]): string {
   const urgency = parseUrgencyMarker(comment.body);
   if (urgency) {
     return `<div class="activity-row" data-comment-id="${comment.id}">
@@ -65,7 +66,7 @@ function renderComment(comment: Comment, questions: QuestionInfo[]): string {
 function renderAnswerComment(
   comment: Comment,
   answers: QuestionAnswer[],
-  questions: QuestionInfo[]
+  questions: MarkerQuestion[]
 ): string {
   const items = questions
     .map((question, index) => {
@@ -151,6 +152,34 @@ function renderCloseActions(
   </div>`;
 }
 
+// The copy button turns the marker's pane id into a pasteable shell command.
+// The marker is issue-body content, so any collaborator on the repo can write
+// it; only a literal tmux pane id (`%N`) is accepted, and the target is still
+// shown as text otherwise. `switch-client -t <pane>` moves the human's own
+// client to that pane's session, window, and pane, which is what a
+// `session:window.pane` name cannot do reliably inside a tmux session group.
+const TMUX_PANE_ID = /^%\d+$/;
+
+function renderOriginLine(origin: Origin | undefined): string {
+  if (!origin) return "";
+  const segments: string[] = [];
+  if (origin.host && origin.machine) {
+    segments.push(`From ${escapeHtml(origin.host)} on ${escapeHtml(origin.machine)}`);
+  } else if (origin.host) {
+    segments.push(`From ${escapeHtml(origin.host)}`);
+  } else if (origin.machine) {
+    segments.push(`on ${escapeHtml(origin.machine)}`);
+  }
+  if (origin.cwd) segments.push(escapeHtml(origin.cwd));
+  if (origin.tmux) segments.push(`tmux ${escapeHtml(origin.tmux)}`);
+  if (segments.length === 0) return "";
+  const copyButton =
+    origin.pane && TMUX_PANE_ID.test(origin.pane)
+      ? `<button type="button" class="origin-copy" data-action="copy-origin" data-copy-text="${escapeHtml(`tmux switch-client -t ${origin.pane}`)}" title="Copy tmux command" aria-label="Copy tmux command">⧉</button>`
+      : "";
+  return `<p class="origin-line"><span class="origin-text">${segments.join(" · ")}</span>${copyButton}</p>`;
+}
+
 export function renderThreadDetail(input: ThreadDetailInput | null): string {
   if (!input) {
     return `<main class="dispatch-detail empty-detail"><p>Select a thread to read the conversation.</p></main>`;
@@ -181,6 +210,7 @@ export function renderThreadDetail(input: ThreadDetailInput | null): string {
         ${renderCloseActions(issue, addressed, writeState)}
       </div>
       <h1>${escapeHtml(issue.title)}</h1>
+      ${renderOriginLine(meta?.origin)}
       <p class="detail-subtitle">Opened by ${escapeHtml(issue.authorLogin)} · ${escapeHtml(timeAgo(issue.createdAt))}</p>
     </header>
     <section class="opening-body">${renderMarkdownLite(stripMetaMarker(issue.body))}</section>

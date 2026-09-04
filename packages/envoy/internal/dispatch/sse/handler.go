@@ -8,9 +8,10 @@ import (
 const defaultHeartbeat = 15 * time.Second
 
 // HandlerFor returns an http.HandlerFunc that streams hub events to a single
-// authenticated client. The caller passes the user's login + watched-repo
-// slugs; the hub uses the watched set to filter the GitHub event firehose.
-func HandlerFor(hub *Hub, login string, watched []string) http.HandlerFunc {
+// authenticated client. The caller passes the user's login + the GitHub
+// account logins (users/orgs) their Envoy App installations cover; the hub
+// uses that owner set to filter the GitHub event firehose.
+func HandlerFor(hub *Hub, login string, owners []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -21,7 +22,7 @@ func HandlerFor(hub *Hub, login string, watched []string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		id, client := hub.AddClient(login, watched)
+		id, client := hub.AddClient(login, owners)
 		defer hub.RemoveClient(id)
 
 		// Initial connect event.

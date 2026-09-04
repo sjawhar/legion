@@ -33,16 +33,28 @@ type QuestionInfo struct {
 	Custom   *bool            `json:"custom,omitempty" yaml:"custom,omitempty"`
 }
 
+// Origin captures where a dispatch call came from — enough for a human to
+// jump back to the asking session. All fields are optional; the shim fills
+// them best-effort from the environment, and each empty field is dropped
+// from the rendered marker.
+type Origin struct {
+	Host    string `json:"host,omitempty" yaml:"host,omitempty"`
+	Machine string `json:"machine,omitempty" yaml:"machine,omitempty"`
+	Cwd     string `json:"cwd,omitempty" yaml:"cwd,omitempty"`
+	Tmux    string `json:"tmux,omitempty" yaml:"tmux,omitempty"`
+	Pane    string `json:"pane,omitempty" yaml:"pane,omitempty"`
+}
+
 // MetaMarker carries the parsed/built dispatch metadata.
 type MetaMarker struct {
 	Urgency   Urgency        `yaml:"urgency"`
 	RequestID string         `yaml:"requestId"`
+	Origin    *Origin        `yaml:"origin,omitempty"`
 	Ask       []QuestionInfo `yaml:"ask,omitempty"`
 }
 
-
-// BuildMetaMarker renders the canonical dispatch metadata comment. The ask
-// attribute is omitted entirely when nil.
+// BuildMetaMarker renders the canonical dispatch metadata comment. Origin
+// and ask are omitted entirely when nil.
 func BuildMetaMarker(m MetaMarker) string {
 	data, err := yaml.Marshal(m)
 	if err != nil {
@@ -80,9 +92,9 @@ func ParseMetaMarker(body string) *MetaMarker {
 	return &m
 }
 
-
-// BuildThreadBody renders the canonical thread body: marker, blank line, bold
-// subject, blank line, body text.
-func BuildThreadBody(marker, subject, body string) string {
-	return fmt.Sprintf("%s\n**%s**\n\n%s", marker, subject, body)
+// BuildThreadBody renders the canonical thread body: marker, subject, then
+// the Context and Question sections. The reader has not seen the caller's
+// transcript, so both sections carry their own heading.
+func BuildThreadBody(marker, subject, context, question string) string {
+	return fmt.Sprintf("%s\n**%s**\n\n## Context\n\n%s\n\n## Question\n\n%s", marker, subject, context, question)
 }

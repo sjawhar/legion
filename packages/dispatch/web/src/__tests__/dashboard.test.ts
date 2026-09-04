@@ -4,6 +4,7 @@ import {
   closeIssue,
   createSseRouter,
   extractIssueNumberFromSubject,
+  getInstallationOwners,
   postComment,
   searchDispatchThreads,
 } from "../api";
@@ -90,6 +91,30 @@ describe("dashboard read-side rendering", () => {
     expect(html).not.toContain("Only thread, already addressed");
   });
 
+  it("matches search against the thread's origin cwd", () => {
+    const threads = [
+      thread({
+        number: 31,
+        title: "Needs decision",
+        origin: {
+          host: "omp",
+          machine: "example-host",
+          cwd: "/home/ubuntu/legion",
+          tmux: "main:3.0",
+        },
+      }),
+      thread({ number: 32, title: "Unrelated thread" }),
+    ];
+    const visible = visibleSidebarThreads(threads, {
+      status: "all",
+      urgency: "all",
+      search: "ubuntu/legion",
+      selectedKey: undefined,
+      showAddressed: false,
+    });
+    expect(visible.map((entry) => entry.thread.number)).toEqual([31]);
+  });
+
   it("renders detail without the meta marker, with conversations, marker activity rows, and inline sub-threads", () => {
     const issue: Issue = {
       repo: "sjawhar/legion",
@@ -128,6 +153,75 @@ describe("dashboard read-side rendering", () => {
     expect(html).toContain("normal reply");
     expect(html).toContain("urgency set to <strong>high</strong>");
     expect(html).toContain("Follow-up");
+    expect(html).not.toContain("origin-line");
+  });
+
+  it("renders an origin line with host/machine/cwd/tmux and a copy button carrying the tmux command", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Blocked deploy",
+      body: [
+        "---",
+        "urgency: blocking",
+        "requestId: R",
+        "origin:",
+        "  host: omp",
+        "  machine: example-host",
+        "  cwd: /home/ubuntu/legion",
+        "  tmux: main:3.0",
+        "  pane: '%840'",
+        "---",
+        "",
+        "Opening body",
+      ].join("\n"),
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+
+    const html = renderThreadDetail({
+      issue,
+      urgency: "blocking",
+      comments: [],
+      subThreads: [],
+      repo: "sjawhar/legion",
+      addressed: false,
+    });
+
+    expect(html).toContain("origin-line");
+    expect(html).toContain("From omp on example-host");
+    expect(html).toContain("/home/ubuntu/legion");
+    expect(html).toContain("tmux main:3.0");
+    expect(html).toContain('data-copy-text="tmux switch-client -t %840"');
+  });
+
+  it("shows the tmux target but only offers to copy a literal pane id", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 13,
+      title: "Hostile marker",
+      body: '---\nurgency: med\nrequestId: R\norigin:\n  tmux: "main:3.0; rm -rf ~"\n  pane: "%1; rm -rf ~"\n---\n\nBody',
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+
+    const html = renderThreadDetail({
+      issue,
+      urgency: "med",
+      comments: [],
+      subThreads: [],
+      repo: "sjawhar/legion",
+      addressed: false,
+    });
+
+    expect(html).toContain("tmux main:3.0; rm -rf ~");
+    expect(html).not.toContain("data-copy-text");
   });
 
   it("keeps the ask question context visible after an answer has been submitted", () => {
@@ -231,11 +325,15 @@ describe("dashboard read-side rendering", () => {
     const comments: Comment[] = [
       { id: 1, body: "hello", createdAt: now, updatedAt: now, authorLogin: "sami" },
     ];
+    const searchCalls: string[][] = [];
     const api = {
-      searchDispatchThreads: async () => [
-        thread({ number: 12, title: "Blocked deploy", urgency: "blocking", parentNumber: 1 }),
-        thread({ number: 15, title: "Sub decision", urgency: "high", parentNumber: 12 }),
-      ],
+      searchDispatchThreads: async (owners: string[]) => {
+        searchCalls.push(owners);
+        return [
+          thread({ number: 12, title: "Blocked deploy", urgency: "blocking", parentNumber: 1 }),
+          thread({ number: 15, title: "Sub decision", urgency: "high", parentNumber: 12 }),
+        ];
+      },
       getIssue: async (_repo: string, number: number) => ({
         repo: _repo,
         number,
@@ -256,10 +354,13 @@ describe("dashboard read-side rendering", () => {
       },
     };
 
-    const controller = createDashboardController({ repos: ["sjawhar/legion"], api });
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
     await controller.selectThread("sjawhar/legion", 12);
 
+    // The controller boots its thread list from the resolved installation
+    // owners in a single owner-scoped call, not a per-repo fan-out.
+    expect(searchCalls).toEqual([["sjawhar"]]);
     expect(controller.render()).toContain("Blocked deploy");
     expect(controller.render()).toContain("Opening body");
     expect(controller.visibleThreads().map((entry) => entry.thread.number)).toEqual([12, 15]);
@@ -268,6 +369,41 @@ describe("dashboard read-side rendering", () => {
     expect(controller.nextSelection("j")).toEqual({ repo: "sjawhar/legion", number: 15 });
     expect(controller.toggleSidebar()).toBe(false);
     expect(controller.toggleHelp()).toBe(true);
+  });
+
+  it("shows the search error in the sidebar instead of an empty list, and keeps the last good list", async () => {
+    let fail = false;
+    const api = {
+      searchDispatchThreads: async () => {
+        if (fail) throw new Error("GraphQL 401: bad credentials");
+        return [thread({ number: 12, title: "Blocked deploy" })];
+      },
+      getIssue: async () => {
+        throw new Error("not used");
+      },
+      getComments: async () => [],
+      postComment: async () => {
+        throw new Error("not used");
+      },
+      closeIssue: async () => {
+        throw new Error("not used");
+      },
+    };
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
+    await controller.loadThreads();
+    expect(controller.render()).toContain("Blocked deploy");
+    expect(controller.render()).not.toContain("load-error");
+
+    fail = true;
+    await controller.loadThreads();
+    const html = controller.render();
+    expect(html).toContain("load-error");
+    expect(html).toContain("GraphQL 401: bad credentials");
+    expect(controller.visibleThreads().map((entry) => entry.thread.number)).toEqual([12]);
+
+    fail = false;
+    await controller.loadThreads();
+    expect(controller.render()).not.toContain("load-error");
   });
 
   it("posts replies with optimistic append and replaces the placeholder with the API comment", async () => {
@@ -296,7 +432,7 @@ describe("dashboard read-side rendering", () => {
       },
     };
 
-    const controller = createDashboardController({ repos: ["sjawhar/legion"], api });
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
     await controller.selectThread("sjawhar/legion", 12);
     const posting = controller.postReply("verifying reply");
@@ -362,7 +498,7 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => issue,
     };
 
-    const controller = createDashboardController({ repos: ["sjawhar/legion"], api });
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
     await controller.selectThread("sjawhar/legion", 12);
 
@@ -408,7 +544,7 @@ describe("dashboard read-side rendering", () => {
       },
     };
 
-    const controller = createDashboardController({ repos: ["sjawhar/legion"], api });
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
     await controller.selectThread("sjawhar/legion", 12);
     const urgencyPost = controller.setUrgency("high");
@@ -425,12 +561,15 @@ describe("dashboard read-side rendering", () => {
 });
 
 describe("GitHub API client shaping", () => {
-  it("searches dispatch threads via GraphQL and parses parent + marker metadata", async () => {
+  it("searches dispatch threads via GraphQL across every owner and parses repo + marker metadata", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       expect(body.query).toContain("search(query: $search");
-      expect(body.variables.search).toContain("label:dispatch-thread is:issue is:open");
+      expect(body.query).toContain("repository { owner { login } name }");
+      expect(body.variables.search).toBe(
+        "is:issue is:open label:dispatch-thread user:sjawhar user:acme-org"
+      );
       return new Response(
         JSON.stringify({
           data: {
@@ -446,6 +585,7 @@ describe("GitHub API client shaping", () => {
                   author: { login: "agent" },
                   comments: { totalCount: 2 },
                   parent: { number: 641 },
+                  repository: { owner: { login: "sjawhar" }, name: "legion" },
                 },
               ],
             },
@@ -455,7 +595,7 @@ describe("GitHub API client shaping", () => {
       );
     }) as typeof fetch;
     try {
-      expect(await searchDispatchThreads("sjawhar/legion")).toEqual([
+      expect(await searchDispatchThreads(["sjawhar", "acme-org"])).toEqual([
         {
           repo: "sjawhar/legion",
           number: 12,
@@ -474,6 +614,10 @@ describe("GitHub API client shaping", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("returns no threads and skips the request when there are no owners", async () => {
+    expect(await searchDispatchThreads([])).toEqual([]);
   });
 
   it("extracts issue numbers from known SSE subject shapes", () => {
@@ -519,6 +663,29 @@ describe("GitHub API client shaping", () => {
       state_reason: "completed",
     });
   });
+
+  it("derives distinct owner logins from the installations proxy response", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("/api/installations?per_page=100");
+      return new Response(
+        JSON.stringify({
+          installations: [
+            { account: { login: "sjawhar" } },
+            { account: { login: "acme-org" } },
+            { account: { login: "sjawhar" } },
+            { account: null },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } }
+      );
+    }) as typeof fetch;
+    try {
+      expect(await getInstallationOwners()).toEqual(["sjawhar", "acme-org"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("SPA shell", () => {
@@ -527,6 +694,7 @@ describe("SPA shell", () => {
 
     expect(html).toContain("Sign in with GitHub");
     expect(html).toContain("dashboard-root");
-    expect(html).toContain("add-repo-input");
+    expect(html).toContain("owner-label");
+    expect(html).toContain("owner-error-overlay");
   });
 });

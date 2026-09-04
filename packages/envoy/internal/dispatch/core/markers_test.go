@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-
 func TestBuildMetaMarkerHasFrontmatterDelimiters(t *testing.T) {
 	got := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: "R"})
 	if !strings.HasPrefix(got, "---\n") {
@@ -23,13 +22,11 @@ func TestBuildMetaMarkerEmitsUrgency(t *testing.T) {
 	}
 }
 
-
 func TestParseMetaMarkerEmpty(t *testing.T) {
 	if ParseMetaMarker("plain body") != nil {
 		t.Errorf("expected nil for body without marker")
 	}
 }
-
 
 func TestBuildMetaMarkerEmitsRequestID(t *testing.T) {
 	got := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: "req-abc123"})
@@ -42,6 +39,30 @@ func TestBuildMetaMarkerOmitsAskWhenEmpty(t *testing.T) {
 	got := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: "R"})
 	if strings.Contains(got, "ask:") {
 		t.Errorf("ask field leaked into output: %q", got)
+	}
+}
+
+func TestBuildMetaMarkerOmitsOriginWhenNil(t *testing.T) {
+	got := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: "R"})
+	if strings.Contains(got, "origin:") {
+		t.Errorf("origin key leaked into output with nil Origin: %q", got)
+	}
+}
+
+func TestBuildMetaMarkerSerializesOriginOmittingEmptyFields(t *testing.T) {
+	got := BuildMetaMarker(MetaMarker{
+		Urgency:   UrgencyMed,
+		RequestID: "R",
+		Origin:    &Origin{Host: "omp", Cwd: "/home/ubuntu/legion"},
+	})
+	if !strings.Contains(got, "host: omp") {
+		t.Errorf("host missing: %q", got)
+	}
+	if !strings.Contains(got, "cwd: /home/ubuntu/legion") {
+		t.Errorf("cwd missing: %q", got)
+	}
+	if strings.Contains(got, "machine:") || strings.Contains(got, "tmux:") {
+		t.Errorf("empty origin fields should be omitted: %q", got)
 	}
 }
 
@@ -116,11 +137,10 @@ func TestParseMetaMarkerRejectsMissingRequestID(t *testing.T) {
 
 func TestBuildThreadBodyComposesFrontmatterSubjectBody(t *testing.T) {
 	marker := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: "R"})
-	got := BuildThreadBody(marker, "Subject", "Body content.")
+	got := BuildThreadBody(marker, "Subject", "Context text.", "Question text.")
 	// Frontmatter already ends with "---\n"; the canonical layout is:
-	// "---\n…---\n\n**Subject**\n\nBody content."  — one blank line between
-	// frontmatter and subject, one between subject and body.
-	want := marker + "\n**Subject**\n\nBody content."
+	// "---\n…---\n\n**Subject**\n\n## Context\n\nContext text.\n\n## Question\n\nQuestion text."
+	want := marker + "\n**Subject**\n\n## Context\n\nContext text.\n\n## Question\n\nQuestion text."
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
@@ -131,6 +151,13 @@ func TestMetaMarkerRoundTrip(t *testing.T) {
 	original := MetaMarker{
 		Urgency:   UrgencyBlocking,
 		RequestID: "req-99",
+		Origin: &Origin{
+			Host:    "omp",
+			Machine: "example-host",
+			Cwd:     "/home/ubuntu/legion",
+			Tmux:    "main:3.0",
+			Pane:    "%840",
+		},
 		Ask: []QuestionInfo{
 			{
 				Question: "Color?",
@@ -151,6 +178,9 @@ func TestMetaMarkerRoundTrip(t *testing.T) {
 	if parsed.Urgency != original.Urgency || parsed.RequestID != original.RequestID {
 		t.Errorf("scalar mismatch: %+v vs %+v", parsed, original)
 	}
+	if parsed.Origin == nil || *parsed.Origin != *original.Origin {
+		t.Errorf("origin mismatch: %+v vs %+v", parsed.Origin, original.Origin)
+	}
 	if len(parsed.Ask) != 1 || parsed.Ask[0].Question != "Color?" {
 		t.Errorf("ask mismatch: %+v", parsed.Ask)
 	}
@@ -159,5 +189,61 @@ func TestMetaMarkerRoundTrip(t *testing.T) {
 	}
 	if parsed.Ask[0].Multiple == nil || !*parsed.Ask[0].Multiple {
 		t.Errorf("Multiple should round-trip true, got %+v", parsed.Ask[0].Multiple)
+	}
+}
+
+func TestParseMetaMarkerReadsOrigin(t *testing.T) {
+	body := "---\nurgency: med\nrequestId: R\norigin:\n  host: omp\n  machine: example-host\n  cwd: /home/ubuntu/legion\n  tmux: main:3.0\n  pane: '%840'\n---\n"
+	parsed := ParseMetaMarker(body)
+	if parsed == nil {
+		t.Fatalf("nil parse")
+	}
+	if parsed.Origin == nil {
+		t.Fatalf("expected non-nil origin")
+	}
+	want := Origin{Host: "omp", Machine: "example-host", Cwd: "/home/ubuntu/legion", Tmux: "main:3.0", Pane: "%840"}
+	if *parsed.Origin != want {
+		t.Errorf("origin: got %+v want %+v", *parsed.Origin, want)
+	}
+}
+
+func TestParseMetaMarkerOriginAbsentWhenNotPresent(t *testing.T) {
+	body := "---\nurgency: med\nrequestId: R\n---\n"
+	parsed := ParseMetaMarker(body)
+	if parsed == nil {
+		t.Fatalf("nil parse")
+	}
+	if parsed.Origin != nil {
+		t.Errorf("expected nil origin, got %+v", parsed.Origin)
+	}
+}
+
+// TestMetaMarkerOriginRoundTripsColonBearingValues guards the values a real
+// session produces that YAML treats specially: tmux targets always carry a
+// colon, and a cwd may contain ": " (which YAML must quote) or a "#" (which
+// an unquoted scalar would truncate as a comment).
+func TestMetaMarkerOriginRoundTripsColonBearingValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		origin Origin
+	}{
+		{"tmux target", Origin{Host: "omp", Tmux: "main:3.0", Pane: "%840"}},
+		{"tmux session name with dots and dash", Origin{Tmux: "legion-2.0:12.1"}},
+		{"cwd with colon-space", Origin{Cwd: "/home/ubuntu/notes: drafts", Tmux: "main:3.0"}},
+		{"cwd with hash", Origin{Cwd: "/home/ubuntu/issue #42", Tmux: "main:3.0"}},
+		{"windows-style cwd", Origin{Cwd: "C:/Users/sami/legion"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := tc.origin
+			marker := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: "R", Origin: &origin})
+			parsed := ParseMetaMarker(marker)
+			if parsed == nil {
+				t.Fatalf("nil parse for %q", marker)
+			}
+			if parsed.Origin == nil || *parsed.Origin != tc.origin {
+				t.Errorf("origin mismatch: got %+v want %+v\nmarker: %q", parsed.Origin, tc.origin, marker)
+			}
+		})
 	}
 }

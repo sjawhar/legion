@@ -3,7 +3,7 @@
 // tool_result hook).
 //
 // When an agent opens a Dispatch thread, the human answers by commenting on
-// the resulting GitHub sub-issue. For the agent to RECEIVE that answer, its
+// the resulting GitHub issue. For the agent to RECEIVE that answer, its
 // session must be subscribed to the thread's Envoy topic
 // (notifications.github.<owner>.<repo>.issue.<thread>.>). The dispatch tool
 // is served by the stateless Go dispatch server, which has no session

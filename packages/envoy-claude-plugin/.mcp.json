@@ -3,6 +3,10 @@
     "envoy": {
       "command": "bun",
       "args": ["${CLAUDE_PLUGIN_ROOT}/bin/envoy-mcp.ts"]
+    },
+    "dispatch": {
+      "command": "bun",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/dispatch-mcp-shim.ts"]
     }
   }
 }

@@ -1,24 +1,39 @@
 import {
   closeIssue,
   getComments,
+  getInstallationOwners,
   getIssue,
+  isCloseReason,
   openGithubEventSource,
   postComment,
   searchDispatchThreads,
 } from "./api";
 import { summarizeAnswers } from "./components/ask-form";
-import { renderSidebar, visibleSidebarThreads } from "./components/sidebar";
+import {
+  isStatusFilter,
+  isUrgencyFilter,
+  renderSidebar,
+  visibleSidebarThreads,
+} from "./components/sidebar";
 import { renderThreadDetail, type ThreadDetailInput } from "./components/thread-detail";
-import { escapeHtml } from "./html";
 import {
   buildAnswerMarkerComment,
   buildUrgencyMarkerComment,
   effectiveUrgency,
+  isUrgency,
   parseMetaMarker,
 } from "./markers";
 import "./styles.css";
 import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
-import type { Comment, Issue, SidebarEntry, SidebarFilters, Thread, Urgency } from "./types";
+import type {
+  CloseReason,
+  Comment,
+  Issue,
+  SidebarEntry,
+  SidebarFilters,
+  Thread,
+  Urgency,
+} from "./types";
 
 export interface AppApi {
   searchDispatchThreads: typeof searchDispatchThreads;
@@ -29,7 +44,7 @@ export interface AppApi {
 }
 
 export interface DashboardControllerOptions {
-  repos: string[];
+  owners: string[];
   addressed?: Record<string, string>;
   api?: AppApi;
 }
@@ -71,6 +86,7 @@ interface DashboardState {
   closeError?: string;
   addressedPending: boolean;
   addressedError?: string;
+  loadError?: string;
 }
 
 const defaultApi: AppApi = {
@@ -91,23 +107,16 @@ export function renderAppShell(): string {
         <p id="auth-hint" class="auth-hint" hidden></p>
       </div>
     </div>
-    <div id="repo-picker-overlay" class="auth-overlay" hidden>
+    <div id="owner-error-overlay" class="auth-overlay" hidden>
       <div class="auth-card">
-        <h1>Watched repos</h1>
-        <p>Each repo must have the Envoy App installed (and you must have access). Threads from every repo here show up in one sidebar.</p>
-        <ul id="watched-list" class="watched-list"></ul>
-        <form id="add-repo-form" class="repo-form" data-action="add-repo">
-          <input id="add-repo-input" name="repo" type="text" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="owner/name" required />
-          <button type="submit">Add</button>
-        </form>
-        <p id="add-repo-error" class="auth-hint" hidden></p>
-        <button type="button" id="close-repo-picker" class="text-button">Done</button>
+        <h1>Dispatch</h1>
+        <p>The Envoy GitHub App is not installed anywhere you can see. Install it on your account or an org you belong to, then reload.</p>
       </div>
     </div>
     <header class="topbar">
       <button type="button" id="toggle-sidebar" title="Toggle sidebar ([ or ])">☰</button>
       <strong>Dispatch</strong>
-      <button type="button" id="repo-label" class="repo-label" title="Manage watched repos"></button>
+      <span id="owner-label" class="owner-label"></span>
       <button type="button" id="help-button" title="Keyboard shortcuts (?)">?</button>
     </header>
     <div id="dashboard-root"></div>
@@ -237,17 +246,17 @@ export function createDashboardController(options: DashboardControllerOptions) {
   }
 
   async function loadThreads(): Promise<void> {
-    // Fan out across every watched repo. We tag each thread with its repo
-    // upstream (api.searchDispatchThreads(repo) does the right thing), so
-    // the resulting array is repo-aware end to end.
-    const fetches = options.repos.map((repo) =>
-      api.searchDispatchThreads(repo).catch((err) => {
-        console.warn(`searchDispatchThreads(${repo}) failed`, err);
-        return [] as Thread[];
-      })
-    );
-    const results = await Promise.all(fetches);
-    state.threads = results.flat();
+    // Owner-scoped search spans every repo the App is installed on for
+    // these accounts in one GraphQL call. Threads already carry their repo
+    // (derived from the GraphQL node), so the result is repo-aware end to end.
+    // A failed search keeps the last good list and shows the error; an empty
+    // sidebar must never stand in for "the search broke".
+    try {
+      state.threads = await api.searchDispatchThreads(options.owners);
+      state.loadError = undefined;
+    } catch (error) {
+      state.loadError = error instanceof Error ? error.message : String(error);
+    }
     if (!state.selected) {
       const first = visibleSidebarThreads(state.threads, sidebarFilters())[0];
       if (first) {
@@ -274,6 +283,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
       selectedKey: selectedKey(),
       highlightedKeys: state.highlighted,
       addressed: state.addressed,
+      loadError: state.loadError,
     };
   }
 
@@ -402,7 +412,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     }
   }
 
-  async function closeSelectedIssue(stateReason: "completed" | "not_planned"): Promise<void> {
+  async function closeSelectedIssue(stateReason: CloseReason): Promise<void> {
     const sel = requireSelected();
     const key = keyOf(sel.repo, sel.number);
     const issue = selectedIssue();
@@ -521,12 +531,13 @@ function attachDom(
       return;
     }
     const pill = target.closest<HTMLButtonElement>("[data-filter]");
-    if (pill?.dataset.filter === "status") {
-      controller.state.filters.status = pill.dataset.value as SidebarFilters["status"];
+    const filterValue = pill?.dataset.value;
+    if (pill?.dataset.filter === "status" && isStatusFilter(filterValue)) {
+      controller.state.filters.status = filterValue;
       paint();
     }
-    if (pill?.dataset.filter === "urgency") {
-      controller.state.filters.urgency = pill.dataset.value as SidebarFilters["urgency"];
+    if (pill?.dataset.filter === "urgency" && isUrgencyFilter(filterValue)) {
+      controller.state.filters.urgency = filterValue;
       paint();
     }
   });
@@ -541,8 +552,9 @@ function attachDom(
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const urgencyOption = target.closest<HTMLButtonElement>("button[data-urgency-value]");
-    if (!urgencyOption?.dataset.urgencyValue) return;
-    const next = urgencyOption.dataset.urgencyValue as Urgency;
+    if (!urgencyOption) return;
+    const next = urgencyOption.dataset.urgencyValue;
+    if (!isUrgency(next)) return;
     // Close the popover so the chip reflects the new state immediately.
     const details = urgencyOption.closest<HTMLDetailsElement>("details.urgency-chip-wrap");
     if (details) details.open = false;
@@ -573,15 +585,6 @@ function attachDom(
     const form = (event.target as HTMLElement).closest<HTMLFormElement>("form[data-action]");
     if (!form) return;
     event.preventDefault();
-    if (form.id === "add-repo-form") {
-      const value = String(new FormData(form).get("repo") ?? "").trim();
-      if (!/^[^/\s]+\/[^/\s]+$/.test(value)) {
-        showHint("add-repo-error", "Enter <owner>/<name>.");
-        return;
-      }
-      void addRepoAndReload(value);
-      return;
-    }
     const formData = new FormData(form);
     if (form.dataset.action === "reply") {
       void controller.postReply(String(formData.get("body") ?? "")).then(paint, paint);
@@ -602,16 +605,15 @@ function attachDom(
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     const button = target.closest<HTMLButtonElement>("button[data-action='close']");
-    if (!button?.dataset.stateReason) return;
+    const stateReason = button?.dataset.stateReason;
+    if (!isCloseReason(stateReason)) return;
     // Close the resolve-as-not-planned menu when picking from it.
     for (const open of root.querySelectorAll<HTMLDetailsElement>(
       "details.resolve-menu-wrap[open]"
     )) {
       open.open = false;
     }
-    void controller
-      .closeSelectedIssue(button.dataset.stateReason as "completed" | "not_planned")
-      .then(paint, paint);
+    void controller.closeSelectedIssue(stateReason).then(paint, paint);
     paint();
   });
 
@@ -626,6 +628,13 @@ function attachDom(
       void controller.unmarkAddressed().then(paint, paint);
       paint();
     }
+  });
+
+  root.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const copyButton = target.closest<HTMLButtonElement>("button[data-action='copy-origin']");
+    const payload = copyButton?.dataset.copyText;
+    if (payload) void navigator.clipboard.writeText(payload);
   });
 
   root.addEventListener("click", (event) => {
@@ -689,21 +698,25 @@ async function boot(): Promise<void> {
     return;
   }
 
-  const view = await fetchView();
-  renderRepoLabel(view.watchedRepos);
-  wireRepoPicker();
-  if (view.watchedRepos.length === 0) {
-    document.getElementById("repo-picker-overlay")?.removeAttribute("hidden");
+  const owners = await getInstallationOwners();
+  renderOwnerLabel(owners);
+  if (owners.length === 0) {
+    document.getElementById("owner-error-overlay")?.removeAttribute("hidden");
     return;
   }
+  // GitHub logins are case-insensitive; a hand-typed URL hash or an event's
+  // NATS subject may not match the installation's casing.
+  const ownerSet = new Set(owners.map((owner) => owner.toLowerCase()));
+  const covers = (repo: string): boolean => ownerSet.has(repo.split("/")[0]?.toLowerCase() ?? "");
 
+  const view = await fetchView();
   const controller = createDashboardController({
-    repos: view.watchedRepos,
+    owners,
     addressed: view.addressed,
   });
   await controller.loadThreads();
   const fromUrl = parseSelectionFromUrl();
-  if (fromUrl && view.watchedRepos.includes(fromUrl.repo)) {
+  if (fromUrl && covers(fromUrl.repo)) {
     await controller.selectThread(fromUrl.repo, fromUrl.number);
   } else if (controller.state.selected) {
     await controller.selectThread(controller.state.selected.repo, controller.state.selected.number);
@@ -715,7 +728,7 @@ async function boot(): Promise<void> {
       paint();
     },
     refetchComments: async (repo, number) => {
-      if (!view.watchedRepos.includes(repo)) return;
+      if (!covers(repo)) return;
       const key = `${repo}#${number}`;
       const fresh = await getComments(repo, number);
       controller.state.comments.set(key, fresh);
@@ -726,7 +739,7 @@ async function boot(): Promise<void> {
       paint();
     },
     refetchIssue: async (repo, number) => {
-      if (!view.watchedRepos.includes(repo)) return;
+      if (!covers(repo)) return;
       const key = `${repo}#${number}`;
       const issue = await getIssue(repo, number);
       controller.state.issues.set(key, issue);
@@ -738,63 +751,11 @@ async function boot(): Promise<void> {
   });
 }
 
-function renderRepoLabel(watched: string[]): void {
-  const repoLabel = document.getElementById("repo-label");
-  if (repoLabel) {
-    if (watched.length === 1) {
-      repoLabel.textContent = watched[0] ?? "";
-    } else if (watched.length === 0) {
-      repoLabel.textContent = "";
-    } else {
-      repoLabel.textContent = `${watched.length} repos`;
-      repoLabel.title = watched.join("\n");
-    }
-  }
-  const list = document.getElementById("watched-list");
-  if (!list) return;
-  list.innerHTML =
-    watched.length === 0
-      ? '<li class="watched-empty">No repos yet — add one below.</li>'
-      : watched
-          .map(
-            (repo) =>
-              `<li class="watched-row"><span class="watched-repo">${escapeHtml(repo)}</span><button type="button" class="watched-remove" data-remove-repo="${escapeHtml(repo)}" title="Remove">×</button></li>`
-          )
-          .join("");
-}
-
-async function removeRepoAndReload(repo: string): Promise<void> {
-  const view = await fetchView();
-  const next = view.watchedRepos.filter((r) => r !== repo);
-  const response = await fetch("/api/view", {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ watchedRepos: next }),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    showHint("add-repo-error", `Remove failed: ${response.status} ${body.slice(0, 200)}`);
-    return;
-  }
-  window.location.reload();
-}
-
-function wireRepoPicker(): void {
-  document.addEventListener("click", (event) => {
-    const target = event.target as HTMLElement;
-    if (target.closest<HTMLElement>("#repo-label")) {
-      document.getElementById("repo-picker-overlay")?.removeAttribute("hidden");
-      return;
-    }
-    if (target.closest<HTMLElement>("#close-repo-picker")) {
-      document.getElementById("repo-picker-overlay")?.setAttribute("hidden", "");
-      return;
-    }
-    const remove = target.closest<HTMLButtonElement>("button[data-remove-repo]");
-    if (remove?.dataset.removeRepo) {
-      void removeRepoAndReload(remove.dataset.removeRepo);
-    }
-  });
+function renderOwnerLabel(owners: string[]): void {
+  const label = document.getElementById("owner-label");
+  if (!label) return;
+  label.textContent = owners.join(" · ");
+  label.title = owners.join("\n");
 }
 
 // URL hash format: #<owner>/<repo>/<number>. Plain string, no encoding
@@ -818,21 +779,14 @@ function updateUrlForSelection(sel: { repo: string; number: number }): void {
 }
 
 interface View {
-  watchedRepos: string[];
   addressed: Record<string, string>;
 }
 
 async function fetchView(): Promise<View> {
   const response = await fetch("/api/view");
-  if (!response.ok) return { watchedRepos: [], addressed: {} };
-  const data = (await response.json()) as {
-    watchedRepos?: string[];
-    addressed?: Record<string, string>;
-  };
-  return {
-    watchedRepos: data.watchedRepos ?? [],
-    addressed: data.addressed ?? {},
-  };
+  if (!response.ok) return { addressed: {} };
+  const data = (await response.json()) as { addressed?: Record<string, string> };
+  return { addressed: data.addressed ?? {} };
 }
 
 async function persistAddressed(addressed: Record<string, string>): Promise<void> {
@@ -845,32 +799,6 @@ async function persistAddressed(addressed: Record<string, string>): Promise<void
     const body = await response.text().catch(() => "");
     throw new Error(`PATCH /api/view returned ${response.status}: ${body.slice(0, 200)}`);
   }
-}
-
-async function addRepoAndReload(repo: string): Promise<void> {
-  const view = await fetchView();
-  if (view.watchedRepos.includes(repo)) {
-    window.location.reload();
-    return;
-  }
-  const response = await fetch("/api/view", {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ watchedRepos: [...view.watchedRepos, repo] }),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    showHint("add-repo-error", `Add failed: ${response.status} ${body.slice(0, 200)}`);
-    return;
-  }
-  window.location.reload();
-}
-
-function showHint(id: string, message: string): void {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.textContent = message;
-  el.hidden = false;
 }
 
 if (typeof document !== "undefined") {

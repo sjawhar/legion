@@ -1,10 +1,12 @@
 // Package sse delivers Server-Sent Events to connected dashboard clients.
 //
-// Each client registers with a (login, watched-repos) pair. Events are
-// published with a `repo` key (the <owner>/<repo> slug derived from the
-// NATS subject); the hub fans out to clients whose watched-repo set
-// contains that slug. A client with an empty watched set receives nothing —
-// new users see "no repos selected" in the sidebar until they pick one.
+// Each client registers with a (login, owner-set) pair, where owners are the
+// GitHub account logins (users/orgs) the client's Envoy App installations
+// cover. Events are published with a `repo` key (the <owner>/<repo> slug
+// derived from the NATS subject); the hub fans out to clients whose owner
+// set contains that slug's account. A client with an empty owner set
+// receives nothing — a user with no App installations sees nothing until
+// they install the App somewhere.
 package sse
 
 import (
@@ -25,18 +27,8 @@ type Event struct {
 // rather than blocking other clients.
 type Client struct {
 	Login    string
-	watched  map[string]struct{}
+	owners   map[string]struct{}
 	Messages chan []byte
-}
-
-// Watches reports whether the client subscribed to events for this repo
-// (case-insensitive).
-func (c *Client) Watches(repo string) bool {
-	if c == nil || c.watched == nil {
-		return false
-	}
-	_, ok := c.watched[strings.ToLower(repo)]
-	return ok
 }
 
 // Hub is a goroutine-safe registry of SSE clients.
@@ -54,17 +46,18 @@ func New() *Hub {
 // AddClient registers a new client and returns its id + receiving channel.
 // The caller must call RemoveClient when the connection ends.
 //
-// watched is the client's list of <owner>/<repo> slugs. The hub stores a
-// copy and lowercases for matching; passing nil means "deliver nothing"
-// rather than "deliver everything".
-func (h *Hub) AddClient(login string, watched []string) (int, *Client) {
+// owners is the client's list of GitHub account logins — the accounts its
+// Envoy App installations cover. The hub stores a copy and lowercases for
+// matching; passing nil means "deliver nothing" rather than "deliver
+// everything".
+func (h *Hub) AddClient(login string, owners []string) (int, *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nextID++
 	id := h.nextID
 	client := &Client{
 		Login:    login,
-		watched:  watchedSet(watched),
+		owners:   ownerSet(owners),
 		Messages: make(chan []byte, 16),
 	}
 	h.clients[id] = client
@@ -82,18 +75,21 @@ func (h *Hub) RemoveClient(id int) {
 	}
 }
 
-// BroadcastRepo sends an event to every client whose watched-set contains
-// repo. Slow clients are dropped, not awaited.
+// BroadcastRepo sends an event to every client whose owner set covers
+// repo's account. Slow clients are dropped, not awaited.
 func (h *Hub) BroadcastRepo(repo string, event Event) {
+	owner, ok := ownerOf(repo)
+	if !ok {
+		return
+	}
 	payload, err := encodeEvent(event)
 	if err != nil {
 		return
 	}
-	key := strings.ToLower(repo)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for id, client := range h.clients {
-		if _, ok := client.watched[key]; !ok {
+		if _, watched := client.owners[owner]; !watched {
 			continue
 		}
 		select {
@@ -105,7 +101,7 @@ func (h *Hub) BroadcastRepo(repo string, event Event) {
 	}
 }
 
-// BroadcastAll sends to every client regardless of watched-repos. Reserved
+// BroadcastAll sends to every client regardless of owner set. Reserved
 // for system events ("you've been logged out", health pings, …) — not for
 // GitHub event fan-out.
 func (h *Hub) BroadcastAll(event Event) {
@@ -132,7 +128,17 @@ func (h *Hub) Size() int {
 	return len(h.clients)
 }
 
-func watchedSet(in []string) map[string]struct{} {
+// ownerOf returns the lowercased account segment of an "<owner>/<repo>"
+// slug. Returns false when repo doesn't have that shape.
+func ownerOf(repo string) (string, bool) {
+	idx := strings.Index(repo, "/")
+	if idx <= 0 {
+		return "", false
+	}
+	return strings.ToLower(repo[:idx]), true
+}
+
+func ownerSet(in []string) map[string]struct{} {
 	if len(in) == 0 {
 		return nil
 	}

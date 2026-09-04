@@ -1,6 +1,6 @@
 import { urgencyWeights } from "../api";
 import { escapeHtml, timeAgo } from "../html";
-import type { SidebarEntry, SidebarFilters, Thread } from "../types";
+import type { SidebarEntry, SidebarFilters, StatusFilter, Thread, UrgencyFilter } from "../types";
 
 function keyOf(thread: Thread): string {
   return `${thread.repo}#${thread.number}`;
@@ -28,7 +28,8 @@ function searchText(thread: Thread, threads: Thread[]): string {
     )
     .map((candidate) => `${candidate.title} ${candidate.body}`)
     .join(" ");
-  return `${thread.repo} ${thread.title} ${thread.body} ${children}`.toLowerCase();
+  const fields = [thread.repo, thread.title, thread.body, thread.origin?.cwd ?? "", children];
+  return fields.join(" ").toLowerCase();
 }
 
 export function visibleSidebarThreads(threads: Thread[], filters: SidebarFilters): SidebarEntry[] {
@@ -70,7 +71,31 @@ function isAddressed(thread: Thread, addressed: Record<string, string> | undefin
   return new Date(thread.updatedAt).getTime() <= new Date(marker).getTime();
 }
 
-function renderFilterPill(kind: "status" | "urgency", value: string, current: string): string {
+// The rendered vocabulary and the guards that read it back off a clicked
+// pill's data-value are the same lists, so a pill can't offer a filter the
+// dashboard would reject (or silently apply as "match nothing").
+const STATUS_FILTERS = ["all", "open", "closed"] as const satisfies readonly StatusFilter[];
+const URGENCY_FILTERS = [
+  "all",
+  "blocking",
+  "high",
+  "med",
+  "low",
+] as const satisfies readonly UrgencyFilter[];
+
+export function isStatusFilter(value: unknown): value is StatusFilter {
+  return STATUS_FILTERS.some((filter) => filter === value);
+}
+
+export function isUrgencyFilter(value: unknown): value is UrgencyFilter {
+  return URGENCY_FILTERS.some((filter) => filter === value);
+}
+
+function renderFilterPill(
+  kind: "status" | "urgency",
+  value: StatusFilter | UrgencyFilter,
+  current: StatusFilter | UrgencyFilter
+): string {
   const active = value === current ? " active" : "";
   return `<button type="button" class="pill${active}" data-filter="${kind}" data-value="${escapeHtml(
     value
@@ -122,14 +147,14 @@ export function renderSidebar(threads: Thread[], filters: SidebarFilters): strin
     <div class="sidebar-controls">
       <input id="search-input" type="search" value="${escapeHtml(filters.search)}" placeholder="Search threads" />
       <div class="filter-row" aria-label="Status filter">
-        <span>Status</span>${["all", "open", "closed"]
-          .map((value) => renderFilterPill("status", value, filters.status))
-          .join("")}
+        <span>Status</span>${STATUS_FILTERS.map((value) =>
+          renderFilterPill("status", value, filters.status)
+        ).join("")}
       </div>
       <div class="filter-row" aria-label="Urgency filter">
-        <span>Urgency</span>${["all", "blocking", "high", "med", "low"]
-          .map((value) => renderFilterPill("urgency", value, filters.urgency))
-          .join("")}
+        <span>Urgency</span>${URGENCY_FILTERS.map((value) =>
+          renderFilterPill("urgency", value, filters.urgency)
+        ).join("")}
       </div>
       <div class="filter-row" aria-label="Addressed filter">
         <span>Addressed</span>
@@ -138,10 +163,14 @@ export function renderSidebar(threads: Thread[], filters: SidebarFilters): strin
       </div>
     </div>
     <div id="thread-list" class="thread-list">${
-      rows ||
-      (hiddenByAddressed > 0
-        ? `<div class="empty-state">No threads match. <button type="button" class="link-button" data-toggle="show-addressed">${hiddenByAddressed} addressed thread${hiddenByAddressed === 1 ? "" : "s"} hidden — Show addressed</button></div>`
-        : `<div class="empty-state">No threads match.</div>`)
+      filters.loadError
+        ? `<div class="empty-state form-error load-error">Couldn't load threads: ${escapeHtml(filters.loadError)}</div>`
+        : rows ||
+          (
+            hiddenByAddressed > 0
+              ? `<div class="empty-state">No threads match. <button type="button" class="link-button" data-toggle="show-addressed">${hiddenByAddressed} addressed thread${hiddenByAddressed === 1 ? "" : "s"} hidden — Show addressed</button></div>`
+              : `<div class="empty-state">No threads match.</div>`
+          )
     }</div>
   </aside>`;
 }

@@ -8,19 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strings"
 )
 
 // DispatchConfig mirrors the `dispatch` sub-object in envoy.json.
 type DispatchConfig struct {
-	Enabled     bool   `json:"enabled,omitempty"`
-	ServerURL   string `json:"serverUrl,omitempty"`
-	DefaultRepo string `json:"defaultRepo,omitempty"`
-	AppClientID string `json:"appClientId,omitempty"`
+	Enabled   bool   `json:"enabled,omitempty"`
+	ServerURL string `json:"serverUrl,omitempty"`
 }
 
 // EnvoyConfig is the top-level envoy.json shape.
@@ -38,18 +35,27 @@ type LoadOptions struct {
 	HomeDir string
 }
 
-var (
-	dispatchKnownKeys = map[string]struct{}{
-		"enabled":     {},
-		"serverUrl":   {},
-		"defaultRepo": {},
-		"appClientId": {},
-	}
-	repoSlugPattern = regexp.MustCompile(`^[^/]+/[^/]+$`)
-)
+var dispatchKnownKeys = map[string]struct{}{
+	"enabled":   {},
+	"serverUrl": {},
+}
 
-// Load reads user and repo config and returns the shallow-merged result. Missing
-// files are not errors; invalid content is logged and skipped.
+// InvalidConfigError reports an envoy.json file that failed validation — an
+// unrecognized key or a malformed value. Load returns it directly instead of
+// silently skipping the file: bad config is a loud failure, not a warning.
+type InvalidConfigError struct {
+	Path   string
+	Issues []string
+}
+
+func (e *InvalidConfigError) Error() string {
+	return fmt.Sprintf("invalid config %s: %s", e.Path, strings.Join(e.Issues, "; "))
+}
+
+// Load reads user and repo config and returns the shallow-merged result. A
+// missing file is not an error. A file that exists but fails validation
+// (an unrecognized key, a malformed value) stops the load and returns an
+// *InvalidConfigError naming the file and the key.
 func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
@@ -69,14 +75,18 @@ func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	}
 
 	merged := &EnvoyConfig{}
-	if userCfg, err := readConfigFile(filepath.Join(home, ".config", "opencode", "envoy.json")); err != nil {
-		slog.Warn("dispatch: failed to load user config", "error", err)
-	} else if userCfg != nil {
+	userCfg, err := readConfigFile(filepath.Join(home, ".config", "opencode", "envoy.json"))
+	if err != nil {
+		return nil, err
+	}
+	if userCfg != nil {
 		merged = mergeConfig(merged, userCfg)
 	}
-	if repoCfg, err := readConfigFile(filepath.Join(cwd, ".opencode", "envoy.json")); err != nil {
-		slog.Warn("dispatch: failed to load repo config", "error", err)
-	} else if repoCfg != nil {
+	repoCfg, err := readConfigFile(filepath.Join(cwd, ".opencode", "envoy.json"))
+	if err != nil {
+		return nil, err
+	}
+	if repoCfg != nil {
 		merged = mergeConfig(merged, repoCfg)
 	}
 	return merged, nil
@@ -92,14 +102,13 @@ func readConfigFile(path string) (*EnvoyConfig, error) {
 	}
 	cfg, issues := parseAndValidate(data)
 	if len(issues) > 0 {
-		slog.Warn("dispatch: invalid config", "path", path, "issues", issues)
-		return nil, nil
+		return nil, &InvalidConfigError{Path: path, Issues: issues}
 	}
 	return cfg, nil
 }
 
-// parseAndValidate runs the same validation as the original TS validator: type
-// checks, unknown-key warnings under dispatch, URL validity, repo slug shape.
+// parseAndValidate mirrors the TS validator (envoy-client/src/dispatch-config.ts):
+// type checks, unknown-key rejection under dispatch, and URL validity.
 func parseAndValidate(data []byte) (*EnvoyConfig, []string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -168,24 +177,6 @@ func parseDispatch(raw json.RawMessage) (*DispatchConfig, []string) {
 			out.ServerURL = s
 		}
 	}
-	if v, ok := m["defaultRepo"]; ok {
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			issues = append(issues, "dispatch.defaultRepo: Expected string")
-		} else if !repoSlugPattern.MatchString(s) {
-			issues = append(issues, "dispatch.defaultRepo: Invalid repository slug")
-		} else {
-			out.DefaultRepo = s
-		}
-	}
-	if v, ok := m["appClientId"]; ok {
-		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			issues = append(issues, "dispatch.appClientId: Expected string")
-		} else {
-			out.AppClientID = s
-		}
-	}
 	return out, issues
 }
 
@@ -221,12 +212,6 @@ func mergeConfig(base, override *EnvoyConfig) *EnvoyConfig {
 			}
 			if override.Dispatch.ServerURL != "" {
 				merged.ServerURL = override.Dispatch.ServerURL
-			}
-			if override.Dispatch.DefaultRepo != "" {
-				merged.DefaultRepo = override.Dispatch.DefaultRepo
-			}
-			if override.Dispatch.AppClientID != "" {
-				merged.AppClientID = override.Dispatch.AppClientID
 			}
 		}
 		out.Dispatch = merged

@@ -18,7 +18,7 @@ describe("buildDispatchMcpEntry", () => {
     const result = buildDispatchMcpEntry({
       dispatch: {
         enabled: true,
-        serverUrl: "http://sami-agents-mx:8766",
+        serverUrl: "http://example-host-mx:8766",
       },
       shimPath: "/path/to/shim.ts",
       runtime: "bun",
@@ -27,7 +27,7 @@ describe("buildDispatchMcpEntry", () => {
       type: "local",
       command: ["bun", "/path/to/shim.ts"],
       environment: {
-        DISPATCH_MCP_URL: "http://sami-agents-mx:8766/mcp",
+        DISPATCH_MCP_URL: "http://example-host-mx:8766/mcp",
       },
       enabled: true,
     });

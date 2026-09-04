@@ -1,8 +1,10 @@
 // Package routes assembles the http.ServeMux for the Dispatch HTTP server.
 //
 // The dashboard is multi-user (one record per GitHub login on disk under
-// ~/.local/share/dispatch/users/<login>.json) and multi-repo (each user keeps
-// their own list of watched <owner>/<repo> pairs; the sidebar aggregates).
+// ~/.local/share/dispatch/users/<login>.json). Repo discovery is
+// owner-scoped: a user's SSE stream and dashboard queries are limited to the
+// GitHub accounts (users/orgs) their Envoy App installations cover, not a
+// manually maintained repo list.
 //
 // Auth is GitHub Apps web flow:
 //
@@ -13,8 +15,8 @@
 //
 // Per-user view:
 //
-//	GET   /api/view                  → { watchedRepos: ["…", …] }
-//	PATCH /api/view                  → replace watchedRepos
+//	GET   /api/view                  → { addressed: {…} }
+//	PATCH /api/view                  → replace addressed
 //	GET   /api/installations         → user's Envoy App installations
 //	GET   /api/installations/{id}/repositories → repos in one installation
 //
@@ -71,12 +73,11 @@ type AppContext struct {
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey  string
-	WebDistDir  string
-	Users       auth.UserStore
-	App         *auth.AppConfig
-	AppSource   string
-	DefaultRepo string
+	SigningKey string
+	WebDistDir string
+	Users      auth.UserStore
+	App        *auth.AppConfig
+	AppSource  string
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -92,7 +93,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		WebDistDir: opts.WebDistDir,
 		Users:      opts.Users,
 		Hub:        sse.New(),
-		MCPServer:  mcp.New(opts.DefaultRepo),
+		MCPServer:  mcp.New(),
 		app:        opts.App,
 		appSource:  opts.AppSource,
 	}, nil
@@ -185,12 +186,12 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "code exchange failed: "+err.Error())
 		return
 	}
-	// Preserve any existing watched-repos list on re-auth; first-time users
-	// get an empty list and pick from the topbar.
+	// Preserve any existing addressed-thread state on re-auth; first-time
+	// users get an empty map.
 	existing, _ := r.ctx.Users.Read(tokens.GithubLogin)
 	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
 	if existing != nil {
-		user.WatchedRepos = existing.WatchedRepos
+		user.Addressed = existing.Addressed
 	}
 	if err := r.ctx.Users.Write(user); err != nil {
 		slog.Error("dispatch: persist user failed", "login", user.Login, "error", err)
@@ -220,7 +221,7 @@ func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"login": login})
 }
 
-// ───── view (watched repos) ─────────────────────────────────────────────────
+// ───── view (addressed threads) ─────────────────────────────────────────────
 
 func (r *router) apiViewGet(w http.ResponseWriter, req *http.Request) {
 	user := r.requireUser(w, req)
@@ -235,49 +236,12 @@ func (r *router) apiViewPatch(w http.ResponseWriter, req *http.Request) {
 	if user == nil {
 		return
 	}
-	// Both fields are optional. Send only the one you're updating; the other
-	// stays untouched. Sending an empty object is a no-op (returns current).
 	var body struct {
-		WatchedRepos *[]string          `json:"watchedRepos,omitempty"`
-		Addressed    *map[string]string `json:"addressed,omitempty"`
+		Addressed *map[string]string `json:"addressed,omitempty"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
-	}
-	if body.WatchedRepos != nil {
-		for _, s := range *body.WatchedRepos {
-			if err := auth.ValidateRepoSlug(s); err != nil {
-				writeError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-		}
-		// Authorize any newly-added repo against the user's own GitHub token so
-		// a user cannot subscribe to event streams for repositories they cannot
-		// see. Repos already watched (and removals) skip the check.
-		if added := addedRepos(user.WatchedRepos, *body.WatchedRepos); len(added) > 0 {
-			cfg, ok := r.proxyConfigForUser(w, user)
-			if !ok {
-				return
-			}
-			for _, slug := range added {
-				owner, name, valid := githubapi.SplitRepo(slug)
-				if !valid {
-					writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid repo slug %q", slug))
-					return
-				}
-				if err := githubapi.CheckRepoAccess(req.Context(), cfg, owner, name); err != nil {
-					if errors.Is(err, githubapi.ErrRepoForbidden) {
-						writeError(w, http.StatusForbidden, fmt.Sprintf("you do not have access to %s", slug))
-						return
-					}
-					slog.Warn("dispatch: repo access check failed", "repo", slug, "error", err)
-					writeError(w, http.StatusBadGateway, "could not verify repo access")
-					return
-				}
-			}
-		}
-		user.WatchedRepos = *body.WatchedRepos
 	}
 	if body.Addressed != nil {
 		// Validate each entry's key shape so we don't end up with garbage in
@@ -303,36 +267,15 @@ func (r *router) apiViewPatch(w http.ResponseWriter, req *http.Request) {
 
 func viewPayload(user *auth.User) map[string]any {
 	return map[string]any{
-		"login":        user.Login,
-		"watchedRepos": user.WatchedRepos,
-		"addressed":    user.Addressed,
+		"login":     user.Login,
+		"addressed": user.Addressed,
 	}
-}
-
-// addedRepos returns the entries in next that are not already present in
-// current (case-insensitive). Used to authorize only newly-watched repos.
-func addedRepos(current, next []string) []string {
-	have := make(map[string]struct{}, len(current))
-	for _, s := range current {
-		have[strings.ToLower(strings.TrimSpace(s))] = struct{}{}
-	}
-	var added []string
-	for _, s := range next {
-		key := strings.ToLower(strings.TrimSpace(s))
-		if key == "" {
-			continue
-		}
-		if _, ok := have[key]; !ok {
-			added = append(added, s)
-		}
-	}
-	return added
 }
 
 // ───── installations ────────────────────────────────────────────────────────
 
 func (r *router) apiInstallations(w http.ResponseWriter, req *http.Request) {
-	r.proxyGithubPath(w, req, "/user/installations")
+	r.proxyGithubPath(w, req, githubapi.InstallationsPath)
 }
 
 func (r *router) apiInstallationRepos(w http.ResponseWriter, req *http.Request) {
@@ -341,7 +284,7 @@ func (r *router) apiInstallationRepos(w http.ResponseWriter, req *http.Request) 
 		writeError(w, http.StatusBadRequest, "missing installation id")
 		return
 	}
-	r.proxyGithubPath(w, req, "/user/installations/"+url.PathEscape(id)+"/repositories")
+	r.proxyGithubPath(w, req, githubapi.InstallationsPath+"/"+url.PathEscape(id)+"/repositories")
 }
 
 func (r *router) proxyGithubPath(w http.ResponseWriter, req *http.Request, path string) {
@@ -363,7 +306,17 @@ func (r *router) apiEvents(w http.ResponseWriter, req *http.Request) {
 	if user == nil {
 		return
 	}
-	sse.HandlerFor(r.ctx.Hub, user.Login, user.WatchedRepos)(w, req)
+	cfg, ok := r.proxyConfigForUser(w, user)
+	if !ok {
+		return
+	}
+	owners, err := githubapi.InstallationOwners(req.Context(), cfg)
+	if err != nil {
+		slog.Warn("dispatch: installation owners lookup failed", "login", user.Login, "error", err)
+		writeError(w, http.StatusBadGateway, "could not determine your GitHub App installations")
+		return
+	}
+	sse.HandlerFor(r.ctx.Hub, user.Login, owners)(w, req)
 }
 
 func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
@@ -423,7 +376,6 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 		Tokens:       &user.Tokens,
 		Users:        r.ctx.Users,
 		Login:        user.Login,
-		WatchedRepos: user.WatchedRepos,
 		ClientID:     app.ClientID,
 		ClientSecret: app.ClientSecret,
 		HTTPClient:   r.ctx.HTTPClient,

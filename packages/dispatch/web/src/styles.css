@@ -56,22 +56,11 @@ select {
   background: var(--card);
 }
 
-.repo-form {
-  display: inline-flex;
-  align-items: center;
-}
-
-.repo-form input {
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.2rem 0.5rem;
-  min-width: 18ch;
-}
-
-.repo-form input:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+.owner-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg-dim);
+  font-size: 0.82rem;
+  margin-left: 0.5rem;
 }
 
 /* ─── Dashboard grid ──────────────────────────────────────────────────── */
@@ -351,6 +340,33 @@ select {
   line-height: 1.25;
   letter-spacing: -0.015em;
   font-weight: 600;
+}
+
+.origin-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.3rem 0 0;
+  color: var(--fg-dim);
+  font-size: 0.8rem;
+}
+
+.origin-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.origin-copy {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+}
+.origin-copy:hover {
+  border-color: var(--line);
+  color: var(--fg);
 }
 
 .detail-subtitle {
@@ -874,13 +890,6 @@ select {
   font-size: 0.85rem;
 }
 
-.repo-label {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--fg-dim);
-  font-size: 0.85rem;
-  margin-left: 0.5rem;
-}
-
 /* ─── Shortcuts modal ───────────────────────────────────────────────── */
 
 .shortcut-modal {
@@ -920,69 +929,6 @@ select {
   color: var(--link);
   text-decoration-color: rgba(10, 111, 222, 0.4);
   text-underline-offset: 2px;
-}
-
-.repo-label {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 0.2rem 0.5rem;
-  cursor: pointer;
-  background: transparent;
-  font-size: 0.82rem;
-  color: var(--fg-dim);
-}
-.repo-label:hover {
-  border-color: var(--accent);
-  color: var(--fg);
-}
-
-.watched-list {
-  list-style: none;
-  padding: 0;
-  margin: 0.6rem 0;
-  display: grid;
-  gap: 0.3rem;
-}
-.watched-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.35rem 0.5rem;
-  border-radius: 6px;
-  background: var(--line-soft);
-}
-.watched-repo {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85rem;
-}
-.watched-remove {
-  background: transparent;
-  border: 0;
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--fg-dim);
-  padding: 0 0.35rem;
-}
-.watched-remove:hover {
-  color: var(--urgency-blocking);
-}
-.watched-empty {
-  color: var(--fg-dim);
-  font-size: 0.85rem;
-  padding: 0.4rem 0;
-}
-
-.text-button {
-  background: transparent;
-  border: 0;
-  color: var(--accent);
-  font: inherit;
-  cursor: pointer;
-  padding: 0.3rem 0;
 }
 
 .thread-repo {
