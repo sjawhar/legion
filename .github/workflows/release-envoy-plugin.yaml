@@ -7,6 +7,7 @@ on:
       - "packages/envoy-plugin/**"
       - "packages/envoy-client/**"
       - "packages/contracts/**"
+      - "skills/**"
   workflow_dispatch:
 
 permissions:

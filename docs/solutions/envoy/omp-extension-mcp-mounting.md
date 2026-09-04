@@ -78,7 +78,10 @@ Key mechanics (from `@oh-my-pi/pi-coding-agent` `src/discovery/omp-plugins.ts` a
 Per-user gating that OpenCode did at injection time moves into the spawned server itself: the
 dispatch shim resolves its endpoint from the shared `envoy.json` (`dispatch.enabled` /
 `dispatch.serverUrl`, `DISPATCH_MCP_URL` env override) and exits 0 without serving when
-dispatch is not enabled (`packages/envoy-client/src/dispatch-config.ts`).
+dispatch is not enabled (`packages/envoy-client/src/dispatch-config.ts`). Which GitHub repo a
+thread lands in is not config either: the shim derives it from the session's cwd (its GitHub
+remote) at call time and injects it into the tool call, not from a `dispatch.defaultRepo`
+setting — there is no configured default repo.
 
 ## Why This Matters
 
