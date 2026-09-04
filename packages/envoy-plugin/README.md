@@ -13,9 +13,9 @@ It also maintains the live session registry metadata needed for Envoy to discove
 
 Slack topic examples must use the real Slack `team_id`, for example:
 
-- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention`
+- `notifications.slack.T01234567.C0A0DHVU8HE.mention`
 
-Do not use workspace slugs like `trajectorylabs` in the topic path.
+Do not use workspace slugs like `acme` in the topic path.
 
 ## Sync to another machine
 

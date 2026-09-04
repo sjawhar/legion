@@ -238,11 +238,11 @@ describe("startDaemon", () => {
       expect(createBoardProjectItemsFetcher).toBeFunction();
       if (!createBoardProjectItemsFetcher) throw new Error("Missing board resync fetcher");
       await createBoardProjectItemsFetcher(
-        { owner: "trajectory-labs-pbc", number: 7 },
+        { owner: "example-org", number: 7 },
         tokenManager,
         runner
       )();
-      expect(tokenCalls).toEqual([{ role: "implement", owner: "trajectory-labs-pbc" }]);
+      expect(tokenCalls).toEqual([{ role: "implement", owner: "example-org" }]);
       expect(commandOptions).toHaveLength(1);
       expect(commandOptions[0]?.env).toMatchObject({
         GH_TOKEN: "ghs_board_owner_app_token",

@@ -306,7 +306,7 @@ describe("TokenManager", () => {
                 id: index + 1,
                 account: { login: `other-${index}` },
               }))
-            : [{ id: 222, account: { login: "Trajectory-Labs-PBC" } }];
+            : [{ id: 222, account: { login: "Example-Org" } }];
         return new Response(JSON.stringify(installations), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -331,8 +331,8 @@ describe("TokenManager", () => {
     );
 
     // When equivalent owner spellings request a token twice.
-    const first = await manager.getToken("implement", "trajectory-labs-pbc");
-    const second = await manager.getToken("implement", "TRAJECTORY-LABS-PBC");
+    const first = await manager.getToken("implement", "example-org");
+    const second = await manager.getToken("implement", "EXAMPLE-ORG");
 
     // Then discovery pages once, finds the installation case-insensitively, and reuses the token.
     expect(first.token).toBe("ghs_discovered");

@@ -673,7 +673,7 @@ describe("fetchGitHubProjectItems", () => {
     const warning = spyOn(console, "warn").mockImplementation(() => {});
     try {
       const result = await fetchGitHubProjectItems(
-        "trajectory-labs-pbc",
+        "example-org",
         7,
         async () => ({
           stdout: JSON.stringify({
@@ -705,7 +705,7 @@ describe("fetchGitHubProjectItems", () => {
       expect(warning).toHaveBeenCalledWith(
         JSON.stringify({
           event: "legion.resync.cross_owner_project_item",
-          board: "trajectory-labs-pbc/7",
+          board: "example-org/7",
           itemId: "PVTI_cross_owner",
         })
       );

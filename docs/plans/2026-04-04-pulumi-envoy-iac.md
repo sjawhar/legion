@@ -16,8 +16,8 @@
 
 ## Assumptions
 
-1. SSH user@host values from architect spec: `ubuntu@sami-agents-mx`, `sami@sami`, `claude@sami-claude`, `ghost-wispr@ghost-wispr`
-2. ghost-wispr is listener-only (no NATS peer) — 3-node NATS cluster: sami-agents-mx, sami, sami-claude
+1. SSH user@host values from architect spec: `ubuntu@example-host-mx`, `sami@sami`, `claude@sami-claude`, `ghost-wispr@ghost-wispr`
+2. ghost-wispr is listener-only (no NATS peer) — 3-node NATS cluster: example-host-mx, sami, sami-claude
 3. GHCR images are public — no `registryAuth` needed for pull on remote hosts
 4. Pulumi state backend: default (Pulumi Cloud or local file — operator chooses at `pulumi login`)
 5. All machines reachable over Tailscale MagicDNS hostnames via SSH
@@ -190,14 +190,14 @@ import { computeNatsRoutes, renderNatsConf } from "../nats";
 
 describe("computeNatsRoutes", () => {
   const machines = [
-    { name: "sami-agents-mx", nats: true },
+    { name: "example-host-mx", nats: true },
     { name: "sami", nats: true },
     { name: "sami-claude", nats: true },
     { name: "ghost-wispr", nats: false },
   ];
 
   test("returns routes to all OTHER peers", () => {
-    const routes = computeNatsRoutes("sami-agents-mx", machines);
+    const routes = computeNatsRoutes("example-host-mx", machines);
     expect(routes).toEqual([
       "nats://sami:6222",
       "nats://sami-claude:6222",
@@ -207,7 +207,7 @@ describe("computeNatsRoutes", () => {
   test("excludes non-NATS machines", () => {
     const routes = computeNatsRoutes("sami", machines);
     expect(routes).toEqual([
-      "nats://sami-agents-mx:6222",
+      "nats://example-host-mx:6222",
       "nats://sami-claude:6222",
     ]);
     expect(routes.some((r) => r.includes("ghost-wispr"))).toBe(false);
@@ -216,7 +216,7 @@ describe("computeNatsRoutes", () => {
   test("returns all peer routes for a non-peer machine", () => {
     const routes = computeNatsRoutes("ghost-wispr", machines);
     expect(routes).toEqual([
-      "nats://sami-agents-mx:6222",
+      "nats://example-host-mx:6222",
       "nats://sami:6222",
       "nats://sami-claude:6222",
     ]);
@@ -225,19 +225,19 @@ describe("computeNatsRoutes", () => {
 
 describe("renderNatsConf", () => {
   test("renders valid nats.conf matching deploy/scripts/render-nats-peer.sh output", () => {
-    const conf = renderNatsConf("sami-agents-mx", [
+    const conf = renderNatsConf("example-host-mx", [
       "nats://sami:6222",
       "nats://sami-claude:6222",
     ]);
 
-    expect(conf).toContain("server_name=sami-agents-mx");
+    expect(conf).toContain("server_name=example-host-mx");
     expect(conf).toContain("listen=0.0.0.0:4222");
     expect(conf).toContain("store_dir=/data");
     expect(conf).toContain("name: envoy");
     expect(conf).toContain("listen: 0.0.0.0:6222");
     expect(conf).toContain("nats://sami:6222");
     expect(conf).toContain("nats://sami-claude:6222");
-    expect(conf).not.toContain("sami-agents-mx:6222");
+    expect(conf).not.toContain("example-host-mx:6222");
   });
 
   test("handles single-route cluster", () => {
@@ -522,14 +522,14 @@ import { computeNatsUrls } from "../services";
 
 describe("computeNatsUrls", () => {
   const machines = [
-    { name: "sami-agents-mx", nats: true },
+    { name: "example-host-mx", nats: true },
     { name: "sami", nats: true },
     { name: "sami-claude", nats: true },
     { name: "ghost-wispr", nats: false },
   ];
 
   test("machine with local NATS peer gets 127.0.0.1 first, then remote peers", () => {
-    const urls = computeNatsUrls("sami-agents-mx", true, machines);
+    const urls = computeNatsUrls("example-host-mx", true, machines);
     expect(urls).toBe(
       "nats://127.0.0.1:4222,nats://sami:4222,nats://sami-claude:4222",
     );
@@ -538,7 +538,7 @@ describe("computeNatsUrls", () => {
   test("machine without local NATS peer gets all remote peers", () => {
     const urls = computeNatsUrls("ghost-wispr", false, machines);
     expect(urls).toBe(
-      "nats://sami-agents-mx:4222,nats://sami:4222,nats://sami-claude:4222",
+      "nats://example-host-mx:4222,nats://sami:4222,nats://sami-claude:4222",
     );
   });
 });
@@ -842,11 +842,11 @@ config:
   envoy:imageTag: PLACEHOLDER_SET_BEFORE_DEPLOY
   envoy:natsImage: "nats:2.11-alpine"
   envoy:machines:
-    - name: sami-agents-mx
-      sshHost: "ssh://ubuntu@sami-agents-mx"
-      machineId: sami-agents-mx
+    - name: example-host-mx
+      sshHost: "ssh://ubuntu@example-host-mx"
+      machineId: example-host-mx
       nats:
-        serverName: sami-agents-mx
+        serverName: example-host-mx
       listener:
         registryDir: /home/ubuntu/.local/state/opencode/registry
       receivers:
@@ -977,7 +977,7 @@ Preview should complete without TypeScript errors. It may fail to connect to rem
 Before any migration, run this preflight on each host:
 
 ```bash
-for host in ubuntu@sami-agents-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
+for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
   echo "=== $host ==="
   echo -n "  Docker: "
   ssh -o ConnectTimeout=5 "$host" docker version --format '{{.Server.Version}}' 2>&1 || echo "UNREACHABLE"
@@ -997,10 +997,10 @@ Expected: All 4 hosts reachable, Docker running, NATS volume name confirmed (lik
 
 Migrate one NATS peer at a time, maintaining 2/3 quorum:
 
-**Machine 1 (sami-agents-mx):**
+**Machine 1 (example-host-mx):**
 ```bash
 # Stop old compose services FIRST to free ports
-ssh ubuntu@sami-agents-mx 'cd ~/legion/default/packages/envoy/deploy && \
+ssh ubuntu@example-host-mx 'cd ~/legion/default/packages/envoy/deploy && \
   docker compose -f compose/nats/peer.compose.yml down && \
   docker compose -f compose/listener.compose.yml down && \
   docker compose -f compose/github.compose.yml down && \
@@ -1009,15 +1009,15 @@ ssh ubuntu@sami-agents-mx 'cd ~/legion/default/packages/envoy/deploy && \
 # Deploy via Pulumi (use resource names from pulumi preview output)
 cd packages/envoy/infra
 pulumi up --stack prod \
-  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-sami-agents-mx' \
+  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-example-host-mx' \
   --target-dependents \
   --yes
 
 # Verify
-curl -sf http://sami-agents-mx:8222/healthz && echo "NATS OK" || echo "NATS FAIL"
-curl -sf http://sami-agents-mx:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
-curl -sf http://sami-agents-mx:9010/healthz && echo "GitHub OK" || echo "GitHub FAIL"
-curl -sf http://sami-agents-mx:9011/healthz && echo "Slack OK" || echo "Slack FAIL"
+curl -sf http://example-host-mx:8222/healthz && echo "NATS OK" || echo "NATS FAIL"
+curl -sf http://example-host-mx:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
+curl -sf http://example-host-mx:9010/healthz && echo "GitHub OK" || echo "GitHub FAIL"
+curl -sf http://example-host-mx:9011/healthz && echo "Slack OK" || echo "Slack FAIL"
 ```
 
 **Machine 2 (sami):**
@@ -1037,7 +1037,7 @@ curl -sf http://sami:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
 
 **Verify 2-peer NATS cluster after machines 1+2:**
 ```bash
-for host in sami-agents-mx sami; do
+for host in example-host-mx sami; do
   echo -n "$host routes: "
   curl -sf "http://$host:8222/routez" | jq '.routes | length'
 done
@@ -1078,37 +1078,37 @@ curl -sf http://ghost-wispr:9020/healthz && echo "Listener OK" || echo "Listener
 
 ```bash
 # Full NATS cluster — all 3 peers show 2 routes each
-for host in sami-agents-mx sami sami-claude; do
+for host in example-host-mx sami sami-claude; do
   echo -n "$host routes: "
   curl -sf "http://$host:8222/routez" | jq '.routes | length'
 done
 # Expected: each returns 2
 
 # All health checks
-for host in sami-agents-mx sami sami-claude ghost-wispr; do
+for host in example-host-mx sami sami-claude ghost-wispr; do
   echo -n "$host listener: "
   curl -sf "http://$host:9020/healthz" && echo "OK" || echo "FAIL"
 done
-echo -n "sami-agents-mx github: "
-curl -sf "http://sami-agents-mx:9010/healthz" && echo "OK" || echo "FAIL"
-echo -n "sami-agents-mx slack: "
-curl -sf "http://sami-agents-mx:9011/healthz" && echo "OK" || echo "FAIL"
+echo -n "example-host-mx github: "
+curl -sf "http://example-host-mx:9010/healthz" && echo "OK" || echo "FAIL"
+echo -n "example-host-mx slack: "
+curl -sf "http://example-host-mx:9011/healthz" && echo "OK" || echo "FAIL"
 # Expected: all OK
 
 # Image digest consistency
-for host in ubuntu@sami-agents-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
+for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
   echo -n "$host envoy-listener: "
   ssh "$host" docker inspect envoy-listener --format '{{.Image}}' 2>&1
 done
 # Expected: all 4 return identical SHA digest
 
 # JetStream data preservation
-curl -sf http://sami-agents-mx:8222/jsz?streams=true | jq '.streams[] | {name: .name, state: .state}'
+curl -sf http://example-host-mx:8222/jsz?streams=true | jq '.streams[] | {name: .name, state: .state}'
 # Expected: ENVOY_NOTIFICATIONS stream with consumer data intact
 
 # NATS cluster replication verification (cross-peer connectivity)
 # Use wget from inside a NATS container to query another peer's monitoring
-ssh ubuntu@sami-agents-mx 'docker exec envoy-nats wget -qO- http://sami:8222/routez' | jq '.routes | length'
+ssh ubuntu@example-host-mx 'docker exec envoy-nats wget -qO- http://sami:8222/routez' | jq '.routes | length'
 # Expected: 2 (proves cross-peer NATS monitoring is reachable)
 
 # Idempotency check
@@ -1158,7 +1158,7 @@ cd infra && pulumi config set envoy:imageTag "$TAG"
 ### Health Check
 
 ```bash
-for host in ubuntu@sami-agents-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
+for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
   echo -n "$host: "
   ssh -o ConnectTimeout=5 "$host" docker version --format '{{.Server.Version}}' 2>&1 || echo "UNREACHABLE"
 done
@@ -1169,28 +1169,28 @@ Expected: All 4 return Docker version. Timeout: retry up to 30s per host.
 ### Verification Steps
 
 **1. NATS cluster health** — All 3 peers show 2 routes each:
-- Action: `for host in sami-agents-mx sami sami-claude; do curl -sf "http://$host:8222/routez" | jq '.routes | length'; done`
+- Action: `for host in example-host-mx sami sami-claude; do curl -sf "http://$host:8222/routez" | jq '.routes | length'; done`
 - Expected: `2` for each peer
 - Tool: curl + jq
 
 **2. All service health checks pass:**
-- Action: `for host in sami-agents-mx sami sami-claude ghost-wispr; do curl -sf "http://$host:9020/healthz"; done && curl -sf http://sami-agents-mx:9010/healthz && curl -sf http://sami-agents-mx:9011/healthz`
+- Action: `for host in example-host-mx sami sami-claude ghost-wispr; do curl -sf "http://$host:9020/healthz"; done && curl -sf http://example-host-mx:9010/healthz && curl -sf http://example-host-mx:9011/healthz`
 - Expected: All return HTTP 200
 - Tool: curl
 
 **3. Image digest consistency across machines:**
-- Action: `for host in ubuntu@sami-agents-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do ssh "$host" docker inspect envoy-listener --format '{{.Image}}'; done`
+- Action: `for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do ssh "$host" docker inspect envoy-listener --format '{{.Image}}'; done`
 - Expected: All 4 return identical SHA digest
 - Tool: ssh + docker inspect
 
 **4. JetStream data preserved:**
-- Action: `curl -sf http://sami-agents-mx:8222/jsz?streams=true | jq '.streams[] | select(.name=="ENVOY_NOTIFICATIONS") | {name: .name, messages: .state.messages, consumers: .state.consumer_count}'`
+- Action: `curl -sf http://example-host-mx:8222/jsz?streams=true | jq '.streams[] | select(.name=="ENVOY_NOTIFICATIONS") | {name: .name, messages: .state.messages, consumers: .state.consumer_count}'`
 - Expected: Stream exists with messages and consumers intact
 - Tool: curl + jq
 
 **5. Cross-peer NATS replication (e2e remote test):**
-- Action: `ssh ubuntu@sami-agents-mx 'docker exec envoy-nats wget -qO- http://sami:8222/routez' | jq '.routes | length'`
-- Expected: `2` (proves NATS container on sami-agents-mx can reach sami's NATS monitoring)
+- Action: `ssh ubuntu@example-host-mx 'docker exec envoy-nats wget -qO- http://sami:8222/routez' | jq '.routes | length'`
+- Expected: `2` (proves NATS container on example-host-mx can reach sami's NATS monitoring)
 - Tool: ssh + wget (via NATS container) + jq
 
 **6. Idempotency:**

@@ -1,10 +1,10 @@
 > **[HISTORICAL]** The Pulumi project this plan modifies (`packages/envoy/infra/`) has been migrated out of this repo to `~/.dotfiles/envoy/`. File-path references below are no longer valid in this repo. Kept for historical reference.
 
-# Enable tsnet for sami-agents-mx Listener — Implementation Plan
+# Enable tsnet for example-host-mx Listener — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Secure the publicly accessible listener port 9020 on sami-agents-mx by enabling tsnet, restricting `/v1/*` API routes to Tailscale TLS only.
+**Goal:** Secure the publicly accessible listener port 9020 on example-host-mx by enabling tsnet, restricting `/v1/*` API routes to Tailscale TLS only.
 
 **Architecture:** Single-file Pulumi config change. PR #313 already implemented tsnet code — the listener reads `listener.tsnet` from `MachineConfig` and conditionally serves `/v1/*` on the tsnet HTTPS interface while restricting legacy port 9020 to `/healthz` only. This plan enables that existing code path via config.
 
@@ -15,26 +15,26 @@
 ## Assumptions
 
 1. Tailscale mesh and ACLs already permit intended callers to reach the listener's new tsnet identity (all machines are already connected via Tailscale SSH for Docker provider transport)
-2. Scope is strictly `sami-agents-mx` — other machines (`sami`, `sami-claude`, `ghost-wispr`) are NOT in scope
+2. Scope is strictly `example-host-mx` — other machines (`sami`, `sami-claude`, `ghost-wispr`) are NOT in scope
 3. No external clients depend on public `http://78.12.245.82:9020/v1/*` — all legitimate Envoy callers are on the Tailscale mesh
 4. The `envoy:tsnetAuthKey` Pulumi secret will either already be set, or the implementer will set it from SOPS before deploying (SOPS key: `TS_AUTHKEY`)
 
 ## File Structure
 
-- **Modify:** `packages/envoy/infra/Pulumi.prod.yaml` — add tsnet config to sami-agents-mx listener
+- **Modify:** `packages/envoy/infra/Pulumi.prod.yaml` — add tsnet config to example-host-mx listener
 
 No new files. No code changes. No test changes.
 
 ---
 
-### Task 1: Edit Pulumi.prod.yaml — enable tsnet for sami-agents-mx — Independent
+### Task 1: Edit Pulumi.prod.yaml — enable tsnet for example-host-mx — Independent
 
 **Files:**
-- Modify: `packages/envoy/infra/Pulumi.prod.yaml:10` (the `listener: {}` line for sami-agents-mx)
+- Modify: `packages/envoy/infra/Pulumi.prod.yaml:10` (the `listener: {}` line for example-host-mx)
 
-- [ ] **Step 1: Edit the listener config for sami-agents-mx**
+- [ ] **Step 1: Edit the listener config for example-host-mx**
 
-In `packages/envoy/infra/Pulumi.prod.yaml`, change the `sami-agents-mx` entry's listener from:
+In `packages/envoy/infra/Pulumi.prod.yaml`, change the `example-host-mx` entry's listener from:
 
 ```yaml
       listener: {}
@@ -45,30 +45,30 @@ To:
 ```yaml
       listener:
         tsnet:
-          hostname: envoy-listener-sami-agents-mx
-          stateDir: /var/lib/envoy-tsnet/listener-sami-agents-mx
+          hostname: envoy-listener-example-host-mx
+          stateDir: /var/lib/envoy-tsnet/listener-example-host-mx
 ```
 
 **Naming conventions** (from `packages/envoy/infra/README.md`):
-- Hostname: `envoy-{service}-{machineName}` → `envoy-listener-sami-agents-mx`
-- State dir: `/var/lib/envoy-tsnet/{service}-{machineName}` → `/var/lib/envoy-tsnet/listener-sami-agents-mx`
+- Hostname: `envoy-{service}-{machineName}` → `envoy-listener-example-host-mx`
+- State dir: `/var/lib/envoy-tsnet/{service}-{machineName}` → `/var/lib/envoy-tsnet/listener-example-host-mx`
 
-**CRITICAL:** Only change `sami-agents-mx`. Do NOT touch:
+**CRITICAL:** Only change `example-host-mx`. Do NOT touch:
 - `sami` (line 19: `listener: {}`)
 - `sami-claude` (line 25: `listener: {}`)
 - `ghost-wispr` (line 29: `listener: {}`)
 
-The full `sami-agents-mx` entry should now read:
+The full `example-host-mx` entry should now read:
 
 ```yaml
-    - name: sami-agents-mx
-      machineId: sami-agents-mx
+    - name: example-host-mx
+      machineId: example-host-mx
       nats:
-        serverName: sami-agents-mx
+        serverName: example-host-mx
       listener:
         tsnet:
-          hostname: envoy-listener-sami-agents-mx
-          stateDir: /var/lib/envoy-tsnet/listener-sami-agents-mx
+          hostname: envoy-listener-example-host-mx
+          stateDir: /var/lib/envoy-tsnet/listener-example-host-mx
       receivers:
         github: true
         slack: true
@@ -88,11 +88,11 @@ Expected output: Only `packages/envoy/infra/Pulumi.prod.yaml` changed. The diff 
 - [ ] **Step 3: Describe and advance**
 
 ```bash
-jj describe -m "security: enable tsnet for sami-agents-mx listener
+jj describe -m "security: enable tsnet for example-host-mx listener
 
 Closes #426
 
-Enable tsnet in Pulumi.prod.yaml for the sami-agents-mx listener.
+Enable tsnet in Pulumi.prod.yaml for the example-host-mx listener.
 When deployed, /v1/* endpoints will be served exclusively on the
 tsnet TLS interface (Tailscale peers only), and the legacy HTTP
 port 9020 will only serve /healthz.
@@ -126,7 +126,7 @@ pulumi config set --secret envoy:tsnetAuthKey "$TS_KEY" --stack prod
 ```
 
 If `read-secret.sh` does not have `TS_AUTHKEY` or returns empty:
-- **ESCALATE**: Post to issue #426: "Blocker: `TS_AUTHKEY` not found in SOPS. Need a Tailscale auth key (reusable, not ephemeral) for initial listener registration on sami-agents-mx."
+- **ESCALATE**: Post to issue #426: "Blocker: `TS_AUTHKEY` not found in SOPS. Need a Tailscale auth key (reusable, not ephemeral) for initial listener registration on example-host-mx."
 - Add `user-input-needed` label, remove `worker-active`, exit.
 
 - [ ] **Step 3: Verify the secret decrypts correctly**
@@ -173,7 +173,7 @@ curl -s -o /dev/null -w "%{http_code}" -X POST http://78.12.245.82:9020/v1/messa
 ```bash
 cd packages/envoy/infra
 pulumi preview --stack prod --diff
-# Verify: changes only to sami-agents-mx listener container + new tsnet volume
+# Verify: changes only to example-host-mx listener container + new tsnet volume
 # No changes to sami, sami-claude, ghost-wispr, or any receiver containers
 
 pulumi up --stack prod
@@ -196,7 +196,7 @@ pulumi up --stack prod
    - Tool: curl
 
 3. **tsnet API available to Tailscale peers**
-   - Action: `curl -sf https://envoy-listener-sami-agents-mx.<tailnet>.ts.net/v1/messages/publish -X POST -d '{"topic":"test.health","message":"ping"}' -H 'Content-Type: application/json'`
+   - Action: `curl -sf https://envoy-listener-example-host-mx.<tailnet>.ts.net/v1/messages/publish -X POST -d '{"topic":"test.health","message":"ping"}' -H 'Content-Type: application/json'`
    - Expected: 200 OK (or appropriate success response) from authorized Tailscale peer
    - Tool: curl from Tailscale-connected machine
    - Note: Replace `<tailnet>` with the actual tailnet name
@@ -207,8 +207,8 @@ pulumi up --stack prod
 
 ### Failure Scenarios
 
-- **Auth key missing**: If `envoy:tsnetAuthKey` is not set and no prior tsnet state exists, the listener will fail to register on the Tailscale network. Check container logs: `docker logs envoy-listener` on sami-agents-mx.
-- **ACL mismatch**: If Tailscale ACLs don't permit the new `envoy-listener-sami-agents-mx` node, peers won't be able to reach it. Check `tailscale status` on the machine.
+- **Auth key missing**: If `envoy:tsnetAuthKey` is not set and no prior tsnet state exists, the listener will fail to register on the Tailscale network. Check container logs: `docker logs envoy-listener` on example-host-mx.
+- **ACL mismatch**: If Tailscale ACLs don't permit the new `envoy-listener-example-host-mx` node, peers won't be able to reach it. Check `tailscale status` on the machine.
 
 ### Tools Needed
 - curl for HTTP verification

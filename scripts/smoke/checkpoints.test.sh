@@ -15,7 +15,7 @@ printf 'none\n' >"${smoke_dir}/webhook-mode"
 printf 'none\n' >"${smoke_dir}/board-scope"
 cat >"${fake_bin}/curl" <<'EOF'
 #!/usr/bin/env bash
-printf '%s' '{"issues":{"trajectory-labs-pbc/legion-smoke#1":{}},"trees":{"trajectory-labs-pbc/legion-smoke#1":{"root":"trajectory-labs-pbc/legion-smoke#1"}},"admission":{"active":["trajectory-labs-pbc/legion-smoke#1"]}}'
+printf '%s' '{"issues":{"example-org/legion-smoke#1":{}},"trees":{"example-org/legion-smoke#1":{"root":"example-org/legion-smoke#1"}},"admission":{"active":["example-org/legion-smoke#1"]}}'
 EOF
 cat >"${fake_bin}/tmux" <<'EOF'
 #!/usr/bin/env bash
@@ -29,8 +29,8 @@ chmod +x "${fake_bin}/curl" "${fake_bin}/gh" "${fake_bin}/tmux"
 
 PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="trajectory-labs-pbc/legion-smoke" \
-  SMOKE_PROJECT="trajectory-labs-pbc/24" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
   SMOKE_PROJECT_ID="PVT_kwDODfEZEs4BhWFj" \
   bash "$checkpoints_script" 1 >"$output_file" 2>&1
 [[ "$(<"$output_file")" == *'CHECKPOINT 1 OK'* ]] || {
@@ -40,8 +40,8 @@ PATH="${fake_bin}:${PATH}" \
 
 PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="trajectory-labs-pbc/legion-smoke" \
-  SMOKE_PROJECT="trajectory-labs-pbc/24" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
   SMOKE_PROJECT_ID="PVT_kwDODfEZEs4BhWFj" \
   bash "$checkpoints_script" 2 >"$output_file" 2>&1
 [[ "$(<"$output_file")" == *'CHECKPOINT 2 OK'* ]] || {
@@ -51,8 +51,8 @@ PATH="${fake_bin}:${PATH}" \
 
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="trajectory-labs-pbc/legion-smoke" \
-  SMOKE_PROJECT="trajectory-labs-pbc/24" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
   bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
   printf 'expected none mode to block the live PR checkpoint\n' >&2
   exit 1
@@ -67,8 +67,8 @@ fi
 printf 'envoy\n' >"${smoke_dir}/webhook-mode"
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="trajectory-labs-pbc/legion-smoke" \
-  SMOKE_PROJECT="trajectory-labs-pbc/24" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
   bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
   printf 'expected checkpoint 5 to require a PR fixture\n' >&2
   exit 1

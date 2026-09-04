@@ -423,8 +423,8 @@ describe("ProcessManager", () => {
   });
   it("gives collision-prone issue paths distinct escaped cosmetic window names", async () => {
     const stateDir = await temporaryDir();
-    const left = formatIssueKey("trajectory-labs", "pbc-legion-smoke", 1);
-    const right = formatIssueKey("trajectory-labs-pbc", "legion-smoke", 1);
+    const left = formatIssueKey("example", "org-legion-smoke", 1);
+    const right = formatIssueKey("example-org", "legion-smoke", 1);
     const { manager: processes, commands } = manager(newLegionState("omp", 2), {
       config: config(stateDir, { admissionCap: 2 }),
     });
@@ -435,10 +435,7 @@ describe("ProcessManager", () => {
     const names = commands
       .filter((command) => command[0] === "tmux" && command.includes("-n"))
       .map((command) => command[command.indexOf("-n") + 1]);
-    expect(names).toEqual([
-      "trajectory_hlabs__pbc_hlegion_hsmoke-1",
-      "trajectory_hlabs_hpbc__legion_hsmoke-1",
-    ]);
+    expect(names).toEqual(["example__org_hlegion_hsmoke-1", "example_horg__legion_hsmoke-1"]);
   });
 
   it("caps an escaped cosmetic window name", async () => {

@@ -51,8 +51,8 @@ The sandbox repository includes the 20-second `ci` check and the `.fail-me`-cont
 ## Start and stop
 
 ```sh
-export SMOKE_REPO=trajectory-labs-pbc/legion-smoke
-export SMOKE_PROJECT=trajectory-labs-pbc/24
+export SMOKE_REPO=example-org/legion-smoke
+export SMOKE_PROJECT=example-org/24
 export SMOKE_PROJECT_ID=PVT_kwDODfEZEs4BhWFj
 export SMOKE_WEBHOOK_MODE=envoy
 
