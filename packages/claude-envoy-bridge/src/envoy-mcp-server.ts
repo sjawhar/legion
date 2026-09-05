@@ -9,6 +9,7 @@ import {
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract"
 import { defaultExec } from "@legion/envoy-client/dispatch-cwd"
+import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe"
 import { machineID } from "@legion/envoy-client/machine"
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { createEnvoyClient } from "@legion/envoy-client/transport"
@@ -62,6 +63,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     ENVOY_SESSION_ID: process.env["ENVOY_SESSION_ID"],
     CLAUDE_CODE_SESSION_ID: process.env["CLAUDE_CODE_SESSION_ID"],
   })
+  const client = createEnvoyClient({
+    baseUrl: envoyDefaultsFromEnvironment(process.env).envoyUrl,
+    fetch: globalThis.fetch,
+  })
   if (name === DISPATCH_TOOL_NAME) {
     if (dispatchConfig.url === null) throw new UnsupportedEnvoyToolError(name)
     const cwd = process.cwd()
@@ -73,16 +78,37 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       env: process.env,
       exec: defaultExec,
     })
-    return callDispatch({ serviceUrl: dispatchConfig.url, getToken: ghTokenGetter(cwd) }, prepared)
+    const result = await callDispatch(
+      { serviceUrl: dispatchConfig.url, getToken: ghTokenGetter(cwd) },
+      prepared,
+    )
+    // The human answers on the GitHub issue; the session hears it only if it
+    // is subscribed to the thread's topic. The thread exists either way, so a
+    // failed subscribe is reported, not surfaced as a failed dispatch.
+    const topic = dispatchSubscriptionTopic(name, JSON.stringify(result))
+    if (topic !== null) {
+      try {
+        await client.subscribe({
+          sessionID: sessionId,
+          directory: cwd,
+          topics: [topic],
+          port: 0,
+          title: "",
+          driving: true,
+          selfSubscribed: true,
+        })
+      } catch (error) {
+        process.stderr.write(
+          `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${error instanceof Error ? error.message : String(error)}\n`,
+        )
+      }
+    }
+    return result
   }
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name)
   if (!spec) {
     throw new UnsupportedEnvoyToolError(name)
   }
-  const client = createEnvoyClient({
-    baseUrl: envoyDefaultsFromEnvironment(process.env).envoyUrl,
-    fetch: globalThis.fetch,
-  })
 
   switch (spec.operation) {
     case EnvoyToolOperation.send: {

@@ -15,7 +15,8 @@ integration to deliver Envoy traffic into a live session, including idle session
   GitHub issue thread or continues one. `dispatch` is offered only when `dispatch.enabled` is set
   in `envoy.json` or `DISPATCH_MCP_URL` names the service endpoint; each call fills the target
   repo from the session's working directory, mints its GitHub token with `gh auth token` there,
-  and stamps the thread with the Claude session id.
+  stamps the thread with the Claude session id, and subscribes the session to the thread's
+  topic so the reply routes back through the monitor as a steer.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tool itself.
 

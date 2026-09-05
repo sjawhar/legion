@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
+import type { Server } from "bun"
 import { z } from "zod"
 import type * as EnvoyMcpServer from "../src/envoy-mcp-server"
 
@@ -78,9 +79,47 @@ test("omits dispatch when it is not enabled", async () => {
   }
 })
 
-test("dispatch posts one stateless call stamped with the Claude session id and host", async () => {
+const SubscribeBody = z.object({
+  session_id: z.string(),
+  dir: z.string(),
+  topics: z.array(z.string()),
+})
+
+interface FakeEnvoy {
+  readonly server: Server<undefined>
+  readonly subscribes: unknown[]
+}
+
+/** A stand-in Envoy listener that records /v1/interests/subscribe bodies. */
+function fakeEnvoy(status = 200): FakeEnvoy {
+  const subscribes: unknown[] = []
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      if (new URL(request.url).pathname !== "/v1/interests/subscribe") {
+        return new Response(null, { status: 404 })
+      }
+      const body = SubscribeBody.parse(await request.json())
+      subscribes.push(body)
+      if (status !== 200) return new Response("nope", { status })
+      return Response.json({
+        session_id: body.session_id,
+        machine_id: "example-host",
+        dir: body.dir,
+        port: 0,
+        title: "",
+        topics: body.topics,
+        self_subscribed: true,
+      })
+    },
+  })
+  return { server, subscribes }
+}
+
+test("dispatch posts one stateless call stamped with the Claude session id and host, then subscribes to the thread", async () => {
   // given
   const posts: Array<{ body: unknown; headers: Record<string, string> }> = []
+  const envoy = fakeEnvoy()
   const service = Bun.serve({
     port: 0,
     fetch: async (request) => {
@@ -106,6 +145,7 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
   // ENVOY_SESSION_ID outranks CLAUDE_CODE_SESSION_ID; a runner exporting it must not leak in.
   delete process.env["ENVOY_SESSION_ID"]
   process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
   try {
     const module = await loadServer("dispatch-call")
@@ -130,8 +170,105 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
       cwd: process.cwd(),
     })
     expect("sessionTitle" in args.origin).toBe(false)
+    expect(envoy.subscribes).toEqual([
+      {
+        session_id: "ses_claude",
+        dir: process.cwd(),
+        topics: ["notifications.github.acme-org.example-repo.issue.3.>"],
+      },
+    ])
   } finally {
     service.stop(true)
+    envoy.server.stop(true)
+    process.env = { ...previous }
+  }
+})
+
+test("a dispatch the service rejects subscribes to nothing", async () => {
+  // given
+  const envoy = fakeEnvoy()
+  const service = Bun.serve({
+    port: 0,
+    fetch: async () =>
+      Response.json({
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          isError: true,
+          content: [{ type: "text", text: "#3 is closed; open a new thread" }],
+        },
+      }),
+  })
+  const ghDir = await mkdtemp(`${tmpdir()}/fake-gh-`)
+  await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
+  try {
+    const module = await loadServer("dispatch-rejected")
+
+    // when / then
+    await expect(
+      module.executeEnvoyTool("dispatch", {
+        thread: "acme-org/example-repo#3",
+        context: "c",
+        question: "q",
+      }),
+    ).rejects.toThrow("#3 is closed; open a new thread")
+    expect(envoy.subscribes).toEqual([])
+  } finally {
+    service.stop(true)
+    envoy.server.stop(true)
+    process.env = { ...previous }
+  }
+})
+
+test("a failed auto-subscribe does not fail the dispatch", async () => {
+  // given
+  const envoy = fakeEnvoy(503)
+  const service = Bun.serve({
+    port: 0,
+    fetch: async () =>
+      Response.json({
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: '{"thread":3,"url":"https://github.com/acme-org/example-repo/issues/3"}',
+            },
+          ],
+        },
+      }),
+  })
+  const ghDir = await mkdtemp(`${tmpdir()}/fake-gh-`)
+  await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
+  try {
+    const module = await loadServer("dispatch-subscribe-fails")
+
+    // when
+    const result = await module.executeEnvoyTool("dispatch", {
+      thread: "acme-org/example-repo#3",
+      context: "c",
+      question: "q",
+    })
+
+    // then
+    expect(result).toEqual({ thread: 3, url: "https://github.com/acme-org/example-repo/issues/3" })
+    expect(envoy.subscribes).toHaveLength(1)
+  } finally {
+    service.stop(true)
+    envoy.server.stop(true)
     process.env = { ...previous }
   }
 })
