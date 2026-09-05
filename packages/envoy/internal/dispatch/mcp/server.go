@@ -1,8 +1,15 @@
 // Package mcp serves the Streamable HTTP MCP endpoint for the dispatch tool.
 //
-// Authentication is per-request: the Authorization header is forwarded verbatim
-// to GitHub for every call made on behalf of the agent. There is no fallback
-// to a server-stored token.
+// Authentication is per-call: the Authorization header of the HTTP request
+// carrying each tools/call is forwarded verbatim to GitHub. There is no
+// fallback to a server-stored token.
+//
+// The endpoint is stateless. The shim holds one MCP session id for the life
+// of its process and never re-initializes, so a server that validated
+// session ids would answer every call from a shim older than the last
+// restart with 404 until that shim's session was restarted. Dispatch is a
+// single request/response tool with no server-initiated messages, which is
+// all stateless mode gives up.
 package mcp
 
 import (
@@ -12,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/go-github/v66/github"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sjawhar/envoy/internal/dispatch/core"
@@ -21,24 +29,23 @@ import (
 // Server wires the per-request bearer middleware around an MCP Streamable HTTP
 // handler that exposes a single tool: dispatch.
 type Server struct {
-	handler http.Handler
-}
-
-type bearerKey struct{}
-
-func bearerFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(bearerKey{}).(string)
-	return v
+	handler   http.Handler
+	newClient func(ctx context.Context, token string) *github.Client
 }
 
 // New returns the dispatch MCP server.
-func New() *Server {
+func New() *Server { return newServer(githubapi.NewClient) }
+
+// newServer builds the server around newClient, which constructs the GitHub
+// client for each call's bearer. New wires githubapi.NewClient; tests
+// substitute a recorder.
+func newServer(newClient func(ctx context.Context, token string) *github.Client) *Server {
 	mcpServer := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "dispatch",
 		Version: "0.1.0",
 	}, nil)
 
-	s := &Server{}
+	s := &Server{newClient: newClient}
 
 	mcpsdk.AddTool(mcpServer, &mcpsdk.Tool{
 		Name:        "dispatch",
@@ -47,7 +54,7 @@ func New() *Server {
 
 	streamable := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server {
 		return mcpServer
-	}, nil)
+	}, &mcpsdk.StreamableHTTPOptions{Stateless: true})
 	s.handler = bearerMiddleware(streamable)
 	return s
 }
@@ -55,31 +62,26 @@ func New() *Server {
 // Handler returns the http.Handler to mount at /mcp.
 func (s *Server) Handler() http.Handler { return s.handler }
 
+// bearerMiddleware rejects requests without a bearer before they reach the MCP
+// handler. The bearer used for GitHub is read from each tools/call's own
+// request in dispatchHandler.
 func bearerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := extractBearer(r)
-		if token == "" {
+		if extractBearer(r.Header) == "" {
 			http.Error(w, `{"error":"missing bearer"}`, http.StatusUnauthorized)
 			return
 		}
-		ctx := context.WithValue(r.Context(), bearerKey{}, token)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
 }
 
-func extractBearer(r *http.Request) string {
-	header := r.Header.Get("Authorization")
-	if header == "" {
-		return ""
-	}
+func extractBearer(header http.Header) string {
+	value := header.Get("Authorization")
 	const prefix = "Bearer "
-	if len(header) < len(prefix) {
+	if len(value) < len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {
 		return ""
 	}
-	if !strings.EqualFold(header[:len(prefix)], prefix) {
-		return ""
-	}
-	return strings.TrimSpace(header[len(prefix):])
+	return strings.TrimSpace(value[len(prefix):])
 }
 
 // dispatchInput mirrors core.DispatchInput. The jsonschema tag is a plain
@@ -96,7 +98,12 @@ type dispatchInput struct {
 }
 
 func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolRequest, input dispatchInput) (*mcpsdk.CallToolResult, any, error) {
-	token := bearerFromContext(ctx)
+	// The bearer is this call's own HTTP header, which the Streamable HTTP
+	// transport sets on every request. Never take it from ctx: under a stateful
+	// transport ctx descends from the initialize request and would pin the
+	// session to the first token the shim sent; the shim mints a fresh one per
+	// call.
+	token := extractBearer(req.Extra.Header)
 	if token == "" {
 		return nil, nil, fmt.Errorf("missing bearer token")
 	}
@@ -104,7 +111,7 @@ func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolReques
 	if urgency == "" {
 		urgency = core.UrgencyMed
 	}
-	client := githubapi.NewClient(ctx, token)
+	client := s.newClient(ctx, token)
 	result, err := core.CreateThread(ctx, client, core.DispatchInput{
 		Repo:     input.Repo,
 		Parent:   input.Parent,
