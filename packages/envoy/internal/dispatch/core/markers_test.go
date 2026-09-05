@@ -38,7 +38,8 @@ func TestBuildMetaMarkerKeyOrder(t *testing.T) {
 		Ask:       []QuestionInfo{{AskID: "R", Question: "Q?"}},
 	})
 	for _, pair := range [][2]string{{"requestId: R", "urgency: high"}, {"urgency: high", "origin:"}, {"origin:", "ask:"}} {
-		if strings.Index(got, pair[0]) > strings.Index(got, pair[1]) {
+		a, b := strings.Index(got, pair[0]), strings.Index(got, pair[1])
+		if a < 0 || b < 0 || a > b {
 			t.Errorf("%q must precede %q in %q", pair[0], pair[1], got)
 		}
 	}

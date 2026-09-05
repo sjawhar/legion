@@ -4,12 +4,12 @@
 // carrying each tools/call is forwarded verbatim to GitHub. There is no
 // fallback to a server-stored token.
 //
-// The endpoint is stateless. The shim holds one MCP session id for the life
-// of its process and never re-initializes, so a server that validated
-// session ids would answer every call from a shim older than the last
-// restart with 404 until that shim's session was restarted. Dispatch is a
-// single request/response tool with no server-initiated messages, which is
-// all stateless mode gives up.
+// The endpoint is stateless. Clients — the `dispatch` tool inside each host
+// plugin, via envoy-client's dispatch-client — send exactly one tools/call
+// POST per invocation and never initialize or hold a session, so a server
+// that validated session ids would refuse them. Dispatch is a single
+// request/response tool with no server-initiated messages, which is all
+// stateless mode gives up.
 package mcp
 
 import (
@@ -49,7 +49,7 @@ func newServer(newClient func(ctx context.Context, token string) *github.Client)
 
 	mcpsdk.AddTool(mcpServer, &mcpsdk.Tool{
 		Name:        "dispatch",
-		Description: "Create a Dispatch thread — a GitHub issue, optionally linked as a sub-issue of a parent. Use for durable questions, decisions, FYIs, or blocking asks that need human attention.",
+		Description: "Raise a durable question to the human as a Dispatch thread (a GitHub issue), or continue an existing thread with a follow-up question. Open with subject; continue with thread.",
 	}, s.dispatchHandler)
 
 	streamable := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server {
@@ -85,42 +85,43 @@ func extractBearer(header http.Header) string {
 }
 
 // dispatchInput mirrors core.DispatchInput. The jsonschema tag is a plain
-// description string; required-ness is conveyed by absence of omitempty.
+// description string; required-ness is conveyed by absence of omitempty:
+// only context and question are required, because `subject` opens a thread
+// and `thread` continues one. core.Dispatch enforces that exactly one is
+// present with its arguments.
 type dispatchInput struct {
-	Subject  string              `json:"subject" jsonschema:"One line: the decision needed."`
-	Context  string              `json:"context" jsonschema:"What you are doing, what you found, why you are stuck. The reader has NOT seen your transcript — never reference 'the list above' or 'those items'."`
-	Question string              `json:"question" jsonschema:"The ask: current state → desired state → proposed change, options with tradeoffs, your recommendation."`
-	Ask      []core.QuestionInfo `json:"ask,omitempty" jsonschema:"Optional structured questions attached to the thread"`
-	Urgency  string              `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med)"`
-	Repo     string              `json:"repo,omitempty" jsonschema:"owner/name. Defaults to the repo of the session's working directory (the shim fills this)."`
-	Parent   string              `json:"parent,omitempty" jsonschema:"<n> | owner/name#<n>[#<commentId>]. When given, the thread is linked as a sub-issue and a breadcrumb is appended to the comment."`
-	Origin   *core.Origin        `json:"origin,omitempty" jsonschema:"Injected by the dispatch shim; leave unset."`
+	Subject  string              `json:"subject,omitempty" jsonschema:"Open a thread: one line, the decision needed. Omit when continuing a thread."`
+	Thread   string              `json:"thread,omitempty" jsonschema:"Continue a thread: <n> | owner/name#<n>. Omit subject, urgency, and parent."`
+	Context  string              `json:"context" jsonschema:"What you are doing, what you found, why you are stuck (at most 1200 characters). The reader has NOT seen your transcript."`
+	Question string              `json:"question" jsonschema:"The ask (at most 800 characters): current state → desired state → your recommendation and why; options go in ask."`
+	Ask      []core.QuestionInfo `json:"ask,omitempty" jsonschema:"Optional structured questions attached to this turn"`
+	Urgency  string              `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med). Opening a thread only."`
+	Repo     string              `json:"repo,omitempty" jsonschema:"owner/name. Filled by the calling plugin from the session's working directory when the call does not name a qualified parent or thread."`
+	Parent   string              `json:"parent,omitempty" jsonschema:"<n> | owner/name#<n>[#<commentId>]. Opening a thread only: link it as a sub-issue and append a breadcrumb to the comment."`
+	Origin   *core.Origin        `json:"origin,omitempty" jsonschema:"Filled by the calling plugin from the session; leave unset."`
 }
 
 func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolRequest, input dispatchInput) (*mcpsdk.CallToolResult, any, error) {
 	// The bearer is this call's own HTTP header, which the Streamable HTTP
 	// transport sets on every request. Never take it from ctx: under a stateful
 	// transport ctx descends from the initialize request and would pin the
-	// session to the first token the shim sent; the shim mints a fresh one per
+	// session to the first token a client sent; plugins mint a fresh one per
 	// call.
 	token := extractBearer(req.Extra.Header)
 	if token == "" {
 		return nil, nil, fmt.Errorf("missing bearer token")
 	}
-	urgency := core.Urgency(input.Urgency)
-	if urgency == "" {
-		urgency = core.UrgencyMed
-	}
 	client := s.newClient(ctx, token)
-	result, err := core.CreateThread(ctx, client, core.DispatchInput{
+	result, err := core.Dispatch(ctx, client, core.DispatchInput{
 		Repo:     input.Repo,
 		Parent:   input.Parent,
+		Thread:   input.Thread,
 		Subject:  input.Subject,
 		Context:  input.Context,
 		Question: input.Question,
 		Origin:   input.Origin,
 		Ask:      input.Ask,
-		Urgency:  urgency,
+		Urgency:  core.Urgency(input.Urgency),
 	})
 	if err != nil {
 		return nil, nil, err

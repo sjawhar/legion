@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -193,27 +192,23 @@ func splitMarker(body string) (kind, yamlText string, ok bool) {
 
 // ParseMetaMarker reads the dispatch:thread marker at the start of an issue
 // body, in either encoding. Returns nil when there is none, when it is another
-// kind, or when it is invalid.
+// kind, or when it is invalid; nil is the whole signal, and the caller owns
+// the user-facing message.
 func ParseMetaMarker(body string) *MetaMarker {
 	kind, text, ok := splitMarker(body)
 	if !ok || kind != KindThread {
 		return nil
 	}
 	var m MetaMarker
-	if err := yaml.Unmarshal([]byte(text), &m); err != nil {
+	if err := yaml.Unmarshal([]byte(text), &m); err != nil || m.RequestID == "" {
 		return nil
 	}
 	switch m.Urgency {
 	case UrgencyLow, UrgencyMed, UrgencyHigh, UrgencyBlocking:
+		return &m
 	default:
-		slog.Warn("dispatch: thread marker has invalid urgency", "urgency", m.Urgency)
 		return nil
 	}
-	if m.RequestID == "" {
-		slog.Warn("dispatch: thread marker missing requestId")
-		return nil
-	}
-	return &m
 }
 
 // ParseAskMarker reads the dispatch:ask marker at the start of a comment.
