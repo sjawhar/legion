@@ -1,94 +1,74 @@
 import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
 
-import { escapeHtml } from "../html";
+import type { ThreadAsk } from "../asks";
+import { escapeHtml, timeAgo } from "../html";
 import type { MarkerQuestion, MarkerQuestionOption } from "../markers";
 
 export interface AskFormInput {
-  ask: MarkerQuestion[];
+  ask: ThreadAsk;
   pending: boolean;
   error?: string;
+  /** When the ask came from a follow-up, the time it was asked (for the "↑ asked" anchor). */
+  askedAt?: string;
 }
 
-function renderOption(
-  questionIndex: number,
-  question: MarkerQuestion,
-  option: MarkerQuestionOption
-): string {
+function renderOption(question: MarkerQuestion, option: MarkerQuestionOption): string {
   const type = question.multiple ? "checkbox" : "radio";
-  const name = `answer-${questionIndex}`;
   const label = escapeHtml(option.label);
   const description = option.description
     ? `<span class="ask-option-description">${escapeHtml(option.description)}</span>`
     : "";
   return `<label class="ask-option">
-    <input type="${type}" name="${name}" value="${label}">
+    <input type="${type}" name="answer" value="${label}">
     <span>${label}</span>${description}
   </label>`;
 }
 
-export function summarizeAnswers(ask: MarkerQuestion[], answers: QuestionAnswer[]): string {
-  return ask
-    .map((question, index) => {
-      const header = question.header || `Question ${index + 1}`;
-      const prompt = question.question?.trim();
-      const values = answers[index] ?? [];
-      const answerText = values.join(", ") || "No answer";
-      // Each question renders as a two-line block so the GitHub comment
-      // body has the full context (header + prompt + answer) even if no
-      // dashboard is rendering the structured Q&A view.
-      const head = prompt ? `**${header}** — ${prompt}` : `**${header}**`;
-      return `${head}\n${answerText}`;
-    })
-    .join("\n\n");
+export function askHeader(question: MarkerQuestion, index: number): string {
+  return question.header || `Question ${index + 1}`;
 }
 
-export function renderAskForm(input: AskFormInput): string {
-  const questions = input.ask
-    .map((question, index) => {
-      const options = (question.options ?? [])
-        .map((option) => renderOption(index, question, option))
-        .join("");
-      // Free-response is always offered. Agents can't opt out; humans may
-      // have an answer that doesn't fit any of the canned options.
-      const customSlot = `<label class="ask-custom-toggle"><input type="checkbox" name="custom-enabled-${index}"> Other (specify)</label>
-        <textarea class="ask-custom-text" name="custom-${index}" rows="3" placeholder="Type your answer"></textarea>`;
-      return `<fieldset class="ask-question" data-question-index="${index}">
-        <legend>${escapeHtml(question.header || `Question ${index + 1}`)}</legend>
-        <p>${escapeHtml(question.question)}</p>
-        <div class="ask-options">${options}</div>
-        ${customSlot}
-      </fieldset>`;
-    })
-    .join("");
+/**
+ * The human-readable summary written below an answer marker: header, prompt,
+ * and the chosen values, so the GitHub comment carries the full context even
+ * where no dashboard renders the structured view.
+ */
+export function summarizeAnswer(
+  question: MarkerQuestion,
+  values: QuestionAnswer,
+  index = 0
+): string {
+  const header = askHeader(question, index);
+  const prompt = question.question?.trim();
+  const head = prompt ? `**${header}** — ${prompt}` : `**${header}**`;
+  return `${head}\n${values.join(", ") || "No answer"}`;
+}
 
-  return `<form class="ask-form" data-action="ask-answer" data-question-count="${input.ask.length}">
-    <h2>Answer requested</h2>
-    ${questions}
+/**
+ * One form per open ask. Created when the thread is selected or when the ask
+ * opens; never re-created by an event, so a half-filled answer survives a
+ * GitHub event arriving.
+ */
+export function renderAskForm(input: AskFormInput): string {
+  const { ask } = input;
+  const askId = escapeHtml(ask.askId);
+  const options = (ask.question.options ?? [])
+    .map((option) => renderOption(ask.question, option))
+    .join("");
+  const asked = input.askedAt ? ` · asked ${escapeHtml(timeAgo(input.askedAt))}` : "";
+  // The turn that asked: the opening section or the follow-up's card.
+  const anchor = ask.source.kind === "body" ? "#detail-opening" : `#turn-${ask.source.commentId}`;
+  // Free-response is always offered. Agents can't opt out; humans may
+  // have an answer that doesn't fit any of the canned options.
+  return `<form class="ask-form" id="ask-form-${askId}" data-action="ask-answer" data-ask-id="${askId}">
+    <h2>Answer: ${escapeHtml(askHeader(ask.question, ask.index))} <span class="ask-form-prompt">— ${escapeHtml(ask.question.question)}</span></h2>
+    <a class="ask-form-anchor" href="${anchor}">↑ question${asked}</a>
+    <div class="ask-options">${options}</div>
+    <label class="ask-custom-toggle"><input type="checkbox" name="custom-enabled"> Other (specify)</label>
+    <textarea class="ask-custom-text" name="custom" rows="3" placeholder="Type your answer"></textarea>
     <div class="form-actions">
       <button type="submit" ${input.pending ? "disabled" : ""}>Submit answer</button>
       ${input.error ? `<span class="form-error">${escapeHtml(input.error)}</span>` : ""}
     </div>
   </form>`;
-}
-
-// Read-only echo of the ask block used after an answer has been submitted
-// (or the thread has been closed). The interactive form disappears, but the
-// question context must remain visible so readers can interpret the answer
-// without scrolling through the conversation to find the original prompt.
-export function renderAskContext(ask: MarkerQuestion[]): string {
-  if (!ask.length) return "";
-  const questions = ask
-    .map((question, index) => {
-      const header = escapeHtml(question.header || `Question ${index + 1}`);
-      const prompt = escapeHtml(question.question || "");
-      return `<div class="ask-context-question" data-question-index="${index}">
-        <strong class="ask-context-header">${header}</strong>
-        ${prompt ? `<span class="ask-context-prompt">${prompt}</span>` : ""}
-      </div>`;
-    })
-    .join("");
-  return `<section class="ask-context" aria-label="Question context">
-    <h2>Question</h2>
-    ${questions}
-  </section>`;
 }

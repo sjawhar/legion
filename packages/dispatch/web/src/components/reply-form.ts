@@ -13,7 +13,7 @@ export interface ReplyFormInput {
  * narrow.
  */
 export function renderReplyForm(input: ReplyFormInput): string {
-  return `<form class="reply-form" data-action="reply" aria-label="Reply">
+  return `<form id="detail-reply" class="reply-form" data-action="reply" aria-label="Reply">
     <textarea
       id="reply-body"
       name="body"

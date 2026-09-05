@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
+import { summarizeAnswer } from "../components/ask-form";
 import {
   buildAnswerMarkerComment,
   buildUrgencyMarkerComment,
@@ -222,5 +223,16 @@ describe("markers — stripMarker", () => {
 
   it("returns the original body when there is no marker", () => {
     expect(stripMarker("plain text")).toBe("plain text");
+  });
+});
+
+describe("ask-form — summarizeAnswer", () => {
+  it("includes header, prompt, and values", () => {
+    const out = summarizeAnswer(
+      { header: "Sanity check", question: "Did it land?", options: [{ label: "yes" }] },
+      ["yes"]
+    );
+    expect(out).toBe("**Sanity check** — Did it land?\nyes");
+    expect(summarizeAnswer({ question: "Q" }, [], 2)).toBe("**Question 3** — Q\nNo answer");
   });
 });

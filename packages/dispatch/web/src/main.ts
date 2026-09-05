@@ -8,7 +8,8 @@ import {
   postComment,
   searchDispatchThreads,
 } from "./api";
-import { summarizeAnswers } from "./components/ask-form";
+import { collectAnswers, collectAsks, openAsks } from "./asks";
+import { summarizeAnswer } from "./components/ask-form";
 import {
   isStatusFilter,
   isUrgencyFilter,
@@ -21,7 +22,6 @@ import {
   buildUrgencyMarkerComment,
   effectiveUrgency,
   isUrgency,
-  parseThreadMarker,
 } from "./markers";
 import "./styles.css";
 import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
@@ -41,6 +41,7 @@ export interface AppApi {
   getComments: typeof getComments;
   postComment: typeof postComment;
   closeIssue: typeof closeIssue;
+  persistAddressed: typeof persistAddressed;
 }
 
 export interface DashboardControllerOptions {
@@ -78,8 +79,9 @@ interface DashboardState {
   highlighted: Set<string>;
   replyPending: boolean;
   replyError?: string;
-  askPending: boolean;
-  askError?: string;
+  /** askId of the answer being posted. */
+  askPending?: string;
+  askError?: { askId: string; message: string };
   urgencyPending: boolean;
   urgencyError?: string;
   closePending: boolean;
@@ -95,6 +97,7 @@ const defaultApi: AppApi = {
   getComments,
   postComment,
   closeIssue,
+  persistAddressed,
 };
 
 export function renderAppShell(): string {
@@ -139,7 +142,6 @@ export function createDashboardController(options: DashboardControllerOptions) {
     helpOpen: false,
     highlighted: new Set(),
     replyPending: false,
-    askPending: false,
     urgencyPending: false,
     closePending: false,
     addressedPending: false,
@@ -164,10 +166,16 @@ export function createDashboardController(options: DashboardControllerOptions) {
     const thread = state.threads.find(
       (candidate) => candidate.repo === selected.repo && candidate.number === selected.number
     );
+    const comments = state.comments.get(key) ?? [];
+    const asks = collectAsks(issue.body, comments);
+    const answers = collectAnswers(comments);
     return {
       issue,
-      urgency: effectiveUrgency(thread?.urgency ?? "med", state.comments.get(key) ?? []),
-      comments: state.comments.get(key) ?? [],
+      urgency: effectiveUrgency(thread?.urgency ?? "med", comments),
+      comments,
+      asks,
+      answers,
+      openAsks: openAsks(asks, answers),
       subThreads: state.threads.filter(
         (candidate) => candidate.repo === issue.repo && candidate.parentNumber === issue.number
       ),
@@ -277,6 +285,20 @@ export function createDashboardController(options: DashboardControllerOptions) {
     state.comments.set(key, comments);
   }
 
+  // Once a thread's comments are loaded they are authoritative for "needs
+  // you"; until then the sidebar trusts the search window's count.
+  function openAskCounts(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const thread of state.threads) {
+      const key = keyOf(thread.repo, thread.number);
+      const comments = state.comments.get(key);
+      if (!comments) continue;
+      const asks = collectAsks(thread.body, comments);
+      counts[key] = openAsks(asks, collectAnswers(comments)).length;
+    }
+    return counts;
+  }
+
   function sidebarFilters(): SidebarFilters {
     return {
       ...state.filters,
@@ -284,6 +306,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
       highlightedKeys: state.highlighted,
       addressed: state.addressed,
       loadError: state.loadError,
+      openAskCounts: openAskCounts(),
     };
   }
 
@@ -334,7 +357,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     const previous = { ...state.addressed };
     state.addressed = { ...state.addressed, [key]: timestamp };
     try {
-      await persistAddressed(state.addressed);
+      await api.persistAddressed(state.addressed);
     } catch (error) {
       state.addressed = previous;
       console.warn("auto-mark addressed failed", error);
@@ -366,16 +389,22 @@ export function createDashboardController(options: DashboardControllerOptions) {
     }
   }
 
-  async function submitAskAnswer(answers: QuestionAnswer[]): Promise<void> {
+  async function submitAskAnswer(askId: string, values: QuestionAnswer): Promise<void> {
     const issue = selectedIssue();
     const key = keyOf(issue.repo, issue.number);
-    const meta = parseThreadMarker(issue.body);
-    const ask = meta?.ask ?? [];
-    const summary = summarizeAnswers(ask, answers);
-    const body = buildAnswerMarkerComment(issue.number, meta?.requestId ?? "", answers, summary);
+    const ask = collectAsks(issue.body, selectedComments()).find(
+      (candidate) => candidate.askId === askId
+    );
+    if (!ask) throw new Error(`askId ${askId} is not on this thread`);
+    const body = buildAnswerMarkerComment(
+      issue.number,
+      askId,
+      [values],
+      summarizeAnswer(ask.question, values, ask.index)
+    );
     const placeholder = optimisticComment(body);
     selectedComments().push(placeholder);
-    state.askPending = true;
+    state.askPending = askId;
     state.askError = undefined;
     try {
       const comment = await api.postComment(issue.repo, issue.number, body);
@@ -384,10 +413,10 @@ export function createDashboardController(options: DashboardControllerOptions) {
       void autoMarkAddressed(key, comment.createdAt);
     } catch (error) {
       removeComment(key, placeholder.id);
-      state.askError = error instanceof Error ? error.message : String(error);
+      state.askError = { askId, message: error instanceof Error ? error.message : String(error) };
       throw error;
     } finally {
-      state.askPending = false;
+      state.askPending = undefined;
     }
   }
 
@@ -441,7 +470,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     state.addressedPending = true;
     state.addressedError = undefined;
     try {
-      await persistAddressed(state.addressed);
+      await api.persistAddressed(state.addressed);
     } catch (error) {
       state.addressed = previous;
       state.addressedError = error instanceof Error ? error.message : String(error);
@@ -462,7 +491,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     state.addressedPending = true;
     state.addressedError = undefined;
     try {
-      await persistAddressed(state.addressed);
+      await api.persistAddressed(state.addressed);
     } catch (error) {
       state.addressed = previous;
       state.addressedError = error instanceof Error ? error.message : String(error);
@@ -479,6 +508,8 @@ export function createDashboardController(options: DashboardControllerOptions) {
   return {
     state,
     render,
+    selectedDetail,
+    sidebarFilters,
     loadThreads,
     selectThread,
     visibleThreads,
@@ -592,13 +623,13 @@ function attachDom(
       paint();
     }
     if (form.dataset.action === "ask-answer") {
-      const count = Number(form.dataset.questionCount ?? "0");
-      const answers: QuestionAnswer[] = Array.from({ length: count }, (_, index) => {
-        const custom = String(formData.get(`custom-${index}`) ?? "").trim();
-        if (formData.has(`custom-enabled-${index}`) && custom) return [custom];
-        return formData.getAll(`answer-${index}`).map(String).filter(Boolean);
-      });
-      void controller.submitAskAnswer(answers).then(paint, paint);
+      const askId = form.dataset.askId ?? "";
+      const custom = String(formData.get("custom") ?? "").trim();
+      const values: QuestionAnswer =
+        formData.has("custom-enabled") && custom
+          ? [custom]
+          : formData.getAll("answer").map(String).filter(Boolean);
+      void controller.submitAskAnswer(askId, values).then(paint, paint);
       paint();
     }
   });
@@ -633,7 +664,9 @@ function attachDom(
 
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
-    const copyButton = target.closest<HTMLButtonElement>("button[data-action='copy-origin']");
+    const copyButton = target.closest<HTMLButtonElement>(
+      "button[data-action='copy-origin'], button[data-action='copy-session-id']"
+    );
     const payload = copyButton?.dataset.copyText;
     if (payload) void navigator.clipboard.writeText(payload);
   });

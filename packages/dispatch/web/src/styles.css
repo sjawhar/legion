@@ -716,23 +716,13 @@ select {
   letter-spacing: -0.005em;
 }
 
-.ask-question {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  padding: 0.65rem 0.75rem;
-  margin: 0;
+.ask-form-prompt {
+  font-weight: normal;
+  opacity: 0.85;
 }
 
-.ask-question legend {
-  font-weight: 600;
-  font-size: 0.85rem;
-  padding: 0 0.25rem;
-}
-
-.ask-question p {
-  margin: 0 0 0.5rem;
-  color: var(--fg-dim);
-  font-size: 0.85rem;
+.ask-form-anchor {
+  font-size: 0.85em;
 }
 
 .ask-options {
@@ -773,8 +763,7 @@ select {
   font: inherit;
 }
 
-/* Read-only echo of the ask block, shown after an answer has been submitted.
-   Distinct from the interactive .ask-form so the question stays visible. */
+/* The opening section's questions, each with its answer beneath it. */
 .ask-context {
   display: grid;
   gap: 0.45rem;
@@ -795,20 +784,10 @@ select {
   color: var(--fg-dim);
 }
 
-.ask-context-question {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.ask-context-header {
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.ask-context-prompt {
-  font-size: 0.85rem;
-  color: var(--fg-dim);
+.ask-forms:empty,
+.ask-context:empty,
+.sub-threads:empty {
+  display: none;
 }
 
 /* ─── Forms / errors ────────────────────────────────────────────────── */
@@ -1031,8 +1010,7 @@ select {
 .comment-answer header {
   align-items: center;
 }
-.comment-answer header .comment-tag {
-  margin-left: auto;
+.comment header .comment-tag {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1041,30 +1019,81 @@ select {
   border-radius: 4px;
   background: var(--line-soft);
 }
+.comment-answer header .comment-tag {
+  margin-left: auto;
+}
 
-.answer-qa {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.25rem;
-  margin: 0.4rem 0 0;
+/* Conversation: follow-up turns, answers under questions, open-ask forms */
+.turn-card {
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--accent);
 }
-.answer-qa dt {
-  display: grid;
-  gap: 0.1rem;
+.turn-origin {
+  margin-left: auto;
+  font-size: 0.8em;
+  opacity: 0.8;
 }
-.answer-qa dt .answer-q-header {
+.ask-history {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.08);
+}
+.ask-history-question {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+.ask-history-header {
   font-weight: 600;
   font-size: 0.85rem;
 }
-.answer-qa dt .answer-q-prompt {
+.ask-history-prompt {
   color: var(--fg-dim);
   font-size: 0.82rem;
 }
-.answer-qa dd {
-  margin: 0.15rem 0 0.5rem;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
+.ask-history-options {
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+.ask-history-option {
+  padding: 0 0.35rem;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+}
+.ask-answer {
+  margin-top: 0.35rem;
+}
+.ask-answer-meta {
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+.ask-waiting {
+  display: inline-block;
+  margin-top: 0.35rem;
+  font-size: 0.9em;
+  font-style: italic;
+}
+.origin-session {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-right: 0.75rem;
+}
+.origin-session-title {
+  font-weight: 600;
+}
+.origin-session-id {
+  font-size: 0.85em;
+}
+.state-badge.state-needs-you {
+  background: #b45309;
+  color: #fff;
+  white-space: nowrap;
+}
+a.gh-ref {
+  text-decoration: underline dotted;
 }
 .answer-pill {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

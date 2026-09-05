@@ -8,8 +8,9 @@ import {
   postComment,
   searchDispatchThreads,
 } from "../api";
+import { collectAnswers, collectAsks, openAsks } from "../asks";
 import { renderSidebar, visibleSidebarThreads } from "../components/sidebar";
-import { renderThreadDetail } from "../components/thread-detail";
+import { renderThreadDetail, type ThreadDetailInput } from "../components/thread-detail";
 import { createDashboardController, renderAppShell } from "../main";
 import type { Comment, Issue, Thread } from "../types";
 
@@ -30,6 +31,27 @@ function thread(overrides: Partial<Thread>): Thread {
     authorLogin: "agent",
     commentCount: 0,
     ...overrides,
+  };
+}
+
+function detail(
+  issue: Issue,
+  comments: Comment[],
+  extra: Partial<ThreadDetailInput> = {}
+): ThreadDetailInput {
+  const asks = collectAsks(issue.body, comments);
+  const answers = collectAnswers(comments);
+  return {
+    issue,
+    urgency: "med",
+    comments,
+    asks,
+    answers,
+    openAsks: openAsks(asks, answers),
+    subThreads: [],
+    repo: issue.repo,
+    addressed: false,
+    ...extra,
   };
 }
 
@@ -138,14 +160,12 @@ describe("dashboard read-side rendering", () => {
       },
     ];
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "blocking",
-      comments,
-      subThreads: [thread({ number: 15, title: "Follow-up", parentNumber: 12 })],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(
+      detail(issue, comments, {
+        urgency: "blocking",
+        subThreads: [thread({ number: 15, title: "Follow-up", parentNumber: 12 })],
+      })
+    );
 
     expect(html).toContain("Blocked deploy");
     expect(html).toContain("Opening body");
@@ -182,14 +202,7 @@ describe("dashboard read-side rendering", () => {
       authorLogin: "agent",
     };
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "blocking",
-      comments: [],
-      subThreads: [],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(detail(issue, [], { urgency: "blocking" }));
 
     expect(html).toContain("origin-line");
     expect(html).toContain("From omp on example-host");
@@ -211,14 +224,7 @@ describe("dashboard read-side rendering", () => {
       authorLogin: "agent",
     };
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "med",
-      comments: [],
-      subThreads: [],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(detail(issue, []));
 
     expect(html).toContain("tmux main:3.0; rm -rf ~");
     expect(html).not.toContain("data-copy-text");
@@ -242,22 +248,100 @@ describe("dashboard read-side rendering", () => {
       { id: 11, body: answeredBody, createdAt: now, updatedAt: now, authorLogin: "sami" },
     ];
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "med",
-      comments,
-      subThreads: [],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(detail(issue, comments));
 
-    // The interactive ask form must be hidden once an answer exists…
-    expect(html).not.toContain('class="ask-form"');
-    // …but the question context must remain visible in the opening section,
-    // separate from the answer comment card buried in the conversation.
-    expect(html).toContain('class="ask-context"');
+    // The interactive ask form must be gone once an answer exists…
+    expect(html).not.toMatch(/<form class="ask-form"/);
+    // …but the question keeps its history card (Playwright selects it by askId),
+    // with the answer rendered directly beneath it.
+    expect(html).toContain('<div class="ask-history" data-ask-id="R">');
     expect(html).toContain("Sanity check");
     expect(html).toContain("Did the migration land cleanly?");
+    expect(html).toContain(">yes<");
+  });
+
+  it("renders one form per open ask, history under answered asks, and a follow-up turn card", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Two asks",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\norigin:\n    host: omp\n    sessionId: ses_1\n    sessionTitle: 'pm: e2e submitter identity'\n    tmux: main:3.0\n    pane: '%15'\nask:\n    - askId: R\n      question: Color?\n      header: Color\n      options:\n        - label: blue\n    - askId: R.1\n      question: Size?\n      header: Size\n      options:\n        - label: small\n-->\n\nOpening body",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const comments: Comment[] = [
+      {
+        id: 1,
+        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "blue"\n-->\n\n**Color** — Color?\nblue',
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+      {
+        id: 2,
+        body: "<!-- dispatch:ask\nrequestId: F\norigin:\n    host: omp\n    sessionId: ses_2\n    sessionTitle: renamed\nask:\n    - askId: F\n      question: Which lane?\n      header: Lane\n      options:\n        - label: A\n        - label: B\n-->\n\n## Context\n\nThe reply changed the question.\n\n## Question\n\nWhich lane?",
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "agent",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+
+    // Forms only for the open asks, each naming its id; the answered ask R keeps
+    // its data-ask-id on the ask-history div (Playwright selects it there) but has no form.
+    expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
+    expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="F"/);
+    expect(html).not.toMatch(/<form class="ask-form"[^>]*data-ask-id="R"/);
+    expect(html).toContain('<div class="ask-history" data-ask-id="R">');
+    expect(html.match(/class="ask-form"/g)?.length).toBe(2);
+    // The answered ask shows its answer beneath the question, and the answer
+    // comment is not repeated in the conversation (one pill on the page).
+    expect(html).toContain("answer-pill");
+    expect(html).toContain(">blue<");
+    expect(html.match(/class="answer-pill"/g)?.length).toBe(1);
+    // The follow-up renders as a turn card with its prose and a waiting marker for its open ask.
+    expect(html).toContain('id="turn-2"');
+    expect(html).toContain("The reply changed the question.");
+    expect(html).toContain("ask-waiting");
+    // Session identity on the header origin line, with copy, and the tmux jump kept.
+    expect(html).toContain('<span class="origin-session-title">pm: e2e submitter identity</span>');
+    expect(html).toContain('<code class="origin-session-id">ses_1</code>');
+    expect(html).toContain('data-action="copy-session-id" data-copy-text="ses_1"');
+    expect(html).toContain('data-copy-text="tmux switch-client -t %15"');
+    // The follow-up turn shows the session that asked it.
+    expect(html).toContain("renamed");
+    // No plumbing visible.
+    expect(html).not.toContain("requestId");
+    expect(html).not.toContain("dispatch:");
+  });
+
+  it("renders an answer for an ask that is not on the thread in place, marked as such", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "T",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\n-->\n\nBody",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const comments: Comment[] = [
+      {
+        id: 9,
+        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "ghost"\nanswers:\n  - - "x"\n-->\n\nsummary',
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+    expect(html).toContain("answer to a question no longer on this thread");
+    expect(html).toContain(">x<");
   });
 
   it("routes synthetic SSE subjects to sidebar, comment, and metadata refetches", () => {
@@ -352,6 +436,7 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => {
         throw new Error("not used");
       },
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
@@ -388,6 +473,7 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => {
         throw new Error("not used");
       },
+      persistAddressed: async () => {},
     };
     const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
@@ -430,6 +516,7 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => {
         throw new Error("not used");
       },
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
@@ -498,6 +585,7 @@ describe("dashboard read-side rendering", () => {
         return { id: 100, body, createdAt: now, updatedAt: now, authorLogin: "sami" };
       },
       closeIssue: async () => issue,
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
@@ -506,16 +594,27 @@ describe("dashboard read-side rendering", () => {
 
     expect(controller.render()).toContain("Color?");
     expect(controller.render()).toContain("Other (specify)");
-    await controller.submitAskAnswer([["blue"], ["a", "b"]]);
+    expect(controller.render().match(/class="ask-form"/g)?.length).toBe(2);
+    await expect(controller.submitAskAnswer("nope", ["blue"])).rejects.toThrow(
+      "askId nope is not on this thread"
+    );
+    await controller.submitAskAnswer("R", ["blue"]);
 
     expect(calls[0]?.startsWith("<!-- dispatch:answer\n")).toBe(true);
     expect(calls[0]).toContain("forThread: 12");
+    expect(calls[0]).toContain('forAsk: "R"');
     expect(calls[0]).toContain("Color"); // header in summary
     expect(calls[0]).toContain("Color?"); // question prompt in summary
     expect(calls[0]).toContain("blue"); // answer value in summary
-    expect(controller.render()).toContain("Color?");
-    expect(controller.render()).toContain("answer-pill");
-    expect(controller.render()).toContain(">blue<");
+    const after = controller.render();
+    expect(after).toContain("Color?");
+    expect(after).toContain("answer-pill");
+    expect(after).toContain(">blue<");
+    // The other ask is still open: exactly one form remains, and it names R.1.
+    expect(after.match(/class="ask-form"/g)?.length).toBe(1);
+    expect(after).toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
+    // Loaded comments are authoritative for the sidebar's "needs you" count.
+    expect(controller.sidebarFilters().openAskCounts).toEqual({ "sjawhar/legion#12": 1 });
   });
 
   it("posts urgency marker comments and closes issues optimistically", async () => {
@@ -544,6 +643,7 @@ describe("dashboard read-side rendering", () => {
         closed.push({ repo, number, reason });
         return { ...issue, state: "CLOSED" as const, stateReason: reason };
       },
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
