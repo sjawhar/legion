@@ -9,12 +9,25 @@ import {
   searchDispatchThreads,
 } from "../api";
 import { collectAnswers, collectAsks, openAsks } from "../asks";
-import { renderSidebar, visibleSidebarThreads } from "../components/sidebar";
+import {
+  renderSidebar,
+  renderSidebarControls,
+  renderThreadList,
+  visibleSidebarThreads,
+} from "../components/sidebar";
 import { renderThreadDetail, type ThreadDetailInput } from "../components/thread-detail";
-import { createDashboardController, renderAppShell } from "../main";
+import { createDashboardController, type DashboardController, renderAppShell } from "../main";
 import type { Comment, Issue, Thread } from "../types";
 
 const now = "2026-05-22T12:00:00Z";
+
+/** What paint.all() puts on the page, as one string: the same renderers, the same inputs. */
+function page(controller: DashboardController): string {
+  const sidebar = controller.state.sidebarOpen
+    ? renderSidebar(controller.state.threads, controller.sidebarFilters())
+    : "";
+  return sidebar + renderThreadDetail(controller.selectedDetail());
+}
 
 function thread(overrides: Partial<Thread>): Thread {
   return {
@@ -135,6 +148,23 @@ describe("dashboard read-side rendering", () => {
       showAddressed: false,
     });
     expect(visible.map((entry) => entry.thread.number)).toEqual([31]);
+  });
+
+  it("renders the thread list separately from the controls so the list can repaint alone", () => {
+    const threads = [thread({ number: 11, title: "Only" })];
+    const filters = {
+      status: "open" as const,
+      urgency: "all" as const,
+      search: "",
+      showAddressed: false,
+    };
+    const list = renderThreadList(threads, filters);
+    expect(list).toContain("Only");
+    expect(list).not.toContain("search-input");
+    expect(renderSidebarControls(filters)).toContain("search-input");
+    expect(renderSidebar(threads, filters)).toContain(
+      `<div id="thread-list" class="thread-list">${list}</div>`
+    );
   });
 
   it("renders detail without the meta marker, with conversations, marker activity rows, and inline sub-threads", () => {
@@ -483,11 +513,11 @@ describe("dashboard read-side rendering", () => {
     // The controller boots its thread list from the resolved installation
     // owners in a single owner-scoped call, not a per-repo fan-out.
     expect(searchCalls).toEqual([["sjawhar"]]);
-    expect(controller.render()).toContain("Blocked deploy");
-    expect(controller.render()).toContain("Opening body");
+    expect(page(controller)).toContain("Blocked deploy");
+    expect(page(controller)).toContain("Opening body");
     expect(controller.visibleThreads().map((entry) => entry.thread.number)).toEqual([12, 15]);
     controller.highlightThread("sjawhar/legion", 12);
-    expect(controller.render()).toContain("live-highlight");
+    expect(page(controller)).toContain("live-highlight");
     expect(controller.nextSelection("j")).toEqual({ repo: "sjawhar/legion", number: 15 });
     expect(controller.toggleSidebar()).toBe(false);
     expect(controller.toggleHelp()).toBe(true);
@@ -514,19 +544,19 @@ describe("dashboard read-side rendering", () => {
     };
     const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
-    expect(controller.render()).toContain("Blocked deploy");
-    expect(controller.render()).not.toContain("load-error");
+    expect(page(controller)).toContain("Blocked deploy");
+    expect(page(controller)).not.toContain("load-error");
 
     fail = true;
     await controller.loadThreads();
-    const html = controller.render();
+    const html = page(controller);
     expect(html).toContain("load-error");
     expect(html).toContain("GraphQL 401: bad credentials");
     expect(controller.visibleThreads().map((entry) => entry.thread.number)).toEqual([12]);
 
     fail = false;
     await controller.loadThreads();
-    expect(controller.render()).not.toContain("load-error");
+    expect(page(controller)).not.toContain("load-error");
   });
 
   it("posts replies with optimistic append and replaces the placeholder with the API comment", async () => {
@@ -561,8 +591,8 @@ describe("dashboard read-side rendering", () => {
     await controller.selectThread("sjawhar/legion", 12);
     const posting = controller.postReply("verifying reply");
 
-    expect(controller.render()).toContain("verifying reply");
-    expect(controller.render()).toContain("disabled");
+    expect(page(controller)).toContain("verifying reply");
+    expect(page(controller)).toContain("disabled");
     await posting;
 
     expect(calls).toEqual([{ repo: "sjawhar/legion", number: 12, body: "verifying reply" }]);
@@ -629,9 +659,9 @@ describe("dashboard read-side rendering", () => {
     await controller.loadThreads();
     await controller.selectThread("sjawhar/legion", 12);
 
-    expect(controller.render()).toContain("Color?");
-    expect(controller.render()).toContain("Other (specify)");
-    expect(controller.render().match(/class="ask-form"/g)?.length).toBe(2);
+    expect(page(controller)).toContain("Color?");
+    expect(page(controller)).toContain("Other (specify)");
+    expect(page(controller).match(/class="ask-form"/g)?.length).toBe(2);
     await expect(controller.submitAskAnswer("nope", ["blue"])).rejects.toThrow(
       "askId nope is not on this thread"
     );
@@ -643,7 +673,7 @@ describe("dashboard read-side rendering", () => {
     expect(calls[0]).toContain("Color"); // header in summary
     expect(calls[0]).toContain("Color?"); // question prompt in summary
     expect(calls[0]).toContain("blue"); // answer value in summary
-    const after = controller.render();
+    const after = page(controller);
     expect(after).toContain("Color?");
     expect(after).toContain("answer-pill");
     expect(after).toContain(">blue<");
@@ -688,13 +718,13 @@ describe("dashboard read-side rendering", () => {
     await controller.selectThread("sjawhar/legion", 12);
     const urgencyPost = controller.setUrgency("high");
 
-    expect(controller.render()).toContain("urgency-badge-high");
+    expect(page(controller)).toContain("urgency-badge-high");
     await urgencyPost;
     expect(calls[0]?.startsWith("<!-- dispatch:urgency\n")).toBe(true);
     expect(calls[0]).toContain("Urgency set to **high**.");
 
     const closePost = controller.closeSelectedIssue("completed");
-    expect(controller.render()).toContain("resolved");
+    expect(page(controller)).toContain("resolved");
     await closePost;
     expect(closed).toEqual([{ repo: "sjawhar/legion", number: 12, reason: "completed" }]);
   });

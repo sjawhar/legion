@@ -75,6 +75,17 @@ select {
   grid-template-columns: 1fr;
 }
 
+/* The paint roots are patch targets, not layout: the aside and main they hold
+   are the grid items, so the sidebar's border spans the column. */
+#sidebar-root,
+#detail-root {
+  display: contents;
+}
+
+#sidebar-root[hidden] {
+  display: none;
+}
+
 /* ─── Sidebar ─────────────────────────────────────────────────────────── */
 
 .dispatch-sidebar {

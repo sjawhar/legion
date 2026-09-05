@@ -3,6 +3,7 @@ import {
   getComments,
   getInstallationOwners,
   getIssue,
+  getReferenceTitle,
   isCloseReason,
   openGithubEventSource,
   postComment,
@@ -14,15 +15,27 @@ import {
   isStatusFilter,
   isUrgencyFilter,
   renderSidebar,
+  renderThreadList,
+  syncSidebarControls,
   visibleSidebarThreads,
 } from "./components/sidebar";
-import { renderThreadDetail, type ThreadDetailInput } from "./components/thread-detail";
+import {
+  renderConversation,
+  renderDetailHeader,
+  renderOpeningAsks,
+  renderOpeningBody,
+  renderSubThreads,
+  renderThreadDetail,
+  type ThreadDetailInput,
+} from "./components/thread-detail";
+import { paintRegion, reconcileAskForms, syncReplyForm } from "./dom";
 import {
   buildAnswerMarkerComment,
   buildUrgencyMarkerComment,
   effectiveUrgency,
   isUrgency,
 } from "./markers";
+import { createReferenceUnfurler, linkifyReferences } from "./unfurl";
 import "./styles.css";
 import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
 import type {
@@ -129,6 +142,9 @@ export function renderAppShell(): string {
     </div>
   </div>`;
 }
+
+/** The dashboard's state and actions; the DOM layer and tests drive it through this. */
+export type DashboardController = ReturnType<typeof createDashboardController>;
 
 export function createDashboardController(options: DashboardControllerOptions) {
   const api = options.api ?? defaultApi;
@@ -242,15 +258,6 @@ export function createDashboardController(options: DashboardControllerOptions) {
       updatedAt: timestamp,
       authorLogin: "you",
     };
-  }
-
-  function render(): string {
-    const filters = sidebarFilters();
-    return `<div class="dashboard-root${state.sidebarOpen ? "" : " sidebar-collapsed"}">
-      ${state.sidebarOpen ? renderSidebar(state.threads, filters) : ""}
-      ${renderThreadDetail(selectedDetail())}
-      ${state.helpOpen ? `<div class="shortcut-modal active">j/k move · Enter select · [/ ] sidebar · ? help</div>` : ""}
-    </div>`;
   }
 
   async function loadThreads(): Promise<void> {
@@ -507,7 +514,6 @@ export function createDashboardController(options: DashboardControllerOptions) {
 
   return {
     state,
-    render,
     selectedDetail,
     sidebarFilters,
     loadThreads,
@@ -532,16 +538,97 @@ async function ensureSignedIn(): Promise<boolean> {
   return response.ok;
 }
 
-function attachDom(
-  controller: ReturnType<typeof createDashboardController>,
-  root: HTMLElement
-): () => void {
-  function paint(): void {
-    root.querySelector("#sidebar-root")?.replaceChildren();
-    root.querySelector("#detail-root")?.replaceChildren();
-    const dashboard = root.querySelector("#dashboard-root");
-    if (dashboard) dashboard.innerHTML = controller.render();
+interface Painter {
+  all(): void;
+  sidebar(): void;
+  detail(): void;
+  help(): void;
+}
+
+function attachDom(controller: DashboardController, root: HTMLElement): Painter {
+  const dashboard = root.querySelector<HTMLElement>("#dashboard-root");
+  if (!dashboard) throw new Error("Missing #dashboard-root");
+  // The help modal is position: fixed; it sits outside the grid so an empty
+  // help root never claims a grid row.
+  dashboard.innerHTML = `<div class="dashboard-root"><div id="sidebar-root"></div><div id="detail-root"></div></div><div id="help-root"></div>`;
+  const shell = dashboard.firstElementChild as HTMLElement;
+  const sidebarRoot = shell.querySelector<HTMLElement>("#sidebar-root") as HTMLElement;
+  const detailRoot = shell.querySelector<HTMLElement>("#detail-root") as HTMLElement;
+  const helpRoot = dashboard.querySelector<HTMLElement>("#help-root") as HTMLElement;
+  const unfurl = createReferenceUnfurler((ref) => getReferenceTitle(ref.repo, ref.number));
+  let renderedKey: string | undefined;
+  let renderedBody: string | undefined;
+
+  // Only prose gets linkified: the opening body and comment bodies. Header
+  // links, sub-thread rows, and forms carry `#N` text that must stay as is.
+  function unfurlIn(region: ParentNode | null, repo: string): void {
+    if (!region) return;
+    const scopes =
+      region instanceof Element && region.matches(".opening-body, .comment-body")
+        ? [region]
+        : [...region.querySelectorAll(".opening-body, .comment-body")];
+    for (const scope of scopes) linkifyReferences(scope, repo);
+    void unfurl(region);
   }
+
+  function paintSidebar(): void {
+    const filters = controller.sidebarFilters();
+    if (!sidebarRoot.firstElementChild) {
+      sidebarRoot.innerHTML = renderSidebar(controller.state.threads, filters);
+    } else {
+      paintRegion(sidebarRoot, "thread-list", renderThreadList(controller.state.threads, filters));
+      syncSidebarControls(sidebarRoot, filters);
+    }
+    sidebarRoot.hidden = !controller.state.sidebarOpen;
+    shell.classList.toggle("sidebar-collapsed", !controller.state.sidebarOpen);
+  }
+
+  // A new selection rebuilds the detail pane once; every later paint patches
+  // regions and leaves the reply form and the open-ask forms alone.
+  function paintDetail(): void {
+    const detail = controller.selectedDetail();
+    const key = detail ? keyOf(detail.repo, detail.issue.number) : undefined;
+    if (!detail || key !== renderedKey) {
+      detailRoot.innerHTML = renderThreadDetail(detail);
+      renderedKey = key;
+      renderedBody = detail?.issue.body;
+      if (detail) unfurlIn(detailRoot, detail.repo);
+      return;
+    }
+    paintRegion(detailRoot, "detail-header", renderDetailHeader(detail));
+    if (detail.issue.body !== renderedBody) {
+      paintRegion(detailRoot, "detail-opening", renderOpeningBody(detail));
+      renderedBody = detail.issue.body;
+      unfurlIn(detailRoot.querySelector("#detail-opening"), detail.repo);
+    }
+    paintRegion(detailRoot, "detail-opening-asks", renderOpeningAsks(detail));
+    paintRegion(detailRoot, "detail-subthreads", renderSubThreads(detail.subThreads));
+    paintRegion(detailRoot, "detail-conversation", renderConversation(detail));
+    unfurlIn(detailRoot.querySelector("#detail-conversation"), detail.repo);
+    reconcileAskForms(detailRoot, detail);
+    syncReplyForm(detailRoot, detail);
+  }
+
+  function paintHelp(): void {
+    helpRoot.innerHTML = controller.state.helpOpen
+      ? `<div class="shortcut-modal active">j/k move · Enter select · [/ ] sidebar · ? help</div>`
+      : "";
+  }
+
+  const paint: Painter = {
+    sidebar: paintSidebar,
+    detail: paintDetail,
+    help: paintHelp,
+    all() {
+      paintSidebar();
+      paintDetail();
+      paintHelp();
+    },
+  };
+  const both = (): void => {
+    paintDetail();
+    paintSidebar();
+  };
 
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
@@ -549,28 +636,28 @@ function attachDom(
     const repo = row?.dataset.threadRepo;
     const number = row?.dataset.threadNumber;
     if (repo && number) {
-      void controller.selectThread(repo, Number(number)).then(paint);
+      void controller.selectThread(repo, Number(number)).then(paint.all);
       return;
     }
     if (target.closest<HTMLElement>("#help-button")) {
       controller.toggleHelp();
-      paint();
+      paintHelp();
       return;
     }
     if (target.closest<HTMLElement>("#toggle-sidebar")) {
       controller.toggleSidebar();
-      paint();
+      paintSidebar();
       return;
     }
     const pill = target.closest<HTMLButtonElement>("[data-filter]");
     const filterValue = pill?.dataset.value;
     if (pill?.dataset.filter === "status" && isStatusFilter(filterValue)) {
       controller.state.filters.status = filterValue;
-      paint();
+      paintSidebar();
     }
     if (pill?.dataset.filter === "urgency" && isUrgencyFilter(filterValue)) {
       controller.state.filters.urgency = filterValue;
-      paint();
+      paintSidebar();
     }
   });
 
@@ -578,7 +665,7 @@ function attachDom(
     const target = event.target as HTMLInputElement;
     if (target.id !== "search-input") return;
     controller.state.filters.search = target.value;
-    paint();
+    paintSidebar();
   });
 
   root.addEventListener("click", (event) => {
@@ -590,8 +677,8 @@ function attachDom(
     // Close the popover so the chip reflects the new state immediately.
     const details = urgencyOption.closest<HTMLDetailsElement>("details.urgency-chip-wrap");
     if (details) details.open = false;
-    void controller.setUrgency(next).then(paint, paint);
-    paint();
+    void controller.setUrgency(next).then(both, both);
+    both();
   });
 
   // Click-outside to close the urgency popover and the resolve-as-not-planned menu.
@@ -619,8 +706,13 @@ function attachDom(
     event.preventDefault();
     const formData = new FormData(form);
     if (form.dataset.action === "reply") {
-      void controller.postReply(String(formData.get("body") ?? "")).then(paint, paint);
-      paint();
+      const textarea = form.querySelector<HTMLTextAreaElement>("textarea[name=body]");
+      // Cleared only once GitHub confirmed the comment: a failed post keeps the draft.
+      void controller.postReply(String(formData.get("body") ?? "")).then(() => {
+        if (textarea) textarea.value = "";
+        both();
+      }, paintDetail);
+      paintDetail();
     }
     if (form.dataset.action === "ask-answer") {
       const askId = form.dataset.askId ?? "";
@@ -629,8 +721,8 @@ function attachDom(
         formData.has("custom-enabled") && custom
           ? [custom]
           : formData.getAll("answer").map(String).filter(Boolean);
-      void controller.submitAskAnswer(askId, values).then(paint, paint);
-      paint();
+      void controller.submitAskAnswer(askId, values).then(both, paintDetail);
+      paintDetail();
     }
   });
 
@@ -645,20 +737,20 @@ function attachDom(
     )) {
       open.open = false;
     }
-    void controller.closeSelectedIssue(stateReason).then(paint, paint);
-    paint();
+    void controller.closeSelectedIssue(stateReason).then(both, both);
+    both();
   });
 
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     if (target.closest<HTMLButtonElement>("button[data-action='mark-addressed']")) {
-      void controller.markAddressed().then(paint, paint);
-      paint();
+      void controller.markAddressed().then(both, both);
+      both();
       return;
     }
     if (target.closest<HTMLButtonElement>("button[data-action='unmark-addressed']")) {
-      void controller.unmarkAddressed().then(paint, paint);
-      paint();
+      void controller.unmarkAddressed().then(both, both);
+      both();
     }
   });
 
@@ -677,10 +769,10 @@ function attachDom(
     if (!toggle) return;
     if (toggle.dataset.toggle === "show-addressed") {
       controller.setShowAddressed(true);
-      paint();
+      paintSidebar();
     } else if (toggle.dataset.toggle === "hide-addressed") {
       controller.setShowAddressed(false);
-      paint();
+      paintSidebar();
     }
   });
 
@@ -690,22 +782,22 @@ function attachDom(
     if (event.key === "j" || event.key === "k") {
       event.preventDefault();
       const next = controller.nextSelection(event.key);
-      if (next) void controller.selectThread(next.repo, next.number).then(paint);
+      if (next) void controller.selectThread(next.repo, next.number).then(paint.all);
     }
     if (event.key === "Enter" && controller.state.selected) {
       event.preventDefault();
       const sel = controller.state.selected;
-      void controller.selectThread(sel.repo, sel.number).then(paint);
+      void controller.selectThread(sel.repo, sel.number).then(paint.all);
     }
     if (event.key === "[" || event.key === "]") {
       event.preventDefault();
       controller.toggleSidebar();
-      paint();
+      paintSidebar();
     }
     if (event.key === "?") {
       event.preventDefault();
       controller.toggleHelp();
-      paint();
+      paintHelp();
     }
   });
 
@@ -714,10 +806,10 @@ function attachDom(
     if (!sel) return;
     const cur = controller.state.selected;
     if (cur && cur.repo === sel.repo && cur.number === sel.number) return;
-    void controller.selectThread(sel.repo, sel.number).then(paint);
+    void controller.selectThread(sel.repo, sel.number).then(paint.all);
   });
 
-  paint();
+  paint.all();
   return paint;
 }
 
@@ -756,32 +848,42 @@ async function boot(): Promise<void> {
     await controller.selectThread(controller.state.selected.repo, controller.state.selected.number);
   }
   const paint = attachDom(controller, app);
+  const isSelected = (repo: string, number: number): boolean =>
+    controller.state.selected?.repo === repo && controller.state.selected?.number === number;
   openGithubEventSource({
     refetchSidebar: async () => {
       await controller.loadThreads();
-      paint();
+      paint.sidebar();
+      // The selected thread's urgency and sub-thread list come from the thread list.
+      paint.detail();
     },
     refetchComments: async (repo, number) => {
       if (!covers(repo)) return;
-      const key = `${repo}#${number}`;
+      const key = keyOf(repo, number);
       const fresh = await getComments(repo, number);
       controller.state.comments.set(key, fresh);
       const thread = controller.state.threads.find(
         (candidate) => candidate.repo === repo && candidate.number === number
       );
       if (thread) thread.urgency = effectiveUrgency(thread.urgency, fresh);
-      paint();
+      paint.sidebar();
+      if (isSelected(repo, number)) paint.detail();
     },
     refetchIssue: async (repo, number) => {
       if (!covers(repo)) return;
-      const key = `${repo}#${number}`;
+      const key = keyOf(repo, number);
       const issue = await getIssue(repo, number);
       controller.state.issues.set(key, issue);
       const thread = controller.state.threads.find((t) => t.repo === repo && t.number === number);
       if (thread) thread.state = issue.state;
-      paint();
+      paint.sidebar();
+      if (isSelected(repo, number)) paint.detail();
     },
-    highlightThread: (repo, number) => controller.highlightThread(repo, number),
+    highlightThread: (repo, number) => {
+      controller.highlightThread(repo, number);
+      paint.sidebar();
+      setTimeout(paint.sidebar, 1900);
+    },
   });
 }
 
