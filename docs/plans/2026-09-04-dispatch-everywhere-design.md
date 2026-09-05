@@ -35,7 +35,9 @@ session) but today it is Legion-shaped and half-broken:
 - **Context is forced at the contract:** `body` splits into required `context` and
   `question`. Descriptions say the reader has not seen the transcript.
 - **Provenance travels with the thread:** host, machine, cwd, tmux target — enough for a
-  human to jump back. Session id omitted (tmux target is the handle).
+  human to jump back. ~~Session id omitted (tmux target is the handle).~~ Superseded
+  2026-09-05: `sessionId`/`sessionTitle` are recorded alongside the tmux target — see
+  `docs/superpowers/specs/2026-09-05-dispatch-conversations-design.md`.
 - **Webhook coverage moves to the App** (tier 1, below). Ingress consolidation of all
   Legion events onto the App hook is a separate, deferred decision (tier 2).
 - **The dispatch App is `legion-envoy`** (id <app-id>, client `<client-id>`),
