@@ -38,8 +38,12 @@ export function syncFormState(
   }
 }
 
+// The id is issue-body content anyone on the repo can write. Escaping only `"`
+// leaves `\` live in the selector: a trailing one makes the lookup miss (so the
+// form is re-created on every paint) and `\"` throws inside querySelector and
+// aborts the paint. CSS.escape neutralises both.
 function askFormSelector(askId: string): string {
-  return `form[data-ask-id="${askId.replaceAll('"', '\\"')}"]`;
+  return `form[data-ask-id="${CSS.escape(askId)}"]`;
 }
 
 /**
