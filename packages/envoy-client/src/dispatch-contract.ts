@@ -30,34 +30,38 @@ export const DISPATCH_ARGUMENTS = {
     "<n> | owner/name#<n>[#<commentId>]. Opening a thread only: link the thread as a sub-issue of an existing issue and append a breadcrumb to the comment.",
 } as const;
 
+// Optional members admit `undefined` explicitly: that is the type zod emits for
+// `.optional()`, and a consumer compiled with exactOptionalPropertyTypes would
+// otherwise reject parseDispatchCall's return. present() drops undefined keys
+// before validation, so no undefined-valued key ever reaches the wire.
 export interface DispatchQuestionOption {
   readonly label: string;
-  readonly description?: string;
+  readonly description?: string | undefined;
 }
 
 export interface DispatchQuestion {
   readonly question: string;
-  readonly header?: string;
-  readonly options?: readonly DispatchQuestionOption[];
-  readonly multiple?: boolean;
-  readonly custom?: boolean;
+  readonly header?: string | undefined;
+  readonly options?: readonly DispatchQuestionOption[] | undefined;
+  readonly multiple?: boolean | undefined;
+  readonly custom?: boolean | undefined;
 }
 
 export interface OpenThreadCall {
   readonly subject: string;
   readonly context: string;
   readonly question: string;
-  readonly ask?: readonly DispatchQuestion[];
-  readonly urgency?: DispatchUrgency;
-  readonly repo?: string;
-  readonly parent?: string;
+  readonly ask?: readonly DispatchQuestion[] | undefined;
+  readonly urgency?: DispatchUrgency | undefined;
+  readonly repo?: string | undefined;
+  readonly parent?: string | undefined;
 }
 
 export interface ContinueThreadCall {
   readonly thread: string;
   readonly context: string;
   readonly question: string;
-  readonly ask?: readonly DispatchQuestion[];
+  readonly ask?: readonly DispatchQuestion[] | undefined;
 }
 
 export type DispatchCall = OpenThreadCall | ContinueThreadCall;

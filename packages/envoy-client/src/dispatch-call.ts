@@ -4,8 +4,8 @@
 // plugin read from its host. Every host plugin runs this before callDispatch.
 
 import {
-  type DispatchCall,
   DispatchArgumentError,
+  type DispatchCall,
   type DispatchQuestion,
   type DispatchUrgency,
   isContinueCall,
@@ -28,16 +28,16 @@ export interface PrepareDispatchCallInput {
   readonly exec: ExecFn;
 }
 
-/** What goes over the wire as `params.arguments`. */
+/** What goes over the wire as `params.arguments`. Optional members carry `undefined` because the call they spread from does. */
 export interface DispatchServiceArguments {
-  readonly subject?: string;
-  readonly thread?: string;
+  readonly subject?: string | undefined;
+  readonly thread?: string | undefined;
   readonly context: string;
   readonly question: string;
-  readonly ask?: readonly DispatchQuestion[];
-  readonly urgency?: DispatchUrgency;
-  readonly repo?: string;
-  readonly parent?: string;
+  readonly ask?: readonly DispatchQuestion[] | undefined;
+  readonly urgency?: DispatchUrgency | undefined;
+  readonly repo?: string | undefined;
+  readonly parent?: string | undefined;
   readonly origin: DispatchOrigin;
 }
 

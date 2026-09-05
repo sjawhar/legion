@@ -10,10 +10,11 @@ integration to deliver Envoy traffic into a live session, including idle session
 - Monitor stdout is rendered by Claude Code as a Monitor event, waking the session for inbound
   Envoy traffic.
 - `bin/envoy-send.ts` sends a direct message through Envoy's local Go listener HTTP API.
-- `.mcp.json` mounts two MCP servers for every Claude session: `envoy` (messaging tools) and
-  `dispatch`, the shared shim from `@legion/envoy-client` that raises a durable question to
-  Sami as a GitHub issue thread. The shim serves only when `dispatch.enabled` is set in
-  `envoy.json`, and fills the target repo from the session's working directory.
+- `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the
+  shared Envoy messaging contract plus `dispatch`, which raises a durable question to Sami as a
+  GitHub issue thread or continues one. `dispatch` is offered only when `dispatch.enabled` is set
+  in `envoy.json`; it fills the target repo from the session's working directory and stamps the
+  thread with the Claude session id.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tool itself.
 
@@ -29,10 +30,11 @@ bun install
 claude --plugin-dir packages/claude-envoy-bridge
 ```
 
-The monitor subscribes using Claude Code's `CLAUDE_CODE_SESSION_ID`. `ENVOY_SESSION_ID` is an
-explicit override for controlled QA. If neither is available, the monitor exits with an actionable
-error rather than subscribing to a made-up address. No Claude configuration-file changes are
-required.
+The monitor and the `envoy` MCP tools identify the session by Claude Code's
+`CLAUDE_CODE_SESSION_ID`, so messages, `envoy_whoami`, and dispatch threads all name one session.
+`ENVOY_SESSION_ID` is an explicit override for controlled QA. If neither is available, the
+monitor exits with an actionable error rather than subscribing to a made-up address. No Claude
+configuration-file changes are required.
 
 ## Send from a Claude session
 
