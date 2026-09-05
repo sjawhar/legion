@@ -840,6 +840,47 @@ describe("GitHub API client shaping", () => {
     }
   });
 
+  it("gives a root thread no parent, so it has zero sub-threads and no self-breadcrumb", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          data: {
+            search: {
+              nodes: [
+                {
+                  number: 12,
+                  title: "Root",
+                  body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\n-->\n\nBody",
+                  state: "OPEN",
+                  updatedAt: now,
+                  createdAt: now,
+                  author: { login: "agent" },
+                  comments: { totalCount: 0, nodes: [] },
+                  parent: null,
+                  repository: { owner: { login: "sjawhar" }, name: "legion" },
+                },
+              ],
+            },
+          },
+        }),
+        { headers: { "content-type": "application/json" } }
+      )) as typeof fetch;
+    try {
+      const [root] = await searchDispatchThreads(["sjawhar"]);
+      expect(root?.parentNumber).toBeNull();
+      const filters = { status: "open", urgency: "all", search: "", showAddressed: false } as const;
+      const [entry] = visibleSidebarThreads([root as Thread], filters);
+      expect(entry?.subThreadCount).toBe(0);
+      expect(entry?.parentInList).toBe(false);
+      const html = renderSidebar([root as Thread], filters);
+      expect(html).not.toContain("1 sub");
+      expect(html).not.toContain("thread-parent");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("returns no threads and skips the request when there are no owners", async () => {
     expect(await searchDispatchThreads([])).toEqual([]);
   });

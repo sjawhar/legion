@@ -119,7 +119,7 @@ function commentFromResponse(comment: RestCommentResponse): Comment {
 
 function threadFromNode(node: GraphqlThreadNode): Thread {
   const meta = parseThreadMarker(node.body);
-  const parentNumber = node.parent?.number ?? node.number;
+  const parentNumber = node.parent?.number ?? null;
   const windowComments: Comment[] = (node.comments?.nodes ?? []).flatMap((comment) =>
     comment
       ? [

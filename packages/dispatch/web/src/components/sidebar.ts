@@ -11,7 +11,7 @@ function keyOf(thread: Thread): string {
 // pointer as a breadcrumb but never use it to hide the row — every thread
 // that needs attention is its own first-class entry.
 function hasParentInList(thread: Thread, knownKeys: Set<string>): boolean {
-  if (thread.parentNumber === thread.number) return false;
+  if (thread.parentNumber === null) return false;
   return knownKeys.has(`${thread.repo}#${thread.parentNumber}`);
 }
 

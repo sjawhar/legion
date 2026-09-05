@@ -30,7 +30,8 @@ export interface Thread {
   urgency: Urgency;
   /** Asks with no answer, from the search window (the detail view recomputes from every comment). */
   openAskCount: number;
-  parentNumber: number;
+  /** The parent issue when this thread was opened as a sub-issue; null for a root thread. */
+  parentNumber: number | null;
   updatedAt: string;
   createdAt: string;
   authorLogin: string;
@@ -83,7 +84,7 @@ export interface SidebarFilters {
 
 export interface SidebarEntry {
   thread: Thread;
-  groupNumber: number;
+  groupNumber: number | null;
   subThreadCount: number;
   parentInList: boolean;
   addressed: boolean;
