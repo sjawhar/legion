@@ -8,10 +8,30 @@
       "bun": "./src/defaults.ts",
       "default": "./dist/defaults.js"
     },
-    "./dispatch-subscribe": {
-      "types": "./src/dispatch-subscribe.ts",
-      "bun": "./src/dispatch-subscribe.ts",
-      "default": "./dist/dispatch-subscribe.js"
+    "./dispatch-call": {
+      "types": "./src/dispatch-call.ts",
+      "bun": "./src/dispatch-call.ts",
+      "default": "./dist/dispatch-call.js"
+    },
+    "./dispatch-client": {
+      "types": "./src/dispatch-client.ts",
+      "bun": "./src/dispatch-client.ts",
+      "default": "./dist/dispatch-client.js"
+    },
+    "./dispatch-config": {
+      "types": "./src/dispatch-config.ts",
+      "bun": "./src/dispatch-config.ts",
+      "default": "./dist/dispatch-config.js"
+    },
+    "./dispatch-contract": {
+      "types": "./src/dispatch-contract.ts",
+      "bun": "./src/dispatch-contract.ts",
+      "default": "./dist/dispatch-contract.js"
+    },
+    "./dispatch-cwd": {
+      "types": "./src/dispatch-cwd.ts",
+      "bun": "./src/dispatch-cwd.ts",
+      "default": "./dist/dispatch-cwd.js"
     },
     "./dispatch-mcp-bridge": {
       "types": "./src/dispatch-mcp-bridge.ts",
@@ -22,6 +42,11 @@
       "types": "./src/dispatch-mcp-shim.ts",
       "bun": "./src/dispatch-mcp-shim.ts",
       "default": "./dist/dispatch-mcp-shim.js"
+    },
+    "./dispatch-subscribe": {
+      "types": "./src/dispatch-subscribe.ts",
+      "bun": "./src/dispatch-subscribe.ts",
+      "default": "./dist/dispatch-subscribe.js"
     },
     "./errors": {
       "types": "./src/errors.ts",
