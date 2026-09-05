@@ -316,6 +316,9 @@ describe("dashboard read-side rendering", () => {
     // No plumbing visible.
     expect(html).not.toContain("requestId");
     expect(html).not.toContain("dispatch:");
+    // The conversation has comments even though the answer renders under its
+    // question rather than in place; no false empty state.
+    expect(html).not.toContain("No comments yet.");
   });
 
   it("renders an answer for an ask that is not on the thread in place, marked as such", () => {
@@ -342,6 +345,40 @@ describe("dashboard read-side rendering", () => {
     const html = renderThreadDetail(detail(issue, comments));
     expect(html).toContain("answer to a question no longer on this thread");
     expect(html).toContain(">x<");
+  });
+
+  it("shows a second answer to the same ask in the conversation instead of hiding it", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Changed mind",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Color?\n      header: Color\n      options:\n        - label: blue\n        - label: red\n-->\n\nBody",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const answer = (id: number, value: string): Comment => ({
+      id,
+      body: `<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "${value}"\n-->\n\n**Color** — Color?\n${value}`,
+      createdAt: now,
+      updatedAt: now,
+      authorLogin: "sami",
+    });
+    const comments = [answer(1, "blue"), answer(2, "red")];
+    const html = renderThreadDetail(detail(issue, comments));
+
+    // The first answer is the one the question shows; the second stays at its
+    // own position, tagged, so nothing on GitHub is invisible.
+    expect(html).toMatch(/<div class="ask-history" data-ask-id="R">[\s\S]*?>blue</);
+    expect(html).toMatch(/data-comment-id="2"[\s\S]*?later answer[\s\S]*?>red</);
+    expect(html).not.toContain('data-comment-id="1"');
+    expect(html.match(/class="answer-pill"/g)?.length).toBe(2);
+    expect(html.match(/class="comment-tag">later answer</g)?.length).toBe(1);
+    expect(html).not.toContain("no longer on this thread");
+    // The ask is answered: no form.
+    expect(html).not.toMatch(/<form class="ask-form"/);
   });
 
   it("routes synthetic SSE subjects to sidebar, comment, and metadata refetches", () => {

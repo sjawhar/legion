@@ -111,9 +111,12 @@ function renderTurnCard(comment: Comment, input: ThreadDetailInput): string {
   </article>`;
 }
 
-function renderOrphanAnswer(comment: Comment, answer: ThreadAnswer): string {
+// An answer comment that is not the one shown beneath a question: it named
+// no ask on the thread, or a different answer to the same ask is the one the
+// question shows. It stays at its own position so nothing on GitHub is hidden.
+function renderStandaloneAnswer(comment: Comment, answer: ThreadAnswer, tag: string): string {
   return `<article class="comment comment-answer" data-comment-id="${comment.id}">
-    <header><strong>${escapeHtml(comment.authorLogin)}</strong><span>${escapeHtml(timeAgo(comment.createdAt))}</span><span class="comment-tag">answer to a question no longer on this thread</span></header>
+    <header><strong>${escapeHtml(comment.authorLogin)}</strong><span>${escapeHtml(timeAgo(comment.createdAt))}</span><span class="comment-tag">${tag}</span></header>
     <div class="comment-body">${renderAnswerValues(answer.answers.flat())}</div>
   </article>`;
 }
@@ -130,9 +133,20 @@ function renderComment(comment: Comment, input: ThreadDetailInput): string {
   if (parseAnswerMarker(comment.body)) {
     const answer = input.answers.find((candidate) => candidate.commentId === comment.id);
     if (!answer) return "";
-    // Answers render beneath the question they settle (renderAskHistory); only
-    // an answer that names no ask on the thread stays at its own position.
-    return answerTargets(answer, input.asks).length > 0 ? "" : renderOrphanAnswer(comment, answer);
+    // The answer a question shows renders beneath it (renderAskHistory) and
+    // nowhere else. Any other answer stays at its own position.
+    const targets = answerTargets(answer, input.asks);
+    if (targets.length === 0) {
+      return renderStandaloneAnswer(
+        comment,
+        answer,
+        "answer to a question no longer on this thread"
+      );
+    }
+    const shown = targets.some(
+      (ask) => answerFor(ask, input.answers)?.answer.commentId === comment.id
+    );
+    return shown ? "" : renderStandaloneAnswer(comment, answer, "later answer");
   }
   return `<article class="comment" data-comment-id="${comment.id}">
     <header><strong>${escapeHtml(comment.authorLogin)}</strong><span>${escapeHtml(timeAgo(comment.createdAt))}</span></header>
@@ -272,8 +286,10 @@ export function renderOpeningAsks(input: ThreadDetailInput): string {
 }
 
 export function renderConversation(input: ThreadDetailInput): string {
-  const rendered = input.comments.map((comment) => renderComment(comment, input)).join("");
-  return rendered || `<div class="empty-state">No comments yet.</div>`;
+  // Answers shown beneath their questions render "" here on purpose, so an
+  // empty join is not an empty conversation.
+  if (input.comments.length === 0) return `<div class="empty-state">No comments yet.</div>`;
+  return input.comments.map((comment) => renderComment(comment, input)).join("");
 }
 
 export function renderAskForms(input: ThreadDetailInput): string {
