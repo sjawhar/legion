@@ -128,7 +128,10 @@ func CreateThread(ctx context.Context, client *github.Client, input DispatchInpu
 	if foundExisting {
 		thread = existing[0]
 	} else {
-		marker := BuildMetaMarker(MetaMarker{Urgency: urgency, RequestID: requestID, Origin: input.Origin, Ask: input.Ask})
+		marker, err := BuildMetaMarker(MetaMarker{RequestID: requestID, Urgency: urgency, Origin: input.Origin, Ask: WithAskIDs(input.Ask, requestID)})
+		if err != nil {
+			return DispatchResult{}, err
+		}
 		body := BuildThreadBody(marker, input.Subject, input.Context, input.Question)
 		thread, err = githubapi.IssueCreate(ctx, client, owner, name, input.Subject, body, []string{dispatchLabel})
 		if err != nil {

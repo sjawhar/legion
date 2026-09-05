@@ -21,7 +21,10 @@ import (
 // requestId (marker) vs request_id (search) mismatch.
 func TestRequestIDQueryMatchesMarker(t *testing.T) {
 	id := ComputeRequestID("sjawhar/legion", "641", "Subject", "Context", "Question", UrgencyMed, nil)
-	marker := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: id})
+	marker, err := BuildMetaMarker(MetaMarker{Urgency: UrgencyMed, RequestID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
 	query := githubapi.BuildRequestIDQuery("sjawhar", "legion", id, dispatchLabel)
 
 	if !strings.Contains(query, "\""+id+"\"") {
