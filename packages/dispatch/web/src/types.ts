@@ -28,7 +28,8 @@ export interface Thread {
   body: string;
   state: IssueState;
   urgency: Urgency;
-  hasAsk: boolean;
+  /** Asks with no answer, from the search window (the detail view recomputes from every comment). */
+  openAskCount: number;
   parentNumber: number;
   updatedAt: string;
   createdAt: string;
@@ -75,6 +76,9 @@ export interface SidebarFilters {
   // this stored timestamp. Pass-through to the renderer; the filter logic
   // lives in visibleSidebarThreads.
   addressed?: Record<string, string>;
+  // Map of "<repo>#<n>" → open-ask count recomputed from the full comment
+  // list once a thread's comments were loaded; overrides the search window.
+  openAskCounts?: Record<string, number>;
 }
 
 export interface SidebarEntry {

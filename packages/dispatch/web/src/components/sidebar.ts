@@ -117,6 +117,7 @@ export function renderSidebar(threads: Thread[], filters: SidebarFilters): strin
   const rows = entries
     .map(({ thread, subThreadCount, parentInList, addressed }) => {
       const key = keyOf(thread);
+      const openAskCount = filters.openAskCounts?.[key] ?? thread.openAskCount;
       const selected = filters.selectedKey === key ? " selected" : "";
       const resolved = thread.state === "CLOSED" ? " resolved" : "";
       const blocking = thread.urgency === "blocking" ? " blocking" : "";
@@ -137,6 +138,7 @@ export function renderSidebar(threads: Thread[], filters: SidebarFilters): strin
           ${parentCrumb}
           ${thread.state === "CLOSED" ? '<span class="badge state-badge state-closed">closed</span>' : ""}
           ${addressed ? '<span class="badge state-badge state-addressed">addressed</span>' : ""}
+          ${openAskCount > 0 ? '<span class="badge state-badge state-needs-you">needs you</span>' : ""}
           ${subThreadCount > 0 ? `<span class="subthread-count">${subThreadCount} sub</span>` : ""}
         </span>
       </button>`;

@@ -1,3 +1,4 @@
+import { collectAnswers, collectAsks, openAsks } from "./asks";
 import { parseThreadMarker } from "./markers";
 import type { CloseReason, Comment, Issue, IssueState, Thread, Urgency } from "./types";
 
@@ -12,6 +13,14 @@ interface SearchResponse {
   };
 }
 
+interface GraphqlCommentNode {
+  databaseId: number;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  author?: { login: string } | null;
+}
+
 interface GraphqlThreadNode {
   number: number;
   title: string;
@@ -20,7 +29,7 @@ interface GraphqlThreadNode {
   updatedAt: string;
   createdAt: string;
   author?: { login: string } | null;
-  comments?: { totalCount: number } | null;
+  comments?: { totalCount: number; nodes?: Array<GraphqlCommentNode | null> | null } | null;
   parent?: { number: number } | null;
   repository: { owner: { login: string }; name: string };
 }
@@ -111,6 +120,20 @@ function commentFromResponse(comment: RestCommentResponse): Comment {
 function threadFromNode(node: GraphqlThreadNode): Thread {
   const meta = parseThreadMarker(node.body);
   const parentNumber = node.parent?.number ?? node.number;
+  const windowComments: Comment[] = (node.comments?.nodes ?? []).flatMap((comment) =>
+    comment
+      ? [
+          {
+            id: comment.databaseId,
+            body: comment.body,
+            createdAt: comment.createdAt,
+            updatedAt: comment.updatedAt,
+            authorLogin: comment.author?.login ?? "unknown",
+          },
+        ]
+      : []
+  );
+  const asks = collectAsks(node.body, windowComments);
   const thread: Thread = {
     repo: `${node.repository.owner.login}/${node.repository.name}`,
     number: node.number,
@@ -118,7 +141,7 @@ function threadFromNode(node: GraphqlThreadNode): Thread {
     body: node.body,
     state: normalizeState(node.state),
     urgency: meta?.urgency ?? "med",
-    hasAsk: Boolean(meta?.ask?.length),
+    openAskCount: openAsks(asks, collectAnswers(windowComments)).length,
     parentNumber,
     updatedAt: node.updatedAt,
     createdAt: node.createdAt,
@@ -163,7 +186,10 @@ export async function searchDispatchThreads(owners: string[]): Promise<Thread[]>
             updatedAt
             createdAt
             author { login }
-            comments { totalCount }
+            comments(last: 30) {
+              totalCount
+              nodes { databaseId body createdAt updatedAt author { login } }
+            }
             parent { number }
             repository { owner { login } name }
           }
@@ -194,6 +220,16 @@ export async function getIssue(repo: string, number: number): Promise<Issue> {
     createdAt: issue.created_at,
     authorLogin: issue.user?.login ?? "unknown",
   };
+}
+
+/** Title of an issue or pull request for unfurling; null when it cannot be read (private, deleted, network). */
+export async function getReferenceTitle(repo: string, number: number): Promise<string | null> {
+  try {
+    const issue = await githubRest<{ title?: string }>(`repos/${repo}/issues/${number}`);
+    return issue.title ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getComments(repo: string, number: number): Promise<Comment[]> {

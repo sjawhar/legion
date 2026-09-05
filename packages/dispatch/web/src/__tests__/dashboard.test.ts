@@ -23,7 +23,7 @@ function thread(overrides: Partial<Thread>): Thread {
     body: "---\nurgency: med\nrequestId: R\n---\n\nBody",
     state: "OPEN",
     urgency: "med",
-    hasAsk: false,
+    openAskCount: 0,
     parentNumber: 1,
     updatedAt: now,
     createdAt: now,
@@ -488,7 +488,9 @@ describe("dashboard read-side rendering", () => {
     };
     const calls: string[] = [];
     const api = {
-      searchDispatchThreads: async () => [thread({ number: 12, hasAsk: true, body: issue.body })],
+      searchDispatchThreads: async () => [
+        thread({ number: 12, openAskCount: 1, body: issue.body }),
+      ],
       getIssue: async () => issue,
       getComments: async () => [],
       postComment: async (_repo: string, _number: number, body: string) => {
@@ -568,6 +570,10 @@ describe("GitHub API client shaping", () => {
       const body = JSON.parse(String(init?.body));
       expect(body.query).toContain("search(query: $search");
       expect(body.query).toContain("repository { owner { login } name }");
+      expect(body.query).toContain("comments(last: 30) {");
+      expect(body.query).toContain(
+        "nodes { databaseId body createdAt updatedAt author { login } }"
+      );
       expect(body.variables.search).toBe(
         "is:issue is:open label:dispatch-thread user:sjawhar user:acme-org"
       );
@@ -584,7 +590,7 @@ describe("GitHub API client shaping", () => {
                   updatedAt: now,
                   createdAt: now,
                   author: { login: "agent" },
-                  comments: { totalCount: 2 },
+                  comments: { totalCount: 2, nodes: [] },
                   parent: { number: 641 },
                   repository: { owner: { login: "sjawhar" }, name: "legion" },
                 },
@@ -604,7 +610,7 @@ describe("GitHub API client shaping", () => {
           body: "---\nurgency: blocking\nrequestId: R\n---\n\nBody",
           state: "OPEN",
           urgency: "blocking",
-          hasAsk: false,
+          openAskCount: 0,
           parentNumber: 641,
           updatedAt: now,
           createdAt: now,
@@ -612,6 +618,56 @@ describe("GitHub API client shaping", () => {
           commentCount: 2,
         },
       ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("counts open asks from the search window so the sidebar can mark threads that need you", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          data: {
+            search: {
+              nodes: [
+                {
+                  number: 12,
+                  title: "Two asks, one answered",
+                  body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: a?\n    - askId: R.1\n      question: b?\n-->\n\nBody",
+                  state: "OPEN",
+                  updatedAt: now,
+                  createdAt: now,
+                  author: { login: "agent" },
+                  comments: {
+                    totalCount: 1,
+                    nodes: [
+                      {
+                        databaseId: 5,
+                        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "yes"\n-->\n\ns',
+                        createdAt: now,
+                        updatedAt: now,
+                        author: { login: "sami" },
+                      },
+                    ],
+                  },
+                  parent: null,
+                  repository: { owner: { login: "sjawhar" }, name: "legion" },
+                },
+              ],
+            },
+          },
+        }),
+        { headers: { "content-type": "application/json" } }
+      )) as typeof fetch;
+    try {
+      const [thread] = await searchDispatchThreads(["sjawhar"]);
+      expect(thread?.openAskCount).toBe(1);
+      const filters = { status: "open", urgency: "all", search: "", showAddressed: false } as const;
+      expect(renderSidebar([thread as Thread], filters)).toContain("needs you");
+      expect(renderSidebar([{ ...(thread as Thread), openAskCount: 0 }], filters)).not.toContain(
+        "needs you"
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
