@@ -263,3 +263,7 @@ $RECYCLE.BIN/
 
 # Playwright MCP transient snapshots
 .playwright-mcp/
+
+# Playwright output (packages/dispatch e2e)
+packages/dispatch/e2e/test-results/
+packages/dispatch/e2e/playwright-report/

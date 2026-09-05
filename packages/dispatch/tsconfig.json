@@ -9,5 +9,5 @@
     "jsx": "preserve",
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "web/src/**/*.ts", "web/vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "web/src/**/*.ts", "web/vite.config.ts", "e2e/**/*.ts"]
 }

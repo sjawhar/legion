@@ -184,6 +184,12 @@ jobs:
       - name: Build dispatch dashboard
         run: bun run build:web
         working-directory: packages/dispatch
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+        working-directory: packages/dispatch
+      - name: Browser-test dispatch dashboard
+        run: bun run e2e
+        working-directory: packages/dispatch
 
   claude-envoy-bridge:
     needs: changes
