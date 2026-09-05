@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "dispatch": {
-      "command": "./bin/dispatch-mcp-shim.ts"
-    }
-  }
-}

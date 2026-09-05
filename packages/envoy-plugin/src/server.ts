@@ -8,8 +8,6 @@ import { machineID } from "@legion/envoy-client/machine";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { tool } from "@opencode-ai/plugin/tool";
-import { loadEnvoyConfig } from "./config";
-import { buildDispatchMcpEntry, injectEnvoyMcp } from "./dispatch-mcp";
 import { logger } from "./log";
 import { resolvePort } from "./port";
 
@@ -38,7 +36,6 @@ const [
 
 export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
-  const config = await loadEnvoyConfig(cwd);
   const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
   const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
   let activeSessionID: string | null = null;
@@ -154,12 +151,7 @@ export default async (input: { serverUrl: URL }) => {
   });
 
   return {
-    config: (
-      cfg: { mcp?: Record<string, unknown>; skills?: { paths?: string[] } } & Record<
-        string,
-        unknown
-      >
-    ) => {
+    config: (cfg: { skills?: { paths?: string[] } } & Record<string, unknown>) => {
       // Serve the bundled legion skills to every session on this serve.
       if (skillsDirectory) {
         cfg.skills ??= {};
@@ -168,20 +160,6 @@ export default async (input: { serverUrl: URL }) => {
           cfg.skills.paths.push(skillsDirectory);
         }
       }
-      // Inject the envoy MCP entry into the OpenCode config when
-      // dispatch is enabled. Centralizing this in the plugin (instead of
-      // each user's opencode.json) means:
-      //   1. Registration is gated by `dispatch.enabled`
-      //   2. The bearer token is sourced per-CWD via the user's gh shim
-      //      (no env coordination needed)
-      //   3. Token rotation happens transparently inside the shim
-      //      subprocess — OpenCode never sees an expired token
-      const entry = buildDispatchMcpEntry({
-        dispatch: config.dispatch,
-      });
-      if (!entry) return;
-      const { warning } = injectEnvoyMcp(cfg, entry);
-      if (warning) logger.warn(warning);
     },
     event: async ({
       event,

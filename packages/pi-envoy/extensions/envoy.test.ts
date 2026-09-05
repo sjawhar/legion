@@ -351,7 +351,7 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, sessionContext());
     await fixture.handlers.get("tool_result")?.(
       {
-        toolName: "mcp__dispatch_dispatch",
+        toolName: "dispatch",
         toolCallId: "call_1",
         input: {},
         details: {
@@ -409,7 +409,7 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, sessionContext());
     const url = '{"thread":92,"url":"https://github.com/sjawhar/legion/issues/92"}';
     await fixture.handlers.get("tool_result")?.(
-      { toolName: "mcp__dispatch_dispatch", toolCallId: "c", input: {}, details: url, isError: true },
+      { toolName: "dispatch", toolCallId: "c", input: {}, details: url, isError: true },
       sessionContext(),
     );
     await fixture.handlers.get("tool_result")?.(

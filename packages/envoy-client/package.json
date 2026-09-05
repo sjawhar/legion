@@ -33,16 +33,6 @@
       "bun": "./src/dispatch-cwd.ts",
       "default": "./dist/dispatch-cwd.js"
     },
-    "./dispatch-mcp-bridge": {
-      "types": "./src/dispatch-mcp-bridge.ts",
-      "bun": "./src/dispatch-mcp-bridge.ts",
-      "default": "./dist/dispatch-mcp-bridge.js"
-    },
-    "./dispatch-mcp-shim": {
-      "types": "./src/dispatch-mcp-shim.ts",
-      "bun": "./src/dispatch-mcp-shim.ts",
-      "default": "./dist/dispatch-mcp-shim.js"
-    },
     "./dispatch-subscribe": {
       "types": "./src/dispatch-subscribe.ts",
       "bun": "./src/dispatch-subscribe.ts",
@@ -70,7 +60,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/dispatch-mcp-bridge.ts src/dispatch-mcp-shim.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/dispatch-call.ts src/dispatch-client.ts src/dispatch-config.ts src/dispatch-contract.ts src/dispatch-cwd.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"

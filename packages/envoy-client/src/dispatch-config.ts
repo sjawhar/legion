@@ -10,7 +10,7 @@ const DEFAULT_SERVER_URL = "http://localhost:8766";
 // Mirrors the shared envoy.json contract (packages/envoy-plugin/src/config/
 // schema.ts and the Go loader in packages/envoy/internal/dispatch/config):
 // strict dispatch keys, URL-shaped serverUrl, tolerant top level. A file the
-// other loaders reject as invalid must not enable the shim either.
+// other loaders reject as invalid must not enable the dispatch tool either.
 const EnvoyFileSchema = z.looseObject({
   $schema: z.string().optional(),
   natsUrls: z.array(z.string()).optional(),
@@ -67,15 +67,16 @@ export interface DispatchConfigResolution {
 }
 
 /**
- * Load the dispatch server URL from the shared envoy.json contract.
+ * Load the dispatch service URL from the shared envoy.json contract.
  *
- * Precedence: an explicit DISPATCH_MCP_URL wins (the OpenCode plugin injects
- * it into the MCP entry it builds); otherwise the shared envoy.json opt-in
- * decides — user config (~/.config/opencode/envoy.json) shallow-merged with
- * repo config (<cwd>/.opencode/envoy.json, repo keys win), the same files the
- * dispatch server and the OpenCode plugin read, validated against the same
- * contract. `url` is null when dispatch is not enabled or a config file is
- * invalid; `error` names the invalid file and key when that is the cause.
+ * Precedence: an explicit DISPATCH_MCP_URL wins (the Legion daemon and the
+ * smoke rig set it to point sessions at a specific service); otherwise the
+ * shared envoy.json opt-in decides — user config
+ * (~/.config/opencode/envoy.json) shallow-merged with repo config
+ * (<cwd>/.opencode/envoy.json, repo keys win), the same files the dispatch
+ * server and the OpenCode plugin read, validated against the same contract.
+ * `url` is null when dispatch is not enabled or a config file is invalid;
+ * `error` names the invalid file and key when that is the cause.
  */
 export function resolveDispatchConfig(
   env: Record<string, string | undefined>,
@@ -84,7 +85,10 @@ export function resolveDispatchConfig(
   const explicit = env["DISPATCH_MCP_URL"];
   if (explicit) return { url: explicit, error: null };
 
-  const home = options.home ?? homedir();
+  // env is the call's one source of truth: a caller that hands us an
+  // environment with HOME set is read from there. os.homedir() alone is not a
+  // seam — Bun resolves it once at startup and ignores later HOME changes.
+  const home = options.home ?? env["HOME"] ?? homedir();
   const cwd = options.cwd ?? process.cwd();
   const userFile = readEnvoyFile(path.join(home, ".config", "opencode", "envoy.json"));
   const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));
@@ -100,24 +104,4 @@ export function resolveDispatchConfig(
   if (merged.enabled !== true) return { url: null, error: null };
   const baseUrl = (merged.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
   return { url: `${baseUrl}/mcp`, error: null };
-}
-
-/** Resolve the dispatch server's /mcp endpoint for a shim process. */
-export function resolveDispatchMcpUrl(
-  env: Record<string, string | undefined>,
-  options: { readonly cwd?: string; readonly home?: string } = {}
-): string | null {
-  return resolveDispatchConfig(env, options).url;
-}
-
-/**
- * Name why config resolution yielded no URL, when the cause is an invalid
- * envoy.json (bad JSON, a removed/unknown dispatch key, or a bad value) — as
- * opposed to dispatch simply being disabled, which has no error to report.
- */
-export function dispatchConfigError(
-  env: Record<string, string | undefined>,
-  options: { readonly cwd?: string; readonly home?: string } = {}
-): string | null {
-  return resolveDispatchConfig(env, options).error;
 }

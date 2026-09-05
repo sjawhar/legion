@@ -22,7 +22,7 @@ export const DISPATCH_ARGUMENTS = {
   thread:
     'Continue an existing thread: "<n>" (an issue in the working directory\'s repo) or "owner/name#<n>". When set, omit subject, urgency, repo, and parent.',
   context: `What you are doing, what you found, why you are stuck — at most ${DISPATCH_CONTEXT_MAX} characters, at most three short paragraphs or a bullet list. The reader has NOT seen your transcript: no nouns you coined this session, no internal identifiers unless the question is about them. GitHub references (#N, owner/repo#N, URLs) may be bare; the dashboard unfurls them.`,
-  question: `The ask, at most ${DISPATCH_QUESTION_MAX} characters, as a list: current state → desired state → options with one-line tradeoffs → your recommendation. Put choices in \`ask\`, not in prose.`,
+  question: `The ask, at most ${DISPATCH_QUESTION_MAX} characters, as a list: current state → desired state → your recommendation and why; options go in \`ask\`.`,
   ask: "Structured questions rendered as buttons on the dashboard. Each: { question, header?, options: [{ label, description? }], multiple?, custom? }. Use this whenever the answer is one of N choices.",
   urgency: "low | med | high | blocking (default med). Opening a thread only.",
   repo: "owner/name. Opening a thread only; defaults to the working directory's GitHub repo.",
