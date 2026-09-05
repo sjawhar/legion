@@ -8,6 +8,16 @@ This package exposes:
 - `envoy_unsubscribe`
 - `envoy_list`
 - `envoy_send`
+- `envoy_publish`
+- `envoy_role_set`
+- `envoy_whoami`
+- `envoy_sessions`
+- `dispatch`
+
+`dispatch` raises or continues a durable question thread for the human (a GitHub
+issue on the Dispatch dashboard) when `dispatch.enabled` is set in envoy.json
+(`~/.config/opencode/envoy.json`, merged with `<repo>/.opencode/envoy.json`). The
+session is auto-subscribed to the thread so the reply arrives back through Envoy.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 
