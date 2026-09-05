@@ -1,4 +1,4 @@
-# @sjawhar/claude-legion-envoy
+# claude-envoy-bridge
 
 Claude Code plugin for Legion's Envoy subsystem. It uses Claude Code's Tier 1 Monitor tool
 integration to deliver Envoy traffic into a live session, including idle sessions.
@@ -26,7 +26,7 @@ From the Legion repository root, install workspace dependencies and load the pac
 
 ```bash
 bun install
-claude --plugin-dir packages/envoy-claude-plugin
+claude --plugin-dir packages/claude-envoy-bridge
 ```
 
 The monitor subscribes using Claude Code's `CLAUDE_CODE_SESSION_ID`. `ENVOY_SESSION_ID` is an
@@ -37,7 +37,7 @@ required.
 ## Send from a Claude session
 
 ```bash
-bun packages/envoy-claude-plugin/bin/envoy-send.ts <target-session-id> "message"
+bun packages/claude-envoy-bridge/bin/envoy-send.ts <target-session-id> "message"
 ```
 
 Set `ENVOY_URL` to use an Envoy listener other than `http://127.0.0.1:9020`. Set
@@ -47,9 +47,9 @@ comma-separated NATS subscriptions.
 ## Local checks
 
 ```bash
-bun run --cwd packages/envoy-claude-plugin lint
-bun run --cwd packages/envoy-claude-plugin typecheck
-bun run --cwd packages/envoy-claude-plugin test
+bun run --cwd packages/claude-envoy-bridge lint
+bun run --cwd packages/claude-envoy-bridge typecheck
+bun run --cwd packages/claude-envoy-bridge test
 ```
 
 ## Caveats

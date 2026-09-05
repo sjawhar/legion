@@ -21,7 +21,7 @@ CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
 
 ## Critical conventions
 
-- Load with `claude --plugin-dir packages/envoy-claude-plugin`; no Claude configuration-file
+- Load with `claude --plugin-dir packages/claude-envoy-bridge`; no Claude configuration-file
   changes are needed.
 - Keep direct subscription to `notifications.agent.<session-id>`; do not add Envoy listener
   registry registration to this package.

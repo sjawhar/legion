@@ -12,7 +12,7 @@ COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
 COPY packages/daemon/package.json packages/daemon/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
-COPY packages/envoy-claude-plugin/package.json packages/envoy-claude-plugin/package.json
+COPY packages/claude-envoy-bridge/package.json packages/claude-envoy-bridge/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
 COPY packages/workspace/package.json packages/workspace/package.json
 RUN bun install --frozen-lockfile

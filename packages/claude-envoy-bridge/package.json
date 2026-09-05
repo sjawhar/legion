@@ -1,5 +1,5 @@
 {
-  "name": "@sjawhar/claude-legion-envoy",
+  "name": "@sjawhar/claude-envoy-bridge",
   "version": "0.1.0",
   "description": "Claude Code plugin for Legion's Envoy Monitor bus",
   "type": "module",
