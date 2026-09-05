@@ -49,4 +49,16 @@ describe("referenceFromUrl", () => {
     expect(referenceFromUrl("https://github.com/acme-org/example-repo/issues/12/files")).toBeNull();
     expect(referenceFromUrl("https://github.com/acme-org/example-repo/issues")).toBeNull();
   });
+
+  it("accepts only GitHub's owner and repo charsets, so a hostile URL never reaches a selector", () => {
+    expect(referenceFromUrl("https://github.com/acme-org/example.repo_1/issues/3")).toEqual({
+      repo: "acme-org/example.repo_1",
+      number: 3,
+    });
+    expect(referenceFromUrl('https://github.com/acme"org/example-repo/issues/1')).toBeNull();
+    expect(referenceFromUrl("https://github.com/acme#org/example-repo/issues/1")).toBeNull();
+    expect(referenceFromUrl("https://github.com/acme_org/example-repo/issues/1")).toBeNull();
+    expect(referenceFromUrl('https://github.com/acme-org/ex"ample/issues/1')).toBeNull();
+    expect(referenceFromUrl("https://github.com/acme-org/ex]ample/issues/1")).toBeNull();
+  });
 });

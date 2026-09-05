@@ -19,8 +19,10 @@ export interface ReferenceMatch {
 // end at a word boundary; `abc#12` and `word#3` are not references.
 const REFERENCE_RE =
   /(^|[\s([])(?:([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+)#([1-9]\d*)|#([1-9]\d*))(?![\w#])/g;
+// Owner and repo use GitHub's charsets, so a matched reference is always safe
+// inside the unquoted attribute selector the unfurler builds from it.
 const URL_RE =
-  /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s#?]+)\/(?:issues|pull)\/([1-9]\d*)(?:[#?].*)?$/;
+  /^https?:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)\/(?:issues|pull)\/([1-9]\d*)(?:[#?].*)?$/;
 
 export function findReferences(text: string, threadRepo: string): ReferenceMatch[] {
   const matches: ReferenceMatch[] = [];
@@ -47,8 +49,8 @@ function referenceKey(ref: GitHubReference): string {
   return `${ref.repo}#${ref.number}`;
 }
 
-function referenceAnchor(ref: GitHubReference, text: string): HTMLAnchorElement {
-  const anchor = document.createElement("a");
+function referenceAnchor(doc: Document, ref: GitHubReference, text: string): HTMLAnchorElement {
+  const anchor = doc.createElement("a");
   anchor.className = "gh-ref";
   anchor.dataset.ghRef = referenceKey(ref);
   anchor.href = `https://github.com/${ref.repo}/issues/${ref.number}`;
@@ -85,7 +87,7 @@ export function linkifyReferences(root: ParentNode, threadRepo: string): void {
     for (const match of matches) {
       if (match.index > cursor) fragment.append(value.slice(cursor, match.index));
       fragment.append(
-        referenceAnchor(match.ref, value.slice(match.index, match.index + match.length))
+        referenceAnchor(doc, match.ref, value.slice(match.index, match.index + match.length))
       );
       cursor = match.index + match.length;
     }
