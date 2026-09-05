@@ -119,9 +119,9 @@ dispatch({
 - `question` (required, ≤ 800 chars): current → desired → recommendation (options live in
   `ask`).
 - `ask` (optional): a list of `{ question, header?, options: [{ label, description? }],
-  multiple?, custom? }`. These render as buttons. `custom: true` adds a free-text field
-  beside the buttons; a plain reply on the thread is always possible but arrives
-  unstructured.
+  multiple?, custom? }`. These render as buttons, always with an "Other (specify)"
+  free-text field beside them (`custom` does not change this); a plain reply on the thread
+  is also possible but arrives unstructured.
 - `urgency` (optional, default `med`): `low` — whenever convenient; `med` — needed today;
   `high` — something will stall soon; `blocking` — you cannot proceed at all right now.
 - `repo` (optional): only to target a **different** repo than your working directory's
