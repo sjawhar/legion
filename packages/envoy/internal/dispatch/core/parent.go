@@ -92,8 +92,9 @@ var (
 	threadBareForm = regexp.MustCompile(`^(\d+)$`)
 )
 
-// ParseThread parses a `thread` argument: "<n>" or "owner/name#<n>". A
-// comment id is not a thread and is rejected.
+// ParseThread parses a `thread` argument: "<n>" or "owner/name#<n>". Every
+// rejection — a comment id, a zero or zero-padded number, anything else — is
+// `Invalid thread: <s>`, the one malformed-thread message the plugins expect.
 func ParseThread(s string) (ParsedThread, error) {
 	s = strings.TrimSpace(s)
 	var repo, issue string
@@ -106,7 +107,7 @@ func ParseThread(s string) (ParsedThread, error) {
 	}
 	n, err := parsePositiveInteger(issue, "issue number")
 	if err != nil {
-		return ParsedThread{}, fmt.Errorf("Invalid thread issue number: %s", issue)
+		return ParsedThread{}, fmt.Errorf("Invalid thread: %s", s)
 	}
 	return ParsedThread{Repo: repo, IssueNumber: n}, nil
 }

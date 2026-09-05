@@ -157,7 +157,10 @@ func newDispatchTestServer(t *testing.T) (*github.Client, *fakeGitHub) {
 		fmt.Fprintf(w, `{"number":%d,"node_id":"node-%d","state":%q,"body":%q,"html_url":%q%s}`, n, n, issue.state, issue.body, issueURL(r, n), pull)
 	})
 	// GET .../issues/{number}/comments (list) and GET .../issues/comments/{id}
-	// (one comment) overlap for ServeMux, so one handler serves both.
+	// (one comment) overlap for ServeMux, so one handler serves both. The list
+	// pages like GitHub: per_page/page slice the comments and a Link header
+	// with rel="next" is set while more remain, which is what go-github turns
+	// into resp.NextPage.
 	mux.HandleFunc("GET /repos/{owner}/{repo}/issues/{first}/{second}", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if r.PathValue("first") == "comments" {
@@ -165,8 +168,26 @@ func newDispatchTestServer(t *testing.T) (*github.Client, *fakeGitHub) {
 			return
 		}
 		n, _ := strconv.Atoi(r.PathValue("first"))
-		items := make([]string, 0, len(gh.comments[n]))
-		for _, c := range gh.comments[n] {
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		if perPage <= 0 {
+			perPage = 30
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page <= 0 {
+			page = 1
+		}
+		all := gh.comments[n]
+		start := min((page-1)*perPage, len(all))
+		end := min(start+perPage, len(all))
+		if end < len(all) {
+			next := *r.URL
+			q := next.Query()
+			q.Set("page", strconv.Itoa(page+1))
+			next.RawQuery = q.Encode()
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s%s>; rel="next"`, r.Host, next.RequestURI()))
+		}
+		items := make([]string, 0, end-start)
+		for _, c := range all[start:end] {
 			items = append(items, fmt.Sprintf(`{"id":%d,"body":%q,"html_url":"%s#issuecomment-%d"}`, c.id, c.body, issueURL(r, n), c.id))
 		}
 		fmt.Fprintf(w, "[%s]", strings.Join(items, ","))
@@ -487,6 +508,38 @@ func TestContinueThreadDedupesOverComments(t *testing.T) {
 	}
 }
 
+// The dedupe scan must read every page of comments: a thread with more than
+// one page of turns whose matching follow-up sits on the last page still
+// short-circuits to that comment instead of posting again.
+func TestContinueThreadDedupesAcrossCommentPages(t *testing.T) {
+	client, gh := newDispatchTestServer(t)
+	gh.issues[42] = fakeIssue{state: "open", body: threadBody(t)}
+	input := DispatchInput{Repo: "acme/widgets", Thread: "42", Context: "C2", Question: "Q2"}
+	requestID := ComputeFollowUpRequestID("acme/widgets", 42, "C2", "Q2", nil)
+	for i := range 100 {
+		gh.comments[42] = append(gh.comments[42], fakeComment{id: int64(i + 1), body: fmt.Sprintf("chatter %d", i)})
+	}
+	marker, err := BuildAskMarker(AskMarker{RequestID: requestID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh.comments[42] = append(gh.comments[42], fakeComment{id: 777, body: BuildFollowUpBody(marker, "C2", "Q2")})
+
+	result, err := Dispatch(context.Background(), client, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Comment != "https://github.com/acme/widgets/issues/42#issuecomment-777" {
+		t.Errorf("must return the comment on the last page, got %q", result.Comment)
+	}
+	if len(gh.comments[42]) != 101 || callsContain(gh.calls, "POST /repos/acme/widgets/issues/42/comments") {
+		t.Errorf("nothing may be posted: %d comments, calls %v", len(gh.comments[42]), gh.calls)
+	}
+	if got := countCalls(gh.calls, "GET /repos/acme/widgets/issues/42/comments"); got != 2 {
+		t.Errorf("101 comments at per_page=100 are two pages, fetched %d: %v", got, gh.calls)
+	}
+}
+
 func TestContinueThreadRefusesNonThreadsAndClosedThreads(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -494,17 +547,13 @@ func TestContinueThreadRefusesNonThreadsAndClosedThreads(t *testing.T) {
 		want  string
 	}{
 		{"plain issue", fakeIssue{state: "open", body: "just an issue"}, "#42 is not a dispatch thread"},
-		{"pull request", fakeIssue{state: "open", body: "", pull: true}, "#42 is not a dispatch thread"},
-		{"closed thread", fakeIssue{state: "closed", body: ""}, "#42 is closed; open a new thread"},
+		{"pull request", fakeIssue{state: "open", body: threadBody(t), pull: true}, "#42 is not a dispatch thread"},
+		{"closed thread", fakeIssue{state: "closed", body: threadBody(t)}, "#42 is closed; open a new thread"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client, gh := newDispatchTestServer(t)
-			issue := tc.issue
-			if issue.body == "" && !issue.pull {
-				issue.body = threadBody(t)
-			}
-			gh.issues[42] = issue
+			gh.issues[42] = tc.issue
 			_, err := Dispatch(context.Background(), client, DispatchInput{Repo: "acme/widgets", Thread: "42", Context: "C", Question: "Q"})
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("err %v, want %q", err, tc.want)
