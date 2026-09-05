@@ -186,7 +186,7 @@ Argument descriptions (verbatim, `DISPATCH_ARGUMENTS`):
 - `subject`: Open a new thread: one line naming the decision needed (the issue title). Omit when continuing a thread with `thread`.
 - `thread`: Continue an existing thread: "<n>" (an issue in the working directory's repo) or "owner/name#<n>". When set, omit subject, urgency, repo, and parent.
 - `context`: What you are doing, what you found, why you are stuck — at most 1200 characters, at most three short paragraphs or a bullet list. The reader has NOT seen your transcript: no nouns you coined this session, no internal identifiers unless the question is about them. GitHub references (#N, owner/repo#N, URLs) may be bare; the dashboard unfurls them.
-- `question`: The ask, at most 800 characters, as a list: current state → desired state → options with one-line tradeoffs → your recommendation. Put choices in `ask`, not in prose.
+- `question`: The ask, at most 800 characters, as a list: current state → desired state → your recommendation and why; options go in `ask`.
 - `ask`: Structured questions rendered as buttons on the dashboard. Each: { question, header?, options: [{ label, description? }], multiple?, custom? }. Use this whenever the answer is one of N choices.
 - `urgency`: low | med | high | blocking (default med). Opening a thread only.
 - `repo`: owner/name. Opening a thread only; defaults to the working directory's GitHub repo.
@@ -277,7 +277,7 @@ The native tool is named exactly `dispatch`. pi-envoy's handler returns `toolSuc
 
 - Search query adds `comments(last: 30) { nodes { databaseId body createdAt updatedAt author { login } } }`; the sidebar's `openAskCount` is computed from that window (31 GraphQL points per sidebar refetch), and from the full REST comment list once a thread's comments have been loaded (authoritative). `Thread.hasAsk` is replaced by `Thread.openAskCount: number`.
 - Stable DOM ids the DOM layer patches and the e2e tests select: `#sidebar-root`, `#thread-list`, `#search-input`, `#detail-root`, `#detail-header`, `#detail-opening`, `#detail-opening-asks`, `#detail-subthreads`, `#detail-conversation`, `#detail-ask-forms`, `#detail-reply`, `#reply-body`, `#help-root`. Per-ask forms: `form.ask-form[data-action="ask-answer"][data-ask-id="<askId>"]` with inputs named `answer`, `custom-enabled`, `custom`. Unfurled references: `a.gh-ref[data-gh-ref="owner/repo#N"]` (`data-unfurled="1"` once the title is applied). Origin line: `.origin-line .origin-session-title`, `.origin-line code.origin-session-id`, `button[data-action="copy-session-id"][data-copy-text="<sessionId>"]`, existing `button[data-action="copy-origin"][data-copy-text="tmux switch-client -t %N"]`. Sidebar badge: `.thread-row .badge.state-needs-you` (text `needs you`).
-- Open-ask forms live in `#detail-ask-forms` (after the conversation, before the reply form), one per open ask, heading `Answer: <header or "Question n"> — <question>` with an anchor `↑ asked <time ago>` (`href="#turn-<commentId>"` or `#detail-opening`). They are created when the thread is selected or when an ask opens, and are never re-created by an event. The reply textarea is created on selection and never re-created; it is cleared only after a successful post.
+- Open-ask forms live in `#detail-ask-forms` (after the conversation, before the reply form), one per open ask, heading `Answer: <header or "Question n"> — <question>` with an anchor `↑ question` (`↑ question · asked <time ago>` when the ask came from a follow-up; `href="#turn-<commentId>"` or `#detail-opening`). They are created when the thread is selected or when an ask opens, and are never re-created by an event. The reply textarea is created on selection and never re-created; it is cleared only after a successful post.
 - Unfurl: after markdown rendering, text nodes outside `a`, `code`, `pre` matching bare `#N`, `owner/repo#N`, and anchors whose text equals a GitHub issue/PR URL become `a.gh-ref` links; titles come from `GET /api/github/rest/repos/{owner}/{repo}/issues/{n}` (PRs included), cached per page load in a `Map<string, Promise<string | null>>`; a failed fetch leaves the plain link. Bare `#N` resolves against the thread's repo. Link text becomes the title; `title` attribute is `owner/repo#N`.
 
 ### Deletions (clean cutover — every one is in scope)
@@ -513,7 +513,7 @@ export const DISPATCH_ARGUMENTS = {
   thread:
     'Continue an existing thread: "<n>" (an issue in the working directory\'s repo) or "owner/name#<n>". When set, omit subject, urgency, repo, and parent.',
   context: `What you are doing, what you found, why you are stuck — at most ${DISPATCH_CONTEXT_MAX} characters, at most three short paragraphs or a bullet list. The reader has NOT seen your transcript: no nouns you coined this session, no internal identifiers unless the question is about them. GitHub references (#N, owner/repo#N, URLs) may be bare; the dashboard unfurls them.`,
-  question: `The ask, at most ${DISPATCH_QUESTION_MAX} characters, as a list: current state → desired state → options with one-line tradeoffs → your recommendation. Put choices in \`ask\`, not in prose.`,
+  question: `The ask, at most ${DISPATCH_QUESTION_MAX} characters, as a list: current state → desired state → your recommendation and why; options go in \`ask\`.`,
   ask: "Structured questions rendered as buttons on the dashboard. Each: { question, header?, options: [{ label, description? }], multiple?, custom? }. Use this whenever the answer is one of N choices.",
   urgency: "low | med | high | blocking (default med). Opening a thread only.",
   repo: "owner/name. Opening a thread only; defaults to the working directory's GitHub repo.",
@@ -2235,7 +2235,7 @@ type dispatchInput struct {
 	Subject  string              `json:"subject,omitempty" jsonschema:"Open a thread: one line, the decision needed. Omit when continuing a thread."`
 	Thread   string              `json:"thread,omitempty" jsonschema:"Continue a thread: <n> | owner/name#<n>. Omit subject, urgency, and parent."`
 	Context  string              `json:"context" jsonschema:"What you are doing, what you found, why you are stuck (at most 1200 characters). The reader has NOT seen your transcript."`
-	Question string              `json:"question" jsonschema:"The ask (at most 800 characters): current state → desired state → options with tradeoffs → your recommendation."`
+	Question string              `json:"question" jsonschema:"The ask (at most 800 characters): current state → desired state → your recommendation and why; options go in ask."`
 	Ask      []core.QuestionInfo `json:"ask,omitempty" jsonschema:"Optional structured questions attached to this turn"`
 	Urgency  string              `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med). Opening a thread only."`
 	Repo     string              `json:"repo,omitempty" jsonschema:"owner/name. Filled by the calling plugin from the session's working directory when the call does not name a qualified parent or thread."`
@@ -5124,7 +5124,7 @@ cd /home/ubuntu/legion/packages/claude-envoy-bridge && ls bin/dispatch-mcp-shim.
 }
 ```
 
-- `packages/envoy-plugin/package.json`: `"build": "bun build src/server.ts --outdir dist --target bun --format esm --external '@opencode-ai/*'"`.
+- `packages/envoy-plugin/package.json`: `"build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*'"` (`--root .` keeps the output at `dist/src/server.js`, where `main`/`exports` point; with a single entry point `bun build` would otherwise flatten it to `dist/server.js`).
 - `packages/envoy-plugin/src/server.ts`: delete `import { buildDispatchMcpEntry, injectEnvoyMcp } from "./dispatch-mcp";`; in the `config:` hook delete the MCP-injection comment block (from `// Inject the envoy MCP entry…` through `if (warning) logger.warn(warning);`), keeping the skills-path injection, and narrow the hook's `cfg` type to `{ skills?: { paths?: string[] } } & Record<string, unknown>`. `config.dispatch` was that block's only reader, so also delete `const config = await loadEnvoyConfig(cwd);` and `import { loadEnvoyConfig } from "./config";` (Biome's unused-variable rule would otherwise fail lint). `src/config/` is now an orphan module that still compiles and passes its own tests; Task 12 deletes it.
 - pi-envoy's `.mcp.json` is simply gone; `scripts/prepack.sh` still checks it and would refuse to pack, which is fine at this commit — Task 11 trims the script.
 
@@ -6401,8 +6401,9 @@ other things, and they will answer the question you wrote, not the one you meant
   dashboard unfurls them into their titles.
 - **Structure over paragraphs.** `context` is at most three short paragraphs or a bullet
   list, one idea each: what you are doing, what you found, why you are stuck. `question`
-  is a list: current state → desired state → options with one-line tradeoffs → your
-  recommendation. Don't just describe the fork — say which branch you'd take and why.
+  is a list: current state → desired state → your recommendation and why; the options
+  themselves go in `ask`, each tradeoff as its `description`. Don't just describe the
+  fork — say which branch you'd take and why.
 - **Options are buttons.** If you are offering choices, put them in `ask`; never enumerate
   them in prose. A human answers a button in one click and the answer arrives structured;
   a choice buried in a paragraph arrives as a sentence you have to interpret.
@@ -6693,7 +6694,7 @@ The incident narrative stays (it is history). Change the present-tense statement
 
 - [ ] **Step 5: `npm-publish-discards-bun-workspace-rewrite.md`**
 
-In the envoy-plugin `package.json` snippet, the `build` line becomes `"build": "bun build src/server.ts --outdir dist --target bun --format esm --external '@opencode-ai/*'",`; in the prose after it, `straight into `dist/src/server.js` and `dist/bin/dispatch-mcp-shim.js`` → `straight into `dist/src/server.js``. Delete the `packages/envoy-plugin/src/dispatch-mcp.ts` code block and the sentence introducing it (the `defaultShimPath` example), keeping the surrounding lesson about resolving sibling artifacts in packed vs source layouts if it still has another example; if that example was its only illustration, keep one sentence: `pi-envoy resolves its bundled skills the same way (`resolveSkillsDirectory` in `packages/pi-envoy/extensions/envoy.ts`): probe the packed location first, then the repo layout.`
+In the envoy-plugin `package.json` snippet, the `build` line becomes `"build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*'",`; in the prose after it, `straight into `dist/src/server.js` and `dist/bin/dispatch-mcp-shim.js`` → `straight into `dist/src/server.js``. Delete the `packages/envoy-plugin/src/dispatch-mcp.ts` code block and the sentence introducing it (the `defaultShimPath` example), keeping the surrounding lesson about resolving sibling artifacts in packed vs source layouts if it still has another example; if that example was its only illustration, keep one sentence: `pi-envoy resolves its bundled skills the same way (`resolveSkillsDirectory` in `packages/pi-envoy/extensions/envoy.ts`): probe the packed location first, then the repo layout.`
 
 - [ ] **Step 6: `packages/envoy/cmd/dispatch/AGENTS.md`**
 

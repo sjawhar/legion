@@ -1,5 +1,5 @@
 ---
-title: "Go MCP SDK handler context is the initialize request's — per-call auth must read req.Extra.Header, and a shim that never re-initializes needs a stateless server"
+title: "Go MCP SDK handler context is the initialize request's — per-call auth must read req.Extra.Header, and a client that never re-initializes needs a stateless server"
 category: envoy
 tags:
   - dispatch
@@ -91,8 +91,10 @@ go-sdk v1.6.1, `mcp/streamable.go`:
   message of every POST. `req.Extra.Header` is the supported per-request surface.
 - `:301` in stateless mode an unknown `Mcp-Session-Id` is not rejected; `:426–472` a
   temporary session with default initialized state is built per request and closed after.
-  The dispatch shim only POSTs and the tool makes no server→client requests, which is all
-  stateless mode gives up.
+  Every client — today the `dispatch` tool inside each host plugin, via
+  `packages/envoy-client/src/dispatch-client.ts` — sends one `tools/call` POST per
+  invocation with a token minted for that call and holds no session, which is all stateless
+  mode gives up.
 
 Proven against the production container before the fix: initialize with a garbage bearer +
 call with a valid one → 401 (the garbage init token was used); initialize valid + call
@@ -121,7 +123,7 @@ and a `tools/call` carrying a session id the server has never seen is served rat
 
 ## Related
 
-- `docs/solutions/envoy/dispatch-thread-provenance.md` — why the shim, not the server, owns
-  session context; the same "server stays stateless" decision this fix completes.
-- `docs/solutions/envoy/omp-extension-mcp-mounting.md` — how the shim is mounted into every
-  OMP session (the reason shims live for days and outlive both tokens and server restarts).
+- `docs/solutions/envoy/dispatch-thread-provenance.md` — why the calling plugin, not the
+  server, owns session context; the same "server stays stateless" decision this fix completes.
+- `docs/superpowers/specs/2026-09-05-dispatch-conversations-design.md` §7 — the protocol
+  note that records the one-stateless-request-per-call contract so it is not reintroduced.

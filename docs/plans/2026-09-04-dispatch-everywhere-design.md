@@ -62,36 +62,32 @@ dispatch({
 })
 ```
 
-Repo resolution, first hit wins: qualified `parent` → `repo` → error. The shim (below)
+Repo resolution, first hit wins: qualified `parent` → `repo` → error. Each host plugin
 fills `repo` from cwd before the call reaches the server, so the server itself never
 guesses. Bare-number `parent` resolves against the resolved repo.
 
-Issue body: frontmatter marker, `## Context`, `## Question`. Marker gains `origin`.
+Issue body: metadata marker (an HTML comment — encoding per the 2026-09-05 spec §2),
+`## Context`, `## Question`. Marker gains `origin`.
 Request id (dedupe) covers repo + subject + context + question + urgency + ask.
 
 `dispatch.defaultRepo` and `dispatch.appClientId` are removed from the config contract
 (Go loader, `envoy-client/src/dispatch-config.ts`, `envoy-plugin/src/config/schema.ts`)
 and from `~/.config/opencode/envoy.json`.
 
-### 2. Shim (`packages/envoy-client/src/dispatch-mcp-shim.ts`)
+### 2. Session-side argument resolution — superseded 2026-09-05
 
-The shim runs in the session cwd and is the path shared by all three hosts (OMP,
-OpenCode, Claude), so it owns cwd knowledge. On `tools/call` for `dispatch`, when the
-arguments lack `repo` and a qualified `parent`, it injects:
-
-- `repo`: from `jj git remote list` (`origin`), falling back to `git remote get-url origin`;
-  GitHub `owner/name` parsed from the URL. `origin` is the user's fork, never `upstream`.
-- `origin`: `{ host: omp|opencode|claude, machine, cwd, tmux: "session:window.pane" }`
-  from the environment. Best effort; absent fields are omitted.
-
-No remote and no `repo` → the shim returns a tool error naming the cwd and the fix.
-Writer identity is unchanged: whatever `gh auth token` resolves for that cwd.
+Superseded by `docs/superpowers/specs/2026-09-05-dispatch-conversations-design.md` §3 and
+§6. The stdio shim this section described is deleted; the cwd → `repo` resolution and the
+`origin` block now run inside each host plugin's native `dispatch` tool
+(`packages/envoy-client/src/dispatch-call.ts`), which also records the session's id and
+title. Repo resolution (`origin` remote, never `upstream`; explicit `repo` or a qualified
+`parent` wins) and writer identity (`gh auth token` in the session cwd) are unchanged.
 
 ### 3. Dashboard (`packages/dispatch/web`)
 
 - **Discovery:** owner-scoped search replaces the manual watched-repos list:
   `is:issue is:open label:dispatch-thread user:<owner>` for every distinct account (user or
-  org) the signer's App installations cover, from `/user/installations`. The frontmatter
+  org) the signer's App installations cover, from `/user/installations`. The marker
   parse remains the authenticity filter. New repos need no configuration. SSE events
   trigger a refetch.
 - **Thread view:** origin line with a copyable `tmux select-window -t …`; `## Context` /
@@ -132,7 +128,7 @@ arguments. One pointer line in Sami's CLAUDE.md "Don't Outsource to the User".
 
 - Go: parent-less create, resolution precedence, marker round-trip with `origin`,
   `context`/`question` body rendering.
-- Shim: repo/origin injection for jj and git remotes, `upstream`-only ignored, no-remote
+- Plugins: repo/origin resolution for jj and git remotes, `upstream`-only ignored, no-remote
   error, explicit args untouched.
 - SPA: owner-scoped query, origin rendering, marker parse with new keys.
 - E2E on the devbox: dispatch from a private-repo cwd → dashboard shows it → reply from the

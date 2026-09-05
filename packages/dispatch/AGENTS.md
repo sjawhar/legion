@@ -5,8 +5,8 @@ by Legion and Envoy workflows.
 
 ## Overview
 
-This package now contains only the Vite SPA. The HTTP backend has been moved
-to a Go binary in the `envoy` package:
+This package contains only the Vite SPA. The HTTP backend is a Go binary in
+the `envoy` package:
 
 | Layer                | Location                                                |
 | -------------------- | ------------------------------------------------------- |
@@ -40,3 +40,18 @@ for every distinct installation owner (user or org) the App is installed on
 and the signer can see. A new repo under an already-installed owner needs no
 configuration; a user with zero visible installations sees an explicit error
 state instead of an empty sidebar.
+
+## Conversations
+
+A thread's questions come from the issue body and from every `dispatch:ask` follow-up
+comment (`web/src/asks.ts`); an ask is open until an answer comment names its `askId`
+(a legacy answer without `forAsk` settles the body's asks by index). The detail view renders
+one form per open ask (`#detail-ask-forms`) and each answer beneath the question it settles;
+the sidebar's `needs you` badge counts open asks from the last 30 comments returned by the
+search query, or from the full comment list once loaded.
+
+Painting never rebuilds the page: `web/src/main.ts` patches regions by id and `web/src/dom.ts`
+reconciles ask forms by `askId`, so the reply textarea and half-filled forms survive events.
+GitHub references in rendered markdown are linkified and unfurled to titles through the REST
+proxy (`web/src/unfurl.ts`). Browser behaviour is covered by `bun run e2e`
+(`e2e/`, Playwright against a fixture backend that speaks the service's HTTP contract).

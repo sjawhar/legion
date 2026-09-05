@@ -23,8 +23,8 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 
 - Tool descriptions must be self-describing enough that agents can infer correct topic formats.
 - Slack examples must use real `team_id` values, not workspace slugs.
-- This package owns the session-registry/port-backfill behavior now; do not split that back into a second plugin casually.
-- Keep the plugin source-of-truth here even if a dotfiles shim is still used for rollout convenience.
+- This package owns the session-registry/port-backfill behavior; do not split that back into a second plugin casually.
+- Keep the plugin source-of-truth here even if a dotfiles wrapper is used for rollout convenience.
 
 ## Topic reminders
 

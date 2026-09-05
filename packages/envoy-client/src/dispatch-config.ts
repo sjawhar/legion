@@ -7,10 +7,10 @@ import { messageFor } from "./errors";
 /** Default dispatch server base URL, matching the Go server's listen address. */
 const DEFAULT_SERVER_URL = "http://localhost:8766";
 
-// Mirrors the shared envoy.json contract (packages/envoy-plugin/src/config/
-// schema.ts and the Go loader in packages/envoy/internal/dispatch/config):
+// Mirrors the shared envoy.json contract (the Go loader in
+// packages/envoy/internal/dispatch/config, which the dispatch server reads):
 // strict dispatch keys, URL-shaped serverUrl, tolerant top level. A file the
-// other loaders reject as invalid must not enable the dispatch tool either.
+// Go loader rejects as invalid must not enable the dispatch tool either.
 const EnvoyFileSchema = z.looseObject({
   $schema: z.string().optional(),
   natsUrls: z.array(z.string()).optional(),
@@ -74,7 +74,7 @@ export interface DispatchConfigResolution {
  * shared envoy.json opt-in decides — user config
  * (~/.config/opencode/envoy.json) shallow-merged with repo config
  * (<cwd>/.opencode/envoy.json, repo keys win), the same files the dispatch
- * server and the OpenCode plugin read, validated against the same contract.
+ * server reads, validated against the same contract.
  * `url` is null when dispatch is not enabled or a config file is invalid;
  * `error` names the invalid file and key when that is the cause.
  */

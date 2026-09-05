@@ -25,7 +25,7 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 
 ## Critical conventions
 
-- Register schemas through the injected `pi.zod`, or as plain JSON Schema (the path OMP's MCP tools take — `dispatch` serialises the shared contract's zod shape this way). OMP rejects schema objects built from another Zod instance.
+- Register schemas through the injected `pi.zod`, or as plain JSON Schema (the path OMP's MCP tools take — `dispatch` serialises the shared contract's zod shape this way). A schema object built from another Zod instance is not rejected: OMP misreads it as JSON Schema, silently, and the model sees a wrong parameter shape.
 - Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.

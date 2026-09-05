@@ -203,8 +203,8 @@ New section, **Writing for the reader**, with rules the tool enforces where it c
   identifiers (eval-set ids, lane names, hashes) unless the question is about them. GitHub
   references may be bare — the dashboard unfurls them.
 - Structure over paragraphs: `context` is at most three short paragraphs or a bullet list,
-  one idea each; `question` is current state → desired state → options with one-line
-  tradeoffs → recommendation, as a list.
+  one idea each; `question` is current state → desired state → your recommendation and
+  why, as a list; options go in `ask`.
 - Options are buttons. If you are offering choices, put them in `ask`; never enumerate them
   in prose.
 - Length caps (1200 / 800) and what to do when you hit them: split the question, or move

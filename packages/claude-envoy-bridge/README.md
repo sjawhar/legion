@@ -13,8 +13,9 @@ integration to deliver Envoy traffic into a live session, including idle session
 - `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the
   shared Envoy messaging contract plus `dispatch`, which raises a durable question to Sami as a
   GitHub issue thread or continues one. `dispatch` is offered only when `dispatch.enabled` is set
-  in `envoy.json`; it fills the target repo from the session's working directory and stamps the
-  thread with the Claude session id.
+  in `envoy.json` or `DISPATCH_MCP_URL` names the service endpoint; each call fills the target
+  repo from the session's working directory, mints its GitHub token with `gh auth token` there,
+  and stamps the thread with the Claude session id.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tool itself.
 
