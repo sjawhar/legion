@@ -17,6 +17,13 @@ integration to deliver Envoy traffic into a live session, including idle session
   repo from the session's working directory, mints its GitHub token with `gh auth token` there,
   stamps the thread with the Claude session id, and subscribes the session to the thread's
   topic so the reply routes back through the monitor as a steer.
+- The MCP server is also the session's topic consumer. Envoy pushes nothing to a session that
+  consumes NATS itself, and the monitor listens only on `notifications.agent.<session-id>`, so
+  for every topic the session follows — a dispatch thread, or anything passed to
+  `envoy_subscribe` — the server subscribes NATS (`ENVOY_NATS_URL`, the monitor's broker) and
+  republishes each envelope on the session's agent subject, where the monitor renders it.
+  `envoy_unsubscribe` stops the forwarding; closing the session drains the connection. Without a
+  broker address the registry interest is still recorded and the gap is noted once on stderr.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tool itself.
 

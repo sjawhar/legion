@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
@@ -144,9 +144,16 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
   // ENVOY_SESSION_ID outranks CLAUDE_CODE_SESSION_ID; a runner exporting it must not leak in.
   delete process.env["ENVOY_SESSION_ID"]
+  // No broker: the registry call still happens and the gap is reported, never a tool error.
+  delete process.env["ENVOY_NATS_URL"]
   process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
+  const stderr: string[] = []
+  const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    stderr.push(String(chunk))
+    return true
+  })
   try {
     const module = await loadServer("dispatch-call")
 
@@ -177,7 +184,11 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
         topics: ["notifications.github.acme-org.example-repo.issue.3.>"],
       },
     ])
+    expect(stderr).toEqual([
+      "envoy-mcp: ENVOY_NATS_URL is not set; messages on subscribed topics will not reach this session\n",
+    ])
   } finally {
+    stderrSpy.mockRestore()
     service.stop(true)
     envoy.server.stop(true)
     process.env = { ...previous }
@@ -250,6 +261,7 @@ test("a failed auto-subscribe does not fail the dispatch", async () => {
   const previous = { ...process.env }
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
   delete process.env["ENVOY_SESSION_ID"]
+  delete process.env["ENVOY_NATS_URL"]
   process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`

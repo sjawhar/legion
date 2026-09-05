@@ -16,8 +16,10 @@ import { createEnvoyClient } from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { connect } from "nats"
 import { z } from "zod"
 import { monitorSessionId } from "./monitor-identity"
+import { createThreadForwarder, type ThreadForwarder } from "./thread-forwarder"
 
 // Claude Code has no native tool API, so dispatch is a tool of this MCP
 // server; it runs with the session identity the monitor uses, which is what
@@ -57,6 +59,53 @@ function mcpResult(value: unknown): {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
 
+// One NATS connection per server process, opened by the first topic a tool
+// follows, with the monitor's connect options. Without a broker address the
+// registry interest is still recorded and the gap reported once on stderr;
+// no tool call fails for it.
+let forwarder: Promise<ThreadForwarder | null> | undefined
+let shuttingDown = false
+
+async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder | null> {
+  const natsUrl = process.env["ENVOY_NATS_URL"]
+  if (natsUrl === undefined || natsUrl.trim().length === 0) {
+    process.stderr.write(
+      "envoy-mcp: ENVOY_NATS_URL is not set; messages on subscribed topics will not reach this session\n",
+    )
+    return null
+  }
+  try {
+    const connection = await connect({ servers: natsUrl, name: `claude-envoy-mcp-${sessionId}` })
+    return createThreadForwarder(connection, sessionId)
+  } catch (error) {
+    // Not cached: the next tool call tries the broker again.
+    forwarder = undefined
+    process.stderr.write(
+      `envoy-mcp: cannot reach ${natsUrl}; messages on subscribed topics will not reach this session — ${error instanceof Error ? error.message : String(error)}\n`,
+    )
+    return null
+  }
+}
+
+async function followTopics(sessionId: string, topics: readonly string[]): Promise<void> {
+  if (shuttingDown) return
+  forwarder ??= openThreadForwarder(sessionId)
+  const active = await forwarder
+  if (active === null || shuttingDown) return
+  for (const topic of topics) active.follow(topic)
+}
+
+// Claude Code ends the session by closing stdin. The stdio transport does not
+// watch for that, and an open NATS socket would otherwise keep this process
+// alive after the session is gone. Only the broker leg is torn down here: a
+// response still in flight is written to stdout as before, and the process
+// exits once nothing else is pending.
+async function shutdownForwarder(): Promise<void> {
+  shuttingDown = true
+  const active = await forwarder
+  await active?.close()
+}
+
 export async function executeEnvoyTool(name: string, input: unknown): Promise<unknown> {
   // The identity the monitor subscribes under, so replies and threads name one session.
   const sessionId = monitorSessionId({
@@ -82,9 +131,11 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       { serviceUrl: dispatchConfig.url, getToken: ghTokenGetter(cwd) },
       prepared,
     )
-    // The human answers on the GitHub issue; the session hears it only if it
-    // is subscribed to the thread's topic. The thread exists either way, so a
-    // failed subscribe is reported, not surfaced as a failed dispatch.
+    // The human answers on the GitHub issue. The registry interest tells Envoy
+    // this session is listening; the forwarder is what actually carries the
+    // thread's envelopes to the session's agent subject, where the monitor
+    // renders them. The thread exists either way, so a failure on this leg is
+    // reported on stderr, not surfaced as a failed dispatch.
     const topic = dispatchSubscriptionTopic(name, JSON.stringify(result))
     if (topic !== null) {
       try {
@@ -97,6 +148,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
           driving: true,
           selfSubscribed: true,
         })
+        await followTopics(sessionId, [topic])
       } catch (error) {
         process.stderr.write(
           `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${error instanceof Error ? error.message : String(error)}\n`,
@@ -129,7 +181,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     }
     case EnvoyToolOperation.subscribe: {
       const args = z.object(spec.arguments).parse(input)
-      return client.subscribe({
+      const interest = await client.subscribe({
         sessionID: sessionId,
         directory: process.cwd(),
         topics: args.topics,
@@ -138,10 +190,13 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
         driving: true,
         selfSubscribed: true,
       })
+      await followTopics(sessionId, args.topics)
+      return interest
     }
     case EnvoyToolOperation.unsubscribe: {
       const args = z.object(spec.arguments).parse(input)
       await client.unsubscribe({ sessionID: sessionId, topics: args.topics ?? [] })
+      if (forwarder) await (await forwarder)?.unfollow(args.topics ?? [])
       return undefined
     }
     case EnvoyToolOperation.listInterests:
@@ -185,6 +240,10 @@ export async function runEnvoyMcpServer(): Promise<void> {
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
     mcpResult(await executeEnvoyTool(request.params.name, request.params.arguments)),
   )
+
+  process.stdin.once("end", () => {
+    void shutdownForwarder()
+  })
 
   await server.connect(new StdioServerTransport())
 }
