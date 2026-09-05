@@ -103,6 +103,8 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
   await writeFile(`${ghDir}/gh`, "#!/bin/sh\necho test-token\n", { mode: 0o755 })
   const previous = { ...process.env }
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  // ENVOY_SESSION_ID outranks CLAUDE_CODE_SESSION_ID; a runner exporting it must not leak in.
+  delete process.env["ENVOY_SESSION_ID"]
   process.env["DISPATCH_MCP_URL"] = `http://127.0.0.1:${service.port}/mcp`
   process.env["PATH"] = `${ghDir}:${process.env["PATH"] ?? ""}`
   try {
@@ -147,8 +149,10 @@ test("uses the shared transport for unsubscribe requests", async () => {
     },
   })
   const previousSessionId = process.env["CLAUDE_CODE_SESSION_ID"]
+  const previousOverride = process.env["ENVOY_SESSION_ID"]
   const previousEnvoyUrl = process.env["ENVOY_URL"]
   process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
   process.env["ENVOY_URL"] = `http://127.0.0.1:${server.port}`
   const module = await import("../src/envoy-mcp-server")
   const execute = Reflect.get(module, "executeEnvoyTool")
@@ -169,6 +173,8 @@ test("uses the shared transport for unsubscribe requests", async () => {
     server.stop(true)
     if (previousSessionId === undefined) delete process.env["CLAUDE_CODE_SESSION_ID"]
     else process.env["CLAUDE_CODE_SESSION_ID"] = previousSessionId
+    if (previousOverride === undefined) delete process.env["ENVOY_SESSION_ID"]
+    else process.env["ENVOY_SESSION_ID"] = previousOverride
     if (previousEnvoyUrl === undefined) delete process.env["ENVOY_URL"]
     else process.env["ENVOY_URL"] = previousEnvoyUrl
   }
