@@ -27,8 +27,7 @@ test("rejects native delivery when Claude Code does not provide messaging creden
   const candidate = Reflect.get(module, "nativeMessagingCredentials")
 
   // when
-  const invoke = (): unknown =>
-    typeof candidate === "function" ? candidate({}) : undefined
+  const invoke = (): unknown => (typeof candidate === "function" ? candidate({}) : undefined)
 
   // then
   expect(invoke).toThrow("Claude Code native messaging is unavailable")

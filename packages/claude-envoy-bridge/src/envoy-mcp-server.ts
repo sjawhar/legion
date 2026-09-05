@@ -60,11 +60,17 @@ function mcpResult(value: unknown): {
 }
 
 // One NATS connection per server process, opened by the first topic a tool
-// follows, with the monitor's connect options. Without a broker address the
-// registry interest is still recorded and the gap reported once on stderr;
-// no tool call fails for it.
+// follows, with pi-envoy's connect options: nats.js rides out broker outages
+// on its own and re-subscribes when the broker returns. A connection it has
+// given up on for good is replaced by the next follow, carrying every followed
+// topic over. Without a broker address the registry interest is still recorded
+// and the gap reported once on stderr; nothing on this leg fails a tool call.
 let forwarder: Promise<ThreadForwarder | null> | undefined
 let shuttingDown = false
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder | null> {
   const natsUrl = process.env["ENVOY_NATS_URL"]
@@ -75,13 +81,19 @@ async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder |
     return null
   }
   try {
-    const connection = await connect({ servers: natsUrl, name: `claude-envoy-mcp-${sessionId}` })
+    const connection = await connect({
+      servers: natsUrl,
+      name: `claude-envoy-mcp-${sessionId}`,
+      reconnect: true,
+      maxReconnectAttempts: -1,
+      reconnectTimeWait: 2_000,
+    })
     return createThreadForwarder(connection, sessionId)
   } catch (error) {
     // Not cached: the next tool call tries the broker again.
     forwarder = undefined
     process.stderr.write(
-      `envoy-mcp: cannot reach ${natsUrl}; messages on subscribed topics will not reach this session — ${error instanceof Error ? error.message : String(error)}\n`,
+      `envoy-mcp: cannot reach ${natsUrl}; messages on subscribed topics will not reach this session — ${describeError(error)}\n`,
     )
     return null
   }
@@ -89,10 +101,29 @@ async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder |
 
 async function followTopics(sessionId: string, topics: readonly string[]): Promise<void> {
   if (shuttingDown) return
-  forwarder ??= openThreadForwarder(sessionId)
-  const active = await forwarder
-  if (active === null || shuttingDown) return
-  for (const topic of topics) active.follow(topic)
+  try {
+    forwarder ??= openThreadForwarder(sessionId)
+    const attempt = forwarder
+    let active = await attempt
+    let pending = topics
+    if (active?.isClosed()) {
+      // The first caller to notice the closed connection replaces it; the
+      // topics it carried come along, since the registry still lists them.
+      pending = [...active.topics(), ...topics]
+      process.stderr.write(
+        `envoy-mcp: the broker connection closed; reopening it for ${pending.length} topic(s)\n`,
+      )
+      if (forwarder === attempt) forwarder = undefined
+      forwarder ??= openThreadForwarder(sessionId)
+      active = await forwarder
+    }
+    if (active === null || shuttingDown) return
+    for (const topic of pending) active.follow(topic)
+  } catch (error) {
+    process.stderr.write(
+      `envoy-mcp: cannot forward ${topics.join(", ")} to ${sessionId} — ${describeError(error)}\n`,
+    )
+  }
 }
 
 // Claude Code ends the session by closing stdin. The stdio transport does not
@@ -151,7 +182,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
         await followTopics(sessionId, [topic])
       } catch (error) {
         process.stderr.write(
-          `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${error instanceof Error ? error.message : String(error)}\n`,
+          `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${describeError(error)}\n`,
         )
       }
     }
@@ -195,9 +226,13 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     }
     case EnvoyToolOperation.unsubscribe: {
       const args = z.object(spec.arguments).parse(input)
-      await client.unsubscribe({ sessionID: sessionId, topics: args.topics ?? [] })
-      if (forwarder) await (await forwarder)?.unfollow(args.topics ?? [])
-      return undefined
+      const topics = args.topics ?? []
+      await client.unsubscribe({ sessionID: sessionId, topics })
+      const active = forwarder === undefined ? null : await forwarder
+      // An empty list means everything; name what was actually being forwarded.
+      const removed = topics.length === 0 ? (active?.topics() ?? []) : topics
+      await active?.unfollow(topics)
+      return { removed }
     }
     case EnvoyToolOperation.listInterests:
       z.object(spec.arguments).parse(input)
