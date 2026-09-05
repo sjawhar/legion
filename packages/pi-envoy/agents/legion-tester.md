@@ -1,7 +1,7 @@
 ---
 name: legion-tester
 description: Verify a Legion issue against its acceptance criteria and return reproducible evidence or actionable failures.
-tools: ["read", "edit", "write", "bash", "task", "hub", "mcp__dispatch_dispatch"]
+tools: ["read", "edit", "write", "bash", "task", "hub", "dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]

@@ -64,29 +64,25 @@ OMP at extension files it does not contain.
 
 ## Dispatch
 
-Every OMP session — Legion sessions included — gets the `dispatch` MCP tool the way
-OpenCode sessions do: the shared `@legion/envoy-client` shim mounts as a stdio MCP server,
-and it serves when `dispatch.enabled` is true in the shared envoy.json
+Every OMP session — Legion sessions included — gets a native `dispatch` tool from this
+extension when `dispatch.enabled` is true in the shared envoy.json
 (`~/.config/opencode/envoy.json`, shallow-merged with `<cwd>/.opencode/envoy.json`) or
-`DISPATCH_MCP_URL` is set explicitly. The server URL comes from `dispatch.serverUrl`
-(default `http://localhost:8766`). Dispatch is how any agent — an interactive session or
-a headless Legion role — raises a durable question to the human: the thread lands as a
-GitHub issue in the session cwd's repo (or an explicit `repo`), carries the session's
-provenance, and shows up on the Dispatch dashboard. The `dispatch` skill (shipped in
-`skills/`) says when to use it. Replies route back to the asking session, which is
-auto-subscribed to the thread's GitHub topic; a Legion role's session survives kill/resume
-because Legion resurrection resumes the same OMP session file, so the reply still lands.
-Lifecycle and scope decisions still go through `hub` to the owning architect — Dispatch is
-for durable questions to the human, not for coordination between roles.
+`DISPATCH_MCP_URL` names a service endpoint explicitly. The service URL comes from
+`dispatch.serverUrl` (default `http://localhost:8766`). Dispatch is how any agent — an
+interactive session or a headless Legion role — raises a durable question to the human
+and keeps the conversation on one GitHub issue: `subject` opens a thread, `thread: N`
+continues one. Each call reads the session's id and title from OMP, resolves the cwd's
+GitHub repo, mints a GitHub token with `gh auth token` in the session cwd, and makes one
+stateless request to the dispatch service, which writes the issue or comment. The
+`dispatch` skill (shipped in `skills/`) says when and how to ask. Replies route back to the
+asking session, which is auto-subscribed to the thread's GitHub topic on every successful
+call; a Legion role's session survives kill/resume because Legion resurrection resumes the
+same OMP session file. Lifecycle and scope decisions still go through `hub` to the owning
+architect — Dispatch is for durable questions to the human, not for coordination between roles.
 
-No manual mount is needed: the package-root `.mcp.json` ships the server with the
-package, so any session that loads it (installed plugin, `--extension`, the Legion
-daemon's repo checkout) discovers `dispatch` automatically. The committed manifest
-runs `./bin/dispatch-mcp-shim.ts` from source; the release workflow points the
-published tarball at the self-contained `./dist/bin/dispatch-mcp-shim.js`. A
-same-named `dispatch` entry in `~/.omp/agent/mcp.json` would override the package
-mount — remove machine-local entries rather than maintaining both.
+The tool's model-facing schema is the shared contract's zod shape
+(`@legion/envoy-client/dispatch-contract`) serialised to JSON Schema, so OMP shows the model
+the same arguments and descriptions as every other host.
 
-The shim forwards newline-delimited JSON-RPC from stdin to the dispatch server's Streamable
-HTTP `/mcp` endpoint with a cached GitHub bearer from the user's `gh` shim. The
-bearer refreshes before expiry and retries once immediately after a 401 response.
+An invalid envoy.json disables the tool and the session is told why on start; a machine
+without dispatch configured has no `dispatch` tool at all.

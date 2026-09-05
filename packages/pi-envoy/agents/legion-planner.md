@@ -1,7 +1,7 @@
 ---
 name: legion-planner
 description: Produce an executable, acceptance-criteria-driven plan for one Legion issue in its shared workspace.
-tools: ["read", "edit", "write", "bash", "task", "hub", "mcp__dispatch_dispatch"]
+tools: ["read", "edit", "write", "bash", "task", "hub", "dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]

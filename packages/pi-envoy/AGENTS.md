@@ -20,12 +20,12 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch MCP mount | `.mcp.json`, `bin/dispatch-mcp-shim.ts` | Package-root mount OMP discovers for every session loading the package; release rewrites args to `dist/bin/dispatch-mcp-shim.js` (see docs/solutions/envoy/omp-extension-mcp-mounting.md) |
+| Dispatch tool | `extensions/envoy.ts` (`DISPATCH_PARAMETERS`, the `registerTool` block), `@legion/envoy-client/dispatch-*` | Native tool, gated on `resolveDispatchConfig`; reads session id/title from the tool context on every call; `tool_result` auto-subscribes the session to the thread |
 | Root session prompts | `roles/*.md` | Daemon `--append-system-prompt` sources; NOT OMP agents — `agents/` is scanned by OMP's agent discovery, which is why these live elsewhere |
 
 ## Critical conventions
 
-- Register schemas through the injected `pi.zod`; OMP rejects schemas built from another Zod instance.
+- Register schemas through the injected `pi.zod`, or as plain JSON Schema (the path OMP's MCP tools take — `dispatch` serialises the shared contract's zod shape this way). OMP rejects schema objects built from another Zod instance.
 - Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.

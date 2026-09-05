@@ -1,7 +1,7 @@
 ---
 name: legion-reviewer
 description: Review a Legion issue for correctness, regressions, and acceptance-criteria compliance, then enforce the final review gate.
-tools: ["read", "bash", "task", "hub", "mcp__dispatch_dispatch"]
+tools: ["read", "bash", "task", "hub", "dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]

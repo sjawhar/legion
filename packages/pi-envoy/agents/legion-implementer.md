@@ -1,7 +1,7 @@
 ---
 name: legion-implementer
 description: Implement one Legion issue end to end in the assigned shared jj workspace and provide evidence for its acceptance criteria.
-tools: ["read", "edit", "write", "bash", "task", "hub", "mcp__dispatch_dispatch"]
+tools: ["read", "edit", "write", "bash", "task", "hub", "dispatch"]
 spawns: ["oracle", "scout", "reviewer", "explore"]
 model: ["@task"]
 autoloadSkills: ["legion-worker"]
