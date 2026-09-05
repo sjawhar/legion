@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveDispatchMcpUrl } from "../dispatch-config";
+import { dispatchConfigError, resolveDispatchMcpUrl } from "../dispatch-config";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "dispatch-config-"));
@@ -73,5 +73,59 @@ describe("resolveDispatchMcpUrl", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "envoy.json"), "{");
     expect(resolveDispatchMcpUrl({}, { home, cwd: tempDir() })).toBe(null);
+  });
+});
+
+describe("dispatchConfigError", () => {
+  it("names the file and the removed defaultRepo key", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true, defaultRepo: "acme/widgets" } });
+    const error = dispatchConfigError({}, { home, cwd: tempDir() });
+    expect(error).toContain("envoy.json");
+    expect(error).toContain("dispatch.defaultRepo");
+  });
+
+  it("names the removed appClientId key", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true, appClientId: "Iv23liXYZ" } });
+    const error = dispatchConfigError({}, { home, cwd: tempDir() });
+    expect(error).toContain("dispatch.appClientId");
+  });
+
+  it("is null when dispatch is simply disabled, not an error", () => {
+    expect(dispatchConfigError({}, { home: tempDir(), cwd: tempDir() })).toBeNull();
+  });
+
+  it("is null when config is valid and enabled", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true } });
+    expect(dispatchConfigError({}, { home, cwd: tempDir() })).toBeNull();
+  });
+
+  it("is null when an explicit DISPATCH_MCP_URL bypasses config entirely", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true, defaultRepo: "acme/widgets" } });
+    const error = dispatchConfigError(
+      { DISPATCH_MCP_URL: "http://example.test/mcp" },
+      { home, cwd: tempDir() }
+    );
+    expect(error).toBeNull();
+  });
+
+  it("names a bad value on an otherwise-valid key", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true, serverUrl: "not a url" } });
+    const error = dispatchConfigError({}, { home, cwd: tempDir() });
+    expect(error).toContain("dispatch.serverUrl");
+  });
+
+  it("reports malformed JSON", () => {
+    const home = tempDir();
+    const dir = path.join(home, ".config", "opencode");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "envoy.json"), "{");
+    const error = dispatchConfigError({}, { home, cwd: tempDir() });
+    expect(error).toContain("envoy.json");
+    expect(error).toContain("JSON");
   });
 });

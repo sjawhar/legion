@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# The shared Dockerfile builds from the repo root: its bun stage bakes the
+# dispatch SPA and regenerates the Go contracts from the whole workspace.
+cd "$(dirname "$0")/../../.."
 
 TAG="${1:?Usage: build-push-images.sh <git-sha-tag>}"
 REGISTRY="${ENVOY_REGISTRY:?ENVOY_REGISTRY is required (e.g. ghcr.io/your-org/your-repo)}"
@@ -14,7 +16,7 @@ echo "=== Building envoy:${TAG} ==="
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t "${REGISTRY}/envoy:${TAG}" \
-  -f docker/Dockerfile \
+  -f packages/envoy/docker/Dockerfile \
   --push \
   .
 echo "=== Pushed ${REGISTRY}/envoy:${TAG} ==="

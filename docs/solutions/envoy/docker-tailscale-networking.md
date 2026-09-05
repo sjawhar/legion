@@ -26,11 +26,11 @@ symptoms:
 ## The Problem
 
 Containers running in Docker's default **bridge networking** mode use Docker's built-in DNS
-resolver, not the host's DNS stack. Tailscale MagicDNS hostnames (e.g., `sami-agents-mx`)
+resolver, not the host's DNS stack. Tailscale MagicDNS hostnames (e.g., `example-host-mx`)
 are only resolvable from the host's network namespace — bridge-networked containers can't
 see them.
 
-This caused a P0 bug where NATS cluster routes used MagicDNS hostnames (`nats://sami-agents-mx:6222`).
+This caused a P0 bug where NATS cluster routes used MagicDNS hostnames (`nats://example-host-mx:6222`).
 The NATS containers couldn't resolve peer hostnames, so the cluster never formed.
 
 ## The Two Address Spaces
@@ -110,6 +110,6 @@ machine's MagicDNS name (= `machine.name` in Pulumi config).
   `machine.name`. That Pulumi project has been moved out of this repo, but the
   pattern is preserved.
 - **Compose path:** `render-nats-peer.sh` requires `NATS_HOSTNAME` env var
-  (e.g., `NATS_HOSTNAME=sami-agents-mx`).
+  (e.g., `NATS_HOSTNAME=example-host-mx`).
 
 See issue #332 for the original bug report.

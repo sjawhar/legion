@@ -1,5 +1,5 @@
 // Package nats subscribes to the Envoy GitHub topics and forwards each
-// event to the SSE hub, filtered per-client by watched repos.
+// event to the SSE hub, filtered per-client by installation owner.
 //
 // Subject shape (from envoy webhook publishers):
 //
@@ -7,10 +7,10 @@
 //
 // We subscribe to notifications.github.> (everything), extract <owner>/<repo>
 // from each message, and call hub.BroadcastRepo(slug, …). The hub then
-// fans out only to clients whose watched-repos set contains that slug.
+// fans out only to clients whose owner set covers that slug's account.
 //
-// Filtering at the hub keeps the consumer agnostic of who's watching what —
-// users add/remove repos in their dashboard without us needing to resubscribe
+// Filtering at the hub keeps the consumer agnostic of who can see what —
+// a user's App installations change without us needing to resubscribe
 // at the NATS layer.
 package nats
 
@@ -42,7 +42,7 @@ func Connect(urls []string) (*natsclient.Conn, error) {
 
 // SubscribeGithub subscribes to every notifications.github.* topic and
 // forwards messages as "github_event" SSE broadcasts, filtered per-client
-// by watched-repos.
+// by installation owner.
 func SubscribeGithub(ctx context.Context, nc *natsclient.Conn, hub *sse.Hub) (*natsclient.Subscription, error) {
 	const subject = "notifications.github.>"
 	sub, err := nc.Subscribe(subject, func(msg *natsclient.Msg) {
@@ -82,10 +82,10 @@ func SubscribeGithub(ctx context.Context, nc *natsclient.Conn, hub *sse.Hub) (*n
 func repoFromSubject(subject string) string {
 	parts := strings.Split(subject, ".")
 	const (
-		prefixLen  = 2 // "notifications.github"
-		ownerIdx   = 2
-		repoIdx    = 3
-		minParts   = 4
+		prefixLen = 2 // "notifications.github"
+		ownerIdx  = 2
+		repoIdx   = 3
+		minParts  = 4
 	)
 	if len(parts) < minParts {
 		return ""

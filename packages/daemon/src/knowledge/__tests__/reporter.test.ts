@@ -19,7 +19,7 @@ const report: ConsolidationReportLike = {
       path: "knowledge/promoted.md",
     },
   ],
-  legionId: "trajectory-labs/240",
+  legionId: "example-org/240",
   logPath: "/tmp/learning-feedback.jsonl",
   statusMutations: [],
   warnings: ["index warning"],
@@ -43,7 +43,7 @@ describe("formatConsolidationReportJson", () => {
       warnings: string[];
     };
 
-    expect(parsed.legionId).toBe("trajectory-labs/240");
+    expect(parsed.legionId).toBe("example-org/240");
     expect(parsed.warnings).toEqual(["index warning"]);
   });
 });

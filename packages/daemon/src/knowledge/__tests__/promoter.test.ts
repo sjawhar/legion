@@ -50,7 +50,7 @@ afterEach(async () => {
 
 describe("sanitizeEntryId", () => {
   it("replaces non-alphanumeric characters with dashes", () => {
-    expect(sanitizeEntryId("trajectory-labs/240")).toBe("trajectory-labs-240");
+    expect(sanitizeEntryId("example-org/240")).toBe("example-org-240");
     expect(sanitizeEntryId("sjawhar-legion-583")).toBe("sjawhar-legion-583");
     expect(sanitizeEntryId("foo/bar.baz")).toBe("foo-bar-baz");
   });

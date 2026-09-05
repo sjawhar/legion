@@ -75,7 +75,7 @@ describe("consolidateKnowledge", () => {
   it("returns categorized dry-run stats for promotable learnings", async () => {
     const workspaceRoot = await makeTempDir();
     const report = await consolidateKnowledge({
-      legionId: "trajectory-labs/240",
+      legionId: "example-org/240",
       workspaceRoot,
       apply: false,
       preCollectedIssues: [
@@ -119,7 +119,7 @@ describe("consolidateKnowledge", () => {
     const learningPath = await writeLearningFile(repoRoot, "knowledge/review.md");
 
     const report = await consolidateKnowledge({
-      legionId: "trajectory-labs/240",
+      legionId: "example-org/240",
       workspaceRoot: repoRoot,
       repoRoot,
       apply: true,
@@ -182,7 +182,7 @@ describe("consolidateKnowledge", () => {
     ];
 
     const firstReport = await consolidateKnowledge({
-      legionId: "trajectory-labs/240",
+      legionId: "example-org/240",
       workspaceRoot: repoRoot,
       repoRoot,
       apply: true,
@@ -192,7 +192,7 @@ describe("consolidateKnowledge", () => {
       now: new Date("2026-04-14T00:00:00.000Z"),
     });
     const secondReport = await consolidateKnowledge({
-      legionId: "trajectory-labs/240",
+      legionId: "example-org/240",
       workspaceRoot: repoRoot,
       repoRoot,
       apply: true,
@@ -217,7 +217,7 @@ describe("consolidateKnowledge", () => {
     await writeFile(path.join(indexDir, "bad.json"), '{"version":"oops"}');
 
     const report = await consolidateKnowledge({
-      legionId: "trajectory-labs/240",
+      legionId: "example-org/240",
       workspaceRoot: repoRoot,
       repoRoot,
       apply: true,

@@ -2,7 +2,7 @@
 
 Go binary serving the Dispatch SPA, GitHub OAuth web flow + REST/GraphQL
 proxy, an SSE stream, an MCP Streamable HTTP endpoint, and per-user
-watched-repos state.
+addressed-thread state.
 
 See `README.md` next to this file for the operator setup checklist (creating
 the Envoy GitHub App, dropping `app.json` in place, installing on orgs).
@@ -16,13 +16,13 @@ This file is the **agent-facing** description of the code.
 | `/auth/callback`                              | GET     | none (state token)           | Exchange code, persist user, set session cookie  |
 | `/auth/logout`                                | POST    | dsession cookie              | Remove user record + clear cookie                |
 | `/auth/whoami`                                | GET     | dsession cookie              | Return logged-in GitHub login                    |
-| `/api/events`                                 | GET     | dsession cookie              | SSE stream filtered by user's watched-repos      |
+| `/api/events`                                 | GET     | dsession cookie              | SSE stream scoped to the user's App-installation owners |
 | `/api/github/rest/...`                        | any     | dsession cookie              | Proxy to GitHub REST (per-user, auto-refresh)    |
 | `/api/github/graphql`                         | POST    | dsession cookie              | Proxy to GitHub GraphQL (per-user, auto-refresh) |
 | `/api/installations`                          | GET     | dsession cookie              | Proxy `/user/installations`                      |
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
-| `/api/view`                                   | GET     | dsession cookie              | Return user's watched-repos                      |
-| `/api/view`                                   | PATCH   | dsession cookie              | Replace user's watched-repos list                |
+| `/api/view`                                   | GET     | dsession cookie              | Return user's addressed-threads map              |
+| `/api/view`                                   | PATCH   | dsession cookie              | Replace user's addressed-threads map             |
 | `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `dispatch` tool            |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist/`           |
@@ -50,20 +50,24 @@ The same Envoy App serves both surfaces. Installation tokens are scoped by
 installation; user-to-server tokens are scoped by what the user authorized.
 Both inherit the App's permissions.
 
-## Multi-user / multi-repo
+## Multi-user, owner-scoped discovery
 
 Each authenticated user has:
 
 - A `Tokens` struct (access + refresh + expiries + login)
-- A `WatchedRepos []string` list of `<owner>/<repo>` slugs
+- An `Addressed` map of `<owner>/<repo>#<number>` → the `updatedAt` at the
+  moment they marked the thread addressed
 
 All written to `users/<login>.json` (mode 0600, parent dir 0700).
 
-The SSE hub fans out GitHub events to clients whose `WatchedRepos` set
-contains the event's repo. Repo is derived from the NATS subject
-(`notifications.github.<owner>.<repo>.…`). Empty watched set → no
-events. Operators don't pre-configure which repos dispatch covers; users
-add their own from the dashboard.
+There is no watched-repos list. `/api/events` calls `/user/installations`
+server-side (`githubapi.InstallationOwners`) and registers the SSE client with
+the set of GitHub account logins (users/orgs) the caller's App
+installations cover. The SSE hub fans out GitHub events to clients whose
+owner set contains the event's repo owner. Repo is derived from the NATS
+subject (`notifications.github.<owner>.<repo>.…`). Empty owner set → no
+events. Operators don't pre-configure which repos or owners dispatch
+covers — it's whatever the App is installed on.
 
 The NATS consumer subscribes to `notifications.github.>` (broader than the
 old single-repo subscription); filtering happens at the SSE-fanout layer.
@@ -75,12 +79,18 @@ the `Authorization: Bearer` header and stashes it in `context.Context`. The
 `dispatch` tool handler reads it back and builds a fresh `*github.Client`
 for each call. No per-instance state, no cached tokens.
 
-The tool's `parent` argument accepts:
+The tool's repo resolution, first hit wins:
 
-- `42` or `42#<commentId>` — bare number form, uses `dispatch.defaultRepo`
-- `<owner>/<repo>#42` — fully qualified, overrides the default
+- A qualified `parent` (`<owner>/<repo>#42`) names its own repo, overriding
+  `repo`.
+- Otherwise the `repo` argument is used. The MCP shim fills it from the
+  calling session's working directory when it's a GitHub repo.
+- Neither present → the tool errors: `no repo: pass repo=owner/name (the
+  shim fills it from the working directory when one is a GitHub repo)`.
 
-See `core/parent.go` for the regex.
+A bare-number `parent` (`42` or `42#<commentId>`) resolves against
+whichever repo the rules above pick. See `core/parent.go` for the regex and
+`core/thread.go`'s `CreateThread` for the resolution order.
 
 ## Marker format
 
@@ -91,25 +101,36 @@ writer (`core/markers.go`) and the dashboard reader
 (`packages/dispatch/web/src/markers.ts`) implement this identically and must
 stay byte-compatible.
 
-- **Thread meta** (issue body) — `urgency`, `requestId`, optional `ask`
-  (`QuestionInfo[]` as raw YAML):
+- **Thread meta** (issue body) — `urgency`, `requestId`, optional `origin`
+  (`Origin` — `host`/`machine`/`cwd`/`tmux`, each omitted when empty),
+  optional `ask` (`QuestionInfo[]` as raw YAML), then `## Context` and
+  `## Question` sections:
 
   ```
   ---
   urgency: med
   requestId: <16-hex>
+  origin:
+    host: omp
+    cwd: /home/ubuntu/legion
   ---
 
   **<subject>**
 
-  <body>
+  ## Context
+
+  <context>
+
+  ## Question
+
+  <question>
   ```
 
 - **Urgency change** (comment) — `kind: urgency`, `urgency: <level>`; latest wins.
 - **Answer** (comment) — `kind: answer`, `forThread: <n>`,
   `answers: QuestionAnswer[]`.
 
-Idempotency: `requestId = sha256(parent|subject|body|urgency|ask)[:16]`
+Idempotency: `requestId = sha256(repo|parent|subject|context|question|urgency|ask)[:16]`
 (`core.ComputeRequestID`). The dedupe search looks for that exact token in the
 issue body, scoped to the `dispatch-thread` label
 (`githubapi.BuildRequestIDQuery`) — the search string and the emitted marker
@@ -141,7 +162,7 @@ supplied each piece.
 | -------------------------------------------- | ---- | ------------------------------------------------- |
 | `~/.local/share/dispatch/app.json`           | 0600 | Envoy App credentials (operator hand-writes once) |
 | `~/.local/share/dispatch/signing-key`        | 0600 | HMAC key for the `dsession` cookie                |
-| `~/.local/share/dispatch/users/<login>.json` | 0600 | Per-user tokens + watched-repos                   |
+| `~/.local/share/dispatch/users/<login>.json` | 0600 | Per-user tokens + addressed-threads map            |
 
 **Env + NATS KV** (production / multi-replica / ephemeral filesystem):
 
@@ -157,12 +178,15 @@ Env wins over file when both are present.
 Reads `~/.config/opencode/envoy.json` and `<cwd>/.opencode/envoy.json`
 (repo overrides user). Relevant keys:
 
-- `dispatch.defaultRepo` — optional `<owner>/<name>`, used only as the
-  fallback target for bare-number parents in the `dispatch` tool.
-  The dashboard ignores this — each user picks their own watched repos.
+- `dispatch.enabled` — whether the plugin surfaces the `dispatch` tool.
+- `dispatch.serverUrl` — the dispatch server's public origin.
 - `natsUrls` — list of NATS URLs (defaults to `nats://127.0.0.1:4222`).
 
-`dispatch.appClientId` is **ignored**; App credentials live in `app.json`.
+There is no `defaultRepo` or `appClientId` key. Repo comes from the MCP
+shim (which fills it from the calling session's working directory) or an
+explicit `repo` argument; App credentials live in `app.json`. Either
+removed key still present in an `envoy.json` is a load error naming the
+key (`config.InvalidConfigError`), not a silent skip.
 
 ## Building and running
 
@@ -185,6 +209,7 @@ go test -timeout 30s ./internal/dispatch/...
 ```
 
 Covers HMAC session cookies, user record I/O round trip, App config I/O,
-SSE hub broadcast/scoping/slow-client drop, meta-marker round trip, parent
-regex cases (including the `<owner>/<repo>#<n>` form), and the config
-user+repo merge.
+SSE hub broadcast/owner-scoping/slow-client drop, meta-marker round trip
+(including `origin`), parent regex cases, `CreateThread` repo resolution
+(qualified parent, repo arg, bare-number parent, no-repo error), and the
+config load rejecting removed keys.

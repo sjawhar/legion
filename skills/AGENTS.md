@@ -8,6 +8,7 @@ event intake, process lifecycle, credentials, and role delivery.
 
 ```
 skills/
+├── dispatch/            # Raising a durable human question as a GitHub-issue thread
 ├── github/              # GitHub issue and pull-request operations
 ├── linear/              # Linear adapter instructions
 ├── legion-architect/    # Tree ownership, decomposition, gates, and scheduling

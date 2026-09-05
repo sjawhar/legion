@@ -2,32 +2,38 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
-import { logger } from "../log";
 import { type EnvoyConfig, EnvoyConfigSchema } from "./schema";
 
 export interface LoadEnvoyConfigOptions {
   homeDir?: string;
 }
 
+/** A present but unusable envoy.json. The plugin refuses to load rather than run with dispatch silently off. */
+export class EnvoyConfigError extends Error {
+  readonly filePath: string;
+  constructor(filePath: string, detail: string) {
+    super(`[envoy-plugin] invalid config at ${filePath}: ${detail}`);
+    this.name = "EnvoyConfigError";
+    this.filePath = filePath;
+  }
+}
+
 function readConfigFile(filePath: string): EnvoyConfig | null {
   if (!existsSync(filePath)) return null;
+  let raw: unknown;
   try {
-    const content = readFileSync(filePath, "utf-8");
-    const raw = JSON.parse(content) as unknown;
-    const parsed = EnvoyConfigSchema.safeParse(raw);
-    if (!parsed.success) {
-      const issues = parsed.error.issues
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-        .join(", ");
-      logger.warn(`[envoy-plugin] Invalid config at ${filePath}: ${issues}`);
-      return null;
-    }
-    return parsed.data as EnvoyConfig;
+    raw = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
   } catch (error) {
-    const message = messageFor(error);
-    logger.warn(`[envoy-plugin] Failed to load config at ${filePath}: ${message}`);
-    return null;
+    throw new EnvoyConfigError(filePath, messageFor(error));
   }
+  const parsed = EnvoyConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join(", ");
+    throw new EnvoyConfigError(filePath, issues);
+  }
+  return parsed.data;
 }
 
 function mergeConfig(base: EnvoyConfig, override: EnvoyConfig): EnvoyConfig {

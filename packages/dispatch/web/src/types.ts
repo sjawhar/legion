@@ -1,6 +1,24 @@
 export type Urgency = "low" | "med" | "high" | "blocking";
 export type IssueState = "OPEN" | "CLOSED";
 
+/** Why a thread was closed, as GitHub's REST API names it. */
+export type CloseReason = "completed" | "not_planned";
+
+/**
+ * Coding-agent hosts a dispatch marker can name. Mirrors `DispatchHost` in
+ * envoy-client, the only producer of the field; a marker naming anything else
+ * is treated as having no host.
+ */
+export type OriginHost = "omp" | "claude";
+
+export interface Origin {
+  host?: OriginHost;
+  machine?: string;
+  cwd?: string;
+  tmux?: string;
+  pane?: string;
+}
+
 export interface Thread {
   repo: string;
   number: number;
@@ -14,6 +32,7 @@ export interface Thread {
   createdAt: string;
   authorLogin: string;
   commentCount: number;
+  origin?: Origin;
 }
 
 export interface Issue {
@@ -36,13 +55,19 @@ export interface Comment {
   authorLogin: string;
 }
 
+export type StatusFilter = "all" | "open" | "closed";
+export type UrgencyFilter = "all" | Urgency;
+
 export interface SidebarFilters {
-  status: "all" | "open" | "closed";
-  urgency: "all" | Urgency;
+  status: StatusFilter;
+  urgency: UrgencyFilter;
   search: string;
   showAddressed: boolean;
   selectedKey?: string;
   highlightedKeys?: Set<string>;
+  // Set when the thread search itself failed; the sidebar shows the error
+  // instead of an empty list that reads as "nothing needs you".
+  loadError?: string;
   // Map of "<repo>#<n>" → ISO timestamp of thread.updatedAt at mark time.
   // The sidebar treats a thread as addressed when its updatedAt is <=
   // this stored timestamp. Pass-through to the renderer; the filter logic

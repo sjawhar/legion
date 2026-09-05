@@ -1,25 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { logger } from "../../log";
-import { loadEnvoyConfig } from "..";
+import { EnvoyConfigError, loadEnvoyConfig } from "..";
 
 describe("loadEnvoyConfig", () => {
   let homeDir: string;
   let repoDir: string;
-  let warn: ReturnType<typeof spyOn>;
 
   beforeEach(async () => {
     homeDir = await mkdtemp(path.join(tmpdir(), "envoy-home-"));
     repoDir = await mkdtemp(path.join(tmpdir(), "envoy-repo-"));
-    // Spy on the file logger — plugin diagnostics route there instead of
-    // console to keep stderr clean for the in-process TUI host.
-    warn = spyOn(logger, "warn").mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    warn.mockRestore();
   });
 
   async function writeJson(filePath: string, value: unknown) {
@@ -30,12 +21,12 @@ describe("loadEnvoyConfig", () => {
   it("loads user-only config", async () => {
     await writeJson(path.join(homeDir, ".config", "opencode", "envoy.json"), {
       natsUrls: ["nats://127.0.0.1:4222"],
-      dispatch: { enabled: true, defaultRepo: "sjawhar/legion" },
+      dispatch: { enabled: true },
     });
 
     await expect(loadEnvoyConfig(repoDir, { homeDir })).resolves.toEqual({
       natsUrls: ["nats://127.0.0.1:4222"],
-      dispatch: { enabled: true, defaultRepo: "sjawhar/legion" },
+      dispatch: { enabled: true },
     });
   });
 
@@ -52,7 +43,7 @@ describe("loadEnvoyConfig", () => {
   it("shallow-merges user config with repo config and lets repo dispatch keys win", async () => {
     await writeJson(path.join(homeDir, ".config", "opencode", "envoy.json"), {
       natsUrls: ["nats://user:4222"],
-      dispatch: { enabled: false, defaultRepo: "sjawhar/legion" },
+      dispatch: { enabled: false },
     });
     await writeJson(path.join(repoDir, ".opencode", "envoy.json"), {
       dispatch: { enabled: true, serverUrl: "http://localhost:8766" },
@@ -62,32 +53,45 @@ describe("loadEnvoyConfig", () => {
       natsUrls: ["nats://user:4222"],
       dispatch: {
         enabled: true,
-        defaultRepo: "sjawhar/legion",
         serverUrl: "http://localhost:8766",
       },
     });
   });
 
-  it("returns empty config and warns on invalid JSON", async () => {
+  it("rejects removed dispatch keys (defaultRepo, appClientId) naming the file and both keys", async () => {
+    const configPath = path.join(repoDir, ".opencode", "envoy.json");
+    await writeJson(configPath, {
+      dispatch: { enabled: true, defaultRepo: "sjawhar/legion", appClientId: "abc123" },
+    });
+
+    const error = await loadEnvoyConfig(repoDir, { homeDir }).then(
+      () => null,
+      (thrown: unknown) => thrown
+    );
+    expect(error).toBeInstanceOf(EnvoyConfigError);
+    const message = (error as Error).message;
+    expect(message).toContain(configPath);
+    expect(message).toContain("defaultRepo");
+    expect(message).toContain("appClientId");
+  });
+
+  it("rejects invalid JSON naming the file", async () => {
     const configPath = path.join(homeDir, ".config", "opencode", "envoy.json");
     await mkdir(path.dirname(configPath), { recursive: true });
     await writeFile(configPath, "{");
 
-    await expect(loadEnvoyConfig(repoDir, { homeDir })).resolves.toEqual({});
-    expect(warn).toHaveBeenCalled();
+    await expect(loadEnvoyConfig(repoDir, { homeDir })).rejects.toThrow(configPath);
   });
 
-  it("returns empty config and warns on schema-invalid JSON", async () => {
+  it("rejects schema-invalid JSON", async () => {
     await writeJson(path.join(repoDir, ".opencode", "envoy.json"), {
       natsUrls: "nats://127.0.0.1:4222",
     });
 
-    await expect(loadEnvoyConfig(repoDir, { homeDir })).resolves.toEqual({});
-    expect(warn).toHaveBeenCalled();
+    await expect(loadEnvoyConfig(repoDir, { homeDir })).rejects.toThrow(EnvoyConfigError);
   });
 
   it("returns empty config when files are missing", async () => {
     await expect(loadEnvoyConfig(repoDir, { homeDir })).resolves.toEqual({});
-    expect(warn).not.toHaveBeenCalled();
   });
 });

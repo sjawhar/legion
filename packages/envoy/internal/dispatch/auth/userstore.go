@@ -1,5 +1,5 @@
 // UserStore abstracts where dispatch persists per-user dashboard state
-// (refreshable tokens + watched-repos list).
+// (refreshable tokens + addressed-thread state).
 //
 // Two production-grade backends ship:
 //
@@ -40,9 +40,9 @@ type FileUserStore struct {
 	Dir string
 }
 
-func (f *FileUserStore) Read(login string) (*User, error)  { return ReadUser(f.Dir, login) }
-func (f *FileUserStore) Write(u *User) error               { return WriteUser(f.Dir, u) }
-func (f *FileUserStore) Remove(login string) error         { return RemoveUser(f.Dir, login) }
+func (f *FileUserStore) Read(login string) (*User, error) { return ReadUser(f.Dir, login) }
+func (f *FileUserStore) Write(u *User) error              { return WriteUser(f.Dir, u) }
+func (f *FileUserStore) Remove(login string) error        { return RemoveUser(f.Dir, login) }
 
 // ─── NATS KV-backed implementation ──────────────────────────────────────
 
@@ -102,7 +102,6 @@ func (s *KVUserStore) Read(login string) (*User, error) {
 	if u.Login == "" {
 		u.Login = login
 	}
-	u.WatchedRepos = normalizeRepoList(u.WatchedRepos)
 	return &u, nil
 }
 
@@ -113,7 +112,6 @@ func (s *KVUserStore) Write(u *User) error {
 	if !loginShape.MatchString(u.Login) {
 		return fmt.Errorf("invalid login %q", u.Login)
 	}
-	u.WatchedRepos = normalizeRepoList(u.WatchedRepos)
 	data, err := json.Marshal(u)
 	if err != nil {
 		return err

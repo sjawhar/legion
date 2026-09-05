@@ -10,6 +10,7 @@ on:
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
       - "packages/pi-envoy/**"
+      - "packages/dispatch/**"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -18,6 +19,7 @@ on:
       - "packages/envoy-plugin/**"
       - "packages/envoy-claude-plugin/**"
       - "packages/pi-envoy/**"
+      - "packages/dispatch/**"
 
 jobs:
   # Detect which packages actually changed to skip unnecessary jobs.
@@ -30,6 +32,7 @@ jobs:
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
+      dispatch: ${{ steps.filter.outputs.dispatch }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -54,6 +57,8 @@ jobs:
             pi_envoy:
               - 'packages/pi-envoy/**'
               - 'packages/contracts/**'
+            dispatch:
+              - 'packages/dispatch/**'
 
   contracts:
     needs: changes
@@ -158,6 +163,27 @@ jobs:
       - name: Build pi-envoy
         run: bun run build
         working-directory: packages/pi-envoy
+
+  dispatch:
+    needs: changes
+    if: needs.changes.outputs.dispatch == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Lint dispatch dashboard
+        run: bun run lint
+        working-directory: packages/dispatch
+      - name: Typecheck dispatch dashboard
+        run: bun run typecheck
+        working-directory: packages/dispatch
+      - name: Test dispatch dashboard
+        run: bun run test
+        working-directory: packages/dispatch
+      - name: Build dispatch dashboard
+        run: bun run build:web
+        working-directory: packages/dispatch
 
   envoy-claude-plugin:
     needs: changes

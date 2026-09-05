@@ -240,22 +240,22 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	// Heartbeats from the plugin do not send MachineID. The cached state must win.
 	cur := Interest{
 		SessionID: "ses_x",
-		MachineID: "sami-agents-mx",
-		Dir:       "/home/ubuntu/agent-c/rl-eval/default",
+		MachineID: "example-host-mx",
+		Dir:       "/home/ubuntu/example-repo/rl-eval/default",
 		Topics:    []string{"notifications.agent.ses_x", "notifications.github.foo.bar.>"},
 	}
 	// Simulates the listener's subscribe handler call shape: MachineID is set by
 	// listener config and matches cur, but heartbeat body sends only agent topic.
-	item := Interest{SessionID: "ses_x", MachineID: "sami-agents-mx", Dir: "/home/ubuntu/agent-c/rl-eval/default"}
+	item := Interest{SessionID: "ses_x", MachineID: "example-host-mx", Dir: "/home/ubuntu/example-repo/rl-eval/default"}
 
 	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x"}, 200)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.MachineID != "sami-agents-mx" {
+	if result.MachineID != "example-host-mx" {
 		t.Fatalf("MachineID lost: got %q", result.MachineID)
 	}
-	if result.Dir != "/home/ubuntu/agent-c/rl-eval/default" {
+	if result.Dir != "/home/ubuntu/example-repo/rl-eval/default" {
 		t.Fatalf("Dir lost: got %q", result.Dir)
 	}
 	// CRITICAL: the github topic must survive heartbeats that send only agent topic.

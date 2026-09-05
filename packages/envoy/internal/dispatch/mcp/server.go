@@ -21,8 +21,7 @@ import (
 // Server wires the per-request bearer middleware around an MCP Streamable HTTP
 // handler that exposes a single tool: dispatch.
 type Server struct {
-	defaultRepo string
-	handler     http.Handler
+	handler http.Handler
 }
 
 type bearerKey struct{}
@@ -32,18 +31,18 @@ func bearerFromContext(ctx context.Context) string {
 	return v
 }
 
-// New returns an *http.Handler for the /mcp route.
-func New(defaultRepo string) *Server {
+// New returns the dispatch MCP server.
+func New() *Server {
 	mcpServer := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "dispatch",
 		Version: "0.1.0",
 	}, nil)
 
-	s := &Server{defaultRepo: defaultRepo}
+	s := &Server{}
 
 	mcpsdk.AddTool(mcpServer, &mcpsdk.Tool{
 		Name:        "dispatch",
-		Description: "Create a Dispatch thread as a GitHub sub-issue under a parent issue or issue comment. Use for durable questions, decisions, FYIs, or blocking asks that need human attention.",
+		Description: "Create a Dispatch thread — a GitHub issue, optionally linked as a sub-issue of a parent. Use for durable questions, decisions, FYIs, or blocking asks that need human attention.",
 	}, s.dispatchHandler)
 
 	streamable := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server {
@@ -86,11 +85,14 @@ func extractBearer(r *http.Request) string {
 // dispatchInput mirrors core.DispatchInput. The jsonschema tag is a plain
 // description string; required-ness is conveyed by absence of omitempty.
 type dispatchInput struct {
-	Parent  string              `json:"parent" jsonschema:"Parent issue: <n> or <n>#<commentId> (uses dispatch.defaultRepo), or <owner>/<repo>#<n>"`
-	Subject string              `json:"subject" jsonschema:"Thread subject"`
-	Body    string              `json:"body" jsonschema:"Thread body"`
-	Ask     []core.QuestionInfo `json:"ask,omitempty" jsonschema:"Optional structured questions attached to the thread"`
-	Urgency string              `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med)"`
+	Subject  string              `json:"subject" jsonschema:"One line: the decision needed."`
+	Context  string              `json:"context" jsonschema:"What you are doing, what you found, why you are stuck. The reader has NOT seen your transcript — never reference 'the list above' or 'those items'."`
+	Question string              `json:"question" jsonschema:"The ask: current state → desired state → proposed change, options with tradeoffs, your recommendation."`
+	Ask      []core.QuestionInfo `json:"ask,omitempty" jsonschema:"Optional structured questions attached to the thread"`
+	Urgency  string              `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med)"`
+	Repo     string              `json:"repo,omitempty" jsonschema:"owner/name. Defaults to the repo of the session's working directory (the shim fills this)."`
+	Parent   string              `json:"parent,omitempty" jsonschema:"<n> | owner/name#<n>[#<commentId>]. When given, the thread is linked as a sub-issue and a breadcrumb is appended to the comment."`
+	Origin   *core.Origin        `json:"origin,omitempty" jsonschema:"Injected by the dispatch shim; leave unset."`
 }
 
 func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolRequest, input dispatchInput) (*mcpsdk.CallToolResult, any, error) {
@@ -103,12 +105,15 @@ func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolReques
 		urgency = core.UrgencyMed
 	}
 	client := githubapi.NewClient(ctx, token)
-	result, err := core.CreateThread(ctx, client, s.defaultRepo, core.DispatchInput{
-		Parent:  input.Parent,
-		Subject: input.Subject,
-		Body:    input.Body,
-		Ask:     input.Ask,
-		Urgency: urgency,
+	result, err := core.CreateThread(ctx, client, core.DispatchInput{
+		Repo:     input.Repo,
+		Parent:   input.Parent,
+		Subject:  input.Subject,
+		Context:  input.Context,
+		Question: input.Question,
+		Origin:   input.Origin,
+		Ask:      input.Ask,
+		Urgency:  urgency,
 	})
 	if err != nil {
 		return nil, nil, err

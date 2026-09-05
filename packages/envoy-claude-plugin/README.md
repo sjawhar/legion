@@ -10,6 +10,12 @@ integration to deliver Envoy traffic into a live session, including idle session
 - Monitor stdout is rendered by Claude Code as a Monitor event, waking the session for inbound
   Envoy traffic.
 - `bin/envoy-send.ts` sends a direct message through Envoy's local Go listener HTTP API.
+- `.mcp.json` mounts two MCP servers for every Claude session: `envoy` (messaging tools) and
+  `dispatch`, the shared shim from `@legion/envoy-client` that raises a durable question to
+  Sami as a GitHub issue thread. The shim serves only when `dispatch.enabled` is set in
+  `envoy.json`, and fills the target repo from the session's working directory.
+- `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
+  `dispatch` skill (when to raise a question) alongside the tool itself.
 
 The adapter intentionally does not register a listener with Envoy's session registry. It consumes
 the direct NATS topic itself.

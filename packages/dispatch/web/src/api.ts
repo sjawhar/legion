@@ -1,5 +1,5 @@
 import { parseMetaMarker } from "./markers";
-import type { Comment, Issue, IssueState, Thread, Urgency } from "./types";
+import type { CloseReason, Comment, Issue, IssueState, Thread, Urgency } from "./types";
 
 interface GraphqlResponse<T> {
   data?: T;
@@ -16,12 +16,13 @@ interface GraphqlThreadNode {
   number: number;
   title: string;
   body: string;
-  state: IssueState;
+  state: string;
   updatedAt: string;
   createdAt: string;
   author?: { login: string } | null;
   comments?: { totalCount: number } | null;
   parent?: { number: number } | null;
+  repository: { owner: { login: string }; name: string };
 }
 
 interface RestIssueResponse {
@@ -49,6 +50,16 @@ export interface GithubEventData {
   payload: unknown;
 }
 
+/**
+ * The SSE stream is JSON off the wire; an event missing `subject` or `repo`
+ * would otherwise reach the router and blow up on a string method.
+ */
+function isGithubEventData(value: unknown): value is GithubEventData {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("subject" in value) || typeof value.subject !== "string") return false;
+  return "repo" in value && typeof value.repo === "string";
+}
+
 export interface SseRouterHandlers {
   refetchSidebar: () => void | Promise<void>;
   refetchComments: (repo: string, threadNumber: number) => void | Promise<void>;
@@ -58,12 +69,6 @@ export interface SseRouterHandlers {
 
 function normalizeState(value: string): IssueState {
   return value.toUpperCase() === "CLOSED" ? "CLOSED" : "OPEN";
-}
-
-function repoParts(repo: string): { owner: string; name: string } {
-  const [owner, name] = repo.split("/");
-  if (!owner || !name) throw new Error(`Invalid repo slug: ${repo}`);
-  return { owner, name };
 }
 
 async function githubGraphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
@@ -103,11 +108,11 @@ function commentFromResponse(comment: RestCommentResponse): Comment {
   };
 }
 
-function threadFromNode(repo: string, node: GraphqlThreadNode): Thread {
+function threadFromNode(node: GraphqlThreadNode): Thread {
   const meta = parseMetaMarker(node.body);
   const parentNumber = node.parent?.number ?? node.number;
-  return {
-    repo,
+  const thread: Thread = {
+    repo: `${node.repository.owner.login}/${node.repository.name}`,
     number: node.number,
     title: node.title,
     body: node.body,
@@ -120,10 +125,32 @@ function threadFromNode(repo: string, node: GraphqlThreadNode): Thread {
     authorLogin: node.author?.login ?? "unknown",
     commentCount: node.comments?.totalCount ?? 0,
   };
+  if (meta?.origin) thread.origin = meta.origin;
+  return thread;
 }
 
-export async function searchDispatchThreads(repo: string): Promise<Thread[]> {
-  const { owner, name } = repoParts(repo);
+interface InstallationsResponse {
+  installations: Array<{ account?: { login?: string } | null } | null>;
+}
+
+// Distinct owner logins across every Envoy App installation the signed-in
+// user can see. These are the accounts (users or orgs) the owner-scoped
+// dashboard search spans — there is no separate watched-repos config.
+// GitHub pages this endpoint at 30 by default; 100 is its maximum.
+export async function getInstallationOwners(): Promise<string[]> {
+  const response = await fetch("/api/installations?per_page=100");
+  if (!response.ok) throw new Error(`GET /api/installations failed: ${response.status}`);
+  const data = (await response.json()) as InstallationsResponse;
+  const owners = new Set<string>();
+  for (const installation of data.installations ?? []) {
+    const login = installation?.account?.login;
+    if (login) owners.add(login);
+  }
+  return [...owners];
+}
+
+export async function searchDispatchThreads(owners: string[]): Promise<Thread[]> {
+  if (owners.length === 0) return [];
   const query = `
     query SearchDispatchThreads($search: String!) {
       search(query: $search, type: ISSUE, first: 100) {
@@ -138,17 +165,20 @@ export async function searchDispatchThreads(repo: string): Promise<Thread[]> {
             author { login }
             comments { totalCount }
             parent { number }
+            repository { owner { login } name }
           }
         }
       }
     }
   `;
-  const data = await githubGraphql<SearchResponse>(query, {
-    search: `repo:${owner}/${name} label:dispatch-thread is:issue is:open`,
-  });
-  return data.search.nodes
-    .filter((node) => parseMetaMarker(node.body))
-    .map((node) => threadFromNode(repo, node));
+  const search = [
+    "is:issue",
+    "is:open",
+    "label:dispatch-thread",
+    ...owners.map((owner) => `user:${owner}`),
+  ].join(" ");
+  const data = await githubGraphql<SearchResponse>(query, { search });
+  return data.search.nodes.filter((node) => parseMetaMarker(node.body)).map(threadFromNode);
 }
 
 export async function getIssue(repo: string, number: number): Promise<Issue> {
@@ -181,10 +211,16 @@ export async function postComment(repo: string, number: number, body: string): P
   return commentFromResponse(comment);
 }
 
+const CLOSE_REASONS = ["completed", "not_planned"] as const satisfies readonly CloseReason[];
+
+export function isCloseReason(value: unknown): value is CloseReason {
+  return CLOSE_REASONS.some((reason) => reason === value);
+}
+
 export async function closeIssue(
   repo: string,
   number: number,
-  stateReason: "completed" | "not_planned"
+  stateReason: CloseReason
 ): Promise<Issue> {
   const issue = await githubRest<RestIssueResponse>(
     `repos/${repo}/issues/${number}`,
@@ -238,7 +274,8 @@ export function openGithubEventSource(handlers: SseRouterHandlers): EventSource 
   const router = createSseRouter(handlers);
   const source = new EventSource("/api/events");
   source.addEventListener("github_event", (event) => {
-    router(JSON.parse(event.data) as GithubEventData);
+    const data: unknown = JSON.parse(event.data);
+    if (isGithubEventData(data)) router(data);
   });
   return source;
 }

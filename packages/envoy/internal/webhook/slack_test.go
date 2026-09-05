@@ -26,7 +26,7 @@ func TestSlackHandler(t *testing.T) {
 	validEventCallback := `{
 		"type": "event_callback",
 		"event_id": "ev-1",
-		"team_id": "T09FRELLTS8",
+		"team_id": "T01234567",
 		"event": {
 			"type": "message",
 			"channel": "C0A0DHVU8HE",
@@ -38,19 +38,19 @@ func TestSlackHandler(t *testing.T) {
 	emptyEventID := `{
 		"type": "event_callback",
 		"event_id": "",
-		"team_id": "T09FRELLTS8",
+		"team_id": "T01234567",
 		"event": {"type": "message", "channel": "C0A0DHVU8HE"}
 	}`
 
 	nonEventCallback := `{
 		"type": "app_rate_limited",
-		"team_id": "T09FRELLTS8"
+		"team_id": "T01234567"
 	}`
 
 	appMention := `{
 		"type": "event_callback",
 		"event_id": "ev-2",
-		"team_id": "T09FRELLTS8",
+		"team_id": "T01234567",
 		"event": {
 			"type": "app_mention",
 			"channel": "C0A0DHVU8HE",

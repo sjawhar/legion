@@ -6,18 +6,42 @@ network and connect outbound to a single NATS server (typically reached via
 Tailscale). The listener serves `127.0.0.1:9020` for local OpenCode session
 registration and webhook ingress when configured; dispatch serves
 `127.0.0.1:8766` for the Dispatch SPA, GitHub OAuth, and the MCP endpoint
-that creates Dispatch threads as GitHub sub-issues.
+that creates Dispatch threads as GitHub issues.
 
 ## Layout
 
 - `compose/listener.compose.yml` — host-network listener container.
 - `compose/dispatch.compose.yml` — host-network dispatch container.
 - `scripts/up-listener.sh` — `docker compose up -d --build` for the listener.
-- `scripts/up-dispatch.sh` — builds the SPA on the host, then
-  `docker compose up -d --build` for dispatch.
-- `scripts/sync-host.sh` — rsync this package to a remote host over SSH.
+- `scripts/up-dispatch.sh` — `docker compose up -d --build` for dispatch; the
+  Dispatch SPA compiles into the image, no host build step.
+- `scripts/sync-host.sh` — rsync `deploy/` (compose files + scripts) to a
+  remote host over SSH; the remote pulls a published image, it builds nothing.
 - `scripts/install-docker-debian.sh` — Docker install helper for fresh hosts.
 - `scripts/read-secret.sh` — read a secret from local SOPS-encrypted state.
+
+## Image
+
+Both compose files share one image, built by `../docker/Dockerfile`. Its
+build context is the repo root (a bun stage builds the Dispatch SPA and
+regenerates the Go contracts from `packages/contracts`, a Go stage builds
+`envoy-listener`/`envoy-dispatch`), so `--build` only works from a full
+checkout. `ENVOY_IMAGE_TAG` names the image tag and has no default in the
+compose files — an unset value fails loudly rather than silently resolving
+to `latest`. `scripts/up-listener.sh` and `scripts/up-dispatch.sh` default
+it to `local` before building, so a full checkout needs no extra setup; a
+host synced via `sync-host.sh` (no Dockerfile present) must set it
+explicitly and pull:
+
+```bash
+export ENVOY_IMAGE_TAG=<sha-or-release-tag>
+docker compose -f compose/dispatch.compose.yml pull
+docker compose -f compose/dispatch.compose.yml up -d
+```
+
+CI publishes `ghcr.io/sjawhar/legion/envoy:latest` and `:<git-sha>` on every
+push to `main` that touches `packages/envoy/**`, `packages/contracts/**`, or
+`packages/dispatch/**`.
 
 ## Listener envs
 
@@ -68,10 +92,9 @@ deploy/scripts/up-dispatch.sh
 curl http://127.0.0.1:8766/healthz
 ```
 
-The SPA is built on the host (`bun run build:web` in `packages/dispatch`)
-because it lives outside this package's Docker build context; the up script
-does this on a full checkout, and accepts a prebuilt
-`packages/dispatch/web/dist` on sync-host targets.
+The SPA ships in the image (see [Image](#image) above): the `web` stage of
+`docker/Dockerfile` builds `packages/dispatch/web` and bakes the output into
+`/srv/dispatch-web`. There is no host build step and no bind mount.
 
 The service binds `127.0.0.1` by default even though it runs on the host
 network. Dispatch envs:
@@ -88,3 +111,6 @@ network. Dispatch envs:
 ```bash
 ./packages/envoy/deploy/scripts/sync-host.sh user@hostname
 ```
+
+This ships only `deploy/` (compose files + scripts); the remote host runs a
+pinned image (see [Image](#image) above) and never builds locally.

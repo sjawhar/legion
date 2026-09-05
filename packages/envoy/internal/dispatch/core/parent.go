@@ -10,7 +10,7 @@ import (
 )
 
 // ParsedParent describes a parent reference. Repo is empty when the caller
-// used the bare-number form (caller falls back to the dispatch default repo).
+// used the bare-number form (caller resolves it against the dispatch repo).
 type ParsedParent struct {
 	Repo        string
 	IssueNumber int
@@ -22,13 +22,13 @@ type ParsedParent struct {
 //	42
 //	42#<commentID>
 //	<owner>/<repo>#42
+//	<owner>/<repo>#42#<commentID>
 //
-// We intentionally don't support `<owner>/<repo>#42#<commentID>` yet — no
-// caller needs it and the triple-hash form is ugly. Add a `@<commentID>`
-// suffix if/when the need arises.
+// Owner and repo segments exclude `/`, `#`, and whitespace — the same shape
+// the MCP shim uses to decide a parent already names its repo.
 var (
 	bareForm = regexp.MustCompile(`^(\d+)(?:#(\d+))?$`)
-	repoForm = regexp.MustCompile(`^([^/]+/[^/]+)#(\d+)$`)
+	repoForm = regexp.MustCompile(`^([^/\s#]+/[^/\s#]+)#(\d+)(?:#(\d+))?$`)
 )
 
 // ParseParent parses a parent reference. Returns an error for invalid input.
@@ -37,24 +37,21 @@ func ParseParent(s string) (ParsedParent, error) {
 	if s == "" {
 		return ParsedParent{}, fmt.Errorf("Invalid parent: %s", s)
 	}
+	var repo, issue, comment string
 	if m := repoForm.FindStringSubmatch(s); m != nil {
-		n, err := parsePositiveInteger(m[2], "issue number")
-		if err != nil {
-			return ParsedParent{}, err
-		}
-		return ParsedParent{Repo: m[1], IssueNumber: n}, nil
-	}
-	m := bareForm.FindStringSubmatch(s)
-	if m == nil {
+		repo, issue, comment = m[1], m[2], m[3]
+	} else if m := bareForm.FindStringSubmatch(s); m != nil {
+		issue, comment = m[1], m[2]
+	} else {
 		return ParsedParent{}, fmt.Errorf("Invalid parent: %s", s)
 	}
-	n, err := parsePositiveInteger(m[1], "issue number")
+	n, err := parsePositiveInteger(issue, "issue number")
 	if err != nil {
 		return ParsedParent{}, err
 	}
-	out := ParsedParent{IssueNumber: n}
-	if m[2] != "" {
-		c, err := parsePositiveInteger(m[2], "comment id")
+	out := ParsedParent{Repo: repo, IssueNumber: n}
+	if comment != "" {
+		c, err := parsePositiveInteger(comment, "comment id")
 		if err != nil {
 			return ParsedParent{}, err
 		}

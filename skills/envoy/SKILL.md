@@ -119,9 +119,9 @@ GitHub topics are **resource-scoped** — every event includes the resource type
 
 Examples:
 
-- `notifications.github.trajectory-labs-pbc.agent-c.pr.9880` (PR #9880 state changes)
-- `notifications.github.trajectory-labs-pbc.agent-c.pr.9880.comment` (comments on PR #9880)
-- `notifications.github.trajectory-labs-pbc.agent-c.issue.9909.>` (all events on issue #9909)
+- `notifications.github.example-org.example-repo.pr.9880` (PR #9880 state changes)
+- `notifications.github.example-org.example-repo.pr.9880.comment` (comments on PR #9880)
+- `notifications.github.example-org.example-repo.issue.9909.>` (all events on issue #9909)
 - `notifications.github.sjawhar.legion.pr.>` (all PR events across all PRs)
 - `notifications.github.sjawhar.legion.mention` (all @mentions repo-wide)
 - `notifications.github.sjawhar.legion.push.branch.main` (pushes to main)
@@ -143,10 +143,10 @@ Thread timestamps are normalized: `1234567890.123456` → `1234567890_123456`
 
 Examples:
 
-- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.message`
-- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention`
-- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.message`
-- `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.mention`
+- `notifications.slack.T01234567.C0A0DHVU8HE.message`
+- `notifications.slack.T01234567.C0A0DHVU8HE.mention`
+- `notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.message`
+- `notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.mention`
 
 ### Ghost Wispr
 
@@ -234,7 +234,7 @@ If you have nothing else to do, end the response. The user is not your alarm clo
 
 ```text
 envoy_subscribe([
-  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.mention"
+  "notifications.slack.T01234567.C0A0DHVU8HE.mention"
 ])
 ```
 
@@ -242,7 +242,7 @@ envoy_subscribe([
 
 ```text
 envoy_subscribe([
-  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.>"
+  "notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.>"
 ])
 ```
 
@@ -250,7 +250,7 @@ envoy_subscribe([
 
 ```text
 envoy_subscribe([
-  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.message"
+  "notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.message"
 ])
 ```
 
@@ -258,23 +258,23 @@ envoy_subscribe([
 
 ```text
 envoy_subscribe([
-  "notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.>"
+  "notifications.slack.T01234567.C0A0DHVU8HE.thread.>"
 ])
 ```
 
-### Subscribe to all PR events for agent-c
+### Subscribe to all PR events for example-repo
 
 ```text
 envoy_subscribe([
-  "notifications.github.trajectory-labs-pbc.agent-c.pr.>"
+  "notifications.github.example-org.example-repo.pr.>"
 ])
 ```
 
-### Subscribe controller to GitHub @mentions for agent-c
+### Subscribe controller to GitHub @mentions for example-repo
 
 ```text
 envoy_subscribe([
-  "notifications.github.trajectory-labs-pbc.agent-c.mention"
+  "notifications.github.example-org.example-repo.mention"
 ])
 ```
 
@@ -326,7 +326,7 @@ Catches all conversations and event kinds for the specified phone number.
 - Different sessions can subscribe to different channels/repos
 - Agent-to-agent delivery uses exact session IDs
 - `envoy_list()` distinguishes `live`, `registry`, and `both`; a `live` topic is receiving now even when the listener registry has not caught up.
-- For Slack, use the real `team_id` in topics (for example `T09FRELLTS8`), not a workspace slug like `trajectorylabs`
+- For Slack, use the real `team_id` in topics (for example `T01234567`), not a workspace slug like `acme`
 - GitHub mention routing is body-based because GitHub has no dedicated app mention webhook event
 
 ## Synthetic Smoke Test (WhatsApp — NATS Routing Only)

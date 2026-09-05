@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,7 +27,6 @@ type ProxyConfig struct {
 	Tokens       *auth.Tokens
 	Users        auth.UserStore
 	Login        string
-	WatchedRepos []string
 	ClientID     string
 	ClientSecret string
 	// HTTPClient lets tests inject a fake transport. nil → default http.Client.
@@ -127,13 +125,18 @@ func refreshAndStore(ctx context.Context, cfg *ProxyConfig, tokens *auth.Tokens)
 	if err != nil {
 		return nil, err
 	}
-	// Persist the refreshed pair back to the user's record. The watched-repos
-	// list on the User struct must round-trip unchanged.
-	user := &auth.User{
-		Login:        cfg.Login,
-		Tokens:       *refreshed,
-		WatchedRepos: cfg.WatchedRepos,
+	// Persist the refreshed pair onto the user's existing record so the rest
+	// of it (the addressed map) survives the refresh. A missing record means
+	// the user logged out under a live cookie; resurrecting them here would
+	// undo that, so refuse instead.
+	user, err := cfg.Users.Read(cfg.Login)
+	if err != nil {
+		return nil, err
 	}
+	if user == nil {
+		return nil, fmt.Errorf("refresh tokens: no user record for %q (logged out?)", cfg.Login)
+	}
+	user.Tokens = *refreshed
 	if err := cfg.Users.Write(user); err != nil {
 		return nil, err
 	}
@@ -194,57 +197,63 @@ func ForwardRequest(w http.ResponseWriter, r *http.Request, cfg *ProxyConfig, ta
 	proxy(w, r, cfg, target)
 }
 
-// ErrRepoForbidden indicates GitHub denied the user access to a repository
-// (404 or 403). It is distinguished from transport/refresh errors so callers
-// can return 403 to the dashboard instead of a 5xx.
-var ErrRepoForbidden = errors.New("repository not accessible")
+// InstallationsPath lists the Envoy App installations visible to the user
+// behind a user-to-server token.
+const InstallationsPath = "/user/installations"
 
-// CheckRepoAccess verifies the user behind cfg can see owner/repo using their
-// own user-to-server token — the same authority GitHub itself enforces. This
-// is the authorization gate for watched repos: without it any signed-in user
-// could subscribe to event streams for private repositories they cannot see.
-// It proactively refreshes an expiring token and retries once on a 401.
-func CheckRepoAccess(ctx context.Context, cfg *ProxyConfig, owner, repo string) error {
-	target := fmt.Sprintf("%s/repos/%s/%s", githubAPIBase, owner, repo)
+// InstallationOwners returns the GitHub account logins (users/orgs) covered
+// by every Envoy App installation visible to the user behind cfg. It
+// proactively refreshes an expiring token and retries once on a 401.
+func InstallationOwners(ctx context.Context, cfg *ProxyConfig) ([]string, error) {
 	tokens, err := proactivelyRefresh(ctx, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	status, err := getRepoStatus(ctx, cfg, target, tokens)
+	resp, err := getInstallations(ctx, cfg, tokens)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if status == http.StatusUnauthorized {
-		refreshed, rerr := refreshAndStore(ctx, cfg, tokens)
-		if rerr != nil {
-			return rerr
-		}
-		status, err = getRepoStatus(ctx, cfg, target, refreshed)
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		refreshed, err := refreshAndStore(ctx, cfg, tokens)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if resp, err = getInstallations(ctx, cfg, refreshed); err != nil {
+			return nil, err
 		}
 	}
-	switch {
-	case status >= 200 && status < 300:
-		return nil
-	case status == http.StatusNotFound || status == http.StatusForbidden:
-		return ErrRepoForbidden
-	default:
-		return fmt.Errorf("repo access check: unexpected status %d", status)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("installations: unexpected status %d", resp.StatusCode)
 	}
+	var payload struct {
+		Installations []struct {
+			Account struct {
+				Login string `json:"login"`
+			} `json:"account"`
+		} `json:"installations"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("parse installations: %w", err)
+	}
+	owners := make([]string, 0, len(payload.Installations))
+	for _, inst := range payload.Installations {
+		if inst.Account.Login != "" {
+			owners = append(owners, inst.Account.Login)
+		}
+	}
+	return owners, nil
 }
 
-func getRepoStatus(ctx context.Context, cfg *ProxyConfig, target string, tokens *auth.Tokens) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+// getInstallations fetches one page of installations; per_page=100 is GitHub's
+// maximum, well above any real installation count for one user.
+func getInstallations(ctx context.Context, cfg *ProxyConfig, tokens *auth.Tokens) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIBase+InstallationsPath+"?per_page=100", nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-	resp, err := cfg.httpClient().Do(req)
-	if err != nil {
-		return 0, err
-	}
-	resp.Body.Close()
-	return resp.StatusCode, nil
+	return cfg.httpClient().Do(req)
 }

@@ -61,7 +61,7 @@
 - **Judges**: Evaluate outputs when running multiple agents on same problem
 
 **Sources:**
-- [What is parallel AI agent coding?](https://departmentofproduct.substack.com/p/what-is-parallel-ai-agent-coding)
+- [What is parallel AI agent coding?](https://departmentofproduct.substack.com/p/what-is-parallel-ai-example-repooding)
 - [Multi-Agent Orchestration: 10+ Claude Instances](https://dev.to/bredmond1019/multi-agent-orchestration-running-10-claude-instances-in-parallel-part-3-29da)
 - [New trend: parallel AI agents (Pragmatic Engineer)](https://blog.pragmaticengineer.com/new-trend-programming-by-kicking-off-parallel-ai-agents/)
 - [Cursor scaling agents](https://cursor.com/blog/scaling-agents)

@@ -69,13 +69,15 @@ OpenCode sessions do: the shared `@legion/envoy-client` shim mounts as a stdio M
 and it serves when `dispatch.enabled` is true in the shared envoy.json
 (`~/.config/opencode/envoy.json`, shallow-merged with `<cwd>/.opencode/envoy.json`) or
 `DISPATCH_MCP_URL` is set explicitly. The server URL comes from `dispatch.serverUrl`
-(default `http://localhost:8766`). Dispatch exists so headless unattended agents —
-Legion architects, planners, phase workers — can raise durable questions to the human.
-Replies route back to the asking session, which is auto-subscribed to the thread's
-GitHub topic; a Legion role's session survives kill/resume because Legion resurrection
-resumes the same OMP session file, so the reply still lands. Lifecycle and scope
-decisions still go through `hub` to the owning architect — Dispatch is for durable
-questions to the human, not for coordination between roles.
+(default `http://localhost:8766`). Dispatch is how any agent — an interactive session or
+a headless Legion role — raises a durable question to the human: the thread lands as a
+GitHub issue in the session cwd's repo (or an explicit `repo`), carries the session's
+provenance, and shows up on the Dispatch dashboard. The `dispatch` skill (shipped in
+`skills/`) says when to use it. Replies route back to the asking session, which is
+auto-subscribed to the thread's GitHub topic; a Legion role's session survives kill/resume
+because Legion resurrection resumes the same OMP session file, so the reply still lands.
+Lifecycle and scope decisions still go through `hub` to the owning architect — Dispatch is
+for durable questions to the human, not for coordination between roles.
 
 No manual mount is needed: the package-root `.mcp.json` ships the server with the
 package, so any session that loads it (installed plugin, `--extension`, the Legion

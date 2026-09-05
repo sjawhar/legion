@@ -9,7 +9,7 @@ const currentEnvelope = (overrides: Record<string, unknown> = {}) => ({
   event_id: "evt-1",
   source: "github",
   source_event_id: "delivery-1",
-  topic: "notifications.github.trajectory-labs-pbc.legion-smoke.issue.1",
+  topic: "notifications.github.example-org.legion-smoke.issue.1",
   dedupe_key: "github.delivery-1",
   issued_at: 1_700_000_000_000,
   payload_summary: "issue #1 labeled",
@@ -21,13 +21,13 @@ const currentEnvelope = (overrides: Record<string, unknown> = {}) => ({
 describe("bridgeConfigFromEnvironment", () => {
   test("limits its upstream subscription to exactly the configured repository", () => {
     const config = bridgeConfigFromEnvironment({
-      SMOKE_REPO: "trajectory-labs-pbc/legion-smoke",
+      SMOKE_REPO: "example-org/legion-smoke",
       SMOKE_RIG_NATS: "nats://127.0.0.1:14222",
     });
 
     expect(config).toEqual({
-      repository: "trajectory-labs-pbc/legion-smoke",
-      subject: "notifications.github.trajectory-labs-pbc.legion-smoke.>",
+      repository: "example-org/legion-smoke",
+      subject: "notifications.github.example-org.legion-smoke.>",
       upstreamUrl: DEFAULT_UPSTREAM_NATS_URL,
       downstreamUrl: "nats://127.0.0.1:14222",
     });
@@ -36,7 +36,7 @@ describe("bridgeConfigFromEnvironment", () => {
   test("rejects repository input that could broaden the NATS allowlist", () => {
     expect(() =>
       bridgeConfigFromEnvironment({
-        SMOKE_REPO: "trajectory-labs-pbc/>",
+        SMOKE_REPO: "example-org/>",
         SMOKE_RIG_NATS: "nats://127.0.0.1:14222",
       })
     ).toThrow("SMOKE_REPO must be a literal <owner>/<repo> repository");

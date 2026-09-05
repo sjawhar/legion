@@ -6,6 +6,7 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "packages/dispatch/**"
   workflow_dispatch:
 
 permissions:
@@ -119,7 +120,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
-          context: packages/envoy
+          context: .
           file: packages/envoy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true

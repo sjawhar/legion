@@ -61,6 +61,101 @@ describe("markers — parseMetaMarker ask payload", () => {
   });
 });
 
+describe("markers — parseMetaMarker origin", () => {
+  it("reads a nested origin block from frontmatter", () => {
+    const body = [
+      "---",
+      "urgency: med",
+      "requestId: R",
+      "origin:",
+      "  host: omp",
+      "  machine: example-host",
+      "  cwd: /home/ubuntu/legion",
+      "  tmux: main:3.0",
+      "---",
+      "",
+    ].join("\n");
+    expect(parseMetaMarker(body)?.origin).toEqual({
+      host: "omp",
+      machine: "example-host",
+      cwd: "/home/ubuntu/legion",
+      tmux: "main:3.0",
+    });
+  });
+
+  it("reads colon-bearing origin values as the Go marshaller emits them", () => {
+    // tmux targets are plain scalars (no space after the colon); a cwd with
+    // ": " or "#" arrives single-quoted from yaml.v3.
+    const body = [
+      "---",
+      "urgency: med",
+      "requestId: R",
+      "origin:",
+      "  host: omp",
+      "  cwd: '/home/ubuntu/notes: issue #42'",
+      "  tmux: legion-2.0:12.1",
+      "---",
+      "",
+    ].join("\n");
+    expect(parseMetaMarker(body)?.origin).toEqual({
+      host: "omp",
+      cwd: "/home/ubuntu/notes: issue #42",
+      tmux: "legion-2.0:12.1",
+    });
+  });
+
+  it("is undefined when the marker has no origin block", () => {
+    const body = "---\nurgency: med\nrequestId: R\n---\n";
+    expect(parseMetaMarker(body)?.origin).toBeUndefined();
+  });
+
+  it("keeps the marker parseable when origin carries unrecognized keys", () => {
+    const body = [
+      "---",
+      "urgency: med",
+      "requestId: R",
+      "origin:",
+      "  host: omp",
+      "  sessionId: abc123",
+      "---",
+      "",
+    ].join("\n");
+    const parsed = parseMetaMarker(body);
+    expect(parsed?.urgency).toBe("med");
+    expect(parsed?.origin).toEqual({ host: "omp" });
+  });
+
+  it("drops an origin block that is not an object", () => {
+    const body = "---\nurgency: med\nrequestId: R\norigin: not-an-object\n---\n";
+    expect(parseMetaMarker(body)?.origin).toBeUndefined();
+  });
+
+  it("drops a host outside the union envoy-client can emit", () => {
+    const body = "---\nurgency: med\nrequestId: R\norigin:\n  host: pirate\n  cwd: /tmp\n---\n";
+    expect(parseMetaMarker(body)?.origin).toEqual({ cwd: "/tmp" });
+  });
+});
+
+describe("markers — parseMetaMarker ask validation", () => {
+  it("drops an ask block whose entries are not questions", () => {
+    const body = "---\nurgency: med\nrequestId: R\nask:\n  - just a string\n---\n";
+    const parsed = parseMetaMarker(body);
+    expect(parsed?.urgency).toBe("med");
+    expect(parsed?.ask).toBeUndefined();
+  });
+
+  it("drops a question whose options are not a list of labels", () => {
+    const body =
+      "---\nurgency: med\nrequestId: R\nask:\n  - question: Color?\n    options: red\n---\n";
+    expect(parseMetaMarker(body)?.ask).toBeUndefined();
+  });
+
+  it("keeps a question that omits header and options, as the Go marshaller emits it", () => {
+    const body = "---\nurgency: med\nrequestId: R\nask:\n  - question: Color?\n---\n";
+    expect(parseMetaMarker(body)?.ask).toEqual([{ question: "Color?" }]);
+  });
+});
+
 describe("markers — parseUrgencyMarker", () => {
   it("reads urgency from a kind=urgency frontmatter comment", () => {
     const body = "---\nkind: urgency\nurgency: high\n---\n";
@@ -101,6 +196,11 @@ describe("markers — parseAnswerMarker", () => {
 
   it("returns null for non-frontmatter bodies", () => {
     expect(parseAnswerMarker("plain comment")).toBeNull();
+  });
+
+  it("returns null when the answers are not lists of strings", () => {
+    const body = "---\nkind: answer\nforThread: 641\nanswers:\n  - ship\n---\n";
+    expect(parseAnswerMarker(body)).toBeNull();
   });
 });
 
@@ -152,16 +252,16 @@ describe("markers — effectiveUrgency", () => {
 });
 
 import { summarizeAnswers } from "../components/ask-form";
-import type { QuestionInfo } from "../markers";
+import type { MarkerQuestion } from "../markers";
 
 describe("ask-form — summarizeAnswers", () => {
   it("includes the question prompt alongside the header and answer values", () => {
-    const ask: QuestionInfo[] = [
+    const ask: MarkerQuestion[] = [
       {
         header: "Sanity check",
         question: "Did the YAML migration land cleanly?",
         options: [{ label: "yes", description: "All good" }],
-      } as QuestionInfo,
+      },
     ];
     const out = summarizeAnswers(ask, [["yes"]]);
     expect(out).toContain("Sanity check");

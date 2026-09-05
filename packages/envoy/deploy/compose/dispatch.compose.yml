@@ -1,8 +1,9 @@
 services:
   dispatch:
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
     build:
-      context: ../..
-      dockerfile: docker/Dockerfile
+      context: ../../../..
+      dockerfile: packages/envoy/docker/Dockerfile
     network_mode: host
     entrypoint: ["/usr/local/bin/envoy-dispatch"]
     restart: unless-stopped
@@ -14,7 +15,6 @@ services:
       start_period: 5s
     environment:
       HOME: /home/envoy
-      DISPATCH_WEB_DIST: /srv/dispatch-web
       DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
       DISPATCH_PORT: ${DISPATCH_PORT:-8766}
       DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
@@ -23,9 +23,6 @@ services:
       # OAuth dashboard over plain HTTP (local/tailnet use).
       DISPATCH_INSECURE_COOKIE: ${DISPATCH_INSECURE_COOKIE:-}
     volumes:
-      # Built on the host by deploy/scripts/up-dispatch.sh: the SPA lives in
-      # packages/dispatch, outside this package's Docker build context.
-      - ../../../dispatch/web/dist:/srv/dispatch-web:ro
       # NATS URLs and the dispatch block come from the shared envoy.json.
       - ~/.config/opencode/envoy.json:/home/envoy/.config/opencode/envoy.json:ro
       # Signing key, file user store, and optional app.json credentials.

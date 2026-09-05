@@ -1,23 +1,18 @@
-import type { QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
+import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
 
 import { escapeHtml } from "../html";
+import type { MarkerQuestion, MarkerQuestionOption } from "../markers";
 
 export interface AskFormInput {
-  ask: QuestionInfo[];
+  ask: MarkerQuestion[];
   pending: boolean;
   error?: string;
 }
 
-type QuestionOption = { label: string; description?: string };
-
-function optionsFor(question: QuestionInfo): QuestionOption[] {
-  return (question.options ?? []) as QuestionOption[];
-}
-
 function renderOption(
   questionIndex: number,
-  question: QuestionInfo,
-  option: QuestionOption
+  question: MarkerQuestion,
+  option: MarkerQuestionOption
 ): string {
   const type = question.multiple ? "checkbox" : "radio";
   const name = `answer-${questionIndex}`;
@@ -31,7 +26,7 @@ function renderOption(
   </label>`;
 }
 
-export function summarizeAnswers(ask: QuestionInfo[], answers: QuestionAnswer[]): string {
+export function summarizeAnswers(ask: MarkerQuestion[], answers: QuestionAnswer[]): string {
   return ask
     .map((question, index) => {
       const header = question.header || `Question ${index + 1}`;
@@ -50,7 +45,7 @@ export function summarizeAnswers(ask: QuestionInfo[], answers: QuestionAnswer[])
 export function renderAskForm(input: AskFormInput): string {
   const questions = input.ask
     .map((question, index) => {
-      const options = optionsFor(question)
+      const options = (question.options ?? [])
         .map((option) => renderOption(index, question, option))
         .join("");
       // Free-response is always offered. Agents can't opt out; humans may
@@ -80,7 +75,7 @@ export function renderAskForm(input: AskFormInput): string {
 // (or the thread has been closed). The interactive form disappears, but the
 // question context must remain visible so readers can interpret the answer
 // without scrolling through the conversation to find the original prompt.
-export function renderAskContext(ask: QuestionInfo[]): string {
+export function renderAskContext(ask: MarkerQuestion[]): string {
   if (!ask.length) return "";
   const questions = ask
     .map((question, index) => {

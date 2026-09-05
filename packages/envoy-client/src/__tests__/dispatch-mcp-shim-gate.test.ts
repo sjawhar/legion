@@ -52,4 +52,14 @@ describe("dispatchShimGate", () => {
     const gate = dispatchShimGate({}, { home, cwd: tempDir() });
     expect(gate).toEqual({ serve: true, remoteUrl: "http://box:9999/mcp" });
   });
+
+  it("declines with the offending file and key named when envoy.json carries a removed key", () => {
+    const home = tempDir();
+    writeUserConfig(home, { dispatch: { enabled: true, defaultRepo: "acme/widgets" } });
+    const gate = dispatchShimGate({}, { home, cwd: tempDir() });
+    expect(gate.serve).toBe(false);
+    if (gate.serve) throw new Error("unreachable");
+    expect(gate.reason).toContain("envoy.json");
+    expect(gate.reason).toContain("dispatch.defaultRepo");
+  });
 });

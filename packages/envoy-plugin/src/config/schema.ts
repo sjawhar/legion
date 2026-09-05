@@ -6,11 +6,6 @@ export const DispatchConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
     serverUrl: z.string().url().optional(),
-    defaultRepo: z
-      .string()
-      .regex(/^[^/]+\/[^/]+$/)
-      .optional(),
-    appClientId: z.string().optional(),
   })
   .strict();
 

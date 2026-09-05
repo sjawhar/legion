@@ -15,7 +15,7 @@ related_issues:
 
 # Controller Session Anti-Patterns: Polling Waste, Version Increments, and Merge Cascades
 
-Source session: `ses_2fe5a7e21ffeZicAZhxr9NXQxu` (2026-03-18 15:55 UTC – 2026-03-19 16:29 UTC), controller for `trajectory-labs-pbc/2` operating on `trajectory-labs-pbc/agent-c`. 821 messages over ~20 hours; 15 bug-fix PRs merged across 5 agar environments plus infra blockers.
+Source session: `ses_2fe5a7e21ffeZicAZhxr9NXQxu` (2026-03-18 15:55 UTC – 2026-03-19 16:29 UTC), controller for `example-org/2` operating on `example-org/example-repo`. 821 messages over ~20 hours; 15 bug-fix PRs merged across 5 agar environments plus infra blockers.
 
 ## Anti-Pattern 1: Polling Waste
 

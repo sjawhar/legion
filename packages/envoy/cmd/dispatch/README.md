@@ -5,9 +5,10 @@ the GitHub OAuth web flow, a REST/GraphQL proxy, a Server-Sent Events
 stream, and an MCP Streamable HTTP endpoint.
 
 The dashboard is **multi-user, multi-repo**. Each authenticated GitHub user
-keeps their own watched-repos list and their own user-to-server token. One
-Envoy GitHub App, installed wherever you want dispatch to operate, backs the
-whole thing.
+sees threads across every repo their own GitHub App installations cover —
+no manually maintained repo list — and keeps their own user-to-server
+token. One Envoy GitHub App, installed wherever you want dispatch to
+operate, backs the whole thing.
 
 ## One-time setup: create the Envoy App
 
@@ -19,7 +20,7 @@ Dispatch requires a single GitHub App that handles both:
 
 Create the App once at <https://github.com/settings/apps/new> with the
 settings below. Replace `https://dispatch.example` with the public origin
-your users browse to (e.g. `http://sami-agents-mx:8766` for a Tailnet
+your users browse to (e.g. `http://example-host-mx:8766` for a Tailnet
 deployment).
 
 | Setting                                              | Value                                          |
@@ -152,8 +153,8 @@ endpoint and `/healthz` continue to work.
 4. Dispatch exchanges the code for a user-to-server token, persists it to
    `~/.local/share/dispatch/users/<login>.json` (mode 0600), and sets the
    `dsession` cookie.
-5. Dashboard loads. On first sign-in the user gets an "Add a repo" prompt;
-   they enter `<owner>/<name>` for any repo the App is installed on.
+5. Dashboard loads, scoped to every repo the user's own App installations
+   cover — no manual repo picker.
 
 Token refresh is automatic and uses the user's stored refresh token plus the
 App's `clientSecret`.
@@ -177,13 +178,13 @@ App's `clientSecret`.
 | `/auth/callback`                              | GET     | none (state token)           | Exchange code, persist user, set session cookie  |
 | `/auth/logout`                                | POST    | dsession cookie              | Remove user record + clear cookie                |
 | `/auth/whoami`                                | GET     | dsession cookie              | Return logged-in GitHub login                    |
-| `/api/events`                                 | GET     | dsession cookie              | SSE stream filtered by user's watched-repos      |
+| `/api/events`                                 | GET     | dsession cookie              | SSE stream scoped to the user's App-installation owners |
 | `/api/github/rest/...`                        | any     | dsession cookie              | Proxy to GitHub REST (auto-refresh)              |
 | `/api/github/graphql`                         | POST    | dsession cookie              | Proxy to GitHub GraphQL (auto-refresh)           |
 | `/api/installations`                          | GET     | dsession cookie              | Proxy `/user/installations`                      |
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
-| `/api/view`                                   | GET     | dsession cookie              | Return current user's watched-repos              |
-| `/api/view`                                   | PATCH   | dsession cookie              | Replace user's watched-repos list                |
+| `/api/view`                                   | GET     | dsession cookie              | Return current user's addressed-threads map      |
+| `/api/view`                                   | PATCH   | dsession cookie              | Replace user's addressed-threads map              |
 | `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP (`dispatch` tool)            |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist`            |
@@ -196,26 +197,32 @@ installation token minted by `gh-app-token`); it's used verbatim for every
 GitHub call made on behalf of the tool invocation. The server never falls
 back to the dashboard user's stored token.
 
-The `dispatch` tool's `parent` argument accepts either form:
+Repo resolution, first hit wins:
 
-- `42` or `42#1234567` — issue (and optional comment id) in
-  `dispatch.defaultRepo`.
-- `<owner>/<repo>#42` — fully-qualified issue, overrides
-  `dispatch.defaultRepo`. The App must be installed on `<owner>/<repo>`
-  with `issues: write`.
+- A qualified `parent` (`<owner>/<repo>#42`) names its own repo. The App
+  must be installed on `<owner>/<repo>` with `issues: write`.
+- Otherwise the `repo` argument (`<owner>/<name>`) is used. The MCP shim
+  fills this from the calling session's working directory when it's a
+  GitHub repo.
+- Neither present → the tool errors naming the fix.
+
+A bare-number `parent` (`42` or `42#1234567`) resolves against whichever
+repo the rules above pick.
 
 ## Configuration
 
 Reads `~/.config/opencode/envoy.json` and `<cwd>/.opencode/envoy.json` (repo
 overrides user). Relevant keys:
 
-- `dispatch.defaultRepo` — optional `<owner>/<name>` slug. Only used as the
-  fallback target for bare-number parents in the MCP tool. The dashboard
-  ignores this field entirely; each user picks their own watched repos.
+- `dispatch.enabled` — whether the plugin surfaces the `dispatch` tool.
+- `dispatch.serverUrl` — the dispatch server's public origin.
 - `natsUrls` — list of NATS URLs (defaults to `nats://127.0.0.1:4222`).
 
-The legacy `dispatch.appClientId` field is **ignored**. App credentials now
-live in `app.json` (see above).
+There is no `defaultRepo` or `appClientId` key: repo comes from the MCP
+shim (which fills it from the calling session's working directory) or an
+explicit `repo` argument, and App credentials live in `app.json` (see
+above). An `envoy.json` that still sets either key is rejected at load
+with an error naming the key.
 
 ## Building and running
 
@@ -238,6 +245,7 @@ go test -timeout 30s ./internal/dispatch/...
 ```
 
 Covers HMAC session cookies, user record I/O, app config I/O, SSE
-hub broadcast/scoping/slow-client drop, meta-marker round trip, parent regex
-cases (including the new `<owner>/<repo>#<n>` form), and the config user+repo
-merge.
+hub broadcast/owner-scoping/slow-client drop, meta-marker round trip
+(including `origin`), parent regex cases, `CreateThread` repo resolution
+(qualified parent, repo arg, bare-number parent, no-repo error), and the
+config load rejecting removed keys.

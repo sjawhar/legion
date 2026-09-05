@@ -59,8 +59,8 @@ subscribe at the granularity they need using wildcard patterns.
 
 | Helper | Example output |
 |--------|---------------|
-| `slackSubject(team, channel, kind)` | `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.message` |
-| `slackThreadSubject(team, channel, threadTs, kind)` | `notifications.slack.T09FRELLTS8.C0A0DHVU8HE.thread.1234567890_123456.message` |
+| `slackSubject(team, channel, kind)` | `notifications.slack.T01234567.C0A0DHVU8HE.message` |
+| `slackThreadSubject(team, channel, threadTs, kind)` | `notifications.slack.T01234567.C0A0DHVU8HE.thread.1234567890_123456.message` |
 
 ### Published topic patterns
 

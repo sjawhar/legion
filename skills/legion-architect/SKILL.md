@@ -62,7 +62,8 @@ legion({ op: "label_add", issue: "<root issue>", label: "needs-approval" })
 dispatch({
   parent: "<root issue>",
   subject: "Legion design approval requested",
-  body: "<summary, specification, and requested decision>"
+  context: "<what the tree is, what triggered the gate>",
+  question: "<specification summary and the decision requested>"
 })
 ```
 

@@ -9,7 +9,7 @@ Legion's workspace model has three compounding issues:
 
 1. **Workspace pollution**: `jj workspace add ... -R user-repo` registers workspaces in the user's jj repo store. `jj workspace list` in a personal checkout shows all Legion workspaces, cluttering the personal environment.
 
-2. **Single-repo assumption**: One `LEGION_DIR` per daemon, one repo per project. But a single GitHub Project can track issues across multiple repositories (agent-c, legion, etc.). Legion can't route issues to different repos.
+2. **Single-repo assumption**: One `LEGION_DIR` per daemon, one repo per project. But a single GitHub Project can track issues across multiple repositories (example-repo, legion, etc.). Legion can't route issues to different repos.
 
 3. **Non-standard state location**: `~/.legion/` is hardcoded. Not XDG-compliant.
 

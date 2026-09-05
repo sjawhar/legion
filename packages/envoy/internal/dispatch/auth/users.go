@@ -1,8 +1,8 @@
 // Per-user state for the dispatch dashboard.
 //
 // One file per user under ~/.local/share/dispatch/users/<login>.json holds
-// their refreshable OAuth tokens and their list of watched <owner>/<repo>
-// pairs. Keying by GitHub login (which is unique and stable) avoids the
+// their refreshable OAuth tokens and the set of threads they've marked
+// addressed. Keying by GitHub login (which is unique and stable) avoids the
 // concurrent-write races of a single shared store, and makes "log out user X"
 // a trivial `os.Remove`.
 package auth
@@ -15,14 +15,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 )
 
 // User is the on-disk record for one authenticated dashboard user.
 type User struct {
-	Login        string   `json:"login"`
-	Tokens       Tokens   `json:"tokens"`
-	WatchedRepos []string `json:"watchedRepos"`
+	Login  string `json:"login"`
+	Tokens Tokens `json:"tokens"`
 	// Addressed maps "<owner>/<repo>#<number>" → the thread.updatedAt at the
 	// moment the user marked it addressed. When the thread's updatedAt
 	// advances past this timestamp (i.e. new activity), the sidebar resurfaces
@@ -76,8 +74,6 @@ func ReadUser(dir, login string) (*User, error) {
 	if u.Login == "" {
 		u.Login = login
 	}
-	// Normalize watched list: lowercase, deduplicate, drop empties.
-	u.WatchedRepos = normalizeRepoList(u.WatchedRepos)
 	return &u, nil
 }
 
@@ -94,8 +90,6 @@ func WriteUser(dir string, u *User) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// Normalize before write so the on-disk shape is canonical.
-	u.WatchedRepos = normalizeRepoList(u.WatchedRepos)
 	data, err := json.MarshalIndent(u, "", "  ")
 	if err != nil {
 		return err
@@ -114,41 +108,4 @@ func RemoveUser(dir, login string) error {
 		return err
 	}
 	return nil
-}
-
-// repoShape enforces the GitHub-style "<owner>/<repo>" form. Owner and repo
-// names follow the same character set; we don't enforce length here because
-// GitHub's own limits change over time.
-var repoShape = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
-
-// ValidateRepoSlug returns nil iff s is a well-formed <owner>/<repo>. Used by
-// the views endpoint to reject malformed input before persistence.
-func ValidateRepoSlug(s string) error {
-	if !repoShape.MatchString(s) {
-		return fmt.Errorf("invalid repo slug %q (expected <owner>/<repo>)", s)
-	}
-	return nil
-}
-
-func normalizeRepoList(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(in))
-	for _, raw := range in {
-		s := strings.ToLower(strings.TrimSpace(raw))
-		if s == "" {
-			continue
-		}
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
