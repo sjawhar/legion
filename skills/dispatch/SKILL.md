@@ -43,8 +43,9 @@ other things, and they will answer the question you wrote, not the one you meant
   dashboard unfurls them into their titles.
 - **Structure over paragraphs.** `context` is at most three short paragraphs or a bullet
   list, one idea each: what you are doing, what you found, why you are stuck. `question`
-  is a list: current state → desired state → options with one-line tradeoffs → your
-  recommendation. Don't just describe the fork — say which branch you'd take and why.
+  is a list: current state → desired state → your recommendation and why; the options
+  themselves go in `ask`, each tradeoff as its `description`. Don't just describe the
+  fork — say which branch you'd take and why.
 - **Options are buttons.** If you are offering choices, put them in `ask`; never enumerate
   them in prose. A human answers a button in one click and the answer arrives structured;
   a choice buried in a paragraph arrives as a sentence you have to interpret.
@@ -115,9 +116,12 @@ dispatch({
 
 - `subject`: one line, the decision — this is the issue title and the dashboard row.
 - `context` (required, ≤ 1200 chars): what you are doing, what you found, why you are stuck.
-- `question` (required, ≤ 800 chars): current → desired → options → recommendation.
+- `question` (required, ≤ 800 chars): current → desired → recommendation (options live in
+  `ask`).
 - `ask` (optional): a list of `{ question, header?, options: [{ label, description? }],
-  multiple?, custom? }`. These render as buttons; the human can always type a free answer too.
+  multiple?, custom? }`. These render as buttons. `custom: true` adds a free-text field
+  beside the buttons; a plain reply on the thread is always possible but arrives
+  unstructured.
 - `urgency` (optional, default `med`): `low` — whenever convenient; `med` — needed today;
   `high` — something will stall soon; `blocking` — you cannot proceed at all right now.
 - `repo` (optional): only to target a **different** repo than your working directory's
@@ -156,8 +160,9 @@ dispatch({
   up in the reply.
 - **Read a challenge as an answer.** "Why not the bot?" is not a request for more prose;
   it is the human declining your framing. Say what you now know, then ask the narrowed
-  question with new options. A follow-up carries your session's identity, so the human
-  sees which conversation is asking even after a handoff.
+  question with new options — unless the challenge itself decides ("Why not the bot? Just
+  use the bot."), in which case act on it and re-ask nothing. A follow-up carries your
+  session's identity, so the human sees which conversation is asking even after a handoff.
 - The tool returns `{"thread": N, "url": "...", "comment": "..."}`.
 
 ## After dispatching
@@ -232,8 +237,9 @@ ask:
 <question>
 ```
 
-`ask` may be omitted when there are no buttons to offer. A hand-posted turn carries no
-`origin`, so the dashboard cannot say which session asked, and nothing subscribes your
-session to a hand-created thread — subscribe it yourself with `envoy_subscribe` to
+`ask` may be omitted when there are no buttons to offer. A second ask on the same turn has
+`askId: <requestId>.1`, a third `.2`. A hand-posted turn carries no `origin`, so the
+dashboard cannot say which session asked, and nothing subscribes your session to a
+hand-created thread — subscribe it yourself with `envoy_subscribe` to
 `notifications.github.<owner>.<name>.issue.<n>.>` or the reply never arrives. Prefer the
 tool.
