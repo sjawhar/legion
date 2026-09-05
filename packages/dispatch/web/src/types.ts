@@ -5,11 +5,11 @@ export type IssueState = "OPEN" | "CLOSED";
 export type CloseReason = "completed" | "not_planned";
 
 /**
- * Coding-agent hosts a dispatch marker can name. Mirrors `DispatchHost` in
+ * Coding-agent hosts that ship a `dispatch` tool. Mirrors `DispatchHost` in
  * envoy-client, the only producer of the field; a marker naming anything else
  * is treated as having no host.
  */
-export type OriginHost = "omp" | "claude";
+export type OriginHost = "omp" | "opencode" | "claude";
 
 export interface Origin {
   host?: OriginHost;
@@ -17,6 +17,8 @@ export interface Origin {
   cwd?: string;
   tmux?: string;
   pane?: string;
+  sessionId?: string;
+  sessionTitle?: string;
 }
 
 export interface Thread {

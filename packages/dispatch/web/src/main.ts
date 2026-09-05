@@ -21,7 +21,7 @@ import {
   buildUrgencyMarkerComment,
   effectiveUrgency,
   isUrgency,
-  parseMetaMarker,
+  parseThreadMarker,
 } from "./markers";
 import "./styles.css";
 import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
@@ -369,9 +369,10 @@ export function createDashboardController(options: DashboardControllerOptions) {
   async function submitAskAnswer(answers: QuestionAnswer[]): Promise<void> {
     const issue = selectedIssue();
     const key = keyOf(issue.repo, issue.number);
-    const ask = parseMetaMarker(issue.body)?.ask ?? [];
+    const meta = parseThreadMarker(issue.body);
+    const ask = meta?.ask ?? [];
     const summary = summarizeAnswers(ask, answers);
-    const body = buildAnswerMarkerComment(issue.number, answers, summary);
+    const body = buildAnswerMarkerComment(issue.number, meta?.requestId ?? "", answers, summary);
     const placeholder = optimisticComment(body);
     selectedComments().push(placeholder);
     state.askPending = true;

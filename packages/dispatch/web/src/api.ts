@@ -1,4 +1,4 @@
-import { parseMetaMarker } from "./markers";
+import { parseThreadMarker } from "./markers";
 import type { CloseReason, Comment, Issue, IssueState, Thread, Urgency } from "./types";
 
 interface GraphqlResponse<T> {
@@ -109,7 +109,7 @@ function commentFromResponse(comment: RestCommentResponse): Comment {
 }
 
 function threadFromNode(node: GraphqlThreadNode): Thread {
-  const meta = parseMetaMarker(node.body);
+  const meta = parseThreadMarker(node.body);
   const parentNumber = node.parent?.number ?? node.number;
   const thread: Thread = {
     repo: `${node.repository.owner.login}/${node.repository.name}`,
@@ -178,7 +178,7 @@ export async function searchDispatchThreads(owners: string[]): Promise<Thread[]>
     ...owners.map((owner) => `user:${owner}`),
   ].join(" ");
   const data = await githubGraphql<SearchResponse>(query, { search });
-  return data.search.nodes.filter((node) => parseMetaMarker(node.body)).map(threadFromNode);
+  return data.search.nodes.filter((node) => parseThreadMarker(node.body)).map(threadFromNode);
 }
 
 export async function getIssue(repo: string, number: number): Promise<Issue> {

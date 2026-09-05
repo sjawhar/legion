@@ -3,9 +3,9 @@ import { escapeHtml, renderMarkdownLite, timeAgo } from "../html";
 import {
   type MarkerQuestion,
   parseAnswerMarker,
-  parseMetaMarker,
+  parseThreadMarker,
   parseUrgencyMarker,
-  stripMetaMarker,
+  stripMarker,
 } from "../markers";
 import type { Comment, Issue, Origin, Thread, Urgency } from "../types";
 import { renderAskContext, renderAskForm } from "./ask-form";
@@ -85,12 +85,8 @@ function renderAnswerComment(
     .join("");
   return `<article class="comment comment-answer" data-comment-id="${comment.id}">
     <header><strong>${escapeHtml(comment.authorLogin)}</strong><span>${escapeHtml(timeAgo(comment.createdAt))}</span><span class="comment-tag">answer</span></header>
-    ${items || `<div class="comment-body">${renderMarkdownLite(stripAnswerMarker(comment.body))}</div>`}
+    ${items || `<div class="comment-body">${renderMarkdownLite(stripMarker(comment.body))}</div>`}
   </article>`;
-}
-
-function stripAnswerMarker(body: string): string {
-  return body.replace(/^<!-- dispatch:answer [^>]+ -->\n{0,2}/, "").trim();
 }
 
 function renderSubThreads(subThreads: Thread[]): string {
@@ -186,7 +182,7 @@ export function renderThreadDetail(input: ThreadDetailInput | null): string {
   }
   const { issue, urgency, comments, subThreads, repo, addressed } = input;
   const writeState = input.writeState ?? EMPTY_WRITE_STATE;
-  const meta = parseMetaMarker(issue.body);
+  const meta = parseThreadMarker(issue.body);
   const ask = meta?.ask;
   const shouldRenderAsk =
     issue.state === "OPEN" && Boolean(ask?.length) && !hasAnswer(comments, issue.number);
@@ -213,7 +209,7 @@ export function renderThreadDetail(input: ThreadDetailInput | null): string {
       ${renderOriginLine(meta?.origin)}
       <p class="detail-subtitle">Opened by ${escapeHtml(issue.authorLogin)} · ${escapeHtml(timeAgo(issue.createdAt))}</p>
     </header>
-    <section class="opening-body">${renderMarkdownLite(stripMetaMarker(issue.body))}</section>
+    <section class="opening-body">${renderMarkdownLite(stripMarker(issue.body))}</section>
     ${
       ask?.length
         ? shouldRenderAsk

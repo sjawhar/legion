@@ -506,7 +506,7 @@ describe("dashboard read-side rendering", () => {
     expect(controller.render()).toContain("Other (specify)");
     await controller.submitAskAnswer([["blue"], ["a", "b"]]);
 
-    expect(calls[0]).toContain("kind: answer");
+    expect(calls[0]?.startsWith("<!-- dispatch:answer\n")).toBe(true);
     expect(calls[0]).toContain("forThread: 12");
     expect(calls[0]).toContain("Color"); // header in summary
     expect(calls[0]).toContain("Color?"); // question prompt in summary
@@ -551,7 +551,8 @@ describe("dashboard read-side rendering", () => {
 
     expect(controller.render()).toContain("urgency-badge-high");
     await urgencyPost;
-    expect(calls).toEqual(["---\nkind: urgency\nurgency: high\n---\n"]);
+    expect(calls[0]?.startsWith("<!-- dispatch:urgency\n")).toBe(true);
+    expect(calls[0]).toContain("Urgency set to **high**.");
 
     const closePost = controller.closeSelectedIssue("completed");
     expect(controller.render()).toContain("resolved");
