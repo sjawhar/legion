@@ -190,6 +190,11 @@ jobs:
       - name: Browser-test dispatch dashboard
         run: bun run e2e
         working-directory: packages/dispatch
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dispatch-e2e-test-results
+          path: packages/dispatch/e2e/test-results
 
   claude-envoy-bridge:
     needs: changes

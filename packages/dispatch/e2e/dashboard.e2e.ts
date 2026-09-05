@@ -82,10 +82,19 @@ test("typed text, form state, and search focus survive GitHub events", async ({
     ])
   ).toEqual([6, 10]);
 
+  // The event names the one visible thread, so its highlight is the sidebar
+  // paint that would destroy the search box if paints rebuilt the sidebar; the
+  // highlight clearing is the timed repaint after the refetch.
   const search = page.locator("#search-input");
   await search.click();
   await search.pressSequentially("harn");
-  await dashboard.emit({ subject: `${SUBJECT}.7`, repo: REPO });
+  await expect(page.locator(".thread-row")).toHaveCount(1);
+  await dashboard.emit({ subject: `${SUBJECT}.12`, repo: REPO });
+  const highlighted = page.locator('.thread-row[data-thread-number="12"].live-highlight');
+  await expect(highlighted).toHaveCount(1);
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("harn");
+  await expect(highlighted).toHaveCount(0, { timeout: 5_000 });
   await expect(page.locator(".thread-row")).toHaveCount(1);
   await expect(search).toBeFocused();
   await expect(search).toHaveValue("harn");

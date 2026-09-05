@@ -33,7 +33,10 @@ export interface FixtureServer {
   readonly posted: PostedComment[];
   addComment(repo: string, number: number, comment: Omit<FixtureComment, "id">): FixtureComment;
   setState(repo: string, number: number, state: FixtureIssue["state"]): void;
-  /** Delivers the frame to every connected SSE client, waiting for the first one to connect. */
+  /**
+   * Delivers the frame to every connected SSE client, waiting up to five
+   * seconds for the first one to connect; rejects when none does.
+   */
   emit(event: FixtureEvent): Promise<void>;
   stop(): Promise<void>;
 }
@@ -48,6 +51,8 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 const REST_ISSUE = /^\/api\/github\/rest\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)(\/comments)?$/;
+// How long emit() waits for the SPA to open /api/events before failing loudly.
+const SUBSCRIBER_TIMEOUT_MS = 5_000;
 
 function readBody(request: IncomingMessage): Promise<string> {
   const body = Promise.withResolvers<string>();
@@ -157,7 +162,14 @@ export function startFixtureServer(options: {
   }
 
   async function emit(event: FixtureEvent): Promise<void> {
-    await subscribed.promise;
+    if (streams.size === 0) {
+      const timeout = Promise.withResolvers<never>();
+      const timer = setTimeout(
+        () => timeout.reject(new Error("no dashboard is connected to /api/events")),
+        SUBSCRIBER_TIMEOUT_MS
+      );
+      await Promise.race([subscribed.promise, timeout.promise]).finally(() => clearTimeout(timer));
+    }
     const frame = `event: github_event\ndata: ${JSON.stringify({ ...event, payload: {} })}\n\n`;
     for (const stream of streams) stream.write(frame);
   }
@@ -267,7 +279,12 @@ export function startFixtureServer(options: {
       return sendJson(response, { ok: true });
     }
     if (pathname === "/__fixture/event" && request.method === "POST") {
-      await emit(await readJson<FixtureEvent>(request));
+      const event = await readJson<FixtureEvent>(request);
+      try {
+        await emit(event);
+      } catch (error) {
+        return sendJson(response, { message: (error as Error).message }, 409);
+      }
       return sendJson(response, { ok: true });
     }
     if (pathname.startsWith("/api/") || pathname.startsWith("/__fixture/")) {
