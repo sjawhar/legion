@@ -239,6 +239,103 @@ func readinessGate(ready func() bool, next http.Handler) http.Handler {
 	})
 }
 
+func messageSource(value string) (string, error) {
+	if value == "" {
+		return "agent", nil
+	}
+	if value == "agent" || value == "human" {
+		return value, nil
+	}
+	return "", fmt.Errorf("source must be one of: agent, human")
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// sendHandler publishes a direct message only while the target session has a
+// live registry entry.
+func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Source         string `json:"source"`
+			SourceSession  string `json:"source_session"`
+			TargetSession  string `json:"target_session"`
+			Message        string `json:"message"`
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		source, err := messageSource(body.Source)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := state.Load()
+		if !isSessionLive(d.sessions, body.TargetSession) {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", body.TargetSession))
+			return
+		}
+		dedupeKey := "agent." + body.TargetSession + "." + id.New()
+		if body.IdempotencyKey != "" {
+			dedupeKey = "agent." + body.TargetSession + "." + body.IdempotencyKey
+		}
+		item := contracts.Envelope{
+			EventID:        id.New(),
+			Source:         source,
+			SourceSession:  body.SourceSession,
+			SourceEventID:  id.New(),
+			Topic:          contracts.AgentSubject(body.TargetSession),
+			DedupeKey:      dedupeKey,
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: body.Message,
+			TraceID:        id.New(),
+		}
+		if err := item.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := d.client.Publish(item); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(item)
+	}
+}
+
+// deleteSessionHandler removes a live session registration at shutdown.
+func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
+		if sessionID == "" {
+			http.Error(w, "session_id required", http.StatusBadRequest)
+			return
+		}
+		if sessions == nil {
+			http.Error(w, "session registry unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := sessions.Delete(sessionID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
 // instead) and publishes the envelope to NATS.
 func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
@@ -267,8 +364,10 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			http.Error(w, "cannot publish to agent topics; use /v1/messages/send for direct agent messages", http.StatusBadRequest)
 			return
 		}
-		if body.Source == "" {
-			body.Source = "agent"
+		source, err := messageSource(body.Source)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		dedupeKey := "publish." + id.New()
 		if body.IdempotencyKey != "" {
@@ -276,7 +375,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		item := contracts.Envelope{
 			EventID:        id.New(),
-			Source:         body.Source,
+			Source:         source,
 			SourceSession:  body.SourceSession,
 			SourceEventID:  id.New(),
 			Topic:          body.Topic,
@@ -694,48 +793,10 @@ func main() {
 		d := deps.Load()
 		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
 	})
-	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			SourceSession  string `json:"source_session"`
-			TargetSession  string `json:"target_session"`
-			Message        string `json:"message"`
-			IdempotencyKey string `json:"idempotency_key"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		dedupeKey := "agent." + body.TargetSession + "." + id.New()
-		if body.IdempotencyKey != "" {
-			dedupeKey = "agent." + body.TargetSession + "." + body.IdempotencyKey
-		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "agent",
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          contracts.AgentSubject(body.TargetSession),
-			DedupeKey:      dedupeKey,
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			TraceID:        id.New(),
-		}
-		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		d := deps.Load()
-		if err := d.client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
+	v1.HandleFunc("/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		deleteSessionHandler(deps.Load().sessions).ServeHTTP(w, r)
 	})
+	v1.HandleFunc("/v1/messages/send", sendHandler(&deps))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(&deps))
 
 	// Serve /v1/* on the listener port for local plugin registration.

@@ -297,7 +297,7 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 		{
 			name:       "rejects empty-ish source after trim",
 			body:       `{"source":" ","topic":"notifications.test.foo","message":"hello"}`,
-			wantSubstr: "source is required",
+			wantSubstr: "source must be one of: agent, human",
 		},
 	}
 
@@ -721,14 +721,14 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 			wantSource: "agent",
 		},
 		{
-			name:       "accepts ghostwispr source",
-			body:       `{"source":"ghostwispr","topic":"notifications.ghostwispr.rec-1.transcript","message":"{}"}`,
-			wantSource: "ghostwispr",
+			name:       "accepts human source",
+			body:       `{"source":"human","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
+			wantSource: "human",
 		},
 		{
-			name:       "accepts github source",
+			name:       "rejects github source",
 			body:       `{"source":"github","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
-			wantSource: "github",
+			wantSource: "",
 		},
 	}
 
@@ -738,6 +738,13 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			handler.ServeHTTP(rr, req)
+
+			if tc.wantSource == "" {
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
+				}
+				return
+			}
 
 			if rr.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -750,6 +757,77 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 				t.Fatalf("expected source %q, got %q", tc.wantSource, env.Source)
 			}
 		})
+	}
+}
+
+func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
+	_, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{sessions: sessions})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/send",
+		strings.NewReader(`{"target_session":"ses_missing","message":"hello"}`),
+	)
+	sendHandler(&state).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error != "no live session ses_missing" {
+		t.Fatalf("error = %q, want %q", response.Error, "no live session ses_missing")
+	}
+}
+
+func TestSendHandler_RejectsInvalidSource(t *testing.T) {
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/send",
+		strings.NewReader(`{"source":"github","target_session":"ses_target","message":"hello"}`),
+	)
+	sendHandler(&state).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDeleteSessionHandler_RemovesRegistration(t *testing.T) {
+	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_closed": 1234})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/ses_closed", nil)
+	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if isSessionLive(sessions, "ses_closed") {
+		t.Fatal("deleted session remains live")
+	}
+}
+
+func TestDeleteSessionHandler_RejectsOtherMethods(t *testing.T) {
+	_, sessions := setupSessionsTest(t, nil, nil)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/ses_closed", nil)
+	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
 	}
 }
 
@@ -859,7 +937,6 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register role session: %v", err)
 	}
-
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role","role":"legion-controller"}`))
@@ -1358,88 +1435,35 @@ func TestSessionsHandler_NoInterestsData(t *testing.T) {
 
 func TestIdempotencyKey_Send(t *testing.T) {
 	client := setupPublishTestClient(t)
+	_, sessions := setupSessionsTest(t, nil, map[string]int{"tgt1": 1})
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
+	state.Store(&listenerDeps{client: client, sessions: sessions})
+	handler := sendHandler(&state)
 
-	// Create a handler for /v1/messages/send
-	mux := http.NewServeMux()
-	v1 := http.NewServeMux()
-	v1.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+	request := `{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`
+	send := func() contracts.Envelope {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(request))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
 		}
-		var body struct {
-			SourceSession  string `json:"source_session"`
-			TargetSession  string `json:"target_session"`
-			Message        string `json:"message"`
-			IdempotencyKey string `json:"idempotency_key"`
+		var envelope contracts.Envelope
+		if err := json.NewDecoder(rr.Body).Decode(&envelope); err != nil {
+			t.Fatalf("decode response: %v", err)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "agent",
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          contracts.AgentSubject(body.TargetSession),
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			TraceID:        id.New(),
-		}
-		dedupeKey := "agent." + body.TargetSession + "." + id.New()
-		if body.IdempotencyKey != "" {
-			dedupeKey = "agent." + body.TargetSession + "." + body.IdempotencyKey
-		}
-		item.DedupeKey = dedupeKey
-		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		d := state.Load()
-		if err := d.client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
-	})
-	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, v1))
-
-	// Test: same idempotency_key produces same DedupeKey
-	rr1 := httptest.NewRecorder()
-	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`))
-	req1.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rr1, req1)
-
-	if rr1.Code != http.StatusOK {
-		t.Fatalf("first request failed: expected 200, got %d (body: %s)", rr1.Code, rr1.Body.String())
-	}
-	var env1 contracts.Envelope
-	if err := json.NewDecoder(rr1.Body).Decode(&env1); err != nil {
-		t.Fatalf("failed to decode first response: %v", err)
+		return envelope
 	}
 
-	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`))
-	req2.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rr2, req2)
+	first := send()
+	second := send()
 
-	if rr2.Code != http.StatusOK {
-		t.Fatalf("second request failed: expected 200, got %d (body: %s)", rr2.Code, rr2.Body.String())
+	if first.DedupeKey != second.DedupeKey {
+		t.Fatalf("expected same DedupeKey for same idempotency_key, got %q and %q", first.DedupeKey, second.DedupeKey)
 	}
-	var env2 contracts.Envelope
-	if err := json.NewDecoder(rr2.Body).Decode(&env2); err != nil {
-		t.Fatalf("failed to decode second response: %v", err)
-	}
-
-	if env1.DedupeKey != env2.DedupeKey {
-		t.Fatalf("expected same DedupeKey for same idempotency_key, got %q and %q", env1.DedupeKey, env2.DedupeKey)
-	}
-	if !strings.HasPrefix(env1.DedupeKey, "agent.tgt1.retry-abc") {
-		t.Fatalf("expected DedupeKey to start with 'agent.tgt1.retry-abc', got %q", env1.DedupeKey)
+	if first.DedupeKey != "agent.tgt1.retry-abc" {
+		t.Fatalf("dedupe key = %q, want %q", first.DedupeKey, "agent.tgt1.retry-abc")
 	}
 }
 
