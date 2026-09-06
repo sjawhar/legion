@@ -20,10 +20,11 @@ export interface DaemonConfig {
   port: number;
   envoyUrl: string;
   /**
-   * Optional MCP endpoint for the dispatch shim, passed through to spawned
-   * session environments as DISPATCH_MCP_URL so agents target a specific
-   * dispatch server (the smoke rig points it at its own instance). When
-   * unset, sessions fall back to their envoy.json dispatch config.
+   * Optional dispatch service endpoint (its /mcp URL), passed through to
+   * spawned session environments as DISPATCH_MCP_URL so the native dispatch
+   * tool targets a specific service (the smoke rig points it at its own
+   * instance). When unset, sessions fall back to their envoy.json dispatch
+   * config.
    */
   dispatchMcpUrl?: string;
   natsUrls: string[];
