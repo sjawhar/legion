@@ -1,0 +1,372 @@
+name: Release Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/daemon/**"
+      - "packages/envoy-plugin/**"
+      - "packages/envoy-client/**"
+      - "packages/contracts/**"
+      - "packages/pi-envoy/**"
+      - "packages/workspace/**"
+      - "skills/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      cli: ${{ steps.filter.outputs.cli }}
+      envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
+      pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            cli:
+              - 'packages/daemon/**'
+            envoy_plugin:
+              - 'packages/envoy-plugin/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'skills/**'
+            pi_envoy:
+              - 'packages/pi-envoy/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'packages/workspace/**'
+              - 'skills/**'
+
+  cli:
+    needs: changes
+    if: needs.changes.outputs.cli == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+      - name: Determine next version
+        id: version
+        run: |
+          PREV_TAG=$(git tag -l 'cli-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            PREV_VERSION="0.0.0"
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/daemon/)
+          else
+            PREV_VERSION="${PREV_TAG#cli-v}"
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/daemon/)
+          fi
+
+          if [ "$VERSION" = "empty" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No commits in packages/daemon/ since ${PREV_TAG:-beginning}"
+            exit 0
+          fi
+          if [ "$VERSION" = "none" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping cli-v${PREV_VERSION} -> cli-v${VERSION}"
+      - uses: oven-sh/setup-bun@v2
+        if: steps.version.outputs.skip != 'true'
+      - name: Install dependencies
+        if: steps.version.outputs.skip != 'true'
+        run: bun install --frozen-lockfile
+      - name: Build CLI
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          bun build \
+            --compile \
+            --target=bun-linux-x64 \
+            --define 'LEGION_VERSION="${{ steps.version.outputs.version }}"' \
+            packages/daemon/src/cli/index.ts \
+            --outfile legion-linux-x64
+          bun build \
+            --compile \
+            --target=bun-darwin-arm64 \
+            --define 'LEGION_VERSION="${{ steps.version.outputs.version }}"' \
+            packages/daemon/src/cli/index.ts \
+            --outfile legion-darwin-arm64
+          bun build \
+            --compile \
+            --target=bun-darwin-x64 \
+            --define 'LEGION_VERSION="${{ steps.version.outputs.version }}"' \
+            packages/daemon/src/cli/index.ts \
+            --outfile legion-darwin-x64
+      - name: Smoke test
+        if: steps.version.outputs.skip != 'true'
+        run: ./legion-linux-x64 --help
+      - name: Update daemon package.json version
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+            packages/daemon/package.json > tmp.json \
+            && mv tmp.json packages/daemon/package.json
+      - name: Commit and tag
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          .github/scripts/release-push.sh tag packages/daemon \
+            "chore: release cli v${{ steps.version.outputs.version }} [skip ci]" \
+            "cli-v${{ steps.version.outputs.version }}"
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="cli-v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it"
+          else
+            gh release create "$tag" \
+              legion-* \
+              --repo "${{ github.repository }}" \
+              --title "CLI v${{ steps.version.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+      - name: Push version bump
+        if: steps.version.outputs.skip != 'true'
+        run: .github/scripts/release-push.sh push-main
+
+  envoy_plugin:
+    needs: [changes, cli]
+    if: >-
+      always() && (needs.cli.result == 'success' || needs.cli.result == 'skipped') &&
+      (needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine next version
+        id: version
+        run: |
+          PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            # When no release tag exists, seed from the published npm version so
+            # an already-published version is never recomputed. Once a release
+            # tags successfully, this branch stops running.
+            PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/)
+          else
+            PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/)
+          fi
+
+          if [ "$VERSION" = "empty" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No commits in tracked paths since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No commits in tracked paths since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$VERSION" = "none" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping opencode-legion-envoy-v${PREV_VERSION} -> opencode-legion-envoy-v${VERSION}"
+
+      - name: Set release version
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+            packages/envoy-plugin/package.json > tmp.json \
+            && mv tmp.json packages/envoy-plugin/package.json
+
+      - name: Pack plugin
+        if: steps.version.outputs.skip != 'true'
+        run: rm -f ./*.tgz && bun pm pack
+        working-directory: packages/envoy-plugin
+
+      - name: Publish to npm
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          if npm view "@sjawhar/opencode-legion-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          else
+            npm publish ./*.tgz --access public --provenance
+          fi
+        working-directory: packages/envoy-plugin
+
+      - name: Commit and tag
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          .github/scripts/release-push.sh tag packages/envoy-plugin \
+            "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]" \
+            "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it"
+          else
+            gh release create "$tag" \
+              packages/envoy-plugin/*.tgz \
+              --repo "${{ github.repository }}" \
+              --title "Envoy Plugin v${{ steps.version.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Push version bump
+        if: steps.version.outputs.skip != 'true'
+        run: .github/scripts/release-push.sh push-main
+
+  pi_envoy:
+    needs: [changes, envoy_plugin]
+    if: >-
+      always() && (needs.envoy_plugin.result == 'success' || needs.envoy_plugin.result == 'skipped') &&
+      (needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine next version
+        id: version
+        run: |
+          PREV_TAG=$(git tag -l 'pi-legion-envoy-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            # When no release tag exists, seed from the published npm version so
+            # an already-published version is never recomputed. Once a release
+            # tags successfully, this branch stops running.
+            PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
+          else
+            PREV_VERSION="${PREV_TAG#pi-legion-envoy-v}"
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
+          fi
+
+          if [ "$VERSION" = "empty" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No commits in tracked paths since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No commits in tracked paths since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$VERSION" = "none" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping pi-legion-envoy-v${PREV_VERSION} -> pi-legion-envoy-v${VERSION}"
+
+      - name: Set release version
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+            packages/pi-envoy/package.json > tmp.json \
+            && mv tmp.json packages/pi-envoy/package.json
+
+      - name: Point extensions at the packed bundle
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          # The committed manifest keeps source paths (extensions/*.ts) so
+          # repo checkouts (the Legion daemon, dev sessions) load sources
+          # without a build. The published tarball ships only self-contained
+          # dist bundles, and only the envoy extension: the legion extension
+          # is daemon infrastructure that global sessions must not load.
+          cp packages/pi-envoy/package.json "$RUNNER_TEMP/pi-envoy-manifest.json"
+          jq '.omp.extensions = ["dist/envoy.js"]' \
+            packages/pi-envoy/package.json > tmp.json \
+            && mv tmp.json packages/pi-envoy/package.json
+
+      - name: Pack extension
+        if: steps.version.outputs.skip != 'true'
+        run: rm -f ./*.tgz && bun pm pack
+        working-directory: packages/pi-envoy
+
+      - name: Publish to npm
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          if npm view "@sjawhar/pi-legion-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          else
+            npm publish ./*.tgz --access public --provenance
+          fi
+        working-directory: packages/pi-envoy
+
+      - name: Restore committed manifest
+        if: always() && steps.version.outputs.skip == 'false'
+        run: |
+          if [ -f "$RUNNER_TEMP/pi-envoy-manifest.json" ]; then
+            mv "$RUNNER_TEMP/pi-envoy-manifest.json" packages/pi-envoy/package.json
+          fi
+
+      - name: Commit and tag
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          .github/scripts/release-push.sh tag packages/pi-envoy \
+            "chore: release pi-envoy v${{ steps.version.outputs.version }} [skip ci]" \
+            "pi-legion-envoy-v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="pi-legion-envoy-v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it"
+          else
+            gh release create "$tag" \
+              packages/pi-envoy/*.tgz \
+              --repo "${{ github.repository }}" \
+              --title "Pi Envoy v${{ steps.version.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Push version bump
+        if: steps.version.outputs.skip != 'true'
+        run: .github/scripts/release-push.sh push-main
