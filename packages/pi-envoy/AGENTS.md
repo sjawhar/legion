@@ -5,8 +5,9 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 ## Overview
 
 This package owns Pi-specific tool registration, direct NATS subscriptions, steering delivery,
-and optional self-subscription registration. HTTP transport, tool metadata, envelope parsing, and
-subject construction come from the Envoy core packages. Role claims are routed by the listener:
+and self-subscription registration for every session. HTTP transport, tool metadata, envelope
+parsing, and subject construction come from the Envoy core packages. Role claims are routed by
+the listener:
 this extension receives a receipt-backed request on its direct agent subject instead of subscribing
 to a role subject itself. The agent pump replies after it accepts the envelope, so the listener can
 turn a claimed-but-deaf holder into a `delivery_failed` exception after two seconds.

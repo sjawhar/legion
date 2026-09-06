@@ -304,9 +304,6 @@ export default function envoyExtension(pi: PiApi): void {
     });
   };
 
-  const registrationRequired = (): boolean =>
-    process.env.ENVOY_REGISTER_SESSION === "1" || claimedRoleTopic !== undefined;
-
   const ensureHeartbeat = (context: SessionContext): void => {
     if (heartbeatRegistered) return;
     // Never let a heartbeat tick reject unhandled: OMP treats unhandled
@@ -316,7 +313,6 @@ export default function envoyExtension(pi: PiApi): void {
     let heartbeatOutageNotified = false;
     let healing = false;
     context.setInterval(() => {
-      if (!registrationRequired()) return;
       // Sessions can be created lazily after session_start (a fresh TUI has no
       // session yet), and the ID this closure registered with goes stale. Heal
       // on drift instead of heartbeating a dead identity forever.
@@ -374,10 +370,10 @@ export default function envoyExtension(pi: PiApi): void {
     if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
       await recoverRegisteredInterests();
     }
-    if (registrationRequired()) {
-      await registerSession();
-      ensureHeartbeat(context);
-    }
+    // Every session subscribes to its own agent subject, so every session is
+    // registered; envoy_send treats an unregistered id as dead.
+    await registerSession();
+    ensureHeartbeat(context);
   };
 
   const setEnvoyRole = async (role: string): Promise<void> => {
@@ -498,14 +494,28 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    const deadline = Promise.withResolvers<void>();
+    const timer = setTimeout(deadline.resolve, 1_000);
     try {
-      // Bound the drain: on a dead connection it can hang past OMP's 2s
-      // shutdown-handler budget and the flush is best-effort anyway.
-      const drain = connection?.drain();
-      if (drain) await Promise.race([drain, new Promise((resolve) => setTimeout(resolve, 1_000))]);
+      // Removing the listener registration first prevents the server from
+      // targeting a session whose NATS connection is about to be drained.
+      const shutdown = async (): Promise<void> => {
+        if (sessionID !== "") {
+          try {
+            await client.unregisterSession(sessionID);
+          } catch {
+            // Session cleanup is best-effort during shutdown.
+          }
+        }
+        await connection?.drain();
+      };
+      // Bound registration cleanup and drain together: either can hang on a
+      // dead listener or NATS connection, while OMP allows two seconds.
+      await Promise.race([shutdown(), deadline.promise]);
     } catch {
       // A failed drain on shutdown is not actionable.
     } finally {
+      clearTimeout(timer);
       connection = undefined;
       activeSessionContext = undefined;
       subscriptions.clear();

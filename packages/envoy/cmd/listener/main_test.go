@@ -568,20 +568,20 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	dead := publishRole(deadTopic, "agent")
 	assertDeliveryException(t, deadProbe, dead, "delivery_failed")
 
-	externalEnvoy := publishRole(roleTopic, "envoy")
+	externalHuman := publishRole(roleTopic, "human")
 	externalMessage, err := probeB.NextMsg(5 * time.Second)
 	if err != nil {
-		t.Fatalf("read externally sourced envoy role event for B: %v", err)
+		t.Fatalf("read human-sourced role event for B: %v", err)
 	}
 	var externalForwarded contracts.Envelope
 	if err := json.Unmarshal(externalMessage.Data, &externalForwarded); err != nil {
-		t.Fatalf("decode externally sourced forwarded envelope: %v", err)
+		t.Fatalf("decode human-sourced forwarded envelope: %v", err)
 	}
-	if externalForwarded.Source != "envoy" {
-		t.Fatalf("externally sourced forwarded source = %q, want envoy", externalForwarded.Source)
+	if externalForwarded.Source != "human" {
+		t.Fatalf("human-sourced forwarded source = %q, want human", externalForwarded.Source)
 	}
-	if externalForwarded.EventID != externalEnvoy.EventID {
-		t.Fatalf("externally sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalEnvoy.EventID)
+	if externalForwarded.EventID != externalHuman.EventID {
+		t.Fatalf("human-sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalHuman.EventID)
 	}
 
 	unclaimedTopic := contracts.RoleTopicPrefix + "legion-no-holder"

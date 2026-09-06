@@ -76,7 +76,6 @@ const TEST_CREDENTIAL_HELPER = `!${process.execPath} ${path.resolve(
 )} credential`;
 const environmentKeys = [
   "ENVOY_NATS_URL",
-  "ENVOY_REGISTER_SESSION",
   "ENVOY_URL",
   "LEGION_CONTROLLER",
   "LEGION_CONTROLLER_SECRET",
@@ -93,7 +92,6 @@ const environmentKeys = [
 ] as const;
 const originalEnvironment: Record<(typeof environmentKeys)[number], string | undefined> = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
-  ENVOY_REGISTER_SESSION: process.env.ENVOY_REGISTER_SESSION,
   ENVOY_URL: process.env.ENVOY_URL,
   LEGION_CONTROLLER: process.env.LEGION_CONTROLLER,
   LEGION_CONTROLLER_SECRET: process.env.LEGION_CONTROLLER_SECRET,
@@ -149,7 +147,6 @@ function createPi(
       prompt: async () => undefined,
     } satisfies ExtensionAgentsApi);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
-  delete process.env.ENVOY_REGISTER_SESSION;
   process.env.LEGION_STATE_DIR ??= "/tmp/legion-state";
   const pi: TestPi = {
     zod: {
@@ -381,6 +378,19 @@ describe("Legion OMP extension", () => {
     await sessionStart({}, context);
 
     expect(requests).toEqual([
+      // Envoy registers the direct subject before Legion bootstraps the root.
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_root",
+          dir: "/tmp/legion-workspace",
+          topics: [agentSubject("ses_root")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
       {
         path: "/legion/v1/process/started",
         body: {
@@ -561,7 +571,21 @@ describe("Legion OMP extension", () => {
       throw new Error("Legion session_start handler was not registered");
     await sessionStart({}, context);
 
-    expect(requests).toEqual([]);
+    // A spawned worker does not bootstrap Legion, but it remains reachable through Envoy.
+    expect(requests).toEqual([
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_worker",
+          dir: "/tmp/legion-worker",
+          topics: [agentSubject("ses_worker")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
+    ]);
   });
   test("registers the root process before claiming its role and agent delivery subject", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
@@ -600,6 +624,19 @@ describe("Legion OMP extension", () => {
     expect(fixture.activeTools).toEqual(["read", "task", "hub", "legion"]);
 
     expect(requests).toEqual([
+      // Envoy registers the direct subject before Legion claims the root role.
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_root",
+          dir: "/tmp/legion-workspace",
+          topics: [agentSubject("ses_root")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
       {
         path: "/legion/v1/process/started",
         body: {
@@ -635,7 +672,8 @@ describe("Legion OMP extension", () => {
     if (secondSessionStart === undefined)
       throw new Error("second session_start handler was not registered");
     await secondSessionStart({}, sessionContext("ses_child"));
-    expect(requests).toHaveLength(4);
+    // Startup and the replacement session each add their direct-subject registration.
+    expect(requests).toHaveLength(6);
   });
   test("provisions an issue workspace and passes it to the phase worker outside the task wire schema", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
@@ -847,6 +885,19 @@ describe("Legion OMP extension", () => {
     await claimCommand.handler("", sessionContext("ses_interactive"));
 
     expect(requests).toEqual([
+      // Envoy registers the direct subject before the controller claim.
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_controller",
+          dir: "/tmp/legion-workspace",
+          topics: [agentSubject("ses_controller")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
       { path: "/legion/v1/state", body: undefined },
       { path: "/v1/roles/set", body: { session_id: "ses_controller", role: token } },
       {
@@ -939,6 +990,20 @@ describe("Legion OMP extension", () => {
     });
 
     expect(requests).toEqual([
+      // Envoy registers the direct subject before the interactive controller claim.
+      {
+        method: "POST",
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_interactive",
+          dir: "/tmp/legion-workspace",
+          topics: [agentSubject("ses_interactive")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
       { method: "GET", path: "/legion/v1/state", body: undefined },
       {
         method: "POST",
@@ -1055,6 +1120,19 @@ describe("Legion OMP extension", () => {
       {
         path: "/legion/v1/phase",
         body: { tree, issue, phase: role, sessionId: "ses_worker", spawnToken },
+      },
+      // Envoy registers the worker's direct subject before its role claim.
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_worker",
+          dir: parentWorkspace,
+          topics: [agentSubject("ses_worker")],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_worker", role: token } },
       {
@@ -1739,7 +1817,7 @@ exec "${process.execPath}" "${path.resolve(import.meta.dir, "../../daemon/src/cl
     );
     await sessionShutdown({}, context);
 
-    expect(deletedSessions).toEqual(["/v1/interests/ses_park"]);
+    expect(deletedSessions).toEqual(["/v1/sessions/ses_park", "/v1/interests/ses_park"]);
   });
   test("reclaims a parked worker role without registering a second phase", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];

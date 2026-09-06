@@ -42,7 +42,6 @@ type Handler = (event: unknown, context: Context) => Promise<unknown>;
 const originalFetch = globalThis.fetch;
 const originalEnvironment = {
   ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
-  ENVOY_REGISTER_SESSION: process.env.ENVOY_REGISTER_SESSION,
   ENVOY_URL: process.env.ENVOY_URL,
   LEGION_BOOT_TOKEN: process.env.LEGION_BOOT_TOKEN,
   LEGION_DAEMON_URL: process.env.LEGION_DAEMON_URL,
@@ -69,7 +68,6 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   const sessionID = "ses_legion_root";
   const role = roleToken("omp", tree, "architect");
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
-  delete process.env.ENVOY_REGISTER_SESSION;
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
   process.env.LEGION_GENERATION = "3";
@@ -92,7 +90,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
         readonly topics: readonly string[];
       };
       registrations.push(body);
-      if (registrations.length === 2) heartbeatRegistration.resolve();
+      if (registrations.length === 3) heartbeatRegistration.resolve();
       return Response.json({ session_id: body.session_id, machine_id: "test", dir: "/tmp", topics: body.topics });
     }
     return Response.json({ session_id: sessionID, machine_id: "test", dir: "/tmp", topics: [] });
@@ -150,11 +148,13 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   await beforeAgentStart({ prompt: "Start the root architect" }, context);
 
   expect(intervals).toHaveLength(1);
-  expect(registrations).toHaveLength(1);
+  // Establishing the role claimant registers before the role is applied, then
+  // refreshes it after the claim.
+  expect(registrations).toHaveLength(2);
   intervals[0]?.();
   await heartbeatRegistration.promise;
-  expect(registrations).toHaveLength(2);
-  expect(registrations[1]).toMatchObject({
+  expect(registrations).toHaveLength(3);
+  expect(registrations[2]).toMatchObject({
     session_id: sessionID,
     topics: [agentSubject(sessionID)],
   });
