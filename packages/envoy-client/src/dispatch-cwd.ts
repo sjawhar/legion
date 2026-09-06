@@ -111,13 +111,17 @@ export async function resolveCwdRepo(cwd: string, exec: ExecFn): Promise<string 
   return originUrl ? parseGitHubRemoteUrl(originUrl) : null;
 }
 
+type OriginEnvironment = {
+  readonly TMUX_PANE?: string;
+} & Record<string, string | undefined>;
+
 /**
  * Best-effort provenance for a dispatch turn: machine, session cwd, and —
  * inside tmux — the pane to jump back to. Host and session identity are the
  * calling plugin's to add; nothing here is guessed from the environment.
  */
 export async function resolveOrigin(
-  env: Record<string, string | undefined>,
+  env: OriginEnvironment,
   exec: ExecFn,
   cwd: string
 ): Promise<DispatchOrigin> {
@@ -126,7 +130,7 @@ export async function resolveOrigin(
     machine: machineID(),
   };
 
-  const pane = env["TMUX_PANE"];
+  const pane = env.TMUX_PANE;
   if (pane) {
     // `#S:#I.#P` reads well but names one session of a session group at
     // random; the pane id is what `switch-client -t` needs to land in the

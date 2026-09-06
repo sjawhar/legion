@@ -51,17 +51,23 @@ export type UnsubscribeInput = {
 
 export type MessageSource = "agent" | "human";
 
-export type SendInput = {
-  readonly source?: MessageSource;
+export type AgentSourceInput = {
+  readonly source?: "agent";
+  readonly sourceSessionID: string;
+};
+
+export type HumanSourceInput = {
+  readonly source: "human";
   readonly sourceSessionID?: string;
+};
+
+export type SendInput = (AgentSourceInput | HumanSourceInput) & {
   readonly targetSessionID: string;
   readonly message: string;
   readonly idempotencyKey?: string;
 };
 
-export type PublishInput = {
-  readonly source?: MessageSource;
-  readonly sourceSessionID?: string;
+export type PublishInput = (AgentSourceInput | HumanSourceInput) & {
   readonly topic: string;
   readonly message: string;
   readonly payload?: string;
