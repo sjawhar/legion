@@ -112,8 +112,8 @@ creates a thread whose replies never route.
 
 Carry the remaining Legion events (`pull_request*`, `check_run`, `workflow_run`, `push`,
 `installation*`) on the App hook with `checks:read` / `actions:read`; delete both per-repo
-hooks; retire `trajectory-s-legion` (3060279) if dead. Belongs with a Legion-running
-session where the daemon's event path can be verified end to end.
+hooks; retire the older per-repo App (`<legacy-app-slug>`, id `<app-id>`) if dead. Belongs
+with a Legion-running session where the daemon's event path can be verified end to end.
 
 ### 5. Skill and guidance
 
