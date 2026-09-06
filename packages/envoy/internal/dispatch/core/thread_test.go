@@ -44,7 +44,7 @@ func TestRequestIDQueryMatchesMarker(t *testing.T) {
 // their structured ask produce different request ids, so they do not collapse
 // onto a single thread.
 func TestComputeRequestIDIncludesAsk(t *testing.T) {
-	ask := []QuestionInfo{{Question: "Color?", Options: []QuestionOption{{Label: "red"}}}}
+	ask := []DispatchQuestion{{Question: "Color?", Options: []DispatchQuestionOption{{Label: "red"}}}}
 	base := ComputeRequestID("o/r", "641", "S", "C", "Q", UrgencyMed, nil)
 	withAsk := ComputeRequestID("o/r", "641", "S", "C", "Q", UrgencyMed, ask)
 	if base == withAsk {
@@ -71,7 +71,7 @@ func TestComputeRequestIDStableForSameInputs(t *testing.T) {
 // questions" and must hash to the same thread.
 func TestComputeRequestIDEmptyAskMatchesNil(t *testing.T) {
 	a := ComputeRequestID("o/r", "", "S", "C", "Q", UrgencyMed, nil)
-	b := ComputeRequestID("o/r", "", "S", "C", "Q", UrgencyMed, []QuestionInfo{})
+	b := ComputeRequestID("o/r", "", "S", "C", "Q", UrgencyMed, []DispatchQuestion{})
 	if a != b {
 		t.Fatalf("nil ask %q and empty ask %q must hash identically", a, b)
 	}
@@ -85,6 +85,34 @@ func TestComputeRequestIDChangesWithRepo(t *testing.T) {
 	b := ComputeRequestID("owner/two", "", "S", "C", "Q", UrgencyMed, nil)
 	if a == b {
 		t.Fatalf("request id ignored repo: both %q", a)
+	}
+}
+func TestComputeRequestIDsIgnoreCallerSuppliedAskIDs(t *testing.T) {
+	asks := []DispatchQuestion{{AskID: "caller-one", Question: "Color?", Options: []DispatchQuestionOption{{Label: "red"}}}}
+	otherIDs := []DispatchQuestion{{AskID: "caller-two", Question: "Color?", Options: []DispatchQuestionOption{{Label: "red"}}}}
+	tests := []struct {
+		name string
+		id   func([]DispatchQuestion) string
+	}{
+		{
+			name: "opening",
+			id: func(ask []DispatchQuestion) string {
+				return ComputeRequestID("o/r", "641", "S", "C", "Q", UrgencyMed, ask)
+			},
+		},
+		{
+			name: "follow-up",
+			id: func(ask []DispatchQuestion) string {
+				return ComputeFollowUpRequestID("o/r", 641, "C", "Q", ask)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := tc.id(otherIDs), tc.id(asks); got != want {
+				t.Errorf("request IDs differ only because caller supplied askId: got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -276,6 +304,25 @@ func TestCreateThreadParentless(t *testing.T) {
 		t.Errorf("parent-less dispatch must not touch a breadcrumb comment, got %v", gh.calls)
 	}
 }
+func TestCreateThreadIgnoresThreadWhenCalledDirectly(t *testing.T) {
+	client, gh := newDispatchTestServer(t)
+	_, err := CreateThread(context.Background(), client, DispatchInput{
+		Repo:     "acme/widgets",
+		Thread:   "other/repo#42",
+		Subject:  "S",
+		Context:  "C",
+		Question: "Q",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	if !callsContain(gh.calls, "/repos/acme/widgets/issues") {
+		t.Errorf("expected calls against input repo, got %v", gh.calls)
+	}
+	if callsContain(gh.calls, "/repos/other/repo/") {
+		t.Errorf("CreateThread must ignore thread repo, got %v", gh.calls)
+	}
+}
 
 func TestCreateThreadQualifiedParentBeatsRepo(t *testing.T) {
 	client, gh := newDispatchTestServer(t)
@@ -394,7 +441,7 @@ func TestCreateThreadWritesAskIDs(t *testing.T) {
 	client, gh := newDispatchTestServer(t)
 	_, err := CreateThread(context.Background(), client, DispatchInput{
 		Repo: "acme/widgets", Subject: "S", Context: "C", Question: "Q",
-		Ask: []QuestionInfo{{Question: "a?"}, {Question: "b?"}},
+		Ask: []DispatchQuestion{{Question: "a?"}, {Question: "b?"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -445,7 +492,7 @@ func TestContinueThreadPostsAskCommentAndCreatesNoIssue(t *testing.T) {
 	result, err := Dispatch(context.Background(), client, DispatchInput{
 		Repo: "acme/widgets", Thread: "42", Context: "More context.", Question: "Revised?",
 		Origin: &Origin{Host: "omp", SessionID: "ses_2", SessionTitle: "renamed"},
-		Ask:    []QuestionInfo{{Question: "Which?", Options: []QuestionOption{{Label: "a"}}}},
+		Ask:    []DispatchQuestion{{Question: "Which?", Options: []DispatchQuestionOption{{Label: "a"}}}},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -605,9 +652,9 @@ func TestContinueThreadResolvesRepo(t *testing.T) {
 }
 
 func TestComputeFollowUpRequestIDCoversThreadContextQuestionAsk(t *testing.T) {
-	ask := []QuestionInfo{{Question: "Color?"}}
+	ask := []DispatchQuestion{{Question: "Color?"}}
 	base := ComputeFollowUpRequestID("o/r", 42, "C", "Q", nil)
-	if base != ComputeFollowUpRequestID("o/r", 42, "C", "Q", []QuestionInfo{}) {
+	if base != ComputeFollowUpRequestID("o/r", 42, "C", "Q", []DispatchQuestion{}) {
 		t.Error("nil and empty ask must hash identically")
 	}
 	for name, other := range map[string]string{
@@ -622,5 +669,25 @@ func TestComputeFollowUpRequestIDCoversThreadContextQuestionAsk(t *testing.T) {
 	}
 	if len(base) != 16 {
 		t.Errorf("request id must be 16 hex chars, got %q", base)
+	}
+}
+
+func TestResolveRepoPrefersTheQualifiedReference(t *testing.T) {
+	cases := map[string]struct {
+		input DispatchInput
+		want  string
+	}{
+		"qualified thread wins":   {DispatchInput{Thread: "other-org/other-repo#5", Repo: "acme/example-repo"}, "other-org/other-repo"},
+		"bare thread uses repo":   {DispatchInput{Thread: "5", Repo: "acme/example-repo"}, "acme/example-repo"},
+		"qualified parent wins":   {DispatchInput{Parent: "other-org/other-repo#3#99", Repo: "acme/example-repo"}, "other-org/other-repo"},
+		"bare parent uses repo":   {DispatchInput{Parent: "3", Repo: "acme/example-repo"}, "acme/example-repo"},
+		"repo only":               {DispatchInput{Repo: "acme/example-repo"}, "acme/example-repo"},
+		"malformed falls through": {DispatchInput{Thread: "not-a-thread", Repo: "acme/example-repo"}, "acme/example-repo"},
+		"nothing":                 {DispatchInput{}, ""},
+	}
+	for name, tc := range cases {
+		if got := ResolveRepo(tc.input); got != tc.want {
+			t.Errorf("%s: ResolveRepo = %q, want %q", name, got, tc.want)
+		}
 	}
 }

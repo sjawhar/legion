@@ -25,15 +25,15 @@ const (
 // DispatchInput captures every parameter the dispatch tool accepts. Thread
 // selects the mode: empty opens a thread, otherwise the call continues one.
 type DispatchInput struct {
-	Repo     string         `json:"repo,omitempty"`
-	Parent   string         `json:"parent,omitempty"`
-	Thread   string         `json:"thread,omitempty"`
-	Subject  string         `json:"subject,omitempty"`
-	Context  string         `json:"context"`
-	Question string         `json:"question"`
-	Origin   *Origin        `json:"origin,omitempty"`
-	Ask      []QuestionInfo `json:"ask,omitempty"`
-	Urgency  Urgency        `json:"urgency,omitempty"`
+	Repo     string             `json:"repo,omitempty"`
+	Parent   string             `json:"parent,omitempty"`
+	Thread   string             `json:"thread,omitempty"`
+	Subject  string             `json:"subject,omitempty"`
+	Context  string             `json:"context"`
+	Question string             `json:"question"`
+	Origin   *Origin            `json:"origin,omitempty"`
+	Ask      []DispatchQuestion `json:"ask,omitempty"`
+	Urgency  Urgency            `json:"urgency,omitempty"`
 }
 
 // DispatchResult is the tool's output payload. URL is always the issue URL;
@@ -53,6 +53,24 @@ func Dispatch(ctx context.Context, client *github.Client, input DispatchInput) (
 	return CreateThread(ctx, client, input)
 }
 
+// ResolveRepo is the repository a call is logged against, first hit wins: a
+// qualified thread ("owner/name#n"), then a qualified parent, then input.Repo.
+// Empty when nothing names one or the reference does not parse — callers that
+// must reject a malformed reference parse it themselves first.
+func ResolveRepo(input DispatchInput) string {
+	if input.Thread != "" {
+		if ref, err := ParseThread(input.Thread); err == nil && ref.Repo != "" {
+			return ref.Repo
+		}
+	}
+	if input.Parent != "" {
+		if parent, err := ParseParent(input.Parent); err == nil && parent.Repo != "" {
+			return parent.Repo
+		}
+	}
+	return input.Repo
+}
+
 // requestID is the hash every request id is: sha256 of the identifying tuple,
 // truncated to 16 hex characters.
 func requestID(tuple string) string {
@@ -61,10 +79,18 @@ func requestID(tuple string) string {
 }
 
 // askJSON renders the ask list for a request-id tuple; an empty ask hashes the
-// same whether the caller omitted it or sent `[]`.
-func askJSON(ask []QuestionInfo) []byte {
+// same whether the caller omitted it or sent `[]`. AskID is assigned by Envoy,
+// so callers cannot affect idempotency by supplying it.
+func askJSON(ask []DispatchQuestion) []byte {
 	if len(ask) == 0 {
 		ask = nil
+	} else {
+		withoutIDs := make([]DispatchQuestion, len(ask))
+		copy(withoutIDs, ask)
+		for i := range withoutIDs {
+			withoutIDs[i].AskID = ""
+		}
+		ask = withoutIDs
 	}
 	out, _ := json.Marshal(ask)
 	return out
@@ -74,13 +100,13 @@ func askJSON(ask []QuestionInfo) []byte {
 // tuple to identify duplicate opening attempts. ask is included so two
 // otherwise identical dispatches that attach different structured questions
 // do not collapse onto the same thread.
-func ComputeRequestID(repo, parent, subject, context, question string, urgency Urgency, ask []QuestionInfo) string {
+func ComputeRequestID(repo, parent, subject, context, question string, urgency Urgency, ask []DispatchQuestion) string {
 	return requestID(fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s", repo, parent, subject, context, question, urgency, askJSON(ask)))
 }
 
 // ComputeFollowUpRequestID hashes (repo|thread|context|question|ask) to
 // identify duplicate follow-up attempts on one thread.
-func ComputeFollowUpRequestID(repo string, thread int, context, question string, ask []QuestionInfo) string {
+func ComputeFollowUpRequestID(repo string, thread int, context, question string, ask []DispatchQuestion) string {
 	return requestID(fmt.Sprintf("follow-up|%s|%d|%s|%s|%s", repo, thread, context, question, askJSON(ask)))
 }
 

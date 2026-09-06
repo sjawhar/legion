@@ -90,15 +90,15 @@ func extractBearer(header http.Header) string {
 // and `thread` continues one. core.Dispatch enforces that exactly one is
 // present with its arguments.
 type dispatchInput struct {
-	Subject  string              `json:"subject,omitempty" jsonschema:"Open a thread: one line, the decision needed. Omit when continuing a thread."`
-	Thread   string              `json:"thread,omitempty" jsonschema:"Continue a thread: <n> | owner/name#<n>. Omit subject, urgency, and parent."`
-	Context  string              `json:"context" jsonschema:"What you are doing, what you found, why you are stuck (at most 1200 characters). The reader has NOT seen your transcript."`
-	Question string              `json:"question" jsonschema:"The ask (at most 800 characters): current state → desired state → your recommendation and why; options go in ask."`
-	Ask      []core.QuestionInfo `json:"ask,omitempty" jsonschema:"Optional structured questions attached to this turn"`
-	Urgency  string              `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med). Opening a thread only."`
-	Repo     string              `json:"repo,omitempty" jsonschema:"owner/name. Filled by the calling plugin from the session's working directory when the call does not name a qualified parent or thread."`
-	Parent   string              `json:"parent,omitempty" jsonschema:"<n> | owner/name#<n>[#<commentId>]. Opening a thread only: link it as a sub-issue and append a breadcrumb to the comment."`
-	Origin   *core.Origin        `json:"origin,omitempty" jsonschema:"Filled by the calling plugin from the session; leave unset."`
+	Subject  string                  `json:"subject,omitempty" jsonschema:"Open a thread: one line, the decision needed. Omit when continuing a thread."`
+	Thread   string                  `json:"thread,omitempty" jsonschema:"Continue a thread: <n> | owner/name#<n>. Omit subject, urgency, and parent."`
+	Context  string                  `json:"context" jsonschema:"What you are doing, what you found, why you are stuck (at most 1200 characters). The reader has NOT seen your transcript."`
+	Question string                  `json:"question" jsonschema:"The ask (at most 800 characters): current state → desired state → your recommendation and why; options go in ask."`
+	Ask      []core.DispatchQuestion `json:"ask,omitempty" jsonschema:"Optional structured questions attached to this turn"`
+	Urgency  string                  `json:"urgency,omitempty" jsonschema:"Urgency: low | med | high | blocking (default med). Opening a thread only."`
+	Repo     string                  `json:"repo,omitempty" jsonschema:"owner/name. Filled by the calling plugin from the session's working directory when the call does not name a qualified parent or thread."`
+	Parent   string                  `json:"parent,omitempty" jsonschema:"<n> | owner/name#<n>[#<commentId>]. Opening a thread only: link it as a sub-issue and append a breadcrumb to the comment."`
+	Origin   *core.Origin            `json:"origin,omitempty" jsonschema:"Filled by the calling plugin from the session; leave unset."`
 }
 
 func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolRequest, input dispatchInput) (*mcpsdk.CallToolResult, any, error) {
