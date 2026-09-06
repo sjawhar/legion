@@ -210,6 +210,9 @@ jobs:
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
         working-directory: packages/claude-envoy-bridge
+      - name: Test Claude Envoy plugin
+        run: bun run test
+        working-directory: packages/claude-envoy-bridge
       - name: Pack Claude Envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/claude-envoy-bridge
