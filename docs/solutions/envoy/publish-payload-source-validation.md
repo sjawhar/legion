@@ -1,10 +1,11 @@
 ---
-title: "Envoy publish payload source field is a closed enum"
+title: "Envoy message payload source field is a closed enum"
 category: envoy
 tags:
   - envoy
   - contracts
   - publish
+  - send
   - api-validation
   - plan-verification
 date: 2026-04-11
@@ -13,19 +14,22 @@ module: envoy-plugin
 related_issues:
   - "sjawhar-legion-418"
 symptoms:
-  - "source must be one of: agent, github, slack, whatsapp, ghostwispr"
-  - "400 error when publishing to Envoy"
-  - "envoy publish returns 400"
+  - "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr"
+  - "400 error when sending or publishing to Envoy"
+  - "envoy send or envoy publish returns 400"
 ---
 
-# Envoy publish payload source field is a closed enum
+# Envoy message payload source field is a closed enum
 
 ## Context
 
-The Envoy `/v1/messages/publish` endpoint validates the `source` field against a closed
-whitelist defined in `packages/envoy/internal/contracts/generated.go`. The allowed values are:
+The Envoy `/v1/messages/send` and `/v1/messages/publish` endpoints validate
+the `source` field against the envelope enum in
+`packages/envoy/internal/contracts/generated.go`. The allowed values are:
 
 - `agent` (default when omitted)
+- `human`
+- `envoy`
 - `github`
 - `slack`
 - `whatsapp`
@@ -36,12 +40,9 @@ causes a 400 rejection.
 
 ## The Pattern
 
-When omitted or empty, `source` defaults to `"agent"` in the publish handler
-(`packages/envoy/cmd/listener/main.go`). This is the correct approach for most agent-
-and CLI-originated messages.
+When omitted or empty, `source` defaults to `"agent"` in the listener handlers.
 
-**Safe default: omit `source` entirely.** Only specify it when publishing on behalf of
-an external system (GitHub webhook, Slack event, etc.) that has its own whitelisted value.
+**Agent senders: omit `source`.** Set `source` to `"human"` when a person is the sender.
 
 ## How This Was Caught
 
@@ -56,8 +57,8 @@ rules like enum whitelists — only contract-aware review or runtime testing wil
 
 ## Guidance
 
-- **CLI tools publishing to Envoy**: omit `source` (defaults to `"agent"`)
-- **MCP tools publishing to Envoy**: omit `source` or use `"agent"` explicitly
+- **CLI tools sending or publishing to Envoy**: omit `source` (defaults to `"agent"`)
+- **MCP tools sending or publishing to Envoy**: omit `source` or use `"agent"` explicitly
 - **New external bridges** (e.g., a Discord bridge): add the new source to the contracts
   whitelist in `packages/envoy/internal/contracts/generated.go` first
 - **Plans specifying Envoy payloads**: reference `packages/contracts/` to verify field

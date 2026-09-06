@@ -42,7 +42,8 @@ if item.Source == "agent" {
 if strings.HasPrefix(item.Topic, "notifications.agent.") {
 ```
 
-Both `envoy_send` and `envoy_publish` set `Source: "agent"`, but they differ in topic shape:
+Tool-originated `envoy_send` and `envoy_publish` envelopes default `Source` to
+`"agent"` unless the caller sets `source`, but they differ in topic shape:
 - `envoy_send` → topic `notifications.agent.<session_id>` → direct delivery
 - `envoy_publish` → topic `notifications.legion.*`, `notifications.github.*`, etc. → broadcast fanout
 

@@ -26,16 +26,6 @@ func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
 }
 
-func messageSource(value string) (string, error) {
-	if value == "" {
-		return "agent", nil
-	}
-	if value == "agent" || value == "human" {
-		return value, nil
-	}
-	return "", fmt.Errorf("source must be one of: agent, human")
-}
-
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -61,15 +51,13 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		source, err := messageSource(body.Source)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if body.TargetSession == "" {
+			writeJSONError(w, http.StatusBadRequest, "session id required")
 			return
 		}
-		d := state.Load()
-		if !isSessionLive(d.sessions, body.TargetSession) {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", body.TargetSession))
-			return
+		source := body.Source
+		if source == "" {
+			source = "agent"
 		}
 		dedupeKey := "agent." + body.TargetSession + "." + id.New()
 		if body.IdempotencyKey != "" {
@@ -87,7 +75,12 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			TraceID:        id.New(),
 		}
 		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		d := state.Load()
+		if !isSessionLive(d.sessions, body.TargetSession) {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", body.TargetSession))
 			return
 		}
 		if err := d.client.Publish(item); err != nil {
@@ -115,7 +108,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			http.Error(w, "session registry unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		if err := sessions.Delete(sessionID); err != nil {
+		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -151,10 +144,9 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			http.Error(w, "cannot publish to agent topics; use /v1/messages/send for direct agent messages", http.StatusBadRequest)
 			return
 		}
-		source, err := messageSource(body.Source)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		source := body.Source
+		if source == "" {
+			source = "agent"
 		}
 		dedupeKey := "publish." + id.New()
 		if body.IdempotencyKey != "" {
@@ -173,7 +165,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			TraceID:        id.New(),
 		}
 		if err := item.Validate(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		d := state.Load()
@@ -345,6 +337,10 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		var body subscribeBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if body.SessionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "session id required")
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))

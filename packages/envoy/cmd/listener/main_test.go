@@ -284,37 +284,30 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 	state.Store(&listenerDeps{})
 	handler := publishHandler(&state)
 
-	cases := []struct {
-		name       string
-		body       string
-		wantSubstr string
-	}{
-		{
-			name:       "rejects invalid source",
-			body:       `{"source":"invalid","topic":"notifications.test.foo","message":"hello"}`,
-			wantSubstr: "source must be one of",
-		},
-		{
-			name:       "rejects empty-ish source after trim",
-			body:       `{"source":" ","topic":"notifications.test.foo","message":"hello"}`,
-			wantSubstr: "source must be one of: agent, human",
-		},
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/publish",
+		strings.NewReader(`{"source":"invalid","topic":"notifications.test.foo","message":"hello"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rr := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body))
-			req.Header.Set("Content-Type", "application/json")
-			handler.ServeHTTP(rr, req)
-
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
-			}
-			if !strings.Contains(rr.Body.String(), tc.wantSubstr) {
-				t.Fatalf("expected body to contain %q, got %q", tc.wantSubstr, rr.Body.String())
-			}
-		})
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode JSON error: %v", err)
+	}
+	const want = "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr"
+	if response.Error != want {
+		t.Fatalf("error = %q, want %q", response.Error, want)
 	}
 }
 
@@ -726,9 +719,29 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 			wantSource: "human",
 		},
 		{
-			name:       "rejects github source",
+			name:       "accepts envoy source",
+			body:       `{"source":"envoy","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
+			wantSource: "envoy",
+		},
+		{
+			name:       "accepts slack source",
+			body:       `{"source":"slack","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
+			wantSource: "slack",
+		},
+		{
+			name:       "accepts whatsapp source",
+			body:       `{"source":"whatsapp","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
+			wantSource: "whatsapp",
+		},
+		{
+			name:       "accepts ghostwispr source",
+			body:       `{"source":"ghostwispr","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
+			wantSource: "ghostwispr",
+		},
+		{
+			name:       "accepts github source",
 			body:       `{"source":"github","topic":"notifications.github.acme.widgets.pr","message":"{}"}`,
-			wantSource: "",
+			wantSource: "github",
 		},
 	}
 
@@ -738,13 +751,6 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			handler.ServeHTTP(rr, req)
-
-			if tc.wantSource == "" {
-				if rr.Code != http.StatusBadRequest {
-					t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
-				}
-				return
-			}
 
 			if rr.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -787,6 +793,35 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 	}
 }
 
+func TestSendHandler_RejectsEmptyTargetSession(t *testing.T) {
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/send",
+		strings.NewReader(`{"target_session":"","message":"hello"}`),
+	)
+	sendHandler(&state).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode JSON error: %v", err)
+	}
+	if response.Error != "session id required" {
+		t.Fatalf("error = %q, want session id required", response.Error)
+	}
+}
+
 func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{})
@@ -795,24 +830,66 @@ func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages/send",
-		strings.NewReader(`{"source":"github","target_session":"ses_target","message":"hello"}`),
+		strings.NewReader(`{"source":"invalid","target_session":"ses_target","message":"hello"}`),
 	)
 	sendHandler(&state).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
 	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode JSON error: %v", err)
+	}
+	const want = "source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr"
+	if response.Error != want {
+		t.Fatalf("error = %q, want %q", response.Error, want)
+	}
 }
 
-func TestDeleteSessionHandler_RemovesRegistration(t *testing.T) {
-	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_closed": 1234})
+func TestSendHandler_AcceptsHumanSource(t *testing.T) {
+	client := setupPublishTestClient(t)
+	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, sessions: sessions})
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/ses_closed", nil)
-	deleteSessionHandler(sessions).ServeHTTP(rr, req)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/send",
+		strings.NewReader(`{"source":"human","target_session":"ses_target","message":"hello"}`),
+	)
+	sendHandler(&state).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var envelope contracts.Envelope
+	if err := json.NewDecoder(rr.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Source != "human" {
+		t.Fatalf("source = %q, want human", envelope.Source)
+	}
+}
+
+func TestDeleteSessionHandler_IsIdempotent(t *testing.T) {
+	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_closed": 1234})
+	handler := deleteSessionHandler(sessions)
+
+	for i := range 2 {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodDelete, "/v1/sessions/ses_closed", nil)
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("delete %d: expected 200, got %d (body: %s)", i+1, rr.Code, rr.Body.String())
+		}
 	}
 	if isSessionLive(sessions, "ses_closed") {
 		t.Fatal("deleted session remains live")
@@ -1253,6 +1330,36 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 	}
 	if items[0].Title != "My Session Title" {
 		t.Fatalf("expected title 'My Session Title', got %q", items[0].Title)
+	}
+}
+
+func TestSubscribeHandler_RejectsEmptySessionID(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{registry: registry, sessions: sessions})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/interests/subscribe",
+		strings.NewReader(`{"session_id":"","topics":["notifications.test.>"],"self_subscribed":true}`),
+	)
+	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode JSON error: %v", err)
+	}
+	if response.Error != "session id required" {
+		t.Fatalf("error = %q, want session id required", response.Error)
 	}
 }
 
