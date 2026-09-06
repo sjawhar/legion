@@ -50,8 +50,10 @@ one form per open ask (`#detail-ask-forms`) and each answer beneath the question
 the sidebar's `needs you` badge counts open asks from the last 30 comments returned by the
 search query, or from the full comment list once loaded.
 
-Painting never rebuilds the page: `web/src/main.ts` patches regions by id and `web/src/dom.ts`
-reconciles ask forms by `askId`, so the reply textarea and half-filled forms survive events.
+Painting never rebuilds the page: every action and event calls one `paint()` (`web/src/main.ts`);
+`web/src/dom.ts` writes a region only when its markup changed since the last paint and
+reconciles ask forms by `askId` (a form whose answer is still posting stays, disabled), so the
+reply textarea, half-filled forms, search focus, and an unchanged conversation survive events.
 GitHub references in rendered markdown are linkified and unfurled to titles through the REST
 proxy (`web/src/unfurl.ts`). Browser behaviour is covered by `bun run e2e`
 (`e2e/`, Playwright against a fixture backend that speaks the service's HTTP contract).

@@ -15,7 +15,7 @@ import {
 } from "../markers";
 import type { Comment, Issue, Origin, Thread, Urgency } from "../types";
 import { type AskFormInput, askHeader, renderAskForm } from "./ask-form";
-import { renderReplyForm } from "./reply-form";
+import { type ReplyFormInput, renderReplyForm } from "./reply-form";
 import { renderUrgencyControls } from "./urgency-controls";
 
 export interface ThreadWriteState {
@@ -342,6 +342,12 @@ export function askFormInput(ask: ThreadAsk, input: ThreadDetailInput): AskFormI
   };
 }
 
+/** The reply form's slice of the write state. */
+export function replyFormInput(input: ThreadDetailInput): ReplyFormInput {
+  const writeState = input.writeState ?? EMPTY_WRITE_STATE;
+  return { pending: writeState.replyPending, error: writeState.replyError };
+}
+
 export function renderAskForms(input: ThreadDetailInput): string {
   return askFormAsks(input)
     .map((ask) => renderAskForm(askFormInput(ask, input)))
@@ -375,7 +381,6 @@ export function renderThreadDetail(
   if (!input || !regions) {
     return `<main class="dispatch-detail empty-detail"><p>Select a thread to read the conversation.</p></main>`;
   }
-  const writeState = input.writeState ?? EMPTY_WRITE_STATE;
   return `<main class="dispatch-detail" data-thread-number="${input.issue.number}">
     <header id="detail-header" class="detail-header">${regions["detail-header"]}</header>
     <section id="detail-opening" class="opening-body">${regions["detail-opening"]}</section>
@@ -383,6 +388,6 @@ export function renderThreadDetail(
     <section id="detail-subthreads" class="sub-threads" aria-label="Sub-threads">${regions["detail-subthreads"]}</section>
     <section id="detail-conversation" class="conversation" aria-label="Conversation">${regions["detail-conversation"]}</section>
     <section id="detail-ask-forms" class="ask-forms" aria-label="Open questions">${renderAskForms(input)}</section>
-    ${input.issue.state === "OPEN" ? renderReplyForm({ pending: writeState.replyPending, error: writeState.replyError }) : ""}
+    ${input.issue.state === "OPEN" ? renderReplyForm(replyFormInput(input)) : ""}
   </main>`;
 }

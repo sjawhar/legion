@@ -5,11 +5,11 @@
 // reconciled by id, never re-created by an event.
 
 import { renderAskForm } from "./components/ask-form";
-import { renderReplyForm } from "./components/reply-form";
+import { type ReplyFormInput, renderReplyForm, replyButtonLabel } from "./components/reply-form";
 import {
   askFormAsks,
   askFormInput,
-  EMPTY_WRITE_STATE,
+  replyFormInput,
   type ThreadDetailInput,
 } from "./components/thread-detail";
 
@@ -52,10 +52,10 @@ export function forgetPainted(root: ParentNode): void {
   painted.delete(root);
 }
 
+/** Reflect one form's pending/error state on its existing controls: the same fields the templates render from. */
 export function syncFormState(
   form: HTMLFormElement,
-  pending: boolean,
-  error: string | undefined
+  { pending, error }: Pick<ReplyFormInput, "pending" | "error">
 ): void {
   for (const control of form.querySelectorAll<
     HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement
@@ -111,7 +111,7 @@ export function reconcileAskForms(root: ParentNode, input: ThreadDetailInput): v
       form = container.querySelector<HTMLFormElement>(askFormSelector(ask.askId));
     }
     if (!form) continue;
-    syncFormState(form, formInput.pending, formInput.error);
+    syncFormState(form, formInput);
     previous = form;
   }
 }
@@ -133,8 +133,8 @@ export function syncReplyForm(root: ParentNode, input: ThreadDetailInput): void 
     form = root.querySelector<HTMLFormElement>("#detail-reply");
     if (!form) return;
   }
-  const writeState = input.writeState ?? EMPTY_WRITE_STATE;
-  syncFormState(form, writeState.replyPending, writeState.replyError);
+  const formInput = replyFormInput(input);
+  syncFormState(form, formInput);
   const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
-  if (button) button.textContent = writeState.replyPending ? "Sending…" : "Reply";
+  if (button) button.textContent = replyButtonLabel(formInput.pending);
 }
