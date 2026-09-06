@@ -1,3 +1,4 @@
+export * from "./dispatch-question";
 export * from "./envelope";
 export * from "./handoff-schema";
 export * from "./legion-daemon-api";

@@ -6,9 +6,14 @@ This package is the language-neutral contract layer for cross-runtime event payl
 
 Current scope:
 
-- envelope schema
-- subject helpers
-- JSON Schema source for future code generation
+- envelope schema and subject helpers
+- dispatch question Zod source: `src/dispatch-question.ts`
+- generated, checked-in dispatch question schema:
+  `schemas/dispatch-question.schema.json`
+- dispatch question schema emitter: `scripts/dispatch-question-schema.ts`
+- Go generation: `scripts/gen-go.ts`
+- generated Go outputs: `packages/envoy/internal/contracts/generated.go` and
+  `packages/envoy/internal/dispatch/core/generated.go`
 
 ## GitHub Topic Hierarchy
 
