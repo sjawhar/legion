@@ -17,7 +17,8 @@
     "lineEnding": "lf",
     "includes": [
       "**",
-      "!packages/contracts/schemas/dispatch-question.schema.json"
+      "!packages/contracts/schemas/dispatch-question.schema.json",
+      "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json"
     ]
   },
   "linter": {

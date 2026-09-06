@@ -1,12 +1,18 @@
 import { describe, expect, it } from "bun:test";
+import { z } from "zod";
 import {
   DISPATCH_ARGUMENTS,
   DISPATCH_TOOL_NAME,
   DISPATCH_URGENCIES,
   DispatchArgumentError,
+  type DispatchQuestion,
+  DispatchQuestionSchema,
+  dispatchToolShape,
   isContinueCall,
   parseDispatchCall,
 } from "../dispatch-contract";
+
+const dispatchToolSchemaFixture = new URL("./fixtures/dispatch-tool.schema.json", import.meta.url);
 
 describe("parseDispatchCall", () => {
   it("accepts an opening call and keeps every field", () => {
@@ -35,6 +41,20 @@ describe("parseDispatchCall", () => {
     const call = parseDispatchCall({ thread: "17158", context: "c", question: "q" });
     expect(isContinueCall(call)).toBe(true);
     expect(call).toEqual({ thread: "17158", context: "c", question: "q" });
+  });
+
+  it("accepts readonly options through the public question type", () => {
+    const input = {
+      question: "Color?",
+      options: [{ label: "red" }],
+    } as const;
+    const fromLiteral: DispatchQuestion = input;
+    const fromSchema: DispatchQuestion = DispatchQuestionSchema.parse({
+      question: "Color?",
+      options: [{ label: "red" }],
+    });
+    expect(fromLiteral.question).toBe("Color?");
+    expect(fromSchema.question).toBe("Color?");
   });
 
   it("treats a key with an undefined value as absent", () => {
@@ -99,5 +119,12 @@ describe("parseDispatchCall", () => {
       "thread",
       "urgency",
     ]);
+  });
+});
+
+describe("dispatch tool schema", () => {
+  it("preserves the dispatch tool JSON Schema while using the contracts question schema", async () => {
+    const actual = `${JSON.stringify(z.toJSONSchema(z.object(dispatchToolShape)), null, 2)}\n`;
+    expect(actual).toBe(await Bun.file(dispatchToolSchemaFixture).text());
   });
 });
