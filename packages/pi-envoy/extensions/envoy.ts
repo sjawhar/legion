@@ -12,6 +12,7 @@ import {
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
+import { isOwnDispatchEcho, replyWith, senderLabel } from "@legion/envoy-client/delivery";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
@@ -144,23 +145,17 @@ export default function envoyExtension(pi: PiApi): void {
           const oldest = dedupeKeys.values().next();
           if (!oldest.done) dedupeKeys.delete(oldest.value);
         }
+        dispatchEcho = isOwnDispatchEcho(envelope, sessionID);
         let message: unknown;
         if (envelope.payload !== undefined) {
           try {
             message = JSON.parse(envelope.payload);
-            if (
-              typeof message === "object" &&
-              message !== null &&
-              "dispatch_session" in message &&
-              typeof message.dispatch_session === "string"
-            ) {
-              dispatchEcho = message.dispatch_session === sessionID;
-            }
           } catch {
             message = envelope.payload;
           }
         }
         if (!dispatchEcho) {
+          const reply = replyWith(envelope);
           // One structured TOON note per delivery. The topic only names where
           // the message was delivered — for an agent message that is the
           // reader's own inbox topic, never the sender — so the sender is named
@@ -171,16 +166,14 @@ export default function envoyExtension(pi: PiApi): void {
           content = encode({
             envoy: {
               topic: envelope.topic,
-              from: envelope.source_session ?? envelope.source,
+              from: senderLabel(envelope),
               ...(echo
                 ? {
                     echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
                   }
-                : envelope.source === "agent" && envelope.source_session !== undefined
-                  ? {
-                      reply_with: `envoy_send(session_id="${envelope.source_session}", message="...")`,
-                    }
-                  : {}),
+                : reply === undefined
+                  ? {}
+                  : { reply_with: reply }),
               summary: envelope.payload_summary,
               ...(message === undefined ? {} : { message }),
             },
@@ -315,9 +308,11 @@ export default function envoyExtension(pi: PiApi): void {
     context.setInterval(() => {
       // Sessions can be created lazily after session_start (a fresh TUI has no
       // session yet), and the ID this closure registered with goes stale. Heal
-      // on drift instead of heartbeating a dead identity forever.
+      // on drift instead of heartbeating a dead identity forever; until the
+      // host mints an id there is nothing to register.
       const liveSessionID = context.sessionManager.getSessionId();
-      const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
+      if (liveSessionID === "") return;
+      const drifted = liveSessionID !== sessionID;
       if (healing) return;
       healing = true;
       void (drifted ? establishSession(context) : registerSession())
@@ -359,6 +354,11 @@ export default function envoyExtension(pi: PiApi): void {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
     activeSessionContext = context;
+    if (sessionID === "") {
+      if (previousTopic !== undefined) closeIntentionally(previousTopic);
+      ensureHeartbeat(context);
+      return;
+    }
     const currentTopic = agentSubject(sessionID);
     if (previousTopic !== undefined && previousTopic !== currentTopic) {
       closeIntentionally(previousTopic);
@@ -497,23 +497,13 @@ export default function envoyExtension(pi: PiApi): void {
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
-      // Removing the listener registration first prevents the server from
-      // targeting a session whose NATS connection is about to be drained.
-      const shutdown = async (): Promise<void> => {
-        if (sessionID !== "") {
-          try {
-            await client.unregisterSession(sessionID);
-          } catch {
-            // Session cleanup is best-effort during shutdown.
-          }
-        }
-        await connection?.drain();
-      };
-      // Bound registration cleanup and drain together: either can hang on a
-      // dead listener or NATS connection, while OMP allows two seconds.
-      await Promise.race([shutdown(), deadline.promise]);
-    } catch {
-      // A failed drain on shutdown is not actionable.
+      const deregistration =
+        sessionID === "" ? Promise.resolve() : client.unregisterSession(sessionID).catch(() => undefined);
+      const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
+      await Promise.race([
+        Promise.allSettled([deregistration, draining]).then(() => undefined),
+        deadline.promise,
+      ]);
     } finally {
       clearTimeout(timer);
       connection = undefined;

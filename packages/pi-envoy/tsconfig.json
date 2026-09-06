@@ -11,6 +11,9 @@
       "@legion/envoy-client/defaults": [
         "../envoy-client/src/defaults.ts"
       ],
+      "@legion/envoy-client/delivery": [
+        "../envoy-client/src/delivery.ts"
+      ],
       "@legion/envoy-client/errors": [
         "../envoy-client/src/errors.ts"
       ],

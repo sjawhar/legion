@@ -2013,6 +2013,34 @@ describe("envoy OMP extension", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_900);
   });
 
+  test("starts NATS drain while listener deregistration is still pending", async () => {
+    const deletion = Promise.withResolvers<Response>();
+    const deleteStarted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/interests/subscribe") return responseWithRegistration(input, init, []);
+      if (path === "/v1/sessions/ses_shutdown") {
+        deleteStarted.resolve();
+        return deletion.promise;
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-parallel-drain");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    const shutdown = fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+    if (shutdown === undefined) throw new Error("session_shutdown handler was not registered");
+
+    await deleteStarted.promise;
+    await Promise.resolve();
+    expect(natsState.drainStarted).toBe(true);
+
+    deletion.reject(new Error("listener cleanup failed"));
+    await shutdown;
+  });
+
   test("/whoami reads the live session ID when the session was created after session_start", async () => {
     globalThis.fetch = async () => response({ session_id: "ses_live", machine_id: "test", dir: "/tmp", topics: [] });
     const { default: envoyExtension } = await import("./envoy.ts?whoami-live-id");
@@ -2057,9 +2085,18 @@ describe("envoy OMP extension", () => {
     };
 
     envoyExtension(fixture.pi);
-    // Fresh TUI: no session yet at session_start; the closure registers "".
+    // A fresh TUI has no direct subject and no registry row until the host
+    // assigns an id, but it still starts the heartbeat that observes that id.
     await fixture.handlers.get("session_start")?.({}, context);
-    expect(intervals.length).toBe(1);
+    expect(registered).toEqual([]);
+    expect(natsState.controls.has("notifications.agent.")).toBe(false);
+    expect(intervals).toHaveLength(1);
+
+    // A tick while the host still has no id registers nothing: the listener
+    // rejects an empty session id, and there is no identity to advertise yet.
+    // The guard returns before any request is issued, so no wait is needed.
+    for (const tick of intervals) tick();
+    expect(registered).toEqual([]);
 
     // The session materializes later; the next heartbeat must rebind the
     // NATS topic and re-register under the live ID instead of heartbeating
@@ -2068,7 +2105,7 @@ describe("envoy OMP extension", () => {
     for (const tick of intervals) tick();
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(registered.at(-1)).toBe("ses_created");
+    expect(registered).toEqual(["ses_created"]);
     expect(natsState.controls.has("notifications.agent.ses_created")).toBe(true);
   });
 });
