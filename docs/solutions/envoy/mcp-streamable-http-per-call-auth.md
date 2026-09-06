@@ -40,7 +40,7 @@ shim → Go MCP server — was read.
 
 ## What Didn't Work
 
-- **Suspecting the shim's TTL / 401-retry** (`packages/envoy-client/src/dispatch-mcp-bridge.ts`).
+- **Suspecting the shim's TTL / 401-retry** (`packages/envoy-client/src/dispatch-client.ts`).
   Simulated tests against the real `createBridge` (injectable `getToken`/`fetchImpl`/`now`)
   passed: it re-mints on 401 and sends the new token on the second attempt. A first draft of
   one test "failed" because the fake server only whitelisted the first token — a harness bug

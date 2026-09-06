@@ -6932,7 +6932,7 @@ What genuinely needs a shared resource: (a) GitHub — real issues are created i
 - The plugins' cutover is the deletion of the shim in envoy-client; splitting "library" from "plugins" would leave a PR that deletes what its siblings still import.
 - Reviewability comes from the commit sequence: each commit is one component with its own tests and a green scoped check, so a reviewer walks it commit by commit. The one deletion that spans packages — the standalone MCP server and its three thin wrappers — lands in a single commit (Task 10) so no package is left importing a deleted module.
 
-Rollout order is operational, not a PR split (spec §Rollout): merge → CI publishes the envoy image → bump the compose pin (`ENVOY_IMAGE_TAG`) first → the plugin releases fire from the same merge (`release-pi-envoy.yaml`, `release-envoy-plugin.yaml` trigger on the paths) → bump the plugin pins in dotfiles second. Old plugins keep working against the new service in between (Task 16 step 8 proves it); new plugins against the old service would fail loudly on `thread`, which is why the service pin moves first.
+Rollout order is operational, not a PR split (spec §Rollout): merge → CI publishes the envoy image → bump the compose pin (`ENVOY_IMAGE_TAG`) first → the plugin releases fire from the same merge (`release-pi-envoy.yaml`, `release-envoy-plugin.yaml` trigger on the paths) → bump the plugin pins in dotfiles second. Old plugins keep working against the new service in between (Task 16 step 8 proves it); new plugins against the old service would fail loudly on every call (the old service rejects `origin.sessionId`), which is why the service pin moves first.
 
 ## Decisions made in this plan (spec ambiguities resolved, not re-opened)
 
@@ -6951,4 +6951,6 @@ Rollout order is operational, not a PR split (spec §Rollout): merge → CI publ
 
 ## Hardening ledger
 
-(empty)
+T15 wrote the envoy-client and dispatch documentation before Tasks 8 and 9 had landed, so it described `web/src/dom.ts`, the `e2e/` directory, and `bun run e2e` on faith. All three exist at head, confirmed against the tree, so the entries stand as written and nothing in the docs is owed.
+
+T8 touched two files outside its file list. `packages/dispatch/web/src/styles.css` gained `display: contents` on `#sidebar-root` and `#detail-root`, because the wrapper shell the task brief prescribed broke the two-column grid; and `packages/dispatch/web/src/types.ts` widened `parentNumber` to `number | null`. Both were reviewed with the task and accepted; the file lists above were not amended.

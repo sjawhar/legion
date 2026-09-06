@@ -267,5 +267,5 @@ Service and dashboard ship in the envoy image (one PR, `main` → published sha 
 pin). `pi-legion-envoy`, `opencode-legion-envoy`, and the Claude plugin each release with
 the native tool, the deleted `.mcp.json` entry, and the skill; bump in dotfiles. Old plugins
 against the new service keep working (no `thread`, front matter still parsed). New plugins
-against the old service fail loudly on `thread` (unknown argument) — deploy the service
-first.
+against the old service fail loudly on every call (the old service rejects `origin.sessionId`);
+deploy the service first.
