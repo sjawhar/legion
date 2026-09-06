@@ -1,11 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { renderDispatchQuestionSchema } from "./dispatch-question-schema";
 
-type Kind = "string" | "integer";
+type ScalarKind = "string" | "integer" | "boolean";
 
 type Prop = {
-  type: Kind;
+  type: ScalarKind | "array" | "object";
   enum?: string[];
+  properties?: Record<string, Prop>;
+  required?: string[];
+  items?: Prop;
 };
 
 type Schema = {
@@ -16,13 +20,21 @@ type Schema = {
 };
 
 const out = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
-
-const file = resolve(import.meta.dir, "../schemas/envelope.schema.json");
+const questionOut = resolve(import.meta.dir, "../../envoy/internal/dispatch/core/generated.go");
+const envelopeFile = resolve(import.meta.dir, "../schemas/envelope.schema.json");
+const questionFile = resolve(import.meta.dir, "../schemas/dispatch-question.schema.json");
 
 const map = {
   string: "string",
   integer: "int64",
-} satisfies Record<Kind, string>;
+  boolean: "bool",
+} satisfies Record<ScalarKind, string>;
+
+const nestedNames: Record<string, Record<string, string>> = {
+  DispatchQuestion: {
+    options: "DispatchQuestionOption",
+  },
+};
 
 const keep = `const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
@@ -77,23 +89,25 @@ func WhatsappSubject(phone, jid, kind string) string {
 
 function title(text: string) {
   if (text === "id") return "ID";
-  return text[0]?.toUpperCase() + text.slice(1);
+  return (text[0]?.toUpperCase() + text.slice(1)).replace(/Id$/, "ID");
 }
 
 function name(key: string) {
   return key.split("_").map(title).join("");
 }
 
-function kind(prop: Prop, req: Set<string>, key: string) {
+function envelopeKind(prop: Prop, req: Set<string>, key: string) {
+  if (prop.type === "array" || prop.type === "object") {
+    throw new Error(`unsupported envelope schema type for ${key}`);
+  }
   const base = map[prop.type];
-  if (!base) throw new Error(`unsupported schema type for ${key}`);
   if (req.has(key) || prop.type === "string") return base;
   return `*${base}`;
 }
 
-function field(key: string, prop: Prop, req: Set<string>, wide: number, types: number) {
+function envelopeField(key: string, prop: Prop, req: Set<string>, wide: number, types: number) {
   const n = name(key);
-  const t = kind(prop, req, key);
+  const t = envelopeKind(prop, req, key);
   const tag = req.has(key) ? key : `${key},omitempty`;
   return `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}"\``;
 }
@@ -106,7 +120,7 @@ function check(key: string, prop: Prop) {
   if (prop.type === "integer") {
     return `\tif e.${n} == 0 {\n\t\treturn fmt.Errorf("${key} must be set")\n\t}`;
   }
-  throw new Error(`unsupported required type for ${key}`);
+  throw new Error(`unsupported required envelope type for ${key}`);
 }
 
 function enums(key: string, prop: Prop) {
@@ -122,13 +136,15 @@ function enums(key: string, prop: Prop) {
   ].join("\n");
 }
 
-function render(schema: Schema) {
+function renderEnvelope(schema: Schema) {
   if (schema.type !== "object") throw new Error("envelope schema must be an object");
   const keys = Object.keys(schema.properties);
   const req = new Set(schema.required ?? []);
   const wide = Math.max(...keys.map((key) => name(key).length));
-  const types = Math.max(...keys.map((key) => kind(schema.properties[key], req, key).length));
-  const body = keys.map((key) => field(key, schema.properties[key], req, wide, types)).join("\n");
+  const types = Math.max(...keys.map((key) => envelopeKind(schema.properties[key], req, key).length));
+  const body = keys
+    .map((key) => envelopeField(key, schema.properties[key], req, wide, types))
+    .join("\n");
   const checks = (schema.required ?? [])
     .map((key) => {
       const prop = schema.properties[key];
@@ -139,6 +155,61 @@ function render(schema: Schema) {
   const source = schema.properties.source;
   const extra = source ? enums("source", source) : "";
   const validate = [checks, extra, "\treturn nil"].filter(Boolean).join("\n");
+  return `type Envelope struct {
+${body}
+}
+
+func (e Envelope) Validate() error {
+${validate}
+}`;
+}
+
+function nestedName(parent: string, key: string) {
+  const nested = nestedNames[parent]?.[key];
+  if (!nested) throw new Error(`unsupported nested question schema key ${parent}.${key}`);
+  return nested;
+}
+
+function questionType(prop: Prop, required: boolean, parent: string, key: string) {
+  if (prop.type === "array") {
+    if (prop.items?.type !== "object") {
+      throw new Error(`unsupported array items for ${key}`);
+    }
+    return `[]${nestedName(parent, key)}`;
+  }
+  const base = map[prop.type as ScalarKind];
+  if (!base) throw new Error(`unsupported question schema type for ${key}`);
+  if (prop.type === "boolean" && !required) return `*${base}`;
+  return base;
+}
+
+function renderQuestionStruct(schema: Schema, typeName: string): string[] {
+  if (schema.type !== "object") throw new Error(`${typeName} schema must be an object`);
+  const keys = Object.keys(schema.properties);
+  const required = new Set(schema.required ?? []);
+  const fields = keys.map((key) => {
+    const prop = schema.properties[key];
+    const n = name(key);
+    const t = questionType(prop, required.has(key), typeName, key);
+    const tag = required.has(key) ? key : `${key},omitempty`;
+    return { n, t, tag };
+  });
+  const wide = Math.max(...fields.map(({ n }) => n.length));
+  const types = Math.max(...fields.map(({ t }) => t.length));
+  const body = fields
+    .map(({ n, t, tag }) => `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}" yaml:"${tag}"\``)
+    .join("\n");
+  const nested = keys.flatMap((key) => {
+    const prop = schema.properties[key];
+    if (prop.type === "array" && prop.items?.type === "object") {
+      return renderQuestionStruct(prop.items as Schema, nestedName(typeName, key));
+    }
+    return [];
+  });
+  return [`type ${typeName} struct {\n${body}\n}`, ...nested];
+}
+
+function renderContracts(envelope: Schema) {
   return `package contracts
 
 import (
@@ -147,28 +218,46 @@ import (
 \t"time"
 )
 
-type Envelope struct {
-${body}
-}
-
-func (e Envelope) Validate() error {
-${validate}
-}
+${renderEnvelope(envelope)}
 
 ${keep}
 `;
 }
 
-const schema = (await Bun.file(file).json()) as Schema;
+// The question types are generated into the dispatch core package, which owns
+// them, rather than into contracts: contracts imports dispatch/core to read the
+// origin session out of dispatch markers, so core must not import contracts.
+function renderQuestion(question: Schema) {
+  return `// Code generated by packages/contracts/scripts/gen-go.ts from
+// packages/contracts/schemas/dispatch-question.schema.json. DO NOT EDIT.
 
-mkdirSync(dirname(out), { recursive: true });
-await Bun.write(out, render(schema));
+package core
+
+${renderQuestionStruct(question, "DispatchQuestion").join("\n\n")}
+`;
+}
+
+// The question schema is emitted from the zod source first, so one run of this
+// script refreshes the checked-in JSON Schema and both generated Go files.
+const questionJson = renderDispatchQuestionSchema();
+await Bun.write(questionFile, questionJson);
+const envelope = (await Bun.file(envelopeFile).json()) as Schema;
+const question = JSON.parse(questionJson) as Schema;
+
+const outputs: Array<[string, string]> = [
+  [out, renderContracts(envelope)],
+  [questionOut, renderQuestion(question)],
+];
+for (const [path, content] of outputs) {
+  mkdirSync(dirname(path), { recursive: true });
+  await Bun.write(path, content);
+}
 
 const fmt = Bun.which("gofmt");
 
 if (fmt) {
   const gofmt = Bun.spawnSync({
-    cmd: [fmt, "-w", out],
+    cmd: [fmt, "-w", ...outputs.map(([path]) => path)],
     stderr: "inherit",
     stdout: "inherit",
   });

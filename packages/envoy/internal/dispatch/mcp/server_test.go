@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +20,7 @@ import (
 // A request with no bearer never reaches the MCP handler, even when it is an
 // otherwise valid initialize that the handler would happily accept.
 func TestHandlerRejectsRequestsWithoutBearer(t *testing.T) {
+	logs := captureLogs(t)
 	server := newServer(func(context.Context, string) *github.Client {
 		t.Error("GitHub client built for a request without a bearer")
 		return nil
@@ -37,6 +40,21 @@ func TestHandlerRejectsRequestsWithoutBearer(t *testing.T) {
 	if recorder.Header().Get("Mcp-Session-Id") != "" {
 		t.Fatal("a session was opened for a request without a bearer")
 	}
+	for _, want := range []string{`msg="dispatch request"`, "method=POST", "path=/mcp", "status=401", "duration_ms=", "bearer=-"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("request log %q does not contain %q", logs.String(), want)
+		}
+	}
+	t.Log(strings.TrimSpace(logs.String()))
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
 }
 
 // rotatingBearer sends whatever token is current at the time of each request:
@@ -116,6 +134,100 @@ func TestDispatchUsesTheBearerOfEachCall(t *testing.T) {
 
 	if want := []string{"token-at-call"}; !slices.Equal(*tokensUsed, want) {
 		t.Fatalf("GitHub client built with %v, want %v", *tokensUsed, want)
+	}
+}
+
+// A GitHub rejection must be observable without disclosing the credential that
+// caused it, so operators can tell stale and rotating bearers apart.
+func TestDispatchLogsGitHubFailureWithoutBearerDisclosure(t *testing.T) {
+	logs := captureLogs(t)
+	githubStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(githubStub.Close)
+	stubURL, err := url.Parse(githubStub.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(func(context.Context, string) *github.Client {
+		client := github.NewClient(nil)
+		client.BaseURL = stubURL
+		return client
+	})
+	const bearer = "raw-bearer-secret"
+	session := connect(t, server, &rotatingBearer{token: bearer})
+
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "dispatch", Arguments: dispatchArguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("GitHub rejection returned success: %+v", result)
+	}
+	for _, want := range []string{`msg="dispatch tool call"`, "tool=dispatch", "upstream_status=401", "result=error", "bearer=eb9af16e"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("tool log %q does not contain %q", logs.String(), want)
+		}
+	}
+	if strings.Contains(logs.String(), bearer) {
+		t.Errorf("tool log leaks bearer %q: %s", bearer, logs.String())
+	}
+	t.Log(strings.TrimSpace(logs.String()))
+}
+
+// A successful tool call records the dispatch result and the caller's origin.
+func TestDispatchLogsSuccessfulToolCall(t *testing.T) {
+	logs := captureLogs(t)
+	server, _ := openingGitHub(t)
+	session := connect(t, server, &rotatingBearer{token: "success-bearer"})
+	arguments := map[string]any{
+		"repo":     "acme/example-repo",
+		"subject":  "s",
+		"context":  "c",
+		"question": "q",
+		"origin": map[string]any{
+			"host":      "example-host",
+			"sessionId": "session-123",
+		},
+	}
+
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "dispatch", Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("dispatch failed: %s", result.Content[0].(*mcpsdk.TextContent).Text)
+	}
+	for _, want := range []string{`msg="dispatch tool call"`, "tool=dispatch", "session=session-123", "host=example-host", "repo=acme/example-repo", "thread=7", "result=ok"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("tool log %q does not contain %q", logs.String(), want)
+		}
+	}
+	t.Log(strings.TrimSpace(logs.String()))
+}
+func TestDispatchLogsMalformedThreadVerbatim(t *testing.T) {
+	logs := captureLogs(t)
+	server := newServer(func(context.Context, string) *github.Client {
+		return github.NewClient(nil)
+	})
+	session := connect(t, server, &rotatingBearer{token: "malformed-thread-bearer"})
+
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name: "dispatch",
+		Arguments: map[string]any{
+			"thread":   "abc",
+			"context":  "c",
+			"question": "q",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("malformed thread returned success: %+v", result)
+	}
+	if !strings.Contains(logs.String(), "thread=abc") {
+		t.Errorf("tool log %q does not preserve the malformed thread", logs.String())
 	}
 }
 
@@ -278,5 +390,82 @@ func TestDispatchAcceptsAnAskWithoutOptions(t *testing.T) {
 	}
 	if !strings.Contains(*posted, "question: x") || strings.Contains(*posted, "options") {
 		t.Errorf("thread body should carry the question and omit options:\n%s", *posted)
+	}
+}
+
+// A qualified thread names its own repository; the log records that one, not
+// the empty repo the plugin sends alongside a qualified reference.
+func TestDispatchLogsTheRepoAQualifiedThreadNames(t *testing.T) {
+	logs := captureLogs(t)
+	githubStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(githubStub.Close)
+	stubURL, err := url.Parse(githubStub.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(func(context.Context, string) *github.Client {
+		client := github.NewClient(nil)
+		client.BaseURL = stubURL
+		return client
+	})
+	session := connect(t, server, &rotatingBearer{token: "qualified-bearer"})
+	arguments := map[string]any{
+		"thread":   "other-org/other-repo#5",
+		"context":  "c",
+		"question": "q",
+	}
+
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "dispatch", Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("GitHub rejection returned success: %+v", result)
+	}
+	for _, want := range []string{"repo=other-org/other-repo", "thread=5", "upstream_status=401", "result=error"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("tool log %q does not contain %q", logs.String(), want)
+		}
+	}
+}
+
+// go-github reports 403/429 rate limiting through its own error types, not
+// ErrorResponse; the log must still carry the upstream status for them.
+func TestUpstreamStatusCoversEveryGoGitHubResponseError(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want int
+	}{
+		"error response":  {&github.ErrorResponse{Response: &http.Response{StatusCode: http.StatusUnauthorized}}, 401},
+		"primary limit":   {fmt.Errorf("dispatch: %w", &github.RateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}), 403},
+		"secondary limit": {fmt.Errorf("dispatch: %w", &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusTooManyRequests}}), 429},
+		"two-factor auth": {fmt.Errorf("dispatch: %w", &github.TwoFactorAuthError{Response: &http.Response{StatusCode: http.StatusUnauthorized}}), 401},
+		"not from github": {fmt.Errorf("no repo"), 0},
+		"nil error":       {nil, 0},
+	}
+	for name, tc := range cases {
+		if got := upstreamStatus(tc.err); got != tc.want {
+			t.Errorf("%s: upstreamStatus = %d, want %d", name, got, tc.want)
+		}
+	}
+}
+
+// The Streamable HTTP transport flushes SSE events through
+// http.ResponseController, which must reach the real writer through the
+// status-recording wrapper.
+func TestStatusResponseWriterStaysFlushableAndRecordsStatus(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writer := &statusResponseWriter{ResponseWriter: recorder}
+	if err := http.NewResponseController(writer).Flush(); err != nil {
+		t.Fatalf("Flush through the wrapper: %v", err)
+	}
+	if !recorder.Flushed {
+		t.Fatal("Flush did not reach the underlying writer")
+	}
+	writer.WriteHeader(http.StatusCreated)
+	if got := writer.statusCode(); got != http.StatusCreated {
+		t.Fatalf("statusCode = %d, want 201", got)
 	}
 }

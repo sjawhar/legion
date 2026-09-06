@@ -6,6 +6,11 @@
 // plugin schemas with its own zod build. Tool schemas must be a single flat
 // object at the top level; the open/continue rule is enforced here.
 
+import {
+  type DispatchQuestionInput,
+  DispatchQuestionInputSchema,
+  type DispatchQuestionOptionSchema,
+} from "@legion/contracts";
 import { z } from "zod";
 
 export const DISPATCH_TOOL_NAME = "dispatch";
@@ -31,22 +36,17 @@ export const DISPATCH_ARGUMENTS = {
     "<n> | owner/name#<n>[#<commentId>]. Opening a thread only: link the thread as a sub-issue of an existing issue and append a breadcrumb to the comment.",
 } as const;
 
+export type DispatchQuestionOption = Readonly<z.infer<typeof DispatchQuestionOptionSchema>>;
+export type DispatchQuestion = Readonly<
+  Omit<DispatchQuestionInput, "options"> & {
+    readonly options?: readonly DispatchQuestionOption[] | undefined;
+  }
+>;
 // Optional members admit `undefined` explicitly: that is the type zod emits for
 // `.optional()`, and a consumer compiled with exactOptionalPropertyTypes would
 // otherwise reject parseDispatchCall's return. present() drops undefined keys
 // before validation, so no undefined-valued key ever reaches the wire.
-export interface DispatchQuestionOption {
-  readonly label: string;
-  readonly description?: string | undefined;
-}
-
-export interface DispatchQuestion {
-  readonly question: string;
-  readonly header?: string | undefined;
-  readonly options?: readonly DispatchQuestionOption[] | undefined;
-  readonly multiple?: boolean | undefined;
-  readonly custom?: boolean | undefined;
-}
+export { DispatchQuestionInputSchema as DispatchQuestionSchema };
 
 export interface OpenThreadCall {
   readonly subject: string;
@@ -71,23 +71,10 @@ export class DispatchArgumentError extends Error {
   override readonly name = "DispatchArgumentError";
 }
 
-const QuestionOptionSchema = z.strictObject({
-  label: z.string().min(1),
-  description: z.string().optional(),
-});
-
-const DispatchQuestionSchema = z.strictObject({
-  question: z.string().min(1),
-  header: z.string().optional(),
-  options: z.array(QuestionOptionSchema).optional(),
-  multiple: z.boolean().optional(),
-  custom: z.boolean().optional(),
-});
-
 const prose = {
   context: z.string(),
   question: z.string(),
-  ask: z.array(DispatchQuestionSchema).optional(),
+  ask: z.array(DispatchQuestionInputSchema).optional(),
 };
 
 const OpenThreadCallSchema = z.strictObject({
@@ -111,7 +98,7 @@ export const dispatchToolShape = {
   thread: z.string().describe(DISPATCH_ARGUMENTS.thread).optional(),
   context: z.string().describe(DISPATCH_ARGUMENTS.context),
   question: z.string().describe(DISPATCH_ARGUMENTS.question),
-  ask: z.array(DispatchQuestionSchema).describe(DISPATCH_ARGUMENTS.ask).optional(),
+  ask: z.array(DispatchQuestionInputSchema).describe(DISPATCH_ARGUMENTS.ask).optional(),
   urgency: z.enum(DISPATCH_URGENCIES).describe(DISPATCH_ARGUMENTS.urgency).optional(),
   repo: z.string().describe(DISPATCH_ARGUMENTS.repo).optional(),
   parent: z.string().describe(DISPATCH_ARGUMENTS.parent).optional(),

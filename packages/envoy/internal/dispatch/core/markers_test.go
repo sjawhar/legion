@@ -35,7 +35,7 @@ func TestBuildMetaMarkerKeyOrder(t *testing.T) {
 		RequestID: "R",
 		Urgency:   UrgencyHigh,
 		Origin:    &Origin{Host: "omp"},
-		Ask:       []QuestionInfo{{AskID: "R", Question: "Q?"}},
+		Ask:       []DispatchQuestion{{AskID: "R", Question: "Q?"}},
 	})
 	for _, pair := range [][2]string{{"requestId: R", "urgency: high"}, {"urgency: high", "origin:"}, {"origin:", "ask:"}} {
 		a, b := strings.Index(got, pair[0]), strings.Index(got, pair[1])
@@ -154,11 +154,11 @@ func TestAskIDFor(t *testing.T) {
 	if got := AskIDFor("abcd", 2); got != "abcd.2" {
 		t.Errorf("index 2: got %q", got)
 	}
-	withIDs := WithAskIDs([]QuestionInfo{{Question: "a"}, {Question: "b"}}, "abcd")
+	withIDs := WithAskIDs([]DispatchQuestion{{Question: "a"}, {Question: "b"}}, "abcd")
 	if withIDs[0].AskID != "abcd" || withIDs[1].AskID != "abcd.1" {
 		t.Errorf("WithAskIDs: %+v", withIDs)
 	}
-	if WithAskIDs(nil, "abcd") != nil || WithAskIDs([]QuestionInfo{}, "abcd") != nil {
+	if WithAskIDs(nil, "abcd") != nil || WithAskIDs([]DispatchQuestion{}, "abcd") != nil {
 		t.Error("empty ask stays nil so the marker omits it")
 	}
 }
@@ -172,9 +172,9 @@ func TestMetaMarkerRoundTripWithEveryField(t *testing.T) {
 			Host: "omp", Machine: "example-host", Cwd: "/home/ubuntu/legion", Tmux: "main:3.0", Pane: "%840",
 			SessionID: "01a05ac6-3b19-7000-9d2b-1e5f0a6c2b7d", SessionTitle: "pm: e2e submitter identity",
 		},
-		Ask: []QuestionInfo{{
+		Ask: []DispatchQuestion{{
 			AskID: "req-99", Question: "Color?", Header: "Color",
-			Options: []QuestionOption{{Label: "blue", Description: "ocean"}, {Label: "red"}}, Multiple: &multiple,
+			Options: []DispatchQuestionOption{{Label: "blue", Description: "ocean"}, {Label: "red"}}, Multiple: &multiple,
 		}},
 	}
 	parsed := ParseMetaMarker(mustBuildMeta(t, original))
@@ -225,7 +225,7 @@ func TestMarkerEscapesCommentDelimitersInValues(t *testing.T) {
 			}
 		})
 	}
-	ask := []QuestionInfo{{AskID: "R", Question: "A --> B?", Options: []QuestionOption{{Label: "-->", Description: "<!-- x"}}}}
+	ask := []DispatchQuestion{{AskID: "R", Question: "A --> B?", Options: []DispatchQuestionOption{{Label: "-->", Description: "<!-- x"}}}}
 	marker := mustBuildMeta(t, MetaMarker{RequestID: "R", Urgency: UrgencyMed, Ask: ask})
 	parsed := ParseMetaMarker(marker)
 	if parsed == nil || parsed.Ask[0].Question != "A --> B?" || parsed.Ask[0].Options[0].Label != "-->" || parsed.Ask[0].Options[0].Description != "<!-- x" {
@@ -257,5 +257,42 @@ func TestBuildFollowUpBodyLayout(t *testing.T) {
 	}
 	if ParseAskMarker(got) == nil {
 		t.Error("the follow-up body must start with a parsable ask marker")
+	}
+}
+
+func TestBuildMetaMarkerPreservesQuestionYAML(t *testing.T) {
+	multiple := true
+	custom := true
+	got := mustBuildMeta(t, MetaMarker{
+		RequestID: "req-1",
+		Urgency:   UrgencyMed,
+		Ask: []DispatchQuestion{{
+			AskID:    "req-1",
+			Question: "Color?",
+			Header:   "Color",
+			Options: []DispatchQuestionOption{
+				{Label: "blue", Description: "ocean"},
+				{Label: "red"},
+			},
+			Multiple: &multiple,
+			Custom:   &custom,
+		}},
+	})
+	want := `<!-- dispatch:thread
+requestId: req-1
+urgency: med
+ask:
+    - askId: req-1
+      question: Color?
+      header: Color
+      options:
+        - label: blue
+          description: ocean
+        - label: red
+      multiple: true
+      custom: true
+-->`
+	if got != want {
+		t.Fatalf("marker changed:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }

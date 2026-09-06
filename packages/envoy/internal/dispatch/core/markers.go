@@ -25,23 +25,6 @@ const (
 	KindAsk    = "ask"
 )
 
-// QuestionOption is one selectable option in a QuestionInfo.
-type QuestionOption struct {
-	Label       string `json:"label" yaml:"label"`
-	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-}
-
-// QuestionInfo describes a structured question attached to a turn. AskID is
-// assigned by this package (AskIDFor) and never supplied by a caller.
-type QuestionInfo struct {
-	AskID    string           `json:"askId,omitempty" yaml:"askId,omitempty"`
-	Question string           `json:"question" yaml:"question"`
-	Header   string           `json:"header,omitempty" yaml:"header,omitempty"`
-	Options  []QuestionOption `json:"options,omitempty" yaml:"options,omitempty"`
-	Multiple *bool            `json:"multiple,omitempty" yaml:"multiple,omitempty"`
-	Custom   *bool            `json:"custom,omitempty" yaml:"custom,omitempty"`
-}
-
 // Origin captures which session a dispatch turn came from and where a human
 // can find it. Every field is optional; the calling plugin fills what its
 // host can supply, and each empty field is dropped from the rendered marker.
@@ -57,17 +40,17 @@ type Origin struct {
 
 // MetaMarker is the dispatch:thread marker at the top of an issue body.
 type MetaMarker struct {
-	RequestID string         `yaml:"requestId"`
-	Urgency   Urgency        `yaml:"urgency"`
-	Origin    *Origin        `yaml:"origin,omitempty"`
-	Ask       []QuestionInfo `yaml:"ask,omitempty"`
+	RequestID string             `yaml:"requestId"`
+	Urgency   Urgency            `yaml:"urgency"`
+	Origin    *Origin            `yaml:"origin,omitempty"`
+	Ask       []DispatchQuestion `yaml:"ask,omitempty"`
 }
 
 // AskMarker is the dispatch:ask marker at the top of a follow-up comment.
 type AskMarker struct {
-	RequestID string         `yaml:"requestId"`
-	Origin    *Origin        `yaml:"origin,omitempty"`
-	Ask       []QuestionInfo `yaml:"ask,omitempty"`
+	RequestID string             `yaml:"requestId"`
+	Origin    *Origin            `yaml:"origin,omitempty"`
+	Ask       []DispatchQuestion `yaml:"ask,omitempty"`
 }
 
 const (
@@ -86,11 +69,11 @@ func AskIDFor(requestID string, index int) string {
 
 // WithAskIDs returns a copy of ask with AskID assigned per AskIDFor. An empty
 // ask stays nil so the marker omits the key.
-func WithAskIDs(ask []QuestionInfo, requestID string) []QuestionInfo {
+func WithAskIDs(ask []DispatchQuestion, requestID string) []DispatchQuestion {
 	if len(ask) == 0 {
 		return nil
 	}
-	out := make([]QuestionInfo, len(ask))
+	out := make([]DispatchQuestion, len(ask))
 	for i, q := range ask {
 		q.AskID = AskIDFor(requestID, i)
 		out[i] = q

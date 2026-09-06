@@ -14,7 +14,12 @@
     "indentStyle": "space",
     "indentWidth": 2,
     "lineWidth": 100,
-    "lineEnding": "lf"
+    "lineEnding": "lf",
+    "includes": [
+      "**",
+      "!packages/contracts/schemas/dispatch-question.schema.json",
+      "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json"
+    ]
   },
   "linter": {
     "enabled": true,
