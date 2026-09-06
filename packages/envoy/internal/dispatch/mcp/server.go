@@ -14,10 +14,16 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v66/github"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -67,12 +73,66 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // request in dispatchHandler.
 func bearerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if extractBearer(r.Header) == "" {
-			http.Error(w, `{"error":"missing bearer"}`, http.StatusUnauthorized)
-			return
+		started := time.Now()
+		bearer := extractBearer(r.Header)
+		response := &statusResponseWriter{ResponseWriter: w}
+		if bearer == "" {
+			http.Error(response, `{"error":"missing bearer"}`, http.StatusUnauthorized)
+		} else {
+			next.ServeHTTP(response, r)
 		}
-		next.ServeHTTP(w, r)
+		slog.Info(
+			"dispatch request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", response.statusCode(),
+			"duration_ms", time.Since(started).Milliseconds(),
+			"bearer", bearerFingerprint(bearer),
+		)
 	})
+}
+
+// statusResponseWriter records the status the handler wrote so the request
+// log can report it. The MCP Streamable HTTP transport streams SSE and flushes
+// through http.NewResponseController, which reaches the real writer via
+// Unwrap; without it every Flush would report ErrNotSupported and events
+// would sit in the buffer until the response ended.
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *statusResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *statusResponseWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func bearerFingerprint(bearer string) string {
+	if bearer == "" {
+		return "-"
+	}
+	sum := sha256.Sum256([]byte(bearer))
+	return hex.EncodeToString(sum[:4])
 }
 
 func extractBearer(header http.Header) string {
@@ -102,17 +162,14 @@ type dispatchInput struct {
 }
 
 func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolRequest, input dispatchInput) (*mcpsdk.CallToolResult, any, error) {
+	started := time.Now()
 	// The bearer is this call's own HTTP header, which the Streamable HTTP
 	// transport sets on every request. Never take it from ctx: under a stateful
 	// transport ctx descends from the initialize request and would pin the
 	// session to the first token a client sent; plugins mint a fresh one per
 	// call.
 	token := extractBearer(req.Extra.Header)
-	if token == "" {
-		return nil, nil, fmt.Errorf("missing bearer token")
-	}
-	client := s.newClient(ctx, token)
-	result, err := core.Dispatch(ctx, client, core.DispatchInput{
+	call := core.DispatchInput{
 		Repo:     input.Repo,
 		Parent:   input.Parent,
 		Thread:   input.Thread,
@@ -122,12 +179,89 @@ func (s *Server) dispatchHandler(ctx context.Context, req *mcpsdk.CallToolReques
 		Origin:   input.Origin,
 		Ask:      input.Ask,
 		Urgency:  core.Urgency(input.Urgency),
-	})
-	if err != nil {
+	}
+	if token == "" {
+		err := fmt.Errorf("missing bearer token")
+		logToolCall(call, token, loggedThread(input.Thread), started, err)
 		return nil, nil, err
 	}
+	client := s.newClient(ctx, token)
+	result, err := core.Dispatch(ctx, client, call)
+	if err != nil {
+		logToolCall(call, token, loggedThread(input.Thread), started, err)
+		return nil, nil, err
+	}
+	logToolCall(call, token, strconv.Itoa(result.Thread), started, nil)
 	data, _ := json.Marshal(result)
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(data)}},
 	}, result, nil
+}
+
+// logToolCall writes the one line per tools/call that the service keeps. repo
+// is the repository the call resolved to (a qualified thread or parent names
+// its own), so a cross-repository continuation logs the repo it posted to
+// rather than the empty input.Repo the plugin sent.
+func logToolCall(call core.DispatchInput, bearer, thread string, started time.Time, err error) {
+	session, host := "-", "-"
+	if call.Origin != nil {
+		if call.Origin.SessionID != "" {
+			session = call.Origin.SessionID
+		}
+		if call.Origin.Host != "" {
+			host = call.Origin.Host
+		}
+	}
+	result, message := "ok", ""
+	if err != nil {
+		result, message = "error", err.Error()
+	}
+	slog.Info(
+		"dispatch tool call",
+		"tool", "dispatch",
+		"session", session,
+		"host", host,
+		"repo", core.ResolveRepo(call),
+		"thread", thread,
+		"upstream_status", upstreamStatus(err),
+		"result", result,
+		"error", message,
+		"duration_ms", time.Since(started).Milliseconds(),
+		"bearer", bearerFingerprint(bearer),
+	)
+}
+
+func loggedThread(thread string) string {
+	if thread == "" {
+		return "new"
+	}
+	parsed, err := core.ParseThread(thread)
+	if err != nil {
+		return thread
+	}
+	return strconv.Itoa(parsed.IssueNumber)
+}
+
+// upstreamStatus is GitHub's HTTP status behind a failed call, or 0 when the
+// error did not come from a GitHub response. go-github returns four types that
+// carry the response: ErrorResponse, TwoFactorAuthError, and the primary and
+// secondary rate-limit errors for 403/429.
+func upstreamStatus(err error) int {
+	var response *github.ErrorResponse
+	if errors.As(err, &response) && response.Response != nil {
+		return response.Response.StatusCode
+	}
+	var twoFactor *github.TwoFactorAuthError
+	if errors.As(err, &twoFactor) && twoFactor.Response != nil {
+		return twoFactor.Response.StatusCode
+	}
+	var rateLimit *github.RateLimitError
+	if errors.As(err, &rateLimit) && rateLimit.Response != nil {
+		return rateLimit.Response.StatusCode
+	}
+	var abuse *github.AbuseRateLimitError
+	if errors.As(err, &abuse) && abuse.Response != nil {
+		return abuse.Response.StatusCode
+	}
+	return 0
 }
