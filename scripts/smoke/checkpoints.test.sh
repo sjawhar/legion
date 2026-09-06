@@ -19,7 +19,7 @@ printf '%s' '{"issues":{"example-org/legion-smoke#1":{}},"trees":{"example-org/l
 EOF
 cat >"${fake_bin}/tmux" <<'EOF'
 #!/usr/bin/env bash
-printf 'controller\ntrajectory_hlabs_hpbc__legion_hsmoke-1\n'
+printf 'controller\nexample_horg__legion_hsmoke-1\n'
 EOF
 cat >"${fake_bin}/gh" <<'EOF'
 #!/usr/bin/env bash
