@@ -131,7 +131,10 @@ describe("callDispatch", () => {
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { isError: true, content: [{ type: "text", text: "#42 is closed; open a new thread" }] },
+          result: {
+            isError: true,
+            content: [{ type: "text", text: "#42 is closed; open a new thread" }],
+          },
         }),
       },
     ]);

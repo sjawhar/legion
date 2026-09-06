@@ -40,7 +40,9 @@ describe("resolveDispatchConfig — url", () => {
   it("defaults the server URL when enabled without serverUrl", () => {
     const home = tempDir();
     writeUserConfig(home, { dispatch: { enabled: true } });
-    expect(resolveDispatchConfig({}, { home, cwd: tempDir() }).url).toBe("http://localhost:8766/mcp");
+    expect(resolveDispatchConfig({}, { home, cwd: tempDir() }).url).toBe(
+      "http://localhost:8766/mcp"
+    );
   });
 
   it("lets repo config keys override user config keys", () => {
