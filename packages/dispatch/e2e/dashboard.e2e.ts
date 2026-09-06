@@ -97,7 +97,7 @@ test("typed text, form state, and search focus survive GitHub events", async ({
   await expect(highlighted).toHaveCount(0, { timeout: 5_000 });
   await expect(page.locator(".thread-row")).toHaveCount(1);
   await expect(search).toBeFocused();
-  await expect(search).toHaveValue("harn");
+  await expect(search).toHaveValue("acme");
 });
 
 test("an event answering one ask removes only its form; a half-filled sibling keeps value and focus", async ({
@@ -297,4 +297,70 @@ test("urgency changes post an HTML-comment marker with a summary line", async ({
   const body = dashboard.posted[0]?.body ?? "";
   expect(body.startsWith("<!-- dispatch:urgency\n")).toBe(true);
   expect(body.endsWith("-->\n\nUrgency set to **blocking**.")).toBe(true);
+});
+
+test("events never rebuild the reply box, the ask forms, the search box, or an unchanged conversation", async ({
+  page,
+  dashboard,
+}) => {
+  await page.goto(`${dashboard.url}/${THREAD}`);
+  await expect(page.locator("#detail-ask-forms form.ask-form")).toHaveCount(2);
+  const reply = page.locator("#reply-body");
+  await reply.fill("draft that must survive");
+  const form = page.locator('form[data-ask-id="F1"]');
+  await form.locator('input[name="custom-enabled"]').check();
+  await form.locator('textarea[name="custom"]').fill("half an answer");
+  const search = page.locator("#search-input");
+  await search.click();
+  // "acme" matches both fixture threads through their repo, so the unrelated
+  // thread's row stays visible for its highlight below.
+  await search.pressSequentially("acme");
+  // Tag the live nodes; a rebuilt node would not carry the tag.
+  const tag = () =>
+    page.evaluate(() => {
+      const nodes: Element[] = [];
+      for (const id of ["reply-body", "search-input"])
+        nodes.push(document.getElementById(id) as Element);
+      nodes.push(document.querySelector('form[data-ask-id="F1"]') as Element);
+      // The conversation's first card: an innerHTML rewrite replaces it, the section itself stays.
+      nodes.push(document.querySelector("#detail-conversation > *") as Element);
+      return nodes.map((node) => {
+        if (!node) return "missing";
+        const tagged = node as HTMLElement & { __tag?: string };
+        tagged.__tag ??= `tag-${Math.random()}`;
+        return tagged.__tag;
+      });
+    });
+  const before = await tag();
+  expect(before).not.toContain("missing");
+
+  // An event on the selected thread repaints the conversation (new comment), so its
+  // cards are new nodes; everything the human types into is the same node.
+  dashboard.addComment(REPO, 12, {
+    body: "another human reply",
+    author: "sami",
+    createdAt: new Date().toISOString(),
+  });
+  await dashboard.emit(COMMENT_EVENT);
+  await expect(page.locator("#detail-conversation")).toContainText("another human reply");
+  const afterSame = await tag();
+  expect(afterSame.slice(0, 3)).toEqual(before.slice(0, 3));
+  expect(afterSame[3]).not.toBe(before[3]);
+
+  // An event on an unrelated thread: nothing in the detail pane is repainted.
+  const conversationHtml = await page.locator("#detail-conversation").innerHTML();
+  dashboard.addComment(REPO, 7, {
+    body: "activity elsewhere",
+    author: "sami",
+    createdAt: new Date().toISOString(),
+  });
+  await dashboard.emit({ subject: `${SUBJECT}.7.comment`, repo: REPO });
+  await expect(page.locator('.thread-row[data-thread-number="7"].live-highlight')).toHaveCount(1);
+  const afterOther = await tag();
+  expect(afterOther).toEqual(afterSame);
+  expect(await page.locator("#detail-conversation").innerHTML()).toBe(conversationHtml);
+  await expect(reply).toHaveValue("draft that must survive");
+  await expect(form.locator('textarea[name="custom"]')).toHaveValue("half an answer");
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("acme");
 });

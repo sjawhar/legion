@@ -7,7 +7,7 @@ import {
 } from "../asks";
 import { escapeHtml, renderMarkdownLite, timeAgo } from "../html";
 import {
-  parseAnswerMarker,
+  type ParsedAskMarker,
   parseAskMarker,
   parseThreadMarker,
   parseUrgencyMarker,
@@ -57,9 +57,24 @@ function renderAnswerValues(values: readonly string[]): string {
   return values.map((value) => `<span class="answer-pill">${escapeHtml(value)}</span>`).join(" ");
 }
 
-// A question and, directly beneath it, its answer (or the fact that it is
-// still waiting, linking down to its form). Used for body asks and for the
-// asks of every follow-up turn.
+// Beneath a question: its answer, or the fact that it is still waiting
+// (linking down to its form), or that the thread closed without one.
+function renderAskAnswer(
+  ask: ThreadAsk,
+  resolved: ResolvedAnswer | null,
+  issueOpen: boolean
+): string {
+  if (resolved) {
+    return `<div class="ask-answer">${renderAnswerValues(resolved.values)}<span class="ask-answer-meta"> — ${escapeHtml(resolved.answer.authorLogin)} · ${escapeHtml(timeAgo(resolved.answer.createdAt))}</span></div>`;
+  }
+  if (issueOpen) {
+    return `<a class="ask-waiting" href="#ask-form-${escapeHtml(ask.askId)}">waiting for an answer — answer below ↓</a>`;
+  }
+  return `<em class="ask-waiting">never answered</em>`;
+}
+
+// A question and, directly beneath it, its answer. Used for body asks and for
+// the asks of every follow-up turn.
 function renderAskHistory(
   ask: ThreadAsk,
   resolved: ResolvedAnswer | null,
@@ -70,32 +85,39 @@ function renderAskHistory(
   const options = (ask.question.options ?? [])
     .map((option) => `<span class="ask-history-option">${escapeHtml(option.label)}</span>`)
     .join(" ");
-  const answer = resolved
-    ? `<div class="ask-answer">${renderAnswerValues(resolved.values)}<span class="ask-answer-meta"> — ${escapeHtml(resolved.answer.authorLogin)} · ${escapeHtml(timeAgo(resolved.answer.createdAt))}</span></div>`
-    : issueOpen
-      ? `<a class="ask-waiting" href="#ask-form-${escapeHtml(ask.askId)}">waiting for an answer — answer below ↓</a>`
-      : `<em class="ask-waiting">never answered</em>`;
   return `<div class="ask-history" data-ask-id="${escapeHtml(ask.askId)}">
     <div class="ask-history-question"><strong class="ask-history-header">${header}</strong>${prompt ? `<span class="ask-history-prompt">${prompt}</span>` : ""}${options ? `<span class="ask-history-options">${options}</span>` : ""}</div>
-    ${answer}
+    ${renderAskAnswer(ask, resolved, issueOpen)}
   </div>`;
+}
+
+// The session that asked, as the header origin line and the turn cards both
+// show it; these two own the class names the stylesheet targets.
+function sessionTitleSpan(origin: Origin): string {
+  if (!origin.sessionTitle) return "";
+  return `<span class="origin-session-title">${escapeHtml(origin.sessionTitle)}</span>`;
+}
+
+function sessionIdCode(origin: Origin): string {
+  if (!origin.sessionId) return "";
+  return `<code class="origin-session-id">${escapeHtml(origin.sessionId)}</code>`;
 }
 
 function renderCompactOrigin(origin: Origin | undefined): string {
   if (!origin) return "";
-  const parts: string[] = [];
-  if (origin.sessionTitle) {
-    parts.push(`<span class="origin-session-title">${escapeHtml(origin.sessionTitle)}</span>`);
-  }
-  if (origin.sessionId) {
-    parts.push(`<code class="origin-session-id">${escapeHtml(origin.sessionId)}</code>`);
-  }
-  if (origin.tmux) parts.push(`tmux ${escapeHtml(origin.tmux)}`);
+  const parts = [
+    sessionTitleSpan(origin),
+    sessionIdCode(origin),
+    origin.tmux ? `tmux ${escapeHtml(origin.tmux)}` : "",
+  ].filter(Boolean);
   return parts.length ? `<span class="turn-origin">${parts.join(" · ")}</span>` : "";
 }
 
-function renderTurnCard(comment: Comment, input: ThreadDetailInput): string {
-  const marker = parseAskMarker(comment.body);
+function renderTurnCard(
+  comment: Comment,
+  marker: ParsedAskMarker,
+  input: ThreadDetailInput
+): string {
   const asks = input.asks.filter(
     (ask) => ask.source.kind === "comment" && ask.source.commentId === comment.id
   );
@@ -105,7 +127,7 @@ function renderTurnCard(comment: Comment, input: ThreadDetailInput): string {
     )
     .join("");
   return `<article class="comment turn-card" id="turn-${comment.id}" data-comment-id="${comment.id}">
-    <header><strong>${escapeHtml(comment.authorLogin)}</strong><span class="comment-tag">follow-up</span><span>${escapeHtml(timeAgo(comment.createdAt))}</span>${renderCompactOrigin(marker?.origin)}</header>
+    <header><strong>${escapeHtml(comment.authorLogin)}</strong><span class="comment-tag">follow-up</span><span>${escapeHtml(timeAgo(comment.createdAt))}</span>${renderCompactOrigin(marker.origin)}</header>
     <div class="comment-body turn-body">${renderMarkdownLite(stripMarker(comment.body))}</div>
     ${history}
   </article>`;
@@ -121,6 +143,9 @@ function renderStandaloneAnswer(comment: Comment, answer: ThreadAnswer, tag: str
   </article>`;
 }
 
+// The urgency and ask markers are read here; answers were classified when
+// input.answers was collected from these same comments, so an answer comment
+// is the one input.answers names.
 function renderComment(comment: Comment, input: ThreadDetailInput): string {
   const urgency = parseUrgencyMarker(comment.body);
   if (urgency) {
@@ -129,10 +154,10 @@ function renderComment(comment: Comment, input: ThreadDetailInput): string {
       urgency set to <strong>${urgency}</strong> by ${escapeHtml(comment.authorLogin)} · ${escapeHtml(timeAgo(comment.createdAt))}
     </div>`;
   }
-  if (parseAskMarker(comment.body)) return renderTurnCard(comment, input);
-  if (parseAnswerMarker(comment.body)) {
-    const answer = input.answers.find((candidate) => candidate.commentId === comment.id);
-    if (!answer) return "";
+  const ask = parseAskMarker(comment.body);
+  if (ask) return renderTurnCard(comment, ask, input);
+  const answer = input.answers.find((candidate) => candidate.commentId === comment.id);
+  if (answer) {
     // The answer a question shows renders beneath it (renderAskHistory) and
     // nowhere else. Any other answer stays at its own position.
     const targets = answerTargets(answer, input.asks);
@@ -215,13 +240,10 @@ const TMUX_PANE_ID = /^%\d+$/;
 
 function renderSessionIdentity(origin: Origin): string {
   if (!origin.sessionTitle && !origin.sessionId) return "";
-  const title = origin.sessionTitle
-    ? `<span class="origin-session-title">${escapeHtml(origin.sessionTitle)}</span>`
-    : "";
   const id = origin.sessionId
-    ? `<code class="origin-session-id">${escapeHtml(origin.sessionId)}</code><button type="button" class="origin-copy" data-action="copy-session-id" data-copy-text="${escapeHtml(origin.sessionId)}" title="Copy session id" aria-label="Copy session id">⧉</button>`
+    ? `${sessionIdCode(origin)}<button type="button" class="origin-copy" data-action="copy-session-id" data-copy-text="${escapeHtml(origin.sessionId)}" title="Copy session id" aria-label="Copy session id">⧉</button>`
     : "";
-  return `<span class="origin-session">${title}${id}</span>`;
+  return `<span class="origin-session">${sessionTitleSpan(origin)}${id}</span>`;
 }
 
 function renderOriginLine(origin: Origin | undefined): string {
@@ -326,17 +348,40 @@ export function renderAskForms(input: ThreadDetailInput): string {
     .join("");
 }
 
-export function renderThreadDetail(input: ThreadDetailInput | null): string {
-  if (!input) {
+/** The patchable regions of the detail pane, by element id. The forms are not regions: they are reconciled in place. */
+export type DetailRegionId =
+  | "detail-header"
+  | "detail-opening"
+  | "detail-opening-asks"
+  | "detail-subthreads"
+  | "detail-conversation";
+export type DetailRegions = Readonly<Record<DetailRegionId, string>>;
+
+export function renderDetailRegions(input: ThreadDetailInput): DetailRegions {
+  return {
+    "detail-header": renderDetailHeader(input),
+    "detail-opening": renderOpeningBody(input),
+    "detail-opening-asks": renderOpeningAsks(input),
+    "detail-subthreads": renderSubThreads(input.subThreads),
+    "detail-conversation": renderConversation(input),
+  };
+}
+
+/** The whole pane. A caller that already rendered the regions (to remember what it painted) passes them in. */
+export function renderThreadDetail(
+  input: ThreadDetailInput | null,
+  regions: DetailRegions | undefined = input ? renderDetailRegions(input) : undefined
+): string {
+  if (!input || !regions) {
     return `<main class="dispatch-detail empty-detail"><p>Select a thread to read the conversation.</p></main>`;
   }
   const writeState = input.writeState ?? EMPTY_WRITE_STATE;
   return `<main class="dispatch-detail" data-thread-number="${input.issue.number}">
-    <header id="detail-header" class="detail-header">${renderDetailHeader(input)}</header>
-    <section id="detail-opening" class="opening-body">${renderOpeningBody(input)}</section>
-    <section id="detail-opening-asks" class="ask-context" aria-label="Questions">${renderOpeningAsks(input)}</section>
-    <section id="detail-subthreads" class="sub-threads" aria-label="Sub-threads">${renderSubThreads(input.subThreads)}</section>
-    <section id="detail-conversation" class="conversation" aria-label="Conversation">${renderConversation(input)}</section>
+    <header id="detail-header" class="detail-header">${regions["detail-header"]}</header>
+    <section id="detail-opening" class="opening-body">${regions["detail-opening"]}</section>
+    <section id="detail-opening-asks" class="ask-context" aria-label="Questions">${regions["detail-opening-asks"]}</section>
+    <section id="detail-subthreads" class="sub-threads" aria-label="Sub-threads">${regions["detail-subthreads"]}</section>
+    <section id="detail-conversation" class="conversation" aria-label="Conversation">${regions["detail-conversation"]}</section>
     <section id="detail-ask-forms" class="ask-forms" aria-label="Open questions">${renderAskForms(input)}</section>
     ${input.issue.state === "OPEN" ? renderReplyForm({ pending: writeState.replyPending, error: writeState.replyError }) : ""}
   </main>`;

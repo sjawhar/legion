@@ -1,4 +1,4 @@
-import { collectAnswers, collectAsks, openAsks } from "./asks";
+import { threadAsks } from "./asks";
 import { parseThreadMarker } from "./markers";
 import type { CloseReason, Comment, Issue, IssueState, Thread, Urgency } from "./types";
 
@@ -133,7 +133,6 @@ function threadFromNode(node: GraphqlThreadNode): Thread {
         ]
       : []
   );
-  const asks = collectAsks(node.body, windowComments);
   const thread: Thread = {
     repo: `${node.repository.owner.login}/${node.repository.name}`,
     number: node.number,
@@ -141,7 +140,7 @@ function threadFromNode(node: GraphqlThreadNode): Thread {
     body: node.body,
     state: normalizeState(node.state),
     urgency: meta?.urgency ?? "med",
-    openAskCount: openAsks(asks, collectAnswers(windowComments)).length,
+    openAskCount: threadAsks(node.body, windowComments).open.length,
     parentNumber,
     updatedAt: node.updatedAt,
     createdAt: node.createdAt,
@@ -225,8 +224,7 @@ export async function getIssue(repo: string, number: number): Promise<Issue> {
 /** Title of an issue or pull request for unfurling; null when it cannot be read (private, deleted, network). */
 export async function getReferenceTitle(repo: string, number: number): Promise<string | null> {
   try {
-    const issue = await githubRest<{ title?: string }>(`repos/${repo}/issues/${number}`);
-    return issue.title ?? null;
+    return (await getIssue(repo, number)).title ?? null;
   } catch {
     return null;
   }

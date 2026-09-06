@@ -105,3 +105,17 @@ export function answerTargets(answer: ThreadAnswer, asks: readonly ThreadAsk[]):
   if (answer.forAsk !== null) return asks.filter((ask) => ask.askId === answer.forAsk);
   return asks.filter((ask) => ask.source.kind === "body");
 }
+
+export interface ThreadAsks {
+  readonly asks: ThreadAsk[];
+  readonly answers: ThreadAnswer[];
+  /** The asks no answer settles. */
+  readonly open: ThreadAsk[];
+}
+
+/** The ask model of one thread from its body and comments: every ask, every answer, and what is still open. */
+export function threadAsks(body: string, comments: readonly Comment[]): ThreadAsks {
+  const asks = collectAsks(body, comments);
+  const answers = collectAnswers(comments);
+  return { asks, answers, open: openAsks(asks, answers) };
+}

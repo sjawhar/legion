@@ -1,8 +1,8 @@
 // DOM patching for the dashboard. The page is never rebuilt wholesale: the
-// sidebar list and the detail regions are repainted individually, and the two
-// things a human types into — the reply textarea and the open-ask forms — are
-// created once per selection and reconciled by id, never re-created by an
-// event.
+// sidebar list and the detail regions are repainted individually — and only
+// when their markup changed — and the two things a human types into — the
+// reply textarea and the open-ask forms — are created once per selection and
+// reconciled by id, never re-created by an event.
 
 import { renderAskForm } from "./components/ask-form";
 import { renderReplyForm } from "./components/reply-form";
@@ -13,9 +13,43 @@ import {
   type ThreadDetailInput,
 } from "./components/thread-detail";
 
-export function paintRegion(root: ParentNode, id: string, innerHtml: string): void {
+// The markup last written into each region, per root. Browsers reserialise
+// innerHTML (quoting, entities), so the source string is what is compared.
+const painted = new WeakMap<ParentNode, Map<string, string>>();
+
+/**
+ * Write `innerHtml` into `#id` under `root` unless it is exactly what was last
+ * painted there. Returns whether the region changed, so callers run the passes
+ * that only matter for new markup (linkify, unfurl) on a real change. Painting
+ * the same string is a no-op: text selection, open `<details>`, and unfurled
+ * titles in an unchanged region survive an unrelated event.
+ */
+export function paintRegion(root: ParentNode, id: string, innerHtml: string): boolean {
+  let regions = painted.get(root);
+  if (!regions) {
+    regions = new Map();
+    painted.set(root, regions);
+  }
+  if (regions.get(id) === innerHtml) return false;
   const region = root.querySelector<HTMLElement>(`#${id}`);
-  if (region) region.innerHTML = innerHtml;
+  if (!region) return false;
+  region.innerHTML = innerHtml;
+  regions.set(id, innerHtml);
+  return true;
+}
+
+/**
+ * Remember what a wholesale render put into `root`'s regions, so the next
+ * paintRegion of the same markup is a no-op rather than a first rewrite.
+ * Replaces whatever was remembered for `root`.
+ */
+export function markPainted(root: ParentNode, regions: Record<string, string>): void {
+  painted.set(root, new Map(Object.entries(regions)));
+}
+
+/** Forget what was painted under `root`: call before replacing its subtree wholesale. */
+export function forgetPainted(root: ParentNode): void {
+  painted.delete(root);
 }
 
 export function syncFormState(

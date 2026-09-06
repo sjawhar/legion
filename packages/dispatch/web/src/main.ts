@@ -9,7 +9,7 @@ import {
   postComment,
   searchDispatchThreads,
 } from "./api";
-import { collectAnswers, collectAsks, openAsks } from "./asks";
+import { collectAsks, threadAsks } from "./asks";
 import { summarizeAnswer } from "./components/ask-form";
 import {
   isStatusFilter,
@@ -20,15 +20,11 @@ import {
   visibleSidebarThreads,
 } from "./components/sidebar";
 import {
-  renderConversation,
-  renderDetailHeader,
-  renderOpeningAsks,
-  renderOpeningBody,
-  renderSubThreads,
+  renderDetailRegions,
   renderThreadDetail,
   type ThreadDetailInput,
 } from "./components/thread-detail";
-import { paintRegion, reconcileAskForms, syncReplyForm } from "./dom";
+import { forgetPainted, markPainted, paintRegion, reconcileAskForms, syncReplyForm } from "./dom";
 import {
   buildAnswerMarkerComment,
   buildUrgencyMarkerComment,
@@ -183,15 +179,14 @@ export function createDashboardController(options: DashboardControllerOptions) {
       (candidate) => candidate.repo === selected.repo && candidate.number === selected.number
     );
     const comments = state.comments.get(key) ?? [];
-    const asks = collectAsks(issue.body, comments);
-    const answers = collectAnswers(comments);
+    const { asks, answers, open } = threadAsks(issue.body, comments);
     return {
       issue,
       urgency: effectiveUrgency(thread?.urgency ?? "med", comments),
       comments,
       asks,
       answers,
-      openAsks: openAsks(asks, answers),
+      openAsks: open,
       subThreads: state.threads.filter(
         (candidate) => candidate.repo === issue.repo && candidate.parentNumber === issue.number
       ),
@@ -217,14 +212,6 @@ export function createDashboardController(options: DashboardControllerOptions) {
     return state.selected;
   }
 
-  function selectedComments(): Comment[] {
-    const key = selectedKey();
-    if (!key) throw new Error("No thread selected");
-    const comments = state.comments.get(key) ?? [];
-    state.comments.set(key, comments);
-    return comments;
-  }
-
   function selectedIssue(): Issue {
     const key = selectedKey();
     if (!key) throw new Error("Selected issue is not loaded");
@@ -233,8 +220,36 @@ export function createDashboardController(options: DashboardControllerOptions) {
     return issue;
   }
 
+  // The sidebar's "needs you" count per thread key. Once a thread's comments
+  // are loaded they are authoritative; until then the sidebar trusts the search
+  // window's count (no entry here). Recomputed where the comments change and
+  // when the thread list refreshes, never per paint.
+  const openAskCountByKey = new Map<string, number>();
+
+  function refreshOpenAskCount(key: string): void {
+    const thread = state.threads.find(
+      (candidate) => keyOf(candidate.repo, candidate.number) === key
+    );
+    const comments = state.comments.get(key);
+    if (!thread || !comments) {
+      openAskCountByKey.delete(key);
+      return;
+    }
+    openAskCountByKey.set(key, threadAsks(thread.body, comments).open.length);
+  }
+
+  /** The one write path for a thread's comment list; every mutation goes through it so the count above stays current. */
+  function setComments(key: string, comments: Comment[]): void {
+    state.comments.set(key, comments);
+    refreshOpenAskCount(key);
+  }
+
+  function appendComment(key: string, comment: Comment): void {
+    setComments(key, [...(state.comments.get(key) ?? []), comment]);
+  }
+
   function replaceComment(key: string, placeholderId: number, comment: Comment): void {
-    state.comments.set(
+    setComments(
       key,
       (state.comments.get(key) ?? []).map((candidate) =>
         candidate.id === placeholderId ? comment : candidate
@@ -243,7 +258,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
   }
 
   function removeComment(key: string, placeholderId: number): void {
-    state.comments.set(
+    setComments(
       key,
       (state.comments.get(key) ?? []).filter((candidate) => candidate.id !== placeholderId)
     );
@@ -272,6 +287,9 @@ export function createDashboardController(options: DashboardControllerOptions) {
     } catch (error) {
       state.loadError = error instanceof Error ? error.message : String(error);
     }
+    // The counts follow the current thread list: a thread that left the list
+    // drops out, and an edited body is recounted.
+    for (const key of state.comments.keys()) refreshOpenAskCount(key);
     if (!state.selected) {
       const first = visibleSidebarThreads(state.threads, sidebarFilters())[0];
       if (first) {
@@ -289,21 +307,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     ]);
     const key = keyOf(repo, number);
     state.issues.set(key, issue);
-    state.comments.set(key, comments);
-  }
-
-  // Once a thread's comments are loaded they are authoritative for "needs
-  // you"; until then the sidebar trusts the search window's count.
-  function openAskCounts(): Record<string, number> {
-    const counts: Record<string, number> = {};
-    for (const thread of state.threads) {
-      const key = keyOf(thread.repo, thread.number);
-      const comments = state.comments.get(key);
-      if (!comments) continue;
-      const asks = collectAsks(thread.body, comments);
-      counts[key] = openAsks(asks, collectAnswers(comments)).length;
-    }
-    return counts;
+    setComments(key, comments);
   }
 
   function sidebarFilters(): SidebarFilters {
@@ -313,7 +317,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
       highlightedKeys: state.highlighted,
       addressed: state.addressed,
       loadError: state.loadError,
-      openAskCounts: openAskCounts(),
+      openAskCounts: Object.fromEntries(openAskCountByKey),
     };
   }
 
@@ -352,10 +356,14 @@ export function createDashboardController(options: DashboardControllerOptions) {
     return state.helpOpen;
   }
 
-  function highlightThread(repo: string, number: number): void {
+  /** Mark a thread's row as just changed; the mark clears itself after 1.8 s, then `onExpire` runs (the repaint that removes it). */
+  function highlightThread(repo: string, number: number, onExpire?: () => void): void {
     const key = keyOf(repo, number);
     state.highlighted.add(key);
-    setTimeout(() => state.highlighted.delete(key), 1800);
+    setTimeout(() => {
+      state.highlighted.delete(key);
+      onExpire?.();
+    }, 1800);
   }
 
   async function autoMarkAddressed(key: string, timestamp: string): Promise<void> {
@@ -377,7 +385,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     const sel = requireSelected();
     const key = keyOf(sel.repo, sel.number);
     const placeholder = optimisticComment(trimmed);
-    selectedComments().push(placeholder);
+    appendComment(key, placeholder);
     state.replyPending = true;
     state.replyError = undefined;
     try {
@@ -399,7 +407,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
   async function submitAskAnswer(askId: string, values: QuestionAnswer): Promise<void> {
     const issue = selectedIssue();
     const key = keyOf(issue.repo, issue.number);
-    const ask = collectAsks(issue.body, selectedComments()).find(
+    const ask = collectAsks(issue.body, state.comments.get(key) ?? []).find(
       (candidate) => candidate.askId === askId
     );
     if (!ask) throw new Error(`askId ${askId} is not on this thread`);
@@ -410,7 +418,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
       summarizeAnswer(ask.question, values, ask.index)
     );
     const placeholder = optimisticComment(body);
-    selectedComments().push(placeholder);
+    appendComment(key, placeholder);
     state.askPending = askId;
     state.askError = undefined;
     try {
@@ -439,7 +447,8 @@ export function createDashboardController(options: DashboardControllerOptions) {
     state.urgencyError = undefined;
     try {
       const comment = await api.postComment(sel.repo, sel.number, body);
-      selectedComments().push(comment);
+      const current = requireSelected();
+      appendComment(keyOf(current.repo, current.number), comment);
     } catch (error) {
       if (thread && previousUrgency) thread.urgency = previousUrgency;
       state.urgencyError = error instanceof Error ? error.message : String(error);
@@ -518,6 +527,7 @@ export function createDashboardController(options: DashboardControllerOptions) {
     sidebarFilters,
     loadThreads,
     selectThread,
+    setComments,
     visibleThreads,
     nextSelection,
     toggleSidebar,
@@ -538,14 +548,15 @@ async function ensureSignedIn(): Promise<boolean> {
   return response.ok;
 }
 
-interface Painter {
-  all(): void;
-  sidebar(): void;
-  detail(): void;
-  help(): void;
-}
-
-function attachDom(controller: DashboardController, root: HTMLElement): Painter {
+/**
+ * Bind the DOM to the controller. Returns paint(): one pass over the sidebar,
+ * the detail pane, and the help modal. No caller decides which region an
+ * action touched — every region compares its markup against what it last
+ * painted and writes only on a change, so an unrelated event costs a string
+ * build and a compare, and the reply draft, the ask forms, and the search
+ * box are never rebuilt.
+ */
+function attachDom(controller: DashboardController, root: HTMLElement): () => void {
   const dashboard = root.querySelector<HTMLElement>("#dashboard-root");
   if (!dashboard) throw new Error("Missing #dashboard-root");
   // The help modal is position: fixed; it sits outside the grid so an empty
@@ -554,10 +565,8 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
   const shell = dashboard.firstElementChild as HTMLElement;
   const sidebarRoot = shell.querySelector<HTMLElement>("#sidebar-root") as HTMLElement;
   const detailRoot = shell.querySelector<HTMLElement>("#detail-root") as HTMLElement;
-  const helpRoot = dashboard.querySelector<HTMLElement>("#help-root") as HTMLElement;
   const unfurl = createReferenceUnfurler((ref) => getReferenceTitle(ref.repo, ref.number));
   let renderedKey: string | undefined;
-  let renderedBody: string | undefined;
 
   // Only prose gets linkified: the opening body and comment bodies. Header
   // links, sub-thread rows, and forms carry `#N` text that must stay as is.
@@ -584,51 +593,44 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
   }
 
   // A new selection rebuilds the detail pane once; every later paint patches
-  // regions and leaves the reply form and the open-ask forms alone.
+  // the regions whose markup changed and leaves the reply form and the
+  // open-ask forms alone.
   function paintDetail(): void {
     const detail = controller.selectedDetail();
     const key = detail ? keyOf(detail.repo, detail.issue.number) : undefined;
-    if (!detail || key !== renderedKey) {
-      detailRoot.innerHTML = renderThreadDetail(detail);
+    const regions = detail ? renderDetailRegions(detail) : undefined;
+    if (!detail || !regions || key !== renderedKey) {
+      forgetPainted(detailRoot);
+      detailRoot.innerHTML = renderThreadDetail(detail, regions);
       renderedKey = key;
-      renderedBody = detail?.issue.body;
-      if (detail) unfurlIn(detailRoot, detail.repo);
+      if (!detail || !regions) return;
+      markPainted(detailRoot, regions);
+      unfurlIn(detailRoot, detail.repo);
       return;
     }
-    paintRegion(detailRoot, "detail-header", renderDetailHeader(detail));
-    if (detail.issue.body !== renderedBody) {
-      paintRegion(detailRoot, "detail-opening", renderOpeningBody(detail));
-      renderedBody = detail.issue.body;
-      unfurlIn(detailRoot.querySelector("#detail-opening"), detail.repo);
+    for (const [id, html] of Object.entries(regions)) {
+      if (paintRegion(detailRoot, id, html))
+        unfurlIn(detailRoot.querySelector(`#${id}`), detail.repo);
     }
-    paintRegion(detailRoot, "detail-opening-asks", renderOpeningAsks(detail));
-    paintRegion(detailRoot, "detail-subthreads", renderSubThreads(detail.subThreads));
-    paintRegion(detailRoot, "detail-conversation", renderConversation(detail));
-    unfurlIn(detailRoot.querySelector("#detail-conversation"), detail.repo);
     reconcileAskForms(detailRoot, detail);
     syncReplyForm(detailRoot, detail);
   }
 
   function paintHelp(): void {
-    helpRoot.innerHTML = controller.state.helpOpen
-      ? `<div class="shortcut-modal active">j/k move · Enter select · [/ ] sidebar · ? help</div>`
-      : "";
+    paintRegion(
+      root,
+      "help-root",
+      controller.state.helpOpen
+        ? `<div class="shortcut-modal active">j/k move · Enter select · [/ ] sidebar · ? help</div>`
+        : ""
+    );
   }
 
-  const paint: Painter = {
-    sidebar: paintSidebar,
-    detail: paintDetail,
-    help: paintHelp,
-    all() {
-      paintSidebar();
-      paintDetail();
-      paintHelp();
-    },
-  };
-  const both = (): void => {
-    paintDetail();
+  function paint(): void {
     paintSidebar();
-  };
+    paintDetail();
+    paintHelp();
+  }
 
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
@@ -636,28 +638,28 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     const repo = row?.dataset.threadRepo;
     const number = row?.dataset.threadNumber;
     if (repo && number) {
-      void controller.selectThread(repo, Number(number)).then(paint.all);
+      void controller.selectThread(repo, Number(number)).then(paint);
       return;
     }
     if (target.closest<HTMLElement>("#help-button")) {
       controller.toggleHelp();
-      paintHelp();
+      paint();
       return;
     }
     if (target.closest<HTMLElement>("#toggle-sidebar")) {
       controller.toggleSidebar();
-      paintSidebar();
+      paint();
       return;
     }
     const pill = target.closest<HTMLButtonElement>("[data-filter]");
     const filterValue = pill?.dataset.value;
     if (pill?.dataset.filter === "status" && isStatusFilter(filterValue)) {
       controller.state.filters.status = filterValue;
-      paintSidebar();
+      paint();
     }
     if (pill?.dataset.filter === "urgency" && isUrgencyFilter(filterValue)) {
       controller.state.filters.urgency = filterValue;
-      paintSidebar();
+      paint();
     }
   });
 
@@ -665,7 +667,7 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     const target = event.target as HTMLInputElement;
     if (target.id !== "search-input") return;
     controller.state.filters.search = target.value;
-    paintSidebar();
+    paint();
   });
 
   root.addEventListener("click", (event) => {
@@ -677,8 +679,8 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     // Close the popover so the chip reflects the new state immediately.
     const details = urgencyOption.closest<HTMLDetailsElement>("details.urgency-chip-wrap");
     if (details) details.open = false;
-    void controller.setUrgency(next).then(both, both);
-    both();
+    void controller.setUrgency(next).then(paint, paint);
+    paint();
   });
 
   // Click-outside to close the urgency popover and the resolve-as-not-planned menu.
@@ -710,9 +712,9 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
       // Cleared only once GitHub confirmed the comment: a failed post keeps the draft.
       void controller.postReply(String(formData.get("body") ?? "")).then(() => {
         if (textarea) textarea.value = "";
-        both();
-      }, paintDetail);
-      paintDetail();
+        paint();
+      }, paint);
+      paint();
     }
     if (form.dataset.action === "ask-answer") {
       const askId = form.dataset.askId ?? "";
@@ -721,8 +723,8 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
         formData.has("custom-enabled") && custom
           ? [custom]
           : formData.getAll("answer").map(String).filter(Boolean);
-      void controller.submitAskAnswer(askId, values).then(both, paintDetail);
-      paintDetail();
+      void controller.submitAskAnswer(askId, values).then(paint, paint);
+      paint();
     }
   });
 
@@ -737,20 +739,20 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     )) {
       open.open = false;
     }
-    void controller.closeSelectedIssue(stateReason).then(both, both);
-    both();
+    void controller.closeSelectedIssue(stateReason).then(paint, paint);
+    paint();
   });
 
   root.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
     if (target.closest<HTMLButtonElement>("button[data-action='mark-addressed']")) {
-      void controller.markAddressed().then(both, both);
-      both();
+      void controller.markAddressed().then(paint, paint);
+      paint();
       return;
     }
     if (target.closest<HTMLButtonElement>("button[data-action='unmark-addressed']")) {
-      void controller.unmarkAddressed().then(both, both);
-      both();
+      void controller.unmarkAddressed().then(paint, paint);
+      paint();
     }
   });
 
@@ -769,10 +771,10 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     if (!toggle) return;
     if (toggle.dataset.toggle === "show-addressed") {
       controller.setShowAddressed(true);
-      paintSidebar();
+      paint();
     } else if (toggle.dataset.toggle === "hide-addressed") {
       controller.setShowAddressed(false);
-      paintSidebar();
+      paint();
     }
   });
 
@@ -782,22 +784,22 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     if (event.key === "j" || event.key === "k") {
       event.preventDefault();
       const next = controller.nextSelection(event.key);
-      if (next) void controller.selectThread(next.repo, next.number).then(paint.all);
+      if (next) void controller.selectThread(next.repo, next.number).then(paint);
     }
     if (event.key === "Enter" && controller.state.selected) {
       event.preventDefault();
       const sel = controller.state.selected;
-      void controller.selectThread(sel.repo, sel.number).then(paint.all);
+      void controller.selectThread(sel.repo, sel.number).then(paint);
     }
     if (event.key === "[" || event.key === "]") {
       event.preventDefault();
       controller.toggleSidebar();
-      paintSidebar();
+      paint();
     }
     if (event.key === "?") {
       event.preventDefault();
       controller.toggleHelp();
-      paintHelp();
+      paint();
     }
   });
 
@@ -806,10 +808,10 @@ function attachDom(controller: DashboardController, root: HTMLElement): Painter 
     if (!sel) return;
     const cur = controller.state.selected;
     if (cur && cur.repo === sel.repo && cur.number === sel.number) return;
-    void controller.selectThread(sel.repo, sel.number).then(paint.all);
+    void controller.selectThread(sel.repo, sel.number).then(paint);
   });
 
-  paint.all();
+  paint();
   return paint;
 }
 
@@ -848,41 +850,32 @@ async function boot(): Promise<void> {
     await controller.selectThread(controller.state.selected.repo, controller.state.selected.number);
   }
   const paint = attachDom(controller, app);
-  const isSelected = (repo: string, number: number): boolean =>
-    controller.state.selected?.repo === repo && controller.state.selected?.number === number;
   openGithubEventSource({
     refetchSidebar: async () => {
       await controller.loadThreads();
-      paint.sidebar();
-      // The selected thread's urgency and sub-thread list come from the thread list.
-      paint.detail();
+      paint();
     },
     refetchComments: async (repo, number) => {
       if (!covers(repo)) return;
-      const key = keyOf(repo, number);
       const fresh = await getComments(repo, number);
-      controller.state.comments.set(key, fresh);
+      controller.setComments(keyOf(repo, number), fresh);
       const thread = controller.state.threads.find(
         (candidate) => candidate.repo === repo && candidate.number === number
       );
       if (thread) thread.urgency = effectiveUrgency(thread.urgency, fresh);
-      paint.sidebar();
-      if (isSelected(repo, number)) paint.detail();
+      paint();
     },
     refetchIssue: async (repo, number) => {
       if (!covers(repo)) return;
-      const key = keyOf(repo, number);
       const issue = await getIssue(repo, number);
-      controller.state.issues.set(key, issue);
+      controller.state.issues.set(keyOf(repo, number), issue);
       const thread = controller.state.threads.find((t) => t.repo === repo && t.number === number);
       if (thread) thread.state = issue.state;
-      paint.sidebar();
-      if (isSelected(repo, number)) paint.detail();
+      paint();
     },
     highlightThread: (repo, number) => {
-      controller.highlightThread(repo, number);
-      paint.sidebar();
-      setTimeout(paint.sidebar, 1900);
+      controller.highlightThread(repo, number, paint);
+      paint();
     },
   });
 }
