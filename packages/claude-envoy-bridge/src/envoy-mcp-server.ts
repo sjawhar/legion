@@ -130,11 +130,16 @@ async function followTopics(sessionId: string, topics: readonly string[]): Promi
 // watch for that, and an open NATS socket would otherwise keep this process
 // alive after the session is gone. Only the broker leg is torn down here: a
 // response still in flight is written to stdout as before, and the process
-// exits once nothing else is pending.
-async function shutdownForwarder(): Promise<void> {
+// exits once nothing else is pending. A reopen in flight may replace
+// `forwarder` while the one captured here is awaited; that connection is
+// closed too, so none outlives the session.
+export async function shutdownForwarder(): Promise<void> {
   shuttingDown = true
-  const active = await forwarder
-  await active?.close()
+  for (let current = forwarder; current !== undefined; ) {
+    const active = await current
+    await active?.close()
+    current = forwarder === current ? undefined : forwarder
+  }
 }
 
 export async function executeEnvoyTool(name: string, input: unknown): Promise<unknown> {

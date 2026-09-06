@@ -507,3 +507,45 @@ test("a broker connection nats.js gave up on is replaced by the next envoy_subsc
     process.env = { ...previous }
   }
 })
+
+test("a replacement connection still opening when stdin ends is closed, not left to hold the process", async () => {
+  // given: a session whose broker connection was given up on, and a broker that
+  // accepts the replacement but leaves its handshake hanging
+  const nats = new FakeNatsServer()
+  const envoy = fakeEnvoy()
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["ENVOY_NATS_URL"] = nats.url
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  const other = "notifications.github.acme-org.example-repo.issue.4.>"
+  const stderr = captureStderr()
+  try {
+    const module = await loadServer("shutdown-during-reopen")
+    await module.executeEnvoyTool("envoy_subscribe", { topics: [THREAD] })
+    await nats.until(() => nats.subscribed.includes(THREAD))
+    await nats.closeClients()
+    nats.holdNext()
+    const reopening = module.executeEnvoyTool("envoy_subscribe", { topics: [other] })
+    await nats.until(() => nats.connections === 2)
+
+    // when: stdin ends while that connect is pending, then the handshake completes
+    const shutdown = module.shutdownForwarder()
+    nats.release()
+    const interest = await reopening
+    await shutdown
+
+    // then: the tool still succeeded, and the broker saw the late connection close
+    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [other] })
+    await nats.until(() => nats.liveConnections === 0)
+    expect(nats.connections).toBe(2)
+    expect(stderr.lines).toEqual([
+      "envoy-mcp: the broker connection closed; reopening it for 2 topic(s)\n",
+    ])
+  } finally {
+    stderr.restore()
+    await nats.stop()
+    envoy.server.stop(true)
+    process.env = { ...previous }
+  }
+})

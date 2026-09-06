@@ -44,6 +44,8 @@ export class FakeNatsServer {
   private readonly clients = new Set<Socket<Client>>()
   private waiters: Waiter[] = []
   private readonly listener: TCPSocketListener<Client>
+  /** Connections accepted while `holdNext()` is in force, with their INFO frames withheld. */
+  private held: Socket<Client>[] | null = null
 
   constructor() {
     this.listener = Bun.listen<Client>({
@@ -54,20 +56,8 @@ export class FakeNatsServer {
           socket.data = { buffer: Buffer.alloc(0), pending: null, subscriptions: new Map() }
           this.clients.add(socket)
           this.connections += 1
-          const info = {
-            server_id: "fake",
-            server_name: "fake",
-            version: "2.10.22",
-            go: "go1.22",
-            host: "127.0.0.1",
-            port: this.listener.port,
-            headers: true,
-            max_payload: 1_048_576,
-            proto: 1,
-            client_id: this.connections,
-            client_ip: "127.0.0.1",
-          }
-          socket.write(`INFO ${JSON.stringify(info)}\r\n`)
+          if (this.held !== null) this.held.push(socket)
+          else this.greet(socket)
           this.notify()
         },
         data: (socket, chunk) => this.receive(socket, chunk),
@@ -78,6 +68,11 @@ export class FakeNatsServer {
         error: () => {},
       },
     })
+  }
+
+  /** Client sockets currently open. */
+  get liveConnections(): number {
+    return this.clients.size
   }
 
   get url(): string {
@@ -100,6 +95,35 @@ export class FakeNatsServer {
     const { promise, resolve } = Promise.withResolvers<void>()
     this.waiters.push({ predicate, resolve })
     return promise
+  }
+
+  /** Accept the next connections but withhold INFO, so their client-side connect stays pending until `release()`. */
+  holdNext(): void {
+    this.held = []
+  }
+
+  /** Send INFO to every held connection, letting their handshakes complete. */
+  release(): void {
+    const held = this.held ?? []
+    this.held = null
+    for (const socket of held) this.greet(socket)
+  }
+
+  private greet(socket: Socket<Client>): void {
+    const info = {
+      server_id: "fake",
+      server_name: "fake",
+      version: "2.10.22",
+      go: "go1.22",
+      host: "127.0.0.1",
+      port: this.listener.port,
+      headers: true,
+      max_payload: 1_048_576,
+      proto: 1,
+      client_id: this.connections,
+      client_ip: "127.0.0.1",
+    }
+    socket.write(`INFO ${JSON.stringify(info)}\r\n`)
   }
 
   /**
