@@ -97,7 +97,7 @@ test("typed text, form state, and search focus survive GitHub events", async ({
   await expect(highlighted).toHaveCount(0, { timeout: 5_000 });
   await expect(page.locator(".thread-row")).toHaveCount(1);
   await expect(search).toBeFocused();
-  await expect(search).toHaveValue("acme");
+  await expect(search).toHaveValue("harn");
 });
 
 test("an event answering one ask removes only its form; a half-filled sibling keeps value and focus", async ({
