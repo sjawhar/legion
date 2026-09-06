@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/core"
 )
 
 func decodeSummary(t *testing.T, raw string) map[string]string {
@@ -1770,6 +1772,119 @@ func TestGithubPayloadAllEventTypes(t *testing.T) {
 			}
 			if !tt.hasPayload && env.Payload != "" {
 				t.Fatalf("expected empty Payload for %s, got %s", tt.event, env.Payload)
+			}
+		})
+	}
+}
+
+func TestGithubPayloadDispatchSession(t *testing.T) {
+	issueMarker, err := core.BuildMetaMarker(core.MetaMarker{
+		RequestID: "request-1",
+		Urgency:   core.UrgencyMed,
+		Origin:    &core.Origin{SessionID: "issue-session"},
+	})
+	if err != nil {
+		t.Fatalf("build issue marker: %v", err)
+	}
+	commentMarker, err := core.BuildAskMarker(core.AskMarker{
+		RequestID: "request-2",
+		Origin:    &core.Origin{SessionID: "comment-session"},
+	})
+	if err != nil {
+		t.Fatalf("build comment marker: %v", err)
+	}
+
+	tests := []struct {
+		name                string
+		event               string
+		body                map[string]any
+		wantDispatchSession string
+	}{
+		{
+			name:  "issue opened with marker",
+			event: "issues",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue": map[string]any{
+					"number": 1,
+					"title":  "Question",
+					"body":   issueMarker,
+					"user":   map[string]any{"login": "author"},
+				},
+			},
+			wantDispatchSession: "issue-session",
+		},
+		{
+			name:  "issue comment created with marker",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue":      map[string]any{"number": 1, "title": "Question"},
+				"comment": map[string]any{
+					"body": commentMarker,
+					"user": map[string]any{"login": "author"},
+				},
+			},
+			wantDispatchSession: "comment-session",
+		},
+		{
+			name:  "comment without marker",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue":      map[string]any{"number": 1, "title": "Question"},
+				"comment": map[string]any{
+					"body": "Ordinary comment",
+					"user": map[string]any{"login": "author"},
+				},
+			},
+		},
+		{
+			name:  "malformed marker",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue":      map[string]any{"number": 1, "title": "Question"},
+				"comment": map[string]any{
+					"body": "<!-- dispatch:ask\nrequestId: request-3\norigin: [\n-->",
+					"user": map[string]any{"login": "author"},
+				},
+			},
+		},
+		{
+			name:  "pull request review comment untouched",
+			event: "pull_request_review_comment",
+			body: map[string]any{
+				"action":       "created",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 1, "title": "Question"},
+				"comment": map[string]any{
+					"body": commentMarker,
+					"user": map[string]any{"login": "author"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := decodeSummary(t, githubPayload(tt.event, tt.body))
+			got, found := payload["dispatch_session"]
+			if tt.wantDispatchSession == "" {
+				if found {
+					t.Fatalf("unexpected dispatch_session %q", got)
+				}
+				return
+			}
+			if !found {
+				t.Fatal("missing dispatch_session")
+			}
+			if got != tt.wantDispatchSession {
+				t.Fatalf("dispatch_session = %q, want %q", got, tt.wantDispatchSession)
 			}
 		})
 	}

@@ -35,6 +35,7 @@ It does not own Legion workflow policy. The daemon/controller decides what to do
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
 - `ENVOY_GHOSTWISPR_SIGNING_SECRET` is optional for trusted Ghost Wispr deployments; when unset, skip signature verification explicitly rather than half-verifying missing headers.
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
+- GitHub issue and issue-comment payloads are content-aware only for dispatch markers: parse them with `internal/dispatch/core` and expose a nonempty `origin.sessionId` as `dispatch_session`.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
 - Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject. The agent pump returns an empty receipt after accepting the envelope; no receipt within two seconds is `delivery_failed` and emits an exception. Do not add durable role consumers or retry transit for role messages.
