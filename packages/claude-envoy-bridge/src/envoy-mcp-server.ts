@@ -1,18 +1,17 @@
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
-import { prepareDispatchCall } from "@legion/envoy-client/dispatch-call"
-import { callDispatch, ghTokenGetter } from "@legion/envoy-client/dispatch-client"
+import { executeDispatch } from "@legion/envoy-client/dispatch-call"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import {
   DISPATCH_TOOL_DESCRIPTION,
+  DISPATCH_TOOL_JSON_SCHEMA,
   DISPATCH_TOOL_NAME,
-  dispatchToolShape,
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract"
-import { defaultExec } from "@legion/envoy-client/dispatch-cwd"
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe"
+import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
-import { createEnvoyClient } from "@legion/envoy-client/transport"
+import { createEnvoyClient, type EnvoyClient, type Interest } from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -33,7 +32,7 @@ if (dispatchConfig.error !== null) {
 const dispatchToolDefinition = {
   name: DISPATCH_TOOL_NAME,
   description: DISPATCH_TOOL_DESCRIPTION,
-  inputSchema: z.toJSONSchema(z.object(dispatchToolShape)),
+  inputSchema: DISPATCH_TOOL_JSON_SCHEMA,
 }
 
 export const envoyMcpToolDefinitions = [
@@ -68,10 +67,6 @@ function mcpResult(value: unknown): {
 let forwarder: Promise<ThreadForwarder | null> | undefined
 let shuttingDown = false
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder | null> {
   const natsUrl = process.env["ENVOY_NATS_URL"]
   if (natsUrl === undefined || natsUrl.trim().length === 0) {
@@ -93,7 +88,7 @@ async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder |
     // Not cached: the next tool call tries the broker again.
     forwarder = undefined
     process.stderr.write(
-      `envoy-mcp: cannot reach ${natsUrl}; messages on subscribed topics will not reach this session — ${describeError(error)}\n`,
+      `envoy-mcp: cannot reach ${natsUrl}; messages on subscribed topics will not reach this session — ${messageFor(error)}\n`,
     )
     return null
   }
@@ -121,7 +116,7 @@ async function followTopics(sessionId: string, topics: readonly string[]): Promi
     for (const topic of pending) active.follow(topic)
   } catch (error) {
     process.stderr.write(
-      `envoy-mcp: cannot forward ${topics.join(", ")} to ${sessionId} — ${describeError(error)}\n`,
+      `envoy-mcp: cannot forward ${topics.join(", ")} to ${sessionId} — ${messageFor(error)}\n`,
     )
   }
 }
@@ -142,6 +137,25 @@ export async function shutdownForwarder(): Promise<void> {
   }
 }
 
+/** Record the interest with Envoy, then carry the topics' envelopes to the session's agent subject. */
+async function subscribeAndFollow(
+  client: EnvoyClient,
+  sessionId: string,
+  topics: readonly string[],
+): Promise<Interest> {
+  const interest = await client.subscribe({
+    sessionID: sessionId,
+    directory: process.cwd(),
+    topics,
+    port: 0,
+    title: "",
+    driving: true,
+    selfSubscribed: true,
+  })
+  await followTopics(sessionId, topics)
+  return interest
+}
+
 export async function executeEnvoyTool(name: string, input: unknown): Promise<unknown> {
   // The identity the monitor subscribes under, so replies and threads name one session.
   const sessionId = monitorSessionId({
@@ -154,19 +168,13 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
   })
   if (name === DISPATCH_TOOL_NAME) {
     if (dispatchConfig.url === null) throw new UnsupportedEnvoyToolError(name)
-    const cwd = process.cwd()
-    const prepared = await prepareDispatchCall({
+    const result = await executeDispatch({
       call: parseDispatchCall(input),
-      cwd,
+      cwd: process.cwd(),
       host: "claude",
       sessionId,
-      env: process.env,
-      exec: defaultExec,
+      serviceUrl: dispatchConfig.url,
     })
-    const result = await callDispatch(
-      { serviceUrl: dispatchConfig.url, getToken: ghTokenGetter(cwd) },
-      prepared,
-    )
     // The human answers on the GitHub issue. The registry interest tells Envoy
     // this session is listening; the forwarder is what actually carries the
     // thread's envelopes to the session's agent subject, where the monitor
@@ -175,19 +183,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     const topic = dispatchSubscriptionTopic(name, JSON.stringify(result))
     if (topic !== null) {
       try {
-        await client.subscribe({
-          sessionID: sessionId,
-          directory: cwd,
-          topics: [topic],
-          port: 0,
-          title: "",
-          driving: true,
-          selfSubscribed: true,
-        })
-        await followTopics(sessionId, [topic])
+        await subscribeAndFollow(client, sessionId, [topic])
       } catch (error) {
         process.stderr.write(
-          `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${describeError(error)}\n`,
+          `envoy-mcp: dispatch opened ${result.url} but subscribing ${sessionId} to ${topic} failed — ${messageFor(error)}\n`,
         )
       }
     }
@@ -217,17 +216,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     }
     case EnvoyToolOperation.subscribe: {
       const args = z.object(spec.arguments).parse(input)
-      const interest = await client.subscribe({
-        sessionID: sessionId,
-        directory: process.cwd(),
-        topics: args.topics,
-        port: 0,
-        title: "",
-        driving: true,
-        selfSubscribed: true,
-      })
-      await followTopics(sessionId, args.topics)
-      return interest
+      return subscribeAndFollow(client, sessionId, args.topics)
     }
     case EnvoyToolOperation.unsubscribe: {
       const args = z.object(spec.arguments).parse(input)

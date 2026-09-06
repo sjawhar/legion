@@ -3,8 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { prepareDispatchCall } from "@legion/envoy-client/dispatch-call";
-import { callDispatch, ghTokenGetter } from "@legion/envoy-client/dispatch-client";
+import { executeDispatch } from "@legion/envoy-client/dispatch-call";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import {
   DISPATCH_ARGUMENTS,
@@ -13,7 +12,6 @@ import {
   DISPATCH_URGENCIES,
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract";
-import { defaultExec } from "@legion/envoy-client/dispatch-cwd";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { machineID } from "@legion/envoy-client/machine";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
@@ -205,22 +203,17 @@ export default async (input: { serverUrl: URL }) => {
             args: dispatchArgs,
             async execute(args, ctx) {
               ctx.metadata({ title: "Dispatch" });
+              // Validate before the title lookup: an invalid call costs no request.
               const call = parseDispatchCall(args);
-              const prepared = await prepareDispatchCall({
+              const result = await executeDispatch({
                 call,
                 cwd: ctx.directory,
                 host: "opencode",
                 sessionId: ctx.sessionID,
                 sessionTitle: (await fetchTitle(ctx.sessionID)) ?? undefined,
-                env: process.env,
-                exec: defaultExec,
+                serviceUrl: dispatchServiceUrl,
               });
-              return JSON.stringify(
-                await callDispatch(
-                  { serviceUrl: dispatchServiceUrl, getToken: ghTokenGetter(ctx.directory) },
-                  prepared
-                )
-              );
+              return JSON.stringify(result);
             },
           }),
         };

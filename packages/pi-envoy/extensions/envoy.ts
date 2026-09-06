@@ -3,16 +3,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { prepareDispatchCall } from "@legion/envoy-client/dispatch-call";
-import { callDispatch, ghTokenGetter } from "@legion/envoy-client/dispatch-client";
+import { executeDispatch } from "@legion/envoy-client/dispatch-call";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import {
   DISPATCH_TOOL_DESCRIPTION,
+  DISPATCH_TOOL_JSON_SCHEMA,
   DISPATCH_TOOL_NAME,
-  dispatchToolShape,
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract";
-import { defaultExec } from "@legion/envoy-client/dispatch-cwd";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
@@ -20,7 +18,6 @@ import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-co
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
-import { z } from "zod";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -28,11 +25,6 @@ import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
-
-// OMP accepts plain JSON Schema for tool parameters (the same path its MCP
-// tools take), so the model-facing dispatch schema is the contract's own zod
-// shape serialised — one source of truth for every host, nothing rebuilt here.
-const DISPATCH_PARAMETERS = z.toJSONSchema(z.object(dispatchToolShape));
 
 type LegionRoleClaim = (
   sessionID: string,
@@ -109,6 +101,10 @@ const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
 export default function envoyExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
+  // One loader for the shared envoy.json contract: the dispatch tool is
+  // registered only where it names a service, and an invalid file is reported
+  // at session start, not silently treated as off.
+  const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
   const dedupeKeys = new Set<string>();
@@ -118,7 +114,6 @@ export default function envoyExtension(pi: PiApi): void {
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
   let activeSessionContext: SessionContext | undefined;
-  let dispatchDisabledReason: string | undefined;
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -400,8 +395,8 @@ export default function envoyExtension(pi: PiApi): void {
   bridge.ready.resolve(claim);
 
   pi.on("session_start", async (_event, context) => {
-    if (dispatchDisabledReason) {
-      context.ui.notify(`envoy: dispatch tool disabled — ${dispatchDisabledReason}`, "warning");
+    if (dispatchConfig.error !== null) {
+      context.ui.notify(`envoy: dispatch tool disabled — ${dispatchConfig.error}`, "warning");
     }
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
@@ -521,34 +516,27 @@ export default function envoyExtension(pi: PiApi): void {
 
   // The dispatch tool runs in this process, so it reads the session's identity
   // from the host on every call: a follow-up after a rename or a handoff
-  // carries the current title and id. Registered only where dispatch is
-  // enabled; an invalid envoy.json is reported, not silently treated as off.
-  const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
+  // carries the current title and id. OMP accepts plain JSON Schema for tool
+  // parameters (the same path its MCP tools take), so the model-facing schema
+  // is the contract's own, nothing rebuilt here.
   if (dispatchConfig.url !== null) {
     const serviceUrl = dispatchConfig.url;
     pi.registerTool({
       name: DISPATCH_TOOL_NAME,
       label: "Dispatch",
       description: DISPATCH_TOOL_DESCRIPTION,
-      parameters: DISPATCH_PARAMETERS,
+      parameters: DISPATCH_TOOL_JSON_SCHEMA,
       execute: async (_id, parameters, _signal, _onUpdate, context) => {
         try {
           const call = parseDispatchCall(parameters);
-          const liveSessionID = context.sessionManager.getSessionId();
-          const liveTitle = context.sessionManager.getSessionName?.();
-          const args = await prepareDispatchCall({
+          const result = await executeDispatch({
             call,
             cwd: context.cwd,
             host: "omp",
-            sessionId: liveSessionID || undefined,
-            sessionTitle: liveTitle || undefined,
-            env: process.env,
-            exec: defaultExec,
+            sessionId: context.sessionManager.getSessionId() || undefined,
+            sessionTitle: context.sessionManager.getSessionName?.() || undefined,
+            serviceUrl,
           });
-          const result = await callDispatch(
-            { serviceUrl, getToken: ghTokenGetter(context.cwd) },
-            args
-          );
           // details carries the issue URL: the tool_result hook below reads it
           // to subscribe this session to the thread's replies.
           return toolSuccess(JSON.stringify(result), { ...result });
@@ -557,8 +545,6 @@ export default function envoyExtension(pi: PiApi): void {
         }
       },
     });
-  } else if (dispatchConfig.error !== null) {
-    dispatchDisabledReason = dispatchConfig.error;
   }
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);

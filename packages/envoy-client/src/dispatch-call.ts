@@ -1,8 +1,16 @@
-// Turn a validated tool call into the arguments the service needs: the repo
-// the working directory implies (when the call does not name one) and the
-// origin — machine, cwd, tmux, plus the host and session identity the calling
-// plugin read from its host. Every host plugin runs this before callDispatch.
+// The dispatch pipeline every host plugin runs once its model has called the
+// tool: turn the validated call into the arguments the service needs — the
+// repo the working directory implies (when the call does not name one) and the
+// origin: machine, cwd, tmux, plus the host and session identity the plugin
+// read from its host — then post it. Hosts keep only their identity lookup and
+// their result formatting.
 
+import {
+  callDispatch,
+  type DispatchServiceResult,
+  ghTokenGetter,
+  type TokenGetter,
+} from "./dispatch-client";
 import {
   DispatchArgumentError,
   type DispatchCall,
@@ -13,6 +21,7 @@ import {
 import {
   type DispatchHost,
   type DispatchOrigin,
+  defaultExec,
   type ExecFn,
   resolveCwdRepo,
   resolveOrigin,
@@ -72,4 +81,43 @@ export async function prepareDispatchCall(
     ...(input.sessionTitle ? { sessionTitle: input.sessionTitle } : {}),
   };
   return { ...call, ...(repo === undefined ? {} : { repo }), origin };
+}
+
+export interface ExecuteDispatchInput {
+  /** The validated call: hosts run parseDispatchCall first, before any identity lookup of their own. */
+  readonly call: DispatchCall;
+  readonly cwd: string;
+  readonly host: DispatchHost;
+  /** Optional members admit `undefined` so a host can pass `value || undefined` under exactOptionalPropertyTypes. */
+  readonly sessionId?: string | undefined;
+  readonly sessionTitle?: string | undefined;
+  /** The service's /mcp endpoint, from resolveDispatchConfig(). */
+  readonly serviceUrl: string;
+  readonly env?: Record<string, string | undefined>;
+  readonly exec?: ExecFn;
+  /** Defaults to `gh auth token` in `cwd` through `exec`. */
+  readonly getToken?: TokenGetter;
+  readonly fetchImpl?: typeof fetch;
+}
+
+/** prepareDispatchCall then callDispatch, with the production defaults for everything a host does not inject. */
+export async function executeDispatch(input: ExecuteDispatchInput): Promise<DispatchServiceResult> {
+  const exec = input.exec ?? defaultExec;
+  const prepared = await prepareDispatchCall({
+    call: input.call,
+    cwd: input.cwd,
+    host: input.host,
+    ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+    ...(input.sessionTitle === undefined ? {} : { sessionTitle: input.sessionTitle }),
+    env: input.env ?? process.env,
+    exec,
+  });
+  return callDispatch(
+    {
+      serviceUrl: input.serviceUrl,
+      getToken: input.getToken ?? ghTokenGetter(input.cwd, exec),
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    },
+    prepared
+  );
 }

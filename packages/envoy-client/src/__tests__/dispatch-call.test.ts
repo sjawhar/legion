@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { prepareDispatchCall } from "../dispatch-call";
+import { executeDispatch, prepareDispatchCall } from "../dispatch-call";
 import { DispatchArgumentError } from "../dispatch-contract";
 import type { ExecFn } from "../dispatch-cwd";
 
@@ -124,5 +124,84 @@ describe("prepareDispatchCall", () => {
         exec: noRemote,
       })
     ).rejects.toThrow("dispatch: /repo has no GitHub remote; pass thread=owner/name#<n>");
+  });
+});
+
+describe("executeDispatch", () => {
+  it("prepares the call and posts it with a token minted through the same exec", async () => {
+    const exec = fakeExec({
+      "jj git remote list": "origin https://github.com/acme-org/example-repo.git",
+      "gh auth token": "test-token\n",
+    });
+    const posts: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      posts.push({ url: url.toString(), init: init ?? {} });
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: '{"thread":5,"url":"https://github.com/acme-org/example-repo/issues/5"}',
+              },
+            ],
+          },
+        }),
+        { headers: { "content-type": "application/json" } }
+      );
+    }) as typeof fetch;
+
+    const result = await executeDispatch({
+      call: { subject: "s", context: "c", question: "q" },
+      cwd: "/work",
+      host: "omp",
+      sessionId: "ses_1",
+      sessionTitle: undefined,
+      serviceUrl: "http://127.0.0.1:1/mcp",
+      env: {},
+      exec,
+      fetchImpl,
+    });
+
+    expect(result).toEqual({
+      thread: 5,
+      url: "https://github.com/acme-org/example-repo/issues/5",
+    });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.url).toBe("http://127.0.0.1:1/mcp");
+    const headers = posts[0]?.init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer test-token");
+    const body = JSON.parse(String(posts[0]?.init.body)) as {
+      params: { arguments: Record<string, unknown> };
+    };
+    expect(body.params.arguments.repo).toBe("acme-org/example-repo");
+    expect(body.params.arguments.origin).toMatchObject({
+      host: "omp",
+      cwd: "/work",
+      sessionId: "ses_1",
+    });
+    expect("sessionTitle" in (body.params.arguments.origin as object)).toBe(false);
+  });
+
+  it("fails before any request when the token cannot be minted", async () => {
+    let fetched = 0;
+    const fetchImpl = (async (_url: string | URL | Request, _init?: RequestInit) => {
+      fetched++;
+      return new Response("{}");
+    }) as typeof fetch;
+    await expect(
+      executeDispatch({
+        call: { thread: "acme-org/example-repo#5", context: "c", question: "q" },
+        cwd: "/work",
+        host: "claude",
+        serviceUrl: "http://127.0.0.1:1/mcp",
+        env: {},
+        exec: noRemote,
+        fetchImpl,
+      })
+    ).rejects.toThrow("dispatch: gh auth token returned empty in /work");
+    expect(fetched).toBe(0);
   });
 });

@@ -12,6 +12,7 @@
 // delivery for the rest, and shutdown never hangs on a dead broker.
 
 import { agentSubject } from "@legion/contracts"
+import { messageFor } from "@legion/envoy-client/errors"
 import { z } from "zod"
 
 export interface ForwardedMessage {
@@ -84,9 +85,7 @@ const SEEN_KEYS_LIMIT = 1000
 const DEFAULT_DRAIN_TIMEOUT_MS = 1_000
 
 function report(what: string, error: unknown): void {
-  process.stderr.write(
-    `envoy-mcp: ${what} — ${error instanceof Error ? error.message : String(error)}\n`,
-  )
+  process.stderr.write(`envoy-mcp: ${what} — ${messageFor(error)}\n`)
 }
 
 export function createThreadForwarder(

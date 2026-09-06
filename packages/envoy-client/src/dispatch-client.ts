@@ -3,21 +3,18 @@
 // initialize handshake, no cache, no retry. The service reads the bearer from
 // each POST and forwards it to GitHub verbatim.
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { DispatchServiceArguments } from "./dispatch-call";
 import { DISPATCH_TOOL_NAME } from "./dispatch-contract";
+import { defaultExec, type ExecFn } from "./dispatch-cwd";
 import { messageFor } from "./errors";
-
-const execFileAsync = promisify(execFile);
 
 export type TokenGetter = () => Promise<string | null>;
 
 /** Mint a GitHub token the way the session's own shell would: `gh auth token` in the session cwd, so the user's per-repo gh profile applies. */
-export function ghTokenGetter(cwd: string): TokenGetter {
+export function ghTokenGetter(cwd: string, exec: ExecFn = defaultExec): TokenGetter {
   return async () => {
     try {
-      const { stdout } = await execFileAsync("gh", ["auth", "token"], { cwd, timeout: 5_000 });
+      const { stdout } = await exec("gh", ["auth", "token"], { cwd });
       const value = stdout.trim();
       return value.length > 0 ? value : null;
     } catch {

@@ -1,15 +1,16 @@
 // The `dispatch` tool as every host plugin exposes it: the strings the model
 // reads, the two call shapes, and the validator each plugin runs before it
-// touches the network. Hosts build their own schema object from
-// DISPATCH_ARGUMENTS with their own builder (OMP's pi.zod, OpenCode's
-// tool.schema, Claude's zod) because tool schemas must be a single flat
+// touches the network. OMP and the Claude bridge register
+// DISPATCH_TOOL_JSON_SCHEMA, the flat shape serialised; the OpenCode plugin
+// rebuilds the same shape with its `tool.schema` because OpenCode converts
+// plugin schemas with its own zod build. Tool schemas must be a single flat
 // object at the top level; the open/continue rule is enforced here.
 
 import { z } from "zod";
 
 export const DISPATCH_TOOL_NAME = "dispatch";
-export const DISPATCH_CONTEXT_MAX = 1200;
-export const DISPATCH_QUESTION_MAX = 800;
+const DISPATCH_CONTEXT_MAX = 1200;
+const DISPATCH_QUESTION_MAX = 800;
 export const DISPATCH_URGENCIES = ["low", "med", "high", "blocking"] as const;
 export type DispatchUrgency = (typeof DISPATCH_URGENCIES)[number];
 
@@ -75,7 +76,7 @@ const QuestionOptionSchema = z.strictObject({
   description: z.string().optional(),
 });
 
-export const DispatchQuestionSchema = z.strictObject({
+const DispatchQuestionSchema = z.strictObject({
   question: z.string().min(1),
   header: z.string().optional(),
   options: z.array(QuestionOptionSchema).optional(),
@@ -100,9 +101,10 @@ const OpenThreadCallSchema = z.strictObject({
 const ContinueThreadCallSchema = z.strictObject({ thread: z.string(), ...prose });
 
 /**
- * The flat, LLM-facing shape for hosts whose builder is zod v4 (the Claude
- * bridge). Descriptions come from DISPATCH_ARGUMENTS so every host shows the
- * model the same words.
+ * The flat, LLM-facing shape, serialised by pi-envoy and the Claude bridge
+ * (DISPATCH_TOOL_JSON_SCHEMA) and mirrored by the OpenCode plugin with its own
+ * zod. Descriptions come from DISPATCH_ARGUMENTS so every host shows the model
+ * the same words.
  */
 export const dispatchToolShape = {
   subject: z.string().describe(DISPATCH_ARGUMENTS.subject).optional(),
@@ -114,6 +116,9 @@ export const dispatchToolShape = {
   repo: z.string().describe(DISPATCH_ARGUMENTS.repo).optional(),
   parent: z.string().describe(DISPATCH_ARGUMENTS.parent).optional(),
 } satisfies z.ZodRawShape;
+
+/** dispatchToolShape as the JSON Schema a host registers the tool with. */
+export const DISPATCH_TOOL_JSON_SCHEMA = z.toJSONSchema(z.object(dispatchToolShape));
 
 export function isContinueCall(call: DispatchCall): call is ContinueThreadCall {
   return "thread" in call;
