@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "claude-envoy-bridge",
-      "source": "./packages/envoy-claude-plugin",
+      "source": "./packages/claude-envoy-bridge",
       "description": "Delivers Envoy NATS notifications into Claude Code."
     }
   ]

@@ -11,7 +11,7 @@ function keyOf(thread: Thread): string {
 // pointer as a breadcrumb but never use it to hide the row — every thread
 // that needs attention is its own first-class entry.
 function hasParentInList(thread: Thread, knownKeys: Set<string>): boolean {
-  if (thread.parentNumber === thread.number) return false;
+  if (thread.parentNumber === null) return false;
   return knownKeys.has(`${thread.repo}#${thread.parentNumber}`);
 }
 
@@ -102,21 +102,39 @@ function renderFilterPill(
   )}">${escapeHtml(value)}</button>`;
 }
 
-export function renderSidebar(threads: Thread[], filters: SidebarFilters): string {
+/** Inner markup of `.sidebar-controls`: search box and filter pills. Rendered once; patched by `syncSidebarControls`. */
+export function renderSidebarControls(filters: SidebarFilters): string {
+  return `<input id="search-input" type="search" value="${escapeHtml(filters.search)}" placeholder="Search threads" />
+      <div class="filter-row" aria-label="Status filter">
+        <span>Status</span>${STATUS_FILTERS.map((value) =>
+          renderFilterPill("status", value, filters.status)
+        ).join("")}
+      </div>
+      <div class="filter-row" aria-label="Urgency filter">
+        <span>Urgency</span>${URGENCY_FILTERS.map((value) =>
+          renderFilterPill("urgency", value, filters.urgency)
+        ).join("")}
+      </div>
+      <div class="filter-row" aria-label="Addressed filter">
+        <span>Addressed</span>
+        <button type="button" class="pill${filters.showAddressed ? "" : " active"}" data-toggle="hide-addressed">hide</button>
+        <button type="button" class="pill${filters.showAddressed ? " active" : ""}" data-toggle="show-addressed">show</button>
+      </div>`;
+}
+
+/** Inner markup of `#thread-list`: the rows, or the load error / empty state. Repainted on every change. */
+export function renderThreadList(threads: Thread[], filters: SidebarFilters): string {
+  if (filters.loadError) {
+    return `<div class="empty-state form-error load-error">Couldn't load threads: ${escapeHtml(filters.loadError)}</div>`;
+  }
   const entries = visibleSidebarThreads(threads, filters);
-  // When the addressed filter is what's hiding the rest, surface a hint
-  // so people aren't staring at an empty list without knowing why.
-  const hiddenByAddressed = filters.showAddressed
-    ? 0
-    : visibleSidebarThreads(threads, { ...filters, showAddressed: true }).filter(
-        (entry) => entry.addressed
-      ).length;
   // Flat list. Every thread is one row, sorted by urgency + recency.
   // The parent relationship is shown as a breadcrumb on the row, not via
   // nesting / grouping — nesting-level shouldn't gate discovery.
   const rows = entries
     .map(({ thread, subThreadCount, parentInList, addressed }) => {
       const key = keyOf(thread);
+      const openAskCount = filters.openAskCounts?.[key] ?? thread.openAskCount;
       const selected = filters.selectedKey === key ? " selected" : "";
       const resolved = thread.state === "CLOSED" ? " resolved" : "";
       const blocking = thread.urgency === "blocking" ? " blocking" : "";
@@ -137,40 +155,42 @@ export function renderSidebar(threads: Thread[], filters: SidebarFilters): strin
           ${parentCrumb}
           ${thread.state === "CLOSED" ? '<span class="badge state-badge state-closed">closed</span>' : ""}
           ${addressed ? '<span class="badge state-badge state-addressed">addressed</span>' : ""}
+          ${openAskCount > 0 ? '<span class="badge state-badge state-needs-you">needs you</span>' : ""}
           ${subThreadCount > 0 ? `<span class="subthread-count">${subThreadCount} sub</span>` : ""}
         </span>
       </button>`;
     })
     .join("");
+  if (rows) return rows;
+  // When the addressed filter is what's hiding the rest, surface a hint
+  // so people aren't staring at an empty list without knowing why.
+  const hiddenByAddressed = filters.showAddressed
+    ? 0
+    : visibleSidebarThreads(threads, { ...filters, showAddressed: true }).filter(
+        (entry) => entry.addressed
+      ).length;
+  return hiddenByAddressed > 0
+    ? `<div class="empty-state">No threads match. <button type="button" class="link-button" data-toggle="show-addressed">${hiddenByAddressed} addressed thread${hiddenByAddressed === 1 ? "" : "s"} hidden — Show addressed</button></div>`
+    : `<div class="empty-state">No threads match.</div>`;
+}
 
+export function renderSidebar(threads: Thread[], filters: SidebarFilters): string {
   return `<aside class="dispatch-sidebar" aria-label="Dispatch threads">
-    <div class="sidebar-controls">
-      <input id="search-input" type="search" value="${escapeHtml(filters.search)}" placeholder="Search threads" />
-      <div class="filter-row" aria-label="Status filter">
-        <span>Status</span>${STATUS_FILTERS.map((value) =>
-          renderFilterPill("status", value, filters.status)
-        ).join("")}
-      </div>
-      <div class="filter-row" aria-label="Urgency filter">
-        <span>Urgency</span>${URGENCY_FILTERS.map((value) =>
-          renderFilterPill("urgency", value, filters.urgency)
-        ).join("")}
-      </div>
-      <div class="filter-row" aria-label="Addressed filter">
-        <span>Addressed</span>
-        <button type="button" class="pill${filters.showAddressed ? "" : " active"}" data-toggle="hide-addressed">hide</button>
-        <button type="button" class="pill${filters.showAddressed ? " active" : ""}" data-toggle="show-addressed">show</button>
-      </div>
-    </div>
-    <div id="thread-list" class="thread-list">${
-      filters.loadError
-        ? `<div class="empty-state form-error load-error">Couldn't load threads: ${escapeHtml(filters.loadError)}</div>`
-        : rows ||
-          (
-            hiddenByAddressed > 0
-              ? `<div class="empty-state">No threads match. <button type="button" class="link-button" data-toggle="show-addressed">${hiddenByAddressed} addressed thread${hiddenByAddressed === 1 ? "" : "s"} hidden — Show addressed</button></div>`
-              : `<div class="empty-state">No threads match.</div>`
-          )
-    }</div>
+    <div class="sidebar-controls">${renderSidebarControls(filters)}</div>
+    <div id="thread-list" class="thread-list">${renderThreadList(threads, filters)}</div>
   </aside>`;
+}
+
+/** Patch the filter pills in place so the search box keeps focus and caret while the list re-renders. */
+export function syncSidebarControls(root: ParentNode, filters: SidebarFilters): void {
+  for (const pill of root.querySelectorAll<HTMLButtonElement>("[data-filter]")) {
+    const current = pill.dataset.filter === "status" ? filters.status : filters.urgency;
+    pill.classList.toggle("active", pill.dataset.value === current);
+  }
+  for (const toggle of root.querySelectorAll<HTMLButtonElement>(
+    ".sidebar-controls [data-toggle]"
+  )) {
+    const showing = toggle.dataset.toggle === "show-addressed";
+    toggle.classList.toggle("active", showing === filters.showAddressed);
+  }
 }

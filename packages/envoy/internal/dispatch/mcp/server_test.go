@@ -39,9 +39,8 @@ func TestHandlerRejectsRequestsWithoutBearer(t *testing.T) {
 	}
 }
 
-// rotatingBearer sends whatever token is current at the time of each request,
-// mirroring the dispatch shim: one MCP session for the life of the process,
-// a freshly minted GitHub token on every call.
+// rotatingBearer sends whatever token is current at the time of each request:
+// every plugin call mints a fresh GitHub token.
 type rotatingBearer struct {
 	token string
 }
@@ -102,9 +101,9 @@ var dispatchArguments = map[string]any{
 	"question": "q",
 }
 
-// Installation tokens expire an hour after the shim initializes its session.
-// The server must authenticate each tools/call with that call's bearer, never
-// the one the session was initialized with.
+// Installation tokens expire within an hour. The server must authenticate each
+// tools/call with that call's bearer, never one seen earlier on the same
+// connection.
 func TestDispatchUsesTheBearerOfEachCall(t *testing.T) {
 	server, tokensUsed := recordingServer(t)
 	bearer := &rotatingBearer{token: "token-at-initialize"}
@@ -137,10 +136,9 @@ func TestDispatchHandlerReadsTheBearerFromTheCallsOwnHeaders(t *testing.T) {
 	}
 }
 
-// The shim never re-initializes, so a session id minted before a server
-// restart keeps arriving for the life of the shim process. A server that has
-// never seen the id must serve the call rather than answer 404 until the shim
-// is restarted.
+// Plugins send no Mcp-Session-Id, but a stray one (a client that did
+// initialize, or a header replayed by a proxy) must not make the server answer
+// 404: the endpoint is stateless and serves every tools/call on its own.
 func TestDispatchServesSessionsFromBeforeARestart(t *testing.T) {
 	server, tokensUsed := recordingServer(t)
 	body, err := json.Marshal(map[string]any{
@@ -166,5 +164,119 @@ func TestDispatchServesSessionsFromBeforeARestart(t *testing.T) {
 	}
 	if want := []string{"token"}; !slices.Equal(*tokensUsed, want) {
 		t.Fatalf("GitHub client built with %v, want %v", *tokensUsed, want)
+	}
+}
+
+// The service-facing schema requires only the prose: `subject` opens a
+// thread and `thread` continues one, so neither can be required.
+func TestDispatchToolSchemaRequiresOnlyContextAndQuestion(t *testing.T) {
+	server, _ := recordingServer(t)
+	session := connect(t, server, &rotatingBearer{token: "token"})
+	tools, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "dispatch" {
+		t.Fatalf("tools: %+v", tools.Tools)
+	}
+	// The client holds the server's schema as its plain JSON marshaling.
+	raw, err := json.Marshal(tools.Tools[0].InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("input schema %s: %v", raw, err)
+	}
+	if want := []string{"context", "question"}; !slices.Equal(schema.Required, want) {
+		t.Errorf("required %v, want %v", schema.Required, want)
+	}
+	for _, name := range []string{"subject", "thread", "ask", "urgency", "repo", "parent", "origin"} {
+		if _, ok := schema.Properties[name]; !ok {
+			t.Errorf("schema lacks %q", name)
+		}
+	}
+}
+
+// A call that mixes the two modes fails validation before any GitHub call.
+func TestDispatchHandlerRejectsMixedModeBeforeGitHub(t *testing.T) {
+	server, tokensUsed := recordingServer(t)
+	header := http.Header{}
+	header.Set("Authorization", "Bearer t")
+	request := &mcpsdk.CallToolRequest{Extra: &mcpsdk.RequestExtra{Header: header}}
+
+	_, _, err := server.dispatchHandler(context.Background(), request, dispatchInput{Repo: "acme/example-repo", Thread: "42", Subject: "s", Context: "c", Question: "q"})
+
+	if err == nil || err.Error() != "thread cannot be combined with subject, urgency, or parent" {
+		t.Fatalf("err %v", err)
+	}
+	if len(*tokensUsed) != 1 {
+		t.Errorf("the GitHub client is built from this call's bearer exactly once: %v", *tokensUsed)
+	}
+}
+
+// openingGitHub answers the two GitHub calls an opening dispatch makes: the
+// request-id search (nothing found) and the issue create, whose body it hands
+// back so tests can read what was posted. Everything else fails.
+func openingGitHub(t *testing.T) (*Server, *string) {
+	t.Helper()
+	body := new(string)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /search/issues", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"total_count":0,"items":[]}`))
+	})
+	mux.HandleFunc("POST /repos/{owner}/{repo}/issues", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Body string `json:"body"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		*body = req.Body
+		_, _ = w.Write([]byte(`{"number":7,"html_url":"https://github.com/acme/example-repo/issues/7"}`))
+	})
+	githubStub := httptest.NewServer(mux)
+	t.Cleanup(githubStub.Close)
+	stubURL, err := url.Parse(githubStub.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(func(context.Context, string) *github.Client {
+		client := github.NewClient(nil)
+		client.BaseURL = stubURL
+		return client
+	})
+	return server, body
+}
+
+// The contract every plugin validates against makes `options` optional on an
+// ask (an options-less question renders as the bare free-text field), so the
+// service's inferred schema must not require it.
+func TestDispatchAcceptsAnAskWithoutOptions(t *testing.T) {
+	server, posted := openingGitHub(t)
+	session := connect(t, server, &rotatingBearer{token: "token"})
+	arguments := map[string]any{
+		"repo":     "acme/example-repo",
+		"subject":  "s",
+		"context":  "c",
+		"question": "q",
+		"ask":      []map[string]any{{"question": "x"}},
+	}
+
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "dispatch", Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result.Content[0].(*mcpsdk.TextContent).Text
+	if result.IsError {
+		t.Fatalf("options-less ask rejected: %s", text)
+	}
+	if !strings.Contains(text, `"thread":7`) {
+		t.Errorf("result %s does not name the opened thread", text)
+	}
+	if !strings.Contains(*posted, "question: x") || strings.Contains(*posted, "options") {
+		t.Errorf("thread body should carry the question and omit options:\n%s", *posted)
 	}
 }

@@ -15,7 +15,7 @@
     "packages/pi-envoy",
     "packages/daemon",
     "packages/envoy-plugin",
-    "packages/envoy-claude-plugin",
+    "packages/claude-envoy-bridge",
     "packages/dispatch",
     "packages/workspace"
   ],

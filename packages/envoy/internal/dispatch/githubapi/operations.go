@@ -103,15 +103,16 @@ func EditComment(ctx context.Context, client *github.Client, owner, repo string,
 // BuildRequestIDQuery builds the GitHub issue-search query used to find an
 // existing dispatch thread by its request id. It searches for the raw request
 // id token that core.BuildMetaMarker embeds in the issue body (the `requestId:
-// <id>` frontmatter line), scoped to the dispatch label so unrelated issues
-// that merely mention the id are ignored. The token must stay in sync with the
-// marker writer — see TestRequestIDQueryMatchesMarker.
+// <id>` line of the dispatch:thread marker; GitHub indexes HTML-comment text),
+// scoped to the dispatch label so unrelated issues that merely mention the id
+// are ignored. The token must stay in sync with the marker writer — see
+// TestRequestIDQueryMatchesMarker.
 func BuildRequestIDQuery(owner, repo, requestID, label string) string {
 	return fmt.Sprintf(`repo:%s/%s label:%s in:body "%s"`, owner, repo, label, requestID)
 }
 
 // SearchByRequestID returns dispatch threads whose body embeds the given
-// request id, as written by core.BuildMetaMarker.
+// request id, as written by core.BuildMetaMarker into the thread marker.
 func SearchByRequestID(ctx context.Context, client *github.Client, owner, repo, requestID, label string) ([]IssueRef, error) {
 	result, _, err := client.Search.Issues(ctx, BuildRequestIDQuery(owner, repo, requestID, label), nil)
 	if err != nil {
@@ -122,4 +123,65 @@ func SearchByRequestID(ctx context.Context, client *github.Client, owner, repo, 
 		refs = append(refs, IssueRef{Number: issue.GetNumber(), URL: issue.GetHTMLURL()})
 	}
 	return refs, nil
+}
+
+// IssueInfo is what ContinueThread needs to know about a target issue.
+type IssueInfo struct {
+	Number      int
+	URL         string
+	State       string // "open" | "closed"
+	Body        string
+	PullRequest bool
+}
+
+// GetIssue fetches an issue's state, body, and URL. Pull requests come back
+// from the same endpoint; PullRequest tells them apart.
+func GetIssue(ctx context.Context, client *github.Client, owner, repo string, number int) (IssueInfo, error) {
+	issue, _, err := client.Issues.Get(ctx, owner, repo, number)
+	if err != nil {
+		return IssueInfo{}, fmt.Errorf("get issue: %w", err)
+	}
+	return IssueInfo{
+		Number:      issue.GetNumber(),
+		URL:         issue.GetHTMLURL(),
+		State:       issue.GetState(),
+		Body:        issue.GetBody(),
+		PullRequest: issue.IsPullRequest(),
+	}, nil
+}
+
+// CommentRef is a minimal pointer to an issue comment.
+type CommentRef struct {
+	ID   int64  `json:"id"`
+	URL  string `json:"url"`
+	Body string `json:"body"`
+}
+
+// ListComments returns every comment on an issue, oldest first, following
+// pagination to the end: follow-up dedupe must see the whole thread.
+func ListComments(ctx context.Context, client *github.Client, owner, repo string, number int) ([]CommentRef, error) {
+	var refs []CommentRef
+	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+	for {
+		comments, resp, err := client.Issues.ListComments(ctx, owner, repo, number, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list comments: %w", err)
+		}
+		for _, c := range comments {
+			refs = append(refs, CommentRef{ID: c.GetID(), URL: c.GetHTMLURL(), Body: c.GetBody()})
+		}
+		if resp.NextPage == 0 {
+			return refs, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}
+
+// CreateComment posts a comment on an issue.
+func CreateComment(ctx context.Context, client *github.Client, owner, repo string, number int, body string) (CommentRef, error) {
+	comment, _, err := client.Issues.CreateComment(ctx, owner, repo, number, &github.IssueComment{Body: github.String(body)})
+	if err != nil {
+		return CommentRef{}, fmt.Errorf("create comment: %w", err)
+	}
+	return CommentRef{ID: comment.GetID(), URL: comment.GetHTMLURL(), Body: comment.GetBody()}, nil
 }

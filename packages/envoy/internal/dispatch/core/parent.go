@@ -1,5 +1,6 @@
-// Package core implements the dispatch thread orchestration: parsing parent
-// references, building meta markers, and the CreateThread workflow.
+// Package core implements the dispatch orchestration: parsing parent and
+// thread references, building markers, and the Dispatch workflow that opens a
+// thread or continues one with a follow-up comment.
 package core
 
 import (
@@ -25,7 +26,7 @@ type ParsedParent struct {
 //	<owner>/<repo>#42#<commentID>
 //
 // Owner and repo segments exclude `/`, `#`, and whitespace — the same shape
-// the MCP shim uses to decide a parent already names its repo.
+// the calling plugin uses to decide a parent already names its repo.
 var (
 	bareForm = regexp.MustCompile(`^(\d+)(?:#(\d+))?$`)
 	repoForm = regexp.MustCompile(`^([^/\s#]+/[^/\s#]+)#(\d+)(?:#(\d+))?$`)
@@ -77,4 +78,24 @@ func parsePositiveInteger(value, label string) (int, error) {
 		return 0, fmt.Errorf("Invalid parent %s: %s", label, value)
 	}
 	return n, nil
+}
+
+// ParsedThread names an existing dispatch thread. Repo is empty for the
+// bare-number form (the caller resolves it against the dispatch repo).
+type ParsedThread struct {
+	Repo        string
+	IssueNumber int
+}
+
+// ParseThread parses a `thread` argument: "<n>" or "owner/name#<n>" — a
+// parent reference without the comment id. Every rejection — a comment id, a
+// zero or zero-padded number, anything else — is `Invalid thread: <s>`, the
+// one malformed-thread message the plugins expect.
+func ParseThread(s string) (ParsedThread, error) {
+	s = strings.TrimSpace(s)
+	parent, err := ParseParent(s)
+	if err != nil || parent.CommentID != 0 {
+		return ParsedThread{}, fmt.Errorf("Invalid thread: %s", s)
+	}
+	return ParsedThread{Repo: parent.Repo, IssueNumber: parent.IssueNumber}, nil
 }

@@ -1,30 +1,28 @@
-// Auto-subscription wiring for the dispatch MCP tool, shared by the Envoy
+// Auto-subscription wiring for the native dispatch tool, shared by the Envoy
 // adapters (OpenCode plugin tool.execute.after hook, OMP extension
 // tool_result hook).
 //
-// When an agent opens a Dispatch thread, the human answers by commenting on
-// the resulting GitHub issue. For the agent to RECEIVE that answer, its
+// When an agent opens or continues a Dispatch thread, the human answers by
+// commenting on the GitHub issue. For the agent to RECEIVE that answer, its
 // session must be subscribed to the thread's Envoy topic
-// (notifications.github.<owner>.<repo>.issue.<thread>.>). The dispatch tool
-// is served by the stateless Go dispatch server, which has no session
-// context, so each adapter closes the loop from its own host hook.
+// (notifications.github.<owner>.<repo>.issue.<thread>.>). The dispatch
+// service is stateless and has no session context, so each adapter closes the
+// loop from its own host hook.
 //
 // This module is the pure, testable core: it turns a completed tool execution
 // into the topic the calling session should subscribe to, or null when the
 // execution isn't a successful dispatch call.
 
+import { DISPATCH_TOOL_NAME } from "./dispatch-contract";
+
 // Matches a GitHub issue URL anywhere in the tool output and captures
-// owner / repo / number. The dispatch tool returns {"thread":N,"url":"…"} as
-// its text content, so the URL is always present on success.
+// owner / repo / number. The dispatch service returns {"thread":N,"url":"…"}
+// as its text content, so the URL is always present on success.
 const ISSUE_URL_RE = /https?:\/\/github\.com\/([^/\s"]+)\/([^/\s"]+)\/issues\/(\d+)/i;
 
-// The tool is registered on the Go MCP server as "dispatch" and exposed to
-// OpenCode under the "envoy" MCP server (so commonly "envoy_dispatch"). Accept
-// any separator a client might use while still excluding unrelated tools.
-const DISPATCH_TOOL_RE = /(^|[-._])dispatch$/i;
-
+/** Every host registers the tool under exactly this name. */
 export function isDispatchTool(tool: string): boolean {
-  return DISPATCH_TOOL_RE.test(tool);
+  return tool === DISPATCH_TOOL_NAME;
 }
 
 /** Build the Envoy topic carrying every event on a dispatch thread issue. */
@@ -35,10 +33,10 @@ export function dispatchThreadTopic(owner: string, repo: string, thread: number)
 /**
  * Given a completed tool execution (name + textual output), return the Envoy
  * topic the calling session should subscribe to so it receives replies on the
- * dispatch thread — or null when this isn't a successful envoy_dispatch call.
+ * dispatch thread — or null when this isn't a successful dispatch call.
  *
  * Parsing the GitHub issue URL out of the output (rather than trusting a JSON
- * field) keeps this robust to however OpenCode surfaces the MCP result: owner,
+ * field) keeps this robust to however a host surfaces the result: owner,
  * repo, and thread number all come from the canonical issue URL.
  */
 export function dispatchSubscriptionTopic(tool: string, output: string): string | null {

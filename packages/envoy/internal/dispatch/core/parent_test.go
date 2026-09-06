@@ -56,3 +56,38 @@ func TestParseParentInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestParseThread(t *testing.T) {
+	cases := []struct {
+		in      string
+		repo    string
+		number  int
+		wantErr string
+	}{
+		{"42", "", 42, ""},
+		{" acme-org/example-repo#17158 ", "acme-org/example-repo", 17158, ""},
+		{"", "", 0, "Invalid thread: "},
+		{"abc", "", 0, "Invalid thread: abc"},
+		{"42#900", "", 0, "Invalid thread: 42#900"},
+		{"acme-org/example-repo#42#900", "", 0, "Invalid thread: acme-org/example-repo#42#900"},
+		{"0", "", 0, "Invalid thread: 0"},
+		{"042", "", 0, "Invalid thread: 042"},
+		{"acme-org/example-repo#0", "", 0, "Invalid thread: acme-org/example-repo#0"},
+	}
+	for _, tc := range cases {
+		got, err := ParseThread(tc.in)
+		if tc.wantErr != "" {
+			if err == nil || err.Error() != tc.wantErr {
+				t.Errorf("ParseThread(%q): err %v, want %q", tc.in, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseThread(%q): %v", tc.in, err)
+			continue
+		}
+		if got.Repo != tc.repo || got.IssueNumber != tc.number {
+			t.Errorf("ParseThread(%q) = %+v", tc.in, got)
+		}
+	}
+}

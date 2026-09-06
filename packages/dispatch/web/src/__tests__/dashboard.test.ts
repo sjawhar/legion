@@ -8,12 +8,31 @@ import {
   postComment,
   searchDispatchThreads,
 } from "../api";
-import { renderSidebar, visibleSidebarThreads } from "../components/sidebar";
-import { renderThreadDetail } from "../components/thread-detail";
-import { createDashboardController, renderAppShell } from "../main";
+import { collectAnswers, collectAsks, openAsks, type ThreadAsk } from "../asks";
+import {
+  renderSidebar,
+  renderSidebarControls,
+  renderThreadList,
+  visibleSidebarThreads,
+} from "../components/sidebar";
+import {
+  askFormAsks,
+  askFormInput,
+  renderThreadDetail,
+  type ThreadDetailInput,
+} from "../components/thread-detail";
+import { createDashboardController, type DashboardController, renderAppShell } from "../main";
 import type { Comment, Issue, Thread } from "../types";
 
 const now = "2026-05-22T12:00:00Z";
+
+/** What paint.all() puts on the page, as one string: the same renderers, the same inputs. */
+function page(controller: DashboardController): string {
+  const sidebar = controller.state.sidebarOpen
+    ? renderSidebar(controller.state.threads, controller.sidebarFilters())
+    : "";
+  return sidebar + renderThreadDetail(controller.selectedDetail());
+}
 
 function thread(overrides: Partial<Thread>): Thread {
   return {
@@ -23,13 +42,34 @@ function thread(overrides: Partial<Thread>): Thread {
     body: "---\nurgency: med\nrequestId: R\n---\n\nBody",
     state: "OPEN",
     urgency: "med",
-    hasAsk: false,
+    openAskCount: 0,
     parentNumber: 1,
     updatedAt: now,
     createdAt: now,
     authorLogin: "agent",
     commentCount: 0,
     ...overrides,
+  };
+}
+
+function detail(
+  issue: Issue,
+  comments: Comment[],
+  extra: Partial<ThreadDetailInput> = {}
+): ThreadDetailInput {
+  const asks = collectAsks(issue.body, comments);
+  const answers = collectAnswers(comments);
+  return {
+    issue,
+    urgency: "med",
+    comments,
+    asks,
+    answers,
+    openAsks: openAsks(asks, answers),
+    subThreads: [],
+    repo: issue.repo,
+    addressed: false,
+    ...extra,
   };
 }
 
@@ -115,6 +155,23 @@ describe("dashboard read-side rendering", () => {
     expect(visible.map((entry) => entry.thread.number)).toEqual([31]);
   });
 
+  it("renders the thread list separately from the controls so the list can repaint alone", () => {
+    const threads = [thread({ number: 11, title: "Only" })];
+    const filters = {
+      status: "open" as const,
+      urgency: "all" as const,
+      search: "",
+      showAddressed: false,
+    };
+    const list = renderThreadList(threads, filters);
+    expect(list).toContain("Only");
+    expect(list).not.toContain("search-input");
+    expect(renderSidebarControls(filters)).toContain("search-input");
+    expect(renderSidebar(threads, filters)).toContain(
+      `<div id="thread-list" class="thread-list">${list}</div>`
+    );
+  });
+
   it("renders detail without the meta marker, with conversations, marker activity rows, and inline sub-threads", () => {
     const issue: Issue = {
       repo: "sjawhar/legion",
@@ -138,14 +195,12 @@ describe("dashboard read-side rendering", () => {
       },
     ];
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "blocking",
-      comments,
-      subThreads: [thread({ number: 15, title: "Follow-up", parentNumber: 12 })],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(
+      detail(issue, comments, {
+        urgency: "blocking",
+        subThreads: [thread({ number: 15, title: "Follow-up", parentNumber: 12 })],
+      })
+    );
 
     expect(html).toContain("Blocked deploy");
     expect(html).toContain("Opening body");
@@ -182,14 +237,7 @@ describe("dashboard read-side rendering", () => {
       authorLogin: "agent",
     };
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "blocking",
-      comments: [],
-      subThreads: [],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(detail(issue, [], { urgency: "blocking" }));
 
     expect(html).toContain("origin-line");
     expect(html).toContain("From omp on example-host");
@@ -211,14 +259,7 @@ describe("dashboard read-side rendering", () => {
       authorLogin: "agent",
     };
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "med",
-      comments: [],
-      subThreads: [],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(detail(issue, []));
 
     expect(html).toContain("tmux main:3.0; rm -rf ~");
     expect(html).not.toContain("data-copy-text");
@@ -242,22 +283,137 @@ describe("dashboard read-side rendering", () => {
       { id: 11, body: answeredBody, createdAt: now, updatedAt: now, authorLogin: "sami" },
     ];
 
-    const html = renderThreadDetail({
-      issue,
-      urgency: "med",
-      comments,
-      subThreads: [],
-      repo: "sjawhar/legion",
-      addressed: false,
-    });
+    const html = renderThreadDetail(detail(issue, comments));
 
-    // The interactive ask form must be hidden once an answer exists…
-    expect(html).not.toContain('class="ask-form"');
-    // …but the question context must remain visible in the opening section,
-    // separate from the answer comment card buried in the conversation.
-    expect(html).toContain('class="ask-context"');
+    // The interactive ask form must be gone once an answer exists…
+    expect(html).not.toMatch(/<form class="ask-form"/);
+    // …but the question keeps its history card (Playwright selects it by askId),
+    // with the answer rendered directly beneath it.
+    expect(html).toContain('<div class="ask-history" data-ask-id="R">');
     expect(html).toContain("Sanity check");
     expect(html).toContain("Did the migration land cleanly?");
+    expect(html).toContain(">yes<");
+  });
+
+  it("renders one form per open ask, history under answered asks, and a follow-up turn card", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Two asks",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\norigin:\n    host: omp\n    sessionId: ses_1\n    sessionTitle: 'pm: e2e submitter identity'\n    tmux: main:3.0\n    pane: '%15'\nask:\n    - askId: R\n      question: Color?\n      header: Color\n      options:\n        - label: blue\n    - askId: R.1\n      question: Size?\n      header: Size\n      options:\n        - label: small\n-->\n\nOpening body",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const comments: Comment[] = [
+      {
+        id: 1,
+        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "blue"\n-->\n\n**Color** — Color?\nblue',
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+      {
+        id: 2,
+        body: "<!-- dispatch:ask\nrequestId: F\norigin:\n    host: omp\n    sessionId: ses_2\n    sessionTitle: renamed\nask:\n    - askId: F\n      question: Which lane?\n      header: Lane\n      options:\n        - label: A\n        - label: B\n-->\n\n## Context\n\nThe reply changed the question.\n\n## Question\n\nWhich lane?",
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "agent",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+
+    // Forms only for the open asks, each naming its id; the answered ask R keeps
+    // its data-ask-id on the ask-history div (Playwright selects it there) but has no form.
+    expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
+    expect(html).toMatch(/<form class="ask-form"[^>]*data-ask-id="F"/);
+    expect(html).not.toMatch(/<form class="ask-form"[^>]*data-ask-id="R"/);
+    expect(html).toContain('<div class="ask-history" data-ask-id="R">');
+    expect(html.match(/class="ask-form"/g)?.length).toBe(2);
+    // The answered ask shows its answer beneath the question, and the answer
+    // comment is not repeated in the conversation (one pill on the page).
+    expect(html).toContain("answer-pill");
+    expect(html).toContain(">blue<");
+    expect(html.match(/class="answer-pill"/g)?.length).toBe(1);
+    // The follow-up renders as a turn card with its prose and a waiting marker for its open ask.
+    expect(html).toContain('id="turn-2"');
+    expect(html).toContain("The reply changed the question.");
+    expect(html).toContain("ask-waiting");
+    // Session identity on the header origin line, with copy, and the tmux jump kept.
+    expect(html).toContain('<span class="origin-session-title">pm: e2e submitter identity</span>');
+    expect(html).toContain('<code class="origin-session-id">ses_1</code>');
+    expect(html).toContain('data-action="copy-session-id" data-copy-text="ses_1"');
+    expect(html).toContain('data-copy-text="tmux switch-client -t %15"');
+    // The follow-up turn shows the session that asked it.
+    expect(html).toContain("renamed");
+    // No plumbing visible.
+    expect(html).not.toContain("requestId");
+    expect(html).not.toContain("dispatch:");
+    // The conversation has comments even though the answer renders under its
+    // question rather than in place; no false empty state.
+    expect(html).not.toContain("No comments yet.");
+  });
+
+  it("renders an answer for an ask that is not on the thread in place, marked as such", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "T",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\n-->\n\nBody",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const comments: Comment[] = [
+      {
+        id: 9,
+        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "ghost"\nanswers:\n  - - "x"\n-->\n\nsummary',
+        createdAt: now,
+        updatedAt: now,
+        authorLogin: "sami",
+      },
+    ];
+    const html = renderThreadDetail(detail(issue, comments));
+    expect(html).toContain("answer to a question no longer on this thread");
+    expect(html).toContain(">x<");
+  });
+
+  it("shows a second answer to the same ask in the conversation instead of hiding it", () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Changed mind",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Color?\n      header: Color\n      options:\n        - label: blue\n        - label: red\n-->\n\nBody",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const answer = (id: number, value: string): Comment => ({
+      id,
+      body: `<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "${value}"\n-->\n\n**Color** — Color?\n${value}`,
+      createdAt: now,
+      updatedAt: now,
+      authorLogin: "sami",
+    });
+    const comments = [answer(1, "blue"), answer(2, "red")];
+    const html = renderThreadDetail(detail(issue, comments));
+
+    // The first answer is the one the question shows; the second stays at its
+    // own position, tagged, so nothing on GitHub is invisible.
+    expect(html).toMatch(/<div class="ask-history" data-ask-id="R">[\s\S]*?>blue</);
+    expect(html).toMatch(/data-comment-id="2"[\s\S]*?later answer[\s\S]*?>red</);
+    expect(html).not.toContain('data-comment-id="1"');
+    expect(html.match(/class="answer-pill"/g)?.length).toBe(2);
+    expect(html.match(/class="comment-tag">later answer</g)?.length).toBe(1);
+    expect(html).not.toContain("no longer on this thread");
+    // The ask is answered: no form.
+    expect(html).not.toMatch(/<form class="ask-form"/);
   });
 
   it("routes synthetic SSE subjects to sidebar, comment, and metadata refetches", () => {
@@ -352,6 +508,7 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => {
         throw new Error("not used");
       },
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
@@ -361,11 +518,11 @@ describe("dashboard read-side rendering", () => {
     // The controller boots its thread list from the resolved installation
     // owners in a single owner-scoped call, not a per-repo fan-out.
     expect(searchCalls).toEqual([["sjawhar"]]);
-    expect(controller.render()).toContain("Blocked deploy");
-    expect(controller.render()).toContain("Opening body");
+    expect(page(controller)).toContain("Blocked deploy");
+    expect(page(controller)).toContain("Opening body");
     expect(controller.visibleThreads().map((entry) => entry.thread.number)).toEqual([12, 15]);
     controller.highlightThread("sjawhar/legion", 12);
-    expect(controller.render()).toContain("live-highlight");
+    expect(page(controller)).toContain("live-highlight");
     expect(controller.nextSelection("j")).toEqual({ repo: "sjawhar/legion", number: 15 });
     expect(controller.toggleSidebar()).toBe(false);
     expect(controller.toggleHelp()).toBe(true);
@@ -388,22 +545,23 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => {
         throw new Error("not used");
       },
+      persistAddressed: async () => {},
     };
     const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
-    expect(controller.render()).toContain("Blocked deploy");
-    expect(controller.render()).not.toContain("load-error");
+    expect(page(controller)).toContain("Blocked deploy");
+    expect(page(controller)).not.toContain("load-error");
 
     fail = true;
     await controller.loadThreads();
-    const html = controller.render();
+    const html = page(controller);
     expect(html).toContain("load-error");
     expect(html).toContain("GraphQL 401: bad credentials");
     expect(controller.visibleThreads().map((entry) => entry.thread.number)).toEqual([12]);
 
     fail = false;
     await controller.loadThreads();
-    expect(controller.render()).not.toContain("load-error");
+    expect(page(controller)).not.toContain("load-error");
   });
 
   it("posts replies with optimistic append and replaces the placeholder with the API comment", async () => {
@@ -430,6 +588,7 @@ describe("dashboard read-side rendering", () => {
       closeIssue: async () => {
         throw new Error("not used");
       },
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
@@ -437,8 +596,8 @@ describe("dashboard read-side rendering", () => {
     await controller.selectThread("sjawhar/legion", 12);
     const posting = controller.postReply("verifying reply");
 
-    expect(controller.render()).toContain("verifying reply");
-    expect(controller.render()).toContain("disabled");
+    expect(page(controller)).toContain("verifying reply");
+    expect(page(controller)).toContain("disabled");
     await posting;
 
     expect(calls).toEqual([{ repo: "sjawhar/legion", number: 12, body: "verifying reply" }]);
@@ -488,7 +647,9 @@ describe("dashboard read-side rendering", () => {
     };
     const calls: string[] = [];
     const api = {
-      searchDispatchThreads: async () => [thread({ number: 12, hasAsk: true, body: issue.body })],
+      searchDispatchThreads: async () => [
+        thread({ number: 12, openAskCount: 1, body: issue.body }),
+      ],
       getIssue: async () => issue,
       getComments: async () => [],
       postComment: async (_repo: string, _number: number, body: string) => {
@@ -496,24 +657,96 @@ describe("dashboard read-side rendering", () => {
         return { id: 100, body, createdAt: now, updatedAt: now, authorLogin: "sami" };
       },
       closeIssue: async () => issue,
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
     await controller.loadThreads();
     await controller.selectThread("sjawhar/legion", 12);
 
-    expect(controller.render()).toContain("Color?");
-    expect(controller.render()).toContain("Other (specify)");
-    await controller.submitAskAnswer([["blue"], ["a", "b"]]);
+    expect(page(controller)).toContain("Color?");
+    expect(page(controller)).toContain("Other (specify)");
+    expect(page(controller).match(/class="ask-form"/g)?.length).toBe(2);
+    await expect(controller.submitAskAnswer("nope", ["blue"])).rejects.toThrow(
+      "askId nope is not on this thread"
+    );
+    await controller.submitAskAnswer("R", ["blue"]);
 
-    expect(calls[0]).toContain("kind: answer");
+    expect(calls[0]?.startsWith("<!-- dispatch:answer\n")).toBe(true);
     expect(calls[0]).toContain("forThread: 12");
+    expect(calls[0]).toContain('forAsk: "R"');
     expect(calls[0]).toContain("Color"); // header in summary
     expect(calls[0]).toContain("Color?"); // question prompt in summary
     expect(calls[0]).toContain("blue"); // answer value in summary
-    expect(controller.render()).toContain("Color?");
-    expect(controller.render()).toContain("answer-pill");
-    expect(controller.render()).toContain(">blue<");
+    const after = page(controller);
+    expect(after).toContain("Color?");
+    expect(after).toContain("answer-pill");
+    expect(after).toContain(">blue<");
+    // The other ask is still open: exactly one form remains, and it names R.1.
+    expect(after.match(/class="ask-form"/g)?.length).toBe(1);
+    expect(after).toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
+    // Loaded comments are authoritative for the sidebar's "needs you" count.
+    expect(controller.sidebarFilters().openAskCounts).toEqual({ "sjawhar/legion#12": 1 });
+  });
+
+  it("keeps a posting ask's form, disabled, and hands it back with the error when the post fails", async () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Needs answer",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Color?\n      header: Color\n      options:\n        - label: blue\n-->\n\nChoose",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const api = {
+      searchDispatchThreads: async () => [thread({ number: 12, body: issue.body })],
+      getIssue: async () => issue,
+      getComments: async () => [],
+      postComment: async () => {
+        throw new Error("GitHub 502");
+      },
+      closeIssue: async () => issue,
+      persistAddressed: async () => {},
+    };
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
+    await controller.loadThreads();
+    await controller.selectThread("sjawhar/legion", 12);
+
+    const posting = controller.submitAskAnswer("R", ["blue"]);
+    // While the answer posts, its optimistic comment settles the ask, yet the
+    // form is still wanted — disabled — so the human's choice is not torn down.
+    const during = controller.selectedDetail();
+    if (!during) throw new Error("no detail");
+    expect(during.openAsks).toEqual([]);
+    expect(askFormAsks(during).map((ask) => ask.askId)).toEqual(["R"]);
+    expect(askFormInput(askFormAsks(during)[0] as ThreadAsk, during)).toMatchObject({
+      pending: true,
+      error: undefined,
+    });
+    expect(renderThreadDetail(during)).toMatch(
+      /<form class="ask-form"[^>]*data-ask-id="R"[\s\S]*?<button type="submit" disabled>/
+    );
+
+    await expect(posting).rejects.toThrow("GitHub 502");
+    // The placeholder is gone, the ask is open again, and the same form now
+    // carries the error instead of being re-created blank.
+    expect(controller.state.comments.get("sjawhar/legion#12")).toEqual([]);
+    const after = controller.selectedDetail();
+    if (!after) throw new Error("no detail");
+    expect(after.openAsks.map((ask) => ask.askId)).toEqual(["R"]);
+    expect(askFormAsks(after).map((ask) => ask.askId)).toEqual(["R"]);
+    expect(askFormInput(askFormAsks(after)[0] as ThreadAsk, after)).toMatchObject({
+      pending: false,
+      error: "GitHub 502",
+    });
+    const html = renderThreadDetail(after);
+    expect(html).toContain('<span class="form-error">GitHub 502</span>');
+    expect(html).toMatch(
+      /<form class="ask-form"[^>]*data-ask-id="R"[\s\S]*?<button type="submit" >/
+    );
   });
 
   it("posts urgency marker comments and closes issues optimistically", async () => {
@@ -542,6 +775,7 @@ describe("dashboard read-side rendering", () => {
         closed.push({ repo, number, reason });
         return { ...issue, state: "CLOSED" as const, stateReason: reason };
       },
+      persistAddressed: async () => {},
     };
 
     const controller = createDashboardController({ owners: ["sjawhar"], api });
@@ -549,12 +783,13 @@ describe("dashboard read-side rendering", () => {
     await controller.selectThread("sjawhar/legion", 12);
     const urgencyPost = controller.setUrgency("high");
 
-    expect(controller.render()).toContain("urgency-badge-high");
+    expect(page(controller)).toContain("urgency-badge-high");
     await urgencyPost;
-    expect(calls).toEqual(["---\nkind: urgency\nurgency: high\n---\n"]);
+    expect(calls[0]?.startsWith("<!-- dispatch:urgency\n")).toBe(true);
+    expect(calls[0]).toContain("Urgency set to **high**.");
 
     const closePost = controller.closeSelectedIssue("completed");
-    expect(controller.render()).toContain("resolved");
+    expect(page(controller)).toContain("resolved");
     await closePost;
     expect(closed).toEqual([{ repo: "sjawhar/legion", number: 12, reason: "completed" }]);
   });
@@ -567,6 +802,10 @@ describe("GitHub API client shaping", () => {
       const body = JSON.parse(String(init?.body));
       expect(body.query).toContain("search(query: $search");
       expect(body.query).toContain("repository { owner { login } name }");
+      expect(body.query).toContain("comments(last: 30) {");
+      expect(body.query).toContain(
+        "nodes { databaseId body createdAt updatedAt author { login } }"
+      );
       expect(body.variables.search).toBe(
         "is:issue is:open label:dispatch-thread user:sjawhar user:acme-org"
       );
@@ -583,7 +822,7 @@ describe("GitHub API client shaping", () => {
                   updatedAt: now,
                   createdAt: now,
                   author: { login: "agent" },
-                  comments: { totalCount: 2 },
+                  comments: { totalCount: 2, nodes: [] },
                   parent: { number: 641 },
                   repository: { owner: { login: "sjawhar" }, name: "legion" },
                 },
@@ -603,7 +842,7 @@ describe("GitHub API client shaping", () => {
           body: "---\nurgency: blocking\nrequestId: R\n---\n\nBody",
           state: "OPEN",
           urgency: "blocking",
-          hasAsk: false,
+          openAskCount: 0,
           parentNumber: 641,
           updatedAt: now,
           createdAt: now,
@@ -611,6 +850,97 @@ describe("GitHub API client shaping", () => {
           commentCount: 2,
         },
       ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("counts open asks from the search window so the sidebar can mark threads that need you", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          data: {
+            search: {
+              nodes: [
+                {
+                  number: 12,
+                  title: "Two asks, one answered",
+                  body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: a?\n    - askId: R.1\n      question: b?\n-->\n\nBody",
+                  state: "OPEN",
+                  updatedAt: now,
+                  createdAt: now,
+                  author: { login: "agent" },
+                  comments: {
+                    totalCount: 1,
+                    nodes: [
+                      {
+                        databaseId: 5,
+                        body: '<!-- dispatch:answer\nforThread: 12\nforAsk: "R"\nanswers:\n  - - "yes"\n-->\n\ns',
+                        createdAt: now,
+                        updatedAt: now,
+                        author: { login: "sami" },
+                      },
+                    ],
+                  },
+                  parent: null,
+                  repository: { owner: { login: "sjawhar" }, name: "legion" },
+                },
+              ],
+            },
+          },
+        }),
+        { headers: { "content-type": "application/json" } }
+      )) as typeof fetch;
+    try {
+      const [thread] = await searchDispatchThreads(["sjawhar"]);
+      expect(thread?.openAskCount).toBe(1);
+      const filters = { status: "open", urgency: "all", search: "", showAddressed: false } as const;
+      expect(renderSidebar([thread as Thread], filters)).toContain("needs you");
+      expect(renderSidebar([{ ...(thread as Thread), openAskCount: 0 }], filters)).not.toContain(
+        "needs you"
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("gives a root thread no parent, so it has zero sub-threads and no self-breadcrumb", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          data: {
+            search: {
+              nodes: [
+                {
+                  number: 12,
+                  title: "Root",
+                  body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\n-->\n\nBody",
+                  state: "OPEN",
+                  updatedAt: now,
+                  createdAt: now,
+                  author: { login: "agent" },
+                  comments: { totalCount: 0, nodes: [] },
+                  parent: null,
+                  repository: { owner: { login: "sjawhar" }, name: "legion" },
+                },
+              ],
+            },
+          },
+        }),
+        { headers: { "content-type": "application/json" } }
+      )) as typeof fetch;
+    try {
+      const [root] = await searchDispatchThreads(["sjawhar"]);
+      expect(root?.parentNumber).toBeNull();
+      const filters = { status: "open", urgency: "all", search: "", showAddressed: false } as const;
+      const [entry] = visibleSidebarThreads([root as Thread], filters);
+      expect(entry?.subThreadCount).toBe(0);
+      expect(entry?.parentInList).toBe(false);
+      const html = renderSidebar([root as Thread], filters);
+      expect(html).not.toContain("1 sub");
+      expect(html).not.toContain("thread-parent");
     } finally {
       globalThis.fetch = originalFetch;
     }

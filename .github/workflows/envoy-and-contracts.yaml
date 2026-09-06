@@ -8,7 +8,7 @@ on:
       - "packages/contracts/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
-      - "packages/envoy-claude-plugin/**"
+      - "packages/claude-envoy-bridge/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
   pull_request:
@@ -17,7 +17,7 @@ on:
       - "packages/contracts/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
-      - "packages/envoy-claude-plugin/**"
+      - "packages/claude-envoy-bridge/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
 
@@ -52,10 +52,12 @@ jobs:
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             claude_plugin:
-              - 'packages/envoy-claude-plugin/**'
+              - 'packages/claude-envoy-bridge/**'
+              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             pi_envoy:
               - 'packages/pi-envoy/**'
+              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             dispatch:
               - 'packages/dispatch/**'
@@ -184,8 +186,19 @@ jobs:
       - name: Build dispatch dashboard
         run: bun run build:web
         working-directory: packages/dispatch
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+        working-directory: packages/dispatch
+      - name: Browser-test dispatch dashboard
+        run: bun run e2e
+        working-directory: packages/dispatch
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dispatch-e2e-test-results
+          path: packages/dispatch/e2e/test-results
 
-  envoy-claude-plugin:
+  claude-envoy-bridge:
     needs: changes
     if: needs.changes.outputs.claude_plugin == 'true'
     runs-on: ubuntu-24.04
@@ -195,16 +208,19 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
-        working-directory: packages/envoy-claude-plugin
+        working-directory: packages/claude-envoy-bridge
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
-        working-directory: packages/envoy-claude-plugin
+        working-directory: packages/claude-envoy-bridge
+      - name: Test Claude Envoy plugin
+        run: bun run test
+        working-directory: packages/claude-envoy-bridge
       - name: Pack Claude Envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
-        working-directory: packages/envoy-claude-plugin
+        working-directory: packages/claude-envoy-bridge
       - uses: actions/upload-artifact@v4
         with:
-          name: claude-legion-envoy-plugin-pr
+          name: claude-envoy-bridge-pr
           path: out/pr-artifacts/*.tgz
 
   envoy-go:

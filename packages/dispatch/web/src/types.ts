@@ -5,11 +5,11 @@ export type IssueState = "OPEN" | "CLOSED";
 export type CloseReason = "completed" | "not_planned";
 
 /**
- * Coding-agent hosts a dispatch marker can name. Mirrors `DispatchHost` in
+ * Coding-agent hosts that ship a `dispatch` tool. Mirrors `DispatchHost` in
  * envoy-client, the only producer of the field; a marker naming anything else
  * is treated as having no host.
  */
-export type OriginHost = "omp" | "claude";
+export type OriginHost = "omp" | "opencode" | "claude";
 
 export interface Origin {
   host?: OriginHost;
@@ -17,6 +17,8 @@ export interface Origin {
   cwd?: string;
   tmux?: string;
   pane?: string;
+  sessionId?: string;
+  sessionTitle?: string;
 }
 
 export interface Thread {
@@ -26,8 +28,10 @@ export interface Thread {
   body: string;
   state: IssueState;
   urgency: Urgency;
-  hasAsk: boolean;
-  parentNumber: number;
+  /** Asks with no answer, from the search window (the detail view recomputes from every comment). */
+  openAskCount: number;
+  /** The parent issue when this thread was opened as a sub-issue; null for a root thread. */
+  parentNumber: number | null;
   updatedAt: string;
   createdAt: string;
   authorLogin: string;
@@ -73,11 +77,14 @@ export interface SidebarFilters {
   // this stored timestamp. Pass-through to the renderer; the filter logic
   // lives in visibleSidebarThreads.
   addressed?: Record<string, string>;
+  // Map of "<repo>#<n>" → open-ask count recomputed from the full comment
+  // list once a thread's comments were loaded; overrides the search window.
+  openAskCounts?: Record<string, number>;
 }
 
 export interface SidebarEntry {
   thread: Thread;
-  groupNumber: number;
+  groupNumber: number | null;
   subThreadCount: number;
   parentInList: boolean;
   addressed: boolean;

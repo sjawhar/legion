@@ -110,43 +110,23 @@ describe("resolveCwdRepo", () => {
 });
 
 describe("resolveOrigin", () => {
-  it("reports host omp from OMP_SESSION_ID", async () => {
+  it("never sets host: the plugin asserts it", async () => {
+    const { exec } = fakeExec({});
+    const origin = await resolveOrigin(
+      { OMP_SESSION_ID: "abc", OMPCODE: "1", CLAUDECODE: "1" },
+      exec,
+      "/repo"
+    );
+    expect(origin.host).toBeUndefined();
+    expect(origin.cwd).toBe("/repo");
+    expect(typeof origin.machine).toBe("string");
+  });
+
+  it("never sets session identity: the plugin supplies it from the host", async () => {
     const { exec } = fakeExec({});
     const origin = await resolveOrigin({ OMP_SESSION_ID: "abc" }, exec, "/repo");
-    expect(origin.host).toBe("omp");
-    expect(origin.cwd).toBe("/repo");
-  });
-
-  it("reports host omp from OMPCODE", async () => {
-    const { exec } = fakeExec({});
-    const origin = await resolveOrigin({ OMPCODE: "1" }, exec, "/repo");
-    expect(origin.host).toBe("omp");
-  });
-
-  it("reports host omp when both OMP_SESSION_ID and CLAUDECODE are set", async () => {
-    // OMP sessions on this machine also carry CLAUDECODE; the more specific
-    // host marker must win or every OMP thread is misattributed to Claude.
-    const { exec } = fakeExec({});
-    const origin = await resolveOrigin({ OMP_SESSION_ID: "abc", CLAUDECODE: "1" }, exec, "/repo");
-    expect(origin.host).toBe("omp");
-  });
-
-  it("reports host claude from CLAUDECODE", async () => {
-    const { exec } = fakeExec({});
-    const origin = await resolveOrigin({ CLAUDECODE: "1" }, exec, "/repo");
-    expect(origin.host).toBe("claude");
-  });
-
-  it("does not infer a host from OPENCODE_* variables (shell profiles export them)", async () => {
-    const { exec } = fakeExec({});
-    const origin = await resolveOrigin({ OPENCODE_GITHUB_REPO: "o/r" }, exec, "/repo");
-    expect(origin.host).toBeUndefined();
-  });
-
-  it("omits host when no recognized host env is set", async () => {
-    const { exec } = fakeExec({});
-    const origin = await resolveOrigin({}, exec, "/repo");
-    expect(origin.host).toBeUndefined();
+    expect(origin.sessionId).toBeUndefined();
+    expect(origin.sessionTitle).toBeUndefined();
   });
 
   it("includes the tmux pane target when TMUX_PANE is set", async () => {

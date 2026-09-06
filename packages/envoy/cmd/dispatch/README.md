@@ -16,7 +16,7 @@ Dispatch requires a single GitHub App that handles both:
 
 - The dashboard's **user-to-server** OAuth flow (humans signing in)
 - The agent path's **installation tokens** (bot acting on the user's behalf,
-  via the `gh-app-token` shim)
+  minted by `gh auth token` in the calling session's working directory)
 
 Create the App once at <https://github.com/settings/apps/new> with the
 settings below. Replace `https://dispatch.example` with the public origin
@@ -185,29 +185,33 @@ App's `clientSecret`.
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
 | `/api/view`                                   | GET     | dsession cookie              | Return current user's addressed-threads map      |
 | `/api/view`                                   | PATCH   | dsession cookie              | Replace user's addressed-threads map              |
-| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP (`dispatch` tool)            |
+| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `dispatch` tool (open or continue a thread); one stateless call per invocation |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist`            |
 
 ## MCP per-request auth
 
-The `/mcp` endpoint authenticates **per-request** via the `Authorization:
-Bearer` header. The token is the agent's own GitHub identity (typically an
-installation token minted by `gh-app-token`); it's used verbatim for every
-GitHub call made on behalf of the tool invocation. The server never falls
-back to the dashboard user's stored token.
+The `/mcp` endpoint is stateless and authenticates **per-request** via the
+`Authorization: Bearer` header of each `tools/call` POST. The token is the
+agent's own GitHub identity — an installation token the calling plugin's
+`dispatch` tool mints with `gh auth token` for that one call — and is used
+verbatim for every GitHub call made on behalf of the invocation. No MCP
+session is kept between calls, and the server never falls back to the
+dashboard user's stored token.
 
-Repo resolution, first hit wins:
+The one tool has two modes: `subject` opens a thread as a GitHub issue;
+`thread` continues an existing one as a follow-up comment. Repo resolution,
+first hit wins:
 
-- A qualified `parent` (`<owner>/<repo>#42`) names its own repo. The App
-  must be installed on `<owner>/<repo>` with `issues: write`.
-- Otherwise the `repo` argument (`<owner>/<name>`) is used. The MCP shim
-  fills this from the calling session's working directory when it's a
+- A qualified `parent` or `thread` (`<owner>/<repo>#42`) names its own repo.
+  The App must be installed on `<owner>/<repo>` with `issues: write`.
+- Otherwise the `repo` argument (`<owner>/<name>`) is used. The calling
+  plugin fills this from the session's working directory when it's a
   GitHub repo.
 - Neither present → the tool errors naming the fix.
 
-A bare-number `parent` (`42` or `42#1234567`) resolves against whichever
-repo the rules above pick.
+A bare-number `parent` or `thread` (`42`, or `42#1234567` for a parent)
+resolves against whichever repo the rules above pick.
 
 ## Configuration
 
@@ -218,11 +222,11 @@ overrides user). Relevant keys:
 - `dispatch.serverUrl` — the dispatch server's public origin.
 - `natsUrls` — list of NATS URLs (defaults to `nats://127.0.0.1:4222`).
 
-There is no `defaultRepo` or `appClientId` key: repo comes from the MCP
-shim (which fills it from the calling session's working directory) or an
-explicit `repo` argument, and App credentials live in `app.json` (see
-above). An `envoy.json` that still sets either key is rejected at load
-with an error naming the key.
+There is no `defaultRepo` or `appClientId` key: repo comes from the calling
+plugin (which fills it from the session's working directory) or an explicit
+`repo` argument, and App credentials live in `app.json` (see above). An
+`envoy.json` that still sets either key is rejected at load with an error
+naming the key.
 
 ## Building and running
 
@@ -247,5 +251,8 @@ go test -timeout 30s ./internal/dispatch/...
 Covers HMAC session cookies, user record I/O, app config I/O, SSE
 hub broadcast/owner-scoping/slow-client drop, meta-marker round trip
 (including `origin`), parent regex cases, `CreateThread` repo resolution
-(qualified parent, repo arg, bare-number parent, no-repo error), and the
-config load rejecting removed keys.
+(qualified parent, repo arg, bare-number parent, no-repo error), the
+config load rejecting removed keys, follow-up comments (posted without a new
+issue, refused on non-threads/PRs/closed threads, deduped over comments),
+prose caps, mixed-mode rejection, both marker encodings, and
+comment-delimiter escaping.

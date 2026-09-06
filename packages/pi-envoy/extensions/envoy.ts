@@ -3,6 +3,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { executeDispatch } from "@legion/envoy-client/dispatch-call";
+import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
+import {
+  DISPATCH_TOOL_DESCRIPTION,
+  DISPATCH_TOOL_JSON_SCHEMA,
+  DISPATCH_TOOL_NAME,
+  parseDispatchCall,
+} from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
@@ -93,6 +101,10 @@ const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
 export default function envoyExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
+  // One loader for the shared envoy.json contract: the dispatch tool is
+  // registered only where it names a service, and an invalid file is reported
+  // at session start, not silently treated as off.
+  const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
   const dedupeKeys = new Set<string>();
@@ -383,6 +395,9 @@ export default function envoyExtension(pi: PiApi): void {
   bridge.ready.resolve(claim);
 
   pi.on("session_start", async (_event, context) => {
+    if (dispatchConfig.error !== null) {
+      context.ui.notify(`envoy: dispatch tool disabled — ${dispatchConfig.error}`, "warning");
+    }
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
         [
@@ -499,12 +514,45 @@ export default function envoyExtension(pi: PiApi): void {
     });
   }
 
+  // The dispatch tool runs in this process, so it reads the session's identity
+  // from the host on every call: a follow-up after a rename or a handoff
+  // carries the current title and id. OMP accepts plain JSON Schema for tool
+  // parameters (the same path its MCP tools take), so the model-facing schema
+  // is the contract's own, nothing rebuilt here.
+  if (dispatchConfig.url !== null) {
+    const serviceUrl = dispatchConfig.url;
+    pi.registerTool({
+      name: DISPATCH_TOOL_NAME,
+      label: "Dispatch",
+      description: DISPATCH_TOOL_DESCRIPTION,
+      parameters: DISPATCH_TOOL_JSON_SCHEMA,
+      execute: async (_id, parameters, _signal, _onUpdate, context) => {
+        try {
+          const call = parseDispatchCall(parameters);
+          const result = await executeDispatch({
+            call,
+            cwd: context.cwd,
+            host: "omp",
+            sessionId: context.sessionManager.getSessionId() || undefined,
+            sessionTitle: context.sessionManager.getSessionName?.() || undefined,
+            serviceUrl,
+          });
+          // details carries the issue URL: the tool_result hook below reads it
+          // to subscribe this session to the thread's replies.
+          return toolSuccess(JSON.stringify(result), { ...result });
+        } catch (error) {
+          return toolFailure(error);
+        }
+      },
+    });
+  }
+
   registerEnvoyWhoamiCommand(pi, () => sessionID);
 
-  // The dispatch MCP tool creates a GitHub thread; the human answers by
-  // commenting on it. The Go dispatch server is stateless, so close the reply
-  // loop here: subscribe the calling session to the thread's topic and
-  // persist the interest, mirroring the OpenCode plugin's after-hook.
+  // The dispatch tool opens or continues a GitHub thread; the human answers by
+  // commenting on it. Close the reply loop here: subscribe the calling session
+  // to the thread's topic and persist the interest — for a follow-up from a
+  // handed-off session, that is the new session id.
   pi.on("tool_result", async (event) => {
     if (event.isError) return;
     const topic = dispatchSubscriptionTopic(event.toolName, JSON.stringify(event.details) ?? "");

@@ -23,7 +23,7 @@ This file is the **agent-facing** description of the code.
 | `/api/installations/{id}/repositories`        | GET     | dsession cookie              | Proxy `/user/installations/{id}/repositories`    |
 | `/api/view`                                   | GET     | dsession cookie              | Return user's addressed-threads map              |
 | `/api/view`                                   | PATCH   | dsession cookie              | Replace user's addressed-threads map             |
-| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `dispatch` tool            |
+| `/mcp`                                        | POST/GET| `Authorization: Bearer …`   | MCP Streamable HTTP — `dispatch` tool (open or continue a thread); one stateless call per invocation |
 | `/healthz`                                    | GET     | none                         | Liveness check                                   |
 | `/...`                                        | GET     | none                         | SPA from `packages/dispatch/web/dist/`           |
 
@@ -41,10 +41,10 @@ token:
   web-flow OAuth dance. One per GitHub login, refreshable for ~6 months
   with the App's `clientSecret`. Stored in
   `~/.local/share/dispatch/users/<login>.json`.
-- **MCP (agent)** — `ghs_…` installation tokens. The shim
-  (`packages/envoy-plugin/bin/dispatch-mcp-shim.ts`) mints them via
-  `gh-app-token` for each request; dispatch's `/mcp` extracts the bearer
-  and uses it verbatim. The server never falls back to a stored token.
+- **MCP (agent)** — `ghs_…` installation tokens. Each host plugin's `dispatch`
+  tool mints one with `gh auth token` in the session cwd for every call
+  (`packages/envoy-client/src/dispatch-client.ts`); dispatch's `/mcp` extracts
+  the bearer and uses it verbatim. The server never falls back to a stored token.
 
 The same Envoy App serves both surfaces. Installation tokens are scoped by
 installation; user-to-server tokens are scoped by what the user authorized.
@@ -72,69 +72,57 @@ covers — it's whatever the App is installed on.
 The NATS consumer subscribes to `notifications.github.>` (broader than the
 old single-repo subscription); filtering happens at the SSE-fanout layer.
 
-## MCP per-request auth pattern
+## Tool contract
 
-`internal/dispatch/mcp/server.go` defines a `bearerMiddleware` that extracts
-the `Authorization: Bearer` header and stashes it in `context.Context`. The
-`dispatch` tool handler reads it back and builds a fresh `*github.Client`
-for each call. No per-instance state, no cached tokens.
+`internal/dispatch/mcp/server.go` reads the `Authorization: Bearer` header of each
+`tools/call` POST (`req.Extra.Header`) and builds a fresh `*github.Client` for that call; the
+endpoint is stateless (`StreamableHTTPOptions{Stateless: true}`). No per-instance state, no
+cached tokens.
 
-The tool's repo resolution, first hit wins:
+One tool, two modes (`core.Dispatch`): `subject` opens a thread (`core.CreateThread`),
+`thread` continues one as a follow-up comment (`core.ContinueThread`). `thread` cannot be
+combined with `subject`, `urgency`, or `parent`. `context` (≤ 1200 chars) and `question`
+(≤ 800) are required in both modes and refused, not truncated, when longer.
 
-- A qualified `parent` (`<owner>/<repo>#42`) names its own repo, overriding
-  `repo`.
-- Otherwise the `repo` argument is used. The MCP shim fills it from the
-  calling session's working directory when it's a GitHub repo.
-- Neither present → the tool errors: `no repo: pass repo=owner/name (the
-  shim fills it from the working directory when one is a GitHub repo)`.
+Repo resolution, first hit wins: a qualified `parent` or `thread` (`owner/name#n`) names its
+own repo; otherwise the `repo` argument, which the calling plugin fills from the session's
+working directory; neither → an error naming the fix. A bare-number `parent`/`thread`
+resolves against the repo those rules pick. See `core/parent.go` (`ParseParent`,
+`ParseThread`) and `core/thread.go`.
 
-A bare-number `parent` (`42` or `42#<commentId>`) resolves against
-whichever repo the rules above pick. See `core/parent.go` for the regex and
-`core/thread.go`'s `CreateThread` for the resolution order.
+A follow-up target must be an open issue whose body carries a thread marker (`#N is not a
+dispatch thread`, `#N is closed; open a new thread`). Dedupe: opening searches the repo's
+issues for the request id (`githubapi.SearchByRequestID`); continuing lists the thread's
+comments and returns the existing follow-up when one carries the same request id.
 
 ## Marker format
 
-Thread metadata travels as **YAML frontmatter** at the top of issue bodies and
-comments — not HTML comments (the original plan's HTML+base64 scheme was
-superseded; see the note atop `.omo/plans/2026-05-22-dispatch.md`). The Go
-writer (`core/markers.go`) and the dashboard reader
-(`packages/dispatch/web/src/markers.ts`) implement this identically and must
-stay byte-compatible.
+Thread metadata travels as **HTML comments** at the very start of issue bodies and
+comments, `<!-- dispatch:<kind>\n<yaml>\n-->`, so GitHub and the dashboard show none of it.
+The Go writer (`core/markers.go`) and the dashboard reader
+(`packages/dispatch/web/src/markers.ts`) implement the same four kinds and must stay
+byte-compatible; both readers also accept the legacy YAML-front-matter encoding.
 
-- **Thread meta** (issue body) — `urgency`, `requestId`, optional `origin`
-  (`Origin` — `host`/`machine`/`cwd`/`tmux`, each omitted when empty),
-  optional `ask` (`QuestionInfo[]` as raw YAML), then `## Context` and
-  `## Question` sections:
+- **thread** (issue body, written here) — `requestId`, `urgency`, optional `origin`
+  (`host`/`machine`/`cwd`/`tmux`/`pane`/`sessionId`/`sessionTitle`, each omitted when
+  empty), optional `ask` (each question carrying an `askId`), then `**<subject>**`,
+  `## Context`, `## Question`.
+- **ask** (comment, written here) — a follow-up turn: `requestId`, `origin` re-stamped at
+  post time, `ask` with `askId`s, then `## Context`, `## Question`.
+- **answer** (comment, written by the dashboard) — `forThread`, `forAsk`, `answers`, then a
+  human-readable summary.
+- **urgency** (comment, written by the dashboard) — `urgency`, then `Urgency set to **x**.`
 
-  ```
-  ---
-  urgency: med
-  requestId: <16-hex>
-  origin:
-    host: omp
-    cwd: /home/ubuntu/legion
-  ---
+`askId` = the turn's `requestId` for its first ask, `<requestId>.<i>` after that
+(`core.AskIDFor`). String values containing `-->`, `<!--`, or `--!>` are emitted
+double-quoted with those sequences `\u`-escaped (`commentSafeYAML`), so a marker is always
+one comment.
 
-  **<subject>**
-
-  ## Context
-
-  <context>
-
-  ## Question
-
-  <question>
-  ```
-
-- **Urgency change** (comment) — `kind: urgency`, `urgency: <level>`; latest wins.
-- **Answer** (comment) — `kind: answer`, `forThread: <n>`,
-  `answers: QuestionAnswer[]`.
-
-Idempotency: `requestId = sha256(repo|parent|subject|context|question|urgency|ask)[:16]`
-(`core.ComputeRequestID`). The dedupe search looks for that exact token in the
-issue body, scoped to the `dispatch-thread` label
-(`githubapi.BuildRequestIDQuery`) — the search string and the emitted marker
-must reference the same `requestId`, or retries create duplicate threads.
+Idempotency: opening `requestId = sha256(repo|parent|subject|context|question|urgency|ask)[:16]`
+(`core.ComputeRequestID`), searched with `in:body "<id>"` under the `dispatch-thread` label
+(GitHub indexes HTML-comment text); continuing
+`requestId = sha256(follow-up|repo|thread|context|question|ask)[:16]`
+(`core.ComputeFollowUpRequestID`), matched against the thread's `dispatch:ask` comments.
 
 ## Answer delivery (AC#4)
 
@@ -182,11 +170,11 @@ Reads `~/.config/opencode/envoy.json` and `<cwd>/.opencode/envoy.json`
 - `dispatch.serverUrl` — the dispatch server's public origin.
 - `natsUrls` — list of NATS URLs (defaults to `nats://127.0.0.1:4222`).
 
-There is no `defaultRepo` or `appClientId` key. Repo comes from the MCP
-shim (which fills it from the calling session's working directory) or an
-explicit `repo` argument; App credentials live in `app.json`. Either
-removed key still present in an `envoy.json` is a load error naming the
-key (`config.InvalidConfigError`), not a silent skip.
+There is no `defaultRepo` or `appClientId` key. Repo comes from the calling
+plugin (which fills it from the session's working directory) or an explicit
+`repo` argument; App credentials live in `app.json`. Either removed key still
+present in an `envoy.json` is a load error naming the key
+(`config.InvalidConfigError`), not a silent skip.
 
 ## Building and running
 
@@ -211,5 +199,7 @@ go test -timeout 30s ./internal/dispatch/...
 Covers HMAC session cookies, user record I/O round trip, App config I/O,
 SSE hub broadcast/owner-scoping/slow-client drop, meta-marker round trip
 (including `origin`), parent regex cases, `CreateThread` repo resolution
-(qualified parent, repo arg, bare-number parent, no-repo error), and the
-config load rejecting removed keys.
+(qualified parent, repo arg, bare-number parent, no-repo error), the
+config load rejecting removed keys, follow-up posts a comment and no issue,
+refuses non-threads/PRs/closed threads, dedupes over comments, prose caps,
+mixed-mode rejection, both marker encodings, comment-delimiter escaping.

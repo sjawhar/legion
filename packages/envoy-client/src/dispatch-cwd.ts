@@ -1,7 +1,7 @@
 // Cwd-derived defaults for the dispatch tool: which GitHub repo a thread
-// belongs to, and where a human jumps back to reply. Every host (OMP,
-// OpenCode, Claude) runs the same shim in the session's own working
-// directory, so this is the one place that needs to know about it.
+// belongs to, and where a human jumps back to reply. Every host plugin (OMP,
+// OpenCode, Claude) calls this from inside the session's own process, so this
+// is the one place that needs to know about the working directory.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -16,18 +16,14 @@ export type ExecFn = (
   options: { readonly cwd: string }
 ) => Promise<{ readonly stdout: string }>;
 
-/** Real exec used outside tests: a 5s timeout keeps a broken jj/git/tmux from hanging the shim. */
+/** Real exec used outside tests: a 5s timeout keeps a broken jj/git/tmux from hanging the tool call. */
 export const defaultExec: ExecFn = (file, args, options) =>
   execFileAsync(file, args, { cwd: options.cwd, timeout: 5_000 });
 
-/**
- * The coding-agent hosts that identify themselves in the environment.
- * `resolveOrigin` is the only producer, so this union is exhaustive; the
- * dispatch dashboard mirrors it as `OriginHost`.
- */
-export type DispatchHost = "omp" | "claude";
+/** The coding-agent hosts that ship a `dispatch` tool. Each plugin asserts its own value. */
+export type DispatchHost = "omp" | "opencode" | "claude";
 
-/** Provenance attached to a dispatch thread so a human can jump back to the asking session. */
+/** Provenance attached to every dispatch turn so a human can find the asking session. */
 export interface DispatchOrigin {
   readonly host?: DispatchHost;
   readonly machine?: string;
@@ -36,6 +32,10 @@ export interface DispatchOrigin {
   readonly tmux?: string;
   /** Stable pane id (`%N`); `tmux switch-client -t %N` jumps there from anywhere. */
   readonly pane?: string;
+  /** The host's session id, read by the plugin at call time. */
+  readonly sessionId?: string;
+  /** The host's session title, read by the plugin at call time. */
+  readonly sessionTitle?: string;
 }
 
 async function tryExec(
@@ -112,10 +112,9 @@ export async function resolveCwdRepo(cwd: string, exec: ExecFn): Promise<string 
 }
 
 /**
- * Best-effort provenance for a dispatch thread: which host app, which
- * machine, the session cwd, and — inside tmux — the pane to jump back to.
- * Every field but `cwd` is omitted rather than guessed when it can't be
- * determined.
+ * Best-effort provenance for a dispatch turn: machine, session cwd, and —
+ * inside tmux — the pane to jump back to. Host and session identity are the
+ * calling plugin's to add; nothing here is guessed from the environment.
  */
 export async function resolveOrigin(
   env: Record<string, string | undefined>,
@@ -126,16 +125,6 @@ export async function resolveOrigin(
     cwd,
     machine: machineID(),
   };
-
-  // Only markers a host process sets for itself. OpenCode has none we know of,
-  // and OPENCODE_* variables are exported from shell profiles on this fleet, so
-  // an OpenCode session reports no host rather than every other process
-  // claiming to be one.
-  if (env["OMP_SESSION_ID"] || env["OMPCODE"]) {
-    origin.host = "omp";
-  } else if (env["CLAUDECODE"]) {
-    origin.host = "claude";
-  }
 
   const pane = env["TMUX_PANE"];
   if (pane) {

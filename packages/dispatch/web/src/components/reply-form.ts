@@ -5,6 +5,11 @@ export interface ReplyFormInput {
   error?: string;
 }
 
+/** The send button's label; the template and the in-place sync both read it here. */
+export function replyButtonLabel(pending: boolean): string {
+  return pending ? "Sending…" : "Reply";
+}
+
 /**
  * Compact reply form. Looks like a single-row text input by default,
  * grows as the textarea fills. No redundant "Reply" label — the
@@ -13,7 +18,7 @@ export interface ReplyFormInput {
  * narrow.
  */
 export function renderReplyForm(input: ReplyFormInput): string {
-  return `<form class="reply-form" data-action="reply" aria-label="Reply">
+  return `<form id="detail-reply" class="reply-form" data-action="reply" aria-label="Reply">
     <textarea
       id="reply-body"
       name="body"
@@ -22,7 +27,7 @@ export function renderReplyForm(input: ReplyFormInput): string {
       ${input.pending ? "disabled" : ""}
     ></textarea>
     <div class="reply-row">
-      <button type="submit" class="btn-primary" ${input.pending ? "disabled" : ""}>${input.pending ? "Sending…" : "Reply"}</button>
+      <button type="submit" class="btn-primary" ${input.pending ? "disabled" : ""}>${replyButtonLabel(input.pending)}</button>
       ${input.error ? `<span class="form-error">${escapeHtml(input.error)}</span>` : ""}
     </div>
   </form>`;

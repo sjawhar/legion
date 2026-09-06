@@ -463,7 +463,7 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
       thread: 742,
       url: "https://github.com/sjawhar/legion/issues/742",
     });
-    const subscribed = await runHook("envoy_dispatch", output);
+    const subscribed = await runHook("dispatch", output);
     expect(subscribed).toContainEqual([
       "ses_dispatch",
       "notifications.github.sjawhar.legion.issue.742.>",

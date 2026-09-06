@@ -100,10 +100,11 @@ Rather than trying to publish `@legion/contracts` and `@legion/envoy-client` to 
     ".": { "import": "./dist/src/server.js" },
     "./server": { "import": "./dist/src/server.js" }
   },
-  "files": ["dist", "src", "!src/**/__tests__"],
+  "files": ["dist", "src", "!src/**/__tests__", "skills"],
   "scripts": {
-    "build": "bun build src/server.ts bin/dispatch-mcp-shim.ts --outdir dist --target bun --format esm --external '@opencode-ai/*'",
-    "prepack": "bun run build"
+    "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*'",
+    "prepack": "bun run build && rm -rf skills && cp -r ../../skills skills",
+    "postpack": "rm -rf skills"
   },
   "dependencies": {
     "@opencode-ai/plugin": "~1.14.46"
@@ -115,7 +116,7 @@ Rather than trying to publish `@legion/contracts` and `@legion/envoy-client` to 
 }
 ```
 
-The two internal packages moved from `dependencies` to `devDependencies`. `main`/`exports` now point at the bundled `dist/` output instead of `src/`. `prepack` runs `bun run build`, which invokes `bun build` targeting bun with esm output, bundling `@legion/contracts` and `@legion/envoy-client` straight into `dist/src/server.js` and `dist/bin/dispatch-mcp-shim.js`. Only `@opencode-ai/*` stays external (it's a real published peer/consumer dependency, not a workspace-only package). `bun pm pack` runs the standard npm/bun lifecycle (`prepack` then pack then `postpack`), which was empirically confirmed to fire correctly on bun 1.3.14 — the bundle exists in the tarball before packing happens.
+The two internal packages moved from `dependencies` to `devDependencies`. `main`/`exports` point at the bundled `dist/` output instead of `src/`. `prepack` runs `bun run build`, which invokes `bun build` targeting bun with esm output, bundling `@legion/contracts` and `@legion/envoy-client` straight into `dist/src/server.js` (`--root .` keeps the `src/` segment in the output path for a single entry point, so `main`/`exports` stay valid), then stages the repo `skills/` tree into the package for the tarball (`postpack` removes it again). Only `@opencode-ai/*` stays external (it's a real published peer/consumer dependency, not a workspace-only package). `bun pm pack` runs the standard npm/bun lifecycle (`prepack` then pack then `postpack`), which was empirically confirmed to fire correctly on bun 1.3.14 — the bundle exists in the tarball before packing happens.
 
 `packages/pi-envoy` (the Oh My Pi extension) has the same shape plus one extra wrinkle: it also has to ship a non-JS asset (the `skills/` tree) and it has two extensions, only one of which (`envoy.ts`) is meant for external consumers — `legion.ts` is daemon-only infrastructure that must never load in a global session.
 
@@ -177,35 +178,11 @@ The committed `package.json` keeps `"omp": { "extensions": ["extensions/envoy.ts
 
 ### 3. Make runtime path resolution candidate-based
 
-Bundling moves the running code from `src/`/`extensions/` into `dist/`, which breaks any `import.meta`-relative path that assumed the source layout. Both packages' path resolution became a small list of candidates checked with `existsSync`, covering both the packed (`dist/`) and repo-source layouts, throwing loudly if neither exists:
-
-`packages/envoy-plugin/src/dispatch-mcp.ts`:
-
-```ts
-function defaultShimPath(): string {
-  // Source layout: this module runs from src/ and the shim wrapper lives at
-  // ../bin/dispatch-mcp-shim.ts. Packed layout: this module is bundled to
-  // dist/src/server.js and the self-contained shim bundle lives at
-  // dist/bin/dispatch-mcp-shim.js — same ../bin relationship, built artifact.
-  const packageRoot = path.join(import.meta.dir, "..");
-  const candidates = [
-    path.join(packageRoot, "bin", "dispatch-mcp-shim.js"),
-    path.join(packageRoot, "bin", "dispatch-mcp-shim.ts"),
-  ];
-  const found = candidates.find((candidate) => existsSync(candidate));
-  if (!found) {
-    throw new Error(`dispatch MCP shim not found; tried: ${candidates.join(", ")}`);
-  }
-  return found;
-}
-```
-
-`packages/pi-envoy/extensions/envoy.ts` gained the equivalent for the skills directory: `<module-dir>/skills` (packed — staged there by `prepack.sh`) then `<module-dir>/../../../skills` (repo source layout), throw if neither is found.
+Bundling moves the running code from `src/`/`extensions/` into `dist/`, which breaks any `import.meta`-relative path that assumed the source layout. Path resolution to a sibling artifact became a small list of candidates checked with `existsSync`, covering both the packed (`dist/`) and repo-source layouts, throwing loudly if neither exists. `packages/pi-envoy/extensions/envoy.ts` resolves its bundled skills this way (`resolveSkillsDirectory`): `<module-dir>/skills` (packed — staged there by `prepack.sh`) then `<module-dir>/../../../skills` (repo source layout), throw if neither is found.
 
 ### Verification
 
 - Tarballs from both packages were installed into bare `/tmp` directories (outside the monorepo, so bun/npm workspace linking could not paper over anything) via both `bun add` and `npm install`; imports resolved.
-- The bundled MCP shim was launched from the installed tarball and confirmed to speak JSON-RPC over stdio correctly.
 - The OMP extension tarball was loaded in a live session (`omp -e package/dist/envoy.js`) with its tools and packed `skills/` tree working end to end.
 - An independent QA agent reproduced the full install-and-run verification separately.
 

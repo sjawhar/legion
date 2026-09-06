@@ -13,16 +13,15 @@ module: pi-envoy
 problem_type: architecture_pattern
 applies_when:
   - "An OMP extension package needs to expose an MCP server to every session that loads it"
-  - "Porting an OpenCode plugin capability that injected MCP entries via a config hook"
+  - "Deciding between a native `pi.registerTool` tool and a package-shipped MCP server"
 ---
 
 ## Context
 
-OpenCode plugins can inject MCP entries into session config at load time (the envoy-plugin
-does this for the dispatch MCP server, gated by `envoy.json` `dispatch.enabled`). When Legion
-moved to Oh My Pi, that injection path disappeared: the OMP `ExtensionAPI` (`pi`) has **no
-runtime MCP registration method** — `omp://extensions.md` confirms MCP mounting is absent from
-the imperative surface.
+The OMP `ExtensionAPI` (`pi`) registers native tools imperatively (`pi.registerTool`) but has
+**no runtime MCP registration method** — `omp://extensions.md` confirms MCP mounting is absent
+from the imperative surface. An extension that wants every session to reach an MCP server
+(as opposed to a tool it can implement in-process) has to ship the mount as a static file.
 
 ## Guidance
 
@@ -34,8 +33,8 @@ To ship an MCP server with an extension package, put `.mcp.json` next to its `pa
 ```json
 {
   "mcpServers": {
-    "dispatch": {
-      "command": "./bin/dispatch-mcp-shim.ts"
+    "example-server": {
+      "command": "./bin/example-server.ts"
     }
   }
 }
@@ -75,42 +74,35 @@ Key mechanics (from `@oh-my-pi/pi-coding-agent` `src/discovery/omp-plugins.ts` a
 - The provider also scans package-root `skills/`, `commands/`, `rules/`, `prompts/`,
   `hooks/`, and `tools/` — a package can ship those the same way.
 
-Per-user gating that OpenCode did at injection time moves into the spawned server itself: the
-dispatch shim resolves its endpoint from the shared `envoy.json` (`dispatch.enabled` /
-`dispatch.serverUrl`, `DISPATCH_MCP_URL` env override) and exits 0 without serving when
-dispatch is not enabled (`packages/envoy-client/src/dispatch-config.ts`). Which GitHub repo a
-thread lands in is not config either: the shim derives it from the session's cwd (its GitHub
-remote) at call time and injects it into the tool call, not from a `dispatch.defaultRepo`
-setting — there is no configured default repo.
+Per-user gating lives in whatever the package mounts or registers: the dispatch tool, for
+example, is registered only when `resolveDispatchConfig`
+(`packages/envoy-client/src/dispatch-config.ts`) yields a service URL from `envoy.json`
+(`dispatch.enabled` / `dispatch.serverUrl`) or `DISPATCH_MCP_URL`. Which GitHub repo a thread
+lands in is not config either: the tool derives it from the session's cwd at call time.
 
 ## Why This Matters
 
-Without this, "the extension should provide tool X to its sessions" dead-ends on the missing
-runtime API and gets solved with per-machine hand-edited config files. Whether to actually
-ship a package-root `.mcp.json` is a separate security decision: it mounts for **every**
-session that loads the package. For dispatch, Legion loads `pi-envoy` for architects,
-controller, and phase workers alike, and the raw `dispatch` tool is served to every one
-of them deliberately — every role needs a direct channel to ask Sami a durable question,
-and the asking session gets the reply regardless of role. The shim gates on exactly one
-thing, whether dispatch is enabled (`packages/envoy-client/src/dispatch-config.ts`), not on
-the Legion environment.
+Without this, "the extension should provide MCP server X to its sessions" dead-ends on the
+missing runtime API and gets solved with per-machine hand-edited config files. Whether to
+actually ship a package-root `.mcp.json` is a separate security decision: it mounts for
+**every** session that loads the package, exactly as a native `pi.registerTool` tool does. For
+dispatch, Legion loads `pi-envoy` for architects, controller, and phase workers alike, and the
+raw `dispatch` tool is served to every one of them deliberately — every role needs a direct
+channel to ask Sami a durable question, and the asking session gets the reply regardless of
+role. The dispatch tool gates on exactly one thing, whether dispatch is enabled
+(`packages/envoy-client/src/dispatch-config.ts`), not on the Legion environment.
 
 ## When to Apply
 
 Any time an OMP extension package should carry an MCP server whose audience really is "every
-session that loads the package"; any time OpenCode plugin behavior built on config-hook
-injection needs an OMP equivalent. When the tool must be scoped narrower than the package's
-sessions, gate inside the spawned server (config opt-in, environment decline) — the static
-mount itself cannot discriminate.
+session that loads the package" and the capability cannot be a native tool. When the tool must
+be scoped narrower than the package's sessions, gate inside the spawned server (config opt-in,
+environment decline) — the static mount itself cannot discriminate.
 
 ## Examples
 
-Dispatch mounts this way in production: `packages/pi-envoy/.mcp.json` spawns
-`bin/dispatch-mcp-shim.ts` from source in repo checkouts (the Legion daemon path) and the
-release workflow rewrites the `command` to the self-contained `dist/bin/dispatch-mcp-shim.js` for
-the npm tarball. Both forms verified on v18.0.10 with
-`omp -p --no-extensions -e <package>` from a scratch directory — `mcp__dispatch_dispatch`
-mounts with zero session-level config. Beware LLM self-reports here: a probe model once
-answered "YES" while `~/.omp/logs/` showed the mount had failed. Ground truth lives in the
-log ("MCP tool load failed, path: mcp:dispatch") and in the spawn argv (wrap `bun` in a
-logging shim on PATH to capture it).
+Dispatch does not use this pattern: its tool is native to the extension (`pi.registerTool`
+in `packages/pi-envoy/extensions/envoy.ts`), so pi-envoy ships no `.mcp.json`. The pattern
+stands for any other MCP server an extension package needs every session to mount; verify a
+mount with `omp -p --no-extensions -e <package>` from a scratch directory and read
+`~/.omp/logs/` for `MCP tool load failed`, not the model's self-report.

@@ -1,7 +1,7 @@
 ---
 name: legion-architect
 description: Own a Legion issue tree from decomposition or adoption through integration, retro, sign-off, and close.
-tools: ["read", "task", "hub", "mcp__dispatch_dispatch"]
+tools: ["read", "task", "hub", "dispatch"]
 spawns: ["legion-architect", "legion-planner", "legion-implementer", "legion-tester", "legion-reviewer", "legion-merger", "oracle", "scout", "reviewer"]
 model: ["@task"]
 autoloadSkills: ["legion-architect"]

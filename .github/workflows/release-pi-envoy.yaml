@@ -76,23 +76,18 @@ jobs:
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
 
-      - name: Point extensions and MCP mount at the packed bundle
+      - name: Point extensions at the packed bundle
         if: steps.version.outputs.skip != 'true'
         run: |
-          # The committed manifests keep source paths (extensions/*.ts,
-          # bin/dispatch-mcp-shim.ts) so repo checkouts (the Legion daemon,
-          # dev sessions) load sources without a build. The published tarball
-          # ships only self-contained dist bundles, and only the envoy
-          # extension: the legion extension is daemon infrastructure that
-          # global sessions must not load.
+          # The committed manifest keeps source paths (extensions/*.ts) so
+          # repo checkouts (the Legion daemon, dev sessions) load sources
+          # without a build. The published tarball ships only self-contained
+          # dist bundles, and only the envoy extension: the legion extension
+          # is daemon infrastructure that global sessions must not load.
           cp packages/pi-envoy/package.json "$RUNNER_TEMP/pi-envoy-manifest.json"
-          cp packages/pi-envoy/.mcp.json "$RUNNER_TEMP/pi-envoy-mcp.json"
           jq '.omp.extensions = ["dist/envoy.js"]' \
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
-          jq '.mcpServers.dispatch.command = "./dist/bin/dispatch-mcp-shim.js"' \
-            packages/pi-envoy/.mcp.json > tmp.json \
-            && mv tmp.json packages/pi-envoy/.mcp.json
 
       - name: Pack extension
         if: steps.version.outputs.skip != 'true'
@@ -109,14 +104,11 @@ jobs:
           fi
         working-directory: packages/pi-envoy
 
-      - name: Restore committed manifests
+      - name: Restore committed manifest
         if: always() && steps.version.outputs.skip == 'false'
         run: |
           if [ -f "$RUNNER_TEMP/pi-envoy-manifest.json" ]; then
             mv "$RUNNER_TEMP/pi-envoy-manifest.json" packages/pi-envoy/package.json
-          fi
-          if [ -f "$RUNNER_TEMP/pi-envoy-mcp.json" ]; then
-            mv "$RUNNER_TEMP/pi-envoy-mcp.json" packages/pi-envoy/.mcp.json
           fi
 
       - name: Commit and tag
