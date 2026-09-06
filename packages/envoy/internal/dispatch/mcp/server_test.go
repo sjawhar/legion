@@ -217,3 +217,66 @@ func TestDispatchHandlerRejectsMixedModeBeforeGitHub(t *testing.T) {
 		t.Errorf("the GitHub client is built from this call's bearer exactly once: %v", *tokensUsed)
 	}
 }
+
+// openingGitHub answers the two GitHub calls an opening dispatch makes: the
+// request-id search (nothing found) and the issue create, whose body it hands
+// back so tests can read what was posted. Everything else fails.
+func openingGitHub(t *testing.T) (*Server, *string) {
+	t.Helper()
+	body := new(string)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /search/issues", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"total_count":0,"items":[]}`))
+	})
+	mux.HandleFunc("POST /repos/{owner}/{repo}/issues", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Body string `json:"body"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		*body = req.Body
+		_, _ = w.Write([]byte(`{"number":7,"html_url":"https://github.com/acme/example-repo/issues/7"}`))
+	})
+	githubStub := httptest.NewServer(mux)
+	t.Cleanup(githubStub.Close)
+	stubURL, err := url.Parse(githubStub.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newServer(func(context.Context, string) *github.Client {
+		client := github.NewClient(nil)
+		client.BaseURL = stubURL
+		return client
+	})
+	return server, body
+}
+
+// The contract every plugin validates against makes `options` optional on an
+// ask (an options-less question renders as the bare free-text field), so the
+// service's inferred schema must not require it.
+func TestDispatchAcceptsAnAskWithoutOptions(t *testing.T) {
+	server, posted := openingGitHub(t)
+	session := connect(t, server, &rotatingBearer{token: "token"})
+	arguments := map[string]any{
+		"repo":     "acme/example-repo",
+		"subject":  "s",
+		"context":  "c",
+		"question": "q",
+		"ask":      []map[string]any{{"question": "x"}},
+	}
+
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "dispatch", Arguments: arguments})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := result.Content[0].(*mcpsdk.TextContent).Text
+	if result.IsError {
+		t.Fatalf("options-less ask rejected: %s", text)
+	}
+	if !strings.Contains(text, `"thread":7`) {
+		t.Errorf("result %s does not name the opened thread", text)
+	}
+	if !strings.Contains(*posted, "question: x") || strings.Contains(*posted, "options") {
+		t.Errorf("thread body should carry the question and omit options:\n%s", *posted)
+	}
+}

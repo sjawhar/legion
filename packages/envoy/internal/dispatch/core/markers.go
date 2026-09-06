@@ -39,7 +39,7 @@ type QuestionInfo struct {
 	AskID    string           `json:"askId,omitempty" yaml:"askId,omitempty"`
 	Question string           `json:"question" yaml:"question"`
 	Header   string           `json:"header,omitempty" yaml:"header,omitempty"`
-	Options  []QuestionOption `json:"options" yaml:"options"`
+	Options  []QuestionOption `json:"options,omitempty" yaml:"options,omitempty"`
 	Multiple *bool            `json:"multiple,omitempty" yaml:"multiple,omitempty"`
 	Custom   *bool            `json:"custom,omitempty" yaml:"custom,omitempty"`
 }
