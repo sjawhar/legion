@@ -87,27 +87,15 @@ type ParsedThread struct {
 	IssueNumber int
 }
 
-var (
-	threadRepoForm = regexp.MustCompile(`^([^/\s#]+/[^/\s#]+)#(\d+)$`)
-	threadBareForm = regexp.MustCompile(`^(\d+)$`)
-)
-
-// ParseThread parses a `thread` argument: "<n>" or "owner/name#<n>". Every
-// rejection — a comment id, a zero or zero-padded number, anything else — is
-// `Invalid thread: <s>`, the one malformed-thread message the plugins expect.
+// ParseThread parses a `thread` argument: "<n>" or "owner/name#<n>" — a
+// parent reference without the comment id. Every rejection — a comment id, a
+// zero or zero-padded number, anything else — is `Invalid thread: <s>`, the
+// one malformed-thread message the plugins expect.
 func ParseThread(s string) (ParsedThread, error) {
 	s = strings.TrimSpace(s)
-	var repo, issue string
-	if m := threadRepoForm.FindStringSubmatch(s); m != nil {
-		repo, issue = m[1], m[2]
-	} else if m := threadBareForm.FindStringSubmatch(s); m != nil {
-		issue = m[1]
-	} else {
+	parent, err := ParseParent(s)
+	if err != nil || parent.CommentID != 0 {
 		return ParsedThread{}, fmt.Errorf("Invalid thread: %s", s)
 	}
-	n, err := parsePositiveInteger(issue, "issue number")
-	if err != nil {
-		return ParsedThread{}, fmt.Errorf("Invalid thread: %s", s)
-	}
-	return ParsedThread{Repo: repo, IssueNumber: n}, nil
+	return ParsedThread{Repo: parent.Repo, IssueNumber: parent.IssueNumber}, nil
 }

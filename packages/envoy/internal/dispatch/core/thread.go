@@ -53,29 +53,35 @@ func Dispatch(ctx context.Context, client *github.Client, input DispatchInput) (
 	return CreateThread(ctx, client, input)
 }
 
-// ComputeRequestID hashes the (repo|parent|subject|context|question|urgency|ask)
-// tuple to identify duplicate opening attempts. ask is included so two
-// otherwise identical dispatches that attach different structured questions
-// do not collapse onto the same thread; an empty ask hashes the same whether
-// the caller omitted it or sent `[]`.
-func ComputeRequestID(repo, parent, subject, context, question string, urgency Urgency, ask []QuestionInfo) string {
+// requestID is the hash every request id is: sha256 of the identifying tuple,
+// truncated to 16 hex characters.
+func requestID(tuple string) string {
+	h := sha256.Sum256([]byte(tuple))
+	return hex.EncodeToString(h[:])[:16]
+}
+
+// askJSON renders the ask list for a request-id tuple; an empty ask hashes the
+// same whether the caller omitted it or sent `[]`.
+func askJSON(ask []QuestionInfo) []byte {
 	if len(ask) == 0 {
 		ask = nil
 	}
-	askJSON, _ := json.Marshal(ask)
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s", repo, parent, subject, context, question, urgency, askJSON)))
-	return hex.EncodeToString(h[:])[:16]
+	out, _ := json.Marshal(ask)
+	return out
+}
+
+// ComputeRequestID hashes the (repo|parent|subject|context|question|urgency|ask)
+// tuple to identify duplicate opening attempts. ask is included so two
+// otherwise identical dispatches that attach different structured questions
+// do not collapse onto the same thread.
+func ComputeRequestID(repo, parent, subject, context, question string, urgency Urgency, ask []QuestionInfo) string {
+	return requestID(fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s", repo, parent, subject, context, question, urgency, askJSON(ask)))
 }
 
 // ComputeFollowUpRequestID hashes (repo|thread|context|question|ask) to
 // identify duplicate follow-up attempts on one thread.
 func ComputeFollowUpRequestID(repo string, thread int, context, question string, ask []QuestionInfo) string {
-	if len(ask) == 0 {
-		ask = nil
-	}
-	askJSON, _ := json.Marshal(ask)
-	h := sha256.Sum256([]byte(fmt.Sprintf("follow-up|%s|%d|%s|%s|%s", repo, thread, context, question, askJSON)))
-	return hex.EncodeToString(h[:])[:16]
+	return requestID(fmt.Sprintf("follow-up|%s|%d|%s|%s|%s", repo, thread, context, question, askJSON(ask)))
 }
 
 // validateProse rejects blank or over-cap context/question, naming the field.

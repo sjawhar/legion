@@ -17,14 +17,12 @@ const (
 	UrgencyBlocking Urgency = "blocking"
 )
 
-// Marker kinds. Every marker is `<!-- dispatch:<kind>\n<yaml>-->` at the very
-// start of an issue body or comment. The dashboard writes answer and urgency
-// markers; this package writes thread and ask markers.
+// Marker kinds this package writes. Every marker is `<!-- dispatch:<kind>\n<yaml>-->`
+// at the very start of an issue body or comment. The dashboard writes the
+// answer and urgency kinds; this package writes thread and ask.
 const (
-	KindThread  = "thread"
-	KindAsk     = "ask"
-	KindAnswer  = "answer"
-	KindUrgency = "urgency"
+	KindThread = "thread"
+	KindAsk    = "ask"
 )
 
 // QuestionOption is one selectable option in a QuestionInfo.
