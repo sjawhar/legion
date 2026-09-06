@@ -63,11 +63,15 @@ interface Following {
 const DedupeIdentity = z.object({
   dedupe_key: z.string().min(1).optional(),
   event_id: z.string().min(1).optional(),
+  payload: z.string().optional(),
 })
 
 const decoder = new TextDecoder()
 
-function dedupeKey(data: Uint8Array): string | undefined {
+function deliveryIdentity(
+  data: Uint8Array,
+  sessionId: string,
+): { readonly key: string; readonly dispatchEcho: boolean } | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(decoder.decode(data))
@@ -76,7 +80,26 @@ function dedupeKey(data: Uint8Array): string | undefined {
   }
   const identity = DedupeIdentity.safeParse(parsed)
   if (!identity.success) return undefined
-  return identity.data.dedupe_key ?? identity.data.event_id
+  const key = identity.data.dedupe_key ?? identity.data.event_id
+  if (key === undefined) return undefined
+
+  let dispatchSession: string | undefined
+  if (identity.data.payload !== undefined) {
+    try {
+      const payload: unknown = JSON.parse(identity.data.payload)
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "dispatch_session" in payload &&
+        typeof payload.dispatch_session === "string"
+      ) {
+        dispatchSession = payload.dispatch_session
+      }
+    } catch {
+      // Non-JSON payloads cannot carry a dispatch echo marker.
+    }
+  }
+  return { key, dispatchEcho: dispatchSession === sessionId }
 }
 
 /** The seen-set bound pi-envoy uses; the oldest key is evicted first. */
@@ -110,8 +133,8 @@ export function createThreadForwarder(
     try {
       for await (const message of subscription) {
         try {
-          const key = dedupeKey(message.data)
-          if (key === undefined) {
+          const identity = deliveryIdentity(message.data, sessionId)
+          if (identity === undefined) {
             process.stderr.write(
               `envoy-mcp: dropped a message on ${message.subject}: no dedupe_key or event_id\n`,
             )
@@ -123,9 +146,9 @@ export function createThreadForwarder(
           // never republished: a pattern covering the inbox would otherwise
           // echo forever, and two sessions whose patterns cover each other's
           // inbox would relay the same envelope back and forth.
-          if (seen.has(key)) continue
-          remember(key)
-          if (message.subject === inbox) continue
+          if (seen.has(identity.key)) continue
+          remember(identity.key)
+          if (identity.dispatchEcho || message.subject === inbox) continue
           connection.publish(inbox, message.data)
         } catch (error) {
           // One message that cannot be republished must not end the topic's delivery.

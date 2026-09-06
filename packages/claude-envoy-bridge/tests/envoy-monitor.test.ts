@@ -81,3 +81,14 @@ test("delivers an Envoy envelope's summary rather than Monitor-style telemetry",
   // then
   expect(output).toBe("Please report the deployment result.")
 })
+
+test("skips a dispatch echo for the originating session", async () => {
+  const { envoyInboundMessage } = await import("../src/envoy-monitor")
+  const envelope = JSON.stringify({
+    dedupe_key: "github.issue.42",
+    payload_summary: "Please report the deployment result.",
+    payload: JSON.stringify({ dispatch_session: "ses_origin" }),
+  })
+
+  expect(envoyInboundMessage(envelope, "ses_origin")).toBeUndefined()
+})

@@ -308,6 +308,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient", async () => {
+    delete process.env.ENVOY_REGISTER_SESSION;
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
@@ -359,14 +360,36 @@ describe("envoy OMP extension", () => {
       { path: "/v1/interests/ses_omp", body: undefined },
       {
         path: "/v1/messages/send",
-        body: { source_session: "ses_omp", target_session: "ses_target", message: "direct" },
+        body: {
+          source: "agent",
+          source_session: "ses_omp",
+          target_session: "ses_target",
+          message: "direct",
+        },
       },
       {
         path: "/v1/messages/publish",
-        body: { source_session: "ses_omp", topic: "team.test", message: "broadcast" },
+        body: { source: "agent", source_session: "ses_omp", topic: "team.test", message: "broadcast" },
       },
       { path: "/v1/sessions", body: undefined },
     ]);
+  });
+
+  test("surfaces a missing target session as an envoy_send tool error", async () => {
+    delete process.env.ENVOY_REGISTER_SESSION;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: "no live session ses_missing" }), { status: 404 });
+    const { default: envoyExtension } = await import("./envoy.ts?missing-target-error");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const send = fixture.tools.find((tool) => tool.name === "envoy_send");
+    if (send === undefined) throw new Error("envoy_send was not registered");
+
+    const result = await send.execute("", { session_id: "ses_missing", message: "hello" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("no live session ses_missing");
   });
 
   test("auto-subscribes the session to the dispatch thread topic on a successful dispatch tool result", async () => {
@@ -747,10 +770,48 @@ describe("envoy OMP extension", () => {
     expect(decode(content)).toEqual({
       envoy: {
         topic: "notifications.agent.ses_omp",
-        from: "agent",
-        reply_to: "ses_peer",
+        from: "ses_peer",
         reply_with: 'envoy_send(session_id="ses_peer", message="...")',
         summary: "hello from a peer",
+      },
+    });
+  });
+
+  test("renders a human envelope without reply metadata", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?human-rendering");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-human-message",
+        source: "human",
+        source_event_id: "human-message",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "human.agent.message",
+        issued_at: 1,
+        payload_summary: "please review this",
+        trace_id: "trace-human-message",
+      })
+    );
+    await injected.promise;
+
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("human delivery was not injected");
+    expect(decode(content)).toEqual({
+      envoy: {
+        topic: "notifications.agent.ses_omp",
+        from: "human",
+        summary: "please review this",
       },
     });
   });
@@ -791,6 +852,65 @@ describe("envoy OMP extension", () => {
     expect(note.envoy.echo).toContain("(ses_omp)");
     expect(note.envoy.reply_to).toBeUndefined();
     expect(note.envoy.reply_with).toBeUndefined();
+  });
+
+  test("records and skips a dispatch echo for this session", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
+    const fixture = createPi();
+    const delivered = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        delivered.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-dispatch-echo",
+        source: "github",
+        source_event_id: "github-dispatch-echo",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "github.dispatch.echo",
+        issued_at: 1,
+        payload_summary: "Keep the thread open?",
+        payload: JSON.stringify({ dispatch_session: "ses_omp" }),
+        trace_id: "trace-dispatch-echo",
+      })
+    );
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-dispatch-later-copy",
+        source: "github",
+        source_event_id: "github-dispatch-later-copy",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "github.dispatch.echo",
+        issued_at: 1,
+        payload_summary: "Keep the thread open?",
+        payload: JSON.stringify({ dispatch_session: "ses_other" }),
+        trace_id: "trace-dispatch-later-copy",
+      })
+    );
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-after-dispatch-echo",
+        source: "github",
+        source_event_id: "github-after-dispatch-echo",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "github.after-dispatch-echo",
+        issued_at: 1,
+        payload_summary: "new message",
+        trace_id: "trace-after-dispatch-echo",
+      })
+    );
+    await delivered.promise;
+
+    expect(fixture.messages).toHaveLength(1);
+    expect(fixture.messages[0]).toContain("new message");
   });
 
   test("injects malformed envelope JSON as raw text", async () => {

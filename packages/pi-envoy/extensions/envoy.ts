@@ -134,6 +134,7 @@ export default function envoyExtension(pi: PiApi): void {
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
     let content = "";
     let duplicate = false;
+    let dispatchEcho = false;
     try {
       const envelope = EnvelopeSchema.parse(JSON.parse(raw));
       duplicate = dedupeKeys.has(envelope.dedupe_key);
@@ -147,35 +148,44 @@ export default function envoyExtension(pi: PiApi): void {
         if (envelope.payload !== undefined) {
           try {
             message = JSON.parse(envelope.payload);
+            if (
+              typeof message === "object" &&
+              message !== null &&
+              "dispatch_session" in message &&
+              typeof message.dispatch_session === "string"
+            ) {
+              dispatchEcho = message.dispatch_session === sessionID;
+            }
           } catch {
             message = envelope.payload;
           }
         }
-        // One structured TOON note per delivery. The topic only names where
-        // the message was delivered — for an agent message that is the
-        // reader's own inbox topic, never the sender — so the sender is named
-        // explicitly, and a message that looped back to its own sender is
-        // flagged so it cannot pass for a delivery receipt.
-        const echo =
-          envelope.source_session !== undefined && envelope.source_session === sessionID;
-        content = encode({
-          envoy: {
-            topic: envelope.topic,
-            from: envelope.source,
-            ...(echo
-              ? {
-                  echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
-                }
-              : envelope.source_session === undefined
-                ? {}
-                : {
-                    reply_to: envelope.source_session,
-                    reply_with: `envoy_send(session_id="${envelope.source_session}", message="...")`,
-                  }),
-            summary: envelope.payload_summary,
-            ...(message === undefined ? {} : { message }),
-          },
-        });
+        if (!dispatchEcho) {
+          // One structured TOON note per delivery. The topic only names where
+          // the message was delivered — for an agent message that is the
+          // reader's own inbox topic, never the sender — so the sender is named
+          // explicitly, and a message that looped back to its own sender is
+          // flagged so it cannot pass for a delivery receipt.
+          const echo =
+            envelope.source_session !== undefined && envelope.source_session === sessionID;
+          content = encode({
+            envoy: {
+              topic: envelope.topic,
+              from: envelope.source_session ?? envelope.source,
+              ...(echo
+                ? {
+                    echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
+                  }
+                : envelope.source === "agent" && envelope.source_session !== undefined
+                  ? {
+                      reply_with: `envoy_send(session_id="${envelope.source_session}", message="...")`,
+                    }
+                  : {}),
+              summary: envelope.payload_summary,
+              ...(message === undefined ? {} : { message }),
+            },
+          });
+        }
       }
     } catch {
       content = encode({ envoy: { topic: subject, message: raw } });
@@ -183,7 +193,7 @@ export default function envoyExtension(pi: PiApi): void {
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    if (!duplicate) {
+    if (!duplicate && !dispatchEcho) {
       pi.sendMessage(
         { customType: "envoy-message", content, display: true },
         { deliverAs: "steer", triggerTurn: true }

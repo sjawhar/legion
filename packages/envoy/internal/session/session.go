@@ -36,8 +36,6 @@ func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) err
 }
 
 func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
-	text := d.Text(item)
-
 	if d.Sessions == nil {
 		return DeliveryResult{}, fmt.Errorf("no session registry configured")
 	}
@@ -45,6 +43,11 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 	if err != nil {
 		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
+	if isDispatchEcho(item.Payload, interest.SessionID) {
+		return DeliveryResult{Skipped: true}, nil
+	}
+	text := d.Text(item)
+
 	if entryVal.SelfSubscribed && entryVal.Port == 0 {
 		// The session consumes its own NATS subscription; there is nothing to push to.
 		return DeliveryResult{Skipped: true}, nil
@@ -55,17 +58,30 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
 
-func (d Deliverer) Text(item contracts.Envelope) string {
-	header := fmt.Sprintf("[NOTIFICATION from %s]", item.Source)
-	if item.SourceSession != "" {
-		header = fmt.Sprintf("[NOTIFICATION from %s (reply-to: %s)]", item.Source, item.SourceSession)
+func isDispatchEcho(payload string, sessionID string) bool {
+	if payload == "" || sessionID == "" {
+		return false
 	}
+	var body struct {
+		DispatchSession string `json:"dispatch_session"`
+	}
+	return json.Unmarshal([]byte(payload), &body) == nil && body.DispatchSession == sessionID
+}
+
+func (d Deliverer) Text(item contracts.Envelope) string {
+	from := item.Source
+	if item.SourceSession != "" {
+		from = item.SourceSession
+	}
+	header := fmt.Sprintf("[NOTIFICATION from %s]", from)
 	body := item.PayloadSummary
 	if item.Payload != "" {
 		body = item.Payload
 	}
 	text := fmt.Sprintf("%s\n%s\n\nTopic: %s\nEvent ID: %s", header, body, item.Topic, item.EventID)
-	if item.SourceSession != "" {
+	// Only an agent sender has an inbox to reply into; a human sending from
+	// the CLI may still name a source session for attribution.
+	if item.Source == "agent" && item.SourceSession != "" {
 		text += fmt.Sprintf("\nUse envoy_send(session_id=\"%s\", message=\"...\") to reply to this message.", item.SourceSession)
 	}
 	return text

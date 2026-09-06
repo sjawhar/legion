@@ -49,15 +49,19 @@ export type UnsubscribeInput = {
   readonly topics: readonly string[];
 };
 
+export type MessageSource = "agent" | "human";
+
 export type SendInput = {
-  readonly sourceSessionID: string;
+  readonly source?: MessageSource;
+  readonly sourceSessionID?: string;
   readonly targetSessionID: string;
   readonly message: string;
   readonly idempotencyKey?: string;
 };
 
 export type PublishInput = {
-  readonly sourceSessionID: string;
+  readonly source?: MessageSource;
+  readonly sourceSessionID?: string;
   readonly topic: string;
   readonly message: string;
   readonly payload?: string;
@@ -92,6 +96,7 @@ export type EnvoyClient = {
   readonly getInterest: (sessionID: string) => Promise<Interest>;
   readonly send: (input: SendInput) => Promise<Envelope>;
   readonly publish: (input: PublishInput) => Promise<Envelope>;
+  readonly unregisterSession: (sessionID: string) => Promise<void>;
   readonly setRole: (input: SetRoleInput) => Promise<Interest>;
   readonly listSessions: () => Promise<readonly SessionInfo[]>;
 };
@@ -150,7 +155,8 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     send: async (input) =>
       toEnvelope(
         await post("/v1/messages/send", {
-          source_session: input.sourceSessionID,
+          source: input.source ?? "agent",
+          ...(input.sourceSessionID === undefined ? {} : { source_session: input.sourceSessionID }),
           target_session: input.targetSessionID,
           message: input.message,
           ...(input.idempotencyKey === undefined ? {} : { idempotency_key: input.idempotencyKey }),
@@ -159,13 +165,17 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     publish: async (input) =>
       toEnvelope(
         await post("/v1/messages/publish", {
-          source_session: input.sourceSessionID,
+          source: input.source ?? "agent",
+          ...(input.sourceSessionID === undefined ? {} : { source_session: input.sourceSessionID }),
           topic: input.topic,
           message: input.message,
           ...(input.payload === undefined ? {} : { payload: input.payload }),
           ...(input.idempotencyKey === undefined ? {} : { idempotency_key: input.idempotencyKey }),
         })
       ),
+    unregisterSession: async (sessionID) => {
+      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    },
     setRole: async (input) =>
       InterestWireSchema.parse(
         JSON.parse(await post("/v1/roles/set", { session_id: input.sessionID, role: input.role }))
