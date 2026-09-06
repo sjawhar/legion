@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./delivery": {
+      "types": "./src/delivery.ts",
+      "bun": "./src/delivery.ts",
+      "default": "./dist/delivery.js"
+    },
     "./defaults": {
       "types": "./src/defaults.ts",
       "bun": "./src/defaults.ts",
@@ -60,7 +65,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/dispatch-call.ts src/dispatch-client.ts src/dispatch-config.ts src/dispatch-contract.ts src/dispatch-cwd.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-call.ts src/dispatch-client.ts src/dispatch-config.ts src/dispatch-contract.ts src/dispatch-cwd.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"

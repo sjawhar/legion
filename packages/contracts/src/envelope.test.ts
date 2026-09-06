@@ -85,6 +85,12 @@ describe("EnvelopeSchema", () => {
     });
   });
 
+  test("accepts human source", () => {
+    const item = EnvelopeSchema.parse(buildEnvelope({ source: "human" }));
+
+    expect(item.source).toBe("human");
+  });
+
   test("accepts envoy source for delivery exceptions", () => {
     const item = EnvelopeSchema.parse(
       buildEnvelope({

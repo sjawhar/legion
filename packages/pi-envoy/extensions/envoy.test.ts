@@ -89,6 +89,7 @@ const natsState = {
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
+  drainStarted: false,
 };
 
 
@@ -107,6 +108,7 @@ mock.module("nats", () => ({
     return {
       isClosed: () => false,
       drain: async () => {
+        natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
       },
       publish: (subject: string, data?: Uint8Array) => natsState.published.push({ subject, data }),
@@ -193,7 +195,6 @@ afterEach(() => {
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   globalThis.fetch = originalFetch;
-  delete process.env.ENVOY_REGISTER_SESSION;
   delete process.env.DISPATCH_MCP_URL;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
@@ -209,6 +210,7 @@ afterEach(() => {
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
   natsState.drainHangs = false;
+  natsState.drainStarted = false;
 });
 
 function createPi(options: { readonly clipboardError?: Error } = {}) {
@@ -266,6 +268,20 @@ function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
+function responseWithRegistration(
+  input: string | URL | Request,
+  init: RequestInit | undefined,
+  fallback: unknown
+): Response {
+  if (new URL(input.toString()).pathname !== "/v1/interests/subscribe") return response(fallback);
+  const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+    readonly session_id: string;
+    readonly dir: string;
+    readonly topics: readonly string[];
+  };
+  return response({ session_id: body.session_id, machine_id: "test", dir: body.dir, topics: body.topics });
+}
+
 /** Put a `gh` on PATH that mints a known token, so the Bearer header is deterministic. */
 function withFakeGh(): void {
   const dir = mkdtempSync(join(tmpdir(), "fake-gh-"));
@@ -317,6 +333,14 @@ describe("envoy OMP extension", () => {
         const role = typeof body?.role === "string" ? body.role : "";
         return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [`notifications.role.${role}`] });
       }
+      if (url.pathname === "/v1/interests/subscribe") {
+        return response({
+          session_id: "ses_omp",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.agent.ses_omp"],
+        });
+      }
       if (url.pathname === "/v1/sessions") return response([]);
       if (url.pathname === "/v1/interests/ses_omp") return response({ session_id: "ses_omp", machine_id: "test", dir: "/tmp", topics: [] });
       return response({
@@ -355,18 +379,61 @@ describe("envoy OMP extension", () => {
     await fixture.tools.find((tool) => tool.name === "envoy_sessions")?.execute("", {});
 
     expect(requests).toEqual([
+      // session_start registers the direct subject before tool calls.
+      {
+        path: "/v1/interests/subscribe",
+        body: {
+          session_id: "ses_omp",
+          dir: "/tmp/envoy-omp-test",
+          topics: ["notifications.agent.ses_omp"],
+          port: 0,
+          title: "",
+          driving: false,
+          self_subscribed: true,
+        },
+      },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
       { path: "/v1/interests/ses_omp", body: undefined },
       {
         path: "/v1/messages/send",
-        body: { source_session: "ses_omp", target_session: "ses_target", message: "direct" },
+        body: {
+          source: "agent",
+          source_session: "ses_omp",
+          target_session: "ses_target",
+          message: "direct",
+        },
       },
       {
         path: "/v1/messages/publish",
-        body: { source_session: "ses_omp", topic: "team.test", message: "broadcast" },
+        body: { source: "agent", source_session: "ses_omp", topic: "team.test", message: "broadcast" },
       },
       { path: "/v1/sessions", body: undefined },
     ]);
+  });
+
+  test("surfaces a missing target session as an envoy_send tool error", async () => {
+    globalThis.fetch = async (input) => {
+      if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+        return response({
+          session_id: "ses_omp",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.agent.ses_omp"],
+        });
+      }
+      return new Response(JSON.stringify({ error: "no live session ses_missing" }), { status: 404 });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?missing-target-error");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const send = fixture.tools.find((tool) => tool.name === "envoy_send");
+    if (send === undefined) throw new Error("envoy_send was not registered");
+
+    const result = await send.execute("", { session_id: "ses_missing", message: "hello" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("no live session ses_missing");
   });
 
   test("auto-subscribes the session to the dispatch thread topic on a successful dispatch tool result", async () => {
@@ -376,7 +443,7 @@ describe("envoy OMP extension", () => {
       if (url.pathname === "/v1/interests/subscribe" && init?.body !== undefined) {
         interestRegistrations.push(JSON.parse(String(init.body)));
       }
-      return response({});
+      return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe");
     const fixture = createPi();
@@ -401,7 +468,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("re-subscribes persisted registry interests on resumed session start, skipping role lanes", async () => {
-    globalThis.fetch = async (input) => {
+    globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/v1/interests/ses_omp") {
         return response({
@@ -415,7 +482,7 @@ describe("envoy OMP extension", () => {
           ],
         });
       }
-      return response({});
+      return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?interest-recovery");
     const fixture = createPi();
@@ -431,7 +498,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("ignores failed and non-dispatch tool results", async () => {
-    globalThis.fetch = async () => response({});
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe-negative");
     const fixture = createPi();
 
@@ -577,7 +644,7 @@ describe("envoy OMP extension", () => {
     mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "envoy.json"), JSON.stringify({ dispatch: { enabled: true, bogus: 1 } }));
     process.env.HOME = home;
-    globalThis.fetch = async () => response({});
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-invalid-config");
     const fixture = createPi();
     envoyExtension(fixture.pi);
@@ -747,10 +814,48 @@ describe("envoy OMP extension", () => {
     expect(decode(content)).toEqual({
       envoy: {
         topic: "notifications.agent.ses_omp",
-        from: "agent",
-        reply_to: "ses_peer",
+        from: "ses_peer",
         reply_with: 'envoy_send(session_id="ses_peer", message="...")',
         summary: "hello from a peer",
+      },
+    });
+  });
+
+  test("renders a human envelope without reply metadata", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?human-rendering");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-human-message",
+        source: "human",
+        source_event_id: "human-message",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "human.agent.message",
+        issued_at: 1,
+        payload_summary: "please review this",
+        trace_id: "trace-human-message",
+      })
+    );
+    await injected.promise;
+
+    const content = fixture.messages[0];
+    if (content === undefined) throw new Error("human delivery was not injected");
+    expect(decode(content)).toEqual({
+      envoy: {
+        topic: "notifications.agent.ses_omp",
+        from: "human",
+        summary: "please review this",
       },
     });
   });
@@ -791,6 +896,65 @@ describe("envoy OMP extension", () => {
     expect(note.envoy.echo).toContain("(ses_omp)");
     expect(note.envoy.reply_to).toBeUndefined();
     expect(note.envoy.reply_with).toBeUndefined();
+  });
+
+  test("records and skips a dispatch echo for this session", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
+    const fixture = createPi();
+    const delivered = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        delivered.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const agent = natsState.controls.get("notifications.agent.ses_omp");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-dispatch-echo",
+        source: "github",
+        source_event_id: "github-dispatch-echo",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "github.dispatch.echo",
+        issued_at: 1,
+        payload_summary: "Keep the thread open?",
+        payload: JSON.stringify({ dispatch_session: "ses_omp" }),
+        trace_id: "trace-dispatch-echo",
+      })
+    );
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-dispatch-later-copy",
+        source: "github",
+        source_event_id: "github-dispatch-later-copy",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "github.dispatch.echo",
+        issued_at: 1,
+        payload_summary: "Keep the thread open?",
+        payload: JSON.stringify({ dispatch_session: "ses_other" }),
+        trace_id: "trace-dispatch-later-copy",
+      })
+    );
+    agent.push(
+      JSON.stringify({
+        event_id: "evt-after-dispatch-echo",
+        source: "github",
+        source_event_id: "github-after-dispatch-echo",
+        topic: "notifications.agent.ses_omp",
+        dedupe_key: "github.after-dispatch-echo",
+        issued_at: 1,
+        payload_summary: "new message",
+        trace_id: "trace-after-dispatch-echo",
+      })
+    );
+    await delivered.promise;
+
+    expect(fixture.messages).toHaveLength(1);
+    expect(fixture.messages[0]).toContain("new message");
   });
 
   test("injects malformed envelope JSON as raw text", async () => {
@@ -841,7 +1005,7 @@ describe("envoy OMP extension", () => {
         unregistrations.push(topics);
         return response({});
       }
-      return response({});
+      return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?role-agent-delivery");
     const fixture = createPi();
@@ -899,7 +1063,7 @@ describe("envoy OMP extension", () => {
           topics: [roleTopic],
         });
       }
-      return response({});
+      return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtensionA } = await import("./envoy.ts?role-agent-takeover-a");
     const fixtureA = createPi();
@@ -944,7 +1108,7 @@ describe("envoy OMP extension", () => {
   test("keeps forwarded role delivery live while the listener HTTP API is unavailable", async () => {
     const role = "legion-controller";
     let listenerAvailable = true;
-    globalThis.fetch = async (input) => {
+    globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/v1/roles/set") {
         return response({
@@ -955,7 +1119,7 @@ describe("envoy OMP extension", () => {
         });
       }
       if (!listenerAvailable) throw new Error("listener API unavailable");
-      return response({});
+      return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?role-agent-listener-down");
     const fixture = createPi();
@@ -980,8 +1144,7 @@ describe("envoy OMP extension", () => {
     expect(fixture.messages.some((message) => message.includes("role event while listener is down"))).toBe(true);
   });
 
-  test("keeps a role claimant registered after the session-staleness window when session registration is otherwise disabled", async () => {
-    delete process.env.ENVOY_REGISTER_SESSION;
+  test("a role claim keeps the existing registration fresh", async () => {
     const registrations: {
       readonly session_id: string;
       readonly self_subscribed: boolean;
@@ -1005,11 +1168,10 @@ describe("envoy OMP extension", () => {
           readonly topics: readonly string[];
         };
         registrations.push(body);
-        heartbeatRegistration.resolve();
+        if (registrations.length === 2) heartbeatRegistration.resolve();
         return response({ session_id: body.session_id, machine_id: "test", dir: "/tmp", topics: body.topics });
       }
-      if (url.pathname === "/v1/interests/unsubscribe") return response({});
-      return response({});
+      return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?role-claim-heartbeat");
     const fixture = createPi();
@@ -1021,32 +1183,23 @@ describe("envoy OMP extension", () => {
 
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, context);
-    expect(intervals).toEqual([]);
+    expect(intervals).toHaveLength(1);
+    expect(registrations).toHaveLength(1);
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    if (roleTool === undefined || unsubscribeTool === undefined) throw new Error("role tools were not registered");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
     await roleTool.execute("", { role: "legion-controller" });
 
-    expect(intervals).toHaveLength(1);
-    // This callback represents the heartbeat due after ClaimStaleAfter; a role
-    // claim must keep registration fresh even without ENVOY_REGISTER_SESSION.
     intervals[0]?.();
     await heartbeatRegistration.promise;
-    expect(registrations).toHaveLength(1);
-    expect(registrations[0]).toMatchObject({
+    expect(registrations).toHaveLength(2);
+    expect(registrations[1]).toMatchObject({
       session_id: "ses_role_heartbeat",
       self_subscribed: true,
       topics: ["notifications.agent.ses_role_heartbeat"],
     });
-    await unsubscribeTool.execute("", { topics: ["notifications.role.legion-controller"] });
-    const registrationsAfterRelease = registrations.length;
-    intervals[0]?.();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(registrations).toHaveLength(registrationsAfterRelease);
   });
 
-  test("registers an optional self-subscribed interest on session start", async () => {
+  test("registers a self-subscribed interest on session start", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {
       requests.push({
@@ -1055,7 +1208,6 @@ describe("envoy OMP extension", () => {
       });
       return response({ session_id: "ses_register", machine_id: "test", dir: "/tmp", topics: [] });
     };
-    process.env.ENVOY_REGISTER_SESSION = "1";
     const { default: envoyExtension } = await import("./envoy.ts?register-session");
     const fixture = createPi();
 
@@ -1074,7 +1226,40 @@ describe("envoy OMP extension", () => {
         self_subscribed: true,
       },
     });
-    delete process.env.ENVOY_REGISTER_SESSION;
+  });
+  test("registers every session and starts its heartbeat on session start", async () => {
+    const registrations: unknown[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/interests/subscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+          readonly session_id: string;
+          readonly dir: string;
+          readonly topics: readonly string[];
+        };
+        registrations.push(body);
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: body.dir,
+          topics: body.topics,
+        });
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?always-register");
+    const fixture = createPi();
+    const heartbeats: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_every_session"),
+      setInterval: (callback) => heartbeats.push(callback),
+    };
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    expect(registrations).toHaveLength(1);
+    expect(heartbeats).toHaveLength(1);
   });
 
   test("registers the session title from the host and refreshes it on heartbeat", async () => {
@@ -1088,7 +1273,6 @@ describe("envoy OMP extension", () => {
       }
       return response({ session_id: "ses_titled", machine_id: "test", dir: "/tmp", topics: [] });
     };
-    process.env.ENVOY_REGISTER_SESSION = "1";
     const { default: envoyExtension } = await import("./envoy.ts?register-title");
     const fixture = createPi();
     // Titles are assigned by omp after the first turn, so session_start
@@ -1112,11 +1296,9 @@ describe("envoy OMP extension", () => {
     for (const tick of heartbeats) tick();
     await heartbeatSubscribe.promise;
     expect(subscribeTitles).toEqual(["", "fix envoy ps titles"]);
-    delete process.env.ENVOY_REGISTER_SESSION;
   });
 
   test("keeps registry registration aligned with live subscriptions", async () => {
-    process.env.ENVOY_REGISTER_SESSION = "1";
     const registrations: { readonly topics: readonly string[] }[] = [];
     const unregistrations: (readonly string[])[] = [];
     const registryTopics = new Set<string>();
@@ -1183,7 +1365,6 @@ describe("envoy OMP extension", () => {
   });
 
   test("merges locally live subscriptions into envoy_list before the next heartbeat", async () => {
-    process.env.ENVOY_REGISTER_SESSION = "1";
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === "/v1/interests/subscribe") {
@@ -1319,6 +1500,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("retries NATS in the background when the initial connection fails", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     natsState.failConnects = 1;
     const notifications: string[] = [];
     const intervals: { callback: () => void; intervalMs: number }[] = [];
@@ -1353,7 +1535,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("rebinds the direct subscription after an in-process session switch", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?session-switch");
     const fixture = createPi();
 
@@ -1367,7 +1549,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("tells the agent its identity changed when a branch re-mints the session id", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?branch-identity-notice");
     const fixture = createPi();
 
@@ -1384,7 +1566,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("tells the agent its identity changed when a fork re-mints the session id", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?fork-identity-notice");
     const fixture = createPi();
 
@@ -1399,7 +1581,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("tells the agent its identity changed when a handoff re-mints the session id", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?handoff-identity-notice");
     const fixture = createPi();
 
@@ -1415,7 +1597,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("stays silent about identity when a switch replaces the transcript or keeps the id", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?switch-identity-silent");
     const fixture = createPi();
 
@@ -1432,7 +1614,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("stays silent about identity when the session gains its first id", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?first-identity-silent");
     const fixture = createPi();
 
@@ -1446,7 +1628,6 @@ describe("envoy OMP extension", () => {
   });
 
   test("a network outage during rebind does not swallow the identity notice", async () => {
-    process.env.ENVOY_REGISTER_SESSION = "1";
     let registryDown = false;
     globalThis.fetch = async () => {
       if (registryDown) throw new Error("network unreachable");
@@ -1479,7 +1660,7 @@ describe("envoy OMP extension", () => {
 
   test("an in-process session switch does not resurrect the previous session's topic", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?switch-no-resubscribe");
     const fixture = createPi();
 
@@ -1507,7 +1688,7 @@ describe("envoy OMP extension", () => {
 
   test("envoy_unsubscribe is not undone by the resubscribe path", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?unsubscribe-stays");
     const fixture = createPi();
 
@@ -1586,7 +1767,7 @@ describe("envoy OMP extension", () => {
 
   test("a deliberately closed topic still recovers from a genuine death once it is back", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?marker-is-consumed");
     const fixture = createPi();
 
@@ -1616,7 +1797,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("a failed message injection does not tear down the subscription", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?deliver-throw");
     const fixture = createPi();
     let throwNext = true;
@@ -1647,7 +1828,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");
     const fixture = createPi();
 
@@ -1665,7 +1846,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("acknowledges an agent-subject request after steering injection", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?agent-receipt");
     const fixture = createPi();
     const injected = Promise.withResolvers<void>();
@@ -1690,7 +1871,7 @@ describe("envoy OMP extension", () => {
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?resubscribe");
     const fixture = createPi();
 
@@ -1713,7 +1894,6 @@ describe("envoy OMP extension", () => {
   });
 
   test("a heartbeat tick during a registry outage warns once instead of rejecting unhandled", async () => {
-    process.env.ENVOY_REGISTER_SESSION = "1";
     // The extension captures fetch by value at creation, so the blip must be
     // flipped inside the same function object rather than by reassigning
     // globalThis.fetch afterwards.
@@ -1756,7 +1936,6 @@ describe("envoy OMP extension", () => {
   });
 
   test("a rebind during a network outage notifies instead of failing the handler", async () => {
-    process.env.ENVOY_REGISTER_SESSION = "1";
     let registryDown = false;
     globalThis.fetch = async () => {
       if (registryDown) throw new Error("network unreachable");
@@ -1788,8 +1967,38 @@ describe("envoy OMP extension", () => {
     expect(notifications.some((message) => message.includes("rebind failed"))).toBe(true);
   });
 
+  test("deregisters a live session before draining its NATS connection", async () => {
+    const requests: { readonly method: string; readonly path: string }[] = [];
+    let drainHadStartedAtDeregistration: boolean | undefined;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      requests.push({ method: init?.method ?? "GET", path: url.pathname });
+      if (url.pathname === "/v1/sessions/ses_shutdown") {
+        drainHadStartedAtDeregistration = natsState.drainStarted;
+      }
+      return response({
+        session_id: "ses_shutdown",
+        machine_id: "test",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_shutdown"],
+      });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-deregister");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+
+    expect(drainHadStartedAtDeregistration).toBe(false);
+    expect(requests).toEqual([
+      { method: "POST", path: "/v1/interests/subscribe" },
+      { method: "DELETE", path: "/v1/sessions/ses_shutdown" },
+    ]);
+  });
+
   test("session_shutdown resolves within its budget when drain hangs on a dead connection", async () => {
-    globalThis.fetch = async () => response([]);
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?shutdown-hang");
     const fixture = createPi();
 
@@ -1802,6 +2011,34 @@ describe("envoy OMP extension", () => {
 
     // OMP kills shutdown handlers at 2s; the bounded drain must finish first.
     expect(Date.now() - startedAt).toBeLessThan(1_900);
+  });
+
+  test("starts NATS drain while listener deregistration is still pending", async () => {
+    const deletion = Promise.withResolvers<Response>();
+    const deleteStarted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/interests/subscribe") return responseWithRegistration(input, init, []);
+      if (path === "/v1/sessions/ses_shutdown") {
+        deleteStarted.resolve();
+        return deletion.promise;
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-parallel-drain");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    const shutdown = fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+    if (shutdown === undefined) throw new Error("session_shutdown handler was not registered");
+
+    await deleteStarted.promise;
+    await Promise.resolve();
+    expect(natsState.drainStarted).toBe(true);
+
+    deletion.reject(new Error("listener cleanup failed"));
+    await shutdown;
   });
 
   test("/whoami reads the live session ID when the session was created after session_start", async () => {
@@ -1828,7 +2065,6 @@ describe("envoy OMP extension", () => {
   });
 
   test("the heartbeat heals a stale registration when the session ID drifts", async () => {
-    process.env.ENVOY_REGISTER_SESSION = "1";
     const registered: string[] = [];
     globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
       if (init?.body !== undefined) {
@@ -1849,9 +2085,18 @@ describe("envoy OMP extension", () => {
     };
 
     envoyExtension(fixture.pi);
-    // Fresh TUI: no session yet at session_start; the closure registers "".
+    // A fresh TUI has no direct subject and no registry row until the host
+    // assigns an id, but it still starts the heartbeat that observes that id.
     await fixture.handlers.get("session_start")?.({}, context);
-    expect(intervals.length).toBe(1);
+    expect(registered).toEqual([]);
+    expect(natsState.controls.has("notifications.agent.")).toBe(false);
+    expect(intervals).toHaveLength(1);
+
+    // A tick while the host still has no id registers nothing: the listener
+    // rejects an empty session id, and there is no identity to advertise yet.
+    // The guard returns before any request is issued, so no wait is needed.
+    for (const tick of intervals) tick();
+    expect(registered).toEqual([]);
 
     // The session materializes later; the next heartbeat must rebind the
     // NATS topic and re-register under the live ID instead of heartbeating
@@ -1860,7 +2105,7 @@ describe("envoy OMP extension", () => {
     for (const tick of intervals) tick();
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(registered.at(-1)).toBe("ses_created");
+    expect(registered).toEqual(["ses_created"]);
     expect(natsState.controls.has("notifications.agent.ses_created")).toBe(true);
   });
 });

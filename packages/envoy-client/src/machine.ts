@@ -8,5 +8,6 @@ import { hostname } from "node:os";
  * Every adapter must use this so one host never reports two machine IDs.
  */
 export function machineID(): string {
+  // biome-ignore lint/complexity/useLiteralKeys: ProcessEnv exposes this key through an index signature.
   return process.env["ENVOY_MACHINE_ID"] || hostname();
 }

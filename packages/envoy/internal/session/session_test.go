@@ -233,6 +233,56 @@ func TestDeliver_UsesPort_whenSelfSubscribedSessionAlsoHasOne(t *testing.T) {
 	}
 }
 
+func TestDeliver_SkipsDispatchEcho(t *testing.T) {
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: 1234, Dir: "/test"}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+	deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("dispatch echo should not prompt the target session")
+		return nil, nil
+	})}
+	item := newTestEnvelope("github", "notifications.github.example-org.example-repo.issue.1", "dispatch echo")
+	item.Payload = `{"dispatch_session":"ses_target"}`
+
+	result, err := deliverer.DeliverWithResult(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
+
+	if err != nil {
+		t.Fatalf("deliver dispatch echo: %v", err)
+	}
+	if !result.Skipped {
+		t.Fatal("dispatch echo was not marked skipped")
+	}
+}
+
+func TestDeliver_DeliversNonGitHubDispatchSession(t *testing.T) {
+	var requests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	sessions, deliverer := newKVDeliverer(t)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: mockPort(target.URL), Dir: "/test"}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "message")
+	item.Payload = `{"dispatch_session":"ses_target"}`
+
+	result, err := deliverer.DeliverWithResult(item, store.Interest{SessionID: "ses_target", Dir: "/test"})
+
+	if err != nil {
+		t.Fatalf("deliver non-GitHub dispatch payload: %v", err)
+	}
+	if result.Skipped {
+		t.Fatal("non-GitHub dispatch payload was skipped")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("prompt requests = %d, want 1", got)
+	}
+}
+
 func TestSessionRegistry_PortlessSelfSubscribedClaimPreservesLivePortfulRoute(t *testing.T) {
 	for _, driving := range []bool{false, true} {
 		t.Run(fmt.Sprintf("incumbent driving %t", driving), func(t *testing.T) {
@@ -299,7 +349,9 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	if err := sessions.Put("ses_target", session.SessionEntry{Port: port, Dir: "/test"}); err != nil {
 		t.Fatalf("failed to register session: %v", err)
 	}
-	item := newTestEnvelope("slack", "notifications.slack.T123.C456.mention", "test payload")
+	// An agent-to-agent message: the only kind whose sender has an inbox to
+	// reply into, so the only kind that renders a reply instruction.
+	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test payload")
 	item.SourceSession = "ses_sender_123"
 
 	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
@@ -322,7 +374,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	if text == "" {
 		t.Fatal("notification text is empty")
 	}
-	for _, want := range []string{"slack", "ses_sender_123", "test payload", "notifications.slack.T123.C456.mention"} {
+	for _, want := range []string{"[NOTIFICATION from ses_sender_123]", "test payload", "notifications.agent.ses_target"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("notification text missing %q: %s", want, text)
 		}
@@ -343,7 +395,7 @@ func TestText_WithSourceSession(t *testing.T) {
 		PayloadSummary: "hello world",
 	}
 	got := deliverer.Text(item)
-	want := "[NOTIFICATION from agent (reply-to: ses_abc)]\nhello world\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-1\nUse envoy_send(session_id=\"ses_abc\", message=\"...\") to reply to this message."
+	want := "[NOTIFICATION from ses_abc]\nhello world\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-1\nUse envoy_send(session_id=\"ses_abc\", message=\"...\") to reply to this message."
 	if got != want {
 		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
 	}
@@ -365,6 +417,46 @@ func TestText_WithoutSourceSession(t *testing.T) {
 	}
 	if strings.Contains(got, "envoy_send") {
 		t.Error("Text() should NOT contain reply instruction when SourceSession is empty")
+	}
+}
+
+func TestText_HumanHasNoReplyHint(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-human",
+		Source:         "human",
+		Topic:          "notifications.agent.ses_target",
+		PayloadSummary: "please review this",
+	}
+
+	got := deliverer.Text(item)
+	want := "[NOTIFICATION from human]\nplease review this\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-human"
+	if got != want {
+		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
+	}
+	if strings.Contains(got, "envoy_send") {
+		t.Error("human notification should not contain reply instruction")
+	}
+}
+
+// A human sending from a harness's shell may name a source session for
+// attribution; that is not an inbox, so no reply hint is offered.
+func TestText_HumanWithSourceSessionHasNoReplyHint(t *testing.T) {
+	deliverer := session.Deliverer{}
+	item := contracts.Envelope{
+		EventID:        "evt-human-2",
+		Source:         "human",
+		SourceSession:  "ses_shell",
+		Topic:          "notifications.agent.ses_target",
+		PayloadSummary: "please review this",
+	}
+
+	got := deliverer.Text(item)
+	if !strings.HasPrefix(got, "[NOTIFICATION from ses_shell]\n") {
+		t.Errorf("Text() header = %q, want it to name the source session", got)
+	}
+	if strings.Contains(got, "envoy_send") {
+		t.Errorf("human notification with a source session must not carry a reply instruction: %q", got)
 	}
 }
 

@@ -60,6 +60,11 @@ function readEnvoyFile(filePath: string): EnvoyFileResult {
   return { kind: "valid", settings: parsed.data.dispatch ?? null };
 }
 
+type DispatchEnvironment = {
+  readonly DISPATCH_MCP_URL?: string;
+  readonly HOME?: string;
+} & Record<string, string | undefined>;
+
 export interface DispatchConfigResolution {
   readonly url: string | null;
   /** Set when a config file failed validation and explains why resolution yielded nothing. */
@@ -79,16 +84,16 @@ export interface DispatchConfigResolution {
  * `error` names the invalid file and key when that is the cause.
  */
 export function resolveDispatchConfig(
-  env: Record<string, string | undefined>,
+  env: DispatchEnvironment,
   options: { readonly cwd?: string; readonly home?: string } = {}
 ): DispatchConfigResolution {
-  const explicit = env["DISPATCH_MCP_URL"];
+  const explicit = env.DISPATCH_MCP_URL;
   if (explicit) return { url: explicit, error: null };
 
   // env is the call's one source of truth: a caller that hands us an
   // environment with HOME set is read from there. os.homedir() alone is not a
   // seam — Bun resolves it once at startup and ignores later HOME changes.
-  const home = options.home ?? env["HOME"] ?? homedir();
+  const home = options.home ?? env.HOME ?? homedir();
   const cwd = options.cwd ?? process.cwd();
   const userFile = readEnvoyFile(path.join(home, ".config", "opencode", "envoy.json"));
   const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));

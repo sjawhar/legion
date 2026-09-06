@@ -12,6 +12,7 @@ import {
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
+import { isOwnDispatchEcho, replyWith, senderLabel } from "@legion/envoy-client/delivery";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
@@ -134,6 +135,7 @@ export default function envoyExtension(pi: PiApi): void {
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
     let content = "";
     let duplicate = false;
+    let dispatchEcho = false;
     try {
       const envelope = EnvelopeSchema.parse(JSON.parse(raw));
       duplicate = dedupeKeys.has(envelope.dedupe_key);
@@ -143,6 +145,7 @@ export default function envoyExtension(pi: PiApi): void {
           const oldest = dedupeKeys.values().next();
           if (!oldest.done) dedupeKeys.delete(oldest.value);
         }
+        dispatchEcho = isOwnDispatchEcho(envelope, sessionID);
         let message: unknown;
         if (envelope.payload !== undefined) {
           try {
@@ -151,31 +154,31 @@ export default function envoyExtension(pi: PiApi): void {
             message = envelope.payload;
           }
         }
-        // One structured TOON note per delivery. The topic only names where
-        // the message was delivered — for an agent message that is the
-        // reader's own inbox topic, never the sender — so the sender is named
-        // explicitly, and a message that looped back to its own sender is
-        // flagged so it cannot pass for a delivery receipt.
-        const echo =
-          envelope.source_session !== undefined && envelope.source_session === sessionID;
-        content = encode({
-          envoy: {
-            topic: envelope.topic,
-            from: envelope.source,
-            ...(echo
-              ? {
-                  echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
-                }
-              : envelope.source_session === undefined
-                ? {}
-                : {
-                    reply_to: envelope.source_session,
-                    reply_with: `envoy_send(session_id="${envelope.source_session}", message="...")`,
-                  }),
-            summary: envelope.payload_summary,
-            ...(message === undefined ? {} : { message }),
-          },
-        });
+        if (!dispatchEcho) {
+          const reply = replyWith(envelope);
+          // One structured TOON note per delivery. The topic only names where
+          // the message was delivered — for an agent message that is the
+          // reader's own inbox topic, never the sender — so the sender is named
+          // explicitly, and a message that looped back to its own sender is
+          // flagged so it cannot pass for a delivery receipt.
+          const echo =
+            envelope.source_session !== undefined && envelope.source_session === sessionID;
+          content = encode({
+            envoy: {
+              topic: envelope.topic,
+              from: senderLabel(envelope),
+              ...(echo
+                ? {
+                    echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
+                  }
+                : reply === undefined
+                  ? {}
+                  : { reply_with: reply }),
+              summary: envelope.payload_summary,
+              ...(message === undefined ? {} : { message }),
+            },
+          });
+        }
       }
     } catch {
       content = encode({ envoy: { topic: subject, message: raw } });
@@ -183,7 +186,7 @@ export default function envoyExtension(pi: PiApi): void {
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    if (!duplicate) {
+    if (!duplicate && !dispatchEcho) {
       pi.sendMessage(
         { customType: "envoy-message", content, display: true },
         { deliverAs: "steer", triggerTurn: true }
@@ -294,9 +297,6 @@ export default function envoyExtension(pi: PiApi): void {
     });
   };
 
-  const registrationRequired = (): boolean =>
-    process.env.ENVOY_REGISTER_SESSION === "1" || claimedRoleTopic !== undefined;
-
   const ensureHeartbeat = (context: SessionContext): void => {
     if (heartbeatRegistered) return;
     // Never let a heartbeat tick reject unhandled: OMP treats unhandled
@@ -306,12 +306,13 @@ export default function envoyExtension(pi: PiApi): void {
     let heartbeatOutageNotified = false;
     let healing = false;
     context.setInterval(() => {
-      if (!registrationRequired()) return;
       // Sessions can be created lazily after session_start (a fresh TUI has no
       // session yet), and the ID this closure registered with goes stale. Heal
-      // on drift instead of heartbeating a dead identity forever.
+      // on drift instead of heartbeating a dead identity forever; until the
+      // host mints an id there is nothing to register.
       const liveSessionID = context.sessionManager.getSessionId();
-      const drifted = liveSessionID !== "" && liveSessionID !== sessionID;
+      if (liveSessionID === "") return;
+      const drifted = liveSessionID !== sessionID;
       if (healing) return;
       healing = true;
       void (drifted ? establishSession(context) : registerSession())
@@ -353,6 +354,11 @@ export default function envoyExtension(pi: PiApi): void {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
     activeSessionContext = context;
+    if (sessionID === "") {
+      if (previousTopic !== undefined) closeIntentionally(previousTopic);
+      ensureHeartbeat(context);
+      return;
+    }
     const currentTopic = agentSubject(sessionID);
     if (previousTopic !== undefined && previousTopic !== currentTopic) {
       closeIntentionally(previousTopic);
@@ -364,10 +370,10 @@ export default function envoyExtension(pi: PiApi): void {
     if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
       await recoverRegisteredInterests();
     }
-    if (registrationRequired()) {
-      await registerSession();
-      ensureHeartbeat(context);
-    }
+    // Every session subscribes to its own agent subject, so every session is
+    // registered; envoy_send treats an unregistered id as dead.
+    await registerSession();
+    ensureHeartbeat(context);
   };
 
   const setEnvoyRole = async (role: string): Promise<void> => {
@@ -488,14 +494,18 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    const deadline = Promise.withResolvers<void>();
+    const timer = setTimeout(deadline.resolve, 1_000);
     try {
-      // Bound the drain: on a dead connection it can hang past OMP's 2s
-      // shutdown-handler budget and the flush is best-effort anyway.
-      const drain = connection?.drain();
-      if (drain) await Promise.race([drain, new Promise((resolve) => setTimeout(resolve, 1_000))]);
-    } catch {
-      // A failed drain on shutdown is not actionable.
+      const deregistration =
+        sessionID === "" ? Promise.resolve() : client.unregisterSession(sessionID).catch(() => undefined);
+      const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
+      await Promise.race([
+        Promise.allSettled([deregistration, draining]).then(() => undefined),
+        deadline.promise,
+      ]);
     } finally {
+      clearTimeout(timer);
       connection = undefined;
       activeSessionContext = undefined;
       subscriptions.clear();

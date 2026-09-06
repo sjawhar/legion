@@ -25,9 +25,10 @@ CLI uses Envoy's local Go listener HTTP API for outbound direct messages.
 
 - Load with `claude --plugin-dir packages/claude-envoy-bridge`; no Claude configuration-file
   changes are needed.
-- The monitor subscribes `notifications.agent.<session-id>` directly and never registers with the
-  listener; the MCP server records registry interests for topics the session follows and forwards
-  them onto that agent subject.
+- The monitor subscribes to `notifications.agent.<session-id>` directly, registers that route as
+  self-subscribed with port zero, refreshes it every heartbeat, and deregisters it at shutdown.
+  The MCP server records registry interests for topics the session follows and forwards them onto
+  that agent subject.
 - The monitor uses `CLAUDE_CODE_SESSION_ID` for its direct route. Set `ENVOY_SESSION_ID` only
   to explicitly override that identity for controlled QA; without either identity, the monitor
   exits with an error rather than subscribing to a made-up route.

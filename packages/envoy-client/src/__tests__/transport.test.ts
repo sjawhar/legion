@@ -125,7 +125,36 @@ describe("EnvoyClient", () => {
 
     expect(envelope.topic).toBe("notifications.agent.ses_target");
     expect(await recorded.requests[0]?.json()).toEqual({
+      source: "agent",
       source_session: "ses_sender",
+      target_session: "ses_target",
+      message: "hello",
+    });
+  });
+
+  test("sends a human direct message without a source session", async () => {
+    const recorded = recordFetch([
+      jsonResponse({
+        event_id: "event-human",
+        source: "human",
+        source_event_id: "human.event-1",
+        topic: "notifications.agent.ses_target",
+        dedupe_key: "agent.ses_target.human-event-1",
+        issued_at: 1,
+        payload_summary: "hello",
+        trace_id: "trace-human",
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.send({
+      source: "human",
+      targetSessionID: "ses_target",
+      message: "hello",
+    });
+
+    expect(await recorded.requests[0]?.json()).toEqual({
+      source: "human",
       target_session: "ses_target",
       message: "hello",
     });
@@ -155,11 +184,23 @@ describe("EnvoyClient", () => {
     });
 
     expect(await recorded.requests[0]?.json()).toEqual({
+      source: "agent",
       source_session: "ses_sender",
       topic: "notifications.role.controller",
       message: "broadcast",
       payload: `{"kind":"role-event"}`,
     });
+  });
+
+  test("deletes a session registration", async () => {
+    const recorded = recordFetch([new Response(null, { status: 200 })]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.unregisterSession("ses_closed");
+
+    expect(recorded.requests).toHaveLength(1);
+    expect(recorded.requests[0]?.method).toBe("DELETE");
+    expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions/ses_closed");
   });
 
   test("sets a role and returns the listener interest response", async () => {

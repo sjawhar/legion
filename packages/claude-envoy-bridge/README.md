@@ -6,8 +6,9 @@ integration to deliver Envoy traffic into a live session, including idle session
 ## Architecture
 
 - `.claude-plugin/plugin.json` declares the plugin and its always-on monitor.
-- `bin/envoy-monitor.ts` subscribes directly to `notifications.agent.<session-id>` over NATS.
-- Monitor stdout is rendered by Claude Code as a Monitor event, waking the session for inbound
+- `bin/envoy-monitor.ts` subscribes directly to `notifications.agent.<session-id>` over NATS,
+  registers that self-subscribed route with Envoy, and refreshes the registration every heartbeat.
+  Monitor stdout is rendered by Claude Code as a Monitor event, waking the session for inbound
   Envoy traffic.
 - `bin/envoy-send.ts` sends a direct message through Envoy's local Go listener HTTP API.
 - `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the
@@ -26,9 +27,6 @@ integration to deliver Envoy traffic into a live session, including idle session
   broker address the registry interest is still recorded and the gap is noted once on stderr.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tool itself.
-
-The adapter intentionally does not register a listener with Envoy's session registry. It consumes
-the direct NATS topic itself.
 
 ## Enable
 
@@ -52,7 +50,7 @@ bun packages/claude-envoy-bridge/bin/envoy-send.ts <target-session-id> "message"
 ```
 
 Set `ENVOY_URL` to use an Envoy listener other than `http://127.0.0.1:9020`. Set
-`ENVOY_NATS_URL` to use a NATS server other than `nats://envoy-nats:4222`; `ENVOY_TOPICS` adds
+`ENVOY_NATS_URL` to use a NATS server other than `nats://example-host:4222`; `ENVOY_TOPICS` adds
 comma-separated NATS subscriptions.
 
 ## Local checks

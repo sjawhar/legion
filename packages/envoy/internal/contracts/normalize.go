@@ -6,6 +6,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/dispatch/core"
 )
 
 type GithubEnvelopeInput struct {
@@ -608,6 +610,9 @@ func githubPayload(event string, body map[string]any) string {
 			"body":        nestedString(body, "comment", "body"),
 			"url":         nestedString(body, "comment", "html_url"),
 		}
+		if marker := core.ParseAskMarker(data["body"]); marker != nil && marker.Origin != nil && marker.Origin.SessionID != "" {
+			data["dispatch_session"] = marker.Origin.SessionID
+		}
 	case "pull_request_review_comment":
 		data = map[string]string{
 			"kind":        "comment",
@@ -654,6 +659,9 @@ func githubPayload(event string, body map[string]any) string {
 			"author": nestedString(body, "issue", "user", "login"),
 			"body":   nestedString(body, "issue", "body"),
 			"url":    nestedString(body, "issue", "html_url"),
+		}
+		if marker := core.ParseMetaMarker(data["body"]); marker != nil && marker.Origin != nil && marker.Origin.SessionID != "" {
+			data["dispatch_session"] = marker.Origin.SessionID
 		}
 	case "workflow_run":
 		data = map[string]string{
