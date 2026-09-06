@@ -8,14 +8,19 @@ import {
   postComment,
   searchDispatchThreads,
 } from "../api";
-import { collectAnswers, collectAsks, openAsks } from "../asks";
+import { collectAnswers, collectAsks, openAsks, type ThreadAsk } from "../asks";
 import {
   renderSidebar,
   renderSidebarControls,
   renderThreadList,
   visibleSidebarThreads,
 } from "../components/sidebar";
-import { renderThreadDetail, type ThreadDetailInput } from "../components/thread-detail";
+import {
+  askFormAsks,
+  askFormInput,
+  renderThreadDetail,
+  type ThreadDetailInput,
+} from "../components/thread-detail";
 import { createDashboardController, type DashboardController, renderAppShell } from "../main";
 import type { Comment, Issue, Thread } from "../types";
 
@@ -682,6 +687,66 @@ describe("dashboard read-side rendering", () => {
     expect(after).toMatch(/<form class="ask-form"[^>]*data-ask-id="R\.1"/);
     // Loaded comments are authoritative for the sidebar's "needs you" count.
     expect(controller.sidebarFilters().openAskCounts).toEqual({ "sjawhar/legion#12": 1 });
+  });
+
+  it("keeps a posting ask's form, disabled, and hands it back with the error when the post fails", async () => {
+    const issue: Issue = {
+      repo: "sjawhar/legion",
+      number: 12,
+      title: "Needs answer",
+      body: "<!-- dispatch:thread\nrequestId: R\nurgency: med\nask:\n    - askId: R\n      question: Color?\n      header: Color\n      options:\n        - label: blue\n-->\n\nChoose",
+      state: "OPEN",
+      stateReason: null,
+      updatedAt: now,
+      createdAt: now,
+      authorLogin: "agent",
+    };
+    const api = {
+      searchDispatchThreads: async () => [thread({ number: 12, body: issue.body })],
+      getIssue: async () => issue,
+      getComments: async () => [],
+      postComment: async () => {
+        throw new Error("GitHub 502");
+      },
+      closeIssue: async () => issue,
+      persistAddressed: async () => {},
+    };
+    const controller = createDashboardController({ owners: ["sjawhar"], api });
+    await controller.loadThreads();
+    await controller.selectThread("sjawhar/legion", 12);
+
+    const posting = controller.submitAskAnswer("R", ["blue"]);
+    // While the answer posts, its optimistic comment settles the ask, yet the
+    // form is still wanted — disabled — so the human's choice is not torn down.
+    const during = controller.selectedDetail();
+    if (!during) throw new Error("no detail");
+    expect(during.openAsks).toEqual([]);
+    expect(askFormAsks(during).map((ask) => ask.askId)).toEqual(["R"]);
+    expect(askFormInput(askFormAsks(during)[0] as ThreadAsk, during)).toMatchObject({
+      pending: true,
+      error: undefined,
+    });
+    expect(renderThreadDetail(during)).toMatch(
+      /<form class="ask-form"[^>]*data-ask-id="R"[\s\S]*?<button type="submit" disabled>/
+    );
+
+    await expect(posting).rejects.toThrow("GitHub 502");
+    // The placeholder is gone, the ask is open again, and the same form now
+    // carries the error instead of being re-created blank.
+    expect(controller.state.comments.get("sjawhar/legion#12")).toEqual([]);
+    const after = controller.selectedDetail();
+    if (!after) throw new Error("no detail");
+    expect(after.openAsks.map((ask) => ask.askId)).toEqual(["R"]);
+    expect(askFormAsks(after).map((ask) => ask.askId)).toEqual(["R"]);
+    expect(askFormInput(askFormAsks(after)[0] as ThreadAsk, after)).toMatchObject({
+      pending: false,
+      error: "GitHub 502",
+    });
+    const html = renderThreadDetail(after);
+    expect(html).toContain('<span class="form-error">GitHub 502</span>');
+    expect(html).toMatch(
+      /<form class="ask-form"[^>]*data-ask-id="R"[\s\S]*?<button type="submit" >/
+    );
   });
 
   it("posts urgency marker comments and closes issues optimistically", async () => {

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
-import { findReferences, referenceFromUrl } from "../unfurl";
+import {
+  createReferenceUnfurler,
+  findReferences,
+  parseReferenceKey,
+  referenceFromUrl,
+} from "../unfurl";
 
 describe("findReferences", () => {
   it("resolves bare #N against the thread repo and owner/repo#N against its own", () => {
@@ -60,5 +65,71 @@ describe("referenceFromUrl", () => {
     expect(referenceFromUrl("https://github.com/acme_org/example-repo/issues/1")).toBeNull();
     expect(referenceFromUrl('https://github.com/acme-org/ex"ample/issues/1')).toBeNull();
     expect(referenceFromUrl("https://github.com/acme-org/ex]ample/issues/1")).toBeNull();
+  });
+});
+
+describe("parseReferenceKey", () => {
+  it("reads the owner/repo#N keys the linkifier writes", () => {
+    expect(parseReferenceKey("acme-org/example.repo_1#12")).toEqual({
+      repo: "acme-org/example.repo_1",
+      number: 12,
+    });
+  });
+
+  it("rejects a planted key that would leave the charset or break a selector", () => {
+    expect(parseReferenceKey('X"]#1')).toBeNull();
+    expect(parseReferenceKey("acme-org/example-repo#0")).toBeNull();
+    expect(parseReferenceKey("acme-org/example-repo#12#3")).toBeNull();
+    expect(parseReferenceKey("../admin#1")).toBeNull();
+    expect(parseReferenceKey("#12")).toBeNull();
+  });
+});
+
+describe("createReferenceUnfurler", () => {
+  it("ignores an anchor whose data-gh-ref a commenter planted: no fetch, no throw", async () => {
+    const fetched: string[] = [];
+    const unfurl = createReferenceUnfurler(async (ref) => {
+      fetched.push(`${ref.repo}#${ref.number}`);
+      return "title";
+    });
+    const planted = { dataset: { ghRef: 'X"]#1' } };
+    const root = { querySelectorAll: () => [planted] } as unknown as ParentNode;
+    await unfurl(root);
+    expect(fetched).toEqual([]);
+  });
+
+  it("applies a title once per call however many anchors cite the reference", async () => {
+    // bun has no CSS namespace; the selector builder only needs escape(), so
+    // install one for this test. The cast names the one global it touches.
+    const globals = globalThis as { CSS?: { escape(value: string): string } };
+    const cssBefore = globals.CSS;
+    globals.CSS = {
+      escape: (value: string) => value.replace(/[^A-Za-z0-9_-]/g, (char) => `\\${char}`),
+    };
+    try {
+      const fetched: string[] = [];
+      const unfurl = createReferenceUnfurler(async (ref) => {
+        fetched.push(`${ref.repo}#${ref.number}`);
+        return "Pick a color";
+      });
+      const applied: string[] = [];
+      const ownerDocument = {
+        querySelectorAll: (selector: string) => {
+          applied.push(selector);
+          return [];
+        },
+      };
+      const anchor = () => ({ dataset: { ghRef: "acme-org/example-repo#7" }, ownerDocument });
+      const root = {
+        querySelectorAll: () => [anchor(), anchor(), anchor()],
+      } as unknown as ParentNode;
+      await unfurl(root);
+      expect(fetched).toEqual(["acme-org/example-repo#7"]);
+      expect(applied).toEqual([
+        'a.gh-ref[data-gh-ref="acme-org\\/example-repo\\#7"]:not([data-unfurled])',
+      ]);
+    } finally {
+      globals.CSS = cssBefore;
+    }
   });
 });

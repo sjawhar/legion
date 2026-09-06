@@ -152,6 +152,68 @@ test("an event answering one ask removes only its form; a half-filled sibling ke
   await expect(formB.locator('input[name="custom-enabled"]')).toBeChecked();
 });
 
+test("a failed answer post keeps the half-filled form, shows the error, and lets the retry through", async ({
+  page,
+  dashboard,
+}) => {
+  await page.goto(`${dashboard.url}/${THREAD}`);
+  const form = page.locator('form[data-ask-id="F1"]');
+  await form.locator('input[value="E2E_SUBMITTER"]').check();
+  await form.locator('input[name="custom-enabled"]').check();
+  const custom = form.locator('textarea[name="custom"]');
+  await custom.fill("use the org-level secret");
+
+  dashboard.failNextComment();
+  await form.locator("button[type=submit]").click();
+  await expect(form.locator(".form-error")).toHaveText("GitHub REST request failed: 500");
+  // Same form, same choice and text: nothing was torn down while the post was in flight.
+  await expect(form.locator('input[value="E2E_SUBMITTER"]')).toBeChecked();
+  await expect(form.locator('input[name="custom-enabled"]')).toBeChecked();
+  await expect(custom).toHaveValue("use the org-level secret");
+  await expect(form.locator("button[type=submit]")).toBeEnabled();
+  // The optimistic answer was withdrawn: the question is still waiting.
+  await expect(page.locator("#turn-103 .ask-waiting")).toBeVisible();
+  expect(dashboard.posted).toEqual([]);
+
+  await form.locator("button[type=submit]").click();
+  await expect(form).toHaveCount(0);
+  await expect(page.locator('#turn-103 .ask-history[data-ask-id="F1"] .answer-pill')).toHaveText(
+    "use the org-level secret"
+  );
+  expect(dashboard.posted.at(-1)?.body).toContain('forAsk: "F1"');
+});
+
+test("a gh-ref anchor planted in a comment is left alone: no proxy fetch, no error, real references still unfurl", async ({
+  page,
+  dashboard,
+}) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const fetched: string[] = [];
+  page.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (pathname.startsWith("/api/github/rest/repos/")) fetched.push(decodeURIComponent(pathname));
+  });
+  await page.goto(`${dashboard.url}/${THREAD}`);
+  await expect(page.locator(`#detail-opening a.gh-ref[data-gh-ref="${REPO}#7"]`)).toHaveText(
+    "Pick a color"
+  );
+
+  dashboard.addComment(REPO, 12, {
+    body: `Planted: <a class="gh-ref" data-gh-ref='X"]#1' href="https://example.com/">bait</a> — and a real one, #7.`,
+    author: "sami",
+    createdAt: new Date().toISOString(),
+  });
+  await dashboard.emit(COMMENT_EVENT);
+  const conversation = page.locator("#detail-conversation");
+  await expect(conversation.locator('a[href="https://example.com/"]')).toHaveText("bait");
+  await expect(conversation.locator(`a.gh-ref[data-gh-ref="${REPO}#7"]`)).toHaveText(
+    "Pick a color"
+  );
+  expect(fetched.filter((path) => path.includes('X"]'))).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});
+
 test("a thread closed then reopened by events gets one fresh reply form; the search draft survives", async ({
   page,
   dashboard,

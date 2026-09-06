@@ -53,9 +53,11 @@ jobs:
               - 'packages/contracts/**'
             claude_plugin:
               - 'packages/claude-envoy-bridge/**'
+              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             pi_envoy:
               - 'packages/pi-envoy/**'
+              - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             dispatch:
               - 'packages/dispatch/**'

@@ -14,7 +14,7 @@ import {
   stripMarker,
 } from "../markers";
 import type { Comment, Issue, Origin, Thread, Urgency } from "../types";
-import { askHeader, renderAskForm } from "./ask-form";
+import { type AskFormInput, askHeader, renderAskForm } from "./ask-form";
 import { renderReplyForm } from "./reply-form";
 import { renderUrgencyControls } from "./urgency-controls";
 
@@ -292,22 +292,37 @@ export function renderConversation(input: ThreadDetailInput): string {
   return input.comments.map((comment) => renderComment(comment, input)).join("");
 }
 
-export function renderAskForms(input: ThreadDetailInput): string {
-  if (input.issue.state !== "OPEN") return "";
+/**
+ * The asks with a form in the pane: every open ask, plus the ask whose answer
+ * is still posting. That ask reads as answered — its optimistic comment is on
+ * the thread — but its form stays, disabled, so a failed post gives it back
+ * with the human's choice intact; it goes once the real comment has replaced
+ * the placeholder. List order is the asks' order.
+ */
+export function askFormAsks(input: ThreadDetailInput): ThreadAsk[] {
+  if (input.issue.state !== "OPEN") return [];
+  const pending = (input.writeState ?? EMPTY_WRITE_STATE).askPending;
+  return input.asks.filter((ask) => ask.askId === pending || input.openAsks.includes(ask));
+}
+
+/** One ask's form input: when it was asked, and this ask's slice of the write state. */
+export function askFormInput(ask: ThreadAsk, input: ThreadDetailInput): AskFormInput {
   const writeState = input.writeState ?? EMPTY_WRITE_STATE;
-  return input.openAsks
-    .map((ask) => {
-      const source = ask.source;
-      return renderAskForm({
-        ask,
-        pending: writeState.askPending === ask.askId,
-        error: writeState.askError?.askId === ask.askId ? writeState.askError.message : undefined,
-        askedAt:
-          source.kind === "comment"
-            ? input.comments.find((comment) => comment.id === source.commentId)?.createdAt
-            : undefined,
-      });
-    })
+  const source = ask.source;
+  return {
+    ask,
+    pending: writeState.askPending === ask.askId,
+    error: writeState.askError?.askId === ask.askId ? writeState.askError.message : undefined,
+    askedAt:
+      source.kind === "comment"
+        ? input.comments.find((comment) => comment.id === source.commentId)?.createdAt
+        : undefined,
+  };
+}
+
+export function renderAskForms(input: ThreadDetailInput): string {
+  return askFormAsks(input)
+    .map((ask) => renderAskForm(askFormInput(ask, input)))
     .join("");
 }
 

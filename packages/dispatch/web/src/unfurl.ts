@@ -19,10 +19,14 @@ export interface ReferenceMatch {
 // end at a word boundary; `abc#12` and `word#3` are not references.
 const REFERENCE_RE =
   /(^|[\s([])(?:([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_.-]+)#([1-9]\d*)|#([1-9]\d*))(?![\w#])/g;
-// Owner and repo use GitHub's charsets, so a matched reference is always safe
-// inside the unquoted attribute selector the unfurler builds from it.
 const URL_RE =
   /^https?:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)\/(?:issues|pull)\/([1-9]\d*)(?:[#?].*)?$/;
+// The `data-gh-ref` key an anchor carries. Anchors are not only the ones this
+// module creates: the markdown sanitiser keeps `class` and `data-*`, so a
+// comment body can plant `<a class="gh-ref" data-gh-ref="…">` with any value.
+// Only a key in GitHub's owner/repo#N charset is trusted; anything else is
+// neither fetched through the proxy nor put into a selector.
+const REFERENCE_KEY_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+#[1-9]\d*$/;
 
 export function findReferences(text: string, threadRepo: string): ReferenceMatch[] {
   const matches: ReferenceMatch[] = [];
@@ -47,6 +51,13 @@ export function referenceFromUrl(href: string): GitHubReference | null {
 
 function referenceKey(ref: GitHubReference): string {
   return `${ref.repo}#${ref.number}`;
+}
+
+/** The reference a `data-gh-ref` key names; null for a key outside the charset. */
+export function parseReferenceKey(key: string): GitHubReference | null {
+  if (!REFERENCE_KEY_RE.test(key)) return null;
+  const [repo, number] = key.split("#") as [string, string];
+  return { repo, number: Number(number) };
 }
 
 function referenceAnchor(doc: Document, ref: GitHubReference, text: string): HTMLAnchorElement {
@@ -109,7 +120,8 @@ export function linkifyReferences(root: ParentNode, threadRepo: string): void {
  * per page load; a failed fetch leaves the plain link. Safe to run after every
  * repaint: already-unfurled anchors are skipped, and a resolved title is
  * applied to every anchor currently in the document with that reference, so a
- * region re-rendered while a fetch was in flight still gets its title.
+ * region re-rendered while a fetch was in flight still gets its title. A
+ * reference cited several times in one region is applied once per call.
  */
 export function createReferenceUnfurler(
   fetchTitle: (ref: GitHubReference) => Promise<string | null>
@@ -117,24 +129,26 @@ export function createReferenceUnfurler(
   const titles = new Map<string, Promise<string | null>>();
   return async (root) => {
     const pending: Promise<void>[] = [];
+    const scheduled = new Set<string>();
     for (const anchor of root.querySelectorAll<HTMLAnchorElement>(
       "a.gh-ref:not([data-unfurled])"
     )) {
       const key = anchor.dataset.ghRef;
-      if (!key) continue;
-      const [repo, number] = key.split("#");
-      if (!repo || !number) continue;
+      if (!key || scheduled.has(key)) continue;
+      const ref = parseReferenceKey(key);
+      if (!ref) continue;
+      scheduled.add(key);
       let title = titles.get(key);
       if (!title) {
-        title = fetchTitle({ repo, number: Number(number) });
+        title = fetchTitle(ref);
         titles.set(key, title);
       }
+      const doc = anchor.ownerDocument;
       pending.push(
         title.then((resolved) => {
           if (resolved === null) return;
-          const doc = anchor.ownerDocument;
           for (const target of doc.querySelectorAll<HTMLAnchorElement>(
-            `a.gh-ref[data-gh-ref="${key}"]:not([data-unfurled])`
+            `a.gh-ref[data-gh-ref="${CSS.escape(key)}"]:not([data-unfurled])`
           )) {
             target.textContent = resolved;
             target.dataset.unfurled = "1";

@@ -9,7 +9,7 @@
 // operations on the returned FixtureServer. Plain node:http, because
 // Playwright runs test files in Node workers, not Bun.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -33,6 +33,8 @@ export interface FixtureServer {
   readonly posted: PostedComment[];
   addComment(repo: string, number: number, comment: Omit<FixtureComment, "id">): FixtureComment;
   setState(repo: string, number: number, state: FixtureIssue["state"]): void;
+  /** The next comment POST answers 500, the way GitHub does on a bad day; the one after succeeds. */
+  failNextComment(): void;
   /**
    * Delivers the frame to every connected SSE client, waiting up to five
    * seconds for the first one to connect; rejects when none does.
@@ -125,11 +127,24 @@ function searchNode(issue: FixtureIssue) {
   };
 }
 
+/** The path when it is a regular file; null when it is missing or anything else. */
+function fileIfPresent(candidate: string): string | null {
+  try {
+    return statSync(candidate).isFile() ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 export function startFixtureServer(options: {
   distDir: string;
   issues: FixtureIssue[];
 }): Promise<FixtureServer> {
   const distDir = path.resolve(options.distDir);
+  const indexHtml = path.join(distDir, "index.html");
+  if (fileIfPresent(indexHtml) === null) {
+    throw new Error(`${indexHtml} is missing: run \`bun run build:web\` before \`bun run e2e\``);
+  }
   const issues = structuredClone(options.issues);
   const posted: PostedComment[] = [];
   const streams = new Set<ServerResponse>();
@@ -137,6 +152,7 @@ export function startFixtureServer(options: {
   // right after the page shows content would otherwise race the connection.
   let subscribed = Promise.withResolvers<void>();
   let addressed: Record<string, string> = {};
+  let failComment = false;
   let nextCommentId = 900;
 
   function find(repo: string, number: number): FixtureIssue {
@@ -177,10 +193,7 @@ export function startFixtureServer(options: {
   function serveStatic(pathname: string, response: ServerResponse): void {
     const requested = path.resolve(distDir, `.${pathname}`);
     const inDist = requested.startsWith(`${distDir}${path.sep}`);
-    const target =
-      inDist && existsSync(requested) && statSync(requested).isFile()
-        ? requested
-        : path.join(distDir, "index.html");
+    const target = (inDist ? fileIfPresent(requested) : null) ?? indexHtml;
     response.writeHead(200, {
       "content-type": CONTENT_TYPES[path.extname(target)] ?? "application/octet-stream",
     });
@@ -238,6 +251,10 @@ export function startFixtureServer(options: {
       if (!issue) return sendJson(response, { message: "Not Found" }, 404);
       if (comments && request.method === "POST") {
         const { body } = await readJson<{ body: string }>(request);
+        if (failComment) {
+          failComment = false;
+          return sendJson(response, { message: "fixture: comment rejected" }, 500);
+        }
         posted.push({ repo: issue.repo, number: issue.number, body });
         const created = addComment(issue.repo, issue.number, {
           body,
@@ -301,6 +318,9 @@ export function startFixtureServer(options: {
       posted,
       addComment,
       setState,
+      failNextComment: () => {
+        failComment = true;
+      },
       emit,
       stop: () => {
         const closed = Promise.withResolvers<void>();
