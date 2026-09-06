@@ -11,7 +11,8 @@
 // patterns match it, a failure on one message or one subscription never ends
 // delivery for the rest, and shutdown never hangs on a dead broker.
 
-import { agentSubject } from "@legion/contracts"
+import { agentSubject, EnvelopeSchema } from "@legion/contracts"
+import { isOwnDispatchEcho } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { z } from "zod"
 
@@ -63,6 +64,7 @@ interface Following {
 const DedupeIdentity = z.object({
   dedupe_key: z.string().min(1).optional(),
   event_id: z.string().min(1).optional(),
+  source: EnvelopeSchema.shape.source.optional(),
   payload: z.string().optional(),
 })
 
@@ -83,23 +85,16 @@ function deliveryIdentity(
   const key = identity.data.dedupe_key ?? identity.data.event_id
   if (key === undefined) return undefined
 
-  let dispatchSession: string | undefined
-  if (identity.data.payload !== undefined) {
-    try {
-      const payload: unknown = JSON.parse(identity.data.payload)
-      if (
-        typeof payload === "object" &&
-        payload !== null &&
-        "dispatch_session" in payload &&
-        typeof payload.dispatch_session === "string"
-      ) {
-        dispatchSession = payload.dispatch_session
-      }
-    } catch {
-      // Non-JSON payloads cannot carry a dispatch echo marker.
-    }
+  return {
+    key,
+    dispatchEcho:
+      identity.data.source === undefined
+        ? false
+        : isOwnDispatchEcho(
+            { source: identity.data.source, payload: identity.data.payload },
+            sessionId,
+          ),
   }
-  return { key, dispatchEcho: dispatchSession === sessionId }
 }
 
 /** The seen-set bound pi-envoy uses; the oldest key is evicted first. */

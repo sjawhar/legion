@@ -176,6 +176,7 @@ test("records and skips a dispatch echo for the originating session", async () =
   const forwarder = createThreadForwarder(nats, "ses_claude")
   forwarder.follow(THREAD)
   const echo = JSON.stringify({
+    source: "github",
     dedupe_key: "github.dispatch.1",
     payload_summary: "Keep the conversation open?",
     payload: JSON.stringify({ dispatch_session: "ses_claude" }),
@@ -191,6 +192,23 @@ test("records and skips a dispatch echo for the originating session", async () =
   await settled()
 
   expect(nats.published).toEqual([])
+})
+
+test("forwards a non-GitHub message that names this dispatch session", async () => {
+  const nats = new FakeNats()
+  const forwarder = createThreadForwarder(nats, "ses_claude")
+  forwarder.follow(THREAD)
+  const message = JSON.stringify({
+    dedupe_key: "agent.dispatch.1",
+    source: "agent",
+    payload_summary: "An agent replied.",
+    payload: JSON.stringify({ dispatch_session: "ses_claude" }),
+  })
+
+  nats.emit(COMMENT, message)
+  await settled()
+
+  expect(nats.published.map((entry) => decode(entry.data))).toEqual([message])
 })
 
 test("following the same topic twice opens one subscription", () => {

@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test"
 import { createServer } from "node:net"
+import { agentSubject } from "@legion/contracts"
+import { decode } from "@toon-format/toon"
+import { runEnvoyMonitor } from "../src/envoy-monitor"
+import { FakeNatsServer } from "./fake-nats-server"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -66,29 +70,209 @@ test("writes native delivery frames to Claude Code's Unix socket", async () => {
   )
 })
 
-test("delivers an Envoy envelope's summary rather than Monitor-style telemetry", async () => {
-  // given
-  const module = await import("../src/envoy-monitor")
-  const candidate = Reflect.get(module, "envoyInboundMessage")
-  const envelope = JSON.stringify({
-    source_session: "ses_sender",
-    payload_summary: "Please report the deployment result.",
+test("renders an agent envelope with its sender and reply instruction", async () => {
+  const { envoyInboundMessage } = await import("../src/envoy-monitor")
+  const rendered = envoyInboundMessage(
+    JSON.stringify({
+      source: "agent",
+      source_session: "ses_sender",
+      topic: "notifications.agent.ses_reader",
+      payload_summary: "Please report the deployment result.",
+    }),
+  )
+
+  expect(decode(rendered ?? "")).toEqual({
+    envoy: {
+      topic: "notifications.agent.ses_reader",
+      from: "ses_sender",
+      reply_with: 'envoy_send(session_id="ses_sender", message="...")',
+      summary: "Please report the deployment result.",
+    },
   })
-
-  // when
-  const output = typeof candidate === "function" ? candidate(envelope) : undefined
-
-  // then
-  expect(output).toBe("Please report the deployment result.")
 })
 
-test("skips a dispatch echo for the originating session", async () => {
+test("renders a human envelope without a reply instruction", async () => {
+  const { envoyInboundMessage } = await import("../src/envoy-monitor")
+  const rendered = envoyInboundMessage(
+    JSON.stringify({
+      source: "human",
+      topic: "notifications.agent.ses_reader",
+      payload_summary: "Please report the deployment result.",
+    }),
+  )
+
+  expect(decode(rendered ?? "")).toEqual({
+    envoy: {
+      topic: "notifications.agent.ses_reader",
+      from: "human",
+      summary: "Please report the deployment result.",
+    },
+  })
+})
+
+test("renders a GitHub envelope without a reply instruction", async () => {
+  const { envoyInboundMessage } = await import("../src/envoy-monitor")
+  const rendered = envoyInboundMessage(
+    JSON.stringify({
+      source: "github",
+      topic: "notifications.github.example-org.example-repo.issue.42.comment",
+      payload_summary: "The human answered.",
+    }),
+  )
+
+  expect(decode(rendered ?? "")).toEqual({
+    envoy: {
+      topic: "notifications.github.example-org.example-repo.issue.42.comment",
+      from: "github",
+      summary: "The human answered.",
+    },
+  })
+})
+
+test("skips a GitHub dispatch echo for the originating session", async () => {
   const { envoyInboundMessage } = await import("../src/envoy-monitor")
   const envelope = JSON.stringify({
-    dedupe_key: "github.issue.42",
+    source: "github",
+    topic: "notifications.agent.ses_origin",
     payload_summary: "Please report the deployment result.",
     payload: JSON.stringify({ dispatch_session: "ses_origin" }),
   })
 
   expect(envoyInboundMessage(envelope, "ses_origin")).toBeUndefined()
+})
+
+test("registers, heartbeats, and deregisters the monitor session", async () => {
+  const nats = new FakeNatsServer()
+  const registrations: Record<string, unknown>[] = []
+  const deletions: string[] = []
+  const firstRegistration = Promise.withResolvers<void>()
+  const secondRegistration = Promise.withResolvers<void>()
+  const envoy = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      if (url.pathname === "/v1/interests/subscribe") {
+        // The direct subject must be subscribed on the wire before the
+        // session is advertised; a sender may deliver the moment this returns.
+        expect(nats.subscribed).toContain(agentSubject("ses_monitor"))
+        const registration = (await request.json()) as {
+          readonly session_id: string
+          readonly dir: string
+          readonly topics: string[]
+        }
+        registrations.push(registration)
+        if (registrations.length === 1) firstRegistration.resolve()
+        if (registrations.length === 2) secondRegistration.resolve()
+        return Response.json({
+          session_id: registration.session_id,
+          machine_id: "example-host",
+          dir: registration.dir,
+          topics: registration.topics,
+        })
+      }
+      if (url.pathname === "/v1/sessions/ses_monitor") {
+        deletions.push(url.pathname)
+        return new Response(null, { status: 200 })
+      }
+      return new Response(null, { status: 404 })
+    },
+  })
+  const previous = { ...process.env }
+  let monitor: Promise<void> | undefined
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_monitor"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["ENVOY_NATS_URL"] = nats.url
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.port}`
+  process.env["ENVOY_HEARTBEAT_MS"] = "25"
+  process.env["CLAUDE_CODE_MESSAGING_SOCKET"] = "/tmp/envoy-monitor-test.sock"
+  process.env["CLAUDE_CODE_MESSAGING_TOKEN"] = "test-token"
+  try {
+    monitor = runEnvoyMonitor()
+    // Subscription first, then registration: the handler above asserts the
+    // order on every registration; here we wait for the registration itself.
+    await firstRegistration.promise
+
+    expect(registrations).toHaveLength(1)
+    expect(registrations[0]).toMatchObject({
+      session_id: "ses_monitor",
+      port: 0,
+      self_subscribed: true,
+      topics: [agentSubject("ses_monitor")],
+    })
+
+    await secondRegistration.promise
+    expect(registrations).toHaveLength(2)
+
+    process.emit("SIGTERM")
+    await monitor
+    expect(deletions).toEqual(["/v1/sessions/ses_monitor"])
+  } finally {
+    process.emit("SIGTERM")
+    await monitor?.catch(() => undefined)
+    envoy.stop(true)
+    await nats.stop()
+    for (const key of Object.keys(process.env)) {
+      if (!(key in previous)) delete process.env[key]
+    }
+    Object.assign(process.env, previous)
+  }
+})
+
+test("reports a registry outage once and clears it on the next successful heartbeat", async () => {
+  const nats = new FakeNatsServer()
+  let attempts = 0
+  const fourthAttempt = Promise.withResolvers<void>()
+  const envoy = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      if (url.pathname === "/v1/interests/subscribe") {
+        attempts += 1
+        if (attempts === 4) fourthAttempt.resolve()
+        // Attempts 1-3 fail (one outage); attempt 4 succeeds.
+        if (attempts < 4) return new Response("registry down", { status: 503 })
+        const registration = (await request.json()) as { readonly session_id: string }
+        return Response.json({
+          session_id: registration.session_id,
+          machine_id: "example-host",
+          dir: "/tmp",
+          topics: [],
+        })
+      }
+      return new Response(null, { status: 200 })
+    },
+  })
+  const stderr: string[] = []
+  const write = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  const previous = { ...process.env }
+  let monitor: Promise<void> | undefined
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_outage"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["ENVOY_NATS_URL"] = nats.url
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.port}`
+  process.env["ENVOY_HEARTBEAT_MS"] = "25"
+  process.env["CLAUDE_CODE_MESSAGING_SOCKET"] = "/tmp/envoy-monitor-test.sock"
+  process.env["CLAUDE_CODE_MESSAGING_TOKEN"] = "test-token"
+  try {
+    monitor = runEnvoyMonitor()
+    await fourthAttempt.promise
+    const failures = stderr.filter((line) => line.includes("registry heartbeat failed"))
+    expect(failures).toHaveLength(1)
+    process.emit("SIGTERM")
+    await monitor
+  } finally {
+    process.stderr.write = write
+    process.emit("SIGTERM")
+    await monitor?.catch(() => undefined)
+    envoy.stop(true)
+    await nats.stop()
+    for (const key of Object.keys(process.env)) {
+      if (!(key in previous)) delete process.env[key]
+    }
+    Object.assign(process.env, previous)
+  }
 })
