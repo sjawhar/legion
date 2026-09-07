@@ -4,11 +4,11 @@
 
 **Goal:** Every Envoy notification an agent receives carries a real one-line summary, a structured body once, the sender's identity and time, and the fields agents were fetching from GitHub by hand; subscribe/publish/send fail visibly instead of silently.
 
-**Architecture:** Producers (Go normalizer, listener API, cistore) emit honest envelopes with additive fields; one shared TypeScript renderer (`envoy-client/src/delivery.ts`) formats them for pi-envoy and the Claude bridge, mirrored by the Go `Deliverer.Text`; the listener stamps `sender` from its registry and answers subscribe/publish with warnings and 404s instead of silent success. No new storage, no new credentials, no company-specific identifiers.
+**Architecture:** Producers (Go normalizer, listener API, cistore) emit honest envelopes with additive fields; one shared TypeScript renderer (`envoy-client/src/delivery.ts`) formats them for pi-envoy and the Claude bridge, mirrored by the Go `Deliverer.Text`; the listener stamps `sender` from its registries and answers subscribe/publish with warnings and 404s instead of silent success. No new storage (the repo-seen check reads the existing JetStream stream), no new credentials, no company-specific identifiers.
 
-**Tech Stack:** Go 1.24 (`packages/envoy`), Bun + TypeScript (`packages/contracts`, `packages/envoy-client`, `packages/pi-envoy`, `packages/claude-envoy-bridge`), zod, `@toon-format/toon`, NATS JetStream KV, Biome, `go test`, `bun test`.
+**Tech Stack:** Go 1.26.1 per `packages/envoy/go.mod` (`packages/envoy`), Bun + TypeScript (`packages/contracts`, `packages/envoy-client`, `packages/pi-envoy`, `packages/claude-envoy-bridge`), zod, `@toon-format/toon`, NATS JetStream (stream + existing KV buckets), Biome, `go test`, `bun test`.
 
-**Spec:** `docs/plans/2026-09-07-envoy-signal-quality-design.md` — Phases 1–3 minus `on_behalf_of` (trust semantics, owner decision) and Phase 4 (attachment storage, owner decision). Research inputs: `.superpowers/sdd/envoy-signal-quality/research-slack.md`, `.superpowers/sdd/envoy-signal-quality/research-sweep.md`.
+**Spec:** `docs/plans/2026-09-07-envoy-signal-quality-design.md` — Phases 1–3 minus `on_behalf_of` (trust semantics, owner decision) and Phase 4 (attachment storage, owner decision). Research inputs: `.superpowers/sdd/2026-09-07-envoy-signal-quality-plan/research-slack.md`, `.superpowers/sdd/2026-09-07-envoy-signal-quality-plan/research-sweep.md`, plan review `plan-review.md` in the same directory.
 
 ## Global Constraints
 
@@ -18,7 +18,7 @@
 - **Renderers never emit raw bytes.** A parse failure renders the recognised fields plus `unrecognised: <list>`.
 - **`payload_summary` is prose, ≤ 160 chars, one line, never JSON.** `payload` carries structure.
 - **Bodies in GitHub/Slack payloads are capped at 2048 chars** with `body_truncated: true` and the URL kept.
-- **No silent success.** Subscribe to a never-seen repository → `warnings[]`; publish to an unheld role → 404; every listener 4xx body is `{"error": string, "expected"?: string[]}`.
+- **No silent success.** Subscribe to a repository with no event in the stream → `warnings[]`; publish to an unheld role → 404; every `/v1` 4xx/5xx body is `{"error": string, "expected"?: string[]}` (webhook ingress handlers are out of scope).
 - **No new storage or credentials.** Only the existing NATS KV buckets; no GitHub/Slack API calls from the listener.
 - **Tests:** Go co-located `_test.go`; TS in `src/__tests__/` or beside the file per package convention; table-driven; deterministic. Run only the package you changed: `go test ./internal/<pkg>/...`, `bun test` inside the package. No project-wide lint/test until the coordinator's final gate.
 - **Shell rules (verbatim):** (1) Never run `rm -rf` (or `rm -r`) on a path that contains a variable, `~`, or `$HOME`; `ls` the literal path first and delete that literal path. (2) Environment variables do not persist between your bash calls; set them per command (`env HOME=/tmp/x cmd`), never `export` in one call and rely on it in the next.
@@ -39,15 +39,17 @@
 
 ### Listener HTTP contract (Task 5 implements; Task 6 consumes)
 
-- `POST /v1/messages/send` and `POST /v1/messages/publish` accept optional `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, `expires_at` (ms). Response stays the envelope JSON. For a `notifications.role.<role>` topic the publish response envelope JSON gains a sibling key `"holder": "<session_id>"`; with no holder the response is `404 {"error":"no holder for role <role>"}`.
-- `GET /v1/roles/<role>` → `200 {"role": "<role>", "holder": "<session_id>", "last_seen": <ms>}` or `404 {"error":"no holder for role <role>"}`.
-- `POST /v1/interests/subscribe` response gains optional `"warnings": ["..."]`.
-- `GET /v1/sessions?dir=<substring>&title=<substring>` filters rows; each row gains `"roles": [...]`.
-- Every 4xx: `{"error": "<message>", "expected": ["field", ...]}` (`expected` present when a required field is missing or malformed).
+- `POST /v1/messages/send` and `POST /v1/messages/publish` accept optional `in_reply_to` (string), `supersedes` (string), `urgency` (`low|med|high|blocking`), `expects_reply` (`none|optional|required`), `expires_at` (integer ms). Invalid enum → `400 {"error":"urgency must be one of low, med, high, blocking","expected":["urgency"]}`. Send response: the envelope JSON plus sibling `"recipient": "<full session id>"`. Publish response: the envelope JSON; for a `notifications.role.<role>` topic also sibling `"holder": "<session_id>"` (a holder counts only when its session is live in the session registry); no live holder → `404 {"error":"no holder for role <role>"}`.
+- `GET /v1/roles/<role>` → `200 {"role": "<role>", "holder": "<session_id>", "last_seen": <ms>}` (live holder only) or `404 {"error":"no holder for role <role>"}`.
+- `POST /v1/interests/subscribe` response gains optional `"warnings": ["..."]`. A failed `sessions.Put` for a session that declares a route (`port > 0 || self_subscribed`) → `503 {"error":"session registry unavailable"}`, not success.
+- `POST /v1/interests/unsubscribe`: `400 {"error":"session_id is required","expected":["session_id"]}` when missing; success `200 {"removed": [...topics]}`.
+- `GET /v1/sessions?dir=<substring>&title=<substring>` filters rows (case-sensitive substring); each row gains `"roles": [...]` (role names from the session's `notifications.role.<role>` interests) and `"last_seen": <ms>` (alias of `updated_at`, which stays).
+- Every `/v1` 4xx/5xx and the readiness gate: `{"error": "<message>", "expected"?: ["field", ...]}`, `Content-Type: application/json`. Webhook ingress handlers (`/webhook/*`) are out of this contract.
+- TypeScript client argument names (camelCase) ↔ wire (snake_case): `inReplyTo`↔`in_reply_to`, `supersedes`, `urgency`, `expectsReply`↔`expects_reply`, `expiresAt`↔`expires_at`. Tool arguments use the wire names. Client return types: `send → { envelope: Envelope; recipient: string }`, `publish → { envelope: Envelope; holder?: string }`, parsed with `EnvelopeSchema.extend({ recipient/holder: z.string().optional() })` so the sibling keys survive.
 
 ### Renderer contract (Task 6 implements; Task 7 verifies)
 
-`packages/envoy-client/src/delivery.ts` exports `renderInbound(raw: string, sessionID: string): { skip: boolean; content: string; envelope?: InboundEnvelope }`. `skip` is true for the reader's own dispatch echo. `content` is the TOON block:
+`packages/envoy-client/src/delivery.ts` exports `renderInbound(raw: string, sessionID: string, subject?: string): { skip: boolean; content: string; envelope?: InboundEnvelope }`. `subject` is the NATS subject the frame arrived on (pi-envoy and the Claude forwarder both have it); when `raw` is not JSON the output is `envoy: { topic: <subject ?? "unknown">, unrecognised: "payload was not JSON" }`. `skip` is true for the reader's own dispatch echo. `content` is the TOON block:
 
 ```
 envoy:
@@ -99,7 +101,7 @@ Acceptance status per row is recorded by the coordinator as `RAN`, `WAIVED-BY-SA
 - Test: `packages/contracts/src/envelope.test.ts`, `packages/envoy/internal/contracts/generated_test.go` (create if absent)
 
 **Interfaces:**
-- Produces: `EnvelopeSchema` with the six fields in "Shared contracts"; Go `contracts.Envelope` gains `Sender *EnvelopeSender`, `InReplyTo`, `Supersedes`, `Urgency`, `ExpectsReply` (all `omitempty`); Go `type EnvelopeSender struct { SessionID string \`json:"session_id"\`; Machine string \`json:"machine,omitempty"\`; Cwd string \`json:"cwd,omitempty"\`; Title string \`json:"title,omitempty"\`; Roles []string \`json:"roles,omitempty"\` }`.
+- Produces: `EnvelopeSchema` with the six fields in "Shared contracts"; Go `contracts.Envelope` gains `Sender *EnvelopeSender`, `InReplyTo`, `Supersedes`, `Urgency`, `ExpectsReply` (all `omitempty`); Go `type EnvelopeSender struct { SessionID string \`json:"session_id"\`; Machine string \`json:"machine,omitempty"\`; Cwd string \`json:"cwd,omitempty"\`; Title string \`json:"title,omitempty"\`; Roles []string \`json:"roles,omitempty"\` }`. The generator (`gen-go.ts:82-86`) currently rejects `array` and `object` envelope properties and its only nested renderer (`renderQuestionStruct`) rejects scalar arrays; this task extends it to emit an optional nested struct for an `object` property and `[]string` for an array of strings.
 - `source` stays an enum in the schema (wire validation on ingress); tolerance is the renderer's job (Task 6).
 
 - [ ] **Step 1: Failing TS test** — in `envelope.test.ts` add a case that parses an envelope carrying all six fields and one that rejects `urgency: "urgent"`. Run `cd packages/contracts && bun test src/envelope.test.ts`; expect the first to fail (unknown key stripped → assertion on `.sender` fails).
@@ -119,7 +121,7 @@ urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
 expects_reply: z.enum(["none", "optional", "required"]).optional(),
 ```
 
-- [ ] **Step 3: Regenerate Go** — `bun packages/contracts/scripts/gen-go.ts`; run it twice and confirm the second run produces no diff (`jj diff --stat` unchanged). If the generator cannot emit the nested `sender` struct, extend `gen-go.ts` following the existing `renderQuestionStruct` pattern for nested objects; do not hand-edit `generated.go`.
+- [ ] **Step 3: Extend the generator, then regenerate** — in `gen-go.ts` add rendering for envelope properties of `type: object` (a named struct `Envelope<PascalCase(prop)>`, pointer field with `omitempty`) and `type: array` with `items.type: string` (`[]string`, `omitempty`). Run `bun packages/contracts/scripts/gen-go.ts` twice; the second run must produce no diff (`jj diff --stat` unchanged). Add a generator test that asserts the emitted `EnvelopeSender` declaration text and the `roles` JSON round trip. Never hand-edit `generated.go`.
 - [ ] **Step 4: Go round-trip test** — `generated_test.go`: marshal an `Envelope` with every new field set, unmarshal, compare; marshal one with none set and assert none of the new JSON keys appear (omitempty).
 - [ ] **Step 5: Run** — `cd packages/contracts && bun test && bunx tsc --noEmit`; `cd packages/envoy && go test ./internal/contracts/...`.
 - [ ] **Step 6: Commit** — `feat(contracts): additive envelope fields — sender, in_reply_to, supersedes, urgency, expects_reply`.
@@ -150,7 +152,9 @@ expects_reply: z.enum(["none", "optional", "required"]).optional(),
 | `push` | `push to <ref_name>: <first(head_commit.message, 70)> (<after7>) by <pusher>` |
 | `workflow_run` | `workflow <name> <head_branch> run <run_id> <status>/<conclusion>` (`/<conclusion>` omitted when empty) |
 
-**Payload fields added:** `push`: `after`, `before`, `pusher` (`pusher.name`), `head_subject`, `commit_count` (len of `commits`), `compare_url`. `pull_request`: `head_sha`, `head_ref`, `base_ref`, `merged` (`"true"`/`"false"`), `merge_commit_sha`, `merged_by` (`pull_request.merged_by.login`). `workflow_run`: `run_id`, `run_attempt`, `head_sha`, `head_branch` (rename of `branch`; keep `branch` too for one release — no: rename outright, nothing consumes it except renderers which are generic), `pr_numbers` (comma-joined from `workflow_run.pull_requests[].number`), `run_started_at`, `updated_at`. `pull_request_review_comment`: `path`, `line` (`comment.line`, else `original_line`). All events: `body` capped by `capBody(s) → (string, truncated bool)` at 2048 runes; when truncated add `body_truncated: "true"`. `issue_comment`/`pull_request_review_comment` with `action == "edited"`: omit `body`, set `body_changed: "true"`.
+Every summary passes through one final `capSummary(s) string` (rune-safe, 160 max, `…` suffix) so unbounded owner/repo/workflow/branch/actor/path segments cannot exceed the limit.
+
+**Payload fields added:** `push`: `after`, `before`, `pusher` (`pusher.name`), `head_subject`, `commit_count` (len of `commits`), `compare_url`. `pull_request`: `head_sha`, `head_ref`, `base_ref`, `merged` (`"true"`/`"false"`), `merge_commit_sha`, `merged_by` (`pull_request.merged_by.login`). `workflow_run`: `run_id`, `run_attempt`, `head_sha`, `head_branch` (added beside the existing `branch`, same value), `pr_numbers` (comma-joined from `workflow_run.pull_requests[].number`), `run_started_at`, `updated_at`. `pull_request_review_comment`: `path`, `line` (`comment.line`, else `original_line`). All events: `body` capped by `capBody(s) → (string, truncated bool)` at 2048 runes; when truncated add `body_truncated: "true"`. `issue_comment`/`pull_request_review_comment` with `action == "edited"`: omit `body`, set `body_changed: "true"`.
 
 **Additive topics** (append to `GithubEnvelopes` following the mention fan-out: most specific copy FIRST, same dedupe key):
 - `pull_request` `closed` + `merged` → copy on `GithubSubject(owner, repo, "pr."+num+".merged")`; `closed` + not merged → `"pr."+num+".closed"`.
@@ -163,9 +167,11 @@ expects_reply: z.enum(["none", "optional", "required"]).optional(),
 - `payload` JSON (strings; omit empty): `kind`, `event_type`, `subtype`, `team_id`, `channel_id`, `channel_type`, `user_id`, `bot_id`, `bot_name`, `ts`, `event_ts`, `thread_ts`, `root_ts`, `text` (capped 2048, `body_truncated: "true"` when cut), `edited_by`, `deleted_ts`, `file_count`, `files` (comma-joined `name|filetype` pairs, ≤ 10), `attachment_count`.
 - Slack test fixtures use `T01234567` / `C01234567` / `U01234567` / `B01234567` (replace the realistic-looking ids in `normalize_test.go` and `webhook/slack_test.go`).
 
-**Ghost Wispr** (F9): same split. `payload_summary`: `ghostwispr <event_type> for session <session_id>` + `: <first(title, 80)>` when a title exists; `payload` carries every field the webhook body already has (`session_id`, `event_type`, `title`, `duration`, `created_at`, and for `summary_ready`: `status`, `summary` capped 2048, `summary_preset`, `timestamp`, `version`).
+**Ghost Wispr** (F9): same split. `payload_summary`: `ghostwispr <event_type> for session <session_id>` + `: <first(title, 80)>` when a title exists. `payload` keys (strings, omit empty): `event_type`, `session_id`, `title`, `duration`, `created_at`; for `summary_ready` additionally `status`, `summary` (capped 2048 with `body_truncated`), `summary_preset`, `timestamp`, `version`, `payload_type` (the body's `payload.type`). Tests: `TestGhostWisprSummary` and `TestGhostWisprPayload` for `session_started`, `session_ended`, `summary_ready` (one with a 3000-char summary).
 
-Out of scope here: channel/user display names, permalinks, reaction aggregates (Web API), and any Slack app subscription manifest (F5).
+`workflow_run` payload keeps the existing `branch` key AND adds `head_branch` (equal values) — additive contract; a test asserts both.
+
+Out of scope here: channel/user display names, permalinks, reaction aggregates (Web API), any Slack app subscription manifest (F5), and `packages/envoy/AGENTS.md` (Task 5 owns that file; this task's new topics are listed in Task 5's docs step).
 
 - [ ] **Step 1: Failing tests** — table-driven `TestGithubSummary` (one row per event above, fixtures under `example-org/example-repo`), `TestGithubPayloadFields` (push, pull_request merged, workflow_run with two PRs, edited comment omits body, 3000-char body truncated), `TestGithubEnvelopesMergedTopic` (merged copy first, same dedupe key; closed-unmerged → `.closed`), `TestGithubEnvelopesWorkflowBranchTopic`, plus the Slack equivalents from the report. Run `cd packages/envoy && go test ./internal/contracts/ -run 'TestGithub|TestSlack'`; expect failures.
 - [ ] **Step 2: Implement** — replace `summaryJSON` use in `githubSummary` with the formats above (keep `summaryJSON` for `githubPayload`); add `capBody`; add the fields; add the fan-out copies; Slack per report.
@@ -179,24 +185,24 @@ Out of scope here: channel/user display names, permalinks, reaction aggregates (
 
 **Files:**
 - Modify: `packages/envoy/internal/cistore/cistore.go`, `render.go`, `loop.go`
-- Modify: `packages/envoy/internal/contracts/normalize.go` — ONLY the CI block: `CIObservation` gains `CheckRunID string` (from `check_run.id` via `nestedNumberString`); nothing else in that file.
-- Modify: `packages/envoy/internal/webhook/github.go` — pass `o.CheckRunID` to `Record`; on `pull_request` `opened|synchronize|reopened` call `ci.RecordHead(owner, repo, number, head_sha)`; extend the `CIRecorder` interface accordingly.
-- Test: `cistore_test.go`, `render_test.go`, `loop_test.go`, new `packages/envoy/internal/contracts/ci_observations_test.go` (do not edit `normalize_test.go`), `webhook/github_test.go`.
+- Modify: `packages/envoy/internal/contracts/normalize.go` — ONLY the CI block: `CIObservation` gains `CheckRunID string` (from `check_run.id` via `nestedNumberString`) and `URL string` (from `check_run.html_url`); nothing else in that file.
+- Modify: `packages/envoy/internal/webhook/github.go` — pass `o.CheckRunID`, `o.URL` to `Record`; on `pull_request` `opened|synchronize|reopened` call `ci.RecordHead(owner, repo, number, head_sha)`; `packages/envoy/internal/webhook/webhook.go` — `CIRecorder` interface gains `RecordHead`; `CIRecorderFunc` becomes a two-method adapter struct (`CIRecorderFuncs{Record, RecordHead}`) and every mock in `webhook_test.go` is updated; `packages/envoy/cmd/listener/main.go:363-364` — the construction site of that adapter (this is the ONLY line range in `cmd/listener` this task touches; Task 5 owns the rest of `main.go`).
+- Test: `cistore_test.go`, `render_test.go`, `loop_test.go`, new `packages/envoy/internal/contracts/ci_observations_test.go` (do not edit `normalize_test.go`), `webhook/github_test.go`, `webhook/webhook_test.go`.
 
 **Interfaces:**
-- Produces: `Store.Record(owner, repo, number, sha, checkName, checkRunID, status, conclusion string) error`; `Store.RecordHead(owner, repo, number, sha string) error`; `Store.Head(owner, repo, number string) (string, bool)`; `Check.CheckRunID string`; `Summary.Cancelled StatusGroup`, `Summary.IsHead bool`; new topic `pr.<n>.checks.settled`.
+- Produces: `Store.Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error`; `Store.RecordHead(owner, repo, number, sha string) error`; `Store.Head(owner, repo, number string) (string, bool)`; `Check.CheckRunID string`, `Check.URL string`; `Summary.Cancelled StatusGroup`, `Summary.IsHead bool`, `Summary.FailingChecks []struct{Name, URL string}` (`json:"failing_checks"`); new topic `pr.<n>.checks.settled`.
 
 **Behaviour:**
 - `classify`: `cancelled` → `catCancelled` (new); JSON bucket `"cancelled"`.
 - `Record` ignores an observation whose `CheckRunID` parses to a number lower than the stored `Check.CheckRunID` for the same name (a re-run creates a new, higher check_run id; late events from the previous attempt must not overwrite).
-- Heads live in the same KV bucket under key `head.<owner>.<repo>.<number>` (value: sha string); `watch()` skips keys with the `head.` prefix for the State cache and maintains a `heads map[string]string`.
+- Heads live in the same KV bucket under key `head.<owner>.<repo>.<number>` (value: sha string); `watch()` skips keys with the `head.` prefix for the State cache and maintains a `heads map[string]string`. While in `watch()`: a malformed value logs `WARN` with key and revision and evicts the cached entry (sweep F10; Task 4 does the same for the interest and session watchers).
 - `runSummaryTick`: `RenderSummary` sets `IsHead = (sha == head)`; when a head is known and `!IsHead`, skip the state entirely (no publish, no MarkEmitted). When no head is known (PR opened before this release), treat as head.
-- Settled: after a `ci` summary is published for a head state with `Running.Count == 0 && Queued.Count == 0 && len(Checks) > 0`, publish one envelope to `GithubSubject(owner, repo, "pr."+n+".checks.settled")`, summary `checks settled on <owner>/<repo>#<n> @ <sha7>: <passed> passed, <failed> failed, <cancelled> cancelled, <skipped> skipped` (+ `; failing: a, b` when failed > 0), payload = the same `Summary` JSON with `kind: "checks_settled"`. Emit-once via `State.SettledEmitted bool` set with a CAS helper `MarkSettled(key) (bool, error)` mirroring `MarkEmitted`.
+- Settled: after a `ci` summary is published for a head state with `Running.Count == 0 && Queued.Count == 0 && len(Checks) > 0`, publish one envelope to `GithubSubject(owner, repo, "pr."+n+".checks.settled")`, summary `checks settled on <owner>/<repo>#<n> @ <sha7>: <passed> passed, <failed> failed, <cancelled> cancelled, <skipped> skipped` (+ `; failing: a, b` when failed > 0), payload = the `Summary` JSON with `kind: "checks_settled"` and `failing_checks: [{name, url}]`. Emit-once via `State.SettledEmitted bool` set with a CAS helper `MarkSettled(key) (bool, error)` mirroring `MarkEmitted`.
 
 - [ ] **Step 1: Failing tests** — `render_test.go`: cancelled bucket; `IsHead` true/false. `cistore_test.go` (existing embedded-NATS harness): stale check_run id ignored; `RecordHead`/`Head`. `loop_test.go`: non-head state not published; settled fires exactly once for a head after all checks complete, not again on a no-op tick, and again for a new head sha. `ci_observations_test.go`: `CheckRunID` extracted. `github_test.go`: `pull_request synchronize` calls `RecordHead`. Run `go test ./internal/cistore/... ./internal/contracts/ -run 'CI|Check' ./internal/webhook/...`; expect failures.
 - [ ] **Step 2: Implement** as specified.
 - [ ] **Step 3: Run** the same packages; `gofmt -l` clean.
-- [ ] **Step 4: Docs** — `docs/solutions/envoy/*ci-summary*.md` if it describes buckets/emission; `packages/envoy/AGENTS.md` topic list gains `pr.<n>.checks.settled`.
+- [ ] **Step 4: Docs** — `docs/solutions/envoy/*ci-summary*.md` if it describes buckets/emission. Not `packages/envoy/AGENTS.md` (Task 5 owns it).
 - [ ] **Step 5: Commit** — `feat(envoy): CI summaries track the PR head and latest attempt, bucket cancelled, emit checks.settled once`.
 
 ---
@@ -208,14 +214,14 @@ Out of scope here: channel/user display names, permalinks, reaction aggregates (
 - Test: `packages/envoy/internal/store/kv_test.go` (existing embedded-NATS harness)
 - Docs: `docs/solutions/envoy/` — add `unsubscribe-resurrection.md` (one page: symptom, mechanism, fix) following the existing files' shape.
 
-**Interfaces:** none new; behaviour of `Registry.Remove`, `Registry.SetRole` (or the role-claim path that writes `roleKV` after the interest `Upsert`), and the KV watcher.
+**Interfaces:** none new; behaviour of `Registry.Remove`, `Registry.SetRole`, and the KV watchers in `store/kv.go` and `session/registry.go` (also owned by this task; `cistore` watcher is Task 3's).
 
 **Behaviour** (research-sweep F1, F10, F11):
 - `Registry.Remove(sessionID, topics)` writes through to `r.cache` after the KV mutation succeeds: partial removal → `r.cache[sessionID] = item`; empty `topics` or zero remaining topics → `delete(r.cache, sessionID)` (mirror `SessionRegistry.Delete` / `Put` in `internal/session/registry.go`). Today the next heartbeat `Upsert` merges the stale cached topics back, resurrecting an unsubscribed topic — the mechanism behind "unsubscribed but still receiving" reports.
-- Role claim: write the role KV entry before the interest `Upsert` that adds the `notifications.role.<role>` topic; if the role write fails, return the error without touching the interest, so a session never advertises a role it does not hold.
-- KV watchers (`store/kv.go` interest watcher; also `internal/session/registry.go` and `internal/cistore/cistore.go` watchers — Task 3 owns cistore, so only log there via the same pattern if not already present): a malformed value logs `WARN` with the key and error instead of being dropped silently.
+- Role claim (`SetRole`) is atomic in both directions: read the current holder; CAS-write the role KV to the new session; `Upsert` the interest with the role topic; if the upsert fails, restore the previous role KV value (or delete it when there was none) and return the error. Tests inject failure at each of the two writes and assert both stores end in their prior state.
+- Watchers in `store/kv.go` and `session/registry.go`: a malformed value logs `WARN` with key and revision and evicts the cached entry, so a bad write cannot leave a stale route live; tests prove the route disappears (`Match` no longer returns the session), not only that a log line exists.
 
-- [ ] **Step 1: Failing tests** — `TestRemoveWritesThroughCache`: subscribe `a`,`b`; `Remove(b)`; immediately `Upsert` with `[a]` (simulating the heartbeat); `Get` and `Match` must not contain `b`. `TestRemoveAllClearsCache`. `TestRoleClaimFailsAtomically`: inject a failing role KV; assert the interest has no role topic. `TestWatcherLogsMalformedValue`: put invalid JSON; assert a WARN log line names the key. Run `cd packages/envoy && go test ./internal/store/...`; expect failures.
+- [ ] **Step 1: Failing tests** — `TestRemoveWritesThroughCache`: subscribe `a`,`b`; `Remove(b)`; immediately `Upsert` with `[a]` (simulating the heartbeat); `Get` and `Match` must not contain `b`. `TestRemoveAllClearsCache`. `TestSetRoleRollsBackWhenInterestUpsertFails` and `TestSetRoleLeavesInterestWhenRoleWriteFails`: inject failure at each write; assert both role KV and interests equal their prior state. `TestWatcherEvictsMalformedValue` (interest and session watchers): put invalid JSON; assert a WARN line names key and revision AND `Match`/`Get` no longer return the entry. Run `cd packages/envoy && go test ./internal/store/... ./internal/session/...`; expect failures.
 - [ ] **Step 2: Implement.** — [ ] **Step 3: Run** `go test ./internal/store/...`; `gofmt -l` clean. — [ ] **Step 4: Docs** (the solutions page). — [ ] **Step 5: Commit** — `fix(envoy): unsubscribe writes through the interest cache; role claims are atomic; malformed KV values are logged`.
 
 ---
@@ -223,46 +229,45 @@ Out of scope here: channel/user display names, permalinks, reaction aggregates (
 ### Task 5: Listener API — honest send/publish, sender stamp, role answers, unwired-repo warning, error bodies
 
 **Files:**
-- Modify: `packages/envoy/cmd/listener/api.go`, `packages/envoy/cmd/listener/delivery.go` (repos-seen touch), `packages/envoy/cmd/listener/main.go` (wire the KV bucket), `packages/envoy/internal/session/session.go` (`Deliverer.Text`)
-- Create: `packages/envoy/internal/store/repos_seen.go` (KV `envoy_repos_seen`, `Touch(ownerRepo string) error`, `Seen(ownerRepo string) (bool, error)`)
-- Test: `api_test.go`, `delivery_test.go`, `session_test.go`, `store/repos_seen_test.go`
-- Docs: `packages/envoy/AGENTS.md` API table; `packages/envoy/deploy/README.md` if it lists KV buckets.
+- Modify: `packages/envoy/cmd/listener/api.go`, `packages/envoy/cmd/listener/main.go` (readiness-gate JSON error; NOT lines 363-364, which Task 3 owns), `packages/envoy/internal/session/session.go` (`Deliverer.Text`)
+- Test: `api_test.go`, `session_test.go`
+- Docs: `packages/envoy/AGENTS.md` (this task is the sole owner: API table AND the topic list, which gains `pr.<n>.merged`, `pr.<n>.closed`, `pr.<n>.checks.settled`, `workflow.<file>.<action>.branch.<name>` from Tasks 2–3), `packages/envoy/deploy/README.md` if it lists API routes.
 
 **Depends on:** Task 1 (`generated.go` fields).
 
 **Behaviour:**
 - Send/publish: `payload_summary = firstLine(message, 160)`; `payload = message` when `message != payload_summary`; the request may still supply `payload` on publish, which wins. Pass through `in_reply_to`, `supersedes`, `urgency` (validate enum → 400 with `expected`), `expects_reply` (same), `expires_at`.
-- `sender` stamp: when `source_session` is set and the registry has a row, fill `{session_id, machine, cwd, title, roles}` (roles from the role-claim KV, see `store.Registry.RoleHolder` and `releaseRoleClaims` for where claims live). Never fail the send on a missing row.
-- Role topics on publish: `store.Registry.RoleHolder(role)`; none → 404 `{"error":"no holder for role <role>"}`; else publish and add `"holder"` to the response.
-- `GET /v1/roles/<role>` as contracted.
-- Subscribe: for each topic with prefix `notifications.github.<owner>.<repo>.` where `Seen("<owner>/<repo>")` is false, append `no GitHub event ever received for <owner>/<repo>; is the App installed there?` to `warnings`.
-- `delivery.go`: on every consumed envelope whose topic starts with `notifications.github.`, `Touch(owner/repo)` (parse the two segments after the prefix; ignore errors with a WARN log).
+- `sender` stamp: when `source_session` is set: interest registry row → `machine`, `cwd` (`Dir`), `roles` (role names parsed from topics with the `notifications.role.` prefix); session registry row → `title`. Each lookup that fails simply omits its fields; the send never fails on a missing row. Test: two roles + missing session row.
+- Role topics on publish: holder = `store.Registry.RoleHolder(role)` AND `isSessionLive(sessions, holder)`; otherwise 404 as contracted; on success publish and add `"holder"` to the response.
+- `GET /v1/roles/<role>` as contracted (same liveness rule).
+- Unwired-repo warning on subscribe: for each topic with prefix `notifications.github.<owner>.<repo>.`, query the existing JetStream stream with `js.StreamInfo(streamName, nats.SubjectsFilter("notifications.github.<owner>.<repo>.>"))` and read `State.Subjects`; when empty, append `no GitHub event for <owner>/<repo> in the stream's retention window; is the App installed there?` to `warnings`. No new bucket, no write path. If the stream query errors, log WARN and omit the warning.
 - All `http.Error(... 4xx/5xx)` calls in `api.go` and the readiness gate in `main.go` become `writeJSONError` with `expected` where a field is missing (research-sweep F3 lists every site). `/v1/interests/unsubscribe` validates `session_id` (400 with `expected: ["session_id"]`) and returns JSON `{"removed": [...]}` instead of `ok`.
 - Subscribe: when `body.Port > 0 || body.SelfSubscribed` and `sessions.Put` fails, return 503 JSON `{"error": "session registry unavailable"}` instead of reporting the interest as success (F4).
 - `Deliverer.Text` prints the same fields as the TS renderer (`to`, `from`, `at`, `by`, `urgency`, `expects_reply`, `re`, `supersedes`, reply hints, summary, body once) in the existing bracket-header text style.
 - `GET /v1/sessions`: `dir`/`title` substring filters; `roles` per row.
 
-- [ ] **Step 1: Failing tests** for each bullet in `api_test.go` (httptest, fake registry), `delivery_test.go` (touch on github topic), `session_test.go` (Text shape, body once), `repos_seen_test.go` (embedded NATS as the other store tests do).
-- [ ] **Step 2: Implement.** — [ ] **Step 3: Run** `go test ./cmd/listener/... ./internal/session/... ./internal/store/...`; `gofmt -l` clean. — [ ] **Step 4: Docs.** — [ ] **Step 5: Commit** — `feat(envoy): sender stamp, role 404/holder, unwired-repo warning, first-line summaries, JSON error bodies`.
+- [ ] **Step 1: Failing tests** for each bullet in `api_test.go` (httptest, fake registries, a fake `StreamInfo` seam), `session_test.go` (Text shape, body once).
+- [ ] **Step 2: Implement.** — [ ] **Step 3: Run** `go test ./cmd/listener/... ./internal/session/...`; `gofmt -l` clean. — [ ] **Step 4: Docs.** — [ ] **Step 5: Commit** — `feat(envoy): sender stamp, role 404/holder, unwired-repo warning, first-line summaries, JSON error bodies`.
 
 ---
 
 ### Task 6: Shared TS renderer, client, pi-envoy, Claude bridge
 
 **Files:**
-- Modify: `packages/envoy-client/src/delivery.ts` (becomes the renderer), `transport.ts` (new send/publish args, `getRole`, `listSessions` filters, retry), `tool-contract.ts` (arguments + descriptions: full topic list incl. `pr.<n>.check`, `pr.<n>.checks.settled`, `pr.<n>.merged`, `pr.<n>.closed`, `pr.<n>.review`, `pr.<n>.comment`, `pr.<n>.mention`, `issue.<n>`, `issue.<n>.comment`, `push.branch.<name>`, `workflow.<file>.<action>`, `workflow.<file>.<action>.branch.<name>`, Slack shapes), new operations `envoy_role_get`, `envoy_inbox`
-- Modify: `packages/pi-envoy/extensions/envoy.ts` (call `renderInbound`; ring buffer of 50 for `envoy_inbox`; print subscribe `warnings`; register the two operations), `packages/claude-envoy-bridge/src/envoy-monitor.ts` (call `renderInbound`), `packages/claude-envoy-bridge/src/envoy-mcp-server.ts` (manual `envoy_subscribe` with no NATS forwarder returns an error naming `ENVOY_NATS_URL` instead of recording an undeliverable interest; dispatch auto-subscribe stays best-effort — research-sweep F5)
+- Modify: `packages/envoy-client/src/delivery.ts` (becomes the renderer), `package.json` (add runtime dependency `@toon-format/toon`), `transport.ts` (new send/publish args and result types, `getRole`, `listSessions` filters, retry), `tool-contract.ts` (arguments for the five new fields; descriptions with the complete topic guide: `agent.<session_id>` (subscribe: own inbox), `role.<role>` (publish-to; holders claim via `envoy_role_set`), GitHub `pr.<n>`, `pr.<n>.check`, `pr.<n>.ci`, `pr.<n>.checks.settled`, `pr.<n>.merged`, `pr.<n>.closed`, `pr.<n>.review`, `pr.<n>.comment`, `pr.<n>.mention`, `issue.<n>`, `issue.<n>.comment`, `issue.<n>.mention`, `mention`, `push.branch.<name>`, `push.tag.<name>`, `workflow.<file>.<action>`, `workflow.<file>.<action>.branch.<name>`, Slack `slack.<team>.<channel>.message|mention`, `slack.<team>.<channel>.thread.<ts>.message|mention`, `ghostwispr.<session>.<kind>`, `whatsapp.<phone>.<jid>.<kind>`, `envoy.exceptions.<original-topic>`), new operations `envoy_role_get` (all hosts) and `envoy_inbox` (Pi only)
+- Modify: `packages/pi-envoy/extensions/envoy.ts` (call `renderInbound(raw, sessionID, subject)`; ring buffer of 50 for `envoy_inbox`; print subscribe `warnings`; register both operations), `packages/claude-envoy-bridge/src/envoy-monitor.ts` (call `renderInbound(raw, sessionID, subject)`), `packages/claude-envoy-bridge/src/envoy-mcp-server.ts` (add the `envoy_role_get` dispatcher case; exclude `envoy_inbox` from the Claude tool list; manual `envoy_subscribe` with no NATS forwarder returns an error naming `ENVOY_NATS_URL` instead of recording an undeliverable interest; dispatch auto-subscribe stays best-effort — research-sweep F5)
 - Test: `packages/envoy-client/src/__tests__/delivery.test.ts`, `transport.test.ts`, `tool-contract.test.ts`; `packages/pi-envoy/extensions/envoy.test.ts`; `packages/claude-envoy-bridge/tests/envoy-monitor.test.ts`
 - Docs: `packages/pi-envoy/AGENTS.md`, `packages/pi-envoy/README.md`, `packages/claude-envoy-bridge/README.md`, `packages/envoy-client/README.md` where they describe rendering or tools.
 
 **Depends on:** Task 1 (types). Codes to the Task 5 HTTP contract without waiting for it.
 
 **Behaviour:**
-- `renderInbound` per the Renderer contract, `id` line always present. Parse with a lenient local schema (`source: z.string()`, `.passthrough()`), never `EnvelopeSchema` strict; on total parse failure (not JSON) render `envoy: { topic, unrecognised: "payload was not JSON" }` — never the raw string.
+- `renderInbound` per the Renderer contract, `id` line always present. Parse with a lenient local schema (`source: z.string()`, `.passthrough()`), never `EnvelopeSchema` strict; on non-JSON input render `envoy: { topic: subject ?? "unknown", unrecognised: "payload was not JSON" }` — never the raw string.
 - Foreign-session note: regex `/\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g` over `payload_summary` + `payload`; any match ≠ `source_session` and ≠ `sessionID` → `note`.
 - `message` omitted when `payload` is undefined or equals `payload_summary`.
 - Retry: one retry after 250 ms on 5xx or `fetch` network error, then throw with the server's `error` text (and `expected` when present).
-- `envoy_inbox`: last 50 rendered deliveries `[{event_id, at, from, summary}]` newest first.
+- `envoy_inbox` (Pi only): last 50 rendered deliveries `[{event_id, at, from, summary}]` newest first.
+- Send result renders `sent <event_id> to <recipient>`; publish result to a role renders `published <event_id>; holder <session_id>`.
 - Tool descriptions state the delivery contract in one sentence: at-least-once, possibly out of order across topics; use `id` for dedupe and `at` for freshness (research-sweep F8).
 
 - [ ] **Step 1: Failing tests** — renderer: GitHub comment (summary prose + message once), agent three-paragraph message (`to`, `from`, `at`, no `summary` duplication), unknown source + unknown fields render without raw bytes, foreign-id note, own dispatch echo → `skip`, `reply_role` when `sender.roles` present. Transport: retry once on 503 then success; 400 error surfaces `expected`. pi-envoy: subscribe warning surfaced in tool result; `envoy_inbox` returns the last deliveries. Bridge: uses the shared renderer (same output as pi-envoy for one fixture).
@@ -277,7 +282,7 @@ Out of scope here: channel/user display names, permalinks, reaction aggregates (
 - Create: `packages/envoy/scripts/fixtures/github/*.json` (issue_comment created/edited, pull_request opened/synchronize/closed-merged, check_run ×3 incl. cancelled, workflow_run with `pull_requests`, push) under `example-org/example-repo`
 - Docs: `packages/envoy/README.md` "Local end-to-end" section.
 
-**Driver contract:** `e2e-local.sh` starts `nats-server -js` in Docker on a free port, builds and starts `./cmd/listener` on `${ENVOY_PORT:-19020}` with `GITHUB_WEBHOOK_SECRET=e2e-local`, starts a Bun fake session (HTTP server logging every `prompt_async` body to `out/e2e/<session>.jsonl`), registers it via `/v1/interests/subscribe`, then for each fixture POSTs a signed webhook and, for direct sends, `POST /v1/messages/send`; finally renders each captured envelope with `bun -e 'import {renderInbound} from "@legion/envoy-client/src/delivery"; …'` into `out/e2e/rendered.txt` and prints a table of `topic → summary`. Exit non-zero if any expected topic from the table above is missing or if `checks.settled` appears more than once per sha. Tears down its containers by literal container name.
+**Driver contract:** `e2e-local.sh` (1) starts `nats-server -js` in Docker (`--name envoy-e2e-nats`, host port from `${E2E_NATS_PORT:-14222}`); (2) builds `./cmd/listener` and starts it with exactly: `PORT=${E2E_PORT:-19020} ENVOY_MACHINE_ID=e2e-local NATS_URLS=nats://127.0.0.1:${E2E_NATS_PORT:-14222} ENVOY_WEBHOOKS=github ENVOY_GITHUB_WEBHOOK_SECRET=e2e-local ENVOY_REVIEWER_APP_ID=1` (any further required variable per `internal/config/config.go` and `internal/webhook/config.go` is added with a harmless value and documented in the script header); (3) waits for `GET /healthz` = 200; (4) starts a Bun fake session (HTTP server logging every `prompt_async` body to `out/e2e/session-prompts.jsonl`) and registers it via `/v1/interests/subscribe` with the topics under test; (5) starts a Bun NATS capture subscriber on `notifications.>` writing raw frames to `out/e2e/envelopes.jsonl`; (6) for each fixture POSTs an HMAC-signed webhook (`X-Hub-Signature-256`) and, for direct sends, `POST /v1/messages/send`; (7) renders every captured raw envelope with `renderInbound` into `out/e2e/rendered-ts.txt` (proves the TypeScript renderer) and prints the fake session's received prompt texts into `out/e2e/rendered-go.txt` (proves `Deliverer.Text`); (8) prints a table `topic → summary` and exits non-zero if any expected topic is missing or `checks.settled` appears more than once per sha; (9) stops and removes `envoy-e2e-nats` by literal name.
 
 - [ ] Steps: write the fixtures; write the script; run it against the integrated branch; commit `test(envoy): local end-to-end driver for envelope rendering and CI settlement`. The acceptance agent then runs it and records observed output for every row of the verification plan.
 
@@ -288,4 +293,4 @@ Out of scope here: channel/user display names, permalinks, reaction aggregates (
 - Spec coverage: Phase 1 → Tasks 2, 5, 6; Phase 2 → Tasks 2, 3; Phase 3 minus `on_behalf_of` → Tasks 1, 5, 6; unwired repo, role 404, retry, error bodies → Tasks 5, 6; inbox → Task 6; discoverability → Task 6; Slack/Ghost Wispr → Task 2 (research-slack F1–F3, F6, F7, F9); sweep F1/F10/F11 → Task 4; F2/F3/F4/F6 → Task 5; F5/F7/F9/F8-doc → Task 6.
 - Type consistency: `CheckRunID string` (Task 3) matches `nestedNumberString` output; `EnvelopeSender` field names match the JSON table; `renderInbound` signature identical in Tasks 6 and 7.
 - Not done, with reasons: persistent cross-restart dedupe (sweep F8) needs a new KV bucket — storage decision for the owner; Slack display names/permalinks and GitHub review inline comments need API credentials; `on_behalf_of` and attachments per the spec §9.
-- Ownership check: `normalize.go` is edited by Task 2 (all non-CI functions) and Task 3 (CI block only); `normalize_test.go` by Task 2 only; `store/kv.go` Task 4 only; `store/repos_seen.go` Task 5 only; `api.go`/`delivery.go`/`main.go`/`session.go` Task 5 only; all TS Task 6 only; `generated.go` Task 1 only.
+- Ownership check: `normalize.go` — Task 2 (all non-CI functions) and Task 3 (CI block only); `normalize_test.go` — Task 2 only; `store/kv.go`, `session/registry.go` — Task 4 only; `cistore/*`, `webhook/github.go`, `webhook/webhook.go`, `cmd/listener/main.go:363-364` — Task 3 only; `api.go`, the rest of `main.go`, `session/session.go`, `packages/envoy/AGENTS.md` — Task 5 only; all TS packages — Task 6 only; `contracts/*`, `generated.go` — Task 1 only; `packages/envoy/scripts/*` — Task 7 only.
