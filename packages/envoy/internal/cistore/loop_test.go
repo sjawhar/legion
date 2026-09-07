@@ -230,7 +230,7 @@ func TestSummaryTickPublishesOneChecksEnvelopeWithoutSuites(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "800", "https://example-host/checks/800", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "800", "https://example-host/checks/800", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -273,7 +273,7 @@ func TestSummaryTickDoesNotPublishWhenHeadMovesBeforeClaim(t *testing.T) {
 		t.Fatalf("record initial head: %v", err)
 	}
 	waitHead(t, store, owner, repo, pr, shaA)
-	if err := recordCheck(store, owner, repo, pr, shaA, "build", "800", "https://example.test/800", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, pr, shaA, "build", "800", "https://example.test/800", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, pr, shaA, 1)
@@ -321,7 +321,7 @@ func TestSummaryTickTreatsUnknownHeadAsStateHead(t *testing.T) {
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := recordCheck(store, owner, repo, number, sha, "build", "806", "https://example-host/checks/806", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "806", "https://example-host/checks/806", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -350,7 +350,7 @@ func TestSummaryTickRequiresCompletedSuitesWhenRecorded(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "801", "https://example-host/checks/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "801", "https://example-host/checks/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	if err := recordSuite(store, owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
@@ -420,7 +420,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "802", "https://example-host/checks/802", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "802", "https://example-host/checks/802", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -436,7 +436,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("initial settled state = %+v, want one emitted settlement", initial)
 	}
 
-	if err := recordCheck(store, owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record rerun check: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -660,10 +660,10 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record passing suite: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "failure", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "failure", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record failing check: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "test", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "802", "https://example.test/802", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record passing check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -714,10 +714,10 @@ func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-a", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record suite A: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "test", "100", "https://example.test/100", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "100", "https://example.test/100", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record suite A test: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "lint", "101", "https://example.test/101", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "101", "https://example.test/101", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record suite A lint: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
@@ -737,10 +737,10 @@ func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record suite B: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "test", "200", "https://example.test/200", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "200", "https://example.test/200", "completed", "success", "2026-09-07T03:02:00Z"); err != nil {
 		t.Fatalf("record suite B test: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "lint", "201", "https://example.test/201", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "201", "https://example.test/201", "completed", "success", "2026-09-07T03:03:00Z"); err != nil {
 		t.Fatalf("record suite B lint: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -766,7 +766,7 @@ func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
 	if got := pub.count(); got != 2 {
 		t.Fatalf("queued suite A rerun published %d settlements, want 2", got)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "test", "300", "https://example.test/300", "completed", "failure", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "300", "https://example.test/300", "completed", "failure", "2026-09-07T03:04:00Z"); err != nil {
 		t.Fatalf("complete suite A rerun: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -802,10 +802,10 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-a", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record first suite: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record first test: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "lint", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "802", "https://example.test/802", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record first lint: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
@@ -849,10 +849,10 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 		t.Fatalf("retargeted in-progress suite published %d settlements, want 1", got)
 	}
 
-	if err := recordCheck(store, owner, repo, number, sha, "test", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "901", "https://example.test/901", "completed", "success", "2026-09-07T03:02:00Z"); err != nil {
 		t.Fatalf("complete retargeted test: %v", err)
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "lint", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "902", "https://example.test/902", "completed", "success", "2026-09-07T03:03:00Z"); err != nil {
 		t.Fatalf("complete retargeted lint: %v", err)
 	}
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
@@ -908,7 +908,7 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "901", "https://example.test/901", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record first observation: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -930,7 +930,7 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 		t.Fatalf("delete expired state: %v", err)
 	}
 	waitCacheStateMissing(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "902", "https://example.test/902", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record post-expiration observation: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -998,7 +998,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1206,7 +1206,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "806", "https://example.test/806", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "806", "https://example.test/806", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record initial check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1246,7 +1246,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("summary tick never acquired its settlement claim")
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "build", "807", "https://example.test/807", "completed", "failure", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "807", "https://example.test/807", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record rearming observation: %v", err)
 	}
 	close(releaseClaim)
@@ -1295,7 +1295,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 		t.Fatalf("record old head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, oldSHA)
-	if err := recordCheck(store, owner, repo, number, oldSHA, "build", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, oldSHA, "build", "901", "https://example.test/901", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record old-head check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, oldSHA, 1)
@@ -1352,7 +1352,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 		t.Fatalf("moved-head state retained claim: %+v", stale.Claim)
 	}
 	waitHead(t, store, owner, repo, number, newSHA)
-	if err := recordCheck(store, owner, repo, number, newSHA, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, newSHA, "build", "902", "https://example.test/902", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record new-head check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, newSHA, 1)
@@ -1399,7 +1399,7 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 	waitHead(t, store, owner, repo, number, sha)
 	if err := recordCheck(store,
 		owner, repo, number, sha,
-		"build", "807", "https://example.test/807", "completed", "success", "",
+		"build", "807", "https://example.test/807", "completed", "success", "2026-09-07T03:00:00Z",
 	); err != nil {
 		t.Fatalf("record initial check: %v", err)
 	}
@@ -1426,7 +1426,7 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
 	if err := recordCheck(store,
 		owner, repo, number, sha,
-		"late-check", "808", "https://example.test/808", "completed", "success", "",
+		"late-check", "808", "https://example.test/808", "completed", "success", "2026-09-07T03:01:00Z",
 	); err != nil {
 		t.Fatalf("complete queued check: %v", err)
 	}
@@ -1475,7 +1475,7 @@ func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
 	if pub.count() != 0 {
 		t.Fatalf("in-progress check published %d envelopes", pub.count())
 	}
-	if err := recordCheck(store, owner, repo, number, sha, "build", "810", "https://example.test/810", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "810", "https://example.test/810", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -1501,7 +1501,7 @@ func TestSummaryTickRetriesSettlementAfterPublishFailure(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "811", "https://example.test/811", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "811", "https://example.test/811", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1542,7 +1542,7 @@ func TestSummaryTickReclaimsStaleClaim(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "812", "https://example.test/812", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "812", "https://example.test/812", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1580,7 +1580,7 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := recordCheck(store, owner, repo, number, sha, "build", "813", "https://example.test/813", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "813", "https://example.test/813", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record initial terminal check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1591,7 +1591,7 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 	}
 	first := pub.last()
 
-	if err := recordCheck(store, owner, repo, number, sha, "build", "813", "https://example.test/813-rerendered", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "813", "https://example.test/813-rerendered", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record changed terminal check: %v", err)
 	}
 	runSummaryTick(store, pub, debounce, logging.New("test"))
@@ -1609,7 +1609,7 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 	}
 }
 
-func TestSummaryTickPublishesLegacyResettledWithEmittedMarker(t *testing.T) {
+func TestSummaryTickDoesNotPublishLegacyResettledWithoutCompletionTimestamp(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -1641,14 +1641,11 @@ func TestSummaryTickPublishesLegacyResettledWithEmittedMarker(t *testing.T) {
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 
 	runSummaryTick(store, pub, 0, logging.New("test"))
-	if got := pub.count(); got != 1 {
-		t.Fatalf("legacy resettled state published %d envelopes, want 1", got)
+	if got := pub.count(); got != 0 {
+		t.Fatalf("legacy resettled state without completion timestamp published %d envelopes, want none", got)
 	}
-	var summary Summary
-	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
-		t.Fatalf("decode legacy resettled summary: %v", err)
-	}
-	if summary.SupersededSettlement != "true" {
-		t.Fatalf("legacy resettled summary = %+v, want superseded settlement", summary)
+	state := getState(t, store, owner, repo, number, sha)
+	if state.SettledEmitted || state.Claim != nil {
+		t.Fatalf("legacy resettled state without completion timestamp was marked emitted: %+v", state)
 	}
 }

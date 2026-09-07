@@ -75,6 +75,27 @@ type Check struct {
 	ObservedAt string     `json:"observed_at"`
 }
 
+// UnmarshalJSON maps the retired updated_at field to observed_at when reading
+// records written by deployed listeners. New records retain observed_at only.
+func (check *Check) UnmarshalJSON(data []byte) error {
+	type checkAlias Check
+	*check = Check{}
+	wire := struct {
+		*checkAlias
+		ObservedAt *string `json:"observed_at"`
+		UpdatedAt  string  `json:"updated_at"`
+	}{checkAlias: (*checkAlias)(check)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.ObservedAt != nil {
+		check.ObservedAt = *wire.ObservedAt
+	} else {
+		check.ObservedAt = wire.UpdatedAt
+	}
+	return nil
+}
+
 // Suite is the last-known state of one GitHub check suite for a commit.
 type Suite struct {
 	ID         string `json:"id"`
@@ -825,7 +846,7 @@ func settlementReady(st State) bool {
 			break
 		}
 	}
-	if !hasCheckRunID {
+	if !hasCheckRunID || !hasCompletedTimestamp(st.Checks) {
 		return false
 	}
 	for _, suite := range st.Suites {
@@ -834,6 +855,20 @@ func settlementReady(st State) bool {
 		}
 	}
 	return true
+}
+
+// hasCompletedTimestamp matches renderSummary's completion-time requirement
+// without constructing a payload during each reconciliation pass.
+func hasCompletedTimestamp(checks map[string]Check) bool {
+	for _, check := range checks {
+		if check.Status != "completed" {
+			continue
+		}
+		if _, err := time.Parse(time.RFC3339, check.ObservedAt); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func terminal(st State) bool {

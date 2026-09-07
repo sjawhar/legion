@@ -152,8 +152,10 @@ func TestStateUnmarshalJSONKeepsChecksWithoutRunIDs(t *testing.T) {
 	if len(state.Checks) != 2 {
 		t.Fatalf("legacy checks = %+v, want both checks", state.Checks)
 	}
-	if state.Checks["build"].CheckRunID != 0 || state.Checks["build"].Conclusion != "failure" {
-		t.Fatalf("legacy build = %+v, want retained failed check without an id", state.Checks["build"])
+	if state.Checks["build"].CheckRunID != 0 ||
+		state.Checks["build"].Conclusion != "failure" ||
+		state.Checks["build"].ObservedAt != "2026-09-01T00:00:00Z" {
+		t.Fatalf("legacy build = %+v, want retained failed check without an id and its legacy timestamp", state.Checks["build"])
 	}
 	if state.Generation != 3 || state.EmittedCount != 1 || !state.SettledEmitted || state.SHA == "" {
 		t.Fatalf("other fields lost on decode: %+v", state)
@@ -167,6 +169,30 @@ func TestStateUnmarshalJSONKeepsChecksWithoutRunIDs(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), `"check_run_id":0`) {
 		t.Fatalf("reencoded legacy state wrote a zero check run id: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `"observed_at":"2026-09-01T00:00:00Z"`) ||
+		strings.Contains(string(encoded), `"updated_at"`) {
+		t.Fatalf("legacy timestamp did not reencode as observed_at: %s", encoded)
+	}
+}
+
+func TestStateUnmarshalJSONMapsLegacyCheckUpdatedAtToObservedAt(t *testing.T) {
+	legacy := `{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef1234567890abcdef1234567890abcdef12",` +
+		`"checks":{"build":{"check_run_id":"900","status":"completed","conclusion":"success","updated_at":"2026-09-07T03:00:00Z"},` +
+		`"lint":{"check_run_id":"901","status":"completed","conclusion":"failure","updated_at":"2026-09-07T03:01:00Z"}}}`
+	var state State
+	if err := json.Unmarshal([]byte(legacy), &state); err != nil {
+		t.Fatalf("unmarshal legacy state: %v", err)
+	}
+	if state.Checks["build"].ObservedAt != "2026-09-07T03:00:00Z" ||
+		state.Checks["lint"].ObservedAt != "2026-09-07T03:01:00Z" {
+		t.Fatalf("legacy timestamps were not mapped to observed_at: %+v", state.Checks)
+	}
+	if !settlementReady(state) {
+		t.Fatalf("timestamped legacy terminal state is not ready: %+v", state)
+	}
+	if latest := renderSummary(state).LatestCompletedAt; latest != "2026-09-07T03:01:00Z" {
+		t.Fatalf("latest_completed_at = %q, want most recent legacy completion timestamp", latest)
 	}
 }
 
@@ -686,11 +712,11 @@ func TestClaimSettlementRechecksDurableDebounce(t *testing.T) {
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	debounce := time.Second
-	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record initial terminal check: %v", err)
 	}
 	stale := getState(t, s, owner, repo, pr, sha)
-	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801-rerendered", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801-rerendered", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record changed terminal check: %v", err)
 	}
 	durable := getState(t, s, owner, repo, pr, sha)
@@ -730,7 +756,7 @@ func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	debounce := time.Second
-	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record terminal check: %v", err)
 	}
 	key := Key(owner, repo, pr, sha)
@@ -832,7 +858,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 		pr    = "42"
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
-	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	state := getState(t, s, owner, repo, pr, sha)
