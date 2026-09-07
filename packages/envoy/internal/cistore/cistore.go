@@ -479,7 +479,6 @@ func rearm(st *State) {
 	}
 	st.Generation++
 	st.SettledEmitted = false
-	st.Claim = nil
 }
 
 func observationMayReplace(incomingAt, storedAt, incomingStatus, storedStatus string) bool {
@@ -675,6 +674,24 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 	return state, true, nil
 }
 
+// ClaimStillHeld verifies from durable KV that this generation retains the
+// settlement right immediately before an external publication.
+func (s *Store) ClaimStillHeld(key string, generation uint64) (bool, error) {
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		return false, err
+	}
+	return !state.SettledEmitted &&
+		state.Generation == generation &&
+		state.Claim != nil &&
+		state.Claim.Generation == generation &&
+		state.Claim.Hash == state.Hash(), nil
+}
+
 // ReclaimSettlement releases a claim from a replica that died before publish.
 // The caller determines the stale threshold from its configured debounce.
 func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int64) (bool, error) {
@@ -688,7 +705,7 @@ func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int
 	}
 	if state.Claim == nil ||
 		state.Claim.Generation != generation ||
-		state.Claim.ClaimedAt >= staleBefore {
+		(state.Generation == generation && state.Claim.ClaimedAt >= staleBefore) {
 		return false, nil
 	}
 	state.Claim = nil

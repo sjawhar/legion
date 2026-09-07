@@ -54,10 +54,11 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		}
 		key := Key(cached.Owner, cached.Repo, cached.Number, cached.SHA)
 		if cached.Claim != nil {
-			if cached.Claim.ClaimedAt >= staleBefore {
+			claimGeneration := cached.Claim.Generation
+			if claimGeneration == cached.Generation && cached.Claim.ClaimedAt >= staleBefore {
 				continue
 			}
-			reclaimed, err := store.ReclaimSettlement(key, cached.Generation, staleBefore)
+			reclaimed, err := store.ReclaimSettlement(key, claimGeneration, staleBefore)
 			if err != nil {
 				logger.Warn("checks reclaim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))
 				continue
@@ -106,6 +107,14 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
 				logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
 			}
+			continue
+		}
+		held, err := store.ClaimStillHeld(key, state.Generation)
+		if err != nil {
+			logger.Warn("checks claim verification failed", slog.String("error", err.Error()), slog.String("sha", state.SHA))
+			continue
+		}
+		if !held {
 			continue
 		}
 		if err := pub.Publish(env); err != nil {

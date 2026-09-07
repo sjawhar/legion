@@ -540,6 +540,88 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		t.Fatalf("replica publishes = %d, want 1", got)
 	}
 }
+func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "806", "https://example.test/806", "completed", "success", ""); err != nil {
+		t.Fatalf("record initial check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+
+	key := Key(owner, repo, number, sha)
+	originalKV := store.kv
+	claimUpdated := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var claimGate struct {
+		sync.Mutex
+		blocked bool
+	}
+	store.kv = &interleavingKV{
+		KeyValue: originalKV,
+		afterUpdate: func(updatedKey string, _ []byte, _ uint64) {
+			claimGate.Lock()
+			if updatedKey != key || claimGate.blocked {
+				claimGate.Unlock()
+				return
+			}
+			claimGate.blocked = true
+			close(claimUpdated)
+			claimGate.Unlock()
+			<-releaseClaim
+		},
+	}
+
+	tickDone := make(chan struct{})
+	go func() {
+		defer close(tickDone)
+		runSummaryTick(store, pub, time.Second, logging.New("test"))
+	}()
+	select {
+	case <-claimUpdated:
+	case <-time.After(5 * time.Second):
+		t.Fatal("summary tick never acquired its settlement claim")
+	}
+	if err := store.Record(owner, repo, number, sha, "build", "807", "https://example.test/807", "completed", "failure", ""); err != nil {
+		t.Fatalf("record rearming observation: %v", err)
+	}
+	close(releaseClaim)
+	select {
+	case <-tickDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("summary tick did not resume")
+	}
+	store.kv = originalKV
+
+	if got := pub.count(); got != 0 {
+		t.Fatalf("rearmed claim published %d stale envelopes, want 0", got)
+	}
+	rearmed := getState(t, store, owner, repo, number, sha)
+	if rearmed.Generation != 1 || rearmed.SettledEmitted || rearmed.Claim == nil || rearmed.Claim.Generation != 0 {
+		t.Fatalf("rearmed state = %+v, want generation one with the obsolete claim retained", rearmed)
+	}
+
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("next tick published %d envelopes, want one fresh settlement", got)
+	}
+	if got := pub.last().DedupeKey; !strings.HasSuffix(got, ".g1") {
+		t.Fatalf("fresh settlement dedupe key = %q, want generation one", got)
+	}
+}
 func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
