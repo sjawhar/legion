@@ -55,7 +55,9 @@ way; delivery metadata is authoritative.
 ## Talking to another session
 
 Answer an Envoy message with its `id`; the send result's `recipient` confirms the session Envoy
-targeted. Put the artefact URL in the message itself. FYIs set `expects_reply="none"`; set
+targeted. Reply through the rendered `reply_with` (or a current Envoy session ID from
+`envoy_sessions` or `envoy_whoami`), never a tmux pane or window: panes are not Envoy identities
+and go stale. Put the artefact URL in the message itself. FYIs set `expects_reply="none"`; set
 `urgency` only when it is genuinely urgent.
 
 ```text
@@ -72,6 +74,9 @@ envoy_send(
 Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the turn. The single
 `pr.42.checks` event wakes you when the current head settles; a `pr.42` `closed` event with
 `merged: true` tells you the PR merged. Do not create `gh` pollers.
+Settlement waits for the head to be quiet for a few seconds, every reported check run to finish,
+and every recorded GitHub check suite to be `completed`; until then, a silent subscription is
+normal, not a failure.
 
 If another check run appears after a head settled, Envoy re-arms that settlement and sends a new
 `checks` payload with `superseded_settlement: "true"`. Treat it as the current verdict.
