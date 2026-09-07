@@ -14,6 +14,7 @@ import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-co
 import {
   createEnvoyClient,
   type EnvoyClient,
+  expandSubscriptionTopics,
   type Interest,
   type MessageMetadataInput,
 } from "@legion/envoy-client/transport"
@@ -234,13 +235,19 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
   switch (spec.operation) {
     case EnvoyToolOperation.send: {
       const args = z.object(spec.arguments).parse(input)
-      return client.send({
+      const result = await client.send({
         source: "agent",
         sourceSessionID: sessionId,
         targetSessionID: args.session_id,
         message: args.message,
         ...messageMetadataFor(args),
       })
+      return {
+        message: `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`,
+        event_id: result.envelope.event_id,
+        recipient: result.recipient,
+        confirmed: result.confirmed,
+      }
     }
     case EnvoyToolOperation.publish: {
       const args = z.object(spec.arguments).parse(input)
@@ -258,7 +265,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     }
     case EnvoyToolOperation.unsubscribe: {
       const args = z.object(spec.arguments).parse(input)
-      const topics = args.topics ?? []
+      const topics = expandSubscriptionTopics(args.topics ?? [])
       await client.unsubscribe({ sessionID: sessionId, topics })
       const active = forwarder === undefined ? null : await forwarder
       // An empty list means everything; name what was actually being forwarded.

@@ -67,6 +67,61 @@ describe("EnvoyClient", () => {
     });
   });
 
+  test("expands a concrete trailing wildcard for subscribe and unsubscribe", async () => {
+    const wildcard = "notifications.github.example-org.example-repo.pr.42.>";
+    const base = "notifications.github.example-org.example-repo.pr.42";
+    const recorded = recordFetch([
+      jsonResponse({
+        session_id: "ses_sender",
+        machine_id: "host-a",
+        dir: "/work",
+        topics: [base, wildcard],
+      }),
+      new Response("ok"),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.subscribe({
+      sessionID: "ses_sender",
+      directory: "/work",
+      topics: [wildcard],
+      port: 0,
+      title: "",
+      driving: true,
+    });
+    await client.unsubscribe({ sessionID: "ses_sender", topics: [wildcard] });
+
+    expect(await recorded.requests[0]?.json()).toMatchObject({ topics: [base, wildcard] });
+    expect(await recorded.requests[1]?.json()).toEqual({
+      session_id: "ses_sender",
+      topics: [base, wildcard],
+    });
+  });
+
+  test("does not expand a trailing wildcard whose base contains a wildcard", async () => {
+    const wildcard = "notifications.github.example-org.example-repo.pr.*.>";
+    const recorded = recordFetch([
+      jsonResponse({
+        session_id: "ses_sender",
+        machine_id: "host-a",
+        dir: "/work",
+        topics: [wildcard],
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.subscribe({
+      sessionID: "ses_sender",
+      directory: "/work",
+      topics: [wildcard],
+      port: 0,
+      title: "",
+      driving: true,
+    });
+
+    expect(await recorded.requests[0]?.json()).toMatchObject({ topics: [wildcard] });
+  });
+
   test("posts an unsubscribe request with an empty topic list", async () => {
     const recorded = recordFetch([new Response("ok")]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
@@ -126,11 +181,42 @@ describe("EnvoyClient", () => {
 
     expect(result.envelope.topic).toBe("notifications.agent.ses_target");
     expect(result.recipient).toBe("ses_target");
+    expect(result.confirmed).toBe(true);
+
     expect(await recorded.requests[0]?.json()).toEqual({
       source: "agent",
       source_session: "ses_sender",
       target_session: "ses_target",
       message: "hello",
+    });
+  });
+
+  test("returns the requested recipient when a legacy listener omits it", async () => {
+    const recorded = recordFetch([
+      jsonResponse({
+        event_id: "event-legacy",
+        source: "agent",
+        source_event_id: "agent.ses_sender.event-legacy",
+        source_session: "ses_sender",
+        topic: "notifications.agent.ses_target",
+        dedupe_key: "agent.ses_target.event-legacy",
+        issued_at: 1,
+        payload_summary: "hello",
+        trace_id: "trace-legacy",
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_target",
+      message: "hello",
+    });
+
+    expect(result).toMatchObject({
+      envelope: { event_id: "event-legacy" },
+      recipient: "ses_target",
+      confirmed: false,
     });
   });
 
@@ -179,12 +265,14 @@ describe("EnvoyClient", () => {
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
-    await client.publish({
+    const result = await client.publish({
       sourceSessionID: "ses_sender",
       topic: "notifications.role.controller",
       message: "broadcast",
       payload: `{"kind":"role-event"}`,
     });
+    expect(result).toMatchObject({ envelope: { event_id: "event-2" } });
+    expect(result.holder).toBeUndefined();
 
     expect(await recorded.requests[0]?.json()).toEqual({
       source: "agent",

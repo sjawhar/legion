@@ -16,7 +16,11 @@ import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-clie
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
-import { createEnvoyClient, type MessageMetadataInput } from "@legion/envoy-client/transport";
+import {
+  createEnvoyClient,
+  expandSubscriptionTopics,
+  type MessageMetadataInput,
+} from "@legion/envoy-client/transport";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
@@ -250,12 +254,18 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const subscribe = async (topic: string): Promise<boolean> => {
-    if (subscriptions.has(topic)) return false;
-    const subscription = (await ensureConnection()).subscribe(topic);
-    // A fresh subscription supersedes any earlier deliberate close of this topic.
-    intentionallyClosed.delete(topic);
-    subscriptions.set(topic, subscription);
-    void pump(topic, subscription);
+    const subjects = expandSubscriptionTopics([topic]).filter(
+      (candidate) => !subscriptions.has(candidate)
+    );
+    if (subjects.length === 0) return false;
+    const activeConnection = await ensureConnection();
+    for (const subject of subjects) {
+      const subscription = activeConnection.subscribe(subject);
+      // A fresh subscription supersedes any earlier deliberate close of this topic.
+      intentionallyClosed.delete(subject);
+      subscriptions.set(subject, subscription);
+      void pump(subject, subscription);
+    }
     return true;
   };
 
@@ -635,9 +645,11 @@ export default function envoyExtension(pi: PiApi): void {
             message: stringFor(parameters, "message"),
             ...messageMetadataFor(parameters),
           });
-          return toolSuccess(`sent ${result.envelope.event_id} to ${result.recipient}`, {
+          const confirmation = result.confirmed ? "" : " (recipient unconfirmed by listener)";
+          return toolSuccess(`sent ${result.envelope.event_id} to ${result.recipient}${confirmation}`, {
             event_id: result.envelope.event_id,
             recipient: result.recipient,
+            confirmed: result.confirmed,
           });
         }
         case EnvoyToolOperation.publish: {
@@ -806,6 +818,6 @@ function topicsFor(
   const value = parameters.topics;
   if (value === undefined) return fallback;
   if (!isStringArray(value)) throw new TypeError("topics must be strings");
-  return value;
+  return expandSubscriptionTopics(value);
 }
 

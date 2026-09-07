@@ -71,6 +71,18 @@ export type UnsubscribeInput = {
   readonly topics: readonly string[];
 };
 
+export function expandSubscriptionTopics(topics: readonly string[]): readonly string[] {
+  const expanded = new Set<string>();
+  for (const topic of topics) {
+    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
+    if (base !== undefined && base.length > 0 && !base.includes("*") && !base.includes(">")) {
+      expanded.add(base);
+    }
+    expanded.add(topic);
+  }
+  return [...expanded];
+}
+
 export type MessageSource = "agent" | "human";
 
 export type AgentSourceInput = {
@@ -119,6 +131,7 @@ export type ListSessionsInput = {
 export type SendResult = {
   readonly envelope: Envelope;
   readonly recipient: string;
+  readonly confirmed: boolean;
 };
 
 export type PublishResult = {
@@ -215,7 +228,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
           await post("/v1/interests/subscribe", {
             session_id: input.sessionID,
             dir: input.directory,
-            topics: input.topics,
+            topics: expandSubscriptionTopics(input.topics),
             port: input.port,
             title: input.title,
             driving: input.driving,
@@ -228,7 +241,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
         session_id: input.sessionID,
-        topics: input.topics,
+        topics: expandSubscriptionTopics(input.topics),
       });
     },
     getInterest: async (sessionID) =>
@@ -250,9 +263,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
           })
         )
       );
-      if (response.recipient === undefined)
-        throw new Error("listener send response missing recipient");
-      return { envelope: response, recipient: response.recipient };
+      return {
+        envelope: response,
+        recipient: response.recipient ?? input.targetSessionID,
+        confirmed: response.recipient !== undefined,
+      };
     },
     publish: async (input) => {
       const response = EnvelopeResponseSchema.parse(

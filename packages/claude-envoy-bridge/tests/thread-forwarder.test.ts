@@ -151,7 +151,8 @@ function captureStderr(): { readonly lines: string[]; restore(): void } {
   return { lines, restore: () => spy.mockRestore() }
 }
 
-const THREAD = "notifications.github.acme-org.example-repo.issue.3.>"
+const THREAD_BASE = "notifications.github.acme-org.example-repo.issue.3"
+const THREAD = `${THREAD_BASE}.>`
 const COMMENT = "notifications.github.acme-org.example-repo.issue.3.comment"
 
 test("republishes thread-topic envelopes verbatim on the session's agent subject", async () => {
@@ -170,6 +171,26 @@ test("republishes thread-topic envelopes verbatim on the session's agent subject
   expect(nats.published.map((m) => [m.subject, decode(m.data)])).toEqual([
     [agentSubject("ses_claude"), reply],
   ])
+})
+
+test("follows a concrete PR wildcard alongside its lifecycle base and removes both", async () => {
+  const nats = new FakeNats()
+  const forwarder = createThreadForwarder(nats, "ses_claude")
+  const wildcard = "notifications.github.example-org.example-repo.pr.42.>"
+  const base = "notifications.github.example-org.example-repo.pr.42"
+
+  forwarder.follow(wildcard)
+
+  expect(forwarder.topics()).toEqual([base, wildcard])
+  const published = nats.nextPublish()
+  nats.emit(base, envelope("github.lifecycle.42"))
+  await published
+  expect(nats.published.map((message) => decode(message.data))).toEqual([
+    envelope("github.lifecycle.42"),
+  ])
+
+  await forwarder.unfollow([wildcard])
+  expect(nats.unsubscribed).toEqual([base, wildcard])
 })
 
 test("forwards and renders a future-source envelope", async () => {
@@ -241,7 +262,7 @@ test("following the same topic twice opens one subscription", () => {
   const forwarder = createThreadForwarder(nats, "ses_claude")
   forwarder.follow(THREAD)
   forwarder.follow(THREAD)
-  expect(forwarder.topics()).toEqual([THREAD])
+  expect(forwarder.topics()).toEqual([THREAD_BASE, THREAD])
 })
 
 test("republishes an envelope once however often it arrives", async () => {
@@ -338,16 +359,19 @@ test("unfollowing a topic stops forwarding it; unfollowing nothing stops everyth
   await published
 
   // then
-  expect(nats.unsubscribed).toEqual([THREAD])
+  expect(nats.unsubscribed).toEqual([THREAD_BASE, THREAD])
   expect(nats.published.map((m) => decode(m.data))).toEqual([envelope("still-followed")])
-  expect(forwarder.topics()).toEqual(["notifications.github.acme-org.example-repo.issue.4.>"])
+  expect(forwarder.topics()).toEqual([
+    "notifications.github.acme-org.example-repo.issue.4",
+    "notifications.github.acme-org.example-repo.issue.4.>",
+  ])
 
   // when
   await forwarder.unfollow([])
 
   // then
   expect(forwarder.topics()).toEqual([])
-  expect(nats.unsubscribed).toHaveLength(2)
+  expect(nats.unsubscribed).toHaveLength(4)
 })
 
 test("never republishes the agent subject to itself", async () => {
@@ -439,7 +463,7 @@ test("close unsubscribes everything and drains the connection", async () => {
 
   await forwarder.close()
 
-  expect(nats.unsubscribed).toEqual([THREAD])
+  expect(nats.unsubscribed).toEqual([THREAD_BASE, THREAD])
   expect(nats.drained).toBe(true)
   expect(forwarder.topics()).toEqual([])
   expect(forwarder.isClosed()).toBe(true)
@@ -456,7 +480,7 @@ test("close does not wait forever for a drain the broker cannot answer", async (
   await forwarder.close()
 
   // then: the connection is closed outright, ending the reconnect loop that would keep the process alive
-  expect(nats.unsubscribed).toEqual([THREAD])
+  expect(nats.unsubscribed).toEqual([THREAD_BASE, THREAD])
   expect(nats.drained).toBe(false)
   expect(nats.closed).toBe(true)
 })

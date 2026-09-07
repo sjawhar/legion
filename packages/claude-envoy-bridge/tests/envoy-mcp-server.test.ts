@@ -125,6 +125,48 @@ function fakeEnvoy(status = 200): FakeEnvoy {
   return { server, subscribes, unsubscribes }
 }
 
+test("reports a legacy listener send as recipient-unconfirmed", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      expect(new URL(request.url).pathname).toBe("/v1/messages/send")
+      return Response.json({
+        event_id: "event-legacy",
+        source: "agent",
+        source_event_id: "agent.ses_claude.event-legacy",
+        source_session: "ses_claude",
+        topic: "notifications.agent.ses_target",
+        dedupe_key: "agent.ses_target.event-legacy",
+        issued_at: 1,
+        payload_summary: "hello",
+        trace_id: "trace-legacy",
+      })
+    },
+  })
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${server.port}`
+  try {
+    const module = await loadServer("legacy-send")
+
+    const result = await module.executeEnvoyTool("envoy_send", {
+      session_id: "ses_target",
+      message: "hello",
+    })
+
+    expect(result).toEqual({
+      message: "sent event-legacy to ses_target (recipient unconfirmed by listener)",
+      event_id: "event-legacy",
+      recipient: "ses_target",
+      confirmed: false,
+    })
+  } finally {
+    server.stop(true)
+    process.env = { ...previous }
+  }
+})
+
 test("returns the role holder through envoy_role_get", async () => {
   let receivedPath = ""
   const server = Bun.serve({
@@ -224,7 +266,10 @@ test("dispatch posts one stateless call stamped with the Claude session id and h
       {
         session_id: "ses_claude",
         dir: process.cwd(),
-        topics: ["notifications.github.acme-org.example-repo.issue.3.>"],
+        topics: [
+          "notifications.github.acme-org.example-repo.issue.3",
+          "notifications.github.acme-org.example-repo.issue.3.>",
+        ],
       },
     ])
     expect(stderr).toEqual([
@@ -384,7 +429,8 @@ function captureStderr(): { readonly lines: string[]; restore(): void } {
   return { lines, restore: () => spy.mockRestore() }
 }
 
-const THREAD = "notifications.github.acme-org.example-repo.issue.3.>"
+const THREAD_BASE = "notifications.github.acme-org.example-repo.issue.3"
+const THREAD = `${THREAD_BASE}.>`
 const COMMENT = "notifications.github.acme-org.example-repo.issue.3.comment"
 const INBOX = "notifications.agent.ses_claude"
 
@@ -474,9 +520,9 @@ test("envoy_subscribe follows its topics on the broker and envoy_unsubscribe sto
     await nats.until(() => nats.published.length >= 2)
 
     // then: the registry heard the subscribe and each reply reached the agent subject exactly once
-    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [THREAD] })
+    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [THREAD_BASE, THREAD] })
     expect(envoy.subscribes).toEqual([
-      { session_id: "ses_claude", dir: process.cwd(), topics: [THREAD] },
+      { session_id: "ses_claude", dir: process.cwd(), topics: [THREAD_BASE, THREAD] },
     ])
     expect(nats.published).toEqual([
       { subject: INBOX, payload: envelope("github.comment.1") },
@@ -486,10 +532,13 @@ test("envoy_subscribe follows its topics on the broker and envoy_unsubscribe sto
     // when
     const removed = await module.executeEnvoyTool("envoy_unsubscribe", { topics: [THREAD] })
     await nats.until(() => nats.unsubscribed.includes(THREAD))
+    await nats.until(() => nats.unsubscribed.includes(THREAD_BASE))
 
     // then
-    expect(removed).toEqual({ removed: [THREAD] })
-    expect(envoy.unsubscribes).toEqual([{ session_id: "ses_claude", topics: [THREAD] }])
+    expect(removed).toEqual({ removed: [THREAD_BASE, THREAD] })
+    expect(envoy.unsubscribes).toEqual([
+      { session_id: "ses_claude", topics: [THREAD_BASE, THREAD] },
+    ])
     expect(stderr.lines).toEqual([])
   } finally {
     stderr.restore()
@@ -509,6 +558,7 @@ test("a broker connection nats.js gave up on is replaced by the next envoy_subsc
   process.env["ENVOY_NATS_URL"] = nats.url
   process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
   const other = "notifications.github.acme-org.example-repo.issue.4.>"
+  const otherBase = "notifications.github.acme-org.example-repo.issue.4"
   const stderr = captureStderr()
   try {
     const module = await loadServer("connection-closed")
@@ -527,14 +577,21 @@ test("a broker connection nats.js gave up on is replaced by the next envoy_subsc
     await nats.until(() => nats.published.length >= 2)
 
     // then: the tool succeeded, a fresh connection follows the new topic and the one it inherited
-    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [other] })
-    expect(nats.subscribed).toEqual([THREAD, THREAD, other])
+    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [otherBase, other] })
+    expect(nats.subscribed).toEqual([
+      THREAD_BASE,
+      THREAD,
+      THREAD_BASE,
+      THREAD,
+      otherBase,
+      other,
+    ])
     expect(nats.published).toEqual([
       { subject: INBOX, payload: envelope("github.comment.9") },
       { subject: INBOX, payload: envelope("github.comment.1") },
     ])
     expect(stderr.lines).toEqual([
-      "envoy-mcp: the broker connection closed; reopening it for 2 topic(s)\n",
+      "envoy-mcp: the broker connection closed; reopening it for 3 topic(s)\n",
     ])
   } finally {
     stderr.restore()
@@ -575,7 +632,7 @@ test("closes a replacement connection when shutdown races a manual subscription"
     await nats.until(() => nats.liveConnections === 0)
     expect(nats.connections).toBe(2)
     expect(stderr.lines).toEqual([
-      "envoy-mcp: the broker connection closed; reopening it for 2 topic(s)\n",
+      "envoy-mcp: the broker connection closed; reopening it for 3 topic(s)\n",
     ])
   } finally {
     stderr.restore()

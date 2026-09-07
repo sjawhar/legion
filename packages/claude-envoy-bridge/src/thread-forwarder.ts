@@ -14,6 +14,7 @@
 import { agentSubject } from "@legion/contracts"
 import { isOwnDispatchEcho } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
+import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 import { z } from "zod"
 
 export interface ForwardedMessage {
@@ -170,12 +171,14 @@ export function createThreadForwarder(
 
   return {
     follow(topic) {
-      if (following.has(topic)) return
-      const subscription = connection.subscribe(topic)
-      following.set(topic, { subscription, done: forward(topic, subscription) })
+      for (const subject of expandSubscriptionTopics([topic])) {
+        if (following.has(subject)) continue
+        const subscription = connection.subscribe(subject)
+        following.set(subject, { subscription, done: forward(subject, subscription) })
+      }
     },
     unfollow(topics) {
-      return stop(topics.length === 0 ? [...following.keys()] : topics)
+      return stop(topics.length === 0 ? [...following.keys()] : expandSubscriptionTopics(topics))
     },
     topics() {
       return [...following.keys()]

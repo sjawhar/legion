@@ -368,9 +368,15 @@ describe("envoy OMP extension", () => {
 
     await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "controller" });
     await fixture.tools.find((tool) => tool.name === "envoy_list")?.execute("", {});
-    await fixture.tools.find((tool) => tool.name === "envoy_send")?.execute("", {
+    const sent = await fixture.tools.find((tool) => tool.name === "envoy_send")?.execute("", {
       session_id: "ses_target",
       message: "direct",
+    });
+    expect(sent?.content[0]?.text).toBe("sent evt_1 to ses_target (recipient unconfirmed by listener)");
+    expect(sent?.details).toMatchObject({
+      event_id: "evt_1",
+      recipient: "ses_target",
+      confirmed: false,
     });
     await fixture.tools.find((tool) => tool.name === "envoy_publish")?.execute("", {
       topic: "team.test",
@@ -1361,15 +1367,24 @@ describe("envoy OMP extension", () => {
       throw new Error("subscription tools were not registered");
     }
 
-    const topic = "notifications.github.o.r.pr.>";
+    const topic = "notifications.github.o.r.pr.42.>";
+    const base = "notifications.github.o.r.pr.42";
     await subscribeTool.execute("", { topics: [topic] });
-    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", base, topic]);
+    expect(natsState.controls.get(base)?.active()).toBe(true);
+    expect(natsState.controls.get(topic)?.active()).toBe(true);
 
     for (const tick of intervals) tick();
-    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", topic]);
+    expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry", base, topic]);
+    const subscribed = await listTool.execute("", {});
+    expect(subscribed.details.interests).toEqual([
+      { topic: "notifications.agent.ses_registry", source: "both" },
+      { topic: base, source: "both" },
+      { topic, source: "both" },
+    ]);
 
     await unsubscribeTool.execute("", { topics: [topic] });
-    expect(unregistrations).toEqual([[topic]]);
+    expect(unregistrations).toEqual([[base, topic]]);
     expect(registrations.at(-1)?.topics).toEqual(["notifications.agent.ses_registry"]);
     const result = await listTool.execute("", {});
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
