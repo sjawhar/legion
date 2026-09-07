@@ -32,9 +32,6 @@ from replacing a newer watcher state.
 
 ## Envelope
 
-The payload is the full status summary: every check group, failing check URLs,
-and `settled_at`. `superseded_settlement` is `"true"` for generations after the
-first, and the one-line payload summary appends `(re-settled)`. The summary
-waits for `ENVOY_CI_DEBOUNCE` (default `5s`), all check runs to be terminal,
-and every observed suite to be `completed`; heads with no suite still settle
-after terminal checks.
+The payload is the full status summary: every check group and failing check URLs.
+Consumers order summaries with `latest_check_run_id`, the largest check-run ID among the retained checks.
+The summary waits for `ENVOY_CI_DEBOUNCE` (default `5s`), all check runs to be terminal, and every observed suite to be `completed`; heads with no suite still settle after terminal checks.
