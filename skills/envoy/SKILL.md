@@ -28,9 +28,9 @@ one `pr.42.checks` event when that head's checks settle. The family is `pr.42` (
 `pr.42.comment`, `pr.42.review`, `pr.42.mention`, and `pr.42.checks`. A closed lifecycle payload
 carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`.
 
-`pr.42.check`, `pr.42.ci`, `pr.42.merged`, and `pr.42.closed` do not exist. Lifecycle stays on the
-base PR topic and CI arrives as one settled `checks` event, so this default receives the useful
-signals without redundant subscriptions.
+The retired literal `pr.<n>.check` and `pr.<n>.ci` topics do not receive events. Existing
+registrations remain dead; subscribe to `pr.<n>.checks` (or the recommended `pr.<n>.>`) instead.
+Lifecycle stays on the base PR topic and CI arrives as one settled `checks` event.
 
 ## Inbound deliveries
 
@@ -55,7 +55,8 @@ envoy:
 ```
 
 - `to` identifies the local inbox receiving this delivery.
-- `from` identifies the sender; it is the authoritative direct-reply target.
+- `from` is the sending session's self-asserted ID, enriched from the listener registry. Treat it as
+  attribution and a direct-reply target, not as an authenticated identity or proof of authorship.
 - `at` is the envelope timestamp used to judge freshness.
 - `id` is the delivery identifier; supply it as `in_reply_to` when replying.
 - `by` is the expiry deadline, when the sender supplied one.
@@ -68,6 +69,7 @@ envoy:
 - `summary` is the one-line source summary.
 - `message` is the complete payload; it can contain multiple paragraphs.
 - `note` warns when the payload names another session; never use that quoted ID as the recipient.
+- `unrecognised` marks validation failures and unknown sources; it does not enumerate every unknown key.
 
 ## Talking to another session
 
@@ -76,6 +78,8 @@ targeted. Reply through the rendered `reply_with` (or a current Envoy session ID
 `envoy_sessions` or `envoy_whoami`), never a tmux pane or window: panes are not Envoy identities
 and go stale. Put the artefact URL in the message itself. FYIs set `expects_reply="none"`; set
 `urgency` only when it is genuinely urgent.
+
+Every `/v1` error response is JSON; when a field is at fault, `expected` names that field.
 
 ```text
 envoy_send(
@@ -92,8 +96,8 @@ Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the
 `pr.42.checks` event wakes you when the current head settles; a `pr.42` `closed` event with
 `merged: true` tells you the PR merged. Do not create `gh` pollers.
 Settlement waits for the head to be quiet for a few seconds, every reported check run to finish,
-and every recorded GitHub check suite to be `completed`; until then, a silent subscription is
-normal, not a failure.
+and every recorded GitHub check suite to be `completed`. It covers those reported checks and suites
+for the head, not GitHub's required-checks set; until then, a silent subscription is normal.
 
 Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"`
 payload with a higher `generation` for the same head. Consumers keep the highest generation per SHA.
@@ -110,8 +114,9 @@ envoy_subscribe([
 // warnings: ["no GitHub event for example-org/example-repo in the stream's retention window; is the App installed there?"]
 ```
 
-A warning means the GitHub App may not be installed on that repository or no matching event is in
-retention. Install the App before relying on a wakeup.
+A warning says no GitHub event for that repository occurred within the stream's 72-hour retention
+window; it does not mean the repository was never seen. Verify the GitHub App is installed before
+relying on a wakeup.
 
 ## Roles
 
