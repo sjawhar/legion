@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -73,18 +74,48 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	if item.SourceSession != "" {
 		from = item.SourceSession
 	}
-	header := fmt.Sprintf("[NOTIFICATION from %s]", from)
-	body := item.PayloadSummary
-	if item.Payload != "" {
-		body = item.Payload
+	header := "[NOTIFICATION"
+	if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
+		header += " to you"
 	}
-	text := fmt.Sprintf("%s\n%s\n\nTopic: %s\nEvent ID: %s", header, body, item.Topic, item.EventID)
-	// Only an agent sender has an inbox to reply into; a human sending from
-	// the CLI may still name a source session for attribution.
+	header += " from " + from
+	if item.Sender != nil && item.Sender.Title != "" {
+		header += " (" + item.Sender.Title + ")"
+	}
+	header += "]"
+
+	lines := []string{
+		header,
+		"At: " + time.UnixMilli(item.IssuedAt).UTC().Format(time.RFC3339),
+		"Event ID: " + item.EventID,
+	}
+	if item.ExpiresAt != nil {
+		lines = append(lines, "By: "+time.UnixMilli(*item.ExpiresAt).UTC().Format(time.RFC3339))
+	}
+	if item.Urgency != "" {
+		lines = append(lines, "Urgency: "+item.Urgency)
+	}
+	if item.ExpectsReply != "" {
+		lines = append(lines, "Expects Reply: "+item.ExpectsReply)
+	}
+	if item.InReplyTo != "" {
+		lines = append(lines, "In Reply To: "+item.InReplyTo)
+	}
+	if item.Supersedes != "" {
+		lines = append(lines, "Supersedes: "+item.Supersedes)
+	}
 	if item.Source == "agent" && item.SourceSession != "" {
-		text += fmt.Sprintf("\nUse envoy_send(session_id=\"%s\", message=\"...\") to reply to this message.", item.SourceSession)
+		lines = append(lines, fmt.Sprintf("Reply With: envoy_send(session_id=%q, message=%q)", item.SourceSession, "..."))
 	}
-	return text
+	if item.Sender != nil && len(item.Sender.Roles) > 0 {
+		lines = append(lines, fmt.Sprintf("Reply Role: envoy_publish(topic=%q, message=%q)", contracts.RoleTopicPrefix+item.Sender.Roles[0], "..."))
+	}
+	lines = append(lines, "Summary: "+item.PayloadSummary)
+	if item.Payload != "" && item.Payload != item.PayloadSummary {
+		lines = append(lines, "Message:", item.Payload)
+	}
+	lines = append(lines, "", "Topic: "+item.Topic)
+	return strings.Join(lines, "\n")
 }
 
 func (d Deliverer) prompt(port int, machineID string, sessionID string, text string) error {

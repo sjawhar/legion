@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -22,14 +24,154 @@ const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
 
 var rolePattern = regexp.MustCompile(rolePatternString)
 
+type streamInfoLookup interface {
+	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
+}
+
+type apiError struct {
+	Error    string   `json:"error"`
+	Expected []string `json:"expected,omitempty"`
+}
+
+type messageBody struct {
+	Source         string  `json:"source"`
+	SourceSession  string  `json:"source_session"`
+	Message        string  `json:"message"`
+	Payload        *string `json:"payload"`
+	IdempotencyKey string  `json:"idempotency_key"`
+	InReplyTo      string  `json:"in_reply_to"`
+	Supersedes     string  `json:"supersedes"`
+	Urgency        string  `json:"urgency"`
+	ExpectsReply   string  `json:"expects_reply"`
+	ExpiresAt      *int64  `json:"expires_at"`
+}
+
+type sendResponse struct {
+	contracts.Envelope
+	Recipient string `json:"recipient"`
+}
+
+type publishResponse struct {
+	contracts.Envelope
+	Holder string `json:"holder,omitempty"`
+}
+
+type subscribeResponse struct {
+	store.Interest
+	Warnings []string `json:"warnings,omitempty"`
+}
+
 func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
 }
 
-func writeJSONError(w http.ResponseWriter, status int, message string) {
+func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string, expected ...string) {
+	writeJSON(w, status, apiError{Error: message, Expected: expected})
+}
+
+func firstLine(message string, limit int) string {
+	end := len(message)
+	runes := 0
+	for i, r := range message {
+		if r == '\n' || r == '\r' || runes == limit {
+			end = i
+			break
+		}
+		runes++
+	}
+	return message[:end]
+}
+
+func validateMessageEnums(body messageBody) (string, string) {
+	if body.Urgency != "" && body.Urgency != "low" && body.Urgency != "med" && body.Urgency != "high" && body.Urgency != "blocking" {
+		return "urgency must be one of low, med, high, blocking", "urgency"
+	}
+	if body.ExpectsReply != "" && body.ExpectsReply != "none" && body.ExpectsReply != "optional" && body.ExpectsReply != "required" {
+		return "expects_reply must be one of none, optional, required", "expects_reply"
+	}
+	return "", ""
+}
+
+func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelope {
+	summary := firstLine(body.Message, 160)
+	payload := ""
+	if body.Payload != nil {
+		payload = *body.Payload
+	} else if body.Message != summary {
+		payload = body.Message
+	}
+	source := body.Source
+	if source == "" {
+		source = "agent"
+	}
+	return contracts.Envelope{
+		EventID:        id.New(),
+		Source:         source,
+		SourceSession:  body.SourceSession,
+		SourceEventID:  id.New(),
+		Topic:          topic,
+		DedupeKey:      dedupeKey,
+		IssuedAt:       contracts.NowMillis(),
+		ExpiresAt:      body.ExpiresAt,
+		PayloadSummary: summary,
+		Payload:        payload,
+		TraceID:        id.New(),
+		InReplyTo:      body.InReplyTo,
+		Supersedes:     body.Supersedes,
+		Urgency:        body.Urgency,
+		ExpectsReply:   body.ExpectsReply,
+	}
+}
+
+func roleNames(topics []string) []string {
+	roles := make([]string, 0)
+	for _, topic := range topics {
+		if role, ok := strings.CutPrefix(topic, contracts.RoleTopicPrefix); ok && role != "" {
+			roles = append(roles, role)
+		}
+	}
+	sort.Strings(roles)
+	return roles
+}
+
+func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, sourceSession string) *contracts.EnvelopeSender {
+	if sourceSession == "" {
+		return nil
+	}
+	sender := &contracts.EnvelopeSender{SessionID: sourceSession}
+	if registry != nil {
+		if interest, err := registry.Get(sourceSession); err == nil {
+			sender.Machine = interest.MachineID
+			sender.Cwd = interest.Dir
+			sender.Roles = roleNames(interest.Topics)
+		}
+	}
+	if sessions != nil {
+		if entry, err := sessions.Get(sourceSession); err == nil {
+			sender.Title = entry.Title
+		}
+	}
+	return sender
+}
+
+func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (string, error) {
+	if registry == nil || sessions == nil {
+		return "", fmt.Errorf("service starting")
+	}
+	holder, err := registry.RoleHolder(role)
+	if err != nil {
+		return "", err
+	}
+	if holder == "" || !isSessionLive(sessions, holder) {
+		return "", nil
+	}
+	return holder, nil
 }
 
 // sendHandler publishes a direct message only while the target session has a
@@ -37,58 +179,57 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		var body struct {
-			Source         string `json:"source"`
-			SourceSession  string `json:"source_session"`
-			TargetSession  string `json:"target_session"`
-			Message        string `json:"message"`
-			IdempotencyKey string `json:"idempotency_key"`
+		var body messageBody
+		var targetSession string
+		var request struct {
+			messageBody
+			TargetSession string `json:"target_session"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		if body.TargetSession == "" {
-			writeJSONError(w, http.StatusBadRequest, "session id required")
+		body = request.messageBody
+		targetSession = strings.TrimSpace(request.TargetSession)
+		if targetSession == "" {
+			writeJSONError(w, http.StatusBadRequest, "target_session is required", "target_session")
 			return
 		}
-		source := body.Source
-		if source == "" {
-			source = "agent"
+		if message, field := validateMessageEnums(body); message != "" {
+			writeJSONError(w, http.StatusBadRequest, message, field)
+			return
 		}
-		dedupeKey := "agent." + body.TargetSession + "." + id.New()
+		dedupeKey := "agent." + targetSession + "." + id.New()
 		if body.IdempotencyKey != "" {
-			dedupeKey = "agent." + body.TargetSession + "." + body.IdempotencyKey
+			dedupeKey = "agent." + targetSession + "." + body.IdempotencyKey
 		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         source,
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          contracts.AgentSubject(body.TargetSession),
-			DedupeKey:      dedupeKey,
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			TraceID:        id.New(),
-		}
+		item := messageEnvelope(body, contracts.AgentSubject(targetSession), dedupeKey)
 		if err := item.Validate(); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		d := state.Load()
-		if !isSessionLive(d.sessions, body.TargetSession) {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", body.TargetSession))
+		if d == nil || d.sessions == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+			return
+		}
+		if !isSessionLive(d.sessions, targetSession) {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			return
+		}
+		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
+		if d.client == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
 		if err := d.client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
+		writeJSON(w, http.StatusOK, sendResponse{Envelope: item, Recipient: targetSession})
 	}
 }
 
@@ -96,20 +237,20 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
 		if sessionID == "" {
-			http.Error(w, "session_id required", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
 		if sessions == nil {
-			http.Error(w, "session registry unavailable", http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
 			return
 		}
 		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -121,60 +262,62 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		var body struct {
-			Source         string `json:"source"`
-			SourceSession  string `json:"source_session"`
-			Topic          string `json:"topic"`
-			Message        string `json:"message"`
-			Payload        string `json:"payload"`
-			IdempotencyKey string `json:"idempotency_key"`
+		var request struct {
+			messageBody
+			Topic string `json:"topic"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		if body.Topic == "" || body.Message == "" {
-			http.Error(w, "topic and message are required", http.StatusBadRequest)
+		if request.Topic == "" || request.Message == "" {
+			writeJSONError(w, http.StatusBadRequest, "topic and message are required", "topic", "message")
 			return
 		}
-		if strings.HasPrefix(body.Topic, contracts.AgentTopicPrefix) {
-			http.Error(w, "cannot publish to agent topics; use /v1/messages/send for direct agent messages", http.StatusBadRequest)
+		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
+			writeJSONError(w, http.StatusBadRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
-		source := body.Source
-		if source == "" {
-			source = "agent"
+		if message, field := validateMessageEnums(request.messageBody); message != "" {
+			writeJSONError(w, http.StatusBadRequest, message, field)
+			return
 		}
 		dedupeKey := "publish." + id.New()
-		if body.IdempotencyKey != "" {
-			dedupeKey = "publish." + body.IdempotencyKey
+		if request.IdempotencyKey != "" {
+			dedupeKey = "publish." + request.IdempotencyKey
 		}
-		item := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         source,
-			SourceSession:  body.SourceSession,
-			SourceEventID:  id.New(),
-			Topic:          body.Topic,
-			DedupeKey:      dedupeKey,
-			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: body.Message,
-			Payload:        body.Payload,
-			TraceID:        id.New(),
-		}
+		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
 		if err := item.Validate(); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		d := state.Load()
-		if err := d.client.Publish(item); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if d == nil || d.client == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(item)
+		holder := ""
+		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
+			var err error
+			holder, err = liveRoleHolder(d.registry, d.sessions, role)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if holder == "" {
+				writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
+				return
+			}
+		}
+		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
+		if err := d.client.Publish(item); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: holder})
 	}
 }
 
@@ -188,7 +331,9 @@ type sessionInfo struct {
 	Title          string   `json:"title"`
 	SelfSubscribed bool     `json:"self_subscribed"`
 	Topics         []string `json:"topics"`
+	Roles          []string `json:"roles"`
 	UpdatedAt      int64    `json:"updated_at"`
+	LastSeen       int64    `json:"last_seen"`
 }
 
 // sessionsHandler returns all live sessions by iterating the session registry
@@ -197,20 +342,25 @@ type sessionInfo struct {
 func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		if sessions == nil {
-			http.Error(w, "session registry unavailable", http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
 			return
 		}
 		entries, err := sessions.List()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		dirFilter := r.URL.Query().Get("dir")
+		titleFilter := r.URL.Query().Get("title")
 		result := make([]sessionInfo, 0, len(entries))
 		for _, entry := range entries {
+			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
+				continue
+			}
 			info := sessionInfo{
 				SessionID:      entry.SessionID,
 				MachineID:      entry.MachineID,
@@ -219,31 +369,34 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				Title:          entry.Title,
 				SelfSubscribed: entry.SelfSubscribed,
 				UpdatedAt:      entry.UpdatedAt,
+				LastSeen:       entry.UpdatedAt,
 			}
 			if registry != nil {
 				if interest, err := registry.Get(entry.SessionID); err == nil {
 					info.Topics = interest.Topics
+					info.Roles = roleNames(interest.Topics)
 				}
 			}
 			result = append(result, info)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(result)
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if registry == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "interest registry unavailable")
+			return
+		}
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
 		if sessionID == "" {
 			if r.Method != http.MethodGet {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			items := registry.List()
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(items)
+			writeJSON(w, http.StatusOK, registry.List())
 			return
 		}
 
@@ -251,21 +404,18 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 		case http.MethodGet:
 			item, err := registry.Get(sessionID)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound)
+				writeJSONError(w, http.StatusNotFound, err.Error())
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(item)
+			writeJSON(w, http.StatusOK, item)
 		case http.MethodDelete:
-			if err := registry.Remove(sessionID, nil); err != nil {
-				if !errors.Is(err, nats.ErrKeyNotFound) {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
+			if err := registry.Remove(sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
 	}
 }
@@ -273,7 +423,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		var body struct {
@@ -281,94 +431,193 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			Role      string `json:"role"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		body.SessionID = strings.TrimSpace(body.SessionID)
 		body.Role = strings.TrimSpace(body.Role)
 		if body.SessionID == "" {
-			http.Error(w, "session_id is required", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
 		if body.Role == "" {
-			http.Error(w, "role is required", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
 		if !isValidRole(body.Role) {
-			http.Error(w, "role must match "+rolePatternString, http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
 			return
 		}
 		d := state.Load()
 		if d == nil || d.registry == nil || d.sessions == nil {
-			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
 		entry, err := d.sessions.Get(body.SessionID)
 		if errors.Is(err, nats.ErrKeyNotFound) {
-			http.Error(w, "session is not registered", http.StatusNotFound)
+			writeJSONError(w, http.StatusNotFound, "session is not registered")
 			return
 		}
 		if err != nil {
-			http.Error(w, "read session registration: "+err.Error(), http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "read session registration: "+err.Error())
 			return
 		}
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
 		if err := d.sessions.Put(body.SessionID, entry); err != nil {
-			http.Error(w, "refresh role claimant registration: "+err.Error(), http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}
 		item, err := d.registry.SetRole(body.SessionID, machineID, body.Role)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(item)
+		writeJSON(w, http.StatusOK, item)
 	}
+}
+
+func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		role := strings.TrimPrefix(r.URL.Path, "/v1/roles/")
+		if role == "" {
+			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
+			return
+		}
+		d := state.Load()
+		if d == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+			return
+		}
+		holder, err := liveRoleHolder(d.registry, d.sessions, role)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if holder == "" {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
+			return
+		}
+		entry, err := d.sessions.Get(holder)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"role":      role,
+			"holder":    holder,
+			"last_seen": entry.UpdatedAt,
+		})
+	}
+}
+
+func (d *listenerDeps) streamInspector() streamInfoLookup {
+	if d == nil {
+		return nil
+	}
+	if d.streamInfo != nil {
+		return d.streamInfo
+	}
+	if d.js != nil {
+		return d.js
+	}
+	if d.client != nil {
+		return d.client.JS()
+	}
+	return nil
+}
+
+func unwiredRepositoryWarning(d *listenerDeps, topic string, logger *logging.Logger) string {
+	const githubTopicPrefix = "notifications.github."
+	remainder, ok := strings.CutPrefix(topic, githubTopicPrefix)
+	if !ok {
+		return ""
+	}
+	parts := strings.Split(remainder, ".")
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	owner, repo := parts[0], parts[1]
+	inspector := d.streamInspector()
+	if inspector == nil {
+		return ""
+	}
+	streamName := d.streamName
+	if streamName == "" {
+		streamName = bus.Stream
+	}
+	subjectsFilter := githubTopicPrefix + owner + "." + repo + ".>"
+	info, err := inspector.StreamInfo(streamName, &nats.StreamInfoRequest{SubjectsFilter: subjectsFilter})
+	if err != nil {
+		logger.Warn("listener stream info failed",
+			slog.String("stream", streamName),
+			slog.String("subjects_filter", subjectsFilter),
+			slog.String("error", err.Error()))
+		return ""
+	}
+	if info == nil || len(info.State.Subjects) == 0 {
+		return fmt.Sprintf("no GitHub event for %s/%s in the stream's retention window; is the App installed there?", owner, repo)
+	}
+	return ""
 }
 
 func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		var body subscribeBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
+		body.SessionID = strings.TrimSpace(body.SessionID)
 		if body.SessionID == "" {
-			writeJSONError(w, http.StatusBadRequest, "session id required")
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
 		d := state.Load()
+		if d == nil || d.registry == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+			return
+		}
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
 			Dir:       body.Dir,
 		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
 		if err != nil {
-			// WARN, not Error: this is a transient condition (typically a NATS/KV
-			// hiccup during heartbeat) and the plugin's next 2-min heartbeat will
-			// retry. Logged at WARN so subscription-drop incidents are greppable
-			// in one shot instead of requiring 2-hour log forensics.
 			logger.Warn("listener upsert failed",
 				slog.String("session_id", body.SessionID),
 				slog.Any("topics", body.Topics),
 				slog.String("error", err.Error()))
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
+			if d.sessions == nil {
+				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
+				return
+			}
 			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
+				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
+				return
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(item)
+		warnings := make([]string, 0)
+		for _, topic := range body.Topics {
+			if warning := unwiredRepositoryWarning(d, topic, logger); warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+		writeJSON(w, http.StatusOK, subscribeResponse{Interest: item, Warnings: warnings})
 	}
 }
 
@@ -376,7 +625,7 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(deps, machineID, logger))
 	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		var body struct {
@@ -384,46 +633,81 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 			Topics    []string `json:"topics"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		body.SessionID = strings.TrimSpace(body.SessionID)
+		if body.SessionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
 		d := deps.Load()
-		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if d == nil || d.registry == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		removed := body.Topics
+		if removed == nil {
+			removed = []string{}
+		}
+		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
 	})
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(deps, machineID))
+	v1.HandleFunc("/v1/roles/", roleGetHandler(deps))
 	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
 		if sessionID == "" {
-			http.Error(w, "session_id required", http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
 		d := deps.Load()
-		entry, err := d.sessions.Get(sessionID)
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
+		if d == nil || d.sessions == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(entry)
+		entry, err := d.sessions.Get(sessionID)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, entry)
 	})
 
 	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
+		if d == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+			return
+		}
 		adminInterestsHandler(d.registry).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
+		if d == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+			return
+		}
 		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
-		deleteSessionHandler(deps.Load().sessions).ServeHTTP(w, r)
+		d := deps.Load()
+		if d == nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+			return
+		}
+		deleteSessionHandler(d.sessions).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/messages/send", sendHandler(deps))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(deps))
+	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
+	v1.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONError(w, http.StatusNotFound, "not found")
+	})
 }

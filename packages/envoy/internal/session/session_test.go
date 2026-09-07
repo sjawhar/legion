@@ -374,12 +374,12 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	if text == "" {
 		t.Fatal("notification text is empty")
 	}
-	for _, want := range []string{"[NOTIFICATION from ses_sender_123]", "test payload", "notifications.agent.ses_target"} {
+	for _, want := range []string{"[NOTIFICATION to you from ses_sender_123]", "test payload", "notifications.agent.ses_target"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("notification text missing %q: %s", want, text)
 		}
 	}
-	replyInstruction := `Use envoy_send(session_id="ses_sender_123", message="...") to reply to this message.`
+	replyInstruction := `Reply With: envoy_send(session_id="ses_sender_123", message="...")`
 	if !strings.Contains(text, replyInstruction) {
 		t.Errorf("notification text missing reply instruction: %s", text)
 	}
@@ -395,7 +395,7 @@ func TestText_WithSourceSession(t *testing.T) {
 		PayloadSummary: "hello world",
 	}
 	got := deliverer.Text(item)
-	want := "[NOTIFICATION from ses_abc]\nhello world\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-1\nUse envoy_send(session_id=\"ses_abc\", message=\"...\") to reply to this message."
+	want := "[NOTIFICATION to you from ses_abc]\nAt: 1970-01-01T00:00:00Z\nEvent ID: evt-1\nReply With: envoy_send(session_id=\"ses_abc\", message=\"...\")\nSummary: hello world\n\nTopic: notifications.agent.ses_target"
 	if got != want {
 		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
 	}
@@ -411,7 +411,7 @@ func TestText_WithoutSourceSession(t *testing.T) {
 		PayloadSummary: "no sender",
 	}
 	got := deliverer.Text(item)
-	want := "[NOTIFICATION from slack]\nno sender\n\nTopic: notifications.slack.T1.C1.mention\nEvent ID: evt-2"
+	want := "[NOTIFICATION from slack]\nAt: 1970-01-01T00:00:00Z\nEvent ID: evt-2\nSummary: no sender\n\nTopic: notifications.slack.T1.C1.mention"
 	if got != want {
 		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
 	}
@@ -430,7 +430,7 @@ func TestText_HumanHasNoReplyHint(t *testing.T) {
 	}
 
 	got := deliverer.Text(item)
-	want := "[NOTIFICATION from human]\nplease review this\n\nTopic: notifications.agent.ses_target\nEvent ID: evt-human"
+	want := "[NOTIFICATION to you from human]\nAt: 1970-01-01T00:00:00Z\nEvent ID: evt-human\nSummary: please review this\n\nTopic: notifications.agent.ses_target"
 	if got != want {
 		t.Errorf("Text() mismatch\ngot:  %q\nwant: %q", got, want)
 	}
@@ -452,7 +452,7 @@ func TestText_HumanWithSourceSessionHasNoReplyHint(t *testing.T) {
 	}
 
 	got := deliverer.Text(item)
-	if !strings.HasPrefix(got, "[NOTIFICATION from ses_shell]\n") {
+	if !strings.HasPrefix(got, "[NOTIFICATION to you from ses_shell]\n") {
 		t.Errorf("Text() header = %q, want it to name the source session", got)
 	}
 	if strings.Contains(got, "envoy_send") {
@@ -460,22 +460,21 @@ func TestText_HumanWithSourceSessionHasNoReplyHint(t *testing.T) {
 	}
 }
 
-func TestText_PrefersPayloadOverSummary(t *testing.T) {
+func TestText_RendersSummaryAndPayload(t *testing.T) {
 	deliverer := session.Deliverer{}
 	item := contracts.Envelope{
 		EventID:        "evt-3",
 		Source:         "github",
 		SourceSession:  "",
-		Topic:          "notifications.github.sjawhar.legion.issue.42.comment",
+		Topic:          "notifications.github.example-org.example-repo.issue.42.comment",
 		PayloadSummary: "truncated summary",
 		Payload:        "full payload content that is much longer",
 	}
 	got := deliverer.Text(item)
-	if !strings.Contains(got, "full payload content that is much longer") {
-		t.Errorf("Text() should use Payload when set, got: %s", got)
-	}
-	if strings.Contains(got, "truncated summary") {
-		t.Errorf("Text() should NOT use PayloadSummary when Payload is set, got: %s", got)
+	for _, want := range []string{"Summary: truncated summary", "Message:\nfull payload content that is much longer"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() missing %q: %s", want, got)
+		}
 	}
 }
 
@@ -492,6 +491,59 @@ func TestText_FallsBackToSummaryWhenPayloadEmpty(t *testing.T) {
 	got := deliverer.Text(item)
 	if !strings.Contains(got, "summary only") {
 		t.Errorf("Text() should fall back to PayloadSummary when Payload is empty, got: %s", got)
+	}
+}
+
+func TestText_RendersSignalQualityFieldsAndBodyOnce(t *testing.T) {
+	deliverer := session.Deliverer{}
+	expiresAt := int64(1788757200000)
+	payload := "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+	item := contracts.Envelope{
+		EventID:        "evt-1",
+		Source:         "agent",
+		SourceSession:  "ses_sender",
+		Topic:          "notifications.agent.ses_target",
+		IssuedAt:       1788756072000,
+		ExpiresAt:      &expiresAt,
+		PayloadSummary: "First paragraph.",
+		Payload:        payload,
+		InReplyTo:      "evt-parent",
+		Supersedes:     "evt-old",
+		Urgency:        "high",
+		ExpectsReply:   "required",
+		Sender: &contracts.EnvelopeSender{
+			SessionID: "ses_sender",
+			Title:     "Deploy coordinator",
+			Roles:     []string{"reviewer"},
+		},
+	}
+
+	got := deliverer.Text(item)
+	t.Logf("rendered Deliverer.Text block:\n%s", got)
+	want := `[NOTIFICATION to you from ses_sender (Deploy coordinator)]
+At: 2026-09-07T04:41:12Z
+Event ID: evt-1
+By: 2026-09-07T05:00:00Z
+Urgency: high
+Expects Reply: required
+In Reply To: evt-parent
+Supersedes: evt-old
+Reply With: envoy_send(session_id="ses_sender", message="...")
+Reply Role: envoy_publish(topic="notifications.role.reviewer", message="...")
+Summary: First paragraph.
+Message:
+First paragraph.
+
+Second paragraph.
+
+Third paragraph.
+
+Topic: notifications.agent.ses_target`
+	if got != want {
+		t.Fatalf("Text() mismatch\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Count(got, payload) != 1 {
+		t.Fatalf("full payload appears %d times, want once: %s", strings.Count(got, payload), got)
 	}
 }
 

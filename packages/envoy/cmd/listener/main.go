@@ -34,10 +34,13 @@ import (
 // initialization completes. HTTP handlers read these via atomic.Pointer to
 // avoid data races during the startup window.
 type listenerDeps struct {
-	client   *bus.Client
-	registry *store.Registry
-	sessions *session.SessionRegistry
-	ciStore  *cistore.Store
+	client     *bus.Client
+	registry   *store.Registry
+	sessions   *session.SessionRegistry
+	ciStore    *cistore.Store
+	streamName string
+	js         nats.JetStreamContext
+	streamInfo streamInfoLookup
 }
 
 func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
@@ -141,6 +144,9 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 }
 
 func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
+	if sessions == nil {
+		return false
+	}
 	_, err := sessions.Get(sessionID)
 	return err == nil
 }
@@ -236,7 +242,7 @@ func runSelfHealthLoop(logger *logging.Logger, probe func() error, terminate fun
 func readinessGate(ready func() bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ready() {
-			http.Error(w, "service starting", http.StatusServiceUnavailable)
+			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -399,7 +405,9 @@ func main() {
 	registerV1Routes(v1, &deps, cfg.MachineID, logger)
 
 	// Serve /v1/* on the listener port for local plugin registration.
-	mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+	v1Handler := readinessGate(func() bool { return deps.Load() != nil }, v1)
+	mux.Handle("/v1", v1Handler)
+	mux.Handle("/v1/", v1Handler)
 
 	// Phase 4: Start HTTP server (port already bound via net.Listen).
 	server := &http.Server{
@@ -563,10 +571,12 @@ func main() {
 
 	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
 	deps.Store(&listenerDeps{
-		client:   client,
-		registry: registry,
-		sessions: sessions,
-		ciStore:  ciStore,
+		client:     client,
+		registry:   registry,
+		sessions:   sessions,
+		ciStore:    ciStore,
+		streamName: bus.Stream,
+		js:         client.JS(),
 	})
 	logger.Info("envoy-listener ready (NATS connected)")
 
