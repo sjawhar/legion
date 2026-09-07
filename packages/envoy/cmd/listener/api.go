@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -60,6 +62,8 @@ type subscribeResponse struct {
 	store.Interest
 	Warnings []string `json:"warnings,omitempty"`
 }
+
+const unwiredRepositoryWarningTimeout = 750 * time.Millisecond
 
 func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
@@ -198,6 +202,10 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "target_session is required", "target_session")
 			return
 		}
+		if strings.TrimSpace(body.Message) == "" {
+			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
+			return
+		}
 		if message, field := validateMessageEnums(body); message != "" {
 			writeJSONError(w, http.StatusBadRequest, message, field)
 			return
@@ -273,8 +281,12 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		if request.Topic == "" || request.Message == "" {
-			writeJSONError(w, http.StatusBadRequest, "topic and message are required", "topic", "message")
+		if strings.TrimSpace(request.Topic) == "" {
+			writeJSONError(w, http.StatusBadRequest, "topic is required", "topic")
+			return
+		}
+		if strings.TrimSpace(request.Message) == "" {
+			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
 			return
 		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
@@ -531,7 +543,29 @@ func (d *listenerDeps) streamInspector() streamInfoLookup {
 	return nil
 }
 
-func unwiredRepositoryWarning(d *listenerDeps, topic string, logger *logging.Logger) string {
+func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamName, subjectsFilter string) (*nats.StreamInfo, error) {
+	type result struct {
+		info *nats.StreamInfo
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		info, err := inspector.StreamInfo(
+			streamName,
+			&nats.StreamInfoRequest{SubjectsFilter: subjectsFilter},
+			nats.Context(ctx),
+		)
+		resultCh <- result{info: info, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.info, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string, logger *logging.Logger) string {
 	const githubTopicPrefix = "notifications.github."
 	remainder, ok := strings.CutPrefix(topic, githubTopicPrefix)
 	if !ok {
@@ -551,7 +585,7 @@ func unwiredRepositoryWarning(d *listenerDeps, topic string, logger *logging.Log
 		streamName = bus.Stream
 	}
 	subjectsFilter := githubTopicPrefix + owner + "." + repo + ".>"
-	info, err := inspector.StreamInfo(streamName, &nats.StreamInfoRequest{SubjectsFilter: subjectsFilter})
+	info, err := streamInfoWithin(ctx, inspector, streamName, subjectsFilter)
 	if err != nil {
 		logger.Warn("listener stream info failed",
 			slog.String("stream", streamName),
@@ -611,9 +645,11 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 				return
 			}
 		}
+		warningCtx, cancelWarnings := context.WithTimeout(r.Context(), unwiredRepositoryWarningTimeout)
+		defer cancelWarnings()
 		warnings := make([]string, 0)
 		for _, topic := range body.Topics {
-			if warning := unwiredRepositoryWarning(d, topic, logger); warning != "" {
+			if warning := unwiredRepositoryWarning(warningCtx, d, topic, logger); warning != "" {
 				warnings = append(warnings, warning)
 			}
 		}

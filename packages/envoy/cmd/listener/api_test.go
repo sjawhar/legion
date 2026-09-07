@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -31,6 +33,15 @@ func (f *fakeStreamInfo) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.St
 		}
 	}
 	return f.info, f.err
+}
+
+type delayedStreamInfo struct {
+	delay time.Duration
+}
+
+func (f delayedStreamInfo) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
+	time.Sleep(f.delay)
+	return &nats.StreamInfo{}, nil
 }
 
 func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
@@ -162,6 +173,49 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 	}
 }
 
+func TestMessageHandlersRejectBlankMessage(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "send",
+			path: "/v1/messages/send",
+			body: `{"target_session":"ses_target","message":"   "}`,
+		},
+		{
+			name: "publish",
+			path: "/v1/messages/publish",
+			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"   "}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			if tc.path == "/v1/messages/send" {
+				sendHandler(&state).ServeHTTP(recorder, request)
+			} else {
+				publishHandler(&state).ServeHTTP(recorder, request)
+			}
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			t.Logf("%s blank message: %s", tc.name, recorder.Body.String())
+			if body := recorder.Body.String(); body != "{\"error\":\"message is required\",\"expected\":[\"message\"]}\n" {
+				t.Fatalf("body = %q", body)
+			}
+		})
+	}
+}
+
 func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
@@ -176,6 +230,20 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	handler := publishHandler(&state)
 
 	t.Run("unheld role returns 404", func(t *testing.T) {
+		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
+		if err != nil {
+			t.Fatalf("subscribe to unheld role: %v", err)
+		}
+		t.Cleanup(func() { _ = roleProbe.Unsubscribe() })
+		exceptionProbe, err := client.Conn.SubscribeSync("notifications.envoy.exceptions.notifications.role.unheld")
+		if err != nil {
+			t.Fatalf("subscribe to unheld-role exception lane: %v", err)
+		}
+		t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+		if err := client.Conn.Flush(); err != nil {
+			t.Fatalf("flush unheld-role subscriptions: %v", err)
+		}
+
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.unheld","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
@@ -186,6 +254,18 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\"}\n" {
 			t.Fatalf("body = %q", body)
 		}
+		assertNoMessage := func(name string, probe *nats.Subscription) {
+			t.Helper()
+			message, err := probe.NextMsg(100 * time.Millisecond)
+			if err == nil {
+				t.Fatalf("unexpected %s message: %s", name, message.Data)
+			}
+			if !errors.Is(err, nats.ErrTimeout) {
+				t.Fatalf("wait for %s message: %v", name, err)
+			}
+		}
+		assertNoMessage("unheld role", roleProbe)
+		assertNoMessage("unheld-role exception", exceptionProbe)
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
@@ -291,6 +371,45 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	}
 	if inspector.stream != "notifications" || inspector.subjectsFilter != "notifications.github.example-org.example-repo.>" {
 		t.Fatalf("stream inspection = stream %q subjects_filter %q", inspector.stream, inspector.subjectsFilter)
+	}
+}
+
+func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{
+		client:     client,
+		registry:   registry,
+		sessions:   sessions,
+		streamName: "notifications",
+		streamInfo: delayedStreamInfo{delay: 2 * time.Second},
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
+		"session_id":"ses_subscriber",
+		"self_subscribed":true,
+		"topics":["notifications.github.example-org.example-repo.pr.>"]
+	}`))
+	start := time.Now()
+	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+	elapsed := time.Since(start)
+	if elapsed > time.Second {
+		t.Fatalf("subscribe took %s, want the advisory check to finish within one second", elapsed)
+	}
+	t.Logf("timed unwired-repository response after %s: %s", elapsed, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode subscribe response: %v", err)
+	}
+	if len(response.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want no warning after timed-out inspection", response.Warnings)
 	}
 }
 

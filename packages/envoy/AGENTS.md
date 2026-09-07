@@ -73,10 +73,13 @@ caller must provide a field.
 
 ## Topic shapes
 
-- GitHub repository topics start with
-  `notifications.github.<owner>.<repo>`. Examples include
-  `pr.<n>.merged`, `pr.<n>.closed`, `pr.<n>.checks.settled`, and
-  `workflow.<file>.<action>.branch.<name>`.
+- GitHub repository topics start with `notifications.github.<owner>.<repo>`.
+  Pull requests use `pr.<n>` for lifecycle (a closed event carries
+  `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`), plus
+  `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and
+  `pr.<n>.checks` when the head's checks settle. Check settlement re-fires with
+  `superseded_settlement` when new runs appear. `workflow.<file>.<action>`
+  carries only runs without an associated pull request.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
   rather than subscribed to by role holders.
