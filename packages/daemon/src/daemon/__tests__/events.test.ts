@@ -238,6 +238,35 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("warns and ignores a raw-shaped GitHub pull request payload", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pump = startEventPump(deps(state, nats, async () => {}));
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request.synchronize",
+        envelope({
+          action: "synchronize",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 7, head: { sha: "unexpected-head" } },
+        })
+      );
+      await pump.drain();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "legion: ignored raw-shaped GitHub payload (nested pull_request); Envoy emits kind/action/head_sha"
+      );
+      expect(state.prs["acme/widgets#7"]).toEqual(checkPr(issue));
+    } finally {
+      pump.stop();
+      warn.mockRestore();
+    }
+  });
+
   it("logs the subject and event ID after consuming a GitHub envelope", async () => {
     const { state, architect } = stateForIssue();
     const nats = new FakeNats();

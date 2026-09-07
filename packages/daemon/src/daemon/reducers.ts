@@ -38,8 +38,11 @@ export interface CiSettlementInput {
   settledAt: number;
   generation?: number;
 }
-function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value) => right.includes(value));
+function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
 function ciVerdictEmissions(
@@ -59,7 +62,7 @@ function ciVerdictEmissions(
   const priorFailing = pr.failing;
   pr.verdict = verdict;
   pr.failing = verdict === "red" ? failing : [];
-  if (priorVerdict === verdict && sameStringSet(priorFailing, pr.failing)) return [];
+  if (priorVerdict === verdict && sameStringMultiset(priorFailing, pr.failing)) return [];
   return verdict === "red"
     ? [{ type: "ci-settled-red", failing, sha: pr.headSha }]
     : [{ type: "ci-green", sha: pr.headSha }];
@@ -309,7 +312,7 @@ function registerPr(
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
-  state.prByBranch[`${repo}@${branch}`] = prKey;
+  if (branch) state.prByBranch[`${repo}@${branch}`] = prKey;
   return pr;
 }
 

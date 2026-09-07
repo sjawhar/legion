@@ -662,6 +662,34 @@ describe("reduceGithubEvent", () => {
       headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
     });
   });
+  it("does not index a registered PR under an unknown branch", () => {
+    const state = rootState();
+    const fallbackIssue = formatIssueKey("acme", "widgets", prNumber);
+    state.issues[fallbackIssue] = {
+      key: fallbackIssue,
+      title: "Fallback PR issue",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+
+    expect(
+      effects(state, {
+        kind: "pr",
+        action: "opened",
+        repo,
+        number: String(prNumber),
+        head_sha: "head-sha",
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      key: fallbackIssue,
+      headSha: "head-sha",
+    });
+    expect(state.prByBranch).toEqual({});
+  });
+
   it("registers a Legion PR on synchronization when its opened event was missed", () => {
     const state = rootState();
     attachChild(state);

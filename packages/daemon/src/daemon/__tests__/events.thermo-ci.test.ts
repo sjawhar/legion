@@ -317,6 +317,48 @@ it("emits settled-red when a red head re-settles with a changed failing set", as
   pump.stop();
 });
 
+it("emits settled-red when duplicate failing names change to a different multiset", async () => {
+  const { state } = stateForCi();
+  state.prs["acme/widgets#7"] = {
+    ...state.prs["acme/widgets#7"],
+    verdict: "red",
+    failing: ["test", "test"],
+    ciSettledAt: 1,
+  };
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        settled_at: 2,
+        failed: { count: 2, checks: ["lint", "test"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["lint", "test"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
 it("does not re-emit when a red head re-settles with the same failing set", async () => {
   const { state } = stateForCi();
   state.prs["acme/widgets#7"] = {

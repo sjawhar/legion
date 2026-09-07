@@ -397,18 +397,32 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         envelope
       );
     } else {
-      const exception = exceptionInfo(deps.state, subject, envelope);
-      if (exception) {
-        if (exception.controller) {
-          addHeld(controllerTarget, exception.roleToken, exception.original.payload, {
-            ...envelope,
-            event_id: exception.original.eventId,
-          });
-          await deps.saveState();
-        }
-        await deps.onException(exception);
+      const rawPayload = recordPayload(envelope);
+      if (
+        subject.startsWith("notifications.github.") &&
+        rawPayload?.kind === undefined &&
+        asRecord(rawPayload?.pull_request)
+      ) {
+        console.warn(
+          "legion: ignored raw-shaped GitHub payload (nested pull_request); Envoy emits kind/action/head_sha"
+        );
       } else {
-        await applyEffects(reduceGithubEvent(deps.state, subject, envelope, deps.config), envelope);
+        const exception = exceptionInfo(deps.state, subject, envelope);
+        if (exception) {
+          if (exception.controller) {
+            addHeld(controllerTarget, exception.roleToken, exception.original.payload, {
+              ...envelope,
+              event_id: exception.original.eventId,
+            });
+            await deps.saveState();
+          }
+          await deps.onException(exception);
+        } else {
+          await applyEffects(
+            reduceGithubEvent(deps.state, subject, envelope, deps.config),
+            envelope
+          );
+        }
       }
     }
     if (shouldSave) await deps.saveState();
