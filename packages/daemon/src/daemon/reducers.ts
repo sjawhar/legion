@@ -46,7 +46,6 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
-/** A listener-authored, same-head settlement identity. */
 /** A live settlement offered to the per-head fence: its ordering identity and its outcome. */
 export interface SettlementCandidate {
   readonly latestCheckRunId: number;
@@ -118,13 +117,14 @@ export interface CiFence {
 
 /**
  * What a rollup read from GitHub may do to the stored fence: replace it (a
- * higher id; or an equal id when the stored fence is also GitHub's); take the
- * tie at an equal id over a live fence (the listener identity stays for
- * duplicate detection; GitHub's completion becomes the watermark and GitHub
- * holds ties at it); apply its verdict unfenced (GitHub reports no check runs);
- * or nothing — the rollup is an older view than the fence (a lower id, or an
- * equal id whose completion is absent or predates the watermark) and its
- * verdict is stale. The live counterpart is `classifySettlement`.
+ * higher id; or an equal id, not older by completion, when the stored fence is
+ * also GitHub's); take the tie at an equal id over a live fence (the listener
+ * identity stays for duplicate detection; GitHub's completion becomes the
+ * watermark and GitHub holds ties at it); apply its verdict unfenced (neither
+ * side has a check run to order by); or nothing — the rollup is an older view
+ * than the fence (a lower id; no id where one is fenced; or an equal id whose
+ * completion is absent or predates the watermark) and its verdict is stale.
+ * The live counterpart is `classifySettlement`.
  */
 export type GitHubFenceEffect = "replace" | "watermark" | "unfenced" | "stale";
 
@@ -133,13 +133,12 @@ export function acceptGitHubFence(
   latestCheckRunId: number | null,
   latestCompletedAt: number | null
 ): GitHubFenceEffect {
-  if (latestCheckRunId === null) return "unfenced";
+  if (latestCheckRunId === null) return pr.ciLatestRunId === null ? "unfenced" : "stale";
   if (pr.ciLatestRunId === null || latestCheckRunId > pr.ciLatestRunId) return "replace";
   if (latestCheckRunId < pr.ciLatestRunId) return "stale";
-  if (pr.ciSettlementGeneration === null) return "replace";
   if (latestCompletedAt === null) return "stale";
   if (pr.ciLatestCompletedAt !== null && latestCompletedAt < pr.ciLatestCompletedAt) return "stale";
-  return "watermark";
+  return pr.ciSettlementGeneration === null ? "replace" : "watermark";
 }
 
 /** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */

@@ -4,7 +4,7 @@ import type { CiFetchResult } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import { startEventPump } from "../events";
 import { type LegionState, newLegionState } from "../legion-state";
-import { reduceGithubEvent } from "../reducers";
+import { type Effect, reduceGithubEvent } from "../reducers";
 import { runResync } from "../resync";
 
 class FakeNats {
@@ -1160,6 +1160,91 @@ it("a rollup older than the completion watermark is ignored and does not take th
     ciReconciled: false,
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
+
+it("a rollup older than a GitHub-authored fence at the same id is ignored", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const applied: Effect[][] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async () => {},
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+  const resync = (
+    ciStatus: "passing" | "failing",
+    latestCheckRunId: number | null,
+    completedAt: string | null,
+    now: number
+  ) =>
+    runResync({
+      state,
+      config,
+      fetchGitHubProjectItems: async () => ({ items: [] }),
+      fetchCiStatusBatch: async () => ({
+        "acme/widgets#7": {
+          ciStatus,
+          failingChecks: ciStatus === "failing" ? ["build"] : [],
+          cancelledCount: 0,
+          mergeableStatus: null,
+          headSha: "head-1",
+          isOpen: true,
+          updatedAt: "2026-09-07T00:00:00.000Z",
+          latestCheckRunId,
+          latestCompletedAt: completedAt === null ? null : Date.parse(completedAt),
+        },
+      }),
+      applyEffects: async (effects) => {
+        applied.push(effects);
+      },
+      now: () => now,
+    });
+  const emitted = () =>
+    applied.flat().flatMap((effect) => (effect.kind === "publish" ? [effect.payload] : []));
+
+  // No live settlement yet: GitHub authors the fence — red, completed 10:02.
+  await resync("failing", 900, "2026-09-07T10:02:00Z", 1);
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    ciLatestRunId: 900,
+    ciSettlementGeneration: null,
+    ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+    ciReconciled: true,
+  });
+  expect(emitted()).toEqual([{ type: "ci-settled-red", sha: "head-1", failing: ["build"] }]);
+
+  // An older view of the same run (green, completed 10:00) must not replace it.
+  await resync("passing", 900, "2026-09-07T10:00:00Z", 1 + config.resyncIntervalMs);
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+  });
+
+  // Nor may a view with no check runs at all (nothing to order it by).
+  await resync("passing", null, null, 1 + 2 * config.resyncIntervalMs);
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciLatestRunId: 900,
+    ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+  });
+  expect(emitted()).toHaveLength(1);
+
+  // GitHub's newer read of the same run (green, completed 10:05) replaces it.
+  await resync("passing", 900, "2026-09-07T10:05:00Z", 1 + 3 * config.resyncIntervalMs);
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "green",
+    ciLatestCompletedAt: Date.parse("2026-09-07T10:05:00Z"),
+  });
+  expect(emitted().at(-1)).toEqual({ type: "ci-green", sha: "head-1" });
   pump.stop();
 });
 

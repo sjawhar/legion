@@ -762,8 +762,8 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: null,
-          latestCompletedAt: null,
+          latestCheckRunId: 5,
+          latestCompletedAt: Date.parse("2026-08-24T00:00:00.000Z"),
           isOpen: true,
         },
       }),
@@ -776,7 +776,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 4,
+      ciLatestRunId: 5,
     });
     expect(dispatched).toEqual([
       [
@@ -817,8 +817,8 @@ describe("runResync", () => {
           failingChecks: ["lint", "unit"],
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: null,
-          latestCompletedAt: null,
+          latestCheckRunId: 5,
+          latestCompletedAt: Date.parse("2026-08-24T00:00:00.000Z"),
           isOpen: true,
         },
       }),
@@ -831,7 +831,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 4,
+      ciLatestRunId: 5,
     });
     expect(dispatched).toEqual([
       [
@@ -878,8 +878,8 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
-            latestCheckRunId: null,
-            latestCompletedAt: null,
+            latestCheckRunId: 5,
+            latestCompletedAt: Date.parse("2026-08-24T00:00:00.000Z"),
             isOpen: true,
           },
         };
@@ -893,7 +893,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 4,
+      ciLatestRunId: 5,
     });
     expect(dispatched).toEqual([]);
   });
@@ -1021,7 +1021,7 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
-            latestCheckRunId: null,
+            latestCheckRunId: 5,
             latestCompletedAt: null,
             isOpen: true,
           },
@@ -1037,7 +1037,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciLatestRunId: 5,
     });
     expect(dispatched).toEqual([]);
   });
@@ -1069,7 +1069,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: null,
+          latestCheckRunId: 5,
           latestCompletedAt: null,
           isOpen: true,
         },
@@ -1083,7 +1083,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciLatestRunId: 5,
     });
     expect(dispatched).toEqual([]);
   });
