@@ -165,7 +165,8 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
 /** The payload's attempt set: a non-empty list of `{name, id}` with unique names and positive ids. */
 function attemptSet(value: unknown): Record<string, number> | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined;
-  const runs: Record<string, number> = {};
+  // Check names are arbitrary strings ("constructor", "__proto__"): own keys only.
+  const runs: Record<string, number> = Object.create(null);
   for (const entry of value) {
     const record = asRecord(entry);
     const name = record?.name;
@@ -176,7 +177,7 @@ function attemptSet(value: unknown): Record<string, number> | undefined {
       typeof id !== "number" ||
       !Number.isSafeInteger(id) ||
       id <= 0 ||
-      name in runs
+      Object.hasOwn(runs, name)
     ) {
       return undefined;
     }

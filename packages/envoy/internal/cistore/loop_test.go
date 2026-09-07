@@ -482,7 +482,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("re-settled summary = %q", third.PayloadSummary)
 	}
 }
-func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *testing.T) {
+func TestSummaryTickCarriesGenerationWhenSettlementsShareTheirHighestRun(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -529,11 +529,13 @@ func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *tes
 	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
 		t.Fatalf("decode second settlement: %v", err)
 	}
-	if maxCheckRunID(first.CheckRuns) != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
+	assertCheckRuns(t, first.CheckRuns, map[string]uint64{"build": 900})
+	assertCheckRuns(t, second.CheckRuns, map[string]uint64{"build": 900, "lint": 850})
+	if first.Generation == nil || first.SupersededSettlement != "" ||
 		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
 		t.Fatalf("first settlement = %+v, want initial green build at run 900", first)
 	}
-	if maxCheckRunID(second.CheckRuns) != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
+	if second.Generation == nil || *second.Generation <= *first.Generation ||
 		second.SupersededSettlement != "true" || second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "lint" ||
 		second.Passed.Count != 1 || strings.Join(second.Passed.Checks, ",") != "build" {
 		t.Fatalf("second settlement = %+v, want a newer red lint settlement with max run 900", second)
@@ -587,14 +589,16 @@ func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
 	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
 		t.Fatalf("decode second settlement: %v", err)
 	}
-	if maxCheckRunID(first.CheckRuns) != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
+	assertCheckRuns(t, first.CheckRuns, map[string]uint64{"build": 900})
+	assertCheckRuns(t, second.CheckRuns, map[string]uint64{"build": 900})
+	if first.Generation == nil || first.SupersededSettlement != "" ||
 		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
 		t.Fatalf("first settlement = %+v, want green build at run 900", first)
 	}
-	if maxCheckRunID(second.CheckRuns) != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
+	if second.Generation == nil || *second.Generation <= *first.Generation ||
 		second.SupersededSettlement != "true" ||
 		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "build" || second.Passed.Count != 0 {
-		t.Fatalf("second settlement = %+v, want a newer red build with later GitHub completion at run 900", second)
+		t.Fatalf("second settlement = %+v, want a newer red build at the same attempt set", second)
 	}
 }
 func TestSummaryTickKeepsLegacyFailureAfterFreshCheckArrives(t *testing.T) {
@@ -679,9 +683,7 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode settlement: %v", err)
 	}
-	if maxCheckRunID(summary.CheckRuns) != 802 {
-		t.Fatalf("latest_check_run_id = %d, want 802", maxCheckRunID(summary.CheckRuns))
-	}
+	assertCheckRuns(t, summary.CheckRuns, map[string]uint64{"test": 802})
 	if summary.Failed.Count != 0 || len(summary.Failed.Checks) != 0 {
 		t.Fatalf("failed checks = %+v, want none", summary.Failed)
 	}

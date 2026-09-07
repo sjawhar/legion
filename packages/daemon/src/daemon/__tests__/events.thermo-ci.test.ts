@@ -746,7 +746,7 @@ it("requires a nonempty snapshot and a well-formed attempt set", async () => {
   pump.stop();
 });
 
-it("applies an equal-id live settlement after a resync fence without a generation", async () => {
+it("applies a same-set live settlement after a pending resync fence without a generation", async () => {
   const { state } = stateForCi();
 
   await runResync({
@@ -799,7 +799,7 @@ it("applies an equal-id live settlement after a resync fence without a generatio
   pump.stop();
 });
 
-it("accepts a higher check-run id after the listener generation restarts", async () => {
+it("accepts a newer attempt set after the listener generation restarts", async () => {
   const { state } = stateForCi();
   state.prs["acme/widgets#7"] = {
     ...state.prs["acme/widgets#7"],
@@ -981,7 +981,7 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
   pump.stop();
 });
 
-it("drops a lower check-run id settlement for the same head", async () => {
+it("drops an older attempt set for the same head", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();
   const published: string[] = [];
@@ -1511,6 +1511,68 @@ for (const order of [
   });
 }
 
+it("check names that collide with Object.prototype are ordinary attempt-set members", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+  const applied: Effect[][] = [];
+  try {
+    const first = [
+      { name: "__proto__", id: 100 },
+      { name: "constructor", id: 200 },
+      { name: "toString", id: 300 },
+    ];
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(settledChecks({ check_runs: first, generation: 1, settled_at: 1 }))
+    );
+    await pump.drain();
+    const storedSet = () => Object.entries(state.prs["acme/widgets#7"]?.ciCheckRuns ?? {}).sort();
+    expect(storedSet()).toEqual([
+      ["__proto__", 100],
+      ["constructor", 200],
+      ["toString", 300],
+    ]);
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+
+    // The same set from GitHub applies; a re-run of "constructor" is a newer set.
+    await resyncWith(
+      state,
+      rollup("passing", Object.fromEntries(first.map((run) => [run.name, run.id]))),
+      applied
+    );
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      ciSettlementGeneration: 1,
+      ciReconciled: true,
+    });
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [first[0], { name: "constructor", id: 201 }, first[2]],
+          generation: 2,
+          snapshot: "hash-b",
+          settled_at: 2,
+          failed: { count: 1, checks: ["constructor"] },
+          passed: { count: 2, checks: ["__proto__", "toString"] },
+        })
+      )
+    );
+    await pump.drain();
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: "red",
+      ciSettlementGeneration: 2,
+      ciReconciled: false,
+    });
+    expect(storedSet()).toEqual([
+      ["__proto__", 100],
+      ["constructor", 201],
+      ["toString", 300],
+    ]);
+  } finally {
+    pump.stop();
+  }
+});
+
 it("a superseding attempt with an earlier completion is a newer set: accepted live and matched by the next read", async () => {
   // Producer trace: build#100 red and lint#900 green settle red; a delayed
   // webhook for build#200 (created later, finished earlier) replaces build#100.
@@ -1643,7 +1705,7 @@ it("a disagreeing live settlement at a GitHub-authored fence's set is stale: Git
   expect(published).toEqual([]);
   pump.stop();
 });
-it("a same-head resync refresh at an equal check-run id never erases the known generation", async () => {
+it("a same-head resync read at an equal attempt set never erases the known generation", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();
   const published: string[] = [];
@@ -1721,7 +1783,7 @@ it("a same-head resync refresh at an equal check-run id never erases the known g
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
 });
-it("drops a delayed lower check-run id and accepts a higher check-run id for the same head", async () => {
+it("drops a delayed older attempt set and accepts a newer one for the same head", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();
   const published: string[] = [];
@@ -1788,7 +1850,7 @@ it("drops a delayed lower check-run id and accepts a higher check-run id for the
   pump.stop();
 });
 
-it("emits when a higher check-run id changes the failing set", async () => {
+it("emits when a newer attempt set changes the failing set", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();
   const published: string[] = [];
@@ -1843,7 +1905,7 @@ it("emits when a higher check-run id changes the failing set", async () => {
   pump.stop();
 });
 
-it("ignores a settlement without a latest check-run id", async () => {
+it("ignores a settlement without an attempt set", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();
   const published: string[] = [];
@@ -1874,7 +1936,7 @@ it("ignores a settlement without a latest check-run id", async () => {
   pump.stop();
 });
 
-it("accepts a settlement for a new head with a lower check-run id", async () => {
+it("accepts a settlement for a new head with lower check-run ids", async () => {
   const { state } = stateForCi();
   state.prs["acme/widgets#7"] = {
     ...state.prs["acme/widgets#7"],
@@ -1924,7 +1986,7 @@ it("accepts a settlement for a new head with a lower check-run id", async () => 
 
   nats.emit(
     "notifications.github.acme.widgets.pr.7.checks",
-    envelope(settledChecks({ sha: "head-2", latest_check_run_id: 1 }))
+    envelope(settledChecks({ sha: "head-2", check_runs: [{ name: "build", id: 1 }] }))
   );
   await pump.drain();
 

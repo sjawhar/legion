@@ -392,7 +392,8 @@ function rollupOutcome(nodes: readonly unknown[]): RollupOutcome {
 }
 
 function checkRunSet(nodes: readonly unknown[]): Record<string, number> {
-  const runs: Record<string, number> = {};
+  // Check names are arbitrary strings ("constructor", "__proto__"): own keys only.
+  const runs: Record<string, number> = Object.create(null);
   for (const node of nodes) {
     const record = recordValue(node);
     const name = record?.name;
@@ -406,8 +407,7 @@ function checkRunSet(nodes: readonly unknown[]): Record<string, number> {
     ) {
       continue;
     }
-    const known = runs[name];
-    if (known === undefined || databaseId > known) runs[name] = databaseId;
+    if (!Object.hasOwn(runs, name) || databaseId > runs[name]) runs[name] = databaseId;
   }
   return runs;
 }

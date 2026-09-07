@@ -70,7 +70,28 @@ func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url,
 	})
 }
 
-// maxCheckRunID is the highest id in a settlement's attempt set.
+// assertCheckRuns fails unless the settlement's attempt set is exactly want.
+func assertCheckRuns(t *testing.T, runs []CheckRunRef, want map[string]uint64) {
+	t.Helper()
+	got := map[string]uint64{}
+	for _, run := range runs {
+		if _, dup := got[run.Name]; dup {
+			t.Fatalf("check_runs repeats %q: %+v", run.Name, runs)
+		}
+		got[run.Name] = run.ID
+	}
+	if len(got) != len(want) {
+		t.Fatalf("check_runs = %+v, want %v", runs, want)
+	}
+	for name, id := range want {
+		if got[name] != id {
+			t.Fatalf("check_runs[%s] = %d, want %d (set %+v)", name, got[name], id, runs)
+		}
+	}
+}
+
+// maxCheckRunID is the highest id in a settlement's attempt set, for tests
+// whose subject is a genuinely higher global maximum.
 func maxCheckRunID(runs []CheckRunRef) uint64 {
 	var max uint64
 	for _, run := range runs {
