@@ -26,8 +26,8 @@ func TestGithubCIObservationsExtractCheckRunIdentity(t *testing.T) {
 		t.Fatalf("observations = %d, want 1", len(observations))
 	}
 	observation := observations[0]
-	if observation.CheckRunID != "987654321" {
-		t.Errorf("check run ID = %q, want 987654321", observation.CheckRunID)
+	if observation.CheckRunID != 987654321 {
+		t.Errorf("check run ID = %d, want 987654321", observation.CheckRunID)
 	}
 	if observation.URL != "https://example-host/checks/987654321" {
 		t.Errorf("check run URL = %q", observation.URL)

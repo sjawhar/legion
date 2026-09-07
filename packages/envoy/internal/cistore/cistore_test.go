@@ -3,6 +3,8 @@ package cistore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -49,13 +51,17 @@ func openStore(t *testing.T, conn *natsgo.Conn) *Store {
 	return st
 }
 func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
+	id, err := strconv.ParseUint(checkRunID, 10, 64)
+	if err != nil {
+		return err
+	}
 	return s.Record(contracts.CIObservation{
 		Owner:      owner,
 		Repo:       repo,
 		Number:     number,
 		SHA:        sha,
 		CheckName:  checkName,
-		CheckRunID: checkRunID,
+		CheckRunID: id,
 		URL:        url,
 		Status:     status,
 		Conclusion: conclusion,
@@ -113,17 +119,33 @@ func (kv *interleavingKV) Update(key string, value []byte, revision uint64) (uin
 	}
 	return updated, err
 }
+func TestStateUnmarshalJSONAcceptsLegacyAndNumericCheckRunIDs(t *testing.T) {
+	for name, checkRunID := range map[string]string{
+		"legacy string": `"987654321"`,
+		"number":        "987654321",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var state State
+			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"checks":{"build":{"check_run_id":%s}}}`, checkRunID)), &state); err != nil {
+				t.Fatalf("unmarshal state: %v", err)
+			}
+			if got := state.Checks["build"].CheckRunID; got != 987654321 {
+				t.Fatalf("check_run_id = %d, want 987654321", got)
+			}
+		})
+	}
+}
 
 func TestRecordAccumulatesChecks(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "build", "", "", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "build", "1", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record build: %v", err)
 	}
 	before := getState(t, s, "sjawhar", "legion", "42", "abc123")
-	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "test", "", "", "in_progress", "", ""); err != nil {
+	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "test", "1", "", "in_progress", "", ""); err != nil {
 		t.Fatalf("record test: %v", err)
 	}
 	st := getState(t, s, "sjawhar", "legion", "42", "abc123")
@@ -171,7 +193,7 @@ func TestRecordConcurrentNoLostUpdate(t *testing.T) {
 		name := "check-" + string(rune('a'+i))
 		go func() {
 			defer wg.Done()
-			errs <- recordCheck(s, "o", "r", "1", "sha", name, "", "", "completed", "success", "")
+			errs <- recordCheck(s, "o", "r", "1", "sha", name, "1", "", "completed", "success", "")
 		}()
 	}
 	wg.Wait()
@@ -214,7 +236,7 @@ func TestListReflectsRecords(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := recordCheck(s, "o", "r", "7", "sha7", "build", "", "", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, "o", "r", "7", "sha7", "build", "1", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -250,7 +272,7 @@ func TestRecordIgnoresStaleCheckRunID(t *testing.T) {
 	}
 
 	check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["unit-tests"]
-	if check.CheckRunID != "200" || check.URL != "https://example-host/checks/200" ||
+	if check.CheckRunID != 200 || check.URL != "https://example-host/checks/200" ||
 		check.Status != "completed" || check.Conclusion != "failure" {
 		t.Fatalf("stale attempt overwrote latest check: %+v", check)
 	}

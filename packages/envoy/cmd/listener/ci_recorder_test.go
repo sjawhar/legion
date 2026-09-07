@@ -40,7 +40,7 @@ func TestCIRecorderDefersDependencyLoadUntilInvocation(t *testing.T) {
 		SHA:        sha,
 		CheckName:  "build",
 		SuiteID:    "900",
-		CheckRunID: "800",
+		CheckRunID: 800,
 		URL:        "https://example-host/checks/800",
 		Status:     "completed",
 		Conclusion: "success",

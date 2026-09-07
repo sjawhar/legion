@@ -1,10 +1,6 @@
 package cistore
 
-import (
-	"fmt"
-	"sort"
-	"strconv"
-)
+import "sort"
 
 // category buckets a check into one of the rollup groups.
 type category int
@@ -85,17 +81,13 @@ type Summary struct {
 
 // renderSummary derives the stable checks payload. Names within each group are
 // sorted; publication owns the settlement timestamp and JSON encoding.
-func renderSummary(s State) (Summary, error) {
+func renderSummary(s State) Summary {
 	groups := map[category][]string{}
 	failingChecks := make([]FailingCheck, 0)
 	var latestCheckRunID uint64
 	for key, check := range s.Checks {
-		checkRunID, err := strconv.ParseUint(check.CheckRunID, 10, 64)
-		if err != nil || checkRunID == 0 {
-			return Summary{}, fmt.Errorf("cistore: invalid check run ID %q for %q", check.CheckRunID, key)
-		}
-		if checkRunID > latestCheckRunID {
-			latestCheckRunID = checkRunID
+		if check.CheckRunID > latestCheckRunID {
+			latestCheckRunID = check.CheckRunID
 		}
 		name := check.Name
 		if name == "" {
@@ -131,7 +123,7 @@ func renderSummary(s State) (Summary, error) {
 	if s.Generation > s.InitialGeneration {
 		sum.SupersededSettlement = "true"
 	}
-	return sum, nil
+	return sum
 }
 
 // group builds a StatusGroup from a name list: sorted names, explicit count, and

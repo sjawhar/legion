@@ -518,7 +518,7 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 		t.Fatalf("settlement count = %d, want 1", got)
 	}
 	state := getState(t, store, owner, repo, number, sha)
-	if len(state.Checks) != 1 || state.Checks["test"].CheckRunID != "802" || state.Checks["test"].Conclusion != "success" {
+	if len(state.Checks) != 1 || state.Checks["test"].CheckRunID != 802 || state.Checks["test"].Conclusion != "success" {
 		t.Fatalf("checks = %+v, want the latest successful test run", state.Checks)
 	}
 	var summary Summary

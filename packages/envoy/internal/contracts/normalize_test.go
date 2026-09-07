@@ -732,6 +732,7 @@ func TestGithubCIObservations(t *testing.T) {
 				"owner":     map[string]any{"login": "sjawhar"},
 			},
 			"check_run": map[string]any{
+				"id":            float64(987654321),
 				"name":          "unit-tests",
 				"status":        "completed",
 				"conclusion":    "failure",
@@ -799,6 +800,25 @@ func TestGithubCIObservationsSkipMalformedPRNumbers(t *testing.T) {
 		}
 		if observations := GithubCIObservations("check_run", body); len(observations) != 0 {
 			t.Fatalf("PR number %v yielded observations: %+v", number, observations)
+		}
+	}
+}
+func TestGithubCIObservationsSkipMalformedCheckRunIDs(t *testing.T) {
+	for _, checkRunID := range []any{nil, float64(0), "0", "not-an-id", float64(12.5), "-1"} {
+		body := map[string]any{
+			"repository": map[string]any{
+				"name":  "example-repo",
+				"owner": map[string]any{"login": "example-org"},
+			},
+			"check_run": map[string]any{
+				"id":            checkRunID,
+				"name":          "build",
+				"head_sha":      "abcdef",
+				"pull_requests": []any{map[string]any{"number": 42}},
+			},
+		}
+		if observations := GithubCIObservations("check_run", body); len(observations) != 0 {
+			t.Fatalf("check run ID %v yielded observations: %+v", checkRunID, observations)
 		}
 	}
 }

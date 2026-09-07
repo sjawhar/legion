@@ -3,6 +3,7 @@ package contracts
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -88,7 +89,7 @@ type CIObservation struct {
 	SHA        string
 	AppID      string
 	CheckName  string
-	CheckRunID string
+	CheckRunID uint64
 	SuiteID    string
 	URL        string
 	Status     string
@@ -127,8 +128,13 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		Conclusion: nestedString(body, key, "conclusion"),
 	}
 	if event == "check_run" {
+		checkRunID := githubPositiveUint64(nested(body, key, "id"))
+		if checkRunID == 0 {
+			log.Printf("github ci check run skipped: invalid id=%v", nested(body, key, "id"))
+			return nil
+		}
 		obs.CheckName = nestedString(body, key, "name")
-		obs.CheckRunID = nestedNumberString(body, key, "id")
+		obs.CheckRunID = checkRunID
 		obs.URL = nestedString(body, key, "html_url")
 		obs.ObservedAt = nestedString(body, key, "completed_at")
 		if obs.ObservedAt == "" {
@@ -410,6 +416,18 @@ func GithubPRNumber(value any) string {
 	default:
 		return ""
 	}
+}
+
+func githubPositiveUint64(value any) uint64 {
+	number := GithubPRNumber(value)
+	if number == "" {
+		return 0
+	}
+	id, err := strconv.ParseUint(number, 10, 64)
+	if err != nil || id == 0 {
+		return 0
+	}
+	return id
 }
 
 func githubNumber(event string, body map[string]any) string {

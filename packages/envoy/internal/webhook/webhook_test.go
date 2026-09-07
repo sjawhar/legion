@@ -55,7 +55,7 @@ func TestCIRecorderFuncs(t *testing.T) {
 		SHA:        "abcdef1234567",
 		CheckName:  "unit-tests",
 		SuiteID:    "900",
-		CheckRunID: "987654321",
+		CheckRunID: 987654321,
 		URL:        "https://example-host/checks/987654321",
 		Status:     "completed",
 		Conclusion: "success",

@@ -112,6 +112,7 @@ func TestGitHubHandler(t *testing.T) {
 	checkRun := `{
 		"action": "completed",
 		"check_run": {
+			"id": 987654321,
 			"name": "unit-tests",
 			"status": "completed",
 			"conclusion": "failure",
@@ -363,6 +364,7 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 	checkRun := `{
 		"action": "completed",
 		"check_run": {
+			"id": 987654321,
 			"name": "unit-tests",
 			"status": "completed",
 			"conclusion": "failure",
@@ -498,6 +500,7 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 		return fmt.Sprintf(`{
 			"action": "completed",
 			"check_run": {
+				"id": 987654321,
 				"name": %q,
 				"status": "completed",
 				"conclusion": "success",

@@ -10,17 +10,14 @@ import (
 func mkChecks(spec map[string][2]string) map[string]Check {
 	out := make(map[string]Check, len(spec))
 	for name, sc := range spec {
-		out[name] = Check{CheckRunID: "1", Status: sc[0], Conclusion: sc[1]}
+		out[name] = Check{CheckRunID: 1, Status: sc[0], Conclusion: sc[1]}
 	}
 	return out
 }
 
 func renderOrFail(t *testing.T, s State) (string, Summary) {
 	t.Helper()
-	sum, err := renderSummary(s)
-	if err != nil {
-		t.Fatalf("render summary: %v", err)
-	}
+	sum := renderSummary(s)
 	raw, err := json.Marshal(sum)
 	if err != nil {
 		t.Fatalf("marshal summary: %v", err)
@@ -78,26 +75,13 @@ func TestRenderSummaryCarriesLatestCheckRunID(t *testing.T) {
 	_, sum := renderOrFail(t, State{
 		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: "abcdef",
 		Checks: map[string]Check{
-			"build": {CheckRunID: "900", Status: "completed", Conclusion: "success"},
-			"lint":  {CheckRunID: "901", Status: "completed", Conclusion: "success"},
-			"test":  {CheckRunID: "1024", Status: "completed", Conclusion: "success"},
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success"},
+			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "success"},
+			"test":  {CheckRunID: 1024, Status: "completed", Conclusion: "success"},
 		},
 	})
 	if sum.LatestCheckRunID != 1024 {
 		t.Fatalf("latest_check_run_id = %d, want 1024", sum.LatestCheckRunID)
-	}
-}
-
-func TestRenderSummaryRejectsInvalidCheckRunID(t *testing.T) {
-	for _, checkRunID := range []string{"", "zero", "0"} {
-		_, err := renderSummary(State{
-			Checks: map[string]Check{
-				"build": {CheckRunID: checkRunID, Status: "completed", Conclusion: "success"},
-			},
-		})
-		if err == nil {
-			t.Fatalf("render summary with check_run_id %q did not fail", checkRunID)
-		}
 	}
 }
 
@@ -200,8 +184,8 @@ func TestRenderSummaryCancelledAndFailingChecks(t *testing.T) {
 		Number: "42",
 		SHA:    "abcdef1234567",
 		Checks: map[string]Check{
-			"cancelled-check": {CheckRunID: "1", Status: "completed", Conclusion: "cancelled"},
-			"failed-check":    {CheckRunID: "2", Status: "completed", Conclusion: "failure", URL: "https://example.test/checks/failed"},
+			"cancelled-check": {CheckRunID: 1, Status: "completed", Conclusion: "cancelled"},
+			"failed-check":    {CheckRunID: 2, Status: "completed", Conclusion: "failure", URL: "https://example.test/checks/failed"},
 		},
 	}
 
