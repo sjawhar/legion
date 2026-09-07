@@ -78,8 +78,8 @@ caller must provide a field.
   `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`), plus
   `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and
   `pr.<n>.checks` when the head's checks settle. Check settlement is at-least-once: a settlement can
-  be followed by a `superseded_settlement` with a higher `generation`; consumers keep the highest
-  generation per SHA. `workflow.<file>.<action>` carries only runs without an associated pull request.
+  be followed by a `superseded_settlement` with the monotonic `latest_check_run_id`, the highest
+  GitHub check-run ID in the settlement; consumers keep the highest `latest_check_run_id` per SHA because Envoy and GitHub's API see the same IDs. `workflow.<file>.<action>` carries only runs without an associated pull request.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.

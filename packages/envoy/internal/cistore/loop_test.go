@@ -432,8 +432,8 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 	first := pub.last()
 	initial := getState(t, store, owner, repo, number, sha)
 	gen0 := initial.Generation
-	if gen0 == 0 || !initial.SettledEmitted {
-		t.Fatalf("initial settled state = %+v, want a positive generation and settled", initial)
+	if gen0 != 0 || !initial.SettledEmitted {
+		t.Fatalf("initial settled state = %+v, want generation 0 and settled", initial)
 	}
 
 	if err := recordCheck(store, owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success", ""); err != nil {
@@ -525,6 +525,9 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode settlement: %v", err)
 	}
+	if summary.LatestCheckRunID != 802 {
+		t.Fatalf("latest_check_run_id = %d, want 802", summary.LatestCheckRunID)
+	}
 	if summary.Failed.Count != 0 || len(summary.Failed.Checks) != 0 {
 		t.Fatalf("failed checks = %+v, want none", summary.Failed)
 	}
@@ -533,6 +536,94 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	}
 	if len(summary.FailingChecks) != 0 {
 		t.Fatalf("failing_checks = %+v, want none", summary.FailingChecks)
+	}
+}
+
+func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := recordSuite(store, owner, repo, number, sha, "suite-a", "completed", "success", "1", ""); err != nil {
+		t.Fatalf("record suite A: %v", err)
+	}
+	if err := recordCheck(store, owner, repo, number, sha, "test", "100", "https://example.test/100", "completed", "success", ""); err != nil {
+		t.Fatalf("record suite A test: %v", err)
+	}
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "101", "https://example.test/101", "completed", "success", ""); err != nil {
+		t.Fatalf("record suite A lint: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 2)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("suite A settlement count = %d, want 1", got)
+	}
+	var first Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &first); err != nil {
+		t.Fatalf("decode suite A settlement: %v", err)
+	}
+	if first.LatestCheckRunID != 101 || first.Failed.Count != 0 {
+		t.Fatalf("suite A settlement = %+v, want green latest run 101", first)
+	}
+
+	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
+		t.Fatalf("record suite B: %v", err)
+	}
+	if err := recordCheck(store, owner, repo, number, sha, "test", "200", "https://example.test/200", "completed", "success", ""); err != nil {
+		t.Fatalf("record suite B test: %v", err)
+	}
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "201", "https://example.test/201", "completed", "success", ""); err != nil {
+		t.Fatalf("record suite B lint: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("suite B settlement count = %d, want 2", got)
+	}
+	var second Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &second); err != nil {
+		t.Fatalf("decode suite B settlement: %v", err)
+	}
+	if second.LatestCheckRunID != 201 || second.Failed.Count != 0 {
+		t.Fatalf("suite B settlement = %+v, want green latest run 201", second)
+	}
+
+	// This run belongs to the earlier suite A. Its newer GitHub check-run id
+	// still replaces suite B's current test run because checks are keyed by name.
+	if err := recordCheck(store, owner, repo, number, sha, "test", "300", "https://example.test/300", "queued", "", ""); err != nil {
+		t.Fatalf("record suite A rerun: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("queued suite A rerun published %d settlements, want 2", got)
+	}
+	if err := recordCheck(store, owner, repo, number, sha, "test", "300", "https://example.test/300", "completed", "failure", ""); err != nil {
+		t.Fatalf("complete suite A rerun: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 3 {
+		t.Fatalf("suite A rerun settlement count = %d, want 3", got)
+	}
+	var third Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &third); err != nil {
+		t.Fatalf("decode suite A rerun settlement: %v", err)
+	}
+	if third.LatestCheckRunID != 300 || third.Failed.Count != 1 || strings.Join(third.Failed.Checks, ",") != "test" {
+		t.Fatalf("suite A rerun settlement = %+v, want failed test at latest run 300", third)
 	}
 }
 
@@ -567,6 +658,13 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	runSummaryTick(store, pub, time.Second, logging.New("test"))
 	if got := pub.count(); got != 1 {
 		t.Fatalf("initial settlement count = %d, want 1", got)
+	}
+	var initialSummary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &initialSummary); err != nil {
+		t.Fatalf("decode initial settlement: %v", err)
+	}
+	if initialSummary.LatestCheckRunID != 802 {
+		t.Fatalf("initial latest_check_run_id = %d, want 802", initialSummary.LatestCheckRunID)
 	}
 	initial := getState(t, store, owner, repo, number, sha)
 	if !initial.SettledEmitted {
@@ -620,6 +718,9 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	if summary.SupersededSettlement != "true" || summary.Failed.Count != 0 || len(summary.FailingChecks) != 0 {
 		t.Fatalf("re-settlement = %+v, want a green superseding settlement", summary)
 	}
+	if summary.LatestCheckRunID != 902 || summary.LatestCheckRunID <= initialSummary.LatestCheckRunID {
+		t.Fatalf("re-settlement latest_check_run_id = %d, want greater than %d", summary.LatestCheckRunID, initialSummary.LatestCheckRunID)
+	}
 
 	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "cancelled", ""); err != nil {
 		t.Fatalf("record late cancelled test: %v", err)
@@ -635,13 +736,11 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	}
 }
 
-func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
+func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
 	pub := &recPub{}
-	clock := time.UnixMilli(1725753600000)
-	store.now = func() time.Time { return clock }
 	const (
 		owner  = "example-org"
 		repo   = "example-repo"
@@ -666,8 +765,8 @@ func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &first); err != nil {
 		t.Fatalf("decode first settlement: %v", err)
 	}
-	if first.Generation == 0 {
-		t.Fatal("first settlement generation = 0, want clock-seeded generation")
+	if first.LatestCheckRunID != 901 {
+		t.Fatalf("first latest_check_run_id = %d, want 901", first.LatestCheckRunID)
 	}
 
 	key := Key(owner, repo, number, sha)
@@ -675,7 +774,6 @@ func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
 		t.Fatalf("delete expired state: %v", err)
 	}
 	waitCacheStateMissing(t, store, owner, repo, number, sha)
-	clock = clock.Add(time.Millisecond)
 	if err := recordCheck(store, owner, repo, number, sha, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
 		t.Fatalf("record post-expiration observation: %v", err)
 	}
@@ -689,8 +787,8 @@ func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &second); err != nil {
 		t.Fatalf("decode post-expiration settlement: %v", err)
 	}
-	if uint64(second.Generation) <= uint64(first.Generation) {
-		t.Fatalf("post-expiration generation = %d, want greater than %d", second.Generation, first.Generation)
+	if second.LatestCheckRunID <= first.LatestCheckRunID {
+		t.Fatalf("post-expiration latest_check_run_id = %d, want greater than %d", second.LatestCheckRunID, first.LatestCheckRunID)
 	}
 }
 
@@ -801,8 +899,8 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
 	gen0 := getState(t, store, owner, repo, number, sha).Generation
-	if gen0 == 0 {
-		t.Fatal("initial state generation = 0, want clock-seeded generation")
+	if gen0 != 0 {
+		t.Fatalf("initial state generation = %d, want 0", gen0)
 	}
 
 	key := Key(owner, repo, number, sha)
@@ -866,8 +964,8 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode fresh settlement: %v", err)
 	}
-	if uint64(summary.Generation) != gen0+1 {
-		t.Fatalf("fresh settlement generation = %d, want %d", summary.Generation, gen0+1)
+	if summary.LatestCheckRunID != 807 {
+		t.Fatalf("fresh settlement latest_check_run_id = %d, want 807", summary.LatestCheckRunID)
 	}
 }
 func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.T) {
@@ -961,7 +1059,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 	}
 }
 
-func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *testing.T) {
+func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -997,8 +1095,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
 	gen0 := getState(t, store, owner, repo, number, sha).Generation
-	if gen0 == 0 {
-		t.Fatal("initial state generation = 0, want clock-seeded generation")
+	if gen0 != 0 {
+		t.Fatalf("initial state generation = %d, want 0", gen0)
 	}
 
 	runSummaryTick(store, pub, time.Second, logging.New("test"))
@@ -1009,8 +1107,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *
 	if err := json.Unmarshal([]byte(pub.last().Payload), &firstPayload); err != nil {
 		t.Fatalf("decode first payload: %v", err)
 	}
-	if uint64(firstPayload.Generation) != gen0 {
-		t.Fatalf("first payload generation = %d, want %d", firstPayload.Generation, gen0)
+	if firstPayload.LatestCheckRunID != 807 {
+		t.Fatalf("first payload latest_check_run_id = %d, want 807", firstPayload.LatestCheckRunID)
 	}
 	rearmedState := getState(t, store, owner, repo, number, sha)
 	if rearmedState.Generation != gen0+1 || rearmedState.SettledEmitted {
@@ -1036,8 +1134,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *
 	if err := json.Unmarshal([]byte(pub.last().Payload), &secondPayload); err != nil {
 		t.Fatalf("decode re-settled payload: %v", err)
 	}
-	if uint64(secondPayload.Generation) != gen0+1 {
-		t.Fatalf("re-settled payload generation = %d, want %d", secondPayload.Generation, gen0+1)
+	if secondPayload.LatestCheckRunID <= firstPayload.LatestCheckRunID {
+		t.Fatalf("re-settled latest_check_run_id = %d, want greater than %d", secondPayload.LatestCheckRunID, firstPayload.LatestCheckRunID)
 	}
 	if secondPayload.SupersededSettlement != "true" {
 		t.Fatalf("superseded settlement = %q, want true", secondPayload.SupersededSettlement)

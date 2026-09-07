@@ -3,7 +3,6 @@ package cistore
 import (
 	"bytes"
 	"encoding/json"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -11,14 +10,17 @@ import (
 func mkChecks(spec map[string][2]string) map[string]Check {
 	out := make(map[string]Check, len(spec))
 	for name, sc := range spec {
-		out[name] = Check{Status: sc[0], Conclusion: sc[1]}
+		out[name] = Check{CheckRunID: "1", Status: sc[0], Conclusion: sc[1]}
 	}
 	return out
 }
 
 func renderOrFail(t *testing.T, s State) (string, Summary) {
 	t.Helper()
-	sum := renderSummary(s)
+	sum, err := renderSummary(s)
+	if err != nil {
+		t.Fatalf("render summary: %v", err)
+	}
 	raw, err := json.Marshal(sum)
 	if err != nil {
 		t.Fatalf("marshal summary: %v", err)
@@ -59,8 +61,11 @@ func TestRenderSummaryJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatalf("decode rendered summary: %v", err)
 	}
-	if got := string(payload["generation"]); got != strconv.FormatUint(s.Generation, 10) {
-		t.Fatalf("generation = %s, want state generation %d", got, s.Generation)
+	if _, ok := payload["generation"]; ok {
+		t.Fatal("rendered summary retains removed generation")
+	}
+	if got := string(payload["latest_check_run_id"]); got != "1" {
+		t.Fatalf("latest_check_run_id = %s, want 1", got)
 	}
 	assertGroup(t, "failed", sum.Failed, []string{"infra-tests"})
 	assertGroup(t, "running", sum.Running, []string{"build-image", "snapshots"})
@@ -69,25 +74,41 @@ func TestRenderSummaryJSON(t *testing.T) {
 	assertGroup(t, "skipped", sum.Skipped, []string{"docs", "lint"})
 }
 
-func TestRenderSummaryCarriesStateGeneration(t *testing.T) {
+func TestRenderSummaryCarriesLatestCheckRunID(t *testing.T) {
 	_, sum := renderOrFail(t, State{
-		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: "abcdef", Generation: 1725753600000,
-		Checks: mkChecks(map[string][2]string{"build": {"completed", "success"}}),
+		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: "abcdef",
+		Checks: map[string]Check{
+			"build": {CheckRunID: "900", Status: "completed", Conclusion: "success"},
+			"lint":  {CheckRunID: "901", Status: "completed", Conclusion: "success"},
+			"test":  {CheckRunID: "1024", Status: "completed", Conclusion: "success"},
+		},
 	})
-	if got := strconv.FormatUint(uint64(sum.Generation), 10); got != "1725753600000" {
-		t.Fatalf("generation = %s, want state generation 1725753600000", got)
+	if sum.LatestCheckRunID != 1024 {
+		t.Fatalf("latest_check_run_id = %d, want 1024", sum.LatestCheckRunID)
+	}
+}
+
+func TestRenderSummaryRejectsInvalidCheckRunID(t *testing.T) {
+	for _, checkRunID := range []string{"", "zero", "0"} {
+		_, err := renderSummary(State{
+			Checks: map[string]Check{
+				"build": {CheckRunID: checkRunID, Status: "completed", Conclusion: "success"},
+			},
+		})
+		if err == nil {
+			t.Fatalf("render summary with check_run_id %q did not fail", checkRunID)
+		}
 	}
 }
 
 func TestRenderSummaryMarksOnlyRearmedGenerationSuperseded(t *testing.T) {
-	initial := uint64(1725753600000)
 	state := State{
 		Owner:             "example-org",
 		Repo:              "example-repo",
 		Number:            "42",
 		SHA:               "abcdef",
-		InitialGeneration: initial,
-		Generation:        initial,
+		InitialGeneration: 0,
+		Generation:        0,
 		Checks:            mkChecks(map[string][2]string{"build": {"completed", "success"}}),
 	}
 	_, initialSummary := renderOrFail(t, state)
@@ -179,14 +200,15 @@ func TestRenderSummaryCancelledAndFailingChecks(t *testing.T) {
 		Number: "42",
 		SHA:    "abcdef1234567",
 		Checks: map[string]Check{
-			"cancelled-check": {Status: "completed", Conclusion: "cancelled"},
-			"failed-check":    {Status: "completed", Conclusion: "failure", URL: "https://example.test/checks/failed"},
+			"cancelled-check": {CheckRunID: "1", Status: "completed", Conclusion: "cancelled"},
+			"failed-check":    {CheckRunID: "2", Status: "completed", Conclusion: "failure", URL: "https://example.test/checks/failed"},
 		},
 	}
 
 	raw, sum := renderOrFail(t, state)
 	assertGroup(t, "cancelled", sum.Cancelled, []string{"cancelled-check"})
-	assertGroup(t, "cancelled empty", renderSummary(State{Checks: mkChecks(map[string][2]string{"passed": {"completed", "success"}})}).Cancelled, []string{})
+	_, passedSummary := renderOrFail(t, State{Checks: mkChecks(map[string][2]string{"passed": {"completed", "success"}})})
+	assertGroup(t, "cancelled empty", passedSummary.Cancelled, []string{})
 	if got := sum.FailingChecks; len(got) != 1 || got[0].Name != "failed-check" || got[0].URL != "https://example.test/checks/failed" {
 		t.Fatalf("failing_checks = %+v", got)
 	}

@@ -76,7 +76,14 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		if !claimed {
 			continue
 		}
-		sum := renderSummary(state)
+		sum, err := renderSummary(state)
+		if err != nil {
+			logger.Error("checks render failed", slog.String("error", err.Error()))
+			if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+				logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+			}
+			continue
+		}
 		issuedAt := contracts.NowMillis()
 		sum.SettledAt = issuedAt
 		payload, err := json.Marshal(sum)

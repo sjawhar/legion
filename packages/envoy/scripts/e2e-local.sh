@@ -433,7 +433,7 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     for (const item of checks) {
       const data = payload(item);
       require(data.kind === "checks", "checks envelope has wrong payload kind");
-      require(Number.isInteger(data.generation) && data.generation >= 0, "checks payload lacks a non-negative integer generation");
+      require(Number.isInteger(data.latest_check_run_id) && data.latest_check_run_id > 0, "checks payload lacks a positive integer latest_check_run_id");
       const forSHA = checksBySHA.get(data.sha) ?? [];
       forSHA.push(data);
       checksBySHA.set(data.sha, forSHA);
@@ -444,7 +444,7 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     require(checksBySHA.get(secondSHA)?.length === 2, "second head must settle once then re-settle once");
     for (const [sha, values] of checksBySHA) {
       require(values.length === 1 || values.slice(1).every((value) => value.superseded_settlement === "true"), `duplicate checks for ${sha} lack superseded_settlement`);
-      require(values.every((value, index) => index === 0 || value.generation === values[index - 1].generation + 1), `checks generations for ${sha} do not increase by one`);
+      require(values.every((value, index) => index === 0 || value.latest_check_run_id >= values[index - 1].latest_check_run_id), `checks latest_check_run_id for ${sha} regressed`);
     }
     require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 1, "second head re-settlement flag is missing");
 

@@ -1,6 +1,10 @@
 package cistore
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+	"strconv"
+)
 
 // category buckets a check into one of the rollup groups.
 type category int
@@ -62,11 +66,12 @@ type FailingCheck struct {
 // Summary is the JSON checks notification body. Every status is always present
 // (count 0, empty checks when none) so consumers see a stable schema.
 type Summary struct {
-	Kind                 string         `json:"kind"`
-	Repo                 string         `json:"repo"`
-	Number               string         `json:"number"`
-	SHA                  string         `json:"sha"`
-	Generation           uint64         `json:"generation"`
+	Kind   string `json:"kind"`
+	Repo   string `json:"repo"`
+	Number string `json:"number"`
+	SHA    string `json:"sha"`
+	// LatestCheckRunID is the max over the check runs this settlement actually uses—the latest run per display name—not over every run ever seen for the head; it equals GitHub's REST check_run.id, which the GraphQL CheckRun.databaseId also reports.
+	LatestCheckRunID     uint64         `json:"latest_check_run_id"`
 	SettledAt            int64          `json:"settled_at,omitempty"`
 	SupersededSettlement string         `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup    `json:"failed"`
@@ -80,10 +85,18 @@ type Summary struct {
 
 // renderSummary derives the stable checks payload. Names within each group are
 // sorted; publication owns the settlement timestamp and JSON encoding.
-func renderSummary(s State) Summary {
+func renderSummary(s State) (Summary, error) {
 	groups := map[category][]string{}
 	failingChecks := make([]FailingCheck, 0)
+	var latestCheckRunID uint64
 	for key, check := range s.Checks {
+		checkRunID, err := strconv.ParseUint(check.CheckRunID, 10, 64)
+		if err != nil || checkRunID == 0 {
+			return Summary{}, fmt.Errorf("cistore: invalid check run ID %q for %q", check.CheckRunID, key)
+		}
+		if checkRunID > latestCheckRunID {
+			latestCheckRunID = checkRunID
+		}
 		name := check.Name
 		if name == "" {
 			name = key
@@ -102,23 +115,23 @@ func renderSummary(s State) Summary {
 	})
 	failed := group(groups[catFailed])
 	sum := Summary{
-		Kind:          "checks",
-		Repo:          s.Owner + "/" + s.Repo,
-		Number:        s.Number,
-		SHA:           s.SHA,
-		Generation:    s.Generation,
-		Failed:        failed,
-		Running:       group(groups[catRunning]),
-		Passed:        group(groups[catPassed]),
-		Queued:        group(groups[catQueued]),
-		Cancelled:     group(groups[catCancelled]),
-		Skipped:       group(groups[catSkipped]),
-		FailingChecks: failingChecks,
+		Kind:             "checks",
+		Repo:             s.Owner + "/" + s.Repo,
+		Number:           s.Number,
+		SHA:              s.SHA,
+		LatestCheckRunID: latestCheckRunID,
+		Failed:           failed,
+		Running:          group(groups[catRunning]),
+		Passed:           group(groups[catPassed]),
+		Queued:           group(groups[catQueued]),
+		Cancelled:        group(groups[catCancelled]),
+		Skipped:          group(groups[catSkipped]),
+		FailingChecks:    failingChecks,
 	}
 	if s.Generation > s.InitialGeneration {
 		sum.SupersededSettlement = "true"
 	}
-	return sum
+	return sum, nil
 }
 
 // group builds a StatusGroup from a name list: sorted names, explicit count, and

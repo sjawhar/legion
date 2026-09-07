@@ -161,7 +161,7 @@ func TestRecordAccumulatesChecks(t *testing.T) {
 	}
 }
 
-func TestRecordSeedsGeneration(t *testing.T) {
+func TestRecordStartsGenerationAtZero(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
@@ -169,8 +169,8 @@ func TestRecordSeedsGeneration(t *testing.T) {
 	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "1", "https://example.test/1", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
-	if generation := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Generation; generation == 0 {
-		t.Fatal("new state generation = 0, want a clock-seeded value")
+	if generation := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Generation; generation != 0 {
+		t.Fatalf("new state generation = %d, want 0", generation)
 	}
 }
 
