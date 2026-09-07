@@ -679,10 +679,15 @@ func TestClaimSettlementRefusesWhenDurableHeadChanged(t *testing.T) {
 		shaA  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		shaB  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	)
-	if err := recordCheck(s, owner, repo, pr, shaA, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, shaA, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	state := getState(t, s, owner, repo, pr, shaA)
+	// The state must be claimable on its own merits, so the refusal below can
+	// only come from the durable head having moved.
+	if !settlementReady(state) {
+		t.Fatalf("fixture is not settlement-ready: %+v", state)
+	}
 	if err := s.RecordHead(owner, repo, pr, shaB, "2026-09-07T03:00:01Z"); err != nil {
 		t.Fatalf("record replacement head: %v", err)
 	}
@@ -708,11 +713,16 @@ func TestClaimSettlementRefusesWhenHashMoved(t *testing.T) {
 		pr    = "42"
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
-	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record initial check: %v", err)
 	}
 	initial := getState(t, s, owner, repo, pr, sha)
-	if err := recordCheck(s, owner, repo, pr, sha, "build", "802", "https://example.test/802", "completed", "failure", ""); err != nil {
+	// Claimable on its own merits, so the refusal below can only come from the
+	// hash having moved.
+	if !settlementReady(initial) {
+		t.Fatalf("fixture is not settlement-ready: %+v", initial)
+	}
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "802", "https://example.test/802", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
 		t.Fatalf("record rerun: %v", err)
 	}
 

@@ -88,6 +88,7 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     ciSettlementGeneration = null,
     ciSnapshot = null,
     ciLatestCompletedAt = null,
+    ciReconciled = false,
     ...rest
   } = overrides;
   state.prs[`${repo}#${prNumber}`] = {
@@ -102,6 +103,7 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     ciSettlementGeneration,
     ciSnapshot,
     ciLatestCompletedAt,
+    ciReconciled,
     fixAttempts: 0,
     ...rest,
   };

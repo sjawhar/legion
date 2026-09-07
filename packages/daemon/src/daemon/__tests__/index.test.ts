@@ -464,6 +464,7 @@ describe("startDaemon", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const logs: string[] = [];

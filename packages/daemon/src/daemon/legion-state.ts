@@ -64,6 +64,8 @@ export interface PrState {
   ciSettlementGeneration: number | null;
   ciSnapshot: string | null;
   ciLatestCompletedAt: number | null;
+  /** True while the stored verdict was last set from GitHub's rollup; a live settlement that ties on completion must agree with it. */
+  ciReconciled: boolean;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
 }
@@ -194,6 +196,7 @@ const PrStateSchema = z
     ciSettlementGeneration: z.number().int().nonnegative().nullable(),
     ciSnapshot: z.string().nullable(),
     ciLatestCompletedAt: z.number().nullable(),
+    ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
@@ -459,7 +462,8 @@ function migrateV11State(state: unknown): unknown {
             ("ciLatestRunId" in pr &&
               "ciSettlementGeneration" in pr &&
               "ciSnapshot" in pr &&
-              "ciLatestCompletedAt" in pr)
+              "ciLatestCompletedAt" in pr &&
+              "ciReconciled" in pr)
           ) {
             return [key, pr];
           }
@@ -471,6 +475,7 @@ function migrateV11State(state: unknown): unknown {
               ...("ciSettlementGeneration" in pr ? {} : { ciSettlementGeneration: null }),
               ...("ciSnapshot" in pr ? {} : { ciSnapshot: null }),
               ...("ciLatestCompletedAt" in pr ? {} : { ciLatestCompletedAt: null }),
+              ...("ciReconciled" in pr ? {} : { ciReconciled: false }),
             },
           ];
         })

@@ -80,6 +80,8 @@ async function recoverPrForMergeGate(
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciLatestCompletedAt: null,
+
+    ciReconciled: false,
     fixAttempts: 0,
   };
   ctx.deps.state.prs[prKey] = pr;

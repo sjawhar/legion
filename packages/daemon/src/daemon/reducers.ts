@@ -52,6 +52,9 @@ export interface SettlementOrder {
   readonly generation: number;
   readonly snapshot: string;
   readonly latestCompletedAt: number;
+  /** The settlement's outcome, compared when only GitHub's tie authority can decide. */
+  readonly verdict: PrState["verdict"];
+  readonly failing: readonly string[];
 }
 
 export type SettlementClassification = "stale" | "duplicate" | "conflict" | "newer";
@@ -64,8 +67,10 @@ export type SettlementClassification = "stale" | "duplicate" | "conflict" | "new
  * (`ciLatestCompletedAt`, raised by every accepted settlement and by every
  * GitHub reconciliation): a settlement whose completion predates the watermark
  * is stale whatever its generation, because GitHub has since seen a later
- * completion; against a GitHub-authored fence an equal completion is also
- * stale (GitHub's view wins the tie).
+ * completion. GitHub holds the tie at a watermark it set: against a
+ * GitHub-authored fence an equal completion is stale; over a live fence whose
+ * verdict was last reconciled from GitHub (`ciReconciled`), an equal completion
+ * is accepted only when it agrees with that verdict and failing set.
  */
 export function classifySettlement(
   pr: PrState,
@@ -81,6 +86,16 @@ export function classifySettlement(
       return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
     }
     if (pr.ciLatestCompletedAt !== null && incoming.latestCompletedAt < pr.ciLatestCompletedAt) {
+      return "stale";
+    }
+    // Same completion second as a GitHub reconciliation: GitHub's view holds
+    // the tie. A settlement that agrees refreshes the listener identity; one
+    // that disagrees predates what GitHub already saw.
+    if (
+      pr.ciReconciled &&
+      incoming.latestCompletedAt === pr.ciLatestCompletedAt &&
+      (incoming.verdict !== pr.verdict || !sameStringMultiset(incoming.failing, pr.failing))
+    ) {
       return "stale";
     }
     return "newer";
@@ -144,6 +159,7 @@ export type CiSnapshot = Pick<
   | "ciSettlementGeneration"
   | "ciSnapshot"
   | "ciLatestCompletedAt"
+  | "ciReconciled"
 >;
 
 export function ciSnapshot(pr: PrState): CiSnapshot {
@@ -156,6 +172,7 @@ export function ciSnapshot(pr: PrState): CiSnapshot {
     ciSettlementGeneration: pr.ciSettlementGeneration,
     ciSnapshot: pr.ciSnapshot,
     ciLatestCompletedAt: pr.ciLatestCompletedAt,
+    ciReconciled: pr.ciReconciled,
   };
 }
 
@@ -168,6 +185,7 @@ export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
     pr.ciSettlementGeneration === snapshot.ciSettlementGeneration &&
     pr.ciSnapshot === snapshot.ciSnapshot &&
     pr.ciLatestCompletedAt === snapshot.ciLatestCompletedAt &&
+    pr.ciReconciled === snapshot.ciReconciled &&
     pr.failing.length === snapshot.failing.length &&
     pr.failing.every((name, index) => name === snapshot.failing[index])
   );
@@ -207,7 +225,10 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  if (input.fence) writeCiFence(pr, input.fence);
+  if (input.fence) {
+    writeCiFence(pr, input.fence);
+    pr.ciReconciled = input.fence.generation === null;
+  }
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,
@@ -443,6 +464,8 @@ function registerPr(
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciLatestCompletedAt: null,
+
+    ciReconciled: false,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -460,6 +483,7 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.ciSettlementGeneration = null;
   pr.ciSnapshot = null;
   pr.ciLatestCompletedAt = null;
+  pr.ciReconciled = false;
   delete pr.reviewDecision;
 }
 

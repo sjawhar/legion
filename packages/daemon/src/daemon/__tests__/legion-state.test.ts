@@ -60,6 +60,7 @@ function stateWithTree() {
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciLatestCompletedAt: null,
+    ciReconciled: false,
     fixAttempts: 1,
     reviewDecision: "approved",
   };
@@ -80,6 +81,7 @@ function legacyV8State(pr: Record<string, unknown>) {
     ciSettlementGeneration: _ciSettlementGeneration,
     ciSnapshot: _ciSnapshot,
     ciLatestCompletedAt: _ciLatestCompletedAt,
+    ciReconciled: _ciReconciled,
     ...legacyPr
   } = current.prs[prKey];
   return {
@@ -99,6 +101,7 @@ function legacyV11State() {
     ciSettlementGeneration: _ciSettlementGeneration,
     ciSnapshot: _ciSnapshot,
     ciLatestCompletedAt: _ciLatestCompletedAt,
+    ciReconciled: _ciReconciled,
     ...legacyPr
   } = current.prs[prKey];
   return {

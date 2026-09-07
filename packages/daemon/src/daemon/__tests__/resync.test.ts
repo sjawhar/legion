@@ -426,6 +426,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -508,6 +509,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
@@ -572,6 +574,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -649,6 +652,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
 
@@ -706,6 +710,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
 
@@ -744,6 +749,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -797,6 +803,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -855,6 +862,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -904,6 +912,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
 
@@ -946,6 +955,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -995,6 +1005,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -1045,6 +1056,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -1090,6 +1102,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -1135,6 +1148,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const before = structuredClone(state.prs["sjawhar/legion#7"]);
@@ -1169,6 +1183,7 @@ describe("runResync", () => {
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciLatestCompletedAt: null,
+      ciReconciled: false,
       fixAttempts: 0,
     };
     const fetchStarted = Promise.withResolvers<void>();

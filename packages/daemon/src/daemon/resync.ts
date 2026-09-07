@@ -222,7 +222,11 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
             latestCompletedAt: status.latestCompletedAt,
           }
         : undefined;
-    if (fenceEffect === "watermark") raiseCompletionWatermark(pr, status.latestCompletedAt);
+    if (fenceEffect === "watermark") {
+      raiseCompletionWatermark(pr, status.latestCompletedAt);
+      // GitHub's view now decides ties at this id until a live settlement is accepted.
+      pr.ciReconciled = true;
+    }
     const failing = status.failingChecks ?? [];
     // Mirror live intake: red only for actual failures; a cancelled-only
     // failing rollup, like a pending one, uncertifies a green head.

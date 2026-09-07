@@ -395,7 +395,8 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    const classification = classifySettlement(pr, input);
+    const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
+    const classification = classifySettlement(pr, { ...input, verdict, failing: input.failed });
     if (classification === "stale") {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
@@ -409,7 +410,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
     await applyEffects(
       settleCiVerdict(
         deps.state,

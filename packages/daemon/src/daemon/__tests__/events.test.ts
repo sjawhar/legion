@@ -131,6 +131,7 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciLatestCompletedAt: null,
+    ciReconciled: false,
     fixAttempts: 0,
   };
 }

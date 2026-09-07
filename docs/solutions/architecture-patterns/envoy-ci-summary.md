@@ -32,16 +32,15 @@ from replacing a newer watcher state.
 ## Envelope
 
 The payload is the full status summary: every check group and failing check URLs,
-the durable `snapshot` hash, and `latest_completed_at`, the maximum RFC3339
-`ObservedAt` among its completed checks. Consumers order summaries for one SHA
+the durable `snapshot` hash, and `latest_completed_at`. `latest_completed_at` is the latest GitHub completion time (`completed_at`) among the settlement's completed check runs — never a start or observation time; a completed check recorded before this release contributes its `updated_at`. If no completed check has a completion time, no settlement is emitted until a check observation supplies one — rerun a check. Consumers order summaries for one SHA
 lexicographically by `(latest_check_run_id, generation)`, with the former the
 largest known check-run ID in the settlement. An equal pair is a duplicate only
-when its `snapshot` matches. A consumer that reconciles a verdict from GitHub's rollup keeps the listener identity it last accepted (for duplicate detection) and raises a completion watermark from GitHub's `completedAt`; an equal-id settlement must then pass BOTH orderings — a higher generation AND a `latest_completed_at` not earlier than the watermark — and against a watermark GitHub set with no listener identity an equal completion is also stale (GitHub's view wins the tie). A genuinely newer settlement completing within the same second as GitHub's read is therefore delayed until the next reconciliation, not lost. The summary waits for `ENVOY_CI_DEBOUNCE` (default
+when its `snapshot` matches. A consumer that reconciles a verdict from GitHub's rollup keeps the listener identity it last accepted (for duplicate detection) and raises a completion watermark from GitHub's `completedAt`; an equal-id settlement must then pass BOTH orderings — a higher generation AND a `latest_completed_at` not earlier than the watermark — and GitHub holds the tie at the watermark it set: while the stored verdict was last reconciled from GitHub (or GitHub set the watermark with no listener identity), an equal-completion settlement is accepted only if it agrees with that verdict and failing set — one that disagrees is stale whatever its generation. A genuinely newer settlement that completes within the same second as GitHub's read and disagrees with it is therefore delayed until the next reconciliation, not lost. The summary waits for `ENVOY_CI_DEBOUNCE` (default
 `5s`), all check runs to be terminal, and every observed suite to be `completed`;
 heads with no suite still settle after terminal checks.
 
 After the seven-day KV TTL recreates a record, its generation restarts at 0 (consumers keep the higher generation they already hold at that id, so such settlements stay rejected until a newer run raises the id). If
 its first observation updates an existing lower-ID run, both are dropped by
-consumers; the consumer's verdict is repaired when it next reads GitHub, and its live fence moves again only when a newer run raises the id. A head settles only when at least one completed check carries a GitHub completion time (`completed_at`; for records written before this release, `updated_at` of a completed check): a head whose completed checks all lack one stays silent until a check with a completion time is observed — rerun one. A legacy check that was in progress at
+consumers; the consumer's verdict is repaired when it next reads GitHub, and its live fence moves again only when a newer run raises the id. A legacy check that was in progress at
 cutover and whose completion is never observed keeps the head unsettled until
 the check reruns; rerun the affected check to release it.

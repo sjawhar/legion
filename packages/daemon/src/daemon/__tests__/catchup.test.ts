@@ -56,6 +56,7 @@ function prState(issue: IssueKey): PrState {
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciLatestCompletedAt: null,
+    ciReconciled: false,
     fixAttempts: 1,
     reviewDecision: "approved",
   };

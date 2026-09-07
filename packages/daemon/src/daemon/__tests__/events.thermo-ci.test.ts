@@ -132,6 +132,7 @@ function stateForCi() {
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciLatestCompletedAt: null,
+    ciReconciled: false,
     fixAttempts: 0,
   };
   return { state, architect, implementer };
@@ -1061,6 +1062,122 @@ it("preserves a live check-run fence through a same-head status-context resync",
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
 });
+it("a same-second GitHub reconciliation holds the tie against a delayed higher-generation settlement that disagrees", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+  const T = "2026-09-07T10:00:00Z";
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 1,
+        snapshot: "hash-a",
+        latest_completed_at: T,
+        settled_at: 1,
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "green", ciReconciled: false });
+
+  // GitHub's rollup: red, same run, same completion second (a lower-id failure
+  // does not move the aggregate max). Resync applies red, keeps the live
+  // identity, and takes tie authority at this completion.
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "failing",
+        failingChecks: ["build"],
+        cancelledCount: 0,
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 900,
+        latestCompletedAt: Date.parse(T),
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 2,
+  });
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciSettlementGeneration: 1,
+    ciLatestCompletedAt: Date.parse(T),
+    ciReconciled: true,
+  });
+
+  // A green re-versioned before the failure (generation 2, same completion
+  // second) arrives late. Equal completion after a reconciliation: GitHub's
+  // view wins, so a disagreeing settlement is stale whatever its generation.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 2,
+        snapshot: "hash-b",
+        latest_completed_at: T,
+        settled_at: 3,
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciSettlementGeneration: 1,
+    ciSnapshot: "hash-a",
+    ciReconciled: true,
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+
+  // The listener's own red for that failure, same second, agrees with GitHub:
+  // it refreshes the identity and the live fence retakes tie authority.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 3,
+        snapshot: "hash-c",
+        latest_completed_at: T,
+        settled_at: 4,
+        failed: { count: 1, checks: ["build"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    ciSettlementGeneration: 3,
+    ciSnapshot: "hash-c",
+    ciReconciled: false,
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
+
 it("a delayed higher-generation settlement cannot reverse a same-id GitHub reconciliation that saw a later completion", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();
@@ -1127,6 +1244,7 @@ it("a delayed higher-generation settlement cannot reverse a same-id GitHub recon
     ciLatestRunId: 900,
     ciSettlementGeneration: 1,
     ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+    ciReconciled: true,
   });
 
   // A green settlement the listener emitted before the failure (generation 2 —
@@ -1150,6 +1268,7 @@ it("a delayed higher-generation settlement cannot reverse a same-id GitHub recon
     failing: ["build"],
     ciSettlementGeneration: 1,
     ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+    ciReconciled: true,
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
 
@@ -1174,6 +1293,7 @@ it("a delayed higher-generation settlement cannot reverse a same-id GitHub recon
     verdict: "red",
     ciSettlementGeneration: 3,
     ciSnapshot: "hash-c",
+    ciReconciled: false,
   });
   // Same verdict and failing set as the reconciled red: quiet.
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
