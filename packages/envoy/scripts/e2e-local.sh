@@ -436,7 +436,7 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
       require(Number.isInteger(data.latest_check_run_id) && data.latest_check_run_id > 0, "checks payload lacks a positive integer latest_check_run_id");
       require(Number.isInteger(data.generation) && data.generation >= 0, "checks payload lacks a non-negative integer generation");
       require(typeof data.snapshot === "string" && data.snapshot.length > 0, "checks payload lacks a snapshot");
-      require(typeof data.latest_completed_at === "string", "checks payload lacks latest_completed_at");
+      require(Number.isFinite(Date.parse(data.latest_completed_at)), `checks latest_completed_at is not a GitHub timestamp: ${JSON.stringify(data.latest_completed_at)}`);
       const forSHA = checksBySHA.get(data.sha) ?? [];
       forSHA.push(data);
       checksBySHA.set(data.sha, forSHA);
@@ -455,6 +455,7 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
         value.latest_check_run_id > previous.latest_check_run_id ||
         (value.latest_check_run_id === previous.latest_check_run_id && value.generation >= previous.generation);
       require(values.every((value, index) => index === 0 || doesNotRegress(values[index - 1], value)), `checks (latest_check_run_id, generation) for ${sha} regressed`);
+      require(values.every((value, index) => index === 0 || Date.parse(value.latest_completed_at) >= Date.parse(values[index - 1].latest_completed_at)), `checks latest_completed_at for ${sha} regressed`);
     }
     require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 1, "second head re-settlement flag is missing");
 
