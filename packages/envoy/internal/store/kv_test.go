@@ -1432,3 +1432,122 @@ func captureRegistryLogs(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	return &logs
 }
+
+func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_role"
+		role      = "legion-controller"
+		roleTopic = "notifications.role.legion-controller"
+	)
+	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV}
+	reg.roleKV = racingKV
+
+	var concurrent Interest
+	var concurrentErr error
+	racingKV.beforeFirstCreate = func() {
+		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role)
+	}
+	first, firstErr := reg.SetRole(sessionID, "example-host", role)
+
+	if concurrentErr != nil {
+		t.Fatalf("concurrent SetRole: %v", concurrentErr)
+	}
+	if firstErr != nil {
+		t.Fatalf("racing SetRole: %v", firstErr)
+	}
+	assertInterestTopics(t, concurrent, roleTopic)
+	assertInterestTopics(t, first, roleTopic)
+	assertRoleHolder(t, reg, role, sessionID)
+	assertInterestTopicsForSession(t, reg, sessionID, roleTopic)
+}
+
+func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const (
+		sessionID = "ses_revision"
+		machineID = "example-host"
+	)
+	if _, err := reg.Upsert(
+		Interest{SessionID: sessionID, MachineID: machineID},
+		[]string{"notifications.a", "notifications.b"},
+	); err != nil {
+		t.Fatalf("initial Upsert: %v", err)
+	}
+	pollMatch(t, reg, machineID, "notifications.a", 1, 5*time.Second)
+
+	interestKV := reg.kv
+	reg.kv = &interleavingPutKeyValue{
+		KeyValue: interestKV,
+		afterFirstPut: func() {
+			putInterest(t, interestKV, Interest{
+				SessionID: sessionID,
+				MachineID: machineID,
+				Topics:    []string{"notifications.remote"},
+			})
+			pollMatch(t, reg, machineID, "notifications.remote", 1, 5*time.Second)
+		},
+	}
+	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	item, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get after interleaving: %v", err)
+	}
+	assertInterestTopics(t, item, "notifications.remote")
+	if got := reg.Match(machineID, "notifications.a"); len(got) != 0 {
+		t.Fatalf("older write-through must not restore notifications.a: %v", got)
+	}
+}
+
+type racingCreateKeyValue struct {
+	natsgo.KeyValue
+
+	creates           int
+	beforeFirstCreate func()
+}
+
+func (kv *racingCreateKeyValue) Create(key string, value []byte) (uint64, error) {
+	kv.creates++
+	if kv.creates == 1 {
+		kv.beforeFirstCreate()
+		return 0, natsgo.ErrKeyExists
+	}
+	return kv.KeyValue.Create(key, value)
+}
+
+type interleavingPutKeyValue struct {
+	natsgo.KeyValue
+
+	puts          int
+	afterFirstPut func()
+}
+
+func (kv *interleavingPutKeyValue) Put(key string, value []byte) (uint64, error) {
+	kv.puts++
+	revision, err := kv.KeyValue.Put(key, value)
+	if err != nil {
+		return 0, err
+	}
+	if kv.puts == 1 {
+		kv.afterFirstPut()
+	}
+	return revision, nil
+}

@@ -23,6 +23,10 @@ type Registry struct {
 	roleKV nats.KeyValue
 	mu     sync.RWMutex
 	cache  map[string]Interest
+	// cacheRevisions holds the latest KV revision applied for each cache key,
+	// including delete tombstones. It prevents a delayed local write-through
+	// from replacing a newer watcher update.
+	cacheRevisions map[string]uint64
 	// readyCh is closed when watch() finishes its initial scan of existing KV
 	// entries (signalled by the nil sentinel WatchAll() emits after delivering
 	// the current value of each existing key). After readyCh is closed, the
@@ -59,7 +63,13 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Registry{kv: kv, roleKV: roleKV, cache: map[string]Interest{}, readyCh: make(chan struct{})}
+	r := &Registry{
+		kv:             kv,
+		roleKV:         roleKV,
+		cache:          map[string]Interest{},
+		cacheRevisions: map[string]uint64{},
+		readyCh:        make(chan struct{}),
+	}
 	// Skip eager load — watch() populates cache asynchronously via KV watcher.
 	// The synchronous load() did N individual kv.Get() calls that block indefinitely
 	// when the KV stream leader is on a remote node.
@@ -90,6 +100,87 @@ func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.Key
 	return kv, err
 }
 
+func (r *Registry) cachedRevision(sessionID string) uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cacheRevisions[sessionID]
+}
+
+func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision uint64) {
+	if revision < r.cacheRevisions[sessionID] {
+		return
+	}
+	if r.cache == nil {
+		r.cache = map[string]Interest{}
+	}
+	if r.cacheRevisions == nil {
+		r.cacheRevisions = map[string]uint64{}
+	}
+	r.cache[sessionID] = item
+	r.cacheRevisions[sessionID] = revision
+}
+
+func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) {
+	if revision < r.cacheRevisions[sessionID] {
+		return
+	}
+	delete(r.cache, sessionID)
+	if r.cacheRevisions == nil {
+		r.cacheRevisions = map[string]uint64{}
+	}
+	r.cacheRevisions[sessionID] = revision
+}
+
+func (r *Registry) deleteInterest(sessionID string) error {
+	revision := r.cachedRevision(sessionID)
+	entry, err := r.kv.Get(sessionID)
+	deleteOpts := []nats.DeleteOpt{}
+	if err == nil {
+		if entry.Revision() > revision {
+			revision = entry.Revision()
+		}
+		deleteOpts = append(deleteOpts, nats.LastRevision(entry.Revision()))
+	} else if !errors.Is(err, nats.ErrKeyNotFound) {
+		return err
+	}
+	if err := r.kv.Delete(sessionID, deleteOpts...); err != nil {
+		return err
+	}
+
+	entries, err := r.kv.History(sessionID)
+	if err == nil && len(entries) > 0 {
+		latest := entries[len(entries)-1]
+		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
+			r.mu.Lock()
+			r.evictCachedInterestLocked(sessionID, latest.Revision())
+			r.mu.Unlock()
+			return nil
+		}
+
+		var item Interest
+		if err := json.Unmarshal(latest.Value(), &item); err != nil {
+			r.mu.Lock()
+			r.evictCachedInterestLocked(sessionID, latest.Revision())
+			r.mu.Unlock()
+			slog.Warn("registry cache evicted malformed value",
+				slog.String("key", latest.Key()),
+				slog.Uint64("revision", latest.Revision()),
+				slog.String("error", err.Error()),
+			)
+			return nil
+		}
+		r.mu.Lock()
+		r.cacheInterestLocked(sessionID, item, latest.Revision())
+		r.mu.Unlock()
+		return nil
+	}
+
+	r.mu.Lock()
+	r.evictCachedInterestLocked(sessionID, revision)
+	r.mu.Unlock()
+	return nil
+}
+
 func (r *Registry) watch() {
 	w, err := r.kv.WatchAll()
 	if err != nil {
@@ -108,22 +199,27 @@ func (r *Registry) watch() {
 			r.signalReady()
 			continue
 		}
-		r.mu.Lock()
 		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-			delete(r.cache, entry.Key())
-		} else {
-			var item Interest
-			if err := json.Unmarshal(entry.Value(), &item); err != nil {
-				delete(r.cache, entry.Key())
-				slog.Warn("registry watcher evicted malformed value",
-					slog.String("key", entry.Key()),
-					slog.Uint64("revision", entry.Revision()),
-					slog.String("error", err.Error()),
-				)
-			} else {
-				r.cache[entry.Key()] = item
-			}
+			r.mu.Lock()
+			r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+			r.mu.Unlock()
+			continue
 		}
+
+		var item Interest
+		if err := json.Unmarshal(entry.Value(), &item); err != nil {
+			r.mu.Lock()
+			r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+			r.mu.Unlock()
+			slog.Warn("registry watcher evicted malformed value",
+				slog.String("key", entry.Key()),
+				slog.Uint64("revision", entry.Revision()),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		r.mu.Lock()
+		r.cacheInterestLocked(entry.Key(), item, entry.Revision())
 		r.mu.Unlock()
 	}
 }
@@ -170,8 +266,14 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	if err != nil {
 		return Interest{}, err
 	}
-	_, err = r.kv.Put(merged.SessionID, buf)
-	return merged, err
+	revision, err := r.kv.Put(merged.SessionID, buf)
+	if err != nil {
+		return Interest{}, err
+	}
+	r.mu.Lock()
+	r.cacheInterestLocked(merged.SessionID, merged, revision)
+	r.mu.Unlock()
+	return merged, nil
 }
 
 // mergeForUpsert computes the Interest to persist by reconciling the requested
@@ -234,15 +336,13 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	if err := r.releaseRoleClaims(sessionID, topics); err != nil {
 		return err
 	}
+	return r.removeInterestTopics(sessionID, topics)
+}
+
+func (r *Registry) removeInterestTopics(sessionID string, topics []string) error {
 	// Empty topics = unsubscribe from everything (delete the entry).
 	if len(topics) == 0 {
-		if err := r.kv.Delete(sessionID); err != nil {
-			return err
-		}
-		r.mu.Lock()
-		delete(r.cache, sessionID)
-		r.mu.Unlock()
-		return nil
+		return r.deleteInterest(sessionID)
 	}
 	item, err := r.Get(sessionID)
 	if err != nil {
@@ -250,24 +350,19 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	}
 	item = Remove(item, topics)
 	if len(item.Topics) == 0 {
-		if err := r.kv.Delete(sessionID); err != nil {
-			return err
-		}
-		r.mu.Lock()
-		delete(r.cache, sessionID)
-		r.mu.Unlock()
-		return nil
+		return r.deleteInterest(sessionID)
 	}
 	item.UpdatedAt = time.Now().UnixMilli()
 	buf, err := json.Marshal(item)
 	if err != nil {
 		return err
 	}
-	if _, err := r.kv.Put(sessionID, buf); err != nil {
+	revision, err := r.kv.Put(sessionID, buf)
+	if err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.cache[sessionID] = item
+	r.cacheInterestLocked(sessionID, item, revision)
 	r.mu.Unlock()
 	return nil
 }
@@ -295,8 +390,15 @@ func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) 
 		_, err = r.roleKV.Update(role, []byte(sessionID), entry.Revision())
 	}
 	if err != nil {
-		if rollbackErr := r.Remove(sessionID, []string{roleTopic}); rollbackErr != nil {
-			return Interest{}, errors.Join(err, rollbackErr)
+		holder, holderErr := r.RoleHolder(role)
+		if holderErr == nil && holder == sessionID {
+			return item, nil
+		}
+		if rollbackErr := r.removeInterestTopics(sessionID, []string{roleTopic}); rollbackErr != nil {
+			return Interest{}, errors.Join(err, holderErr, rollbackErr)
+		}
+		if holderErr != nil {
+			return Interest{}, errors.Join(err, holderErr)
 		}
 		return Interest{}, err
 	}
@@ -346,7 +448,7 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	err = json.Unmarshal(entry.Value(), &fresh)
 	if err == nil {
 		r.mu.Lock()
-		r.cache[sessionID] = fresh
+		r.cacheInterestLocked(sessionID, fresh, entry.Revision())
 		r.mu.Unlock()
 	}
 	return fresh, err
@@ -417,7 +519,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 	r.mu.RUnlock()
 
 	for _, sid := range stale {
-		if err := r.kv.Delete(sid); err != nil {
+		if err := r.deleteInterest(sid); err != nil {
 			return 0, err
 		}
 	}

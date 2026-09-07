@@ -38,6 +38,10 @@ After a successful partial removal, `Registry.Remove` writes the remaining inter
 its cache. After removing every topic, it removes the cache entry. This keeps the cache and KV
 consistent before the asynchronous watcher receives the mutation.
 
+Each cached entry keeps the KV revision that produced it. A local write-through or watcher update
+applies only when its revision is at least as new as the cached revision; delete tombstones retain
+their revision so a delayed older write cannot restore a removed route.
+
 KV watchers evict a cache entry when decoding its value fails and emit a warning with the key and
 revision. Matching then treats the route as absent rather than delivering using stale state.
 
@@ -45,3 +49,7 @@ Role claims use the same ordering principle: publish the new interest, atomicall
 KV entry with its observed revision, then remove the old holder's interest. If the atomic role
 write fails, remove the new interest as compensation. If old-holder cleanup fails after the role
 write, return the error while retaining the authoritative new role holder.
+
+When a compare-and-set conflict reports that the same session now holds the role, the caller treats
+the claim as a concurrent success. Otherwise compensation removes only the role topic from the new
+interest and never releases the role KV entry.
