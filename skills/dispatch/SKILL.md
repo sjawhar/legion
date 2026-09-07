@@ -158,6 +158,15 @@ dispatch({
   (`#N is not a dispatch thread`, `#N is closed; open a new thread`).
 - Same decision → same thread. A genuinely new decision → a new thread, even if it came
   up in the reply.
+- **A follow-up supersedes the thread's earlier unanswered questions.** The dashboard
+  offers an answer only for the latest turn; earlier open questions read "superseded by a
+  later follow-up". If an earlier question still stands, restate it in the follow-up's
+  `ask` list. A follow-up with no `ask` list is one free-text question — the text under
+  its `## Question` — and the human answers it in prose.
+- **Ask once.** An unanswered question is not a reason to post again. New facts that do
+  not change the decision go in a plain `gh issue comment` on the thread, not a new
+  `dispatch` call; a follow-up is for a changed question. A thread that fills with
+  restated asks is noise for the human and hides the decision it is waiting on.
 - **Read a challenge as an answer.** "Why not the bot?" is not a request for more prose;
   it is the human declining your framing. Say what you now know, then ask the narrowed
   question with new options — unless the challenge itself decides ("Why not the bot? Just

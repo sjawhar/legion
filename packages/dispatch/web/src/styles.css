@@ -1080,11 +1080,15 @@ select {
   font-size: 0.85em;
   opacity: 0.7;
 }
-.ask-waiting {
+.ask-waiting,
+.ask-superseded {
   display: inline-block;
   margin-top: 0.35rem;
   font-size: 0.9em;
   font-style: italic;
+}
+.ask-superseded {
+  color: var(--fg-dim);
 }
 .origin-session {
   display: inline-flex;

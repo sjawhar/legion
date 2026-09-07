@@ -1,6 +1,12 @@
 // The ask/answer model of a thread: which questions were asked on which turn,
 // which answers settle them, and which are still open. Pure functions over the
 // issue body and its comments; the renderer and the sidebar both consume this.
+//
+// A thread is a sequence of turns: the opening body, then every `dispatch:ask`
+// follow-up comment. A follow-up supersedes the thread's earlier unanswered
+// questions — the asker is restating what it needs — so only the latest turn's
+// unanswered asks are open. A follow-up with no structured `ask` list is one
+// free-text question, taken from its `## Question` section.
 
 import {
   type MarkerQuestion,
@@ -19,6 +25,8 @@ export interface ThreadAsk {
   readonly source:
     | { readonly kind: "body" }
     | { readonly kind: "comment"; readonly commentId: number };
+  /** Synthesised from a follow-up's prose because the turn carried no `ask` list; answered free-text. */
+  readonly prose?: true;
 }
 
 export interface ThreadAnswer {
@@ -40,6 +48,17 @@ export function askIdFor(requestId: string, index: number): string {
   return index === 0 ? requestId : `${requestId}.${index}`;
 }
 
+/**
+ * The question a follow-up asks in prose: the text of its `## Question`
+ * section (the service writes `## Context` then `## Question`), or the whole
+ * comment minus the marker when the section is missing.
+ */
+export function proseQuestion(commentBody: string): string {
+  const withoutMarker = commentBody.replace(/^\s*<!--[\s\S]*?-->\s*/, "");
+  const section = /^##\s+Question\s*\n([\s\S]*)$/m.exec(withoutMarker);
+  return (section?.[1] ?? withoutMarker).trim();
+}
+
 export function collectAsks(body: string, comments: readonly Comment[]): ThreadAsk[] {
   const asks: ThreadAsk[] = [];
   const thread = parseThreadMarker(body);
@@ -56,12 +75,23 @@ export function collectAsks(body: string, comments: readonly Comment[]): ThreadA
   for (const comment of comments) {
     const marker = parseAskMarker(comment.body);
     if (!marker) continue;
+    const source = { kind: "comment", commentId: comment.id } as const;
+    if (marker.ask.length === 0) {
+      asks.push({
+        askId: askIdFor(marker.requestId, 0),
+        question: { question: proseQuestion(comment.body) },
+        index: 0,
+        source,
+        prose: true,
+      });
+      continue;
+    }
     for (const [index, question] of marker.ask.entries()) {
       asks.push({
         askId: question.askId ?? askIdFor(marker.requestId, index),
         question,
         index,
-        source: { kind: "comment", commentId: comment.id },
+        source,
       });
     }
   }
@@ -93,11 +123,38 @@ export function answerFor(ask: ThreadAsk, answers: readonly ThreadAnswer[]): Res
   return { values: legacy.answers[ask.index] ?? [], answer: legacy };
 }
 
+function sameTurn(left: ThreadAsk["source"], right: ThreadAsk["source"]): boolean {
+  return left.kind === "body"
+    ? right.kind === "body"
+    : right.kind === "comment" && right.commentId === left.commentId;
+}
+
+/**
+ * The asks still waiting for an answer: the unanswered asks of the latest
+ * turn. Earlier unanswered asks were superseded by that turn (see
+ * `supersededAsks`).
+ */
 export function openAsks(
   asks: readonly ThreadAsk[],
   answers: readonly ThreadAnswer[]
 ): ThreadAsk[] {
-  return asks.filter((ask) => answerFor(ask, answers) === null);
+  const latest = asks.at(-1);
+  if (!latest) return [];
+  return asks.filter(
+    (ask) => sameTurn(ask.source, latest.source) && answerFor(ask, answers) === null
+  );
+}
+
+/** Unanswered asks of earlier turns: a later follow-up restated the question, so they take no answer. */
+export function supersededAsks(
+  asks: readonly ThreadAsk[],
+  answers: readonly ThreadAnswer[]
+): ThreadAsk[] {
+  const latest = asks.at(-1);
+  if (!latest) return [];
+  return asks.filter(
+    (ask) => !sameTurn(ask.source, latest.source) && answerFor(ask, answers) === null
+  );
 }
 
 /** The asks an answer settles; empty when it names an ask that is not on the thread. */
