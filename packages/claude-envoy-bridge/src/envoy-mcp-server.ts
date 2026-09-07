@@ -175,19 +175,20 @@ async function subscribeAndFollow(
   topics: readonly string[],
   requireForwarder = false,
 ): Promise<Interest> {
-  if (requireForwarder && !(await followTopics(sessionId, topics))) {
+  const expandedTopics = expandSubscriptionTopics(topics)
+  if (requireForwarder && !(await followTopics(sessionId, expandedTopics))) {
     throw new Error("envoy_subscribe requires a live ENVOY_NATS_URL forwarder")
   }
   const interest = await client.subscribe({
     sessionID: sessionId,
     directory: process.cwd(),
-    topics,
+    topics: expandedTopics,
     port: 0,
     title: "",
     driving: true,
     selfSubscribed: true,
   })
-  if (!requireForwarder) await followTopics(sessionId, topics)
+  if (!requireForwarder) await followTopics(sessionId, expandedTopics)
   return interest
 }
 

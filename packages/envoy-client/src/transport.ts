@@ -75,9 +75,17 @@ export function expandSubscriptionTopics(topics: readonly string[]): readonly st
   const expanded = new Set<string>();
   for (const topic of topics) {
     const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
-    if (base !== undefined && base.length > 0 && !base.includes("*") && !base.includes(">")) {
-      expanded.add(base);
+    if (base === undefined || base.includes("*") || base.includes(">")) {
+      expanded.add(topic);
+      continue;
     }
+    const segments = base.split(".");
+    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
+      throw new TypeError(
+        `cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`
+      );
+    }
+    expanded.add(base);
     expanded.add(topic);
   }
   return [...expanded];
@@ -247,6 +255,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     getInterest: async (sessionID) =>
       InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
     send: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
       const response = EnvelopeResponseSchema.parse(
         JSON.parse(
           await post("/v1/messages/send", {
@@ -256,9 +265,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               : { source_session: input.sourceSessionID }),
             target_session: input.targetSessionID,
             message: input.message,
-            ...(input.idempotencyKey === undefined
-              ? {}
-              : { idempotency_key: input.idempotencyKey }),
+            idempotency_key: idempotencyKey,
             ...messageMetadata(input),
           })
         )
@@ -270,6 +277,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       };
     },
     publish: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
       const response = EnvelopeResponseSchema.parse(
         JSON.parse(
           await post("/v1/messages/publish", {
@@ -280,9 +288,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             topic: input.topic,
             message: input.message,
             ...(input.payload === undefined ? {} : { payload: input.payload }),
-            ...(input.idempotencyKey === undefined
-              ? {}
-              : { idempotency_key: input.idempotencyKey }),
+            idempotency_key: idempotencyKey,
             ...messageMetadata(input),
           })
         )
