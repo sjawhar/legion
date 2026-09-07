@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -50,7 +51,6 @@ type Check struct {
 	Status     string `json:"status"`     // queued|in_progress|completed
 	Conclusion string `json:"conclusion"` // success|failure|... ("" until completed)
 	ObservedAt string `json:"observed_at"`
-	UpdatedAt  int64  `json:"updated_at"`
 }
 
 // Suite is the last-known state of one GitHub check suite for a commit.
@@ -82,6 +82,7 @@ type headRecord struct {
 	Kind      string `json:"kind"`
 	SHA       string `json:"sha"`
 	UpdatedAt string `json:"updated_at"`
+	Receipt   uint64 `json:"receipt"`
 }
 
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
@@ -141,7 +142,6 @@ func (s State) Hash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Store is a KV-backed CI state registry with an in-memory WatchAll read-cache.
 type Store struct {
 	kv        nats.KeyValue
 	mu        sync.RWMutex
@@ -149,6 +149,7 @@ type Store struct {
 	heads     map[string]string
 	readyCh   chan struct{}
 	readyOnce sync.Once
+	receipts  atomic.Uint64
 	// watchErr is non-nil once the WatchAll watcher fails to start or its update
 	// stream ends. The summary loop reads only the cache (no KV fallback), so a
 	// dead watcher silently stops/staleness summaries; surfacing it via Ping lets
@@ -264,6 +265,7 @@ func (s *Store) watch() {
 				var st State
 				if err := json.Unmarshal(entry.Value(), &st); err != nil {
 					delete(s.cache, key)
+					delete(s.heads, key)
 					malformed = err
 				} else {
 					s.cache[key] = st
@@ -323,7 +325,7 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 		}
 		if current, ok := st.Checks[checkName]; ok {
 			if checkRunIDIsOlder(checkRunID, current.CheckRunID) ||
-				(checkRunID == current.CheckRunID && observationIsOlder(observedAt, current.ObservedAt)) {
+				(checkRunID == current.CheckRunID && !observationMayReplace(observedAt, current.ObservedAt, status, current.Status)) {
 				return false
 			}
 		}
@@ -337,10 +339,9 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 		if current, ok := st.Checks[checkName]; ok && sameCheck(current, next) {
 			return false
 		}
-		next.UpdatedAt = time.Now().UnixMilli()
 		st.Checks[checkName] = next
 		rearm(st)
-		st.LastEventAt = next.UpdatedAt
+		st.LastEventAt = time.Now().UnixMilli()
 		return true
 	})
 }
@@ -353,7 +354,7 @@ func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusio
 		}
 		next := Suite{ID: suiteID, AppID: appID, Status: status, Conclusion: conclusion, ObservedAt: observedAt}
 		if current, ok := st.Suites[suiteID]; ok {
-			if observationIsOlder(observedAt, current.ObservedAt) || current == next {
+			if !observationMayReplace(observedAt, current.ObservedAt, status, current.Status) || current == next {
 				return false
 			}
 		}
@@ -424,16 +425,37 @@ func rearm(st *State) {
 	}
 }
 
-func observationIsOlder(incoming, stored string) bool {
-	if incoming == "" || stored == "" {
+func observationMayReplace(incomingAt, storedAt, incomingStatus, storedStatus string) bool {
+	incoming, incomingErr := time.Parse(time.RFC3339, incomingAt)
+	stored, storedErr := time.Parse(time.RFC3339, storedAt)
+	incomingValid := incomingErr == nil
+	storedValid := storedErr == nil
+	switch {
+	case incomingValid && storedValid:
+		if incoming.Before(stored) {
+			return false
+		}
+		if incoming.After(stored) {
+			return true
+		}
+		return statusRank(incomingStatus) >= statusRank(storedStatus)
+	case !incomingValid && storedValid:
 		return false
+	case incomingValid:
+		return true
+	default:
+		// A missing timestamp cannot order two observations, so preserve receipt
+		// order for two timestamp-less values. A timestamp-less incoming never
+		// displaces a stored observation with a usable timestamp.
+		return true
 	}
-	incomingAt, err := time.Parse(time.RFC3339, incoming)
-	if err != nil {
-		return false
+}
+
+func statusRank(status string) int {
+	if status == "completed" {
+		return 1
 	}
-	storedAt, err := time.Parse(time.RFC3339, stored)
-	return err == nil && incomingAt.Before(storedAt)
+	return 0
 }
 
 func checkRunIDIsOlder(incoming, stored string) bool {
@@ -477,11 +499,14 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 		}
 		if current.UpdatedAt != "" && updatedAt != "" {
 			storedAt, err := time.Parse(time.RFC3339, current.UpdatedAt)
-			if err == nil && !incomingAt.After(storedAt) {
-				return nil
+			if err == nil {
+				if incomingAt.Before(storedAt) || (incomingAt.Equal(storedAt) && current.SHA == sha) {
+					return nil
+				}
 			}
 		}
-		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt})
+		receipt := s.nextReceipt(current.Receipt)
+		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt, Receipt: receipt})
 		if err != nil {
 			return err
 		}
@@ -502,6 +527,18 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 			return errors.New("cistore: record head exceeded CAS budget")
 		}
 		time.Sleep(casBackoff(attempt))
+	}
+}
+
+func (s *Store) nextReceipt(after uint64) uint64 {
+	for {
+		receipt := s.receipts.Add(1)
+		if receipt > after {
+			return receipt
+		}
+		if s.receipts.CompareAndSwap(receipt, after) {
+			return s.receipts.Add(1)
+		}
 	}
 }
 
@@ -563,6 +600,18 @@ func (s *Store) MarkSettled(key, expectedHash string, debounce time.Duration) (b
 		!settlementReady(st) {
 		return false, nil
 	}
+	head, err := s.kv.Get(headKey(st.Owner, st.Repo, st.Number))
+	if err == nil {
+		var current headRecord
+		if err := json.Unmarshal(head.Value(), &current); err != nil {
+			return false, nil
+		}
+		if validHeadSHA(current.SHA) && current.SHA != st.SHA {
+			return false, nil
+		}
+	} else if !errors.Is(err, nats.ErrKeyNotFound) {
+		return false, err
+	}
 	st.SettledEmitted = true
 	buf, err := json.Marshal(st)
 	if err != nil {
@@ -574,6 +623,9 @@ func (s *Store) MarkSettled(key, expectedHash string, debounce time.Duration) (b
 		}
 		return false, err
 	}
+	s.mu.Lock()
+	s.cache[key] = st
+	s.mu.Unlock()
 	return true, nil
 }
 

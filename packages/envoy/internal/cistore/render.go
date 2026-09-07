@@ -1,9 +1,6 @@
 package cistore
 
-import (
-	"encoding/json"
-	"sort"
-)
+import "sort"
 
 // category buckets a check into one of the rollup groups.
 type category int
@@ -63,7 +60,7 @@ type Summary struct {
 	Repo                 string      `json:"repo"`
 	Number               string      `json:"number"`
 	SHA                  string      `json:"sha"`
-	IsHead               bool        `json:"is_head"`
+	SettledAt            int64       `json:"settled_at,omitempty"`
 	SupersededSettlement string      `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup `json:"failed"`
 	Running              StatusGroup `json:"running"`
@@ -77,14 +74,9 @@ type Summary struct {
 	} `json:"failing_checks"`
 }
 
-// RenderSummary produces the JSON notification body for a commit's CI state.
-// Pure and deterministic: names within each group are sorted.
-func RenderSummary(s State, head string) (string, error) {
-	_, raw, err := renderSummary(s, head)
-	return raw, err
-}
-
-func renderSummary(s State, head string) (Summary, string, error) {
+// renderSummary derives the stable checks payload. Names within each group are
+// sorted; publication owns the settlement timestamp and JSON encoding.
+func renderSummary(s State) Summary {
 	groups := map[category][]string{}
 	for name, c := range s.Checks {
 		cat := classify(c)
@@ -106,7 +98,6 @@ func renderSummary(s State, head string) (Summary, string, error) {
 		Repo:          s.Owner + "/" + s.Repo,
 		Number:        s.Number,
 		SHA:           s.SHA,
-		IsHead:        s.SHA == head,
 		Failed:        failed,
 		Running:       group(groups[catRunning]),
 		Passed:        group(groups[catPassed]),
@@ -118,11 +109,7 @@ func renderSummary(s State, head string) (Summary, string, error) {
 	if s.Resettled {
 		sum.SupersededSettlement = "true"
 	}
-	buf, err := json.Marshal(sum)
-	if err != nil {
-		return Summary{}, "", err
-	}
-	return sum, string(buf), nil
+	return sum
 }
 
 // group builds a StatusGroup from a name list: sorted names, explicit count, and

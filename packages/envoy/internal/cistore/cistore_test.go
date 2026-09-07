@@ -315,8 +315,8 @@ func TestRecordHeadOrdersTimestampedUpdatesAndAcceptsMissingTimestamp(t *testing
 	if err := s.RecordHead(owner, repo, pr, headD, "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record equal-timestamp head: %v", err)
 	}
-	if got := readHead(t).SHA; got != headB {
-		t.Fatalf("equal timestamp replaced head with %q, want %q", got, headB)
+	if got := readHead(t).SHA; got != headD {
+		t.Fatalf("later equal-timestamp receipt did not replace head: got %q, want %q", got, headD)
 	}
 	if err := s.RecordHead(owner, repo, pr, headC, ""); err != nil {
 		t.Fatalf("record head without timestamp: %v", err)
@@ -392,5 +392,150 @@ func TestRecordHeadRejectsInvalidSHA(t *testing.T) {
 
 	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567", "2026-09-07T03:00:00Z"); err == nil {
 		t.Fatal("RecordHead accepted an invalid SHA")
+	}
+}
+func TestRecordSameIDDoesNotRegressCompletedAtEqualOrMissingTimestamps(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	const (
+		owner     = "example-org"
+		repo      = "example-repo"
+		number    = "42"
+		sha       = "abcdef1234567"
+		timestamp = "2026-09-07T03:00:00Z"
+	)
+	if err := s.Record(owner, repo, number, sha, "build", "800", "https://example.test/800", "completed", "success", timestamp); err != nil {
+		t.Fatalf("record completed check: %v", err)
+	}
+	if err := s.Record(owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", timestamp); err != nil {
+		t.Fatalf("record equal-timestamp in-progress check: %v", err)
+	}
+	if err := s.Record(owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
+		t.Fatalf("record timestamp-less in-progress check: %v", err)
+	}
+	if check := getState(t, s, owner, repo, number, sha).Checks["build"]; check.Status != "completed" || check.Conclusion != "success" {
+		t.Fatalf("completed check regressed: %+v", check)
+	}
+
+	if err := s.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", timestamp); err != nil {
+		t.Fatalf("record completed suite: %v", err)
+	}
+	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", timestamp); err != nil {
+		t.Fatalf("record equal-timestamp in-progress suite: %v", err)
+	}
+	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
+		t.Fatalf("record timestamp-less in-progress suite: %v", err)
+	}
+	if suite := getState(t, s, owner, repo, number, sha).Suites["900"]; suite.Status != "completed" || suite.Conclusion != "success" {
+		t.Fatalf("completed suite regressed: %+v", suite)
+	}
+}
+
+func TestRecordTimestamplessObservationUpdatesTimestamplessState(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := s.Record("example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "queued", "", ""); err != nil {
+		t.Fatalf("record queued check: %v", err)
+	}
+	if err := s.Record("example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
+		t.Fatalf("record in-progress check: %v", err)
+	}
+	if check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["build"]; check.Status != "in_progress" {
+		t.Fatalf("timestamp-less observation did not apply: %+v", check)
+	}
+}
+
+func TestRecordHeadEqualTimestampUsesLaterReceipt(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		headA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		headB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		when  = "2026-09-07T03:00:00Z"
+	)
+	if err := s.RecordHead(owner, repo, pr, headA, when); err != nil {
+		t.Fatalf("record first head: %v", err)
+	}
+	if err := s.RecordHead(owner, repo, pr, headB, when); err != nil {
+		t.Fatalf("record later same-time head: %v", err)
+	}
+	entry, err := s.kv.Get(headKey(owner, repo, pr))
+	if err != nil {
+		t.Fatalf("get durable head: %v", err)
+	}
+	var head headRecord
+	if err := json.Unmarshal(entry.Value(), &head); err != nil {
+		t.Fatalf("decode durable head: %v", err)
+	}
+	if head.SHA != headB {
+		t.Fatalf("head = %+v, want later SHA %q", head, headB)
+	}
+}
+
+func TestMarkSettledRefusesWhenDurableHeadChanged(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		shaA  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		shaB  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	if err := s.Record(owner, repo, pr, shaA, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	state := getState(t, s, owner, repo, pr, shaA)
+	if err := s.RecordHead(owner, repo, pr, shaB, "2026-09-07T03:00:01Z"); err != nil {
+		t.Fatalf("record replacement head: %v", err)
+	}
+	claimed, err := s.MarkSettled(Key(owner, repo, pr, shaA), state.Hash(), 0)
+	if err != nil {
+		t.Fatalf("mark settled: %v", err)
+	}
+	if claimed {
+		t.Fatal("MarkSettled claimed a state whose durable head changed")
+	}
+	if getState(t, s, owner, repo, pr, shaA).SettledEmitted {
+		t.Fatal("stale state was marked settled")
+	}
+}
+
+func TestWatchEvictsMalformedHead(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := s.RecordHead(owner, repo, pr, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, s, owner, repo, pr, sha)
+	if _, err := s.kv.Put(headKey(owner, repo, pr), []byte("{")); err != nil {
+		t.Fatalf("put malformed head: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, ok := s.Head(owner, repo, pr); !ok {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("malformed head remained in cache")
+		case <-time.After(15 * time.Millisecond):
+		}
 	}
 }

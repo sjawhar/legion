@@ -70,9 +70,11 @@ guarantees no real subscriber will ever match the probe traffic.
 ## e2e-local.sh
 
 Runs the local listener against a throwaway `nats:2.10-alpine` container. It
-posts signed public GitHub fixtures and a direct message, captures the raw
+posts signed public GitHub fixtures and a three-paragraph direct message,
+checks the one-warning response for a never-seen GitHub repository, rejects an
+unheld role publish before claiming it for the fake session, captures the raw
 notification envelopes, and proves both the Go prompt text and the shared
-TypeScript renderer.
+TypeScript renderer retain one summary followed by the full direct message.
 
 Docker downloads `nats:2.10-alpine` automatically on the first run when it is
 not already cached.

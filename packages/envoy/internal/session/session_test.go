@@ -757,3 +757,25 @@ func TestDefaultClientFallback(t *testing.T) {
 		t.Fatalf("expected timeout-driven fallback client, request took %v", elapsed)
 	}
 }
+func TestTextNotesForeignSessionNamedInBody(t *testing.T) {
+	deliverer := session.Deliverer{}
+	const (
+		source    = "01a01234-5678-7abc-8def-0123456789ab"
+		recipient = "01a04321-8765-7cba-8fed-ba9876543210"
+		foreign   = "01a0beef-1234-7abc-8def-0123456789ab"
+	)
+	item := contracts.Envelope{
+		EventID:        "evt-foreign",
+		Source:         "agent",
+		SourceSession:  source,
+		Topic:          contracts.AgentSubject(recipient),
+		PayloadSummary: "please inspect " + foreign,
+		Payload:        "please inspect " + foreign,
+	}
+
+	got := deliverer.Text(item)
+	want := "Note: body names session " + foreign + "; the sender is " + source
+	if !strings.Contains(got, want) {
+		t.Fatalf("Text() missing foreign-session note %q:\n%s", want, got)
+	}
+}

@@ -62,6 +62,10 @@ readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
 readonly rendered_go_file="${out_dir}/rendered-go.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
+readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
+readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
+readonly role_claim_response_file="${out_dir}/role-claim-response.json"
+readonly held_role_response_file="${out_dir}/held-role-response.json"
 readonly listener_log_file="${out_dir}/listener.log"
 readonly session_log_file="${out_dir}/session.log"
 readonly subscriber_log_file="${out_dir}/subscriber.log"
@@ -107,8 +111,8 @@ fi
 
 mkdir -p "$out_dir"
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
-  "$direct_response_file" "$listener_log_file" "$session_log_file" "$subscriber_log_file" \
-  "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+  "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
 : >"$envelopes_file"
 : >"$session_prompts_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
@@ -217,6 +221,19 @@ subscribe_body="$(jq -nc \
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
 
+unwired_subscribe_body="$(jq -nc \
+  --arg session_id "$session_id" \
+  --arg topic "notifications.github.never-seen.e2e-repository.>" \
+  '{session_id:$session_id,topics:[$topic]}')"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/interests/subscribe" -d "$unwired_subscribe_body" >"$unwired_response_file"
+jq -e \
+  '.warnings | length == 1 and .[0] == "no GitHub event for never-seen/e2e-repository in the stream'\''s retention window; is the App installed there?"' \
+  "$unwired_response_file" >/dev/null || {
+  printf 'ERR: never-seen repository did not produce exactly one wiring warning.\n' >&2
+  exit 1
+}
+
 post_github() {
   local event=$1
   local fixture=$2
@@ -271,15 +288,42 @@ wait_for_prompt_count() {
   return 1
 }
 
+direct_message=$'Direct acceptance summary.\n\nDirect second paragraph.\n\nDirect third paragraph.'
+direct_body="$(jq -nc \
+  --arg session_id "$session_id" \
+  --arg message "$direct_message" \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message}')"
 printf 'posting direct message\n'
 curl -fsS -X POST -H 'Content-Type: application/json' \
-  "${listener_url}/v1/messages/send" \
-  -d '{"source":"agent","source_session":"octocat","target_session":"ses_e2e_local","message":"Direct acceptance message."}' \
-  >"$direct_response_file"
-jq -e --arg recipient "$session_id" \
-  '.recipient == $recipient and .topic == ("notifications.agent." + $recipient)' \
+  "${listener_url}/v1/messages/send" -d "$direct_body" >"$direct_response_file"
+jq -e --arg recipient "$session_id" --arg message "$direct_message" \
+  '.recipient == $recipient and .topic == ("notifications.agent." + $recipient) and .payload_summary == "Direct acceptance summary." and .payload == $message' \
   "$direct_response_file" >/dev/null || {
-  printf 'ERR: direct send response did not retain the recipient contract.\n' >&2
+  printf 'ERR: direct send response did not retain the three-paragraph message contract.\n' >&2
+  exit 1
+}
+
+role="e2e-reviewer"
+unheld_status="$(curl -sS -o "$unheld_role_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/publish" \
+  -d "{\"topic\":\"notifications.role.${role}\",\"message\":\"Role delivery.\"}")"
+if [[ "$unheld_status" != 404 ]] || ! jq -e --arg role "$role" '.error == ("no holder for role " + $role)' "$unheld_role_response_file" >/dev/null; then
+  printf 'ERR: an unheld role publish was not rejected with 404.\n' >&2
+  exit 1
+fi
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/roles/set" \
+  -d "{\"session_id\":\"${session_id}\",\"role\":\"${role}\"}" >"$role_claim_response_file"
+jq -e --arg session_id "$session_id" '.session_id == $session_id' "$role_claim_response_file" >/dev/null || {
+  printf 'ERR: fake session did not claim the role.\n' >&2
+  exit 1
+}
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/publish" \
+  -d "{\"topic\":\"notifications.role.${role}\",\"message\":\"Role delivery.\"}" >"$held_role_response_file"
+jq -e --arg session_id "$session_id" '.holder == $session_id' "$held_role_response_file" >/dev/null || {
+  printf 'ERR: held role publish did not return the fake-session holder.\n' >&2
   exit 1
 }
 
@@ -356,11 +400,13 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     console.log("topic → summary");
     for (const item of envelopes) console.log(`${item.topic} → ${item.payload_summary}`);
 
+    const directSummary = "Direct acceptance summary.";
+    const directBody = `${directSummary}\n\nDirect second paragraph.\n\nDirect third paragraph.`;
     const directTopic = `notifications.agent.${sessionID}`;
     const direct = withTopic(directTopic);
     require(direct.length === 1, `direct envelope count = ${direct.length}, want 1`);
     require(direct[0].source === "agent" && direct[0].source_session === "octocat", "direct envelope loses sender identity");
-    require(direct[0].payload_summary === "Direct acceptance message." && (direct[0].payload === undefined || direct[0].payload === ""), "direct body was not rendered exactly once");
+    require(direct[0].payload_summary === directSummary && direct[0].payload === directBody, "direct envelope loses the three-paragraph body");
 
     const lifecycle = withTopic(topic("pr.42"));
     require(lifecycle.length === 3, `pr lifecycle count = ${lifecycle.length}, want 3`);
@@ -407,10 +453,16 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     const obsolete = ["pr.42.check", "pr.42.ci", "pr.42.merged", "pr.42.closed"];
     for (const suffix of obsolete) require(withTopic(topic(suffix)).length === 0, `obsolete topic was published: ${suffix}`);
 
-    const tsFirst = readFileSync(renderedTSFile, "utf8").trim().split("\n\n")[0];
-    const goFirst = readFileSync(renderedGoFile, "utf8").trim().split("\n\n")[0];
-    require(tsFirst.includes("to: you") && tsFirst.includes("from: octocat") && tsFirst.includes("at:") && tsFirst.includes("id:") && (tsFirst.match(/Direct acceptance message\./g) ?? []).length === 1, "TypeScript direct rendering is incomplete or duplicated");
-    require(goFirst.includes("[NOTIFICATION to you from octocat]") && goFirst.includes("At:") && goFirst.includes("Event ID:") && (goFirst.match(/Direct acceptance message\./g) ?? []).length === 1, "Go direct rendering is incomplete or duplicated");
+    const tsFirst = readFileSync(renderedTSFile, "utf8").split("\n\nenvoy:")[0];
+    const goFirst = readFileSync(renderedGoFile, "utf8").split("\n[NOTIFICATION")[0];
+    const assertDirectRender = (rendered, fullMessage, renderer) => {
+      const summaryAt = rendered.indexOf(directSummary);
+      const bodyAt = rendered.indexOf(fullMessage);
+      require(summaryAt >= 0 && summaryAt < bodyAt, `${renderer} direct summary is not first`);
+      require(rendered.split(fullMessage).length === 2, `${renderer} did not render the full direct message exactly once`);
+    };
+    assertDirectRender(tsFirst, `message: ${JSON.stringify(directBody)}`, "TypeScript");
+    assertDirectRender(goFirst, `Message:\n${directBody}`, "Go");
 
     console.log("PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract");
   '

@@ -2,6 +2,7 @@ package cistore
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -356,7 +357,83 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	if pub.count() == 0 {
+		t.Fatal("concurrent ticks did not publish")
+	}
+	dedupe := pub.last().DedupeKey
+	for _, envelope := range pub.all() {
+		if envelope.DedupeKey != dedupe {
+			t.Fatalf("replica publishes used different dedupe keys: %q and %q", dedupe, envelope.DedupeKey)
+		}
+	}
+}
+func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "810", "https://example.test/810", "in_progress", "", ""); err != nil {
+		t.Fatalf("record in-progress check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 0 {
+		t.Fatalf("in-progress check published %d envelopes", pub.count())
+	}
+	if err := store.Record(owner, repo, number, sha, "build", "810", "https://example.test/810", "completed", "success", ""); err != nil {
+		t.Fatalf("record completed check: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
 	if pub.count() != 1 {
-		t.Fatalf("concurrent checks publishes = %d, want 1", pub.count())
+		t.Fatalf("completed check published %d envelopes, want one", pub.count())
+	}
+}
+
+func TestSummaryTickRetriesSettlementAfterPublishFailure(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "811", "https://example.test/811", "completed", "success", ""); err != nil {
+		t.Fatalf("record completed check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	time.Sleep(10 * time.Millisecond)
+	pub.setErr(errors.New("nats unavailable"))
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if getState(t, store, owner, repo, number, sha).SettledEmitted {
+		t.Fatal("failed publication marked the state settled")
+	}
+
+	pub.setErr(nil)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 1 {
+		t.Fatalf("retry published %d envelopes, want one", pub.count())
+	}
+	if !getState(t, store, owner, repo, number, sha).SettledEmitted {
+		t.Fatal("successful retry did not mark the state settled")
 	}
 }

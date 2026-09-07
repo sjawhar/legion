@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
@@ -49,19 +48,18 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		if !knownHead {
 			head = st.SHA
 		}
-		sum, _, err := renderSummary(st, head)
-		if err != nil {
-			logger.Error("checks render failed", slog.String("error", err.Error()))
-			continue
-		}
-		if !sum.IsHead {
+		if st.SHA != head {
 			continue
 		}
 		if st.SettledEmitted || !settlementReady(st) {
 			continue
 		}
 
+		sum := renderSummary(st)
+
 		h := st.Hash()
+		issuedAt := contracts.NowMillis()
+		sum.SettledAt = issuedAt
 		payload, err := json.Marshal(sum)
 		if err != nil {
 			logger.Error("checks payload failed", slog.String("error", err.Error()))
@@ -73,7 +71,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			SourceEventID:  id.New(),
 			Topic:          contracts.GithubSubject(st.Owner, st.Repo, "pr."+st.Number+".checks"),
 			DedupeKey:      "github.checks." + st.Owner + "/" + st.Repo + ".pr." + st.Number + "." + st.SHA + "." + h,
-			IssuedAt:       contracts.NowMillis(),
+			IssuedAt:       issuedAt,
 			PayloadSummary: settledPayloadSummary(sum),
 			Payload:        string(payload),
 			TraceID:        id.New(),
@@ -82,20 +80,17 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			logger.Error("checks invalid envelope", slog.String("error", err.Error()))
 			continue
 		}
-		ok, err := store.MarkSettled(Key(st.Owner, st.Repo, st.Number, st.SHA), h, debounce)
-		if err != nil {
-			logger.Warn("checks mark-settled failed", slog.String("error", err.Error()))
-			continue
-		}
-		if !ok {
-			continue
-		}
 		if err := pub.Publish(env); err != nil {
-			logger.Warn("checks publish failed (dropped)",
+			logger.Warn("checks publish failed",
 				slog.String("error", err.Error()),
 				slog.String("topic", env.Topic),
 				slog.String("sha", st.SHA),
 			)
+			continue
+		}
+		if _, err := store.MarkSettled(Key(st.Owner, st.Repo, st.Number, st.SHA), h, debounce); err != nil {
+			logger.Warn("checks mark-settled failed", slog.String("error", err.Error()))
+			continue
 		}
 	}
 }
@@ -112,7 +107,7 @@ func settledPayloadSummary(sum Summary) string {
 	if sum.SupersededSettlement == "true" {
 		summary += " (re-settled)"
 	}
-	return payloadSummary(summary)
+	return contracts.OneLineSummary(summary)
 }
 
 func sha7(sha string) string {
@@ -120,13 +115,4 @@ func sha7(sha string) string {
 		return sha[:7]
 	}
 	return sha
-}
-
-func payloadSummary(summary string) string {
-	summary = strings.NewReplacer("\r", " ", "\n", " ").Replace(summary)
-	if utf8.RuneCountInString(summary) <= 160 {
-		return summary
-	}
-	runes := []rune(summary)
-	return string(runes[:159]) + "…"
 }

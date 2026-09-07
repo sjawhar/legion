@@ -38,14 +38,14 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if input.Event == "workflow_run" && len(sliceValue(nested(input.Body, "workflow_run", "pull_requests"))) > 0 {
 		return nil
 	}
-	item := GithubEnvelope(input)
-	if item.Topic == "" {
-		// Event should not be routed (e.g. push to non-heads/tags ref).
-		return nil
-	}
 	if githubCIEvent(input.Event) {
 		// CI events fold into envoy_ci_state through the webhook handler's
 		// CIRecorder. The listener emits one settled pr.<n>.checks envelope.
+		return nil
+	}
+	item := GithubEnvelope(input)
+	if item.Topic == "" {
+		// Event should not be routed (e.g. push to non-heads/tags ref).
 		return nil
 	}
 	if !githubCommentEvent(input.Event) {
@@ -582,7 +582,7 @@ func githubSummary(event string, body map[string]any) string {
 	default:
 		summary = fmt.Sprintf("%s %s", event, action)
 	}
-	return capSummary(summary)
+	return OneLineSummary(summary)
 }
 
 func githubPayload(event string, body map[string]any) string {
@@ -847,7 +847,7 @@ func slackSummary(body map[string]any) string {
 	if suffix := slackFilesSuffix(slackFiles(event, message)); suffix != "" {
 		summary += suffix
 	}
-	return capSummary(summary)
+	return OneLineSummary(summary)
 }
 
 func slackPayload(body map[string]any) string {
@@ -1020,13 +1020,22 @@ func firstLine(s string) string {
 	return strings.TrimSuffix(s, "\r")
 }
 
-func capSummary(s string) string {
-	s = firstLine(s)
-	runes := []rune(s)
-	if len(runes) <= 160 {
-		return s
+// OneLineSummary returns the first non-empty message line, capped at 160 runes
+// including its ellipsis. It is the common human-facing summary contract for
+// normalized webhooks, listener API messages, and settled CI notifications.
+func OneLineSummary(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimLeft(line, " \t\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		runes := []rune(line)
+		if len(runes) <= 160 {
+			return line
+		}
+		return string(runes[:159]) + "…"
 	}
-	return string(runes[:159]) + "…"
+	return ""
 }
 
 func truncateWithEllipsis(s string, maxRunes int) string {
@@ -1121,7 +1130,7 @@ func ghostWisprSummary(eventType string, body map[string]any) string {
 	if title := nestedString(body, "payload", "title"); title != "" {
 		summary += ": " + first(title, 80)
 	}
-	return capSummary(summary)
+	return OneLineSummary(summary)
 }
 
 func ghostWisprPayload(eventType string, body map[string]any) string {

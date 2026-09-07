@@ -15,17 +15,14 @@ func mkChecks(spec map[string][2]string) map[string]Check {
 	return out
 }
 
-func renderOrFail(t *testing.T, s State, head string) (string, Summary) {
+func renderOrFail(t *testing.T, s State) (string, Summary) {
 	t.Helper()
-	raw, err := RenderSummary(s, head)
+	sum := renderSummary(s)
+	raw, err := json.Marshal(sum)
 	if err != nil {
-		t.Fatalf("RenderSummary: %v", err)
+		t.Fatalf("marshal summary: %v", err)
 	}
-	var sum Summary
-	if err := json.Unmarshal([]byte(raw), &sum); err != nil {
-		t.Fatalf("summary is not valid JSON: %v\n%s", err, raw)
-	}
-	return raw, sum
+	return string(raw), sum
 }
 
 func assertGroup(t *testing.T, label string, g StatusGroup, want []string) {
@@ -52,7 +49,7 @@ func TestRenderSummaryJSON(t *testing.T) {
 			"lint":        {"completed", "skipped"},
 		}),
 	}
-	_, sum := renderOrFail(t, s, s.SHA)
+	_, sum := renderOrFail(t, s)
 
 	if sum.Kind != "checks" || sum.Repo != "sjawhar/legion" || sum.Number != "13728" || sum.SHA != "a1b2c3d9999999" {
 		t.Fatalf("identity wrong: %+v", sum)
@@ -70,7 +67,7 @@ func TestRenderSummarySkippedKeepsAllNames(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		spec["skip-"+string(rune('a'+i))] = [2]string{"completed", "skipped"}
 	}
-	_, sum := renderOrFail(t, State{Owner: "o", Repo: "r", Number: "9", SHA: "sha", Checks: mkChecks(spec)}, "sha")
+	_, sum := renderOrFail(t, State{Owner: "o", Repo: "r", Number: "9", SHA: "sha", Checks: mkChecks(spec)})
 	if sum.Skipped.Count != 12 || len(sum.Skipped.Checks) != 12 {
 		t.Fatalf("skipped should keep all 12 names, got count=%d names=%d", sum.Skipped.Count, len(sum.Skipped.Checks))
 	}
@@ -80,7 +77,7 @@ func TestRenderSummaryEmptyGroupsArePresent(t *testing.T) {
 	raw, sum := renderOrFail(t, State{
 		Owner: "o", Repo: "r", Number: "1", SHA: "sha",
 		Checks: mkChecks(map[string][2]string{"a": {"completed", "success"}, "b": {"completed", "success"}}),
-	}, "sha")
+	})
 	assertGroup(t, "passed", sum.Passed, []string{"a", "b"})
 	for _, empty := range []StatusGroup{sum.Failed, sum.Running, sum.Queued, sum.Skipped} {
 		if empty.Count != 0 || len(empty.Checks) != 0 {
@@ -101,7 +98,7 @@ func TestRenderSummaryIncludesReviewerVerdicts(t *testing.T) {
 			"architect":  {"completed", "failure"},
 			"unit-tests": {"completed", "success"},
 		}),
-	}, "deadbeef")
+	})
 	assertGroup(t, "passed", sum.Passed, []string{"tester", "unit-tests"})
 	assertGroup(t, "failed", sum.Failed, []string{"architect"})
 }
@@ -134,27 +131,26 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryCancelledAndHead(t *testing.T) {
+func TestRenderSummaryCancelledAndFailingChecks(t *testing.T) {
 	state := State{
 		Owner:  "example-org",
 		Repo:   "example-repo",
 		Number: "42",
 		SHA:    "abcdef1234567",
-		Checks: mkChecks(map[string][2]string{
-			"cancelled-check": {"completed", "cancelled"},
-			"failed-check":    {"completed", "failure"},
-		}),
+		Checks: map[string]Check{
+			"cancelled-check": {Status: "completed", Conclusion: "cancelled"},
+			"failed-check":    {Status: "completed", Conclusion: "failure", URL: "https://example.test/checks/failed"},
+		},
 	}
 
-	_, head := renderOrFail(t, state, state.SHA)
-	assertGroup(t, "cancelled", head.Cancelled, []string{"cancelled-check"})
-	if !head.IsHead {
-		t.Fatal("summary for the recorded head must set is_head")
+	raw, sum := renderOrFail(t, state)
+	assertGroup(t, "cancelled", sum.Cancelled, []string{"cancelled-check"})
+	assertGroup(t, "cancelled empty", renderSummary(State{Checks: mkChecks(map[string][2]string{"passed": {"completed", "success"}})}).Cancelled, []string{})
+	if got := sum.FailingChecks; len(got) != 1 || got[0].Name != "failed-check" || got[0].URL != "https://example.test/checks/failed" {
+		t.Fatalf("failing_checks = %+v", got)
 	}
-
-	_, stale := renderOrFail(t, state, "newer-head")
-	if stale.IsHead {
-		t.Fatal("summary for a stale SHA must clear is_head")
+	if !strings.Contains(raw, `"cancelled":{"count":1,"checks":["cancelled-check"]}`) {
+		t.Fatalf("cancelled group is not serialized: %s", raw)
 	}
 }
 
@@ -176,7 +172,7 @@ func TestRenderSummaryExample(t *testing.T) {
 	for i := 1; i <= 12; i++ {
 		spec["skip-"+string(rune('a'+i-1))] = [2]string{"completed", "skipped"}
 	}
-	raw, _ := renderOrFail(t, State{Owner: "citest", Repo: "citest", Number: "13728", SHA: "a1b2c3d9999999", Checks: mkChecks(spec)}, "a1b2c3d9999999")
+	raw, _ := renderOrFail(t, State{Owner: "citest", Repo: "citest", Number: "13728", SHA: "a1b2c3d9999999", Checks: mkChecks(spec)})
 	var pretty bytes.Buffer
 	_ = json.Indent(&pretty, []byte(raw), "", "  ")
 	t.Logf("EXAMPLE checks notification:\n%s", pretty.String())

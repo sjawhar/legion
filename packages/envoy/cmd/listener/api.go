@@ -41,10 +41,10 @@ type messageBody struct {
 	Message        string  `json:"message"`
 	Payload        *string `json:"payload"`
 	IdempotencyKey string  `json:"idempotency_key"`
-	InReplyTo      string  `json:"in_reply_to"`
-	Supersedes     string  `json:"supersedes"`
-	Urgency        string  `json:"urgency"`
-	ExpectsReply   string  `json:"expects_reply"`
+	InReplyTo      *string `json:"in_reply_to"`
+	Supersedes     *string `json:"supersedes"`
+	Urgency        *string `json:"urgency"`
+	ExpectsReply   *string `json:"expects_reply"`
 	ExpiresAt      *int64  `json:"expires_at"`
 }
 
@@ -79,31 +79,40 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
 }
 
-func firstLine(message string, limit int) string {
-	end := len(message)
-	runes := 0
-	for i, r := range message {
-		if r == '\n' || r == '\r' || runes == limit {
-			end = i
-			break
+func validateMessageBody(body messageBody) (string, string) {
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{
+		{"in_reply_to", body.InReplyTo},
+		{"supersedes", body.Supersedes},
+	} {
+		if field.value != nil && strings.TrimSpace(*field.value) == "" {
+			return field.name + " must not be empty", field.name
 		}
-		runes++
 	}
-	return message[:end]
-}
-
-func validateMessageEnums(body messageBody) (string, string) {
-	if body.Urgency != "" && body.Urgency != "low" && body.Urgency != "med" && body.Urgency != "high" && body.Urgency != "blocking" {
-		return "urgency must be one of low, med, high, blocking", "urgency"
+	if body.Urgency != nil {
+		if *body.Urgency == "" || (*body.Urgency != "low" && *body.Urgency != "med" && *body.Urgency != "high" && *body.Urgency != "blocking") {
+			return "urgency must be one of low, med, high, blocking", "urgency"
+		}
 	}
-	if body.ExpectsReply != "" && body.ExpectsReply != "none" && body.ExpectsReply != "optional" && body.ExpectsReply != "required" {
-		return "expects_reply must be one of none, optional, required", "expects_reply"
+	if body.ExpectsReply != nil {
+		if *body.ExpectsReply == "" || (*body.ExpectsReply != "none" && *body.ExpectsReply != "optional" && *body.ExpectsReply != "required") {
+			return "expects_reply must be one of none, optional, required", "expects_reply"
+		}
 	}
 	return "", ""
 }
 
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelope {
-	summary := firstLine(body.Message, 160)
+	summary := contracts.OneLineSummary(body.Message)
 	payload := ""
 	if body.Payload != nil {
 		payload = *body.Payload
@@ -126,10 +135,10 @@ func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelo
 		PayloadSummary: summary,
 		Payload:        payload,
 		TraceID:        id.New(),
-		InReplyTo:      body.InReplyTo,
-		Supersedes:     body.Supersedes,
-		Urgency:        body.Urgency,
-		ExpectsReply:   body.ExpectsReply,
+		InReplyTo:      optionalString(body.InReplyTo),
+		Supersedes:     optionalString(body.Supersedes),
+		Urgency:        optionalString(body.Urgency),
+		ExpectsReply:   optionalString(body.ExpectsReply),
 	}
 }
 
@@ -206,7 +215,7 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
 			return
 		}
-		if message, field := validateMessageEnums(body); message != "" {
+		if message, field := validateMessageBody(body); message != "" {
 			writeJSONError(w, http.StatusBadRequest, message, field)
 			return
 		}
@@ -220,7 +229,7 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if d == nil || d.sessions == nil {
+		if d.sessions == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
@@ -293,7 +302,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
-		if message, field := validateMessageEnums(request.messageBody); message != "" {
+		if message, field := validateMessageBody(request.messageBody); message != "" {
 			writeJSONError(w, http.StatusBadRequest, message, field)
 			return
 		}
@@ -307,7 +316,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if d == nil || d.client == nil {
+		if d.client == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
@@ -461,7 +470,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			return
 		}
 		d := state.Load()
-		if d == nil || d.registry == nil || d.sessions == nil {
+		if d.registry == nil || d.sessions == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
@@ -501,10 +510,6 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if d == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		holder, err := liveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -528,9 +533,6 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 }
 
 func (d *listenerDeps) streamInspector() streamInfoLookup {
-	if d == nil {
-		return nil
-	}
 	if d.streamInfo != nil {
 		return d.streamInfo
 	}
@@ -565,17 +567,28 @@ func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamNam
 	}
 }
 
-func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string, logger *logging.Logger) string {
+func githubRepositoryTopic(topic string) (owner, repo string, ok bool) {
 	const githubTopicPrefix = "notifications.github."
 	remainder, ok := strings.CutPrefix(topic, githubTopicPrefix)
 	if !ok {
-		return ""
+		return "", "", false
 	}
 	parts := strings.Split(remainder, ".")
 	if len(parts) < 3 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string, logger *logging.Logger) string {
+	owner, repo, ok := githubRepositoryTopic(topic)
+	if !ok {
 		return ""
 	}
-	owner, repo := parts[0], parts[1]
+	if strings.ContainsAny(owner, "*>") || strings.ContainsAny(repo, "*>") {
+		logger.Warn("listener ignored GitHub repository topic with wildcard segment", slog.String("topic", topic))
+		return ""
+	}
 	inspector := d.streamInspector()
 	if inspector == nil {
 		return ""
@@ -584,7 +597,7 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 	if streamName == "" {
 		streamName = bus.Stream
 	}
-	subjectsFilter := githubTopicPrefix + owner + "." + repo + ".>"
+	subjectsFilter := "notifications.github." + owner + "." + repo + ".>"
 	info, err := streamInfoWithin(ctx, inspector, streamName, subjectsFilter)
 	if err != nil {
 		logger.Warn("listener stream info failed",
@@ -617,7 +630,7 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
 		d := state.Load()
-		if d == nil || d.registry == nil {
+		if d.registry == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
@@ -648,7 +661,17 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		warningCtx, cancelWarnings := context.WithTimeout(r.Context(), unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
 		warnings := make([]string, 0)
+		warnedRepositories := make(map[string]struct{})
 		for _, topic := range body.Topics {
+			owner, repo, ok := githubRepositoryTopic(topic)
+			if !ok {
+				continue
+			}
+			key := owner + "\x00" + repo
+			if _, seen := warnedRepositories[key]; seen {
+				continue
+			}
+			warnedRepositories[key] = struct{}{}
 			if warning := unwiredRepositoryWarning(warningCtx, d, topic, logger); warning != "" {
 				warnings = append(warnings, warning)
 			}
@@ -679,7 +702,7 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
 		d := deps.Load()
-		if d == nil || d.registry == nil {
+		if d.registry == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
@@ -702,7 +725,7 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 			return
 		}
 		d := deps.Load()
-		if d == nil || d.sessions == nil {
+		if d.sessions == nil {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
@@ -716,26 +739,14 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 
 	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
-		if d == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		adminInterestsHandler(d.registry).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
-		if d == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		d := deps.Load()
-		if d == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		deleteSessionHandler(d.sessions).ServeHTTP(w, r)
 	})
 	v1.HandleFunc("/v1/messages/send", sendHandler(deps))

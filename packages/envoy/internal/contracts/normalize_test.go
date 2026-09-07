@@ -2279,3 +2279,12 @@ func TestGithubPayloadUsesRepositoryPartsFallback(t *testing.T) {
 		t.Fatalf("repo = %q, want %q", got, want)
 	}
 }
+func TestOneLineSummarySkipsLeadingBlankLinesAndCapsRunes(t *testing.T) {
+	long := strings.Repeat("界", 161)
+	if got := OneLineSummary("\n \r\n  first useful line\nsecond line"); got != "first useful line" {
+		t.Fatalf("summary = %q", got)
+	}
+	if got := OneLineSummary(long); got != strings.Repeat("界", 159)+"…" {
+		t.Fatalf("rune-safe summary = %q", got)
+	}
+}

@@ -1,32 +1,29 @@
 package contracts
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 )
 
 type Envelope struct {
-	EventID            string          `json:"event_id"`
-	Source             string          `json:"source"`
-	SourceEventID      string          `json:"source_event_id"`
-	SourceSession      string          `json:"source_session,omitempty"`
-	Topic              string          `json:"topic"`
-	DedupeKey          string          `json:"dedupe_key"`
-	IssuedAt           int64           `json:"issued_at"`
-	ExpiresAt          *int64          `json:"expires_at,omitempty"`
-	PayloadSummary     string          `json:"payload_summary"`
-	PayloadRef         string          `json:"payload_ref,omitempty"`
-	Payload            string          `json:"payload,omitempty"`
-	TraceID            string          `json:"trace_id"`
-	Sender             *EnvelopeSender `json:"sender,omitempty"`
-	InReplyTo          string          `json:"in_reply_to,omitempty"`
-	Supersedes         string          `json:"supersedes,omitempty"`
-	Urgency            string          `json:"urgency,omitempty"`
-	ExpectsReply       string          `json:"expects_reply,omitempty"`
-	inReplyToWasEmpty  bool
-	supersedesWasEmpty bool
+	EventID        string          `json:"event_id"`
+	Source         string          `json:"source"`
+	SourceEventID  string          `json:"source_event_id"`
+	SourceSession  string          `json:"source_session,omitempty"`
+	Topic          string          `json:"topic"`
+	DedupeKey      string          `json:"dedupe_key"`
+	IssuedAt       int64           `json:"issued_at"`
+	ExpiresAt      *int64          `json:"expires_at,omitempty"`
+	PayloadSummary string          `json:"payload_summary"`
+	PayloadRef     string          `json:"payload_ref,omitempty"`
+	Payload        string          `json:"payload,omitempty"`
+	TraceID        string          `json:"trace_id"`
+	Sender         *EnvelopeSender `json:"sender,omitempty"`
+	InReplyTo      string          `json:"in_reply_to,omitempty"`
+	Supersedes     string          `json:"supersedes,omitempty"`
+	Urgency        string          `json:"urgency,omitempty"`
+	ExpectsReply   string          `json:"expects_reply,omitempty"`
 }
 
 type EnvelopeSender struct {
@@ -81,42 +78,10 @@ func (e Envelope) Validate() error {
 			return fmt.Errorf("expects_reply must be one of: none, optional, required")
 		}
 	}
-	if e.inReplyToWasEmpty && e.InReplyTo == "" {
-		return fmt.Errorf("in_reply_to must not be empty")
-	}
-	if e.supersedesWasEmpty && e.Supersedes == "" {
-		return fmt.Errorf("supersedes must not be empty")
-	}
 	if e.Sender != nil {
 		if strings.TrimSpace(e.Sender.SessionID) == "" {
 			return fmt.Errorf("sender.session_id is required")
 		}
-	}
-	return nil
-}
-
-// UnmarshalJSON decodes an Envelope.
-// Do not embed Envelope in a struct that is itself json-unmarshalled: the promoted UnmarshalJSON skips the outer fields. Compose it as a named field instead.
-func (e *Envelope) UnmarshalJSON(data []byte) error {
-	type envelopeAlias Envelope
-	var decoded envelopeAlias
-	var wire struct {
-		*envelopeAlias
-		InReplyTo  *string `json:"in_reply_to"`
-		Supersedes *string `json:"supersedes"`
-	}
-	wire.envelopeAlias = &decoded
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	*e = Envelope(decoded)
-	if wire.InReplyTo != nil {
-		e.InReplyTo = *wire.InReplyTo
-		e.inReplyToWasEmpty = *wire.InReplyTo == ""
-	}
-	if wire.Supersedes != nil {
-		e.Supersedes = *wire.Supersedes
-		e.supersedesWasEmpty = *wire.Supersedes == ""
 	}
 	return nil
 }

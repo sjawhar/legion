@@ -65,10 +65,12 @@ packages/envoy/scripts/e2e-local.sh
 ```
 
 It builds `cmd/listener`, starts a throwaway `nats:2.10-alpine` container, and
-submits signed public GitHub fixtures plus a direct agent message. The driver
-asserts the settled pull-request checks topic, lifecycle and comment topics,
-PR-less workflow behavior, absence of obsolete GitHub topics, and direct
-delivery metadata.
+submits signed public GitHub fixtures plus a three-paragraph direct agent
+message. The driver asserts the one-warning response for a never-seen GitHub
+repository, rejects an unheld role publish before proving the fake session can
+claim and receive that role, validates settled pull-request checks, lifecycle
+and comment topics, PR-less workflow behavior, obsolete-topic absence, and
+both renderers' direct-message summary/body contract.
 
 Docker downloads `nats:2.10-alpine` automatically on the first run when it is
 not already cached.

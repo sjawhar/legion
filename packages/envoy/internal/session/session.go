@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 // ErrWrongMachine is returned when a session belongs to a different machine.
 // Callers should ACK the message (another listener owns this session).
 var ErrWrongMachine = errors.New("session belongs to a different machine")
+
+var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 
 type Deliverer struct {
 	MachineID    string
@@ -114,8 +117,28 @@ func (d Deliverer) Text(item contracts.Envelope) string {
 	if item.Payload != "" && item.Payload != item.PayloadSummary {
 		lines = append(lines, "Message:", item.Payload)
 	}
+	if foreign := foreignSession(item); foreign != "" {
+		sender := item.SourceSession
+		if sender == "" {
+			sender = "unknown"
+		}
+		lines = append(lines, "Note: body names session "+foreign+"; the sender is "+sender)
+	}
 	lines = append(lines, "", "Topic: "+item.Topic)
 	return strings.Join(lines, "\n")
+}
+
+func foreignSession(item contracts.Envelope) string {
+	recipient := ""
+	if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
+		recipient = strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
+	}
+	for _, candidate := range foreignSessionID.FindAllString(item.PayloadSummary+"\n"+item.Payload, -1) {
+		if candidate != item.SourceSession && candidate != recipient {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func (d Deliverer) prompt(port int, machineID string, sessionID string, text string) error {

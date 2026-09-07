@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -23,9 +24,11 @@ type fakeStreamInfo struct {
 	err            error
 	stream         string
 	subjectsFilter string
+	calls          int
 }
 
 func (f *fakeStreamInfo) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
+	f.calls++
 	f.stream = stream
 	if len(opts) > 0 {
 		if request, ok := opts[0].(*nats.StreamInfoRequest); ok {
@@ -103,8 +106,8 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 	if metadata.Recipient != "ses_target" {
 		t.Fatalf("recipient = %q, want ses_target", metadata.Recipient)
 	}
-	if response.PayloadSummary != strings.Repeat("a", 160) {
-		t.Fatalf("payload_summary = %q, want first 160 characters", response.PayloadSummary)
+	if response.PayloadSummary != strings.Repeat("a", 159)+"…" {
+		t.Fatalf("payload_summary = %q, want 160-rune summary with ellipsis", response.PayloadSummary)
 	}
 	if response.Payload != message {
 		t.Fatalf("payload = %q, want original message", response.Payload)
@@ -133,22 +136,25 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
 
 	cases := []struct {
-		name string
-		path string
-		body string
-		want string
+		name  string
+		path  string
+		body  string
+		want  string
+		field string
 	}{
 		{
-			name: "send urgency",
-			path: "/v1/messages/send",
-			body: `{"target_session":"ses_target","message":"hello","urgency":"critical"}`,
-			want: "urgency must be one of low, med, high, blocking",
+			name:  "send urgency",
+			path:  "/v1/messages/send",
+			body:  `{"target_session":"ses_target","message":"hello","urgency":"critical"}`,
+			want:  "urgency must be one of low, med, high, blocking",
+			field: "urgency",
 		},
 		{
-			name: "publish expects reply",
-			path: "/v1/messages/publish",
-			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"soon"}`,
-			want: "expects_reply must be one of none, optional, required",
+			name:  "publish expects reply",
+			path:  "/v1/messages/publish",
+			body:  `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"soon"}`,
+			want:  "expects_reply must be one of none, optional, required",
+			field: "expects_reply",
 		},
 	}
 	for _, tc := range cases {
@@ -170,8 +176,8 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 				t.Fatalf("decode error body: %v", err)
 			}
-			if response.Error != tc.want || len(response.Expected) != 1 {
-				t.Fatalf("error response = %+v", response)
+			if response.Error != tc.want || len(response.Expected) != 1 || response.Expected[0] != tc.field {
+				t.Fatalf("error response = %+v, want field %q", response, tc.field)
 			}
 		})
 	}
@@ -290,6 +296,26 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			t.Fatalf("holder = %q, want ses_holder", response.Holder)
 		}
 	})
+
+	t.Run("stale holder returns 404 from publish and lookup", func(t *testing.T) {
+		if err := sessions.Delete("ses_holder"); err != nil {
+			t.Fatalf("delete holder session: %v", err)
+		}
+		publishRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(publishRecorder, httptest.NewRequest(
+			http.MethodPost,
+			"/v1/messages/publish",
+			strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`),
+		))
+		if publishRecorder.Code != http.StatusNotFound {
+			t.Fatalf("publish status = %d, want 404; body = %s", publishRecorder.Code, publishRecorder.Body.String())
+		}
+		roleRecorder := httptest.NewRecorder()
+		roleGetHandler(&state).ServeHTTP(roleRecorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
+		if roleRecorder.Code != http.StatusNotFound {
+			t.Fatalf("role lookup status = %d, want 404; body = %s", roleRecorder.Code, roleRecorder.Body.String())
+		}
+	})
 }
 
 func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
@@ -354,7 +380,7 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
 		"session_id":"ses_subscriber",
 		"self_subscribed":true,
-		"topics":["notifications.github.example-org.example-repo.pr.>"]
+		"topics":["notifications.github.example-org.example-repo.pr","notifications.github.example-org.example-repo.pr.>"]
 	}`))
 	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
@@ -374,6 +400,20 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	}
 	if inspector.stream != "notifications" || inspector.subjectsFilter != "notifications.github.example-org.example-repo.>" {
 		t.Fatalf("stream inspection = stream %q subjects_filter %q", inspector.stream, inspector.subjectsFilter)
+	}
+	if inspector.calls != 1 {
+		t.Fatalf("stream inspector calls = %d, want one per repository", inspector.calls)
+	}
+}
+
+func TestUnwiredRepositoryWarningSkipsWildcardRepositorySegment(t *testing.T) {
+	inspector := &fakeStreamInfo{info: &nats.StreamInfo{}}
+	deps := &listenerDeps{streamName: "notifications", streamInfo: inspector}
+	if warning := unwiredRepositoryWarning(context.Background(), deps, "notifications.github.*.example-repo.pr.>", logging.New("test")); warning != "" {
+		t.Fatalf("warning = %q, want no warning for invalid repository segment", warning)
+	}
+	if inspector.calls != 0 {
+		t.Fatalf("stream inspector calls = %d, want zero for invalid repository segment", inspector.calls)
 	}
 }
 
@@ -593,6 +633,38 @@ func TestPublishHandler_SuppliedPayloadWins(t *testing.T) {
 	}
 }
 
+func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	recorder := httptest.NewRecorder()
+	publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/publish",
+		strings.NewReader(`{
+			"topic":"notifications.github.example-org.example-repo.pr.1",
+			"message":"first paragraph\n\nsecond paragraph",
+			"in_reply_to":"evt_parent",
+			"supersedes":"evt_old",
+			"urgency":"blocking",
+			"expects_reply":"required"
+		}`),
+	))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+	if response.InReplyTo != "evt_parent" ||
+		response.Supersedes != "evt_old" ||
+		response.Urgency != "blocking" ||
+		response.ExpectsReply != "required" {
+		t.Fatalf("optional fields = %+v", response)
+	}
+}
+
 func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 	mux := http.NewServeMux()
@@ -613,5 +685,58 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 				t.Fatalf("body = %q", body)
 			}
 		})
+	}
+}
+func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	for _, tc := range []struct {
+		path, body, field string
+	}{
+		{"/v1/messages/send", `{"target_session":"ses_target","message":"hello","in_reply_to":""}`, "in_reply_to"},
+		{"/v1/messages/send", `{"target_session":"ses_target","message":"hello","supersedes":""}`, "supersedes"},
+		{"/v1/messages/publish", `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","urgency":""}`, "urgency"},
+		{"/v1/messages/publish", `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":""}`, "expects_reply"},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			if tc.path == "/v1/messages/send" {
+				sendHandler(&state).ServeHTTP(rr, req)
+			} else {
+				publishHandler(&state).ServeHTTP(rr, req)
+			}
+			var response apiError
+			_ = json.NewDecoder(rr.Body).Decode(&response)
+			if rr.Code != http.StatusBadRequest || len(response.Expected) != 1 || response.Expected[0] != tc.field {
+				t.Fatalf("status=%d response=%+v, want expected %q", rr.Code, response, tc.field)
+			}
+		})
+	}
+}
+
+func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	for _, tc := range []struct{ path, body string }{
+		{"/v1/messages/send", `{"target_session":"ses_target","message":"\n  \nFirst paragraph.\n\nSecond paragraph."}`},
+		{"/v1/messages/publish", `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"\n  \nFirst paragraph.\n\nSecond paragraph."}`},
+	} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		if tc.path == "/v1/messages/send" {
+			sendHandler(&state).ServeHTTP(rr, req)
+		} else {
+			publishHandler(&state).ServeHTTP(rr, req)
+		}
+		var envelope contracts.Envelope
+		_ = json.NewDecoder(rr.Body).Decode(&envelope)
+		if rr.Code != http.StatusOK || envelope.PayloadSummary != "First paragraph." || envelope.Payload == "" {
+			t.Fatalf("%s response = %d %+v", tc.path, rr.Code, envelope)
+		}
 	}
 }

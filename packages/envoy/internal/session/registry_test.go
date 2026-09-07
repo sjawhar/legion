@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -267,6 +268,116 @@ func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
 		})
 	}
 	t.Logf("session watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
+}
+
+func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("OpenSessionRegistry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const sessionID = "ses_revision"
+	raw := reg.kv
+	reg.kv = &interleavingSessionPutKeyValue{
+		KeyValue: raw,
+		afterFirstPut: func() {
+			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
+			buf, err := json.Marshal(remote)
+			if err != nil {
+				t.Fatalf("marshal remote entry: %v", err)
+			}
+			if _, err := raw.Put(sessionID, buf); err != nil {
+				t.Fatalf("put remote entry: %v", err)
+			}
+			waitFor(t, 5*time.Second, func() bool {
+				got, err := reg.Get(sessionID)
+				return err == nil && got.Port == remote.Port
+			})
+		},
+	}
+	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "local-host", Dir: "/local", Driving: true}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get after interleaving: %v", err)
+	}
+	if got.Port != 13382 || got.MachineID != "remote-host" {
+		t.Fatalf("older write-through restored local entry: %+v", got)
+	}
+}
+
+func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("OpenSessionRegistry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const sessionID = "ses_delete"
+	item := SessionEntry{Port: 13381, MachineID: "example-host", Dir: "/example"}
+	if err := reg.Put(sessionID, item); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	entry, err := reg.kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get seeded entry: %v", err)
+	}
+	reg.kv = &historyFailSessionKeyValue{
+		KeyValue: reg.kv,
+		err:      errors.New("injected history failure"),
+	}
+	if err := reg.Delete(sessionID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	reg.mu.Lock()
+	reg.cacheSessionLocked(sessionID, item, time.Time{}, entry.Revision())
+	reg.mu.Unlock()
+	if _, err := reg.Get(sessionID); err == nil {
+		t.Fatal("Get returned a session restored by a stale watcher update")
+	}
+}
+
+type interleavingSessionPutKeyValue struct {
+	natsgo.KeyValue
+
+	puts          int
+	afterFirstPut func()
+}
+
+func (kv *interleavingSessionPutKeyValue) Put(key string, value []byte) (uint64, error) {
+	kv.puts++
+	revision, err := kv.KeyValue.Put(key, value)
+	if err != nil {
+		return 0, err
+	}
+	if kv.puts == 1 {
+		kv.afterFirstPut()
+	}
+	return revision, nil
+}
+
+type historyFailSessionKeyValue struct {
+	natsgo.KeyValue
+
+	err error
+}
+
+func (kv *historyFailSessionKeyValue) History(string, ...natsgo.WatchOpt) ([]natsgo.KeyValueEntry, error) {
+	return nil, kv.err
 }
 
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
