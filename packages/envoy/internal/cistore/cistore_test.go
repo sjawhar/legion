@@ -101,11 +101,15 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 
 type interleavingKV struct {
 	natsgo.KeyValue
+	beforeGet   func(string)
 	afterGet    func(string)
 	afterUpdate func(string, []byte, uint64)
 }
 
 func (kv *interleavingKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	if kv.beforeGet != nil {
+		kv.beforeGet(key)
+	}
 	entry, err := kv.KeyValue.Get(key)
 	if err == nil && kv.afterGet != nil {
 		kv.afterGet(key)
@@ -151,7 +155,7 @@ func TestStateUnmarshalJSONKeepsChecksWithoutRunIDs(t *testing.T) {
 	if state.Checks["build"].CheckRunID != 0 || state.Checks["build"].Conclusion != "failure" {
 		t.Fatalf("legacy build = %+v, want retained failed check without an id", state.Checks["build"])
 	}
-	if state.Generation != 3 || !state.SettledEmitted || state.SHA == "" {
+	if state.Generation != 3 || state.EmittedCount != 1 || !state.SettledEmitted || state.SHA == "" {
 		t.Fatalf("other fields lost on decode: %+v", state)
 	}
 	if settlementReady(state) {
@@ -601,6 +605,14 @@ func TestRecordHeadEqualTimestampUsesLatestObservation(t *testing.T) {
 	if head.SHA != headB {
 		t.Fatalf("head = %+v, want later SHA %q", head, headB)
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(entry.Value(), &raw); err != nil {
+		t.Fatalf("decode durable head fields: %v", err)
+	}
+	var generation uint64
+	if version, ok := raw["generation"]; !ok || json.Unmarshal(version, &generation) != nil || generation != 1 {
+		t.Fatalf("head generation = %s, want 1 after a head move", version)
+	}
 }
 
 func TestClaimSettlementRefusesWhenDurableHeadChanged(t *testing.T) {
@@ -760,6 +772,56 @@ func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
 	}
 }
 
+func TestStateVersionAdvancesWhenClaimsAreReleasedReclaimedAndReplaced(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record green check: %v", err)
+	}
+	key := Key(owner, repo, pr, sha)
+	initial := getState(t, s, owner, repo, pr, sha)
+	claimed, ok, err := s.ClaimSettlement(key, initial.Hash(), initial.Generation, time.Now().UnixMilli(), 0)
+	if err != nil || !ok {
+		t.Fatalf("claim initial settlement = (%+v, %t, %v), want claimed state", claimed, ok, err)
+	}
+	released, err := s.ReleaseClaim(key, claimed.Generation)
+	if err != nil || !released {
+		t.Fatalf("release settlement claim = (%t, %v), want released", released, err)
+	}
+	afterRelease := getState(t, s, owner, repo, pr, sha)
+	if afterRelease.Generation <= claimed.Generation || afterRelease.Claim != nil {
+		t.Fatalf("released state = %+v, want a newer unclaimed version", afterRelease)
+	}
+
+	reclaimedClaim, ok, err := s.ClaimSettlement(key, afterRelease.Hash(), afterRelease.Generation, time.Now().UnixMilli(), 0)
+	if err != nil || !ok {
+		t.Fatalf("claim released settlement = (%+v, %t, %v), want claimed state", reclaimedClaim, ok, err)
+	}
+	reclaimed, err := s.ReclaimSettlement(key, reclaimedClaim.Generation, time.Now().Add(time.Second).UnixMilli())
+	if err != nil || !reclaimed {
+		t.Fatalf("reclaim settlement claim = (%t, %v), want reclaimed", reclaimed, err)
+	}
+	afterReclaim := getState(t, s, owner, repo, pr, sha)
+	if afterReclaim.Generation <= reclaimedClaim.Generation || afterReclaim.Claim != nil {
+		t.Fatalf("reclaimed state = %+v, want a newer unclaimed version", afterReclaim)
+	}
+
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "900", "https://example.test/900", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record red replacement: %v", err)
+	}
+	afterReplacement := getState(t, s, owner, repo, pr, sha)
+	if afterReplacement.Generation <= afterReclaim.Generation || afterReplacement.Hash() == afterReclaim.Hash() {
+		t.Fatalf("replaced state = %+v, want a newer version for the changed snapshot", afterReplacement)
+	}
+}
+
 func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -821,7 +883,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 	cached := s.cache[key]
 	cachedRevision := s.cacheRevisions[key]
 	s.mu.RUnlock()
-	if cached.Generation != claimedState.Generation+1 || cached.SettledEmitted {
+	if cached.Generation <= claimedState.Generation || cached.SettledEmitted {
 		t.Fatalf("cached state = %+v, want the newer watcher state", cached)
 	}
 	if cachedRevision != watcherRevision {

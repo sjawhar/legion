@@ -109,7 +109,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			}
 			continue
 		}
-		held, err := store.ClaimStillHeld(key, state.Generation)
+		held, err := store.ClaimStillHeld(key, state.Generation, state.Hash())
 		if err != nil {
 			logger.Warn("checks claim verification failed", slog.String("error", err.Error()), slog.String("sha", state.SHA))
 			continue

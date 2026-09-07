@@ -432,8 +432,8 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 	first := pub.last()
 	initial := getState(t, store, owner, repo, number, sha)
 	gen0 := initial.Generation
-	if gen0 != 0 || !initial.SettledEmitted {
-		t.Fatalf("initial settled state = %+v, want generation 0 and settled", initial)
+	if !initial.SettledEmitted || initial.EmittedCount != 1 {
+		t.Fatalf("initial settled state = %+v, want one emitted settlement", initial)
 	}
 
 	if err := recordCheck(store, owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success", ""); err != nil {
@@ -450,8 +450,8 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 	}
 	rearmedForCheck := getState(t, store, owner, repo, number, sha)
 	gen1 := rearmedForCheck.Generation
-	if gen1 != gen0+1 || !rearmedForCheck.SettledEmitted {
-		t.Fatalf("check re-armed state = %+v, want generation %d and settled", rearmedForCheck, gen0+1)
+	if gen1 <= gen0 || !rearmedForCheck.SettledEmitted || rearmedForCheck.EmittedCount <= initial.EmittedCount {
+		t.Fatalf("check re-armed state = %+v, want a newer version and another emitted settlement", rearmedForCheck)
 	}
 
 	if err := recordSuite(store, owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
@@ -468,8 +468,8 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 	}
 	rearmedForSuite := getState(t, store, owner, repo, number, sha)
 	gen2 := rearmedForSuite.Generation
-	if gen2 != gen1+1 || !rearmedForSuite.SettledEmitted {
-		t.Fatalf("new-suite re-armed state = %+v, want generation %d and settled", rearmedForSuite, gen1+1)
+	if gen2 <= gen1 || !rearmedForSuite.SettledEmitted || rearmedForSuite.EmittedCount <= rearmedForCheck.EmittedCount {
+		t.Fatalf("new-suite re-armed state = %+v, want a newer version and another emitted settlement", rearmedForSuite)
 	}
 	var summary Summary
 	if err := json.Unmarshal([]byte(third.Payload), &summary); err != nil {
@@ -515,10 +515,11 @@ func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *tes
 	}
 
 	type payload struct {
-		LatestCheckRunID uint64      `json:"latest_check_run_id"`
-		Generation       *uint64     `json:"generation"`
-		Failed           StatusGroup `json:"failed"`
-		Passed           StatusGroup `json:"passed"`
+		LatestCheckRunID     uint64      `json:"latest_check_run_id"`
+		Generation           *uint64     `json:"generation"`
+		SupersededSettlement string      `json:"superseded_settlement"`
+		Failed               StatusGroup `json:"failed"`
+		Passed               StatusGroup `json:"passed"`
 	}
 	var first, second payload
 	items := pub.all()
@@ -528,14 +529,14 @@ func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *tes
 	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
 		t.Fatalf("decode second settlement: %v", err)
 	}
-	if first.LatestCheckRunID != 900 || first.Generation == nil || *first.Generation != 0 ||
+	if first.LatestCheckRunID != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
 		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
-		t.Fatalf("first settlement = %+v, want generation 0 green build at run 900", first)
+		t.Fatalf("first settlement = %+v, want initial green build at run 900", first)
 	}
-	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation != 1 ||
-		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "lint" ||
+	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
+		second.SupersededSettlement != "true" || second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "lint" ||
 		second.Passed.Count != 1 || strings.Join(second.Passed.Checks, ",") != "build" {
-		t.Fatalf("second settlement = %+v, want generation 1 red lint with max run 900", second)
+		t.Fatalf("second settlement = %+v, want a newer red lint settlement with max run 900", second)
 	}
 }
 
@@ -572,10 +573,12 @@ func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
 	}
 
 	type payload struct {
-		LatestCheckRunID uint64      `json:"latest_check_run_id"`
-		Generation       *uint64     `json:"generation"`
-		Failed           StatusGroup `json:"failed"`
-		Passed           StatusGroup `json:"passed"`
+		LatestCheckRunID     uint64      `json:"latest_check_run_id"`
+		Generation           *uint64     `json:"generation"`
+		LatestCompletedAt    string      `json:"latest_completed_at"`
+		SupersededSettlement string      `json:"superseded_settlement"`
+		Failed               StatusGroup `json:"failed"`
+		Passed               StatusGroup `json:"passed"`
 	}
 	var first, second payload
 	items := pub.all()
@@ -585,13 +588,15 @@ func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
 	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
 		t.Fatalf("decode second settlement: %v", err)
 	}
-	if first.LatestCheckRunID != 900 || first.Generation == nil || *first.Generation != 0 ||
+	if first.LatestCheckRunID != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
+		first.LatestCompletedAt != "2026-09-07T03:00:00Z" ||
 		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
-		t.Fatalf("first settlement = %+v, want generation 0 green build at run 900", first)
+		t.Fatalf("first settlement = %+v, want green build at run 900", first)
 	}
-	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation != 1 ||
+	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
+		second.SupersededSettlement != "true" || second.LatestCompletedAt != "2026-09-07T03:01:00Z" ||
 		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "build" || second.Passed.Count != 0 {
-		t.Fatalf("second settlement = %+v, want generation 1 red build at run 900", second)
+		t.Fatalf("second settlement = %+v, want a newer red build with later GitHub completion at run 900", second)
 	}
 }
 func TestSummaryTickKeepsLegacyFailureAfterFreshCheckArrives(t *testing.T) {
@@ -818,8 +823,8 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 		t.Fatalf("initial latest_check_run_id = %d, want 802", initialSummary.LatestCheckRunID)
 	}
 	initial := getState(t, store, owner, repo, number, sha)
-	if !initial.SettledEmitted {
-		t.Fatalf("initial state = %+v, want settled", initial)
+	if !initial.SettledEmitted || initial.EmittedCount != 1 {
+		t.Fatalf("initial state = %+v, want one emitted settlement", initial)
 	}
 
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "in_progress", "", "1", ""); err != nil {
@@ -832,8 +837,8 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 		t.Fatalf("record retargeted lint: %v", err)
 	}
 	rearmed := getState(t, store, owner, repo, number, sha)
-	if rearmed.Generation != initial.Generation+1 || rearmed.SettledEmitted {
-		t.Fatalf("retargeted state = %+v, want generation %d and unsettled", rearmed, initial.Generation+1)
+	if rearmed.Generation <= initial.Generation || rearmed.SettledEmitted || rearmed.EmittedCount != initial.EmittedCount {
+		t.Fatalf("retargeted state = %+v, want a newer unsettled version without another emission", rearmed)
 	}
 	if len(rearmed.Checks) != 2 {
 		t.Fatalf("retargeted checks = %+v, want latest runs only", rearmed.Checks)
@@ -859,8 +864,8 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 		t.Fatalf("re-settlement count = %d, want 2", got)
 	}
 	settled := getState(t, store, owner, repo, number, sha)
-	if settled.Generation != initial.Generation+1 || !settled.SettledEmitted {
-		t.Fatalf("re-settled state = %+v, want generation %d and settled", settled, initial.Generation+1)
+	if settled.Generation <= rearmed.Generation || !settled.SettledEmitted || settled.EmittedCount <= initial.EmittedCount {
+		t.Fatalf("re-settled state = %+v, want a newer settled version with another emission", settled)
 	}
 	var summary Summary
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
@@ -1029,6 +1034,163 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		t.Fatalf("replica publishes = %d, want 1", got)
 	}
 }
+func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	replicaA := openStore(t, conn)
+	replicaB := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if err := replicaA.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, replicaA, owner, repo, number, sha)
+	waitHead(t, replicaB, owner, repo, number, sha)
+	if err := recordCheck(replicaA, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record green build: %v", err)
+	}
+	waitCacheChecks(t, replicaA, owner, repo, number, sha, 1)
+	waitCacheChecks(t, replicaB, owner, repo, number, sha, 1)
+
+	key := Key(owner, repo, number, sha)
+	aReady := make(chan struct{})
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	var releaseAOnce, releaseBOnce sync.Once
+	t.Cleanup(func() {
+		releaseAOnce.Do(func() { close(releaseA) })
+		releaseBOnce.Do(func() { close(releaseB) })
+	})
+	originalKV := replicaA.kv
+	var keyGets int
+	replicaA.kv = &interleavingKV{
+		KeyValue: originalKV,
+		beforeGet: func(got string) {
+			if got != key {
+				return
+			}
+			keyGets++
+			if keyGets == 2 {
+				close(aReady)
+				<-releaseA
+			}
+		},
+	}
+	t.Cleanup(func() { replicaA.kv = originalKV })
+
+	bPublished := make(chan struct{})
+	pub := &recPub{onPublish: func(contracts.Envelope) {
+		select {
+		case <-bPublished:
+			return
+		default:
+			close(bPublished)
+			<-releaseB
+		}
+	}}
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		runSummaryTick(replicaA, pub, 0, logging.New("replica-a"))
+	}()
+	select {
+	case <-aReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replica A never reached claim verification")
+	}
+
+	claimed := getState(t, replicaB, owner, repo, number, sha)
+	if claimed.Claim == nil {
+		t.Fatal("replica A never acquired its green settlement claim")
+	}
+	reclaimed, err := replicaB.ReclaimSettlement(key, claimed.Claim.Generation, time.Now().Add(time.Second).UnixMilli())
+	if err != nil {
+		t.Fatalf("reclaim replica A claim: %v", err)
+	}
+	if !reclaimed {
+		t.Fatal("replica B did not reclaim replica A's aged claim")
+	}
+	if err := recordCheck(replicaB, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record red in-place build update: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		for _, state := range replicaB.List() {
+			if Key(state.Owner, state.Repo, state.Number, state.SHA) == key && state.Checks["build"].Conclusion == "failure" {
+				goto replicaBReady
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("replica B cache never observed the red replacement")
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+
+replicaBReady:
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		runSummaryTick(replicaB, pub, 0, logging.New("replica-b"))
+	}()
+	select {
+	case <-bPublished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replica B never published its red settlement")
+	}
+	if got := pub.count(); got != 1 {
+		t.Fatalf("replica B publishes = %d, want one red settlement before replica A resumes", got)
+	}
+	var red Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &red); err != nil {
+		t.Fatalf("decode red settlement: %v", err)
+	}
+	if red.Failed.Count != 1 || strings.Join(red.Failed.Checks, ",") != "build" {
+		t.Fatalf("replica B settlement = %+v, want red build", red)
+	}
+
+	releaseAOnce.Do(func() { close(releaseA) })
+	select {
+	case <-aDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replica A did not resume")
+	}
+	releaseBOnce.Do(func() { close(releaseB) })
+	select {
+	case <-bDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replica B did not finish")
+	}
+
+	if got := pub.count(); got != 1 {
+		t.Fatalf("replica publishes = %d, want exactly one red settlement", got)
+	}
+	type settlementIdentity struct {
+		LatestCheckRunID uint64 `json:"latest_check_run_id"`
+		Generation       uint64 `json:"generation"`
+		Snapshot         string `json:"snapshot"`
+	}
+	seen := map[struct{ latestCheckRunID, generation uint64 }]string{}
+	for _, envelope := range pub.all() {
+		var settlement settlementIdentity
+		if err := json.Unmarshal([]byte(envelope.Payload), &settlement); err != nil {
+			t.Fatalf("decode settlement identity: %v", err)
+		}
+		if settlement.Snapshot == "" {
+			t.Fatal("settlement snapshot is empty")
+		}
+		pair := struct{ latestCheckRunID, generation uint64 }{settlement.LatestCheckRunID, settlement.Generation}
+		if previous, ok := seen[pair]; ok && previous != settlement.Snapshot {
+			t.Fatalf("settlements %v reused an identity for snapshots %q and %q", pair, previous, settlement.Snapshot)
+		}
+		seen[pair] = settlement.Snapshot
+	}
+}
+
 func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1050,9 +1212,6 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
 	gen0 := getState(t, store, owner, repo, number, sha).Generation
-	if gen0 != 0 {
-		t.Fatalf("initial state generation = %d, want 0", gen0)
-	}
 
 	key := Key(owner, repo, number, sha)
 	originalKV := store.kv
@@ -1102,11 +1261,12 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 		t.Fatalf("rearmed claim published %d stale envelopes, want 0", got)
 	}
 	rearmed := getState(t, store, owner, repo, number, sha)
-	if rearmed.Generation != gen0+1 || rearmed.SettledEmitted || rearmed.Claim == nil || rearmed.Claim.Generation != gen0 {
-		t.Fatalf("rearmed state = %+v, want generation %d with the obsolete claim retained", rearmed, gen0+1)
+	if rearmed.Generation <= gen0 || rearmed.SettledEmitted || rearmed.Claim == nil || rearmed.Claim.Generation >= rearmed.Generation {
+		t.Fatalf("rearmed state = %+v, want a newer version with an obsolete claim retained", rearmed)
 	}
 
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
 	runSummaryTick(store, pub, time.Second, logging.New("test"))
 	if got := pub.count(); got != 1 {
 		t.Fatalf("next tick published %d envelopes, want one fresh settlement", got)
@@ -1246,9 +1406,6 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
 	gen0 := getState(t, store, owner, repo, number, sha).Generation
-	if gen0 != 0 {
-		t.Fatalf("initial state generation = %d, want 0", gen0)
-	}
 
 	runSummaryTick(store, pub, time.Second, logging.New("test"))
 	if got := pub.count(); got != 1 {
@@ -1262,8 +1419,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 		t.Fatalf("first payload latest_check_run_id = %d, want 807", firstPayload.LatestCheckRunID)
 	}
 	rearmedState := getState(t, store, owner, repo, number, sha)
-	if rearmedState.Generation != gen0+1 || rearmedState.SettledEmitted {
-		t.Fatalf("post-publication rearmed state = %+v, want unsettled generation %d", rearmedState, gen0+1)
+	if rearmedState.Generation <= gen0 || rearmedState.SettledEmitted {
+		t.Fatalf("post-publication rearmed state = %+v, want a newer unsettled version", rearmedState)
 	}
 
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
@@ -1291,8 +1448,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 	if secondPayload.SupersededSettlement != "true" {
 		t.Fatalf("superseded settlement = %q, want true", secondPayload.SupersededSettlement)
 	}
-	if settled := getState(t, store, owner, repo, number, sha); settled.Generation != gen0+1 || !settled.SettledEmitted {
-		t.Fatalf("final state = %+v, want settled generation %d", settled, gen0+1)
+	if settled := getState(t, store, owner, repo, number, sha); settled.Generation <= gen0 || !settled.SettledEmitted || settled.EmittedCount < 2 {
+		t.Fatalf("final state = %+v, want a newer settled version with both emissions recorded", settled)
 	}
 }
 func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
@@ -1398,6 +1555,7 @@ func TestSummaryTickReclaimsStaleClaim(t *testing.T) {
 	})
 
 	runSummaryTick(store, pub, debounce, logging.New("test"))
+	runSummaryTick(store, pub, debounce, logging.New("test"))
 	if got := pub.count(); got != 1 {
 		t.Fatalf("stale claim published %d envelopes, want one", got)
 	}
@@ -1451,7 +1609,7 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 	}
 }
 
-func TestSummaryTickPublishesLegacyResettledAsGenerationOne(t *testing.T) {
+func TestSummaryTickPublishesLegacyResettledWithEmittedMarker(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -1485,9 +1643,6 @@ func TestSummaryTickPublishesLegacyResettledAsGenerationOne(t *testing.T) {
 	runSummaryTick(store, pub, 0, logging.New("test"))
 	if got := pub.count(); got != 1 {
 		t.Fatalf("legacy resettled state published %d envelopes, want 1", got)
-	}
-	if got := pub.last().DedupeKey; !strings.HasSuffix(got, ".g1") {
-		t.Fatalf("legacy resettled dedupe key = %q, want generation one", got)
 	}
 	var summary Summary
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {

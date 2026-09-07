@@ -84,7 +84,7 @@ type Suite struct {
 	ObservedAt string `json:"observed_at"`
 }
 
-// SettlementClaim is the durable right to publish one settlement generation.
+// SettlementClaim is the durable right to publish one settlement snapshot.
 // Claims prevent replicas from publishing the same episode concurrently.
 type SettlementClaim struct {
 	Hash       string `json:"hash"`
@@ -95,21 +95,21 @@ type SettlementClaim struct {
 // State is the aggregated set of checks and suites for one (owner, repo, PR
 // number, head SHA).
 type State struct {
-	Owner             string           `json:"owner"`
-	Repo              string           `json:"repo"`
-	Number            string           `json:"number"`
-	SHA               string           `json:"sha"`
-	Checks            map[string]Check `json:"checks"`
-	Suites            map[string]Suite `json:"suites"`
-	LastEventAt       int64            `json:"last_event_at"`
-	InitialGeneration uint64           `json:"initial_generation"`
-	Generation        uint64           `json:"generation"`
-	SettledEmitted    bool             `json:"settled_emitted"`
-	Claim             *SettlementClaim `json:"claim,omitempty"`
+	Owner          string           `json:"owner"`
+	Repo           string           `json:"repo"`
+	Number         string           `json:"number"`
+	SHA            string           `json:"sha"`
+	Checks         map[string]Check `json:"checks"`
+	Suites         map[string]Suite `json:"suites"`
+	LastEventAt    int64            `json:"last_event_at"`
+	Generation     uint64           `json:"generation"`
+	EmittedCount   uint64           `json:"emitted_count"`
+	SettledEmitted bool             `json:"settled_emitted"`
+	Claim          *SettlementClaim `json:"claim,omitempty"`
 }
 
-// UnmarshalJSON maps the retired resettled marker to the generation that
-// publishes the equivalent re-settlement envelope.
+// UnmarshalJSON maps the retired resettled marker to the durable fact that
+// this record emitted at least one settlement.
 func (state *State) UnmarshalJSON(data []byte) error {
 	type stateAlias State
 	*state = State{}
@@ -120,8 +120,8 @@ func (state *State) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	if wire.Resettled && state.Generation == 0 {
-		state.Generation = 1
+	if (wire.Resettled || state.SettledEmitted) && state.EmittedCount == 0 {
+		state.EmittedCount = 1
 	}
 	return nil
 }
@@ -131,9 +131,10 @@ const headRecordKind = "head"
 var ErrInvalidHeadSHA = errors.New("cistore: invalid head SHA")
 
 type headRecord struct {
-	Kind      string `json:"kind"`
-	SHA       string `json:"sha"`
-	UpdatedAt string `json:"updated_at"`
+	Kind       string `json:"kind"`
+	SHA        string `json:"sha"`
+	UpdatedAt  string `json:"updated_at"`
+	Generation uint64 `json:"generation"`
 }
 
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
@@ -476,8 +477,13 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 		default:
 			return getErr
 		}
+		beforeHash := st.Hash()
+		generation := st.Generation
 		if !mutate(&st) {
 			return nil
+		}
+		if rev != 0 && st.Hash() != beforeHash && st.Generation == generation {
+			st.Generation++
 		}
 		buf, err := json.Marshal(st)
 		if err != nil {
@@ -586,7 +592,11 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 				}
 			}
 		}
-		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt})
+		generation := current.Generation
+		if current.SHA != "" && current.SHA != sha {
+			generation++
+		}
+		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt, Generation: generation})
 		if err != nil {
 			return err
 		}
@@ -719,9 +729,9 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 	return state, true, nil
 }
 
-// ClaimStillHeld verifies from durable KV that this generation retains the
+// ClaimStillHeld verifies from durable KV that this exact snapshot retains the
 // settlement right immediately before an external publication.
-func (s *Store) ClaimStillHeld(key string, generation uint64) (bool, error) {
+func (s *Store) ClaimStillHeld(key string, generation uint64, hash string) (bool, error) {
 	entry, err := s.kv.Get(key)
 	if err != nil {
 		return false, err
@@ -738,7 +748,8 @@ func (s *Store) ClaimStillHeld(key string, generation uint64) (bool, error) {
 		state.Generation == generation &&
 		state.Claim != nil &&
 		state.Claim.Generation == generation &&
-		state.Claim.Hash == state.Hash(), nil
+		state.Claim.Hash == hash &&
+		state.Hash() == hash, nil
 }
 
 // ReclaimSettlement releases a claim from a replica that died before publish.
@@ -751,6 +762,7 @@ func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int
 			return false, nil
 		}
 		state.Claim = nil
+		state.Generation++
 		return true, nil
 	})
 	return reclaimed, err
@@ -763,23 +775,24 @@ func (s *Store) ReleaseClaim(key string, generation uint64) (bool, error) {
 			return false, nil
 		}
 		state.Claim = nil
+		state.Generation++
 		return true, nil
 	})
 	return released, err
 }
 
-// MarkSettled marks a successfully published claim as emitted. A re-arm moves
-// Generation, causing this CAS to refuse the obsolete publisher.
+// MarkSettled records a successfully published claim. A re-arm that happened
+// after publication keeps its newer snapshot unsettled, but it must not erase
+// the fact that the obsolete snapshot was emitted.
 func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
 	_, marked, err := s.casState(key, func(state *State) (bool, error) {
-		if state.SettledEmitted ||
-			state.Generation != generation ||
-			state.Claim == nil ||
-			state.Claim.Generation != generation ||
-			state.Claim.Hash != state.Hash() {
+		if state.Claim == nil || state.Claim.Generation != generation {
 			return false, nil
 		}
-		state.SettledEmitted = true
+		state.EmittedCount++
+		if state.Generation == generation && state.Claim.Hash == state.Hash() {
+			state.SettledEmitted = true
+		}
 		state.Claim = nil
 		return true, nil
 	})
