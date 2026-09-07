@@ -622,6 +622,87 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 		t.Fatalf("fresh settlement dedupe key = %q, want generation one", got)
 	}
 }
+func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	rearmed := false
+	pub := &recPub{onPublish: func(contracts.Envelope) {
+		if rearmed {
+			return
+		}
+		rearmed = true
+		if err := store.Record(
+			owner, repo, number, sha,
+			"late-check", "808", "https://example.test/808", "queued", "", "",
+		); err != nil {
+			t.Fatalf("record queued check during publication: %v", err)
+		}
+	}}
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(
+		owner, repo, number, sha,
+		"build", "807", "https://example.test/807", "completed", "success", "",
+	); err != nil {
+		t.Fatalf("record initial check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("published %d envelopes, want the obsolete generation-zero settlement", got)
+	}
+	var firstPayload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(pub.last().Payload), &firstPayload); err != nil {
+		t.Fatalf("decode generation-zero payload: %v", err)
+	}
+	if got := string(firstPayload["generation"]); got != "0" {
+		t.Fatalf("generation-zero payload generation = %s, want 0", got)
+	}
+	rearmedState := getState(t, store, owner, repo, number, sha)
+	if rearmedState.Generation != 1 || rearmedState.SettledEmitted {
+		t.Fatalf("post-publication rearmed state = %+v, want unsettled generation one", rearmedState)
+	}
+
+	waitCacheChecks(t, store, owner, repo, number, sha, 2)
+	if err := store.Record(
+		owner, repo, number, sha,
+		"late-check", "808", "https://example.test/808", "completed", "success", "",
+	); err != nil {
+		t.Fatalf("complete queued check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 2)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+
+	if got := pub.count(); got != 2 {
+		t.Fatalf("published %d envelopes, want one generation-one supersession", got)
+	}
+	var secondPayload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(pub.last().Payload), &secondPayload); err != nil {
+		t.Fatalf("decode generation-one payload: %v", err)
+	}
+	if got := string(secondPayload["generation"]); got != "1" {
+		t.Fatalf("generation-one payload generation = %s, want 1", got)
+	}
+	if got := string(secondPayload["superseded_settlement"]); got != `"true"` {
+		t.Fatalf("superseded settlement = %s, want true", got)
+	}
+	if settled := getState(t, store, owner, repo, number, sha); settled.Generation != 1 || !settled.SettledEmitted {
+		t.Fatalf("final state = %+v, want settled generation one", settled)
+	}
+}
 func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()

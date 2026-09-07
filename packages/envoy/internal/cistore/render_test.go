@@ -49,10 +49,17 @@ func TestRenderSummaryJSON(t *testing.T) {
 			"lint":        {"completed", "skipped"},
 		}),
 	}
-	_, sum := renderOrFail(t, s)
+	raw, sum := renderOrFail(t, s)
 
 	if sum.Kind != "checks" || sum.Repo != "sjawhar/legion" || sum.Number != "13728" || sum.SHA != "a1b2c3d9999999" {
 		t.Fatalf("identity wrong: %+v", sum)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode rendered summary: %v", err)
+	}
+	if got := string(payload["generation"]); got != "0" {
+		t.Fatalf("generation = %s, want 0", got)
 	}
 	assertGroup(t, "failed", sum.Failed, []string{"infra-tests"})
 	assertGroup(t, "running", sum.Running, []string{"build-image", "snapshots"})

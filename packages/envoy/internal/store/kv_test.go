@@ -953,6 +953,48 @@ func TestInterestReaper(t *testing.T) {
 		t.Fatalf("ses_dead should be deleted, got err: %v", err)
 	}
 }
+func TestReapReleasesRoleClaims(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_reap_role"
+		role      = "legion-controller"
+	)
+	if _, err := reg.SetRole(sessionID, "example-host", role); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	stale, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get role interest: %v", err)
+	}
+	stale.UpdatedAt = time.Now().Add(-time.Minute).UnixMilli()
+	raw, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal stale interest: %v", err)
+	}
+	entry, err := reg.kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("get durable interest: %v", err)
+	}
+	revision, err := reg.kv.Update(sessionID, raw, entry.Revision())
+	if err != nil {
+		t.Fatalf("make interest stale: %v", err)
+	}
+	reg.mu.Lock()
+	reg.cacheInterestLocked(sessionID, stale, revision)
+	reg.mu.Unlock()
+
+	count, err := reg.Reap(func(string) bool { return false }, 0)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("reaped interests = %d, want 1", count)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
 
 func TestReaperGraceWindow(t *testing.T) {
 	conn, cleanup := connectNATS(t)

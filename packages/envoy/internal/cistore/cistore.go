@@ -476,7 +476,7 @@ func sameCheck(current, next Check) bool {
 }
 
 func rearm(st *State) {
-	if !st.SettledEmitted && st.Claim == nil {
+	if !st.SettledEmitted && (st.Claim == nil || st.Claim.Generation != st.Generation) {
 		return
 	}
 	st.Generation++

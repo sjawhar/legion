@@ -557,7 +557,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 	r.mu.RUnlock()
 
 	for _, sid := range stale {
-		if err := r.deleteInterest(sid); err != nil {
+		if err := r.Remove(sid, nil); err != nil {
 			return 0, err
 		}
 	}

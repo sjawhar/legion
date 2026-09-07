@@ -77,6 +77,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			continue
 		}
 		sum := renderSummary(state)
+		sum.Generation = int(state.Generation)
 		issuedAt := contracts.NowMillis()
 		sum.SettledAt = issuedAt
 		payload, err := json.Marshal(sum)

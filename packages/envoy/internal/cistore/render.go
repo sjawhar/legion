@@ -60,6 +60,7 @@ type Summary struct {
 	Repo                 string      `json:"repo"`
 	Number               string      `json:"number"`
 	SHA                  string      `json:"sha"`
+	Generation           int         `json:"generation"`
 	SettledAt            int64       `json:"settled_at,omitempty"`
 	SupersededSettlement string      `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup `json:"failed"`
