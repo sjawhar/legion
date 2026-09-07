@@ -57,17 +57,17 @@ func TestSlackEnvelope(t *testing.T) {
 		EventID: "e1",
 		TraceID: "t1",
 		Body: map[string]any{
-			"team_id":  "T123",
+			"team_id":  "T01234567",
 			"event_id": "Ev123",
 			"event": map[string]any{
 				"type":    "app_mention",
-				"user":    "U123",
-				"channel": "C123",
+				"user":    "U01234567",
+				"channel": "C01234567",
 				"text":    "hello envoy",
 			},
 		},
 	})
-	if item.Topic != "notifications.slack.T123.C123.mention" {
+	if item.Topic != "notifications.slack.T01234567.C01234567.mention" {
 		t.Fatalf("unexpected topic: %s", item.Topic)
 	}
 	if item.DedupeKey != "slack.Ev123" {
@@ -404,9 +404,9 @@ func TestGithubEnvelopesSubIssuesTopic(t *testing.T) {
 					"parent_issue": map[string]any{"number": 42},
 					"sub_issue":    map[string]any{"number": 99},
 					"repository": map[string]any{
-						"name": "legion",
+						"name": "example-repo",
 						"owner": map[string]any{
-							"login": "sjawhar",
+							"login": "example-org",
 						},
 					},
 					"sender": map[string]any{"login": "someone", "type": tt.senderType},
@@ -415,12 +415,12 @@ func TestGithubEnvelopesSubIssuesTopic(t *testing.T) {
 			if len(items) != 1 {
 				t.Fatalf("expected 1 envelope, got %d", len(items))
 			}
-			if items[0].Topic != "notifications.github.sjawhar.legion.issue.42.sub_issue" {
+			if items[0].Topic != "notifications.github.example-org.example-repo.issue.42.sub_issue" {
 				t.Fatalf("unexpected topic: %s", items[0].Topic)
 			}
-			payload := decodeSummary(t, items[0].PayloadSummary)
-			if payload["action"] != tt.action {
-				t.Fatalf("unexpected action in payload summary: %s", payload["action"])
+			wantSummary := "sub issue " + tt.action + ": example-org/example-repo#42"
+			if items[0].PayloadSummary != wantSummary {
+				t.Fatalf("summary = %q, want %q", items[0].PayloadSummary, wantSummary)
 			}
 		})
 	}
@@ -477,12 +477,12 @@ func TestSlackEnvelopesThread(t *testing.T) {
 		EventID: "e1",
 		TraceID: "t1",
 		Body: map[string]any{
-			"team_id":  "T123",
+			"team_id":  "T01234567",
 			"event_id": "Ev123",
 			"event": map[string]any{
 				"type":      "message",
-				"user":      "U123",
-				"channel":   "C123",
+				"user":      "U01234567",
+				"channel":   "C01234567",
 				"text":      "reply in thread",
 				"thread_ts": "1234567890.123456",
 			},
@@ -496,10 +496,10 @@ func TestSlackEnvelopesThread(t *testing.T) {
 	// channel copy gives dual-subscribed sessions ONE push labeled with the most
 	// specific topic — instead of the channel copy silently starving the thread
 	// subscription (observed live 2026-07-20).
-	if items[0].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.message" {
+	if items[0].Topic != "notifications.slack.T01234567.C01234567.thread.1234567890_123456.message" {
 		t.Fatalf("unexpected thread topic: %s", items[0].Topic)
 	}
-	if items[1].Topic != "notifications.slack.T123.C123.message" {
+	if items[1].Topic != "notifications.slack.T01234567.C01234567.message" {
 		t.Fatalf("unexpected channel topic: %s", items[1].Topic)
 	}
 	if items[0].DedupeKey != "slack.Ev123" || items[1].DedupeKey != "slack.Ev123" {
@@ -512,12 +512,12 @@ func TestSlackEnvelopesThreadMention(t *testing.T) {
 		EventID: "e1",
 		TraceID: "t1",
 		Body: map[string]any{
-			"team_id":  "T123",
+			"team_id":  "T01234567",
 			"event_id": "Ev123",
 			"event": map[string]any{
 				"type":      "app_mention",
-				"user":      "U123",
-				"channel":   "C123",
+				"user":      "U01234567",
+				"channel":   "C01234567",
 				"text":      "@bot help in thread",
 				"thread_ts": "1234567890.123456",
 			},
@@ -526,10 +526,10 @@ func TestSlackEnvelopesThreadMention(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.slack.T123.C123.thread.1234567890_123456.mention" {
+	if items[0].Topic != "notifications.slack.T01234567.C01234567.thread.1234567890_123456.mention" {
 		t.Fatalf("unexpected thread topic: %s", items[0].Topic)
 	}
-	if items[1].Topic != "notifications.slack.T123.C123.mention" {
+	if items[1].Topic != "notifications.slack.T01234567.C01234567.mention" {
 		t.Fatalf("unexpected channel topic: %s", items[1].Topic)
 	}
 	if items[0].DedupeKey != "slack.Ev123" || items[1].DedupeKey != "slack.Ev123" {
@@ -542,12 +542,12 @@ func TestSlackEnvelopesNoThread(t *testing.T) {
 		EventID: "e1",
 		TraceID: "t1",
 		Body: map[string]any{
-			"team_id":  "T123",
+			"team_id":  "T01234567",
 			"event_id": "Ev123",
 			"event": map[string]any{
 				"type":    "app_mention",
-				"user":    "U123",
-				"channel": "C123",
+				"user":    "U01234567",
+				"channel": "C01234567",
 				"text":    "hello",
 				"ts":      "9999999999.000000",
 			},
@@ -557,7 +557,7 @@ func TestSlackEnvelopesNoThread(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected 1 envelope (no thread fallback), got %d", len(items))
 	}
-	if items[0].Topic != "notifications.slack.T123.C123.mention" {
+	if items[0].Topic != "notifications.slack.T01234567.C01234567.mention" {
 		t.Fatalf("unexpected channel topic: %s", items[0].Topic)
 	}
 }
@@ -582,253 +582,36 @@ func TestSlackEnvelopeDefaultsUnknownTeamAndChannel(t *testing.T) {
 	}
 }
 
-func TestTruncateBody(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		max      int
-		expected string
-	}{
-		{name: "under limit", input: "hello", max: 500, expected: "hello"},
-		{name: "at limit", input: "abcde", max: 5, expected: "abcde"},
-		{name: "over limit", input: "abcdef", max: 5, expected: "abcde... [truncated]"},
-		{name: "empty", input: "", max: 500, expected: ""},
-		{name: "emoji preserved", input: "\U0001f525\U0001f525\U0001f525", max: 2, expected: "\U0001f525\U0001f525... [truncated]"},
-		{name: "mixed multibyte", input: "hello\U0001f30dworld", max: 6, expected: "hello\U0001f30d... [truncated]"},
-		{name: "zero max", input: "hello", max: 0, expected: "... [truncated]"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := truncateBody(tt.input, tt.max)
-			if got != tt.expected {
-				t.Fatalf("truncateBody(%q, %d) = %q, want %q", tt.input, tt.max, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestGithubSummaryJSON(t *testing.T) {
-	tests := []struct {
-		name         string
-		event        string
-		body         map[string]any
-		expectedKeys []string
-		checkValues  map[string]string
-	}{
-		{
-			name:  "issue_comment on issue",
-			event: "issue_comment",
-			body: map[string]any{
-				"action":     "created",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"issue":      map[string]any{"number": 42, "title": "Bug report"},
-				"comment": map[string]any{
-					"body": "Looks good to me", "html_url": "https://github.com/sjawhar/legion/issues/42#issuecomment-1",
-					"user": map[string]any{"login": "reviewer"},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
-			checkValues: map[string]string{
-				"kind": "comment", "action": "created", "repo": "sjawhar/legion", "number": "42",
-				"title": "Bug report", "parent_kind": "issue", "author": "reviewer",
-				"body": "Looks good to me", "url": "https://github.com/sjawhar/legion/issues/42#issuecomment-1",
-			},
+func TestGithubSummaryCapsLongFields(t *testing.T) {
+	summary := githubSummary("issues", map[string]any{
+		"action": "opened",
+		"repository": map[string]any{
+			"name":  "example-repo",
+			"owner": map[string]any{"login": strings.Repeat("o", 200)},
 		},
-		{
-			name:  "issue_comment on PR",
-			event: "issue_comment",
-			body: map[string]any{
-				"action":     "created",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"issue":      map[string]any{"number": 99, "title": "Add feature", "pull_request": map[string]any{}},
-				"comment": map[string]any{
-					"body": "LGTM", "html_url": "https://github.com/sjawhar/legion/pull/99#issuecomment-2",
-					"user": map[string]any{"login": "dev"},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
-			checkValues:  map[string]string{"kind": "comment", "parent_kind": "pr", "number": "99", "title": "Add feature"},
-		},
-		{
-			name:  "pull_request_review_comment",
-			event: "pull_request_review_comment",
-			body: map[string]any{
-				"action":       "created",
-				"repository":   map[string]any{"full_name": "sjawhar/legion"},
-				"pull_request": map[string]any{"number": 55, "title": "Refactor auth"},
-				"comment": map[string]any{
-					"body": "Nit: rename this variable", "html_url": "https://github.com/sjawhar/legion/pull/55#discussion_r1",
-					"user": map[string]any{"login": "reviewer"},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
-			checkValues:  map[string]string{"kind": "comment", "parent_kind": "pr", "number": "55", "title": "Refactor auth"},
-		},
-		{
-			name:  "pull_request_review",
-			event: "pull_request_review",
-			body: map[string]any{
-				"action":       "submitted",
-				"repository":   map[string]any{"full_name": "sjawhar/legion"},
-				"pull_request": map[string]any{"number": 77, "title": "Add metrics"},
-				"review": map[string]any{
-					"body": "Approved with minor comments", "html_url": "https://github.com/sjawhar/legion/pull/77#pullrequestreview-1",
-					"state": "approved", "user": map[string]any{"login": "lead"},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url", "state"},
-			checkValues:  map[string]string{"kind": "review", "parent_kind": "pr", "state": "approved", "number": "77", "author": "lead"},
-		},
-		{
-			name:  "pull_request",
-			event: "pull_request",
-			body: map[string]any{
-				"action":     "opened",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"pull_request": map[string]any{
-					"number": 10, "title": "New feature", "body": "This PR adds a new feature",
-					"html_url": "https://github.com/sjawhar/legion/pull/10",
-					"user":     map[string]any{"login": "author"},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "author", "body", "url"},
-			checkValues: map[string]string{
-				"kind": "pr", "action": "opened", "number": "10", "title": "New feature",
-				"author": "author", "body": "This PR adds a new feature", "url": "https://github.com/sjawhar/legion/pull/10",
-			},
-		},
-		{
-			name:  "issues",
-			event: "issues",
-			body: map[string]any{
-				"action":     "opened",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"issue": map[string]any{
-					"number": 5, "title": "Bug: crash on startup", "body": "Steps to reproduce...",
-					"html_url": "https://github.com/sjawhar/legion/issues/5",
-					"user":     map[string]any{"login": "reporter"},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "author", "body", "url"},
-			checkValues:  map[string]string{"kind": "issue", "action": "opened", "number": "5", "title": "Bug: crash on startup", "author": "reporter"},
-		},
-		{
-			name:  "push",
-			event: "push",
-			body: map[string]any{
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"ref":        "refs/heads/main",
-			},
-			expectedKeys: []string{"kind", "repo", "ref"},
-			checkValues:  map[string]string{"kind": "push", "repo": "sjawhar/legion", "ref": "refs/heads/main"},
-		},
-		{
-			name:  "check_run",
-			event: "check_run",
-			body: map[string]any{
-				"action":     "completed",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"check_run": map[string]any{
-					"name":          "test",
-					"status":        "completed",
-					"conclusion":    "success",
-					"pull_requests": []any{},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "name", "status", "conclusion"},
-			checkValues:  map[string]string{"kind": "ci", "action": "completed", "repo": "sjawhar/legion", "number": "", "name": "test", "status": "completed", "conclusion": "success"},
-		},
-		{
-			name:  "check_suite",
-			event: "check_suite",
-			body: map[string]any{
-				"action":     "completed",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-				"check_suite": map[string]any{
-					"status":        "completed",
-					"conclusion":    "failure",
-					"pull_requests": []any{},
-				},
-			},
-			expectedKeys: []string{"kind", "action", "repo", "number", "status", "conclusion"},
-			checkValues:  map[string]string{"kind": "ci", "action": "completed", "repo": "sjawhar/legion", "number": "", "status": "completed", "conclusion": "failure"},
-		},
-		{
-			name:  "unknown event",
-			event: "deployment",
-			body: map[string]any{
-				"action":     "created",
-				"repository": map[string]any{"full_name": "sjawhar/legion"},
-			},
-			expectedKeys: []string{"kind", "action", "repo"},
-			checkValues:  map[string]string{"kind": "unknown", "action": "created", "repo": "sjawhar/legion"},
-		},
-		{
-			name:         "missing webhook data produces empty strings",
-			event:        "issue_comment",
-			body:         map[string]any{"action": "created"},
-			expectedKeys: []string{"kind", "action", "repo", "number", "title", "parent_kind", "author", "body", "url"},
-			checkValues: map[string]string{
-				"kind": "comment", "action": "created", "repo": "", "number": "", "title": "",
-				"parent_kind": "issue", "author": "", "body": "", "url": "",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := githubSummary(tt.event, tt.body)
-			parsed := decodeSummary(t, result)
-			if len(parsed) != len(tt.expectedKeys) {
-				t.Fatalf("expected %d keys, got %d: %v", len(tt.expectedKeys), len(parsed), parsed)
-			}
-			for _, key := range tt.expectedKeys {
-				if _, ok := parsed[key]; !ok {
-					t.Fatalf("missing expected key %q in %v", key, parsed)
-				}
-			}
-			for key, want := range tt.checkValues {
-				if got := parsed[key]; got != want {
-					t.Fatalf("key %q: got %q, want %q", key, got, want)
-				}
-			}
-		})
-	}
-}
-
-func TestGithubSummaryTruncation(t *testing.T) {
-	longBody := strings.Repeat("a", 600)
-	result := githubSummary("issue_comment", map[string]any{
-		"action":     "created",
-		"repository": map[string]any{"full_name": "sjawhar/legion"},
-		"comment":    map[string]any{"body": longBody},
+		"issue": map[string]any{"number": 1, "title": "Long repository owner"},
 	})
-	var parsed map[string]string
-	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
+	if got := len([]rune(summary)); got != 160 {
+		t.Fatalf("summary has %d runes, want 160: %q", got, summary)
 	}
-	truncSuffix := "... [truncated]"
-	body := parsed["body"]
-	if !strings.HasSuffix(body, truncSuffix) {
-		t.Fatalf("expected truncated body to end with %q", truncSuffix)
+	if !strings.HasSuffix(summary, "…") {
+		t.Fatalf("summary must end with an ellipsis when capped: %q", summary)
 	}
-	if runes := []rune(body); len(runes) != 500+len([]rune(truncSuffix)) {
-		t.Fatalf("expected body truncated to 500 chars + suffix, got %d", len(runes))
+	if strings.Contains(summary, "\n") {
+		t.Fatalf("summary contains a newline: %q", summary)
 	}
+}
 
-	// Verify multi-byte truncation preserves valid UTF-8
-	longEmoji := strings.Repeat("\U0001f525", 600)
-	result2 := githubSummary("pull_request", map[string]any{
+func TestGithubSummaryTruncatesTitleRunes(t *testing.T) {
+	title := strings.Repeat("🌍", 100)
+	summary := githubSummary("pull_request", map[string]any{
 		"action":       "opened",
-		"repository":   map[string]any{"full_name": "sjawhar/legion"},
-		"pull_request": map[string]any{"body": longEmoji},
+		"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+		"pull_request": map[string]any{"number": 1, "title": title},
 	})
-	var parsed2 map[string]string
-	if err := json.Unmarshal([]byte(result2), &parsed2); err != nil {
-		t.Fatalf("emoji truncation produced invalid JSON: %v", err)
-	}
-	if runes2 := []rune(parsed2["body"]); len(runes2) != 500+len([]rune(truncSuffix)) {
-		t.Fatalf("expected emoji body truncated to 500 chars + suffix, got %d", len(runes2))
+	wantTitle := strings.Repeat("🌍", 90) + "…"
+	if !strings.HasSuffix(summary, wantTitle) {
+		t.Fatalf("summary = %q, want title suffix %q", summary, wantTitle)
 	}
 }
 
@@ -1130,12 +913,12 @@ func TestSlackEnvelopeHandlesNonObjectEvent(t *testing.T) {
 		EventID: "e-malformed",
 		TraceID: "t-malformed",
 		Body: map[string]any{
-			"team_id":  "T123",
+			"team_id":  "T01234567",
 			"event_id": "Ev123",
 			"event":    "not-an-object",
 		},
 	})
-	if item.Topic != "notifications.slack.T123.unknown.message" {
+	if item.Topic != "notifications.slack.T01234567.unknown.message" {
 		t.Fatalf("unexpected topic: %s", item.Topic)
 	}
 	if err := item.Validate(); err != nil {
@@ -1291,9 +1074,9 @@ func TestGithubEnvelopesWorkflowRunInProgress(t *testing.T) {
 		Body: map[string]any{
 			"action": "in_progress",
 			"repository": map[string]any{
-				"full_name": "sjawhar/legion",
-				"name":      "legion",
-				"owner":     map[string]any{"login": "sjawhar"},
+				"full_name": "example-org/example-repo",
+				"name":      "example-repo",
+				"owner":     map[string]any{"login": "example-org"},
 			},
 			"workflow_run": map[string]any{
 				"id":          float64(42),
@@ -1301,19 +1084,21 @@ func TestGithubEnvelopesWorkflowRunInProgress(t *testing.T) {
 				"path":        ".github/workflows/ci.yml",
 				"head_branch": "main",
 				"status":      "in_progress",
-				"html_url":    "https://github.com/sjawhar/legion/actions/runs/42",
+				"html_url":    "https://example-host/actions/runs/42",
 			},
 		},
 	}, "@legion")
-	if len(items) != 1 {
-		t.Fatalf("expected 1 envelope, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.github.sjawhar.legion.workflow.ci_yml.in_progress" {
-		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	if items[0].Topic != "notifications.github.example-org.example-repo.workflow.ci_yml.in_progress.branch.main" {
+		t.Fatalf("unexpected branch topic: %s", items[0].Topic)
 	}
-	summary := decodeSummary(t, items[0].PayloadSummary)
-	if summary["kind"] != "workflow" || summary["action"] != "in_progress" || summary["branch"] != "main" {
-		t.Fatalf("unexpected summary: %v", summary)
+	if items[1].Topic != "notifications.github.example-org.example-repo.workflow.ci_yml.in_progress" {
+		t.Fatalf("unexpected base topic: %s", items[1].Topic)
+	}
+	if got, want := items[0].PayloadSummary, "workflow CI main run 42 in_progress"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
 
@@ -1326,9 +1111,9 @@ func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
 		Body: map[string]any{
 			"action": "completed",
 			"repository": map[string]any{
-				"full_name": "sjawhar/legion",
-				"name":      "legion",
-				"owner":     map[string]any{"login": "sjawhar"},
+				"full_name": "example-org/example-repo",
+				"name":      "example-repo",
+				"owner":     map[string]any{"login": "example-org"},
 			},
 			"workflow_run": map[string]any{
 				"id":          float64(43),
@@ -1337,15 +1122,18 @@ func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
 				"head_branch": "main",
 				"status":      "completed",
 				"conclusion":  "success",
-				"html_url":    "https://github.com/sjawhar/legion/actions/runs/43",
+				"html_url":    "https://example-host/actions/runs/43",
 			},
 		},
 	}, "@legion")
-	if len(items) != 1 {
-		t.Fatalf("expected 1 envelope, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.github.sjawhar.legion.workflow.release-prod_yaml.completed" {
-		t.Fatalf("unexpected topic: %s", items[0].Topic)
+	if items[0].Topic != "notifications.github.example-org.example-repo.workflow.release-prod_yaml.completed.branch.main" {
+		t.Fatalf("unexpected branch topic: %s", items[0].Topic)
+	}
+	if items[1].Topic != "notifications.github.example-org.example-repo.workflow.release-prod_yaml.completed" {
+		t.Fatalf("unexpected base topic: %s", items[1].Topic)
 	}
 	if items[0].Payload == "" {
 		t.Fatal("expected non-empty Payload for completed workflow_run")
@@ -1387,8 +1175,8 @@ func TestGithubEnvelopesWorkflowRunLargeRunIDNotScientific(t *testing.T) {
 			},
 		},
 	}, "@legion")
-	if len(items) != 1 {
-		t.Fatalf("expected 1 envelope, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 envelopes, got %d", len(items))
 	}
 	var payload map[string]string
 	if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
@@ -1454,13 +1242,12 @@ func TestGhostWisprEnvelopeSessionEnded(t *testing.T) {
 	if err := item.Validate(); err != nil {
 		t.Fatalf("expected valid envelope: %v", err)
 	}
-	// Verify summary has duration
-	summary := decodeSummary(t, item.PayloadSummary)
-	if summary["duration"] == "" {
-		t.Fatal("expected duration in summary")
+	if got, want := item.PayloadSummary, "ghostwispr session_ended for session 20260326041405"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
 	}
-	if summary["session_id"] != "20260326041405" {
-		t.Fatalf("unexpected session_id in summary: %s", summary["session_id"])
+	payload := decodeSummary(t, item.Payload)
+	if got, want := payload["duration"], "51.05"; got != want {
+		t.Fatalf("payload duration = %q, want %q", got, want)
 	}
 }
 
@@ -1492,10 +1279,12 @@ func TestGhostWisprEnvelopeSummaryReady(t *testing.T) {
 	if err := item.Validate(); err != nil {
 		t.Fatalf("expected valid envelope: %v", err)
 	}
-	// Verify summary has title
-	summary := decodeSummary(t, item.PayloadSummary)
-	if summary["title"] != "How are we gonna do the" {
-		t.Fatalf("unexpected title in summary: %s", summary["title"])
+	if got, want := item.PayloadSummary, "ghostwispr summary_ready for session 20260326041629: How are we gonna do the"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+	payload := decodeSummary(t, item.Payload)
+	if got, want := payload["summary_preset"], "default"; got != want {
+		t.Fatalf("summary_preset = %q, want %q", got, want)
 	}
 }
 
@@ -1539,9 +1328,8 @@ func TestGhostWisprEnvelopeMissingSessionIdUsesUnknownTopic(t *testing.T) {
 	if err := item.Validate(); err != nil {
 		t.Fatalf("expected valid envelope even without session_id: %v", err)
 	}
-	summary := decodeSummary(t, item.PayloadSummary)
-	if summary["session_id"] != "" {
-		t.Fatalf("expected empty session_id in summary, got %q", summary["session_id"])
+	if got, want := item.PayloadSummary, "ghostwispr session_ended for session "; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
 
@@ -1589,12 +1377,8 @@ func TestGhostWisprEnvelopeSanitizesSessionID(t *testing.T) {
 	if item.Topic != "notifications.ghostwispr.2026_03_26_041405.session.ended" {
 		t.Fatalf("unexpected sanitized topic: %s", item.Topic)
 	}
-	var summary map[string]string
-	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
-		t.Fatalf("invalid summary JSON: %v", err)
-	}
-	if summary["session_id"] != "2026.03/26 041405" {
-		t.Fatalf("unexpected session_id in summary: %q", summary["session_id"])
+	if got, want := item.PayloadSummary, "ghostwispr session_ended for session 2026.03/26 041405"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
 
@@ -1611,17 +1395,12 @@ func TestGhostWisprEnvelopeNormalizesEventType(t *testing.T) {
 	if item.Topic != "notifications.ghostwispr.20260326041629.summary.ready" {
 		t.Fatalf("unexpected topic: %s", item.Topic)
 	}
-	var summary map[string]string
-	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
-		t.Fatalf("invalid summary JSON: %v", err)
-	}
-	if summary["event_type"] != "summary_ready" {
-		t.Fatalf("unexpected normalized event_type in summary: %q", summary["event_type"])
+	if got, want := item.PayloadSummary, "ghostwispr summary_ready for session 20260326041629"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
 
 func TestGhostWisprSummaryTruncatesTitle(t *testing.T) {
-	longTitle := strings.Repeat("a", 600)
 	item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
 		EventType: "summary_ready",
 		Delivery:  "gw-delivery-title",
@@ -1630,58 +1409,38 @@ func TestGhostWisprSummaryTruncatesTitle(t *testing.T) {
 		Body: map[string]any{
 			"payload": map[string]any{
 				"session_id": "20260326041629",
-				"title":      longTitle,
+				"title":      strings.Repeat("a", 600),
 			},
 		},
 	})
-	var summary map[string]string
-	if err := json.Unmarshal([]byte(item.PayloadSummary), &summary); err != nil {
-		t.Fatalf("invalid summary JSON: %v", err)
-	}
-	expectedLen := 500 + len([]rune("... [truncated]"))
-	if got := len([]rune(summary["title"])); got != expectedLen {
-		t.Fatalf("unexpected truncated title length: %d, want %d", got, expectedLen)
+	wantTitle := strings.Repeat("a", 80) + "…"
+	if !strings.HasSuffix(item.PayloadSummary, wantTitle) {
+		t.Fatalf("summary = %q, want title suffix %q", item.PayloadSummary, wantTitle)
 	}
 }
 
-func TestGithubPayloadNotTruncated(t *testing.T) {
-	longBody := strings.Repeat("a", 600)
-	input := GithubEnvelopeInput{
+func TestGithubPayloadCapsBodyRunes(t *testing.T) {
+	body := strings.Repeat("🔥", 3000)
+	payload := decodeSummary(t, GithubEnvelope(GithubEnvelopeInput{
 		Event:    "issue_comment",
 		Delivery: "d1",
 		EventID:  "e1",
 		TraceID:  "t1",
 		Body: map[string]any{
 			"action":     "created",
-			"repository": map[string]any{"full_name": "sjawhar/legion", "name": "legion", "owner": map[string]any{"login": "sjawhar"}},
+			"repository": map[string]any{"full_name": "example-org/example-repo"},
 			"issue":      map[string]any{"number": 42, "title": "Test issue"},
 			"comment": map[string]any{
-				"body":     longBody,
-				"html_url": "https://github.com/sjawhar/legion/issues/42#issuecomment-1",
-				"user":     map[string]any{"login": "commenter"},
+				"body": body,
+				"user": map[string]any{"login": "commenter"},
 			},
 		},
+	}).Payload)
+	if got := len([]rune(payload["body"])); got != 2048 {
+		t.Fatalf("payload body has %d runes, want 2048", got)
 	}
-	env := GithubEnvelope(input)
-
-	// PayloadSummary should still be truncated to 500 + suffix
-	summary := decodeSummary(t, env.PayloadSummary)
-	truncSuffix := "... [truncated]"
-	expectedLen := 500 + len([]rune(truncSuffix))
-	if runes := []rune(summary["body"]); len(runes) != expectedLen {
-		t.Fatalf("expected summary body truncated to %d chars (500 + suffix), got %d", expectedLen, len(runes))
-	}
-
-	// Payload should contain the full body (600 chars), not truncated
-	if env.Payload == "" {
-		t.Fatal("expected Payload to be populated")
-	}
-	payload := decodeSummary(t, env.Payload)
-	if runes := []rune(payload["body"]); len(runes) != 600 {
-		t.Fatalf("expected payload body to be full 600 chars, got %d", len(runes))
-	}
-	if payload["body"] != longBody {
-		t.Fatal("payload body does not match original")
+	if got, want := payload["body_truncated"], "true"; got != want {
+		t.Fatalf("body_truncated = %q, want %q", got, want)
 	}
 }
 
@@ -1746,10 +1505,10 @@ func TestGithubPayloadAllEventTypes(t *testing.T) {
 			hasPayload: true,
 		},
 		{
-			name:       "push has no payload",
+			name:       "push has payload",
 			event:      "push",
-			body:       map[string]any{"repository": map[string]any{"full_name": "sjawhar/legion"}, "ref": "refs/heads/main"},
-			hasPayload: false,
+			body:       map[string]any{"repository": map[string]any{"full_name": "example-org/example-repo"}, "ref": "refs/heads/main"},
+			hasPayload: true,
 		},
 		{
 			name:       "check_run has no payload",
@@ -1887,5 +1646,718 @@ func TestGithubPayloadDispatchSession(t *testing.T) {
 				t.Fatalf("dispatch_session = %q, want %q", got, tt.wantDispatchSession)
 			}
 		})
+	}
+}
+
+func TestGithubSummary(t *testing.T) {
+	tests := []struct {
+		name  string
+		event string
+		body  map[string]any
+		want  string
+	}{
+		{
+			name:  "created issue comment uses its first line",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"issue":      map[string]any{"number": 17},
+				"comment":    map[string]any{"body": "Ship it\nwith a follow-up", "user": map[string]any{"login": "commenter"}},
+			},
+			want: "comment on example-org/example-repo#17 by commenter: Ship it",
+		},
+		{
+			name:  "edited issue comment omits its body",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "edited",
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"issue":      map[string]any{"number": 17},
+				"comment":    map[string]any{"body": "changed", "user": map[string]any{"login": "commenter"}},
+			},
+			want: "comment edited on example-org/example-repo#17 by commenter",
+		},
+		{
+			name:  "deleted issue comment omits its body",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "deleted",
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"issue":      map[string]any{"number": 17},
+				"comment":    map[string]any{"body": "removed", "user": map[string]any{"login": "commenter"}},
+			},
+			want: "comment deleted on example-org/example-repo#17 by commenter",
+		},
+		{
+			name:  "review comment includes location and excerpt",
+			event: "pull_request_review_comment",
+			body: map[string]any{
+				"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"pull_request": map[string]any{"number": 18},
+				"comment": map[string]any{
+					"body": "Use the existing helper",
+					"user": map[string]any{"login": "reviewer"},
+					"path": "internal/contracts/normalize.go",
+					"line": 42,
+				},
+			},
+			want: "review comment on example-org/example-repo#18 by reviewer (internal/contracts/normalize.go:42): Use the existing helper",
+		},
+		{
+			name:  "review includes state and nonempty body",
+			event: "pull_request_review",
+			body: map[string]any{
+				"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"pull_request": map[string]any{"number": 19},
+				"review":       map[string]any{"state": "approved", "body": "Looks good", "user": map[string]any{"login": "reviewer"}},
+			},
+			want: "review approved on example-org/example-repo#19 by reviewer: Looks good",
+		},
+		{
+			name:  "review excludes empty body",
+			event: "pull_request_review",
+			body: map[string]any{
+				"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"pull_request": map[string]any{"number": 19},
+				"review":       map[string]any{"state": "commented", "user": map[string]any{"login": "reviewer"}},
+			},
+			want: "review commented on example-org/example-repo#19 by reviewer",
+		},
+		{
+			name:  "opened pull request includes title",
+			event: "pull_request",
+			body: map[string]any{
+				"action":       "opened",
+				"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"pull_request": map[string]any{"number": 20, "title": "Improve envelopes"},
+			},
+			want: "pr opened: example-org/example-repo#20 Improve envelopes",
+		},
+		{
+			name:  "merged pull request includes merger and short SHA",
+			event: "pull_request",
+			body: map[string]any{
+				"action":     "closed",
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"pull_request": map[string]any{
+					"number":           20,
+					"merged":           true,
+					"merged_by":        map[string]any{"login": "merger"},
+					"merge_commit_sha": "abcdef0123456789",
+				},
+			},
+			want: "pr merged: example-org/example-repo#20 by merger → abcdef0",
+		},
+		{
+			name:  "issue includes title",
+			event: "issues",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"issue":      map[string]any{"number": 21, "title": "Document the payload"},
+			},
+			want: "issue opened: example-org/example-repo#21 Document the payload",
+		},
+		{
+			name:  "push includes branch subject short SHA and pusher",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"ref":         "refs/heads/feature/demo",
+				"after":       "0123456789abcdef",
+				"pusher":      map[string]any{"name": "pusher"},
+				"head_commit": map[string]any{"message": "Ship the normalizer\nwith details"},
+			},
+			want: "push to feature/demo: Ship the normalizer (0123456) by pusher",
+		},
+		{
+			name:  "workflow includes conclusion",
+			event: "workflow_run",
+			body: map[string]any{
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"workflow_run": map[string]any{
+					"id":          float64(22),
+					"name":        "Checks",
+					"head_branch": "main",
+					"status":      "completed",
+					"conclusion":  "success",
+				},
+			},
+			want: "workflow Checks main run 22 completed/success",
+		},
+		{
+			name:  "workflow omits an empty conclusion separator",
+			event: "workflow_run",
+			body: map[string]any{
+				"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"workflow_run": map[string]any{
+					"id":          float64(23),
+					"name":        "Checks",
+					"head_branch": "main",
+					"status":      "in_progress",
+				},
+			},
+			want: "workflow Checks main run 23 in_progress",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := githubSummary(tt.event, tt.body)
+			if got != tt.want {
+				t.Fatalf("githubSummary(%q) = %q, want %q", tt.event, got, tt.want)
+			}
+			if len([]rune(got)) > 160 {
+				t.Fatalf("summary is %d runes, want at most 160", len([]rune(got)))
+			}
+			if strings.Contains(got, "\n") {
+				t.Fatalf("summary contains a newline: %q", got)
+			}
+		})
+	}
+}
+
+func TestGithubPayloadFields(t *testing.T) {
+	longBody := strings.Repeat("a", 3000)
+	tests := []struct {
+		name        string
+		event       string
+		body        map[string]any
+		want        map[string]string
+		omitted     []string
+		wantBodyLen int
+	}{
+		{
+			name:  "push carries delivery facts",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"before":      "1111111111111111",
+				"after":       "2222222222222222",
+				"pusher":      map[string]any{"name": "pusher"},
+				"head_commit": map[string]any{"message": "Add actionable payloads\n\nBody"},
+				"commits":     []any{map[string]any{"id": "1"}, map[string]any{"id": "2"}},
+				"compare":     "https://example-host/compare",
+			},
+			want: map[string]string{
+				"after": "2222222222222222", "before": "1111111111111111", "pusher": "pusher",
+				"head_subject": "Add actionable payloads", "commit_count": "2", "compare_url": "https://example-host/compare",
+			},
+		},
+		{
+			name:  "merged pull request carries merge and ref facts",
+			event: "pull_request",
+			body: map[string]any{
+				"action":     "closed",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{
+					"number":           24,
+					"merged":           true,
+					"head":             map[string]any{"sha": "head-sha", "ref": "feature/payloads"},
+					"base":             map[string]any{"ref": "main"},
+					"merge_commit_sha": "merge-sha",
+					"merged_by":        map[string]any{"login": "merger"},
+				},
+			},
+			want: map[string]string{
+				"head_sha": "head-sha", "head_ref": "feature/payloads", "base_ref": "main", "merged": "true",
+				"merge_commit_sha": "merge-sha", "merged_by": "merger",
+			},
+		},
+		{
+			name:  "workflow run carries branch and pull request facts",
+			event: "workflow_run",
+			body: map[string]any{
+				"action":     "completed",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"workflow_run": map[string]any{
+					"id":             float64(25),
+					"run_attempt":    float64(2),
+					"head_sha":       "workflow-sha",
+					"head_branch":    "feature/payloads",
+					"pull_requests":  []any{map[string]any{"number": float64(12)}, map[string]any{"number": float64(34)}},
+					"run_started_at": "2026-09-07T10:00:00Z",
+					"updated_at":     "2026-09-07T10:01:00Z",
+				},
+			},
+			want: map[string]string{
+				"run_id": "25", "run_attempt": "2", "head_sha": "workflow-sha", "branch": "feature/payloads",
+				"head_branch": "feature/payloads", "pr_numbers": "12,34", "run_started_at": "2026-09-07T10:00:00Z",
+				"updated_at": "2026-09-07T10:01:00Z",
+			},
+		},
+		{
+			name:  "edited comment signals body change without resending it",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "edited",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue":      map[string]any{"number": 26},
+				"comment":    map[string]any{"body": "Do not resend this", "user": map[string]any{"login": "commenter"}},
+			},
+			want:    map[string]string{"body_changed": "true"},
+			omitted: []string{"body"},
+		},
+		{
+			name:  "review comment carries location",
+			event: "pull_request_review_comment",
+			body: map[string]any{
+				"action":       "created",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 27},
+				"comment": map[string]any{
+					"body": "Use the helper", "path": "internal/contracts/normalize.go", "original_line": float64(44),
+				},
+			},
+			want: map[string]string{"path": "internal/contracts/normalize.go", "line": "44"},
+		},
+		{
+			name:  "long comment body is capped and marked",
+			event: "issue_comment",
+			body: map[string]any{
+				"action":     "created",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"issue":      map[string]any{"number": 28},
+				"comment":    map[string]any{"body": longBody, "user": map[string]any{"login": "commenter"}},
+			},
+			want:        map[string]string{"body_truncated": "true"},
+			wantBodyLen: 2048,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := decodeSummary(t, GithubEnvelope(GithubEnvelopeInput{
+				Event: tt.event, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: tt.body,
+			}).Payload)
+			for key, want := range tt.want {
+				if got := payload[key]; got != want {
+					t.Fatalf("payload[%q] = %q, want %q", key, got, want)
+				}
+			}
+			for _, key := range tt.omitted {
+				if _, found := payload[key]; found {
+					t.Fatalf("payload unexpectedly contains %q: %q", key, payload[key])
+				}
+			}
+			if tt.wantBodyLen != 0 && len([]rune(payload["body"])) != tt.wantBodyLen {
+				t.Fatalf("body has %d runes, want %d", len([]rune(payload["body"])), tt.wantBodyLen)
+			}
+		})
+	}
+}
+
+func TestGithubEnvelopesMergedTopic(t *testing.T) {
+	tests := []struct {
+		name   string
+		merged bool
+		topic  string
+	}{
+		{name: "merged", merged: true, topic: "notifications.github.example-org.example-repo.pr.29.merged"},
+		{name: "closed without merge", merged: false, topic: "notifications.github.example-org.example-repo.pr.29.closed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items := GithubEnvelopes(GithubEnvelopeInput{
+				Event: "pull_request", Delivery: "delivery", EventID: "event", TraceID: "trace",
+				Body: map[string]any{
+					"action":     "closed",
+					"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+					"pull_request": map[string]any{
+						"number": 29,
+						"merged": tt.merged,
+					},
+				},
+			}, "@envoy")
+			if len(items) != 2 {
+				t.Fatalf("got %d envelopes, want 2", len(items))
+			}
+			if items[0].Topic != tt.topic {
+				t.Fatalf("first topic = %q, want %q", items[0].Topic, tt.topic)
+			}
+			if items[1].Topic != "notifications.github.example-org.example-repo.pr.29" {
+				t.Fatalf("base topic = %q", items[1].Topic)
+			}
+			if items[0].DedupeKey != items[1].DedupeKey {
+				t.Fatalf("fan-out copies have different dedupe keys: %q and %q", items[0].DedupeKey, items[1].DedupeKey)
+			}
+		})
+	}
+}
+
+func TestGithubEnvelopesWorkflowBranchTopic(t *testing.T) {
+	items := GithubEnvelopes(GithubEnvelopeInput{
+		Event: "workflow_run", Delivery: "delivery", EventID: "event", TraceID: "trace",
+		Body: map[string]any{
+			"action":     "completed",
+			"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+			"workflow_run": map[string]any{
+				"path":        ".github/workflows/checks.yml",
+				"head_branch": "feature/add.payload",
+			},
+		},
+	}, "@envoy")
+	if len(items) != 2 {
+		t.Fatalf("got %d envelopes, want 2", len(items))
+	}
+	if got, want := items[0].Topic, "notifications.github.example-org.example-repo.workflow.checks_yml.completed.branch.feature/add_payload"; got != want {
+		t.Fatalf("first topic = %q, want %q", got, want)
+	}
+	if got, want := items[1].Topic, "notifications.github.example-org.example-repo.workflow.checks_yml.completed"; got != want {
+		t.Fatalf("base topic = %q, want %q", got, want)
+	}
+	if items[0].DedupeKey != items[1].DedupeKey {
+		t.Fatalf("fan-out copies have different dedupe keys: %q and %q", items[0].DedupeKey, items[1].DedupeKey)
+	}
+}
+
+func TestSlackSummary(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{
+			name: "mention",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "app_mention", "channel": "C01234567", "user": "U01234567", "text": "Please review"},
+			},
+			want: "slack mention in C01234567 from U01234567: Please review",
+		},
+		{
+			name: "message",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "channel": "C01234567", "user": "U01234567", "text": "An update"},
+			},
+			want: "slack message in C01234567 from U01234567: An update",
+		},
+		{
+			name: "thread reply",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "channel": "C01234567", "user": "U01234567", "thread_ts": "123.456", "text": "A reply"},
+			},
+			want: "slack thread reply in C01234567 from U01234567 (thread 123.456): A reply",
+		},
+		{
+			name: "bot message prefers username",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "subtype": "bot_message", "channel": "C01234567", "bot_id": "B01234567", "username": "build-bot", "text": "Build passed"},
+			},
+			want: "slack bot message in C01234567 from build-bot: Build passed",
+		},
+		{
+			name: "changed message reads nested facts",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "message_changed", "channel": "C01234567",
+					"message": map[string]any{"user": "U01234567", "ts": "456.789", "text": "New text"},
+				},
+			},
+			want: "slack message edited in C01234567 by U01234567 at 456.789: New text",
+		},
+		{
+			name: "deleted message has timestamp only",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "subtype": "message_deleted", "channel": "C01234567", "deleted_ts": "456.789"},
+			},
+			want: "slack message deleted in C01234567: 456.789",
+		},
+		{
+			name: "files add title",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "See attachment",
+					"files": []any{map[string]any{"title": "design", "filetype": "pdf"}},
+				},
+			},
+			want: "slack message in C01234567 from U01234567: See attachment (1 file(s): design)",
+		},
+		{
+			name: "unknown subtype",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "subtype": "channel_join", "channel": "C01234567", "text": "Joined"},
+			},
+			want: "slack channel_join message in C01234567: Joined",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SlackEnvelope(SlackEnvelopeInput{Body: tt.body, EventID: "event", TraceID: "trace"}).PayloadSummary
+			if got != tt.want {
+				t.Fatalf("summary = %q, want %q", got, tt.want)
+			}
+			if len([]rune(got)) > 160 || strings.Contains(got, "\n") {
+				t.Fatalf("summary must be a one-line maximum-160-rune string: %q", got)
+			}
+		})
+	}
+}
+
+func TestSlackPayload(t *testing.T) {
+	longText := strings.Repeat("a", 3000)
+	tests := []struct {
+		name        string
+		body        map[string]any
+		want        map[string]string
+		omitted     []string
+		wantTextLen int
+		wantFiles   int
+	}{
+		{
+			name: "bot message captures bot files and attachments",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "bot_message", "channel": "C01234567", "channel_type": "channel",
+					"bot_id": "B01234567", "bot_profile": map[string]any{"name": "fallback-name"}, "username": "build-bot",
+					"ts": "123.456", "event_ts": "123.457", "thread_ts": "123.000", "text": "Build passed",
+					"files": []any{
+						map[string]any{"name": "first.txt", "filetype": "text"},
+						map[string]any{"name": "second.pdf", "filetype": "pdf"},
+					},
+					"attachments": []any{map[string]any{}, map[string]any{}},
+				},
+			},
+			want: map[string]string{
+				"kind": "message", "event_type": "message", "subtype": "bot_message", "team_id": "T01234567",
+				"channel_id": "C01234567", "channel_type": "channel", "bot_id": "B01234567", "bot_name": "build-bot",
+				"ts": "123.456", "event_ts": "123.457", "thread_ts": "123.000", "text": "Build passed",
+				"file_count": "2", "attachment_count": "2",
+			},
+			omitted:   []string{"user_id", "root_ts"},
+			wantFiles: 2,
+		},
+		{
+			name: "changed message uses nested message fields",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "message_changed", "channel": "C01234567", "event_ts": "124.000",
+					"message": map[string]any{
+						"user": "U01234567", "ts": "123.456", "thread_ts": "123.000", "text": "Updated message",
+						"edited": map[string]any{"user": "U01234567"},
+					},
+				},
+			},
+			want: map[string]string{
+				"kind": "message", "event_type": "message", "subtype": "message_changed", "team_id": "T01234567",
+				"channel_id": "C01234567", "user_id": "U01234567", "ts": "123.456", "event_ts": "124.000",
+				"thread_ts": "123.000", "text": "Updated message", "edited_by": "U01234567",
+			},
+		},
+		{
+			name: "deleted message omits text",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "subtype": "message_deleted", "channel": "C01234567", "deleted_ts": "123.456"},
+			},
+			want:    map[string]string{"deleted_ts": "123.456"},
+			omitted: []string{"text"},
+		},
+		{
+			name: "thread broadcast captures root timestamp",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "thread_broadcast", "channel": "C01234567", "user": "U01234567",
+					"ts": "123.456", "text": "Broadcast", "root": map[string]any{"ts": "123.000"},
+				},
+			},
+			want: map[string]string{"root_ts": "123.000"},
+		},
+		{
+			name: "long text is capped and marked",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event":   map[string]any{"type": "message", "channel": "C01234567", "user": "U01234567", "text": longText},
+			},
+			want:        map[string]string{"body_truncated": "true"},
+			wantTextLen: 2048,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := decodeSummary(t, SlackEnvelope(SlackEnvelopeInput{Body: tt.body, EventID: "event", TraceID: "trace"}).Payload)
+			for key, want := range tt.want {
+				if got := payload[key]; got != want {
+					t.Fatalf("payload[%q] = %q, want %q", key, got, want)
+				}
+			}
+			for _, key := range tt.omitted {
+				if _, found := payload[key]; found {
+					t.Fatalf("payload unexpectedly contains %q: %q", key, payload[key])
+				}
+			}
+			if tt.wantTextLen != 0 && len([]rune(payload["text"])) != tt.wantTextLen {
+				t.Fatalf("text has %d runes, want %d", len([]rune(payload["text"])), tt.wantTextLen)
+			}
+			if tt.wantFiles != 0 && len(strings.Split(payload["files"], ",")) != tt.wantFiles {
+				t.Fatalf("files = %q, want %d pairs", payload["files"], tt.wantFiles)
+			}
+		})
+	}
+}
+
+func TestGhostWisprSummary(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		body      map[string]any
+		want      string
+	}{
+		{
+			name:      "session started",
+			eventType: "session_started",
+			body:      map[string]any{"payload": map[string]any{"session_id": "session-start"}},
+			want:      "ghostwispr session_started for session session-start",
+		},
+		{
+			name:      "session ended with title",
+			eventType: "session_ended",
+			body:      map[string]any{"payload": map[string]any{"session_id": "session-end", "title": "Retrospective\nignored"}},
+			want:      "ghostwispr session_ended for session session-end: Retrospective",
+		},
+		{
+			name:      "summary ready with title",
+			eventType: "summary_ready",
+			body:      map[string]any{"payload": map[string]any{"session_id": "session-summary", "title": "Weekly summary"}},
+			want:      "ghostwispr summary_ready for session session-summary: Weekly summary",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+				EventType: tt.eventType, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: tt.body,
+			}).PayloadSummary
+			if got != tt.want {
+				t.Fatalf("summary = %q, want %q", got, tt.want)
+			}
+			if len([]rune(got)) > 160 || strings.Contains(got, "\n") {
+				t.Fatalf("summary must be a one-line maximum-160-rune string: %q", got)
+			}
+		})
+	}
+}
+
+func TestGhostWisprPayload(t *testing.T) {
+	longSummary := strings.Repeat("s", 3000)
+	tests := []struct {
+		name           string
+		eventType      string
+		body           map[string]any
+		want           map[string]string
+		omitted        []string
+		wantSummaryLen int
+	}{
+		{
+			name:      "session started",
+			eventType: "session_started",
+			body: map[string]any{
+				"created_at": "2026-09-07T10:00:00Z",
+				"payload":    map[string]any{"session_id": "session-start", "title": "Start", "type": "session_started"},
+			},
+			want: map[string]string{
+				"event_type": "session_started", "session_id": "session-start", "title": "Start", "created_at": "2026-09-07T10:00:00Z",
+			},
+			omitted: []string{"status", "summary", "summary_preset"},
+		},
+		{
+			name:      "session ended",
+			eventType: "session_ended",
+			body: map[string]any{
+				"created_at": "2026-09-07T10:01:00Z",
+				"payload":    map[string]any{"session_id": "session-end", "duration": float64(51.05), "type": "session_ended"},
+			},
+			want: map[string]string{
+				"event_type": "session_ended", "session_id": "session-end", "duration": "51.05", "created_at": "2026-09-07T10:01:00Z",
+			},
+		},
+		{
+			name:      "summary ready carries capped summary metadata",
+			eventType: "summary_ready",
+			body: map[string]any{
+				"created_at": "2026-09-07T10:02:00Z",
+				"payload": map[string]any{
+					"session_id": "session-summary", "title": "Summary", "duration": float64(60),
+					"status": "completed", "summary": longSummary, "summary_preset": "default",
+					"timestamp": "2026-09-07T10:02:00.000Z", "version": float64(2), "type": "summary_ready",
+				},
+			},
+			want: map[string]string{
+				"event_type": "summary_ready", "session_id": "session-summary", "title": "Summary", "duration": "60",
+				"created_at": "2026-09-07T10:02:00Z", "status": "completed", "body_truncated": "true",
+				"summary_preset": "default", "timestamp": "2026-09-07T10:02:00.000Z", "version": "2", "payload_type": "summary_ready",
+			},
+			wantSummaryLen: 2048,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := decodeSummary(t, GhostWisprEnvelope(GhostWisprEnvelopeInput{
+				EventType: tt.eventType, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: tt.body,
+			}).Payload)
+			for key, want := range tt.want {
+				if got := payload[key]; got != want {
+					t.Fatalf("payload[%q] = %q, want %q", key, got, want)
+				}
+			}
+			for _, key := range tt.omitted {
+				if _, found := payload[key]; found {
+					t.Fatalf("payload unexpectedly contains %q: %q", key, payload[key])
+				}
+			}
+			if tt.wantSummaryLen != 0 && len([]rune(payload["summary"])) != tt.wantSummaryLen {
+				t.Fatalf("summary has %d runes, want %d", len([]rune(payload["summary"])), tt.wantSummaryLen)
+			}
+		})
+	}
+}
+
+func TestGithubSummaryUsesFullNameFallback(t *testing.T) {
+	got := githubSummary("issues", map[string]any{
+		"action":     "opened",
+		"repository": map[string]any{"full_name": "example-org/example-repo"},
+		"issue":      map[string]any{"number": 9, "title": "Fallback"},
+	})
+	const want = "issue opened: example-org/example-repo#9 Fallback"
+	if got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestPayloadJSONOmitsEmptyFields(t *testing.T) {
+	got := summaryJSON(map[string]string{"present": "value", "empty": ""})
+	const want = `{"present":"value"}`
+	if got != want {
+		t.Fatalf("payload = %s, want %s", got, want)
+	}
+}
+
+func TestGithubPayloadUsesRepositoryPartsFallback(t *testing.T) {
+	payload := decodeSummary(t, GithubEnvelope(GithubEnvelopeInput{
+		Event: "issues",
+		Body: map[string]any{
+			"action":     "opened",
+			"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+			"issue":      map[string]any{"number": 10},
+		},
+	}).Payload)
+	if got, want := payload["repo"], "example-org/example-repo"; got != want {
+		t.Fatalf("repo = %q, want %q", got, want)
 	}
 }

@@ -29,8 +29,8 @@ func TestSlackHandler(t *testing.T) {
 		"team_id": "T01234567",
 		"event": {
 			"type": "message",
-			"channel": "C0A0DHVU8HE",
-			"user": "U12345",
+			"channel": "C01234567",
+			"user": "U01234567",
 			"text": "hello world"
 		}
 	}`
@@ -39,7 +39,7 @@ func TestSlackHandler(t *testing.T) {
 		"type": "event_callback",
 		"event_id": "",
 		"team_id": "T01234567",
-		"event": {"type": "message", "channel": "C0A0DHVU8HE"}
+		"event": {"type": "message", "channel": "C01234567"}
 	}`
 
 	nonEventCallback := `{
@@ -53,8 +53,8 @@ func TestSlackHandler(t *testing.T) {
 		"team_id": "T01234567",
 		"event": {
 			"type": "app_mention",
-			"channel": "C0A0DHVU8HE",
-			"user": "U12345",
+			"channel": "C01234567",
+			"user": "U01234567",
 			"text": "@legion help"
 		}
 	}`
