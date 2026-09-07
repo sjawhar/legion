@@ -383,33 +383,36 @@ function migrateV7State(state: unknown): unknown {
   };
 }
 
-function migrateV8State(state: unknown): unknown {
-  if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
-  if (!("version" in state) || state.version !== 8) return state;
-  const { prs, ...rest } = state as Record<string, unknown>;
-  const migratedPrs = recordValue(prs)
-    ? Object.fromEntries(
-        Object.entries(prs).map(([key, pr]) => {
-          if (!recordValue(pr)) return [key, pr];
-          const { checks: _droppedChecks, ...withoutChecks } = pr;
-          return [key, withoutChecks];
-        })
-      )
-    : undefined;
-  return { ...rest, version: 9, ...(migratedPrs ? { prs: migratedPrs } : {}) };
+function legacyChecksVerdict(checks: unknown): "green" | "red" | undefined {
+  if (!recordValue(checks)) return undefined;
+  const observations = Object.values(checks);
+  if (
+    observations.length === 0 ||
+    !observations.every((check) => recordValue(check) && check.status === "completed")
+  ) {
+    return undefined;
+  }
+  return observations.some(
+    (check) =>
+      recordValue(check) &&
+      check.conclusion !== "success" &&
+      check.conclusion !== "neutral" &&
+      check.conclusion !== "skipped"
+  )
+    ? "red"
+    : "green";
 }
 
-function migrateV9State(state: unknown): unknown {
-  if (!recordValue(state) || state.version !== 9) return state;
+function migrateV8State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 8) return state;
   const { prs, ...rest } = state;
   const migratedPrs = recordValue(prs)
     ? Object.fromEntries(
         Object.entries(prs).map(([key, pr]) => {
           if (!recordValue(pr)) return [key, pr];
-          if ("verdict" in pr && "failing" in pr && ("settledAt" in pr || "ciSettledAt" in pr)) {
-            return [key, pr];
-          }
+          if ("verdict" in pr && "failing" in pr && "ciSettledAt" in pr) return [key, pr];
           const {
+            checks,
             firstRedEmitted,
             settledRedEmitted,
             greenEmitted,
@@ -417,33 +420,19 @@ function migrateV9State(state: unknown): unknown {
             ...withoutLegacyCi
           } = pr;
           const verdict =
-            firstRedEmitted === true || settledRedEmitted === true
-              ? "red"
-              : greenEmitted === true
-                ? "green"
-                : null;
-          const settledAt =
+            legacyChecksVerdict(checks) ??
+            (greenEmitted === true
+              ? "green"
+              : firstRedEmitted === true || settledRedEmitted === true
+                ? "red"
+                : null);
+          const ciSettledAt =
             verdict === null ||
             typeof lastEventAt !== "number" ||
             !Number.isSafeInteger(lastEventAt)
               ? null
               : lastEventAt;
-          return [key, { ...withoutLegacyCi, verdict, failing: [], settledAt }];
-        })
-      )
-    : undefined;
-  return { ...rest, version: 10, ...(migratedPrs ? { prs: migratedPrs } : {}) };
-}
-
-function migrateV10State(state: unknown): unknown {
-  if (!recordValue(state) || state.version !== 10) return state;
-  const { prs, ...rest } = state;
-  const migratedPrs = recordValue(prs)
-    ? Object.fromEntries(
-        Object.entries(prs).map(([key, pr]) => {
-          if (!recordValue(pr) || "ciSettledAt" in pr) return [key, pr];
-          const { settledAt, ...withoutSettledAt } = pr;
-          return [key, { ...withoutSettledAt, ciSettledAt: settledAt }];
+          return [key, { ...withoutLegacyCi, verdict, failing: [], ciSettledAt }];
         })
       )
     : undefined;
@@ -461,9 +450,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
-  const state = migrateV10State(
-    migrateV9State(migrateV8State(migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw))))))
-  );
+  const state = migrateV8State(migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw)))));
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;

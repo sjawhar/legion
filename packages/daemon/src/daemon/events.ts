@@ -137,15 +137,20 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
   };
 }
 
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
 function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
   const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
   pr.ciSettledAt = input.settledAt;
   if (verdict === null) return [];
 
   const priorVerdict = pr.verdict;
+  const priorFailing = pr.failing;
   pr.verdict = verdict;
   pr.failing = verdict === "red" ? input.failed : [];
-  if (priorVerdict === verdict) return [];
+  if (priorVerdict === verdict && sameStringSet(priorFailing, pr.failing)) return [];
   return verdict === "red"
     ? [{ type: "ci-settled-red", failing: input.failed, sha: pr.headSha }]
     : [{ type: "ci-green", sha: pr.headSha }];

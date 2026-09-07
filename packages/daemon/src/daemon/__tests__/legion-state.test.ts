@@ -7,6 +7,7 @@ import { loadState, newLegionState, saveState } from "../legion-state";
 
 const issue = formatIssueKey("sjawhar", "legion", 42);
 const initialState = { project: "omp", cap: 4 };
+const prKey = "sjawhar/legion#7";
 
 function stateWithTree() {
   const state = newLegionState(initialState.project, initialState.cap);
@@ -47,7 +48,7 @@ function stateWithTree() {
     role: "controller",
     sessionId: "ses_controller",
   };
-  state.prs["sjawhar/legion#7"] = {
+  state.prs[prKey] = {
     key: issue,
     repo: "sjawhar/legion",
     number: 7,
@@ -63,6 +64,24 @@ function stateWithTree() {
   state.phases[issue] = { phase: "implement", sessionId: "ses_123" };
   state.controllerCapabilityHash = "f".repeat(64);
   return state;
+}
+
+function legacyV8State(pr: Record<string, unknown>) {
+  const current = stateWithTree();
+  const {
+    verdict: _verdict,
+    failing: _failing,
+    ciSettledAt: _ciSettledAt,
+    ...legacyPr
+  } = current.prs[prKey];
+  return {
+    current,
+    legacy: {
+      ...current,
+      version: 8,
+      prs: { ...current.prs, [prKey]: { ...legacyPr, ...pr } },
+    },
+  };
 }
 
 describe("legion state", () => {
@@ -214,73 +233,68 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(expected);
   });
 
-  it("migrates v8 PR state by dropping per-check observations", async () => {
+  it("migrates v8 legacy red flags with a later green emission to green", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-"));
     const file = path.join(tempDir, "state.json");
-    const current = stateWithTree();
-    const prKey = "sjawhar/legion#7";
-    const { ciSettledAt, ...legacyPr } = current.prs[prKey];
-    const legacy = {
-      ...current,
-      version: 8,
-      prs: {
-        ...current.prs,
-        [prKey]: {
-          ...legacyPr,
-          settledAt: ciSettledAt,
-          checks: { unit: { status: "completed", conclusion: "success" } },
-        },
-      },
-    };
+    const { current, legacy } = legacyV8State({
+      firstRedEmitted: true,
+      settledRedEmitted: true,
+      greenEmitted: true,
+      lastEventAt: 1_724_457_600_000,
+    });
     await writeFile(file, JSON.stringify(legacy), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates v9 PR emission flags to the current CI verdict", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v9-"));
+  it("migrates v8 legacy red flags without a green emission to red", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-"));
     const file = path.join(tempDir, "state.json");
-    const current = stateWithTree();
-    const prKey = "sjawhar/legion#7";
-    const {
-      failing: _failing,
-      ciSettledAt: _ciSettledAt,
-      verdict: _verdict,
-      ...legacyPr
-    } = current.prs[prKey];
-    const legacy = {
-      ...current,
-      version: 9,
-      prs: {
-        ...current.prs,
-        [prKey]: {
-          ...legacyPr,
-          firstRedEmitted: false,
-          settledRedEmitted: false,
-          greenEmitted: true,
-          lastEventAt: 1_724_457_600_000,
-        },
-      },
-    };
+    const { current, legacy } = legacyV8State({
+      firstRedEmitted: true,
+      settledRedEmitted: true,
+      greenEmitted: false,
+      lastEventAt: 1_724_457_600_000,
+    });
+    current.prs[prKey] = { ...current.prs[prKey], verdict: "red" };
     await writeFile(file, JSON.stringify(legacy), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates v10 settlement timestamps into the CI ordering domain", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v10-"));
+  it("migrates v8 terminal failing checks to red over legacy green flags", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-"));
     const file = path.join(tempDir, "state.json");
-    const current = stateWithTree();
-    const prKey = "sjawhar/legion#7";
-    const { ciSettledAt, ...legacyPr } = current.prs[prKey];
-    const legacy = {
-      ...current,
-      version: 10,
-      prs: {
-        ...current.prs,
-        [prKey]: { ...legacyPr, settledAt: ciSettledAt },
+    const { current, legacy } = legacyV8State({
+      checks: {
+        lint: { status: "completed", conclusion: "failure" },
+        unit: { status: "completed", conclusion: "success" },
       },
-    };
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: true,
+      lastEventAt: 1_724_457_600_000,
+    });
+    current.prs[prKey] = { ...current.prs[prKey], verdict: "red" };
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v8 terminal non-success checks to red", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-"));
+    const file = path.join(tempDir, "state.json");
+    const { current, legacy } = legacyV8State({
+      checks: {
+        integration: { status: "completed", conclusion: "cancelled" },
+        unit: { status: "completed", conclusion: "success" },
+      },
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: true,
+      lastEventAt: 1_724_457_600_000,
+    });
+    current.prs[prKey] = { ...current.prs[prKey], verdict: "red" };
     await writeFile(file, JSON.stringify(legacy), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
