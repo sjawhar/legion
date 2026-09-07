@@ -58,8 +58,8 @@ func TestRenderSummaryJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatalf("decode rendered summary: %v", err)
 	}
-	if _, ok := payload["generation"]; ok {
-		t.Fatal("rendered summary retains removed generation")
+	if got := string(payload["generation"]); got != "0" {
+		t.Fatalf("generation = %s, want 0", got)
 	}
 	if got := string(payload["latest_check_run_id"]); got != "1" {
 		t.Fatalf("latest_check_run_id = %s, want 1", got)

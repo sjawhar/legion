@@ -66,8 +66,9 @@ type Summary struct {
 	Repo   string `json:"repo"`
 	Number string `json:"number"`
 	SHA    string `json:"sha"`
-	// LatestCheckRunID is the max over the check runs this settlement actually uses—the latest run per display name—not over every run ever seen for the head; it equals GitHub's REST check_run.id, which the GraphQL CheckRun.databaseId also reports.
+	// LatestCheckRunID is the max over known check-run IDs in this settlement.
 	LatestCheckRunID     uint64         `json:"latest_check_run_id"`
+	Generation           uint64         `json:"generation"`
 	SettledAt            int64          `json:"settled_at,omitempty"`
 	SupersededSettlement string         `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup    `json:"failed"`
@@ -86,7 +87,7 @@ func renderSummary(s State) Summary {
 	failingChecks := make([]FailingCheck, 0)
 	var latestCheckRunID uint64
 	for key, check := range s.Checks {
-		if uint64(check.CheckRunID) > latestCheckRunID {
+		if check.CheckRunID > 0 && uint64(check.CheckRunID) > latestCheckRunID {
 			latestCheckRunID = uint64(check.CheckRunID)
 		}
 		name := check.Name
@@ -112,6 +113,7 @@ func renderSummary(s State) Summary {
 		Number:           s.Number,
 		SHA:              s.SHA,
 		LatestCheckRunID: latestCheckRunID,
+		Generation:       s.Generation,
 		Failed:           failed,
 		Running:          group(groups[catRunning]),
 		Passed:           group(groups[catPassed]),

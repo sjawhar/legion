@@ -482,6 +482,119 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("re-settled summary = %q", third.PayloadSummary)
 	}
 }
+func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record build: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "850", "https://example.test/850", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record failed lint: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("settlement count = %d, want 2", got)
+	}
+
+	type payload struct {
+		LatestCheckRunID uint64      `json:"latest_check_run_id"`
+		Generation       *uint64     `json:"generation"`
+		Failed           StatusGroup `json:"failed"`
+		Passed           StatusGroup `json:"passed"`
+	}
+	var first, second payload
+	items := pub.all()
+	if err := json.Unmarshal([]byte(items[0].Payload), &first); err != nil {
+		t.Fatalf("decode first settlement: %v", err)
+	}
+	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
+		t.Fatalf("decode second settlement: %v", err)
+	}
+	if first.LatestCheckRunID != 900 || first.Generation == nil || *first.Generation != 0 ||
+		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
+		t.Fatalf("first settlement = %+v, want generation 0 green build at run 900", first)
+	}
+	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation != 1 ||
+		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "lint" ||
+		second.Passed.Count != 1 || strings.Join(second.Passed.Checks, ",") != "build" {
+		t.Fatalf("second settlement = %+v, want generation 1 red lint with max run 900", second)
+	}
+}
+
+func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record successful build: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+
+	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://example.test/900", "completed", "failure", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record failed in-place build update: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("settlement count = %d, want 2", got)
+	}
+
+	type payload struct {
+		LatestCheckRunID uint64      `json:"latest_check_run_id"`
+		Generation       *uint64     `json:"generation"`
+		Failed           StatusGroup `json:"failed"`
+		Passed           StatusGroup `json:"passed"`
+	}
+	var first, second payload
+	items := pub.all()
+	if err := json.Unmarshal([]byte(items[0].Payload), &first); err != nil {
+		t.Fatalf("decode first settlement: %v", err)
+	}
+	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
+		t.Fatalf("decode second settlement: %v", err)
+	}
+	if first.LatestCheckRunID != 900 || first.Generation == nil || *first.Generation != 0 ||
+		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
+		t.Fatalf("first settlement = %+v, want generation 0 green build at run 900", first)
+	}
+	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation != 1 ||
+		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "build" || second.Passed.Count != 0 {
+		t.Fatalf("second settlement = %+v, want generation 1 red build at run 900", second)
+	}
+}
+
 func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()

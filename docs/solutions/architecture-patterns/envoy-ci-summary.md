@@ -33,5 +33,8 @@ from replacing a newer watcher state.
 ## Envelope
 
 The payload is the full status summary: every check group and failing check URLs.
-Consumers order summaries with `latest_check_run_id`, the largest check-run ID among the retained checks.
-The summary waits for `ENVOY_CI_DEBOUNCE` (default `5s`), all check runs to be terminal, and every observed suite to be `completed`; heads with no suite still settle after terminal checks.
+Consumers order summaries for one SHA lexicographically by `(latest_check_run_id, generation)`, with
+the former the largest known check-run ID in the settlement. Equal pairs rely on the changed check set
+to distinguish duplicate delivery from a new settlement. The summary waits for `ENVOY_CI_DEBOUNCE`
+(default `5s`), all check runs to be terminal, and every observed suite to be `completed`; heads with
+no suite still settle after terminal checks.

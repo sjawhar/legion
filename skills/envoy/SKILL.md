@@ -100,7 +100,9 @@ and every recorded GitHub check suite to be `completed`. It covers those reporte
 for the head, not GitHub's required-checks set; until then, a silent subscription is normal.
 
 Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"`
-payload with the monotonic `latest_check_run_id`, the highest GitHub check-run ID in the settlement; consumers keep the highest `latest_check_run_id` per SHA because Envoy and GitHub's API see the same IDs.
+payload with `latest_check_run_id`, the highest GitHub check-run ID in the settlement. Consumers order
+summaries for one SHA lexicographically by `(latest_check_run_id, generation)`; an equal pair uses the
+changed check set to distinguish a duplicate delivery from a new settlement.
 
 ## When a subscription is silent
 
