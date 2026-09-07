@@ -175,8 +175,11 @@ func (r *Registry) deleteInterest(sessionID string) error {
 		return nil
 	}
 
+	// KeyValue.Delete does not return its revision. A successful delete must
+	// still fence off any watcher update from the preceding revision while the
+	// delete marker remains pending.
 	r.mu.Lock()
-	r.evictCachedInterestLocked(sessionID, revision)
+	r.evictCachedInterestLocked(sessionID, revision+1)
 	r.mu.Unlock()
 	return nil
 }

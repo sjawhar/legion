@@ -1551,3 +1551,54 @@ func (kv *interleavingPutKeyValue) Put(key string, value []byte) (uint64, error)
 	}
 	return revision, nil
 }
+
+func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_delete"
+		machineID = "example-host"
+		topic     = "notifications.delete"
+	)
+	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{topic})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get seeded interest: %v", err)
+	}
+
+	reg.kv = &historyFailKeyValue{
+		KeyValue: kv,
+		err:      errors.New("injected history failure"),
+	}
+	if err := reg.removeInterestTopics(sessionID, nil); err != nil {
+		t.Fatalf("remove all: %v", err)
+	}
+
+	// This is the same cache mutation performed by a WatchAll update that was
+	// queued before the delete marker. Its older revision must stay rejected.
+	reg.mu.Lock()
+	reg.cacheInterestLocked(sessionID, item, entry.Revision())
+	reg.mu.Unlock()
+
+	if got := reg.Match(machineID, topic); len(got) != 0 {
+		t.Fatalf("stale watcher update restored deleted route: %v", got)
+	}
+	if _, err := reg.Get(sessionID); err == nil {
+		t.Fatal("Get returned a session restored by a stale watcher update")
+	}
+}
+
+type historyFailKeyValue struct {
+	natsgo.KeyValue
+
+	err error
+}
+
+func (kv *historyFailKeyValue) History(string, ...natsgo.WatchOpt) ([]natsgo.KeyValueEntry, error) {
+	return nil, kv.err
+}

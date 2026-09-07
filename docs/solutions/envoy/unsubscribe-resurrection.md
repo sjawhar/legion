@@ -42,6 +42,10 @@ Each cached entry keeps the KV revision that produced it. A local write-through 
 applies only when its revision is at least as new as the cached revision; delete tombstones retain
 their revision so a delayed older write cannot restore a removed route.
 
+When the KV history lookup cannot return the delete marker's exact revision, the cache records a
+one-revision-higher tombstone until the watcher supplies the marker. That lower bound rejects any
+pending update from before the successful deletion.
+
 KV watchers evict a cache entry when decoding its value fails and emit a warning with the key and
 revision. Matching then treats the route as absent rather than delivering using stale state.
 
