@@ -67,7 +67,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			}
 		}
 
-		state, claimed, err := store.ClaimSettlement(key, cached.Hash(), cached.Generation)
+		state, claimed, err := store.ClaimSettlement(key, cached.Hash(), cached.Generation, now, debounce)
 		if err != nil {
 			logger.Warn("checks claim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))
 			continue

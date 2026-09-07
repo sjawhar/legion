@@ -255,7 +255,7 @@ func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
 		t.Fatalf("delayed suite re-armed state: %+v", suite)
 	}
 	state := getState(t, s, owner, repo, number, sha)
-	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, number, sha), state.Hash(), state.Generation)
+	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, number, sha), state.Hash(), state.Generation, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("claim settlement: %v", err)
 	}
@@ -527,7 +527,7 @@ func TestClaimSettlementRefusesWhenDurableHeadChanged(t *testing.T) {
 	if err := s.RecordHead(owner, repo, pr, shaB, "2026-09-07T03:00:01Z"); err != nil {
 		t.Fatalf("record replacement head: %v", err)
 	}
-	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, shaA), state.Hash(), state.Generation)
+	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, shaA), state.Hash(), state.Generation, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("claim settlement: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestClaimSettlementRefusesWhenHashMoved(t *testing.T) {
 		t.Fatalf("record rerun: %v", err)
 	}
 
-	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), initial.Hash(), initial.Generation)
+	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), initial.Hash(), initial.Generation, time.Now().UnixMilli(), 0)
 	if err != nil {
 		t.Fatalf("claim settlement: %v", err)
 	}
@@ -566,6 +566,50 @@ func TestClaimSettlementRefusesWhenHashMoved(t *testing.T) {
 	}
 	if getState(t, s, owner, repo, pr, sha).Claim != nil {
 		t.Fatal("hash-moved state gained a settlement claim")
+	}
+}
+
+func TestClaimSettlementRechecksDurableDebounce(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	debounce := time.Second
+	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+		t.Fatalf("record initial terminal check: %v", err)
+	}
+	stale := getState(t, s, owner, repo, pr, sha)
+	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801-rerendered", "completed", "success", ""); err != nil {
+		t.Fatalf("record changed terminal check: %v", err)
+	}
+	durable := getState(t, s, owner, repo, pr, sha)
+	if stale.Hash() != durable.Hash() || stale.Generation != durable.Generation {
+		t.Fatalf("changed terminal metadata altered settlement identity: stale=%+v durable=%+v", stale, durable)
+	}
+
+	key := Key(owner, repo, pr, sha)
+	_, claimed, err := s.ClaimSettlement(key, stale.Hash(), stale.Generation, durable.LastEventAt+debounce.Milliseconds()-1, debounce)
+	if err != nil {
+		t.Fatalf("claim inside durable debounce: %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimSettlement claimed inside the durable debounce window")
+	}
+	if getState(t, s, owner, repo, pr, sha).Claim != nil {
+		t.Fatal("durable-debounce rejection created a claim")
+	}
+
+	_, claimed, err = s.ClaimSettlement(key, stale.Hash(), stale.Generation, durable.LastEventAt+debounce.Milliseconds(), debounce)
+	if err != nil {
+		t.Fatalf("claim after durable debounce: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimSettlement did not claim after the durable debounce window")
 	}
 }
 
@@ -583,7 +627,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 		t.Fatalf("record check: %v", err)
 	}
 	state := getState(t, s, owner, repo, pr, sha)
-	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), state.Hash(), state.Generation)
+	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), state.Hash(), state.Generation, time.Now().UnixMilli(), 0)
 	if err != nil || !claimed {
 		t.Fatalf("claim settlement = (%+v, %t, %v), want claimed state", claimedState, claimed, err)
 	}

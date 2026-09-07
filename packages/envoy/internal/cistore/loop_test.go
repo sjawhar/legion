@@ -139,7 +139,10 @@ func setLastEventAt(t *testing.T, store *Store, owner, repo, number, sha string,
 	deadline := time.After(5 * time.Second)
 	for {
 		for _, cached := range store.List() {
-			if Key(cached.Owner, cached.Repo, cached.Number, cached.SHA) == key && cached.LastEventAt == at {
+			if Key(cached.Owner, cached.Repo, cached.Number, cached.SHA) == key &&
+				cached.LastEventAt == at &&
+				cached.Generation == state.Generation &&
+				cached.SettledEmitted == state.SettledEmitted {
 				return
 			}
 		}
@@ -645,5 +648,97 @@ func TestSummaryTickReclaimsStaleClaim(t *testing.T) {
 	}
 	if settled := getState(t, store, owner, repo, number, sha); !settled.SettledEmitted || settled.Claim != nil {
 		t.Fatalf("stale claim final state = %+v, want settled with no claim", settled)
+	}
+}
+
+func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	debounce := time.Second
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "813", "https://example.test/813", "completed", "success", ""); err != nil {
+		t.Fatalf("record initial terminal check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, debounce, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("initial terminal check published %d envelopes, want 1", got)
+	}
+	first := pub.last()
+
+	if err := store.Record(owner, repo, number, sha, "build", "813", "https://example.test/813-rerendered", "completed", "success", ""); err != nil {
+		t.Fatalf("record changed terminal check: %v", err)
+	}
+	runSummaryTick(store, pub, debounce, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("changed terminal check published %d envelopes before debounce, want 1", got)
+	}
+
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, debounce, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("changed terminal check published %d envelopes after debounce, want 2", got)
+	}
+	if second := pub.last(); second.DedupeKey == first.DedupeKey {
+		t.Fatalf("changed terminal check reused dedupe key %q", second.DedupeKey)
+	}
+}
+
+func TestSummaryTickPublishesLegacyResettledAsGenerationOne(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	legacy := []byte(`{
+		"owner":"example-org",
+		"repo":"example-repo",
+		"number":"42",
+		"sha":"abcdef1234567890abcdef1234567890abcdef12",
+		"checks":{
+			"build":{
+				"check_run_id":"814",
+				"url":"https://example.test/814",
+				"status":"completed",
+				"conclusion":"success"
+			}
+		},
+		"resettled":true
+	}`)
+	if _, err := store.kv.Put(Key(owner, repo, number, sha), legacy); err != nil {
+		t.Fatalf("store legacy state: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+
+	runSummaryTick(store, pub, 0, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("legacy resettled state published %d envelopes, want 1", got)
+	}
+	if got := pub.last().DedupeKey; !strings.HasSuffix(got, ".g1") {
+		t.Fatalf("legacy resettled dedupe key = %q, want generation one", got)
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode legacy resettled summary: %v", err)
+	}
+	if summary.SupersededSettlement != "true" {
+		t.Fatalf("legacy resettled summary = %+v, want superseded settlement", summary)
 	}
 }

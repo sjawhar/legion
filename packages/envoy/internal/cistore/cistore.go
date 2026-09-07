@@ -84,6 +84,24 @@ type State struct {
 	Claim          *SettlementClaim `json:"claim,omitempty"`
 }
 
+// UnmarshalJSON maps the retired resettled marker to the generation that
+// publishes the equivalent re-settlement envelope.
+func (state *State) UnmarshalJSON(data []byte) error {
+	type stateAlias State
+	*state = State{}
+	wire := struct {
+		*stateAlias
+		Resettled bool `json:"resettled"`
+	}{stateAlias: (*stateAlias)(state)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Resettled && state.Generation == 0 {
+		state.Generation = 1
+	}
+	return nil
+}
+
 const headRecordKind = "head"
 
 type headRecord struct {
@@ -376,9 +394,8 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 		if current, ok := st.Checks[checkName]; ok && sameCheck(current, next) {
 			return false
 		}
-		before := st.Hash()
 		st.Checks[checkName] = next
-		rearm(st, before != st.Hash())
+		rearm(st)
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
 	})
@@ -396,9 +413,8 @@ func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusio
 				return false
 			}
 		}
-		before := st.Hash()
 		st.Suites[suiteID] = next
-		rearm(st, before != st.Hash())
+		rearm(st)
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
 	})
@@ -457,8 +473,8 @@ func sameCheck(current, next Check) bool {
 		current.ObservedAt == next.ObservedAt
 }
 
-func rearm(st *State, terminalPictureChanged bool) {
-	if !terminalPictureChanged || (!st.SettledEmitted && st.Claim == nil) {
+func rearm(st *State) {
+	if !st.SettledEmitted && st.Claim == nil {
 		return
 	}
 	st.Generation++
@@ -611,8 +627,9 @@ func (s *Store) List() []State {
 }
 
 // ClaimSettlement atomically acquires the right to publish a ready state
-// generation after re-reading the durable state and head record.
-func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64) (State, bool, error) {
+// generation after re-reading the durable state and head record. It applies
+// the debounce window to the durable LastEventAt value, not the cache snapshot.
+func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64, now int64, debounce time.Duration) (State, bool, error) {
 	entry, err := s.kv.Get(key)
 	if err != nil {
 		return State{}, false, err
@@ -625,7 +642,8 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 		state.Claim != nil ||
 		state.Generation != expectedGeneration ||
 		state.Hash() != expectedHash ||
-		!settlementReady(state) {
+		!settlementReady(state) ||
+		state.LastEventAt+debounce.Milliseconds() > now {
 		return State{}, false, nil
 	}
 	headMatches, err := s.durableHeadMatches(state)
@@ -638,7 +656,7 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 	state.Claim = &SettlementClaim{
 		Hash:       expectedHash,
 		Generation: expectedGeneration,
-		ClaimedAt:  time.Now().UnixMilli(),
+		ClaimedAt:  now,
 	}
 	buf, err := json.Marshal(state)
 	if err != nil {
