@@ -89,15 +89,19 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 		t.Fatalf("send status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	t.Logf("send success: %s", recorder.Body.String())
-	var response struct {
-		contracts.Envelope
+	responseBody := recorder.Body.Bytes()
+	var response contracts.Envelope
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		t.Fatalf("decode send envelope: %v", err)
+	}
+	var metadata struct {
 		Recipient string `json:"recipient"`
 	}
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf("decode send response: %v", err)
+	if err := json.Unmarshal(responseBody, &metadata); err != nil {
+		t.Fatalf("decode send recipient: %v", err)
 	}
-	if response.Recipient != "ses_target" {
-		t.Fatalf("recipient = %q, want ses_target", response.Recipient)
+	if metadata.Recipient != "ses_target" {
+		t.Fatalf("recipient = %q, want ses_target", metadata.Recipient)
 	}
 	if response.PayloadSummary != strings.Repeat("a", 160) {
 		t.Fatalf("payload_summary = %q, want first 160 characters", response.PayloadSummary)
@@ -106,7 +110,7 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 		t.Fatalf("payload = %q, want original message", response.Payload)
 	}
 	if response.InReplyTo != "evt-parent" || response.Supersedes != "evt-old" || response.Urgency != "high" || response.ExpectsReply != "required" {
-		t.Fatalf("correlation fields = %+v", response.Envelope)
+		t.Fatalf("correlation fields = %+v", response)
 	}
 	if response.ExpiresAt == nil || *response.ExpiresAt != 1757221200000 {
 		t.Fatalf("expires_at = %v, want 1757221200000", response.ExpiresAt)
@@ -277,11 +281,10 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		}
 		t.Logf("publish live-held role: %s", recorder.Body.String())
 		var response struct {
-			contracts.Envelope
 			Holder string `json:"holder"`
 		}
 		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-			t.Fatalf("decode publish response: %v", err)
+			t.Fatalf("decode publish holder: %v", err)
 		}
 		if response.Holder != "ses_holder" {
 			t.Fatalf("holder = %q, want ses_holder", response.Holder)
@@ -546,9 +549,7 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
-	var response struct {
-		contracts.Envelope
-	}
+	var response contracts.Envelope
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode send response: %v", err)
 	}

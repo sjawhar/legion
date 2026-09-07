@@ -551,10 +551,11 @@ func TestDelivery_ReplyToInBody(t *testing.T) {
 		t.Fatalf("expected 1 part, got %d", len(parsed.Parts))
 	}
 	text := parsed.Parts[0]["text"]
-	if !contains(text, "ses_sender_xyz") {
-		t.Fatalf("text should contain source session 'ses_sender_xyz', got: %s", text)
+	header := "[NOTIFICATION to you from ses_sender_xyz]"
+	if !contains(text, header) {
+		t.Fatalf("text should contain header %q, got: %s", header, text)
 	}
-	replyInstruction := `Use envoy_send(session_id="ses_sender_xyz", message="...") to reply to this message.`
+	replyInstruction := `Reply With: envoy_send(session_id="ses_sender_xyz", message="...")`
 	if !contains(text, replyInstruction) {
 		t.Fatalf("text should contain exact reply instruction %q, got: %s", replyInstruction, text)
 	}
