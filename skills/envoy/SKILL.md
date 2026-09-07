@@ -102,10 +102,10 @@ for the head, not GitHub's required-checks set; until then, a silent subscriptio
 Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"`
 payload with `latest_check_run_id`, the highest GitHub check-run ID in the settlement. Consumers order
 summaries for one SHA lexicographically by `(latest_check_run_id, generation)`; an equal pair is a
-duplicate only when its `snapshot` matches. A verdict a consumer reconciled from GitHub's rollup carries no generation; against it an equal-id settlement is ordered by `latest_completed_at` (GitHub's clock), and on a tie GitHub's view wins.
+duplicate only when its `snapshot` matches. A consumer that reconciles a verdict from GitHub's rollup keeps the listener identity it last accepted (for duplicate detection) and raises a completion watermark from GitHub's `completedAt`; an equal-id settlement must then pass BOTH orderings — a higher generation AND a `latest_completed_at` not earlier than the watermark — and against a watermark GitHub set with no listener identity an equal completion is also stale (GitHub's view wins the tie). A genuinely newer settlement completing within the same second as GitHub's read is therefore delayed until the next reconciliation, not lost.
 
-After the seven-day KV TTL recreates a record, its generation restarts at 0; if the first observation
-updates an existing lower-ID run, consumers drop both until resync reads GitHub. A legacy in-progress
+After the seven-day KV TTL recreates a record, its generation restarts at 0 (consumers keep the higher generation they already hold at that id, so such settlements stay rejected until a newer run raises the id); if the first observation
+updates an existing lower-ID run, consumers drop both; the consumer's verdict is repaired when it next reads GitHub, and its live fence moves again only when a newer run raises the id. A head settles only when at least one completed check carries a GitHub completion time (`completed_at`; for records written before this release, `updated_at` of a completed check): a head whose completed checks all lack one stays silent until a check with a completion time is observed — rerun one. A legacy in-progress
 check whose completion is never observed holds its head unsettled until it reruns; rerun the affected
 check to release it.
 

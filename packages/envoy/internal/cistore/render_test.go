@@ -92,8 +92,8 @@ func TestRenderSummaryCarriesSnapshotAndLatestCompletedAt(t *testing.T) {
 		Number: "42",
 		SHA:    "abcdef",
 		Checks: map[string]Check{
-			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T03:00:00Z"},
-			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "failure", ObservedAt: "2026-09-07T03:01:00Z"},
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T03:00:00Z", CompletedAt: "2026-09-07T03:00:00Z"},
+			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "failure", ObservedAt: "2026-09-07T03:01:00Z", CompletedAt: "2026-09-07T03:01:00Z"},
 			"test":  {CheckRunID: 902, Status: "in_progress", ObservedAt: "2026-09-07T03:02:00Z"},
 		},
 	}

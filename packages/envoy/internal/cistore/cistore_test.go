@@ -67,6 +67,8 @@ func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url,
 		Status:     status,
 		Conclusion: conclusion,
 		ObservedAt: observedAt,
+		// A completed observation's timestamp is its completion time.
+		CompletedAt: map[bool]string{true: observedAt, false: ""}[status == "completed"],
 	})
 }
 
@@ -193,6 +195,31 @@ func TestStateUnmarshalJSONMapsLegacyCheckUpdatedAtToObservedAt(t *testing.T) {
 	}
 	if latest := renderSummary(state).LatestCompletedAt; latest != "2026-09-07T03:01:00Z" {
 		t.Fatalf("latest_completed_at = %q, want most recent legacy completion timestamp", latest)
+	}
+}
+
+func TestCompletedCheckWithoutCompletionTimeNeitherReadyNorInWatermark(t *testing.T) {
+	// GitHub reported the run completed but sent no completed_at; the start
+	// time orders the observation and must not stand in for a completion.
+	st := State{
+		SHA: "abcdef1234567890abcdef1234567890abcdef12",
+		Checks: map[string]Check{
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T02:00:00Z"},
+		},
+	}
+	if hasCompletedTimestamp(st.Checks) {
+		t.Fatalf("a start time satisfied the completion requirement")
+	}
+	if renderSummary(st).LatestCompletedAt != "" {
+		t.Fatalf("a start time entered the watermark: %q", renderSummary(st).LatestCompletedAt)
+	}
+	// Another completed check with a real completion supplies both.
+	st.Checks["lint"] = Check{CheckRunID: 901, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T02:05:00Z", CompletedAt: "2026-09-07T02:05:00Z"}
+	if !hasCompletedTimestamp(st.Checks) {
+		t.Fatalf("a completed check with completed_at should satisfy readiness")
+	}
+	if got := renderSummary(st).LatestCompletedAt; got != "2026-09-07T02:05:00Z" {
+		t.Fatalf("watermark = %q, want lint's completion", got)
 	}
 }
 

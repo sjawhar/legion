@@ -98,11 +98,11 @@ func renderSummary(s State) Summary {
 			latestCheckRunID = uint64(check.CheckRunID)
 		}
 		if check.Status == "completed" {
-			if observedAt, err := time.Parse(time.RFC3339, check.ObservedAt); err == nil &&
-				(latestCompletedAt == "" || observedAt.After(latestCompleted) ||
-					(observedAt.Equal(latestCompleted) && check.ObservedAt > latestCompletedAt)) {
-				latestCompleted = observedAt
-				latestCompletedAt = check.ObservedAt
+			if completedAt, err := time.Parse(time.RFC3339, check.CompletedAt); err == nil &&
+				(latestCompletedAt == "" || completedAt.After(latestCompleted) ||
+					(completedAt.Equal(latestCompleted) && check.CompletedAt > latestCompletedAt)) {
+				latestCompleted = completedAt
+				latestCompletedAt = check.CompletedAt
 			}
 		}
 		name := check.Name

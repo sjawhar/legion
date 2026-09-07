@@ -58,8 +58,14 @@ export type SettlementClassification = "stale" | "duplicate" | "conflict" | "new
 
 /**
  * Classifies a live settlement against the per-head fence. Check-run ids order
- * every source; a live fence uses the listener's state generation and snapshot,
- * while a GitHub fence uses GitHub's completed-at clock.
+ * every source. At an equal id two independent orderings apply and both must
+ * pass: the listener's state generation (against a live fence: lower is stale,
+ * equal is a duplicate or a conflict) and GitHub's completion watermark
+ * (`ciLatestCompletedAt`, raised by every accepted settlement and by every
+ * GitHub reconciliation): a settlement whose completion predates the watermark
+ * is stale whatever its generation, because GitHub has since seen a later
+ * completion; against a GitHub-authored fence an equal completion is also
+ * stale (GitHub's view wins the tie).
  */
 export function classifySettlement(
   pr: PrState,
@@ -71,8 +77,13 @@ export function classifySettlement(
 
   if (pr.ciSettlementGeneration !== null) {
     if (incoming.generation < pr.ciSettlementGeneration) return "stale";
-    if (incoming.generation > pr.ciSettlementGeneration) return "newer";
-    return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
+    if (incoming.generation === pr.ciSettlementGeneration) {
+      return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
+    }
+    if (pr.ciLatestCompletedAt !== null && incoming.latestCompletedAt < pr.ciLatestCompletedAt) {
+      return "stale";
+    }
+    return "newer";
   }
 
   if (pr.ciLatestCompletedAt === null || incoming.latestCompletedAt > pr.ciLatestCompletedAt) {
@@ -90,15 +101,20 @@ export interface CiFence {
 }
 
 /**
- * Whether a fence read from GitHub's rollup may replace the stored one: a
- * higher id always; an equal id only when the stored fence is also GitHub's
- * (a live fence's identity is never erased by a same-id refresh); a lower id
- * never. The live counterpart is `classifySettlement`.
+ * What a fence read from GitHub's rollup may do to the stored one: replace it
+ * (a higher id; or an equal id when the stored fence is also GitHub's); raise
+ * only the completion watermark (an equal id over a live fence — the listener
+ * identity stays for duplicate detection, GitHub's later completion still
+ * orders later live settlements); or nothing (a lower id). The live
+ * counterpart is `classifySettlement`.
  */
-export function acceptGitHubFence(pr: PrState, latestCheckRunId: number | null): boolean {
-  if (latestCheckRunId === null) return false;
-  if (pr.ciLatestRunId === null || latestCheckRunId > pr.ciLatestRunId) return true;
-  return latestCheckRunId === pr.ciLatestRunId && pr.ciSettlementGeneration === null;
+export type GitHubFenceEffect = "replace" | "watermark" | "none";
+
+export function acceptGitHubFence(pr: PrState, latestCheckRunId: number | null): GitHubFenceEffect {
+  if (latestCheckRunId === null) return "none";
+  if (pr.ciLatestRunId === null || latestCheckRunId > pr.ciLatestRunId) return "replace";
+  if (latestCheckRunId < pr.ciLatestRunId) return "none";
+  return pr.ciSettlementGeneration === null ? "replace" : "watermark";
 }
 
 /** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */
@@ -107,6 +123,14 @@ export function writeCiFence(pr: PrState, fence: CiFence): void {
   pr.ciSettlementGeneration = fence.generation;
   pr.ciSnapshot = fence.snapshot;
   pr.ciLatestCompletedAt = fence.latestCompletedAt;
+}
+
+/** Raises the completion watermark from a GitHub reconciliation at the stored id; never lowers it. */
+export function raiseCompletionWatermark(pr: PrState, latestCompletedAt: number | null): void {
+  if (latestCompletedAt === null) return;
+  if (pr.ciLatestCompletedAt === null || latestCompletedAt > pr.ciLatestCompletedAt) {
+    pr.ciLatestCompletedAt = latestCompletedAt;
+  }
 }
 
 /** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */

@@ -1061,6 +1061,187 @@ it("preserves a live check-run fence through a same-head status-context resync",
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
 });
+it("a delayed higher-generation settlement cannot reverse a same-id GitHub reconciliation that saw a later completion", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  // Live: (900, gen 1) green, completed 10:00.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 1,
+        snapshot: "hash-a",
+        latest_completed_at: "2026-09-07T10:00:00Z",
+        settled_at: 1,
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "green",
+    ciSettlementGeneration: 1,
+  });
+
+  // Run 900 flipped to failure at 10:02; GitHub's rollup shows it before the
+  // listener's red reaches the daemon. Resync applies red and raises the
+  // completion watermark while keeping the live identity.
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "failing",
+        failingChecks: ["build"],
+        cancelledCount: 0,
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 900,
+        latestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 2,
+  });
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+    ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+  });
+
+  // A green settlement the listener emitted before the failure (generation 2 —
+  // a URL-only change re-versioned the record) arrives late. Its completion
+  // predates the watermark: stale, whatever its generation.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 2,
+        snapshot: "hash-b",
+        latest_completed_at: "2026-09-07T10:00:00Z",
+        settled_at: 3,
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciSettlementGeneration: 1,
+    ciLatestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+
+  // The listener's own red for that failure (generation 3, completed 10:02)
+  // passes both orderings.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 3,
+        snapshot: "hash-c",
+        latest_completed_at: "2026-09-07T10:02:00Z",
+        settled_at: 4,
+        failed: { count: 1, checks: ["build"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    ciSettlementGeneration: 3,
+    ciSnapshot: "hash-c",
+  });
+  // Same verdict and failing set as the reconciled red: quiet.
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
+it("an equal-second completion against a GitHub-authored fence is stale: GitHub wins the tie", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "failing",
+        failingChecks: ["build"],
+        cancelledCount: 0,
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 900,
+        latestCompletedAt: Date.parse("2026-09-07T10:02:00Z"),
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 2,
+  });
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    ciSettlementGeneration: null,
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 0,
+        snapshot: "hash-a",
+        latest_completed_at: "2026-09-07T10:02:00Z",
+        settled_at: 3,
+      })
+    )
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["build"],
+    ciSettlementGeneration: null,
+  });
+  expect(published).toEqual([]);
+  pump.stop();
+});
 it("a same-head resync refresh at an equal check-run id never erases the known generation", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();

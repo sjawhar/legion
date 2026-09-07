@@ -12,6 +12,7 @@ import {
   type Effect,
   type EnvelopeJson,
   type ReducerConfig,
+  raiseCompletionWatermark,
   reduceGithubEvent,
   resetPrHead,
   settleCiVerdict,
@@ -207,10 +208,13 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
     }
-    // GitHub's rollup authors a fence with no listener identity; it replaces
-    // the stored one only where acceptGitHubFence allows.
+    // GitHub's rollup authors a fence with no listener identity. It replaces
+    // the stored one, or only raises its completion watermark (an equal id over
+    // a live fence keeps the listener identity for duplicate detection), or
+    // does nothing — acceptGitHubFence decides.
+    const fenceEffect = acceptGitHubFence(pr, status.latestCheckRunId);
     const fence: CiFence | undefined =
-      status.latestCheckRunId !== null && acceptGitHubFence(pr, status.latestCheckRunId)
+      fenceEffect === "replace" && status.latestCheckRunId !== null
         ? {
             latestCheckRunId: status.latestCheckRunId,
             generation: null,
@@ -218,6 +222,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
             latestCompletedAt: status.latestCompletedAt,
           }
         : undefined;
+    if (fenceEffect === "watermark") raiseCompletionWatermark(pr, status.latestCompletedAt);
     const failing = status.failingChecks ?? [];
     // Mirror live intake: red only for actual failures; a cancelled-only
     // failing rollup, like a pending one, uncertifies a green head.
