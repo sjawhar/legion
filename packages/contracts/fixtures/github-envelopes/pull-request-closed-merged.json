@@ -1,0 +1,20 @@
+{
+  "topic": "notifications.github.example-org.example-repo.pr.42",
+  "payload_summary": "pr merged: example-org/example-repo#42 by octocat → 3333333",
+  "payload": {
+    "action": "closed",
+    "author": "octocat",
+    "base_ref": "main",
+    "body": "Exercise the listener with a merged close.",
+    "head_ref": "acceptance-driver",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "kind": "pr",
+    "merge_commit_sha": "3333333333333333333333333333333333333333",
+    "merged": "true",
+    "merged_by": "octocat",
+    "number": "42",
+    "repo": "example-org/example-repo",
+    "title": "Add local acceptance driver",
+    "url": "https://example.invalid/example-org/example-repo/pull/42"
+  }
+}

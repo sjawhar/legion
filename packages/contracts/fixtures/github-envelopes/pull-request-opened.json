@@ -1,0 +1,18 @@
+{
+  "topic": "notifications.github.example-org.example-repo.pr.42",
+  "payload_summary": "pr opened: example-org/example-repo#42 Add local acceptance driver",
+  "payload": {
+    "action": "opened",
+    "author": "octocat",
+    "base_ref": "main",
+    "body": "Exercise the listener with public fixture data.",
+    "head_ref": "acceptance-driver",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "kind": "pr",
+    "merged": "false",
+    "number": "42",
+    "repo": "example-org/example-repo",
+    "title": "Add local acceptance driver",
+    "url": "https://example.invalid/example-org/example-repo/pull/42"
+  }
+}
