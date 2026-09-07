@@ -29,14 +29,23 @@ describe("gen-go", () => {
 \tRoles     []string \`json:"roles,omitempty"\`
 }`);
 
-    const goTest = Bun.spawn(["go", "test", "./internal/contracts/...", "-run", "^TestEnvelopeSignalQualityFieldsRoundTrip$"], {
-      cwd: resolve(repoRoot, "packages/envoy"),
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    const goStderr = await new Response(goTest.stderr).text();
+    const goTest = Bun.spawn(
+      ["go", "test", "./internal/contracts/...", "-run", "^TestEnvelopeSignalQualityFieldsRoundTrip$"],
+      {
+        cwd: resolve(repoRoot, "packages/envoy"),
+        stderr: "pipe",
+        stdout: "pipe",
+      }
+    );
+    // On a cold runner the toolchain writes `go: downloading …` to stderr; that is
+    // not a test failure. Judge the exit code and the package result line instead.
+    const [goStdout, goStderr, goExit] = await Promise.all([
+      new Response(goTest.stdout).text(),
+      new Response(goTest.stderr).text(),
+      goTest.exited,
+    ]);
 
-    expect(goStderr).toBe("");
-    expect(await goTest.exited).toBe(0);
+    expect(goExit, `go test failed:\n${goStdout}\n${goStderr}`).toBe(0);
+    expect(goStdout).toMatch(/^ok\s+github\.com\/sjawhar\/envoy\/internal\/contracts/m);
   }, 120_000);
 });
