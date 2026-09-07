@@ -6,6 +6,8 @@ const generator = resolve(import.meta.dir, "gen-go.ts");
 const repoRoot = resolve(import.meta.dir, "../../..");
 
 describe("gen-go", () => {
+  // Spawns the generator (which shells out to gofmt) and a `go test` that compiles
+  // the contracts package from cold on a CI runner; Bun's 5 s default cannot cover it.
   test("emits the envelope sender struct", async () => {
     const process = Bun.spawn(["bun", generator], {
       cwd: repoRoot,
@@ -36,5 +38,5 @@ describe("gen-go", () => {
 
     expect(goStderr).toBe("");
     expect(await goTest.exited).toBe(0);
-  });
+  }, 120_000);
 });
