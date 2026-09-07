@@ -49,49 +49,50 @@ func githubSenderField(payload map[string]any, field string) string {
 
 // CIRecorder folds check-run, check-suite, and PR-head observations into CI state.
 type CIRecorder interface {
-	Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error
-	RecordSuite(owner, repo, number, sha, suiteID, status, conclusion string, appID ...string) error
-	RecordHead(owner, repo, number, sha string) error
+	Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error
+	RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error
+	RecordHead(owner, repo, number, sha, updatedAt string) error
 }
 
 func reviewerVerdict(name string) bool {
 	return name == "tester" || name == "architect"
 }
 
-func githubPullRequestHead(event string, payload map[string]any) (owner, repo, number, sha string, ok bool) {
+func githubPullRequestHead(event string, payload map[string]any) (owner, repo, number, sha, updatedAt string, ok bool) {
 	if event != "pull_request" {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	switch payload["action"] {
 	case "opened", "synchronize", "reopened":
 	default:
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	repository, ok := payload["repository"].(map[string]any)
 	if !ok {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	repositoryOwner, ok := repository["owner"].(map[string]any)
 	if !ok {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	owner, _ = repositoryOwner["login"].(string)
 	repo, _ = repository["name"].(string)
 	pullRequest, ok := payload["pull_request"].(map[string]any)
 	if !ok {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	head, ok := pullRequest["head"].(map[string]any)
 	if !ok {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	sha, _ = head["sha"].(string)
+	updatedAt, _ = pullRequest["updated_at"].(string)
 	value, ok := payload["number"].(float64)
 	if !ok || value != math.Trunc(value) {
-		return "", "", "", "", false
+		return "", "", "", "", "", false
 	}
 	number = strconv.FormatInt(int64(value), 10)
-	return owner, repo, number, sha, owner != "" && repo != "" && number != "" && sha != ""
+	return owner, repo, number, sha, updatedAt, owner != "" && repo != "" && number != "" && sha != "" && updatedAt != ""
 }
 
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
@@ -133,8 +134,8 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			_, _ = w.Write([]byte("ok"))
 			return
 		}
-		if owner, repo, number, sha, ok := githubPullRequestHead(event, payload); ok {
-			if err := ci.RecordHead(owner, repo, number, sha); err != nil {
+		if owner, repo, number, sha, updatedAt, ok := githubPullRequestHead(event, payload); ok {
+			if err := ci.RecordHead(owner, repo, number, sha, updatedAt); err != nil {
 				log.Printf("github ci head record failed: %v", err)
 				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 				return
@@ -145,7 +146,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
 				if o.SuiteID != "" {
-					if err := ci.RecordSuite(o.Owner, o.Repo, o.Number, o.SHA, o.SuiteID, o.Status, o.Conclusion, o.AppID); err != nil {
+					if err := ci.RecordSuite(o.Owner, o.Repo, o.Number, o.SHA, o.SuiteID, o.Status, o.Conclusion, o.AppID, o.ObservedAt); err != nil {
 						log.Printf("github ci suite record failed: %v", err)
 						http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 						return
@@ -162,7 +163,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 						continue
 					}
 				}
-				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.CheckRunID, o.URL, o.Status, o.Conclusion); err != nil {
+				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.CheckRunID, o.URL, o.Status, o.Conclusion, o.ObservedAt); err != nil {
 					log.Printf("github ci record failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return

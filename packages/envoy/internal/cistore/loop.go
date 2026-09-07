@@ -47,7 +47,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		}
 		head, knownHead := store.Head(st.Owner, st.Repo, st.Number)
 		if !knownHead {
-			continue
+			head = st.SHA
 		}
 		sum, _, err := renderSummary(st, head)
 		if err != nil {

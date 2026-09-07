@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"sort"
@@ -48,6 +49,7 @@ type Check struct {
 	URL        string `json:"url"`
 	Status     string `json:"status"`     // queued|in_progress|completed
 	Conclusion string `json:"conclusion"` // success|failure|... ("" until completed)
+	ObservedAt string `json:"observed_at"`
 	UpdatedAt  int64  `json:"updated_at"`
 }
 
@@ -57,6 +59,7 @@ type Suite struct {
 	AppID      string `json:"app_id"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	ObservedAt string `json:"observed_at"`
 }
 
 // State is the aggregated set of checks and suites for one (owner, repo, PR
@@ -76,8 +79,9 @@ type State struct {
 const headRecordKind = "head"
 
 type headRecord struct {
-	Kind string `json:"kind"`
-	SHA  string `json:"sha"`
+	Kind      string `json:"kind"`
+	SHA       string `json:"sha"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
@@ -312,15 +316,24 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 }
 
 // Record folds one check observation into the per-commit state via CAS.
-func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error {
+func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
 	return s.update(owner, repo, number, sha, func(st *State) bool {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
-		if current, ok := st.Checks[checkName]; ok && checkRunIDIsOlder(checkRunID, current.CheckRunID) {
-			return false
+		if current, ok := st.Checks[checkName]; ok {
+			if checkRunIDIsOlder(checkRunID, current.CheckRunID) ||
+				(checkRunID == current.CheckRunID && observationIsOlder(observedAt, current.ObservedAt)) {
+				return false
+			}
 		}
-		next := Check{CheckRunID: checkRunID, URL: url, Status: status, Conclusion: conclusion}
+		next := Check{
+			CheckRunID: checkRunID,
+			URL:        url,
+			Status:     status,
+			Conclusion: conclusion,
+			ObservedAt: observedAt,
+		}
 		if current, ok := st.Checks[checkName]; ok && sameCheck(current, next) {
 			return false
 		}
@@ -332,21 +345,17 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 	})
 }
 
-// RecordSuite folds a check_suite observation into the per-commit state. appID
-// is optional so callers that only have GitHub's suite identity can still use
-// the exact suite-state contract.
-func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusion string, appIDs ...string) error {
-	appID := ""
-	if len(appIDs) > 0 {
-		appID = appIDs[0]
-	}
+// RecordSuite folds a check_suite observation into the per-commit state.
+func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
 	return s.update(owner, repo, number, sha, func(st *State) bool {
 		if st.Suites == nil {
 			st.Suites = map[string]Suite{}
 		}
-		next := Suite{ID: suiteID, AppID: appID, Status: status, Conclusion: conclusion}
-		if current, ok := st.Suites[suiteID]; ok && current == next {
-			return false
+		next := Suite{ID: suiteID, AppID: appID, Status: status, Conclusion: conclusion, ObservedAt: observedAt}
+		if current, ok := st.Suites[suiteID]; ok {
+			if observationIsOlder(observedAt, current.ObservedAt) || current == next {
+				return false
+			}
 		}
 		st.Suites[suiteID] = next
 		rearm(st)
@@ -404,7 +413,8 @@ func sameCheck(current, next Check) bool {
 	return current.CheckRunID == next.CheckRunID &&
 		current.URL == next.URL &&
 		current.Status == next.Status &&
-		current.Conclusion == next.Conclusion
+		current.Conclusion == next.Conclusion &&
+		current.ObservedAt == next.ObservedAt
 }
 
 func rearm(st *State) {
@@ -412,6 +422,18 @@ func rearm(st *State) {
 		st.SettledEmitted = false
 		st.Resettled = true
 	}
+}
+
+func observationIsOlder(incoming, stored string) bool {
+	if incoming == "" || stored == "" {
+		return false
+	}
+	incomingAt, err := time.Parse(time.RFC3339, incoming)
+	if err != nil {
+		return false
+	}
+	storedAt, err := time.Parse(time.RFC3339, stored)
+	return err == nil && incomingAt.Before(storedAt)
 }
 
 func checkRunIDIsOlder(incoming, stored string) bool {
@@ -424,16 +446,59 @@ func checkRunIDIsOlder(incoming, stored string) bool {
 }
 
 // RecordHead persists the current PR head SHA. The WatchAll cache serves Head.
-func (s *Store) RecordHead(owner, repo, number, sha string) error {
+func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 	if !validHeadSHA(sha) {
 		return errors.New("cistore: invalid head SHA")
 	}
-	buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha})
+	incomingAt, err := time.Parse(time.RFC3339, updatedAt)
 	if err != nil {
-		return err
+		return fmt.Errorf("cistore: invalid head updated_at: %w", err)
 	}
-	_, err = s.kv.Put(headKey(owner, repo, number), buf)
-	return err
+	key := headKey(owner, repo, number)
+	deadline := time.Now().Add(recordBudget)
+	for attempt := 0; ; attempt++ {
+		entry, getErr := s.kv.Get(key)
+		var current headRecord
+		var rev uint64
+		switch {
+		case getErr == nil:
+			if err := json.Unmarshal(entry.Value(), &current); err != nil {
+				return err
+			}
+			rev = entry.Revision()
+		case errors.Is(getErr, nats.ErrKeyNotFound):
+			current = headRecord{Kind: headRecordKind}
+		default:
+			return getErr
+		}
+		if current.UpdatedAt != "" {
+			storedAt, err := time.Parse(time.RFC3339, current.UpdatedAt)
+			if err == nil && !incomingAt.After(storedAt) {
+				return nil
+			}
+		}
+		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt})
+		if err != nil {
+			return err
+		}
+		if rev == 0 {
+			if _, err := s.kv.Create(key, buf); err == nil {
+				return nil
+			} else if !errors.Is(err, nats.ErrKeyExists) {
+				return err
+			}
+		} else {
+			if _, err := s.kv.Update(key, buf, rev); err == nil {
+				return nil
+			} else if !isCASConflict(err) {
+				return err
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("cistore: record head exceeded CAS budget")
+		}
+		time.Sleep(casBackoff(attempt))
+	}
 }
 
 // Head returns the current PR head SHA when one has been observed.

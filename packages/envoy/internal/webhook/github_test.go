@@ -332,6 +332,7 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 			"name": "unit-tests",
 			"status": "completed",
 			"conclusion": "failure",
+			"completed_at": "2026-09-07T03:00:00Z",
 			"head_sha": "deadbeef",
 			"pull_requests": [{"number": 42}, {"number": 43}]
 		},
@@ -363,6 +364,9 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 		if rec.calls[0].number != "42" || rec.calls[1].number != "43" {
 			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].number, rec.calls[1].number)
 		}
+		if rec.calls[0].observedAt != "2026-09-07T03:00:00Z" || rec.calls[1].observedAt != "2026-09-07T03:00:00Z" {
+			t.Fatalf("check observation timestamps = %q, %q", rec.calls[0].observedAt, rec.calls[1].observedAt)
+		}
 	})
 
 	t.Run("check_suite records without publishing raw observations", func(t *testing.T) {
@@ -372,6 +376,7 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 				"id": 900,
 				"status": "completed",
 				"conclusion": "success",
+				"updated_at": "2026-09-07T03:01:00Z",
 				"head_sha": "abcdef1234567890abcdef1234567890abcdef12",
 				"app": {"id": 77},
 				"pull_requests": [{"number": 42}]
@@ -400,7 +405,7 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 		if got := rec.suiteCalls[0]; got != (suiteCall{
 			owner: "example-org", repo: "example-repo", number: "42",
 			sha: "abcdef1234567890abcdef1234567890abcdef12", suiteID: "900",
-			status: "completed", conclusion: "success", appID: "77",
+			status: "completed", conclusion: "success", appID: "77", observedAt: "2026-09-07T03:01:00Z",
 		}) {
 			t.Fatalf("suite recorder call = %+v", got)
 		}
@@ -546,6 +551,7 @@ func TestGitHubHandlerRecordsHeadOnPullRequestSynchronize(t *testing.T) {
 			"number": 42,
 			"pull_request": {
 				"head": {"sha": "abcdef1234567"},
+				"updated_at": "2026-09-07T03:00:00Z",
 				"title": "Synchronize CI"
 			},
 			"sender": {"login": "ci-user", "type": "User"},
@@ -579,7 +585,7 @@ func TestGitHubHandlerRecordsHeadOnPullRequestSynchronize(t *testing.T) {
 			t.Fatalf("head calls = %d, want 1", len(rec.headCalls))
 		}
 		if got := rec.headCalls[0]; got != (headCall{
-			owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567",
+			owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567", updatedAt: "2026-09-07T03:00:00Z",
 		}) {
 			t.Fatalf("head call = %+v", got)
 		}

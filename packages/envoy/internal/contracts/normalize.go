@@ -93,6 +93,7 @@ type CIObservation struct {
 	URL        string
 	Status     string
 	Conclusion string
+	ObservedAt string
 }
 
 // GithubCIObservations extracts one CI observation per associated PR. Both
@@ -129,11 +130,16 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		obs.CheckName = nestedString(body, key, "name")
 		obs.CheckRunID = nestedNumberString(body, key, "id")
 		obs.URL = nestedString(body, key, "html_url")
+		obs.ObservedAt = nestedString(body, key, "completed_at")
+		if obs.ObservedAt == "" {
+			obs.ObservedAt = nestedString(body, key, "started_at")
+		}
 		if obs.CheckName == "" {
 			return nil
 		}
 	} else {
 		obs.SuiteID = nestedNumberString(body, key, "id")
+		obs.ObservedAt = nestedString(body, key, "updated_at")
 		if obs.SuiteID == "" {
 			return nil
 		}
@@ -490,15 +496,29 @@ func githubSummary(event string, body map[string]any) string {
 		if line == "" {
 			line = nestedNumberString(body, "comment", "original_line")
 		}
-		summary = fmt.Sprintf(
-			"review comment on %s#%s by %s (%s:%s): %s",
-			repository,
-			number,
-			nestedString(body, "comment", "user", "login"),
-			nestedString(body, "comment", "path"),
-			line,
-			first(nestedString(body, "comment", "body"), 80),
-		)
+		author := nestedString(body, "comment", "user", "login")
+		path := nestedString(body, "comment", "path")
+		if action == "created" {
+			summary = fmt.Sprintf(
+				"review comment on %s#%s by %s (%s:%s): %s",
+				repository,
+				number,
+				author,
+				path,
+				line,
+				first(nestedString(body, "comment", "body"), 80),
+			)
+		} else {
+			summary = fmt.Sprintf(
+				"review comment %s on %s#%s by %s (%s:%s)",
+				action,
+				repository,
+				number,
+				author,
+				path,
+				line,
+			)
+		}
 	case "pull_request_review":
 		summary = fmt.Sprintf(
 			"review %s on %s#%s by %s",

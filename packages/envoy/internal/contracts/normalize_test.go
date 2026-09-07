@@ -1641,6 +1641,7 @@ func TestGithubSummary(t *testing.T) {
 			name:  "review comment includes location and excerpt",
 			event: "pull_request_review_comment",
 			body: map[string]any{
+				"action":       "created",
 				"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
 				"pull_request": map[string]any{"number": 18},
 				"comment": map[string]any{
@@ -1651,6 +1652,22 @@ func TestGithubSummary(t *testing.T) {
 				},
 			},
 			want: "review comment on example-org/example-repo#18 by reviewer (internal/contracts/normalize.go:42): Use the existing helper",
+		},
+		{
+			name:  "edited review comment omits its body",
+			event: "pull_request_review_comment",
+			body: map[string]any{
+				"action":       "edited",
+				"repository":   map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
+				"pull_request": map[string]any{"number": 18},
+				"comment": map[string]any{
+					"body": "secret edit body",
+					"user": map[string]any{"login": "reviewer"},
+					"path": "internal/contracts/normalize.go",
+					"line": 42,
+				},
+			},
+			want: "review comment edited on example-org/example-repo#18 by reviewer (internal/contracts/normalize.go:42)",
 		},
 		{
 			name:  "review includes state and nonempty body",

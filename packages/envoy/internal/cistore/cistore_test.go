@@ -68,11 +68,11 @@ func TestRecordAccumulatesChecks(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("sjawhar", "legion", "42", "abc123", "build", "", "", "completed", "success"); err != nil {
+	if err := s.Record("sjawhar", "legion", "42", "abc123", "build", "", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record build: %v", err)
 	}
 	before := getState(t, s, "sjawhar", "legion", "42", "abc123")
-	if err := s.Record("sjawhar", "legion", "42", "abc123", "test", "", "", "in_progress", ""); err != nil {
+	if err := s.Record("sjawhar", "legion", "42", "abc123", "test", "", "", "in_progress", "", ""); err != nil {
 		t.Fatalf("record test: %v", err)
 	}
 	st := getState(t, s, "sjawhar", "legion", "42", "abc123")
@@ -107,7 +107,7 @@ func TestRecordConcurrentNoLostUpdate(t *testing.T) {
 		name := "check-" + string(rune('a'+i))
 		go func() {
 			defer wg.Done()
-			errs <- s.Record("o", "r", "1", "sha", name, "", "", "completed", "success")
+			errs <- s.Record("o", "r", "1", "sha", name, "", "", "completed", "success", "")
 		}()
 	}
 	wg.Wait()
@@ -150,7 +150,7 @@ func TestListReflectsRecords(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("o", "r", "7", "sha7", "build", "", "", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "7", "sha7", "build", "", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -174,13 +174,13 @@ func TestRecordIgnoresStaleCheckRunID(t *testing.T) {
 
 	if err := s.Record(
 		"example-org", "example-repo", "42", "abcdef1234567",
-		"unit-tests", "200", "https://example-host/checks/200", "completed", "failure",
+		"unit-tests", "200", "https://example-host/checks/200", "completed", "failure", "",
 	); err != nil {
 		t.Fatalf("record latest attempt: %v", err)
 	}
 	if err := s.Record(
 		"example-org", "example-repo", "42", "abcdef1234567",
-		"unit-tests", "199", "https://example-host/checks/199", "in_progress", "",
+		"unit-tests", "199", "https://example-host/checks/199", "in_progress", "", "",
 	); err != nil {
 		t.Fatalf("record stale attempt: %v", err)
 	}
@@ -192,13 +192,72 @@ func TestRecordIgnoresStaleCheckRunID(t *testing.T) {
 	}
 }
 
+func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	const (
+		owner      = "example-org"
+		repo       = "example-repo"
+		number     = "42"
+		sha        = "abcdef1234567"
+		completed  = "2026-09-07T03:00:00Z"
+		inProgress = "2026-09-07T02:00:00Z"
+	)
+	if err := s.Record(
+		owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200",
+		"completed", "failure", completed,
+	); err != nil {
+		t.Fatalf("record completed check: %v", err)
+	}
+	if err := s.Record(
+		owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200",
+		"in_progress", "", inProgress,
+	); err != nil {
+		t.Fatalf("record delayed check: %v", err)
+	}
+	check := getState(t, s, owner, repo, number, sha).Checks["unit-tests"]
+	if check.Status != "completed" || check.Conclusion != "failure" {
+		t.Fatalf("delayed check re-armed state: %+v", check)
+	}
+
+	if err := s.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", completed); err != nil {
+		t.Fatalf("record completed suite: %v", err)
+	}
+	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
+		t.Fatalf("record delayed suite: %v", err)
+	}
+	suite := getState(t, s, owner, repo, number, sha).Suites["900"]
+	if suite.Status != "completed" || suite.Conclusion != "success" {
+		t.Fatalf("delayed suite re-armed state: %+v", suite)
+	}
+	state := getState(t, s, owner, repo, number, sha)
+	claimed, err := s.MarkSettled(Key(owner, repo, number, sha), state.Hash(), 0)
+	if err != nil {
+		t.Fatalf("mark settled: %v", err)
+	}
+	if !claimed {
+		t.Fatal("mark settled did not claim completed state")
+	}
+	if err := s.Record(owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200", "in_progress", "", inProgress); err != nil {
+		t.Fatalf("record delayed check after settlement: %v", err)
+	}
+	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
+		t.Fatalf("record delayed suite after settlement: %v", err)
+	}
+	if !getState(t, s, owner, repo, number, sha).SettledEmitted {
+		t.Fatal("delayed observations re-armed settled state")
+	}
+}
+
 func TestRecordHeadAndHead(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
 	const sha = "abcdef1234567890abcdef1234567890abcdef12"
 
-	if err := s.RecordHead("example-org", "example-repo", "42", sha); err != nil {
+	if err := s.RecordHead("example-org", "example-repo", "42", sha, "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record head: %v", err)
 	}
 
@@ -219,6 +278,40 @@ func TestRecordHeadAndHead(t *testing.T) {
 	}
 }
 
+func TestRecordHeadKeepsNewerHeadForLateAndEqualUpdates(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		headA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		headB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		headC = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+	if err := s.RecordHead(owner, repo, pr, headB, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record current head: %v", err)
+	}
+	if err := s.RecordHead(owner, repo, pr, headA, "2026-09-07T02:00:00Z"); err != nil {
+		t.Fatalf("record delayed head: %v", err)
+	}
+	if err := s.RecordHead(owner, repo, pr, headC, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record equal-time head: %v", err)
+	}
+	entry, err := s.kv.Get(headKey(owner, repo, pr))
+	if err != nil {
+		t.Fatalf("get durable head: %v", err)
+	}
+	var head headRecord
+	if err := json.Unmarshal(entry.Value(), &head); err != nil {
+		t.Fatalf("decode durable head: %v", err)
+	}
+	if head.SHA != headB {
+		t.Fatalf("head regressed to %q, want %q", head.SHA, headB)
+	}
+}
+
 func TestWatchEvictsMalformedState(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -230,7 +323,7 @@ func TestWatchEvictsMalformedState(t *testing.T) {
 		sha    = "abcdef1234567"
 	)
 
-	if err := s.Record(owner, repo, number, sha, "build", "300", "https://example-host/checks/300", "completed", "success"); err != nil {
+	if err := s.Record(owner, repo, number, sha, "build", "300", "https://example-host/checks/300", "completed", "success", ""); err != nil {
 		t.Fatalf("record valid state: %v", err)
 	}
 	waitCacheChecks(t, s, owner, repo, number, sha, 1)
@@ -263,11 +356,11 @@ func TestWatchDistinguishesHeadRecordsFromStateKeys(t *testing.T) {
 		sha        = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := s.Record(stateOwner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success"); err != nil {
+	if err := s.Record(stateOwner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success", ""); err != nil {
 		t.Fatalf("record state: %v", err)
 	}
 	waitCacheChecks(t, s, stateOwner, repo, number, sha, 1)
-	if err := s.RecordHead(headOwner, repo, number, sha); err != nil {
+	if err := s.RecordHead(headOwner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record head: %v", err)
 	}
 
@@ -283,7 +376,7 @@ func TestRecordHeadRejectsInvalidSHA(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567"); err == nil {
+	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567", "2026-09-07T03:00:00Z"); err == nil {
 		t.Fatal("RecordHead accepted an invalid SHA")
 	}
 }

@@ -81,7 +81,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	}
 	postEvent("pull_request", fmt.Sprintf(`{
 		"action": "opened", "number": 42,
-		"pull_request": {"head": {"sha": %q}},
+		"pull_request": {"head": {"sha": %q}, "updated_at": "2026-09-07T03:00:00Z"},
 		"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
 	}`, sha), "d0")
 
@@ -89,7 +89,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 		t.Helper()
 		body := fmt.Sprintf(`{
 			"action": "completed",
-			"check_run": {"id": 1, "name": %q, "status": %q, "conclusion": %q, "head_sha": %q,
+			"check_run": {"id": 1, "name": %q, "status": %q, "conclusion": %q, "completed_at": "2026-09-07T03:01:00Z", "head_sha": %q,
 				"pull_requests": [{"number": 42}]},
 			"sender": {"login": "ci", "type": "Bot"},
 			"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
