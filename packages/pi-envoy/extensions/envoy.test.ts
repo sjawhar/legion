@@ -407,11 +407,18 @@ describe("envoy OMP extension", () => {
           source_session: "ses_omp",
           target_session: "ses_target",
           message: "direct",
+          idempotency_key: expect.any(String),
         },
       },
       {
         path: "/v1/messages/publish",
-        body: { source: "agent", source_session: "ses_omp", topic: "team.test", message: "broadcast" },
+        body: {
+          source: "agent",
+          source_session: "ses_omp",
+          topic: "team.test",
+          message: "broadcast",
+          idempotency_key: expect.any(String),
+        },
       },
       { path: "/v1/sessions", body: undefined },
     ]);
@@ -468,10 +475,31 @@ describe("envoy OMP extension", () => {
     );
 
     const topic = "notifications.github.sjawhar.legion.issue.91.>";
+    const base = "notifications.github.sjawhar.legion.issue.91";
+    expect(natsState.controls.has(base)).toBe(true);
     expect(natsState.controls.has(topic)).toBe(true);
     const lastRegistration = interestRegistrations.at(-1) as { topics?: string[] } | undefined;
-    expect(lastRegistration?.topics).toContain(topic);
+    expect(lastRegistration?.topics).toEqual(expect.arrayContaining([base, topic]));
   });
+
+  test("rejects malformed wildcard bases before opening subscriptions", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?malformed-wildcard-base");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const subscribe = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribe === undefined) throw new Error("subscription tool was not registered");
+
+    for (const topic of ["a..b.>", "a.>"]) {
+      const result = await subscribe.execute("", { topics: [topic] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("concrete base");
+      expect(natsState.controls.has(topic)).toBe(false);
+    }
+  });
+
 
   test("re-subscribes persisted registry interests on resumed session start, skipping role lanes", async () => {
     globalThis.fetch = async (input, init) => {
@@ -500,6 +528,8 @@ describe("envoy OMP extension", () => {
     };
     await fixture.handlers.get("session_start")?.({}, resumed);
     expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91.>")).toBe(true);
+    expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91")).toBe(true);
+
     expect(natsState.controls.has("notifications.role.legion-controller")).toBe(false);
   });
 

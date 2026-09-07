@@ -99,8 +99,9 @@ describe("renderInbound", () => {
     expect(rendered.content.match(/A comment was created on issue 42\./g)).toHaveLength(1);
   });
 
-  test("renders direct agent metadata and does not duplicate a three-paragraph body", async () => {
+  test("renders direct agent metadata with a one-line summary and body once each", async () => {
     const sender = "01a0bbbb-cccc-7ddd-eeee-0123456789ab";
+    const summary = "First paragraph.";
     const body = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
     const rendered = await renderInbound(
       JSON.stringify({
@@ -112,12 +113,14 @@ describe("renderInbound", () => {
         dedupe_key: "agent-message-2",
         issued_at: Date.parse("2026-09-07T04:41:12Z"),
         expires_at: Date.parse("2026-09-07T05:00:00Z"),
-        payload_summary: body,
+        payload_summary: summary,
         payload: body,
         trace_id: "trace-agent-message-2",
         sender: { session_id: sender, title: "Reviewer", roles: ["legion-reviewer"] },
         in_reply_to: "agent-message-1",
+        supersedes: "agent-message-0",
         urgency: "high",
+        expects_reply: "required",
       }),
       reader
     );
@@ -132,14 +135,42 @@ describe("renderInbound", () => {
         "  id: agent-message-2",
         '  by: "2026-09-07T05:00:00Z"',
         "  urgency: high",
+        "  expects_reply: required",
         "  re: agent-message-1",
+        "  supersedes: agent-message-0",
         `  reply_with: "envoy_send(session_id=\\"${sender}\\", message=\\"...\\")"`,
         '  reply_role: "envoy_publish(topic=\\"notifications.role.legion-reviewer\\", message=\\"...\\")"',
-        '  summary: "First paragraph.\\n\\nSecond paragraph.\\n\\nThird paragraph."',
+        "  summary: First paragraph.",
+        '  message: "First paragraph.\\n\\nSecond paragraph.\\n\\nThird paragraph."',
       ].join("\n"),
       envelope: expect.any(Object),
     });
-    expect(rendered.content).not.toContain("\n  message:");
+    expect(rendered.content.match(/\n {2}summary:/g)).toHaveLength(1);
+    expect(rendered.content.match(/\n {2}message:/g)).toHaveLength(1);
+  });
+
+  test("notes a foreign session named only in a payload", async () => {
+    const sender = "01a0bbbb-cccc-7ddd-eeee-0123456789ab";
+    const foreign = "01a0cccc-dddd-7eee-ffff-0123456789ab";
+    const rendered = await renderInbound(
+      JSON.stringify({
+        event_id: "agent-message-foreign-session",
+        source: "agent",
+        source_session: sender,
+        source_event_id: "agent.message-foreign-session",
+        topic: `notifications.agent.${reader}`,
+        dedupe_key: "agent-message-foreign-session",
+        issued_at: Date.parse("2026-09-07T04:41:12Z"),
+        payload_summary: "The reviewer shared a detailed update.",
+        payload: `Ask ${foreign} to confirm the release.`,
+        trace_id: "trace-agent-message-foreign-session",
+      }),
+      reader
+    );
+
+    expect(rendered.content).toContain(
+      `  note: body names session ${foreign}; the sender is ${sender}`
+    );
   });
 
   test("renders recognized fields without raw unknown data", async () => {

@@ -121,6 +121,25 @@ describe("EnvoyClient", () => {
 
     expect(await recorded.requests[0]?.json()).toMatchObject({ topics: [wildcard] });
   });
+  test("rejects a wildcard whose concrete base has empty segments", async () => {
+    const recorded = recordFetch([]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    for (const topic of ["a..b.>", "a.>"]) {
+      await expect(
+        client.subscribe({
+          sessionID: "ses_sender",
+          directory: "/work",
+          topics: [topic],
+          port: 0,
+          title: "",
+          driving: true,
+        })
+      ).rejects.toThrow("concrete base");
+    }
+
+    expect(recorded.requests).toEqual([]);
+  });
 
   test("posts an unsubscribe request with an empty topic list", async () => {
     const recorded = recordFetch([new Response("ok")]);
@@ -183,11 +202,12 @@ describe("EnvoyClient", () => {
     expect(result.recipient).toBe("ses_target");
     expect(result.confirmed).toBe(true);
 
-    expect(await recorded.requests[0]?.json()).toEqual({
+    expect(await recorded.requests[0]?.json()).toMatchObject({
       source: "agent",
       source_session: "ses_sender",
       target_session: "ses_target",
       message: "hello",
+      idempotency_key: expect.any(String),
     });
   });
 
@@ -242,10 +262,11 @@ describe("EnvoyClient", () => {
       message: "hello",
     });
 
-    expect(await recorded.requests[0]?.json()).toEqual({
+    expect(await recorded.requests[0]?.json()).toMatchObject({
       source: "human",
       target_session: "ses_target",
       message: "hello",
+      idempotency_key: expect.any(String),
     });
   });
 
@@ -274,12 +295,13 @@ describe("EnvoyClient", () => {
     expect(result).toMatchObject({ envelope: { event_id: "event-2" } });
     expect(result.holder).toBeUndefined();
 
-    expect(await recorded.requests[0]?.json()).toEqual({
+    expect(await recorded.requests[0]?.json()).toMatchObject({
       source: "agent",
       source_session: "ses_sender",
       topic: "notifications.role.controller",
       message: "broadcast",
       payload: `{"kind":"role-event"}`,
+      idempotency_key: expect.any(String),
     });
   });
 
@@ -391,6 +413,86 @@ describe("EnvoyClient", () => {
       recipient: "01a01111-2222-7333-4444-555555555555",
       envelope: { event_id: "event-retried" },
     });
+  });
+  test("retries a delivered direct message with one generated idempotency key", async () => {
+    const idempotencyKeys: string[] = [];
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { readonly idempotency_key?: string };
+        if (typeof body.idempotency_key !== "string") {
+          return new Response("idempotency key required", { status: 400 });
+        }
+        idempotencyKeys.push(body.idempotency_key);
+        if (idempotencyKeys.length === 1) {
+          throw new TypeError("response lost after delivery");
+        }
+        if (body.idempotency_key !== idempotencyKeys[0]) {
+          return new Response("duplicate message", { status: 409 });
+        }
+        return jsonResponse({
+          event_id: "event-delivered",
+          source: "agent",
+          source_event_id: "agent.sender.event-delivered",
+          source_session: "ses_sender",
+          topic: "notifications.agent.ses_target",
+          dedupe_key: "event-delivered",
+          issued_at: 1,
+          payload_summary: "hello",
+          trace_id: "trace-delivered",
+          recipient: "ses_target",
+        });
+      },
+    });
+
+    await client.send({
+      sourceSessionID: "ses_sender",
+      targetSessionID: "ses_target",
+      message: "hello",
+    });
+
+    expect(idempotencyKeys).toHaveLength(2);
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+  });
+
+  test("retries a delivered publish with one generated idempotency key", async () => {
+    const idempotencyKeys: string[] = [];
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { readonly idempotency_key?: string };
+        if (typeof body.idempotency_key !== "string") {
+          return new Response("idempotency key required", { status: 400 });
+        }
+        idempotencyKeys.push(body.idempotency_key);
+        if (idempotencyKeys.length === 1) {
+          throw new TypeError("response lost after delivery");
+        }
+        if (body.idempotency_key !== idempotencyKeys[0]) {
+          return new Response("duplicate message", { status: 409 });
+        }
+        return jsonResponse({
+          event_id: "event-published",
+          source: "agent",
+          source_event_id: "agent.sender.event-published",
+          source_session: "ses_sender",
+          topic: "notifications.role.legion-reviewer",
+          dedupe_key: "event-published",
+          issued_at: 1,
+          payload_summary: "review this",
+          trace_id: "trace-published",
+        });
+      },
+    });
+
+    await client.publish({
+      sourceSessionID: "ses_sender",
+      topic: "notifications.role.legion-reviewer",
+      message: "review this",
+    });
+
+    expect(idempotencyKeys).toHaveLength(2);
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
   });
 
   test("serializes all additive message fields and retains role holder results", async () => {

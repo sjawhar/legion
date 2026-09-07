@@ -591,7 +591,7 @@ test("a broker connection nats.js gave up on is replaced by the next envoy_subsc
       { subject: INBOX, payload: envelope("github.comment.1") },
     ])
     expect(stderr.lines).toEqual([
-      "envoy-mcp: the broker connection closed; reopening it for 3 topic(s)\n",
+      "envoy-mcp: the broker connection closed; reopening it for 4 topic(s)\n",
     ])
   } finally {
     stderr.restore()
@@ -632,7 +632,7 @@ test("closes a replacement connection when shutdown races a manual subscription"
     await nats.until(() => nats.liveConnections === 0)
     expect(nats.connections).toBe(2)
     expect(stderr.lines).toEqual([
-      "envoy-mcp: the broker connection closed; reopening it for 3 topic(s)\n",
+      "envoy-mcp: the broker connection closed; reopening it for 4 topic(s)\n",
     ])
   } finally {
     stderr.restore()
@@ -641,6 +641,28 @@ test("closes a replacement connection when shutdown races a manual subscription"
     process.env = { ...previous }
   }
 })
+test("rejects malformed wildcard bases before connecting to NATS or recording interest", async () => {
+  const envoy = fakeEnvoy()
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  delete process.env["ENVOY_NATS_URL"]
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  try {
+    const module = await loadServer("malformed-wildcard-base")
+
+    for (const topic of ["a..b.>", "a.>"]) {
+      await expect(module.executeEnvoyTool("envoy_subscribe", { topics: [topic] })).rejects.toThrow(
+        "concrete base",
+      )
+    }
+    expect(envoy.subscribes).toEqual([])
+  } finally {
+    envoy.server.stop(true)
+    process.env = { ...previous }
+  }
+})
+
 
 test("rejects a manual envoy_subscribe without ENVOY_NATS_URL before recording the interest", async () => {
   const envoy = fakeEnvoy()

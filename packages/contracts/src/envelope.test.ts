@@ -99,6 +99,17 @@ describe("EnvelopeSchema", () => {
       expires_at: 1_725_686_400_000,
     });
   });
+  test("rejects malformed signal-quality envelope fields", () => {
+    expectInvalidFields(
+      {
+        expects_reply: "soon",
+        sender: { session_id: "" },
+        in_reply_to: "",
+        supersedes: "",
+      },
+      ["expects_reply", "sender.session_id", "in_reply_to", "supersedes"]
+    );
+  });
 
   test("rejects unrecognized urgency", () => {
     expectInvalidFields({ urgency: "urgent" }, ["urgency"]);
