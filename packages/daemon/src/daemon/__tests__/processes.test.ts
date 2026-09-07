@@ -44,7 +44,6 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     workerBudget: 5,
     maxRecursionDepth: 8,
     lingerHours: 2,
-    ciQuietMs: 30_000,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },

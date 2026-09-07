@@ -297,10 +297,9 @@ describe("Legion HTTP API", () => {
       repo: "acme/widgets",
       number: 17,
       headSha: "approved-head",
-      checks: { test: { status: "completed", conclusion: "success" } },
       firstRedEmitted: false,
       settledRedEmitted: false,
-      greenEmitted: false,
+      greenEmitted: true,
       lastEventAt: 0,
       fixAttempts: 0,
     };

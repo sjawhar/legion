@@ -160,7 +160,6 @@ function config(stateDir: string): DaemonConfig {
     workerBudget: 6,
     maxRecursionDepth: 8,
     lingerHours: 72,
-    ciQuietMs: 30_000,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },

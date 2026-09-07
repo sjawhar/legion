@@ -195,7 +195,6 @@ function config(stateDir: string, port: number, natsUrl: string, project: string
     workerBudget: 2,
     maxRecursionDepth: 8,
     lingerHours: 72,
-    ciQuietMs: 5_000,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },

@@ -52,7 +52,6 @@ function stateWithTree() {
     repo: "sjawhar/legion",
     number: 7,
     headSha: "abc123",
-    checks: { test: { status: "completed", conclusion: "success" } },
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: true,
@@ -78,9 +77,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v8 state with a valid project and admission capacity", () => {
+  it("initializes empty v9 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 8,
+      version: 9,
       project: "omp",
       issues: {},
       trees: {},
@@ -214,6 +213,27 @@ describe("legion state", () => {
     expected.trees[issue].heldEvents = [retainedHeldEvent];
 
     expect(await loadState(file, initialState)).toEqual(expected);
+  });
+
+  it("migrates v8 PR state by dropping per-check observations", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const prKey = "sjawhar/legion#7";
+    const legacy = {
+      ...current,
+      version: 8,
+      prs: {
+        ...current.prs,
+        [prKey]: {
+          ...current.prs[prKey],
+          checks: { unit: { status: "completed", conclusion: "success" } },
+        },
+      },
+    };
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
   });
 
   it("rejects removed v6 fields on current-version state", async () => {

@@ -7,7 +7,6 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
-import { type CheckObservation, type CiEmission, reduceCheck, settle } from "./ci-reducer";
 import type { DaemonConfig } from "./config";
 import type { HeldEvent, LegionState, PrState, TreeState } from "./legion-state";
 import {
@@ -16,15 +15,17 @@ import {
   type LegionEventPayload,
   reduceCiEmission,
   reduceGithubEvent,
+  type CiEmission as SettledCiEmission,
 } from "./reducers";
 
-const CHECK_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.check(?:\.|$)/;
+const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
-const SETTLE_INTERVAL_MS = 5_000;
 const MAX_RETRY_DELAY_MS = 30_000;
 const INITIAL_RETRY_DELAY_MS = 1_000;
 
 type JsonRecord = Record<string, unknown>;
+
+type CiEmission = SettledCiEmission | { type: "ci-first-red"; check: string; sha: string };
 
 export interface EventPumpDeps {
   nats: {
@@ -53,11 +54,12 @@ interface HeldTarget {
   isActive(): boolean;
 }
 
-interface CheckInput {
+interface ChecksInput {
   repo: `${string}/${string}`;
   number: number;
-  branch?: string;
-  observation: CheckObservation;
+  sha: string;
+  failed: string[];
+  cancelledCount: number;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -75,44 +77,44 @@ function recordPayload(envelope: EnvelopeJson): JsonRecord | undefined {
   return asRecord(JSON.parse(envelope.payload));
 }
 
-function valueFrom(records: Array<JsonRecord | undefined>, key: string): unknown {
-  for (const record of records) {
-    if (record?.[key] !== undefined) return record[key];
+function statusGroup(payload: JsonRecord, key: string): { count: number; checks: string[] } {
+  const group = asRecord(payload[key]);
+  const count = group?.count;
+  const checks = group?.checks;
+  if (
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0 ||
+    !Array.isArray(checks) ||
+    !checks.every((check): check is string => typeof check === "string") ||
+    checks.length !== count
+  ) {
+    throw new Error(`Invalid checks payload ${key} group`);
   }
-  return undefined;
+  return { count, checks };
 }
 
-function checkInput(subject: string, envelope: EnvelopeJson): CheckInput | undefined {
-  const match = CHECK_TOPIC.exec(subject);
+function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | undefined {
+  const match = CHECKS_TOPIC.exec(subject);
   if (!match) return undefined;
   const number = Number(match[3]);
-  if (!Number.isSafeInteger(number)) return undefined;
+  if (!Number.isSafeInteger(number)) throw new Error(`Invalid checks topic: ${subject}`);
   const repo = `${match[1]}/${match[2]}` as `${string}/${string}`;
   const payload = recordPayload(envelope);
-  if (!payload) return undefined;
-  const checkRun = asRecord(payload.check_run);
-  const checkSuite = asRecord(payload.check_suite);
-  const nestedSuite = asRecord(checkRun?.check_suite);
-  const records = [payload, checkRun, checkSuite, nestedSuite];
-  const sha = stringValue(valueFrom(records, "sha")) ?? stringValue(valueFrom(records, "head_sha"));
-  const name =
-    stringValue(valueFrom(records, "name")) ??
-    stringValue(asRecord(checkSuite?.app)?.name) ??
-    stringValue(asRecord(nestedSuite?.app)?.name);
-  const status = stringValue(valueFrom(records, "status"));
-  const rawConclusion = valueFrom(records, "conclusion");
-  const conclusion =
-    rawConclusion === null || typeof rawConclusion === "string" ? rawConclusion : undefined;
-  const branch =
-    stringValue(valueFrom(records, "branch")) ?? stringValue(valueFrom(records, "head_branch"));
-  if (!sha || !name || !status || conclusion === undefined) return undefined;
-
-  return {
-    repo,
-    number,
-    branch,
-    observation: { sha, name, status, conclusion },
-  };
+  if (!payload) throw new Error("Checks envelope requires a JSON object payload");
+  if (
+    payload.kind !== "checks" ||
+    payload.repo !== repo ||
+    payload.number !== String(number) ||
+    payload.is_head !== true
+  ) {
+    throw new Error(`Checks envelope does not match subject: ${subject}`);
+  }
+  const sha = stringValue(payload.sha);
+  if (!sha) throw new Error("Checks envelope requires sha");
+  const failed = statusGroup(payload, "failed");
+  const cancelled = statusGroup(payload, "cancelled");
+  return { repo, number, sha, failed: failed.checks, cancelledCount: cancelled.count };
 }
 
 function issueForBranch(repo: string, branch: string): IssueKey | undefined {
@@ -124,21 +126,18 @@ function issueForBranch(repo: string, branch: string): IssueKey | undefined {
   return formatIssueKey(owner, name, number);
 }
 
-function findOrCreatePr(state: LegionState, input: CheckInput): PrState | undefined {
+function findOrCreatePr(state: LegionState, input: ChecksInput): PrState | undefined {
   const prKey = `${input.repo}#${input.number}`;
   const existing = state.prs[prKey];
   if (existing) return existing;
-  let branch = input.branch;
-  if (!branch) {
-    const mapping = Object.entries(state.prByBranch).find(
-      ([branchKey, mappedPrKey]) => mappedPrKey === prKey && branchKey.startsWith(`${input.repo}@`)
-    );
-    branch = mapping?.[0].slice(input.repo.length + 1);
-  }
+  const mapping = Object.entries(state.prByBranch).find(
+    ([branchKey, mappedPrKey]) => mappedPrKey === prKey && branchKey.startsWith(`${input.repo}@`)
+  );
+  const branch = mapping?.[0].slice(input.repo.length + 1);
   if (!branch) return undefined;
 
   const mappedPrKey = state.prByBranch[`${input.repo}@${branch}`];
-  if (mappedPrKey !== undefined && mappedPrKey !== prKey) return undefined;
+  if (mappedPrKey !== prKey) return undefined;
   const issue = issueForBranch(input.repo, branch);
   if (!issue || !state.issues[issue]) return undefined;
 
@@ -146,8 +145,7 @@ function findOrCreatePr(state: LegionState, input: CheckInput): PrState | undefi
     key: issue,
     repo: input.repo,
     number: input.number,
-    headSha: input.observation.sha,
-    checks: {},
+    headSha: input.sha,
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: false,
@@ -155,10 +153,38 @@ function findOrCreatePr(state: LegionState, input: CheckInput): PrState | undefi
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
-  state.prByBranch[`${input.repo}@${branch}`] = prKey;
   return pr;
 }
 
+function updatePrHead(pr: PrState, sha: string): void {
+  if (pr.headSha === sha) return;
+  if (pr.settledRedEmitted) pr.fixAttempts += 1;
+  pr.headSha = sha;
+  pr.firstRedEmitted = false;
+  pr.settledRedEmitted = false;
+  pr.greenEmitted = false;
+  delete pr.reviewDecision;
+}
+
+function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
+  if (input.failed.length > 0) {
+    const emissions: CiEmission[] = [];
+    if (!pr.firstRedEmitted) {
+      pr.firstRedEmitted = true;
+      emissions.push({ type: "ci-first-red", check: input.failed[0], sha: pr.headSha });
+    }
+    if (!pr.settledRedEmitted) {
+      pr.settledRedEmitted = true;
+      emissions.push({ type: "ci-settled-red", failing: input.failed, sha: pr.headSha });
+    }
+    return emissions;
+  }
+  if (input.cancelledCount === 0 && !pr.greenEmitted) {
+    pr.greenEmitted = true;
+    return [{ type: "ci-green", sha: pr.headSha }];
+  }
+  return [];
+}
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
   let current = issue;
   const visited = new Set<IssueKey>();
@@ -378,31 +404,19 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     }
   };
 
-  const handleCheck = async (subject: string, envelope: EnvelopeJson): Promise<void> => {
-    const input = checkInput(subject, envelope);
+  const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<void> => {
+    const input = checksInput(subject, envelope);
     if (!input) return;
     const pr = findOrCreatePr(deps.state, input);
     if (!pr) return;
-    const now = Date.now();
-    reduceCheck(pr, input.observation, now);
-    await publishCiEmissions(pr, settle(pr, now, deps.config.ciQuietMs, "eager"), envelope);
-  };
-
-  const settleChecks = async (): Promise<void> => {
-    const now = Date.now();
-    for (const pr of Object.values(deps.state.prs)) {
-      const envelope: EnvelopeJson = {
-        event_id: `ci:${pr.repo}#${pr.number}:${pr.headSha}`,
-        issued_at: now,
-      };
-      await publishCiEmissions(pr, settle(pr, now, deps.config.ciQuietMs), envelope);
-    }
-    await deps.saveState();
+    updatePrHead(pr, input.sha);
+    pr.lastEventAt = envelope.issued_at;
+    await publishCiEmissions(pr, ciEmissions(pr, input), envelope);
   };
 
   const handleMessage = async (subject: string, data: string): Promise<void> => {
     const envelope = EnvelopeSchema.parse(JSON.parse(data)) as EnvelopeJson;
-    if (CHECK_TOPIC.test(subject)) await handleCheck(subject, envelope);
+    if (CHECKS_TOPIC.test(subject)) await handleChecks(subject, envelope);
     else if (isMention(subject)) {
       await publishController(
         typeof envelope.payload === "string" ? envelope.payload : "{}",
@@ -438,9 +452,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       track(handleMessage(subject, data));
     }),
   ];
-  const sweepTimer = setInterval(() => {
-    track(settleChecks());
-  }, SETTLE_INTERVAL_MS);
 
   return {
     applyEffects: applyEffectsAndSave,
@@ -470,7 +481,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     stop(): void {
       stopped = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
-      clearInterval(sweepTimer);
       for (const timer of retryTimers) clearTimeout(timer as never);
       retryTimers.clear();
     },

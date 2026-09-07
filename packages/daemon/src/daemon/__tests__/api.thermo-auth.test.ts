@@ -179,7 +179,6 @@ describe("thermonuclear API regressions", () => {
       repo: "acme/widgets",
       number: 17,
       headSha: "cached-head",
-      checks: { required: { status: "completed", conclusion: "failure" } },
       firstRedEmitted: true,
       settledRedEmitted: true,
       greenEmitted: true,
@@ -201,7 +200,6 @@ describe("thermonuclear API regressions", () => {
     expect(await gate.json()).toEqual({ approved: true, pr: 17, headSha: "live-head" });
     expect(state.prs["acme/widgets#17"]).toMatchObject({
       headSha: "live-head",
-      checks: {},
       firstRedEmitted: false,
       settledRedEmitted: false,
       greenEmitted: false,

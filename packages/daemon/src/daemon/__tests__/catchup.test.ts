@@ -49,10 +49,6 @@ function prState(issue: IssueKey): PrState {
     repo: "acme/widgets",
     number: 7,
     headSha: "head-7",
-    checks: {
-      build: { status: "completed", conclusion: "success" },
-      unit: { status: "completed", conclusion: "success" },
-    },
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: true,

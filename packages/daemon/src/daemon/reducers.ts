@@ -221,27 +221,6 @@ function filtered(comment: JsonRecord, config: ReducerConfig): boolean {
   );
 }
 
-function isFailingCheck(check: { status: string; conclusion: string | null }): boolean {
-  return (
-    check.status === "completed" &&
-    check.conclusion !== "success" &&
-    check.conclusion !== "neutral" &&
-    check.conclusion !== "skipped"
-  );
-}
-
-function isGreen(pr: PrState): boolean {
-  const checks = Object.values(pr.checks);
-  return (
-    checks.length > 0 &&
-    checks.every((check) => check.status === "completed" && !isFailingCheck(check))
-  );
-}
-
-function wasRed(pr: PrState): boolean {
-  return Object.values(pr.checks).some(isFailingCheck);
-}
-
 function issueForBranch(repo: string, branch: string): IssueKey | undefined {
   const match = /^legion\/issue-(\d+)$/.exec(branch);
   return match ? keyFor(repo, Number(match[1])) : undefined;
@@ -263,7 +242,6 @@ function registerPr(
     repo: repo as `${string}/${string}`,
     number,
     headSha: sha,
-    checks: {},
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: false,
@@ -557,7 +535,7 @@ function review(
     envelope
   );
   result.push({ kind: "approval-status", repo, pr: number, sha: pr.headSha });
-  if (isCurrentHead && decision === "approved" && prior !== "approved" && isGreen(pr)) {
+  if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.greenEmitted) {
     result.push(...route(state, pr.key, "architect", { type: "pr-ready", pr: number }, envelope));
   }
   return result;
@@ -597,9 +575,8 @@ function pullRequest(
   if (!pr) return [];
   if (payload.action === "synchronize") {
     if (!sha) return [];
-    if (wasRed(pr)) pr.fixAttempts += 1;
+    if (pr.settledRedEmitted) pr.fixAttempts += 1;
     pr.headSha = sha;
-    pr.checks = {};
     pr.firstRedEmitted = false;
     pr.settledRedEmitted = false;
     pr.greenEmitted = false;
@@ -620,7 +597,7 @@ export function reduceGithubEvent(
   envelope: EnvelopeJson,
   config: ReducerConfig
 ): Effect[] {
-  if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.check(?:\.|$)/.test(topic)) return [];
+  if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic)) return [];
   const payload = payloadFrom(envelope);
   if (!payload) return [];
   const repo = repository(payload);

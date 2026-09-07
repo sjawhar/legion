@@ -105,7 +105,6 @@ function config(): DaemonConfig {
     workerBudget: 6,
     maxRecursionDepth: 8,
     lingerHours: 72,
-    ciQuietMs: 5_000,
     maxFixAttempts: 3,
     resyncIntervalMs: 600_000,
     gates: { design: "root-issues", merge: "human" },
@@ -120,7 +119,6 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     repo: "acme/widgets",
     number: 7,
     headSha,
-    checks: {},
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: false,
@@ -165,6 +163,23 @@ function issueComment(): Record<string, unknown> {
       html_url: "https://github.com/acme/widgets/issues/1#comment",
     },
     repository: { full_name: "acme/widgets" },
+  };
+}
+function settledChecks(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "checks",
+    repo: "acme/widgets",
+    number: "7",
+    sha: "head-1",
+    is_head: true,
+    failed: { count: 0, checks: [] },
+    running: { count: 0, checks: [] },
+    passed: { count: 1, checks: ["unit"] },
+    queued: { count: 0, checks: [] },
+    skipped: { count: 0, checks: [] },
+    cancelled: { count: 0, checks: [] },
+    failing_checks: [],
+    ...overrides,
   };
 }
 
@@ -282,7 +297,7 @@ describe("core-NATS event pump", () => {
     }
   });
 
-  it("creates and eagerly routes a PR from a raw check without a branch field", async () => {
+  it("creates and routes a PR from a settled failed checks envelope", async () => {
     const { state, implementer } = stateForIssue();
     state.prByBranch["acme/widgets@legion/issue-1"] = "acme/widgets#7";
     const nats = new FakeNats();
@@ -294,16 +309,14 @@ describe("core-NATS event pump", () => {
     );
 
     nats.emit(
-      "notifications.github.acme.widgets.pr.7.check",
-      envelope({
-        repository: { full_name: "acme/widgets" },
-        check_run: {
-          head_sha: "head-1",
-          name: "unit",
-          status: "completed",
-          conclusion: "failure",
-        },
-      })
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+          failing_checks: [{ name: "unit", url: "https://example.test/checks/unit" }],
+        })
+      )
     );
     await flush();
 
@@ -322,13 +335,24 @@ describe("core-NATS event pump", () => {
           sha: "head-1",
         }),
       },
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({
+          type: "ci-settled-red",
+          failing: ["unit"],
+          sha: "head-1",
+        }),
+      },
     ]);
     pump.stop();
   });
 
-  it("routes raw check observations through reduceCheck and emits eager first-red only to the implementer", async () => {
+  it("uses the settled checks SHA as the current head before routing green CI", async () => {
     const { state, issue, implementer } = stateForIssue();
-    state.prs["acme/widgets#7"] = checkPr(issue);
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue, "stale-head"),
+      reviewDecision: "approved",
+    };
     const nats = new FakeNats();
     const published: Array<{ topic: string; payloadJson: string }> = [];
     const pump = startEventPump(
@@ -338,43 +362,24 @@ describe("core-NATS event pump", () => {
     );
 
     nats.emit(
-      "notifications.github.acme.widgets.pr.7.check",
-      envelope({
-        action: "opened",
-        repository: { full_name: "acme/widgets" },
-        pull_request: {
-          number: 7,
-          head: { sha: "head-1", ref: "legion/issue-1" },
-        },
-        check_run: {
-          head_sha: "head-1",
-          name: "unit",
-          status: "completed",
-          conclusion: "failure",
-        },
-      })
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(settledChecks({ sha: "settled-head" }))
     );
     await flush();
 
+    expect(state.prs["acme/widgets#7"]?.headSha).toBe("settled-head");
+    expect(state.prs["acme/widgets#7"]?.reviewDecision).toBeUndefined();
     expect(published).toEqual([
       {
         topic: roleTopic(implementer),
-        payloadJson: JSON.stringify({
-          type: "ci-first-red",
-          check: "unit",
-          sha: "head-1",
-        }),
+        payloadJson: JSON.stringify({ type: "ci-green", sha: "settled-head" }),
       },
     ]);
-    expect(state.prs["acme/widgets#7"].checks).toEqual({
-      unit: { status: "completed", conclusion: "failure" },
-    });
     pump.stop();
   });
 
-  it("publishes settled CI emissions from the five-second sweep", async () => {
-    vi.useFakeTimers();
-    const { state, issue, implementer } = stateForIssue();
+  it("does not emit a CI verdict for a cancelled-only settled envelope", async () => {
+    const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = checkPr(issue);
     const nats = new FakeNats();
     const published: string[] = [];
@@ -384,36 +389,19 @@ describe("core-NATS event pump", () => {
       })
     );
 
-    try {
-      nats.emit(
-        "notifications.github.acme.widgets.pr.7.check",
-        envelope({
-          repository: { full_name: "acme/widgets" },
-          check_run: {
-            head_sha: "head-1",
-            name: "unit",
-            status: "completed",
-            conclusion: "failure",
-          },
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          passed: { count: 0, checks: [] },
+          cancelled: { count: 1, checks: ["cancelled-job"] },
         })
-      );
-      await flush();
-      vi.advanceTimersByTime(5_000);
-      await flush();
+      )
+    );
+    await flush();
 
-      expect(published).toEqual([
-        JSON.stringify({ type: "ci-first-red", check: "unit", sha: "head-1" }),
-        JSON.stringify({
-          type: "ci-settled-red",
-          failing: ["unit"],
-          sha: "head-1",
-        }),
-      ]);
-      expect(state.roles[implementer]).toBeDefined();
-    } finally {
-      pump.stop();
-      vi.useRealTimers();
-    }
+    expect(published).toEqual([]);
+    pump.stop();
   });
 
   it("persists a failed role publication and retries it with backoff", async () => {

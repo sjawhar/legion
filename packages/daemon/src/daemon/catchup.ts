@@ -95,21 +95,8 @@ function stateTree(state: LegionState, tree: IssueKey): Set<IssueKey> {
 }
 
 function ciVerdict(pr: PrState): CiVerdict {
-  const checks = Object.values(pr.checks);
-  if (
-    checks.some(
-      (check) =>
-        check.status === "completed" &&
-        check.conclusion !== "success" &&
-        check.conclusion !== "neutral" &&
-        check.conclusion !== "skipped"
-    )
-  ) {
-    return "red";
-  }
-  return checks.length > 0 && checks.every((check) => check.status === "completed")
-    ? "green"
-    : "pending";
+  if (pr.firstRedEmitted || pr.settledRedEmitted) return "red";
+  return pr.greenEmitted ? "green" : "pending";
 }
 
 export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<LegionEventPayload> {

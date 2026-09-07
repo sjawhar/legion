@@ -72,7 +72,6 @@ async function recoverPrForMergeGate(
     repo,
     number,
     headSha: head.sha,
-    checks: {},
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: false,
@@ -115,19 +114,8 @@ export async function handleMergeGate(
     throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
   }
   if (pr.headSha !== snapshot.head.sha) {
-    if (
-      Object.values(pr.checks).some(
-        (check) =>
-          check.status === "completed" &&
-          check.conclusion !== "success" &&
-          check.conclusion !== "neutral" &&
-          check.conclusion !== "skipped"
-      )
-    ) {
-      pr.fixAttempts += 1;
-    }
+    if (pr.settledRedEmitted) pr.fixAttempts += 1;
     pr.headSha = snapshot.head.sha;
-    pr.checks = {};
     pr.firstRedEmitted = false;
     pr.settledRedEmitted = false;
     pr.greenEmitted = false;

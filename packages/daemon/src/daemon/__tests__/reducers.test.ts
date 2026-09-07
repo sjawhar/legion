@@ -88,7 +88,6 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     repo,
     number: prNumber,
     headSha: "old-sha",
-    checks: {},
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: false,
@@ -445,13 +444,13 @@ describe("reduceGithubEvent", () => {
     expect(state.issues[root].state).toBe("closed");
   });
 
-  it("ignores raw per-check observation topics", () => {
+  it("keeps settled CI envelopes out of the generic GitHub reducer", () => {
     const state = rootState();
     expect(
       effects(
         state,
         { action: "completed", check_run: { conclusion: "failure" } },
-        `notifications.github.acme.widgets.pr.${prNumber}.check`
+        `notifications.github.acme.widgets.pr.${prNumber}.checks`
       )
     ).toEqual([]);
   });
@@ -679,12 +678,11 @@ describe("reduceGithubEvent", () => {
     expect(state.prByBranch[`${repo}@legion/issue-2`]).toBe(`${repo}#${prNumber}`);
   });
 
-  it("resets PR checks and approval state on synchronization, counts a red-head retry, and rechecks approval", () => {
+  it("resets PR CI verdict and approval state on synchronization, counts a red-head retry, and rechecks approval", () => {
     const state = rootState();
     attachChild(state);
     addPr(state, {
       headSha: "old-sha",
-      checks: { tests: { status: "completed", conclusion: "failure" } },
       firstRedEmitted: true,
       settledRedEmitted: true,
       greenEmitted: true,
@@ -702,7 +700,6 @@ describe("reduceGithubEvent", () => {
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "new-sha" }]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       headSha: "new-sha",
-      checks: {},
       firstRedEmitted: false,
       settledRedEmitted: false,
       greenEmitted: false,
@@ -711,16 +708,13 @@ describe("reduceGithubEvent", () => {
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
   });
 
-  it("treats neutral and skipped completed checks as green for an approved review", () => {
+  it("treats a settled green PR as ready after an approved review", () => {
     const state = rootState();
     attachChild(state);
     const implementer = claim(state, child, "implementer");
     const architect = claim(state, child, "architect");
     addPr(state, {
-      checks: {
-        lint: { status: "completed", conclusion: "neutral" },
-        optional: { status: "completed", conclusion: "skipped" },
-      },
+      greenEmitted: true,
     });
 
     expect(
@@ -752,24 +746,6 @@ describe("reduceGithubEvent", () => {
         payload: { type: "pr-ready", pr: prNumber },
       },
     ]);
-  });
-
-  it("counts completed checks missing a conclusion as red when a PR synchronizes", () => {
-    const state = rootState();
-    attachChild(state);
-    addPr(state, {
-      checks: { delayed: { status: "completed", conclusion: null } },
-    });
-
-    effects(state, {
-      action: "synchronize",
-      pull_request: {
-        number: prNumber,
-        head: { ref: "legion/issue-2", sha: "new-sha" },
-      },
-    });
-
-    expect(state.prs[`${repo}#${prNumber}`].fixAttempts).toBe(1);
   });
 
   it("removes an unmerged PR mapping and tells the issue architect", () => {
@@ -805,7 +781,7 @@ describe("reduceGithubEvent", () => {
     const implementer = claim(state, child, "implementer");
     const architect = claim(state, child, "architect");
     addPr(state, {
-      checks: { tests: { status: "completed", conclusion: "success" } },
+      greenEmitted: true,
     });
 
     expect(
@@ -846,7 +822,6 @@ describe("reduceGithubEvent", () => {
     const implementer = claim(state, child, "implementer");
     addPr(state, {
       headSha: "current-sha",
-      checks: { tests: { status: "completed", conclusion: "success" } },
     });
 
     expect(
