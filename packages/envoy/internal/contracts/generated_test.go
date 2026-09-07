@@ -31,6 +31,30 @@ func validSignalQualityEnvelope() Envelope {
 	}
 }
 
+func envelopeWithEmptyJSONField(t *testing.T, key string) Envelope {
+	t.Helper()
+
+	encoded, err := json.Marshal(validSignalQualityEnvelope())
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("decode envelope JSON: %v", err)
+	}
+	fields[key] = json.RawMessage(`""`)
+	encoded, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal envelope JSON: %v", err)
+	}
+
+	var envelope Envelope
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	return envelope
+}
+
 func TestEnvelopeSignalQualityFieldsRoundTrip(t *testing.T) {
 	want := validSignalQualityEnvelope()
 
@@ -51,9 +75,10 @@ func TestEnvelopeSignalQualityFieldsRoundTrip(t *testing.T) {
 
 func TestEnvelopeValidateRejectsInvalidSignalQualityFields(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(*Envelope)
-		want   string
+		name           string
+		emptyJSONField string
+		mutate         func(*Envelope)
+		want           string
 	}{
 		{
 			name: "unrecognized urgency",
@@ -76,13 +101,27 @@ func TestEnvelopeValidateRejectsInvalidSignalQualityFields(t *testing.T) {
 			},
 			want: "sender.session_id is required",
 		},
+		{
+			name:           "empty in reply to",
+			emptyJSONField: "in_reply_to",
+			want:           "in_reply_to must not be empty",
+		},
+		{
+			name:           "empty supersedes",
+			emptyJSONField: "supersedes",
+			want:           "supersedes must not be empty",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			envelope := validSignalQualityEnvelope()
-			test.mutate(&envelope)
-
+			if test.emptyJSONField != "" {
+				envelope = envelopeWithEmptyJSONField(t, test.emptyJSONField)
+			}
+			if test.mutate != nil {
+				test.mutate(&envelope)
+			}
 			err := envelope.Validate()
 			if err == nil || err.Error() != test.want {
 				t.Errorf("Validate() error = %v, want %q", err, test.want)
@@ -93,6 +132,24 @@ func TestEnvelopeValidateRejectsInvalidSignalQualityFields(t *testing.T) {
 
 func TestEnvelopeValidateAcceptsSignalQualityFields(t *testing.T) {
 	if err := validSignalQualityEnvelope().Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestEnvelopeValidateAcceptsOmittedOptionalStringFields(t *testing.T) {
+	want := validSignalQualityEnvelope()
+	want.InReplyTo = ""
+	want.Supersedes = ""
+
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var got Envelope
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if err := got.Validate(); err != nil {
 		t.Errorf("Validate() error = %v, want nil", err)
 	}
 }

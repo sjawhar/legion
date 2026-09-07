@@ -7,6 +7,7 @@ type ScalarKind = "string" | "integer" | "boolean";
 type Prop = {
   type: ScalarKind | "array" | "object";
   enum?: string[];
+  minLength?: number;
   properties?: Record<string, Prop>;
   required?: string[];
   items?: Prop;
@@ -146,6 +147,52 @@ function enums(key: string, prop: Prop, optional: boolean) {
   return `\tif e.${n} != "" {\n${body}\n\t}`;
 }
 
+function optionalStringProperties(schema: Schema, req: Set<string>) {
+  return Object.entries(schema.properties)
+    .filter(([key, prop]) => !req.has(key) && prop.type === "string" && (prop.minLength ?? 0) >= 1)
+    .map(([key]) => key);
+}
+
+function emptyFlag(key: string) {
+  const field = name(key);
+  return `${field[0].toLowerCase()}${field.slice(1)}WasEmpty`;
+}
+
+function optionalStringChecks(keys: string[]) {
+  return keys
+    .map((key) => {
+      const field = name(key);
+      return `\tif e.${emptyFlag(key)} && e.${field} == "" {\n\t\treturn fmt.Errorf("${key} must not be empty")\n\t}`;
+    })
+    .join("\n");
+}
+
+function renderOptionalStringUnmarshal(keys: string[]) {
+  if (!keys.length) return "";
+  const wireFields = keys.map((key) => `\t\t${name(key)} *string \`json:"${key}"\``).join("\n");
+  const assignments = keys
+    .map(
+      (key) =>
+        `\tif wire.${name(key)} != nil {\n\t\te.${name(key)} = *wire.${name(key)}\n\t\te.${emptyFlag(key)} = *wire.${name(key)} == ""\n\t}`
+    )
+    .join("\n");
+  return `func (e *Envelope) UnmarshalJSON(data []byte) error {
+\ttype envelopeAlias Envelope
+\tvar decoded envelopeAlias
+\tvar wire struct {
+\t\t*envelopeAlias
+${wireFields}
+\t}
+\twire.envelopeAlias = &decoded
+\tif err := json.Unmarshal(data, &wire); err != nil {
+\t\treturn err
+\t}
+\t*e = Envelope(decoded)
+${assignments}
+\treturn nil
+}`;
+}
+
 function objectChecks(key: string, prop: Prop) {
   if (prop.type !== "object" || !prop.properties) {
     throw new Error(`missing object properties for ${key}`);
@@ -183,11 +230,15 @@ function renderEnvelope(schema: Schema) {
   if (schema.type !== "object") throw new Error("envelope schema must be an object");
   const keys = Object.keys(schema.properties);
   const req = new Set(schema.required ?? []);
+  const optionalStrings = optionalStringProperties(schema, req);
   const wide = Math.max(...keys.map((key) => name(key).length));
-  const types = Math.max(...keys.map((key) => envelopeKind(schema.properties[key], req, key).length));
-  const body = keys
-    .map((key) => envelopeField(key, schema.properties[key], req, wide, types))
-    .join("\n");
+  const types = Math.max(
+    ...keys.map((key) => envelopeKind(schema.properties[key], req, key).length)
+  );
+  const body = [
+    ...keys.map((key) => envelopeField(key, schema.properties[key], req, wide, types)),
+    ...optionalStrings.map((key) => `\t${emptyFlag(key)} bool`),
+  ].join("\n");
   const checks = (schema.required ?? [])
     .map((key) => {
       const prop = schema.properties[key];
@@ -204,7 +255,10 @@ function renderEnvelope(schema: Schema) {
     .map((key) => objectChecks(key, schema.properties[key]))
     .filter(Boolean)
     .join("\n");
-  const validate = [checks, enumChecks, nestedChecks, "\treturn nil"].filter(Boolean).join("\n");
+  const optionalChecks = optionalStringChecks(optionalStrings);
+  const validate = [checks, enumChecks, optionalChecks, nestedChecks, "\treturn nil"]
+    .filter(Boolean)
+    .join("\n");
   const nested = keys
     .filter((key) => schema.properties[key].type === "object")
     .map((key) => renderEnvelopeObject(key, schema.properties[key]))
@@ -253,7 +307,9 @@ function renderQuestionStruct(schema: Schema, typeName: string): string[] {
   const wide = Math.max(...fields.map(({ n }) => n.length));
   const types = Math.max(...fields.map(({ t }) => t.length));
   const body = fields
-    .map(({ n, t, tag }) => `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}" yaml:"${tag}"\``)
+    .map(
+      ({ n, t, tag }) => `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}" yaml:"${tag}"\``
+    )
     .join("\n");
   const nested = keys.flatMap((key) => {
     const prop = schema.properties[key];
@@ -266,15 +322,20 @@ function renderQuestionStruct(schema: Schema, typeName: string): string[] {
 }
 
 function renderContracts(envelope: Schema) {
+  const required = new Set(envelope.required ?? []);
+  const optionalStrings = optionalStringProperties(envelope, required);
+  const jsonImport = optionalStrings.length ? '\t"encoding/json"\n' : "";
   return `package contracts
 
 import (
-\t"fmt"
+${jsonImport}\t"fmt"
 \t"strings"
 \t"time"
 )
 
 ${renderEnvelope(envelope)}
+
+${renderOptionalStringUnmarshal(optionalStrings)}
 
 ${keep}
 `;
