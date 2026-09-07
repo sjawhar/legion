@@ -482,7 +482,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("re-settled summary = %q", third.PayloadSummary)
 	}
 }
-func TestSummaryTickIdentifiesChecksBySuiteAndName(t *testing.T) {
+func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -510,25 +510,128 @@ func TestSummaryTickIdentifiesChecksBySuiteAndName(t *testing.T) {
 	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "802", "https://example.test/802", "completed", "success", ""); err != nil {
 		t.Fatalf("record passing check: %v", err)
 	}
-	waitCacheChecks(t, store, owner, repo, number, sha, 2)
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	waitCacheSuites(t, store, owner, repo, number, sha, 2)
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
 	runSummaryTick(store, pub, time.Second, logging.New("test"))
 	if got := pub.count(); got != 1 {
 		t.Fatalf("settlement count = %d, want 1", got)
 	}
+	state := getState(t, store, owner, repo, number, sha)
+	if len(state.Checks) != 1 || state.Checks["test"].CheckRunID != "802" || state.Checks["test"].Conclusion != "success" {
+		t.Fatalf("checks = %+v, want the latest successful test run", state.Checks)
+	}
 	var summary Summary
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode settlement: %v", err)
 	}
-	if summary.Failed.Count != 1 || len(summary.Failed.Checks) != 1 || summary.Failed.Checks[0] != "test" {
-		t.Fatalf("failed checks = %+v, want one failed test", summary.Failed)
+	if summary.Failed.Count != 0 || len(summary.Failed.Checks) != 0 {
+		t.Fatalf("failed checks = %+v, want none", summary.Failed)
 	}
 	if summary.Passed.Count != 1 || len(summary.Passed.Checks) != 1 || summary.Passed.Checks[0] != "test" {
-		t.Fatalf("passed checks = %+v, want one passed test", summary.Passed)
+		t.Fatalf("passed checks = %+v, want the latest test run", summary.Passed)
 	}
-	if len(summary.FailingChecks) != 1 || summary.FailingChecks[0].Name != "test" || summary.FailingChecks[0].URL != "https://example.test/801" {
-		t.Fatalf("failing_checks = %+v, want the failing suite's test URL", summary.FailingChecks)
+	if len(summary.FailingChecks) != 0 {
+		t.Fatalf("failing_checks = %+v, want none", summary.FailingChecks)
+	}
+}
+
+func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := recordSuite(store, owner, repo, number, sha, "suite-a", "completed", "success", "1", ""); err != nil {
+		t.Fatalf("record first suite: %v", err)
+	}
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+		t.Fatalf("record first test: %v", err)
+	}
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "lint", "suite-a", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+		t.Fatalf("record first lint: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 2)
+	waitCacheSuites(t, store, owner, repo, number, sha, 1)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("initial settlement count = %d, want 1", got)
+	}
+	initial := getState(t, store, owner, repo, number, sha)
+	if !initial.SettledEmitted {
+		t.Fatalf("initial state = %+v, want settled", initial)
+	}
+
+	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "in_progress", "", "1", ""); err != nil {
+		t.Fatalf("record retargeted suite: %v", err)
+	}
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "901", "https://example.test/901", "in_progress", "", ""); err != nil {
+		t.Fatalf("record retargeted test: %v", err)
+	}
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "lint", "suite-b", "902", "https://example.test/902", "in_progress", "", ""); err != nil {
+		t.Fatalf("record retargeted lint: %v", err)
+	}
+	rearmed := getState(t, store, owner, repo, number, sha)
+	if rearmed.Generation != initial.Generation+1 || rearmed.SettledEmitted {
+		t.Fatalf("retargeted state = %+v, want generation %d and unsettled", rearmed, initial.Generation+1)
+	}
+	if len(rearmed.Checks) != 2 {
+		t.Fatalf("retargeted checks = %+v, want latest runs only", rearmed.Checks)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("retargeted in-progress suite published %d settlements, want 1", got)
+	}
+
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+		t.Fatalf("complete retargeted test: %v", err)
+	}
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "lint", "suite-b", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+		t.Fatalf("complete retargeted lint: %v", err)
+	}
+	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
+		t.Fatalf("complete retargeted suite: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("re-settlement count = %d, want 2", got)
+	}
+	settled := getState(t, store, owner, repo, number, sha)
+	if settled.Generation != initial.Generation+1 || !settled.SettledEmitted {
+		t.Fatalf("re-settled state = %+v, want generation %d and settled", settled, initial.Generation+1)
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode re-settlement: %v", err)
+	}
+	if summary.SupersededSettlement != "true" || summary.Failed.Count != 0 || len(summary.FailingChecks) != 0 {
+		t.Fatalf("re-settlement = %+v, want a green superseding settlement", summary)
+	}
+
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "cancelled", ""); err != nil {
+		t.Fatalf("record late cancelled test: %v", err)
+	}
+	afterLate := getState(t, store, owner, repo, number, sha)
+	if afterLate.Generation != settled.Generation || !afterLate.SettledEmitted || afterLate.Checks["test"].Conclusion != "success" {
+		t.Fatalf("late cancelled run changed settled state: %+v", afterLate)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 2 {
+		t.Fatalf("late cancelled run published %d settlements, want 2", got)
 	}
 }
 

@@ -389,7 +389,7 @@ func (s *Store) record(observation contracts.CIObservation) error {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
-		key := checkKey(observation.SuiteID, observation.CheckName)
+		key := observation.CheckName
 		if current, ok := st.Checks[key]; ok {
 			if checkRunIDIsOlder(observation.CheckRunID, current.CheckRunID) ||
 				(observation.CheckRunID == current.CheckRunID && !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status)) {
@@ -483,13 +483,6 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 		}
 		time.Sleep(casBackoff(attempt))
 	}
-}
-
-func checkKey(suiteID, checkName string) string {
-	if suiteID == "" {
-		return checkName
-	}
-	return suiteID + "\x00" + checkName
 }
 
 func rearm(st *State) {
