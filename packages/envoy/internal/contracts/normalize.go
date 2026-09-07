@@ -35,12 +35,14 @@ func GithubEnvelope(input GithubEnvelopeInput) Envelope {
 }
 
 func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
+	if input.Event == "workflow_run" && len(sliceValue(nested(input.Body, "workflow_run", "pull_requests"))) > 0 {
+		return nil
+	}
 	item := GithubEnvelope(input)
 	if item.Topic == "" {
 		// Event should not be routed (e.g. push to non-heads/tags ref).
 		return nil
 	}
-	owner, repo := githubRepo(input.Body)
 	if githubCIEvent(input.Event) {
 		// CI events (check_run/check_suite) are no longer published raw. They fold
 		// into envoy_ci_state via the webhook handler's CIRecorder (see
@@ -48,16 +50,14 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 		// on pr.<n>.ci by the listener's summary loop. See internal/cistore.
 		return nil
 	}
-
-	out := []Envelope{item}
-	specific := githubSpecificEnvelopes(input, item, owner, repo)
 	if !githubCommentEvent(input.Event) {
-		return append(specific, out...)
+		return []Envelope{item}
 	}
 	body := githubCommentBody(input.Event, input.Body)
 	if !ContainsMention(body, trigger) {
-		return append(specific, out...)
+		return []Envelope{item}
 	}
+	owner, repo := githubRepo(input.Body)
 	// Publish mention topic with same structure: type.number.mention
 	num := githubNumber(input.Event, input.Body)
 	base := githubParentKind(input.Event, input.Body)
@@ -78,42 +78,7 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	mention := item
 	mention.Topic = GithubSubject(owner, repo, "mention")
 	mentions = append(mentions, mention)
-	return append(append(mentions, specific...), out...)
-}
-
-func githubSpecificEnvelopes(input GithubEnvelopeInput, item Envelope, owner, repo string) []Envelope {
-	switch input.Event {
-	case "pull_request":
-		if stringValue(input.Body["action"]) != "closed" {
-			return nil
-		}
-		number := githubNumber(input.Event, input.Body)
-		if number == "" {
-			return nil
-		}
-		specific := item
-		if boolValue(nested(input.Body, "pull_request", "merged")) {
-			specific.Topic = GithubSubject(owner, repo, "pr."+number+".merged")
-		} else {
-			specific.Topic = GithubSubject(owner, repo, "pr."+number+".closed")
-		}
-		return []Envelope{specific}
-	case "workflow_run":
-		branch := nestedString(input.Body, "workflow_run", "head_branch")
-		if branch == "" {
-			return nil
-		}
-		filename := githubWorkflowFilename(input.Body)
-		action := stringValue(input.Body["action"])
-		if filename == "" || action == "" {
-			return nil
-		}
-		specific := item
-		specific.Topic = GithubWorkflowSubject(owner, repo, filename, action) + ".branch." + SanitizeSubjectSegment(branch)
-		return []Envelope{specific}
-	default:
-		return nil
-	}
+	return append(mentions, item)
 }
 
 // CIObservation is the per-(PR, check) fact the CI summary aggregator needs,

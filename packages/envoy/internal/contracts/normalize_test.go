@@ -1088,14 +1088,11 @@ func TestGithubEnvelopesWorkflowRunInProgress(t *testing.T) {
 			},
 		},
 	}, "@legion")
-	if len(items) != 2 {
-		t.Fatalf("expected 2 envelopes, got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.github.example-org.example-repo.workflow.ci_yml.in_progress.branch.main" {
-		t.Fatalf("unexpected branch topic: %s", items[0].Topic)
-	}
-	if items[1].Topic != "notifications.github.example-org.example-repo.workflow.ci_yml.in_progress" {
-		t.Fatalf("unexpected base topic: %s", items[1].Topic)
+	if items[0].Topic != "notifications.github.example-org.example-repo.workflow.ci_yml.in_progress" {
+		t.Fatalf("unexpected workflow topic: %s", items[0].Topic)
 	}
 	if got, want := items[0].PayloadSummary, "workflow CI main run 42 in_progress"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
@@ -1126,14 +1123,11 @@ func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
 			},
 		},
 	}, "@legion")
-	if len(items) != 2 {
-		t.Fatalf("expected 2 envelopes, got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
 	}
-	if items[0].Topic != "notifications.github.example-org.example-repo.workflow.release-prod_yaml.completed.branch.main" {
-		t.Fatalf("unexpected branch topic: %s", items[0].Topic)
-	}
-	if items[1].Topic != "notifications.github.example-org.example-repo.workflow.release-prod_yaml.completed" {
-		t.Fatalf("unexpected base topic: %s", items[1].Topic)
+	if items[0].Topic != "notifications.github.example-org.example-repo.workflow.release-prod_yaml.completed" {
+		t.Fatalf("unexpected workflow topic: %s", items[0].Topic)
 	}
 	if items[0].Payload == "" {
 		t.Fatal("expected non-empty Payload for completed workflow_run")
@@ -1175,8 +1169,8 @@ func TestGithubEnvelopesWorkflowRunLargeRunIDNotScientific(t *testing.T) {
 			},
 		},
 	}, "@legion")
-	if len(items) != 2 {
-		t.Fatalf("expected 2 envelopes, got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 envelope, got %d", len(items))
 	}
 	var payload map[string]string
 	if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
@@ -1949,68 +1943,21 @@ func TestGithubPayloadFields(t *testing.T) {
 	}
 }
 
-func TestGithubEnvelopesMergedTopic(t *testing.T) {
-	tests := []struct {
-		name   string
-		merged bool
-		topic  string
-	}{
-		{name: "merged", merged: true, topic: "notifications.github.example-org.example-repo.pr.29.merged"},
-		{name: "closed without merge", merged: false, topic: "notifications.github.example-org.example-repo.pr.29.closed"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			items := GithubEnvelopes(GithubEnvelopeInput{
-				Event: "pull_request", Delivery: "delivery", EventID: "event", TraceID: "trace",
-				Body: map[string]any{
-					"action":     "closed",
-					"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
-					"pull_request": map[string]any{
-						"number": 29,
-						"merged": tt.merged,
-					},
-				},
-			}, "@envoy")
-			if len(items) != 2 {
-				t.Fatalf("got %d envelopes, want 2", len(items))
-			}
-			if items[0].Topic != tt.topic {
-				t.Fatalf("first topic = %q, want %q", items[0].Topic, tt.topic)
-			}
-			if items[1].Topic != "notifications.github.example-org.example-repo.pr.29" {
-				t.Fatalf("base topic = %q", items[1].Topic)
-			}
-			if items[0].DedupeKey != items[1].DedupeKey {
-				t.Fatalf("fan-out copies have different dedupe keys: %q and %q", items[0].DedupeKey, items[1].DedupeKey)
-			}
-		})
-	}
-}
-
-func TestGithubEnvelopesWorkflowBranchTopic(t *testing.T) {
+func TestGithubEnvelopesWorkflowRunWithPullRequestsDropsEnvelope(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event: "workflow_run", Delivery: "delivery", EventID: "event", TraceID: "trace",
 		Body: map[string]any{
 			"action":     "completed",
 			"repository": map[string]any{"name": "example-repo", "owner": map[string]any{"login": "example-org"}},
 			"workflow_run": map[string]any{
-				"path":        ".github/workflows/checks.yml",
-				"head_branch": "feature/add.payload",
+				"path":          ".github/workflows/checks.yml",
+				"head_branch":   "feature/add.payload",
+				"pull_requests": []any{map[string]any{"number": 30}},
 			},
 		},
 	}, "@envoy")
-	if len(items) != 2 {
-		t.Fatalf("got %d envelopes, want 2", len(items))
-	}
-	if got, want := items[0].Topic, "notifications.github.example-org.example-repo.workflow.checks_yml.completed.branch.feature/add_payload"; got != want {
-		t.Fatalf("first topic = %q, want %q", got, want)
-	}
-	if got, want := items[1].Topic, "notifications.github.example-org.example-repo.workflow.checks_yml.completed"; got != want {
-		t.Fatalf("base topic = %q, want %q", got, want)
-	}
-	if items[0].DedupeKey != items[1].DedupeKey {
-		t.Fatalf("fan-out copies have different dedupe keys: %q and %q", items[0].DedupeKey, items[1].DedupeKey)
+	if len(items) != 0 {
+		t.Fatalf("got %d envelopes, want none for a pull-request workflow run", len(items))
 	}
 }
 
