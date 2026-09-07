@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -310,22 +311,29 @@ func putInterest(t *testing.T, kv natsgo.KeyValue, item Interest) {
 	}
 }
 
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if condition() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for observable state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // pollMatch retries Match() until the expected count is reached or timeout fires.
 func pollMatch(t *testing.T, r *Registry, machineID, topic string, wantCount int, timeout time.Duration) []Interest {
 	t.Helper()
-	deadline := time.After(timeout)
-	for {
-		got := r.Match(machineID, topic)
-		if len(got) == wantCount {
-			return got
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("timed out waiting for Match() to return %d results (got %d)", wantCount, len(got))
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
+	var got []Interest
+	waitFor(t, timeout, func() bool {
+		got = r.Match(machineID, topic)
+		return len(got) == wantCount
+	})
+	return got
 }
 
 func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
@@ -1292,9 +1300,9 @@ func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
 	assertInterestTopicsForSession(t, reg, newSession, roleTopic)
 	assertInterestTopicsForSession(t, reg, oldSession, roleTopic, "notifications.slack.>")
 	for _, want := range []string{"level=WARN", "role=legion-controller", "old_session_id=ses_old", "new_session_id=ses_new"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Fatalf("cleanup warning %q does not contain %q", logs.String(), want)
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			return strings.Contains(logs.String(), want)
+		})
 	}
 	t.Logf("old-holder cleanup warning: %s", strings.TrimSpace(logs.String()))
 }
@@ -1338,9 +1346,9 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 		"key=" + sessionID,
 		"revision=" + strconv.FormatUint(revision, 10),
 	} {
-		if !strings.Contains(logs.String(), want) {
-			t.Fatalf("malformed-value warning %q does not contain %q", logs.String(), want)
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			return strings.Contains(logs.String(), want)
+		})
 	}
 	t.Logf("interest watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
 }
@@ -1424,13 +1432,30 @@ func assertInterestMissing(t *testing.T, reg *Registry, sessionID string) {
 	}
 }
 
-func captureRegistryLogs(t *testing.T) *bytes.Buffer {
+func captureRegistryLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var logs bytes.Buffer
+	var logs lockedBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	return &logs
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {

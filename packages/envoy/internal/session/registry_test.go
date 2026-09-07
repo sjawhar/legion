@@ -262,32 +262,58 @@ func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
 		"key=" + sessionID,
 		"revision=" + strconv.FormatUint(revision, 10),
 	} {
-		if !strings.Contains(logs.String(), want) {
-			t.Fatalf("malformed-value warning %q does not contain %q", logs.String(), want)
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			return strings.Contains(logs.String(), want)
+		})
 	}
 	t.Logf("session watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
 }
 
-func waitForSessionEviction(t *testing.T, reg *SessionRegistry, sessionID string, timeout time.Duration) {
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		_, getErr := reg.Get(sessionID)
-		entries, listErr := reg.List()
-		if getErr != nil && listErr == nil && len(entries) == 0 {
+	for {
+		if condition() {
 			return
 		}
-		time.Sleep(25 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for observable state")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("malformed value left session %q route cached", sessionID)
 }
 
-func captureSessionRegistryLogs(t *testing.T) *bytes.Buffer {
+func waitForSessionEviction(t *testing.T, reg *SessionRegistry, sessionID string, timeout time.Duration) {
 	t.Helper()
-	var logs bytes.Buffer
+	waitFor(t, timeout, func() bool {
+		_, getErr := reg.Get(sessionID)
+		entries, listErr := reg.List()
+		return getErr != nil && listErr == nil && len(entries) == 0
+	})
+}
+
+func captureSessionRegistryLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	var logs lockedBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	return &logs
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
