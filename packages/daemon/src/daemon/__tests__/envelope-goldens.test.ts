@@ -63,6 +63,7 @@ describe("Envoy GitHub envelope goldens", () => {
 
     expect(state.prs[prKey]).toMatchObject({
       headSha: synchronized.payload.head_sha,
+      headUpdatedAt: Date.parse(synchronized.payload.updated_at),
       verdict: null,
       failing: [],
       ciSettledAt: null,
