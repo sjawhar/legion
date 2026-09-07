@@ -317,18 +317,41 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 		if role == "" || strings.ContainsAny(role, "*>") {
 			continue
 		}
-		entry, err := r.roleKV.Get(role)
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			continue
-		}
-		if err != nil {
+		if err := r.releaseRoleClaim(sessionID, role); err != nil {
 			return err
 		}
-		if string(entry.Value()) != sessionID {
-			continue
-		}
-		err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
-		if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
+	}
+	return nil
+}
+
+func (r *Registry) releaseRoleClaim(sessionID, role string) error {
+	entry, err := r.roleKV.Get(role)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if string(entry.Value()) != sessionID {
+		return nil
+	}
+	err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
+	if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
+		return err
+	}
+	return nil
+}
+
+func (r *Registry) releaseAllRoleClaims(sessionID string) error {
+	roles, err := r.roleKV.Keys()
+	if errors.Is(err, nats.ErrNoKeysFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, role := range roles {
+		if err := r.releaseRoleClaim(sessionID, role); err != nil {
 			return err
 		}
 	}
@@ -336,7 +359,19 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 }
 
 func (r *Registry) Remove(sessionID string, topics []string) error {
-	if err := r.releaseRoleClaims(sessionID, topics); err != nil {
+	if len(topics) == 0 {
+		item, err := r.Get(sessionID)
+		if err == nil {
+			if err := r.releaseRoleClaims(sessionID, item.Topics); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, nats.ErrKeyNotFound) {
+			return err
+		}
+		if err := r.releaseAllRoleClaims(sessionID); err != nil {
+			return err
+		}
+	} else if err := r.releaseRoleClaims(sessionID, topics); err != nil {
 		return err
 	}
 	return r.removeInterestTopics(sessionID, topics)

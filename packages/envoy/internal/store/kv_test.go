@@ -1175,6 +1175,43 @@ func TestRemoveAllClearsCache(t *testing.T) {
 		t.Fatalf("unsubscribed session must not route, got %v", got)
 	}
 }
+func TestRemoveAllReleasesRoleClaims(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_remove_all_role"
+		role      = "legion-controller"
+	)
+	if _, err := reg.SetRole(sessionID, "example-host", role); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	if err := reg.Remove(sessionID, nil); err != nil {
+		t.Fatalf("Remove all: %v", err)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
+func TestRemoveAllReleasesRoleClaimMissingFromInterest(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_remove_orphaned_role"
+		role      = "legion-controller"
+	)
+	if _, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: "example-host"}, []string{"notifications.agent." + sessionID}); err != nil {
+		t.Fatalf("Upsert interest: %v", err)
+	}
+	if _, err := reg.roleKV.Put(role, []byte(sessionID)); err != nil {
+		t.Fatalf("seed orphaned role claim: %v", err)
+	}
+	if err := reg.Remove(sessionID, nil); err != nil {
+		t.Fatalf("Remove all: %v", err)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
 
 func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 	conn, cleanup := connectNATS(t)

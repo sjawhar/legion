@@ -524,6 +524,39 @@ func TestUnsubscribeRequiresSessionIDAndReturnsRemovedTopics(t *testing.T) {
 		}
 	})
 }
+func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	const (
+		sessionID = "ses_unsubscribe_role"
+		role      = "legion-controller"
+	)
+	if _, err := registry.SetRole(sessionID, "test-machine", role); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	mux := http.NewServeMux()
+	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodPost,
+		"/v1/interests/unsubscribe",
+		strings.NewReader(`{"session_id":"ses_unsubscribe_role","topics":[]}`),
+	))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	holder, err := registry.RoleHolder(role)
+	if err != nil {
+		t.Fatalf("RoleHolder: %v", err)
+	}
+	if holder != "" {
+		t.Fatalf("role holder = %q, want removed session", holder)
+	}
+}
 
 func TestSessionsHandlerFiltersAndReportsRoles(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, map[string][]string{
