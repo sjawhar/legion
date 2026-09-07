@@ -63,6 +63,28 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 	return st
 }
 
+type interleavingKV struct {
+	natsgo.KeyValue
+	afterGet    func(string)
+	afterUpdate func(string, []byte, uint64)
+}
+
+func (kv *interleavingKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	entry, err := kv.KeyValue.Get(key)
+	if err == nil && kv.afterGet != nil {
+		kv.afterGet(key)
+	}
+	return entry, err
+}
+
+func (kv *interleavingKV) Update(key string, value []byte, revision uint64) (uint64, error) {
+	updated, err := kv.KeyValue.Update(key, value, revision)
+	if err == nil && kv.afterUpdate != nil {
+		kv.afterUpdate(key, value, updated)
+	}
+	return updated, err
+}
+
 func TestRecordAccumulatesChecks(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -233,12 +255,19 @@ func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
 		t.Fatalf("delayed suite re-armed state: %+v", suite)
 	}
 	state := getState(t, s, owner, repo, number, sha)
-	claimed, err := s.MarkSettled(Key(owner, repo, number, sha), state.Hash(), 0)
+	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, number, sha), state.Hash(), state.Generation)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if !claimed {
+		t.Fatal("claim settlement did not claim completed state")
+	}
+	marked, err := s.MarkSettled(Key(owner, repo, number, sha), claimedState.Generation)
 	if err != nil {
 		t.Fatalf("mark settled: %v", err)
 	}
-	if !claimed {
-		t.Fatal("mark settled did not claim completed state")
+	if !marked {
+		t.Fatal("mark settled did not mark claimed state")
 	}
 	if err := s.Record(owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200", "in_progress", "", inProgress); err != nil {
 		t.Fatalf("record delayed check after settlement: %v", err)
@@ -449,7 +478,7 @@ func TestRecordTimestamplessObservationUpdatesTimestamplessState(t *testing.T) {
 	}
 }
 
-func TestRecordHeadEqualTimestampUsesLaterReceipt(t *testing.T) {
+func TestRecordHeadEqualTimestampUsesLatestObservation(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
@@ -480,7 +509,7 @@ func TestRecordHeadEqualTimestampUsesLaterReceipt(t *testing.T) {
 	}
 }
 
-func TestMarkSettledRefusesWhenDurableHeadChanged(t *testing.T) {
+func TestClaimSettlementRefusesWhenDurableHeadChanged(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
@@ -498,15 +527,114 @@ func TestMarkSettledRefusesWhenDurableHeadChanged(t *testing.T) {
 	if err := s.RecordHead(owner, repo, pr, shaB, "2026-09-07T03:00:01Z"); err != nil {
 		t.Fatalf("record replacement head: %v", err)
 	}
-	claimed, err := s.MarkSettled(Key(owner, repo, pr, shaA), state.Hash(), 0)
+	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, shaA), state.Hash(), state.Generation)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimSettlement claimed a state whose durable head changed")
+	}
+	if getState(t, s, owner, repo, pr, shaA).Claim != nil {
+		t.Fatal("stale state gained a settlement claim")
+	}
+}
+
+func TestClaimSettlementRefusesWhenHashMoved(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+		t.Fatalf("record initial check: %v", err)
+	}
+	initial := getState(t, s, owner, repo, pr, sha)
+	if err := s.Record(owner, repo, pr, sha, "build", "802", "https://example.test/802", "completed", "failure", ""); err != nil {
+		t.Fatalf("record rerun: %v", err)
+	}
+
+	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), initial.Hash(), initial.Generation)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimSettlement claimed a state whose hash changed")
+	}
+	if getState(t, s, owner, repo, pr, sha).Claim != nil {
+		t.Fatal("hash-moved state gained a settlement claim")
+	}
+}
+
+func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	state := getState(t, s, owner, repo, pr, sha)
+	claimedState, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, sha), state.Hash(), state.Generation)
+	if err != nil || !claimed {
+		t.Fatalf("claim settlement = (%+v, %t, %v), want claimed state", claimedState, claimed, err)
+	}
+
+	originalKV := s.kv
+	var watcherRevision uint64
+	s.kv = &interleavingKV{
+		KeyValue: originalKV,
+		afterUpdate: func(key string, _ []byte, _ uint64) {
+			entry, err := originalKV.Get(key)
+			if err != nil {
+				t.Fatalf("get marked state: %v", err)
+			}
+			var newer State
+			if err := json.Unmarshal(entry.Value(), &newer); err != nil {
+				t.Fatalf("decode marked state: %v", err)
+			}
+			newer.Generation++
+			newer.SettledEmitted = false
+			raw, err := json.Marshal(newer)
+			if err != nil {
+				t.Fatalf("encode newer watcher state: %v", err)
+			}
+			watcherRevision, err = originalKV.Update(key, raw, entry.Revision())
+			if err != nil {
+				t.Fatalf("write newer watcher state: %v", err)
+			}
+			s.mu.Lock()
+			s.cacheStateLocked(key, newer, watcherRevision)
+			s.mu.Unlock()
+		},
+	}
+	t.Cleanup(func() { s.kv = originalKV })
+
+	marked, err := s.MarkSettled(Key(owner, repo, pr, sha), claimedState.Generation)
 	if err != nil {
 		t.Fatalf("mark settled: %v", err)
 	}
-	if claimed {
-		t.Fatal("MarkSettled claimed a state whose durable head changed")
+	if !marked {
+		t.Fatal("MarkSettled did not mark the claimed generation")
 	}
-	if getState(t, s, owner, repo, pr, shaA).SettledEmitted {
-		t.Fatal("stale state was marked settled")
+	key := Key(owner, repo, pr, sha)
+	s.mu.RLock()
+	cached := s.cache[key]
+	cachedRevision := s.cacheRevisions[key]
+	s.mu.RUnlock()
+	if cached.Generation != claimedState.Generation+1 || cached.SettledEmitted {
+		t.Fatalf("cached state = %+v, want the newer watcher state", cached)
+	}
+	if cachedRevision != watcherRevision {
+		t.Fatalf("cached revision = %d, want watcher revision %d", cachedRevision, watcherRevision)
 	}
 }
 

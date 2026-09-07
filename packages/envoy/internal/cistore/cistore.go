@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -62,6 +61,14 @@ type Suite struct {
 	ObservedAt string `json:"observed_at"`
 }
 
+// SettlementClaim is the durable right to publish one settlement generation.
+// Claims prevent replicas from publishing the same episode concurrently.
+type SettlementClaim struct {
+	Hash       string `json:"hash"`
+	Generation uint64 `json:"generation"`
+	ClaimedAt  int64  `json:"claimed_at"`
+}
+
 // State is the aggregated set of checks and suites for one (owner, repo, PR
 // number, head SHA).
 type State struct {
@@ -72,8 +79,9 @@ type State struct {
 	Checks         map[string]Check `json:"checks"`
 	Suites         map[string]Suite `json:"suites"`
 	LastEventAt    int64            `json:"last_event_at"`
+	Generation     uint64           `json:"generation"`
 	SettledEmitted bool             `json:"settled_emitted"`
-	Resettled      bool             `json:"resettled"`
+	Claim          *SettlementClaim `json:"claim,omitempty"`
 }
 
 const headRecordKind = "head"
@@ -82,7 +90,6 @@ type headRecord struct {
 	Kind      string `json:"kind"`
 	SHA       string `json:"sha"`
 	UpdatedAt string `json:"updated_at"`
-	Receipt   uint64 `json:"receipt"`
 }
 
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
@@ -143,13 +150,13 @@ func (s State) Hash() string {
 }
 
 type Store struct {
-	kv        nats.KeyValue
-	mu        sync.RWMutex
-	cache     map[string]State
-	heads     map[string]string
-	readyCh   chan struct{}
-	readyOnce sync.Once
-	receipts  atomic.Uint64
+	kv             nats.KeyValue
+	mu             sync.RWMutex
+	cache          map[string]State
+	heads          map[string]string
+	cacheRevisions map[string]uint64
+	readyCh        chan struct{}
+	readyOnce      sync.Once
 	// watchErr is non-nil once the WatchAll watcher fails to start or its update
 	// stream ends. The summary loop reads only the cache (no KV fallback), so a
 	// dead watcher silently stops/staleness summaries; surfacing it via Ping lets
@@ -207,7 +214,13 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{kv: kv, cache: map[string]State{}, heads: map[string]string{}, readyCh: make(chan struct{})}
+	s := &Store{
+		kv:             kv,
+		cache:          map[string]State{},
+		heads:          map[string]string{},
+		cacheRevisions: map[string]uint64{},
+		readyCh:        make(chan struct{}),
+	}
 	go s.watch()
 	return s, nil
 }
@@ -243,8 +256,7 @@ func (s *Store) watch() {
 		s.mu.Lock()
 		switch {
 		case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
-			delete(s.cache, key)
-			delete(s.heads, key)
+			s.evictCachedLocked(key, entry.Revision())
 		default:
 			var marker struct {
 				Kind string `json:"kind"`
@@ -252,23 +264,21 @@ func (s *Store) watch() {
 			if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == headRecordKind {
 				var head headRecord
 				if err := json.Unmarshal(entry.Value(), &head); err != nil {
-					delete(s.heads, key)
+					s.evictCachedLocked(key, entry.Revision())
 					malformed = err
 				} else if !validHeadSHA(head.SHA) {
-					delete(s.heads, key)
+					s.evictCachedLocked(key, entry.Revision())
 					malformed = errors.New("invalid head SHA")
 				} else {
-					delete(s.cache, key)
-					s.heads[key] = head.SHA
+					s.cacheHeadLocked(key, head.SHA, entry.Revision())
 				}
 			} else {
 				var st State
 				if err := json.Unmarshal(entry.Value(), &st); err != nil {
-					delete(s.cache, key)
-					delete(s.heads, key)
+					s.evictCachedLocked(key, entry.Revision())
 					malformed = err
 				} else {
-					s.cache[key] = st
+					s.cacheStateLocked(key, st, entry.Revision())
 				}
 			}
 		}
@@ -287,6 +297,33 @@ func (s *Store) watch() {
 	// the listener and rebuilds the cache from durable KV.
 	s.setWatchErr(errors.New("cistore: KV watcher stream closed"))
 	s.signalReady()
+}
+
+func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
+	if revision < s.cacheRevisions[key] {
+		return
+	}
+	s.cache[key] = state
+	delete(s.heads, key)
+	s.cacheRevisions[key] = revision
+}
+
+func (s *Store) cacheHeadLocked(key, sha string, revision uint64) {
+	if revision < s.cacheRevisions[key] {
+		return
+	}
+	delete(s.cache, key)
+	s.heads[key] = sha
+	s.cacheRevisions[key] = revision
+}
+
+func (s *Store) evictCachedLocked(key string, revision uint64) {
+	if revision < s.cacheRevisions[key] {
+		return
+	}
+	delete(s.cache, key)
+	delete(s.heads, key)
+	s.cacheRevisions[key] = revision
 }
 
 func (s *Store) setWatchErr(err error) {
@@ -339,8 +376,9 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 		if current, ok := st.Checks[checkName]; ok && sameCheck(current, next) {
 			return false
 		}
+		before := st.Hash()
 		st.Checks[checkName] = next
-		rearm(st)
+		rearm(st, before != st.Hash())
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
 	})
@@ -358,8 +396,9 @@ func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusio
 				return false
 			}
 		}
+		before := st.Hash()
 		st.Suites[suiteID] = next
-		rearm(st)
+		rearm(st, before != st.Hash())
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
 	})
@@ -418,11 +457,13 @@ func sameCheck(current, next Check) bool {
 		current.ObservedAt == next.ObservedAt
 }
 
-func rearm(st *State) {
-	if st.SettledEmitted {
-		st.SettledEmitted = false
-		st.Resettled = true
+func rearm(st *State, terminalPictureChanged bool) {
+	if !terminalPictureChanged || (!st.SettledEmitted && st.Claim == nil) {
+		return
 	}
+	st.Generation++
+	st.SettledEmitted = false
+	st.Claim = nil
 }
 
 func observationMayReplace(incomingAt, storedAt, incomingStatus, storedStatus string) bool {
@@ -505,8 +546,7 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 				}
 			}
 		}
-		receipt := s.nextReceipt(current.Receipt)
-		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt, Receipt: receipt})
+		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt})
 		if err != nil {
 			return err
 		}
@@ -527,18 +567,6 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 			return errors.New("cistore: record head exceeded CAS budget")
 		}
 		time.Sleep(casBackoff(attempt))
-	}
-}
-
-func (s *Store) nextReceipt(after uint64) uint64 {
-	for {
-		receipt := s.receipts.Add(1)
-		if receipt > after {
-			return receipt
-		}
-		if s.receipts.CompareAndSwap(receipt, after) {
-			return s.receipts.Add(1)
-		}
 	}
 }
 
@@ -572,8 +600,8 @@ func (s *Store) List() []State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]State, 0, len(s.cache))
-	for _, st := range s.cache {
-		out = append(out, st)
+	for _, state := range s.cache {
+		out = append(out, state)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return Key(out[i].Owner, out[i].Repo, out[i].Number, out[i].SHA) <
@@ -582,51 +610,168 @@ func (s *Store) List() []State {
 	return out
 }
 
-// MarkSettled claims the right to emit one checks envelope for the current
-// settled episode. It reloads state and rechecks the rendered hash, debounce,
-// check terminality, and check-suite gate before its CAS update.
-func (s *Store) MarkSettled(key, expectedHash string, debounce time.Duration) (bool, error) {
+// ClaimSettlement atomically acquires the right to publish a ready state
+// generation after re-reading the durable state and head record.
+func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64) (State, bool, error) {
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		return State{}, false, err
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		return State{}, false, err
+	}
+	if state.SettledEmitted ||
+		state.Claim != nil ||
+		state.Generation != expectedGeneration ||
+		state.Hash() != expectedHash ||
+		!settlementReady(state) {
+		return State{}, false, nil
+	}
+	headMatches, err := s.durableHeadMatches(state)
+	if err != nil {
+		return State{}, false, err
+	}
+	if !headMatches {
+		return State{}, false, nil
+	}
+	state.Claim = &SettlementClaim{
+		Hash:       expectedHash,
+		Generation: expectedGeneration,
+		ClaimedAt:  time.Now().UnixMilli(),
+	}
+	buf, err := json.Marshal(state)
+	if err != nil {
+		return State{}, false, err
+	}
+	revision, err := s.kv.Update(key, buf, entry.Revision())
+	if err != nil {
+		if isCASConflict(err) {
+			return State{}, false, nil
+		}
+		return State{}, false, err
+	}
+	s.mu.Lock()
+	s.cacheStateLocked(key, state, revision)
+	s.mu.Unlock()
+	return state, true, nil
+}
+
+// ReclaimSettlement releases a claim from a replica that died before publish.
+// The caller determines the stale threshold from its configured debounce.
+func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int64) (bool, error) {
 	entry, err := s.kv.Get(key)
 	if err != nil {
 		return false, err
 	}
-	var st State
-	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
 		return false, err
 	}
-	if st.SettledEmitted ||
-		st.Hash() != expectedHash ||
-		time.Now().UnixMilli()-st.LastEventAt < debounce.Milliseconds() ||
-		!settlementReady(st) {
+	if state.Claim == nil ||
+		state.Claim.Generation != generation ||
+		state.Claim.ClaimedAt >= staleBefore {
 		return false, nil
 	}
-	head, err := s.kv.Get(headKey(st.Owner, st.Repo, st.Number))
-	if err == nil {
-		var current headRecord
-		if err := json.Unmarshal(head.Value(), &current); err != nil {
-			return false, nil
-		}
-		if validHeadSHA(current.SHA) && current.SHA != st.SHA {
-			return false, nil
-		}
-	} else if !errors.Is(err, nats.ErrKeyNotFound) {
-		return false, err
-	}
-	st.SettledEmitted = true
-	buf, err := json.Marshal(st)
+	state.Claim = nil
+	buf, err := json.Marshal(state)
 	if err != nil {
 		return false, err
 	}
-	if _, err := s.kv.Update(key, buf, entry.Revision()); err != nil {
+	revision, err := s.kv.Update(key, buf, entry.Revision())
+	if err != nil {
 		if isCASConflict(err) {
 			return false, nil
 		}
 		return false, err
 	}
 	s.mu.Lock()
-	s.cache[key] = st
+	s.cacheStateLocked(key, state, revision)
 	s.mu.Unlock()
 	return true, nil
+}
+
+// ReleaseClaim clears this generation's claim after a failed publication.
+func (s *Store) ReleaseClaim(key string, generation uint64) (bool, error) {
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		return false, err
+	}
+	if state.Claim == nil || state.Claim.Generation != generation {
+		return false, nil
+	}
+	state.Claim = nil
+	buf, err := json.Marshal(state)
+	if err != nil {
+		return false, err
+	}
+	revision, err := s.kv.Update(key, buf, entry.Revision())
+	if err != nil {
+		if isCASConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	s.mu.Lock()
+	s.cacheStateLocked(key, state, revision)
+	s.mu.Unlock()
+	return true, nil
+}
+
+// MarkSettled marks a successfully published claim as emitted. A re-arm moves
+// Generation, causing this CAS to refuse the obsolete publisher.
+func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		return false, err
+	}
+	if state.SettledEmitted ||
+		state.Generation != generation ||
+		state.Claim == nil ||
+		state.Claim.Generation != generation ||
+		state.Claim.Hash != state.Hash() {
+		return false, nil
+	}
+	state.SettledEmitted = true
+	state.Claim = nil
+	buf, err := json.Marshal(state)
+	if err != nil {
+		return false, err
+	}
+	revision, err := s.kv.Update(key, buf, entry.Revision())
+	if err != nil {
+		if isCASConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	s.mu.Lock()
+	s.cacheStateLocked(key, state, revision)
+	s.mu.Unlock()
+	return true, nil
+}
+
+func (s *Store) durableHeadMatches(state State) (bool, error) {
+	entry, err := s.kv.Get(headKey(state.Owner, state.Repo, state.Number))
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var head headRecord
+	if err := json.Unmarshal(entry.Value(), &head); err != nil || !validHeadSHA(head.SHA) {
+		return false, nil
+	}
+	return head.SHA == state.SHA, nil
 }
 
 func settlementReady(st State) bool {

@@ -40,24 +40,42 @@ func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce
 // runSummaryTick performs a single reconcile pass. Split out for testability.
 func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger *logging.Logger) {
 	now := time.Now().UnixMilli()
-	for _, st := range store.List() {
-		if now-st.LastEventAt < debounce.Milliseconds() {
+	staleBefore := now - (2 * debounce).Milliseconds()
+	for _, cached := range store.List() {
+		if now-cached.LastEventAt < debounce.Milliseconds() {
 			continue
 		}
-		head, knownHead := store.Head(st.Owner, st.Repo, st.Number)
+		head, knownHead := store.Head(cached.Owner, cached.Repo, cached.Number)
 		if !knownHead {
-			head = st.SHA
+			head = cached.SHA
 		}
-		if st.SHA != head {
+		if cached.SHA != head || cached.SettledEmitted || !settlementReady(cached) {
 			continue
 		}
-		if st.SettledEmitted || !settlementReady(st) {
-			continue
+		key := Key(cached.Owner, cached.Repo, cached.Number, cached.SHA)
+		if cached.Claim != nil {
+			if cached.Claim.ClaimedAt >= staleBefore {
+				continue
+			}
+			reclaimed, err := store.ReclaimSettlement(key, cached.Generation, staleBefore)
+			if err != nil {
+				logger.Warn("checks reclaim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))
+				continue
+			}
+			if !reclaimed {
+				continue
+			}
 		}
 
-		sum := renderSummary(st)
-
-		h := st.Hash()
+		state, claimed, err := store.ClaimSettlement(key, cached.Hash(), cached.Generation)
+		if err != nil {
+			logger.Warn("checks claim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))
+			continue
+		}
+		if !claimed {
+			continue
+		}
+		sum := renderSummary(state)
 		issuedAt := contracts.NowMillis()
 		sum.SettledAt = issuedAt
 		payload, err := json.Marshal(sum)
@@ -66,11 +84,18 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			continue
 		}
 		env := contracts.Envelope{
-			EventID:        id.New(),
-			Source:         "github",
-			SourceEventID:  id.New(),
-			Topic:          contracts.GithubSubject(st.Owner, st.Repo, "pr."+st.Number+".checks"),
-			DedupeKey:      "github.checks." + st.Owner + "/" + st.Repo + ".pr." + st.Number + "." + st.SHA + "." + h,
+			EventID:       id.New(),
+			Source:        "github",
+			SourceEventID: id.New(),
+			Topic:         contracts.GithubSubject(state.Owner, state.Repo, "pr."+state.Number+".checks"),
+			DedupeKey: fmt.Sprintf(
+				"github.checks.%s/%s.pr.%s.%s.g%d",
+				state.Owner,
+				state.Repo,
+				state.Number,
+				state.SHA,
+				state.Generation,
+			),
 			IssuedAt:       issuedAt,
 			PayloadSummary: settledPayloadSummary(sum),
 			Payload:        string(payload),
@@ -78,19 +103,24 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		}
 		if err := env.Validate(); err != nil {
 			logger.Error("checks invalid envelope", slog.String("error", err.Error()))
+			if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+				logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+			}
 			continue
 		}
 		if err := pub.Publish(env); err != nil {
 			logger.Warn("checks publish failed",
 				slog.String("error", err.Error()),
 				slog.String("topic", env.Topic),
-				slog.String("sha", st.SHA),
+				slog.String("sha", state.SHA),
 			)
+			if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+				logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+			}
 			continue
 		}
-		if _, err := store.MarkSettled(Key(st.Owner, st.Repo, st.Number, st.SHA), h, debounce); err != nil {
+		if _, err := store.MarkSettled(key, state.Generation); err != nil {
 			logger.Warn("checks mark-settled failed", slog.String("error", err.Error()))
-			continue
 		}
 	}
 }

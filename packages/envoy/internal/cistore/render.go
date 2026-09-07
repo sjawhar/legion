@@ -106,7 +106,7 @@ func renderSummary(s State) Summary {
 		Skipped:       group(groups[catSkipped]),
 		FailingChecks: failingChecks,
 	}
-	if s.Resettled {
+	if s.Generation > 0 {
 		sum.SupersededSettlement = "true"
 	}
 	return sum

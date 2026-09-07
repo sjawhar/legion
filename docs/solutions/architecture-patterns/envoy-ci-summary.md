@@ -1,84 +1,40 @@
 # Envoy CI Notifications
+Envoy emits one settled CI result per pull-request head on
+`notifications.github.<owner>.<repo>.pr.<number>.checks`. Check runs and check
+suites are aggregated first; raw CI observations are not published.
 
-Envoy emits one useful CI event per pull-request head:
-`notifications.github.<owner>.<repo>.pr.<number>.checks`. Agents that subscribe
-to `pr.<number>.>` therefore receive the settled CI result without filtering
-raw check traffic or intermediate snapshots.
+## Durable settlement state machine
 
-## Delivery path
+Each commit uses the KV key `<owner>.<repo>.pr<number>.<sha>` in
+`envoy_ci_state`; the PR head is a separate durable `head.<owner>.<repo>.<number>`
+record. State contains checks, suites, `Generation`, `SettledEmitted`, and an
+optional claim `{hash, generation, claimed_at}`.
 
-1. A PR-associated `check_run` records its name, attempt ID, URL, status, and
-   conclusion in the per-head CI state.
-2. A PR-associated `check_suite` records its ID, status, conclusion, and app
-   ID in the same state.
-3. The reconcile loop waits for `ENVOY_CI_DEBOUNCE` (default `5s`), confirms
-   the SHA is the PR head, and emits `checks` only when every check run is
-   terminal and every recorded suite is `completed`.
+1. `Record` and `RecordSuite` CAS-update the aggregate. A terminal-picture
+   change while settled or claimed re-arms it: increment `Generation`, clear
+   `SettledEmitted`, and clear the claim. A generation above zero marks a
+   re-settlement.
+2. The reconcile loop reads its rebuildable cache and selects only a quiet,
+   terminal, current-head state without an emitted or live claim. A claim older
+   than twice the debounce interval is reclaimed.
+3. `ClaimSettlement` re-reads durable state and head, verifies hash,
+   generation, terminality, and head identity, then CAS-writes the claim.
+   A mismatch publishes nothing.
+4. The claimant renders that durable snapshot and publishes with
+   `github.checks.<owner>/<repo>.pr.<number>.<sha>.g<generation>`.
+5. `MarkSettled` CAS-marks the same generation emitted and clears its claim.
+   A publish failure calls `ReleaseClaim`, so the next tick retries. A
+   generation change makes either cleanup refuse the obsolete claim.
 
-Some CI providers send no suites. When no suite was observed for a head, the
-terminal check-run rule is sufficient. A check run is always required.
-
-## Exactly-once episodes
-
-`MarkSettled` uses a compare-and-swap against fresh JetStream KV state. It
-rechecks the rendered state hash, debounce window, terminal check runs, and
-suite gate before setting `SettledEmitted`, so stale WatchAll state cannot
-publish a false result and listener replicas cannot both publish the same
-episode.
-
-The claim happens before the publish. This deliberately favors exactly-once
-delivery: a failed publish is logged as a warning rather than retried as a
-potential duplicate; a subsequent CI change creates a new settlement episode.
-
-A changed check run or a suite returning to a non-completed state re-arms a
-settled head. The next completed episode emits another `checks` envelope with
-`"superseded_settlement":"true"` in `Payload` and ` (re-settled)` appended to
-the prose summary.
+All local cache write-through and watcher updates carry a KV revision and only
+apply at or above the cached revision. This prevents an older claim/mark write
+from replacing a newer watcher state.
 
 ## Envelope
 
-```text
-Topic: notifications.github.example-org.example-repo.pr.42.checks
-PayloadSummary: checks settled on example-org/example-repo#42 @ abcdef1: 1 passed, 1 failed, 0 cancelled, 0 skipped; failing: lint
-```
-
-`Payload` is JSON rendered from the complete state:
-
-```json
-{
-  "kind": "checks",
-  "repo": "example-org/example-repo",
-  "number": "42",
-  "sha": "abcdef1234567890abcdef1234567890abcdef12",
-  "is_head": true,
-  "failed": { "count": 1, "checks": ["lint"] },
-  "running": { "count": 0, "checks": [] },
-  "passed": { "count": 1, "checks": ["build"] },
-  "queued": { "count": 0, "checks": [] },
-  "cancelled": { "count": 0, "checks": [] },
-  "skipped": { "count": 0, "checks": [] },
-  "failing_checks": [{ "name": "lint", "url": "https://example-host/checks/301" }]
-}
-```
-
-`PayloadSummary` is one line of prose capped at 160 characters. JSON belongs
-only in `Payload`.
-
-## Operational behavior
-
-- CI state is in the `envoy_ci_state` JetStream KV bucket, keyed by owner,
-  repository, PR number, and head SHA.
-- The WatchAll cache is rebuildable. A failed watcher makes `Ping` fail so the
-  listener self-health watchdog restarts the loop.
-- State expires seven days after its last CI event.
-- Unknown completed conclusions are classified as failed; unknown active
-  statuses are treated as queued.
-
-## Files
-
-- `packages/envoy/internal/contracts/normalize.go` extracts check-run and
-  check-suite observations.
-- `packages/envoy/internal/webhook/github.go` records observations without
-  publishing raw CI envelopes.
-- `packages/envoy/internal/cistore/` stores state, applies the settlement CAS,
-  renders JSON, and publishes `checks`.
+The payload is the full status summary: every check group, failing check URLs,
+and `settled_at`. `superseded_settlement` is `"true"` for generations after the
+first, and the one-line payload summary appends `(re-settled)`. The summary
+waits for `ENVOY_CI_DEBOUNCE` (default `5s`), all check runs to be terminal,
+and every observed suite to be `completed`; heads with no suite still settle
+after terminal checks.
