@@ -40,6 +40,20 @@ type listenerDeps struct {
 	ciStore  *cistore.Store
 }
 
+func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
+	return webhook.CIRecorderFuncs{
+		RecordFunc: func(owner, repo, number, sha, name, id, url, status, conclusion string) error {
+			return deps.Load().ciStore.Record(owner, repo, number, sha, name, id, url, status, conclusion)
+		},
+		RecordSuiteFunc: func(owner, repo, number, sha, suiteID, status, conclusion string, appID ...string) error {
+			return deps.Load().ciStore.RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID...)
+		},
+		RecordHeadFunc: func(owner, repo, number, sha string) error {
+			return deps.Load().ciStore.RecordHead(owner, repo, number, sha)
+		},
+	}
+}
+
 // Canonical policy for the listener's durable consumer. DeliverSubject is
 // deliberately not part of the policy: it is fixed at creation and preserved
 // for the consumer's lifetime (nats.Bind attaches to whatever subject the
@@ -360,11 +374,7 @@ func main() {
 	})
 	// CI recorder folds check_run events into cistore behind the same readiness
 	// gate (deps is non-nil once init completes, so ciStore is set).
-	ciRecorder := webhook.CIRecorderFuncs{
-		RecordFunc:      deps.Load().ciStore.Record,
-		RecordSuiteFunc: deps.Load().ciStore.RecordSuite,
-		RecordHeadFunc:  deps.Load().ciStore.RecordHead,
-	}
+	ciRecorder := newCIRecorder(&deps)
 	if webhookCfg.GitHub != nil {
 		mux.Handle("/webhook/github", readinessGate(
 			func() bool { return deps.Load() != nil },
