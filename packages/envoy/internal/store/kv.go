@@ -113,7 +113,14 @@ func (r *Registry) watch() {
 			delete(r.cache, entry.Key())
 		} else {
 			var item Interest
-			if err := json.Unmarshal(entry.Value(), &item); err == nil {
+			if err := json.Unmarshal(entry.Value(), &item); err != nil {
+				delete(r.cache, entry.Key())
+				slog.Warn("registry watcher evicted malformed value",
+					slog.String("key", entry.Key()),
+					slog.Uint64("revision", entry.Revision()),
+					slog.String("error", err.Error()),
+				)
+			} else {
 				r.cache[entry.Key()] = item
 			}
 		}
@@ -227,9 +234,15 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	if err := r.releaseRoleClaims(sessionID, topics); err != nil {
 		return err
 	}
-	// Empty topics = unsubscribe from everything (delete the entry)
+	// Empty topics = unsubscribe from everything (delete the entry).
 	if len(topics) == 0 {
-		return r.kv.Delete(sessionID)
+		if err := r.kv.Delete(sessionID); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		delete(r.cache, sessionID)
+		r.mu.Unlock()
+		return nil
 	}
 	item, err := r.Get(sessionID)
 	if err != nil {
@@ -237,15 +250,26 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	}
 	item = Remove(item, topics)
 	if len(item.Topics) == 0 {
-		return r.kv.Delete(sessionID)
+		if err := r.kv.Delete(sessionID); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		delete(r.cache, sessionID)
+		r.mu.Unlock()
+		return nil
 	}
 	item.UpdatedAt = time.Now().UnixMilli()
 	buf, err := json.Marshal(item)
 	if err != nil {
 		return err
 	}
-	_, err = r.kv.Put(sessionID, buf)
-	return err
+	if _, err := r.kv.Put(sessionID, buf); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.cache[sessionID] = item
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) {
@@ -254,21 +278,39 @@ func (r *Registry) SetRole(sessionID, machineID, role string) (Interest, error) 
 	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 		return Interest{}, err
 	}
+
+	oldSessionID := ""
 	if err == nil {
-		oldSessionID := string(entry.Value())
-		if oldSessionID != "" && oldSessionID != sessionID {
-			if removeErr := r.Remove(oldSessionID, []string{roleTopic}); removeErr != nil && !errors.Is(removeErr, nats.ErrKeyNotFound) {
-				return Interest{}, removeErr
-			}
-		}
+		oldSessionID = string(entry.Value())
 	}
 
 	item, err := r.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{roleTopic})
 	if err != nil {
 		return Interest{}, err
 	}
-	if _, err := r.roleKV.Put(role, []byte(sessionID)); err != nil {
+
+	if entry == nil {
+		_, err = r.roleKV.Create(role, []byte(sessionID))
+	} else {
+		_, err = r.roleKV.Update(role, []byte(sessionID), entry.Revision())
+	}
+	if err != nil {
+		if rollbackErr := r.Remove(sessionID, []string{roleTopic}); rollbackErr != nil {
+			return Interest{}, errors.Join(err, rollbackErr)
+		}
 		return Interest{}, err
+	}
+
+	if oldSessionID != "" && oldSessionID != sessionID {
+		if err := r.Remove(oldSessionID, []string{roleTopic}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			slog.Warn("registry role claim old holder cleanup failed",
+				slog.String("role", role),
+				slog.String("old_session_id", oldSessionID),
+				slog.String("new_session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+			return Interest{}, err
+		}
 	}
 	return item, nil
 }

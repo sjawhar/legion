@@ -1,8 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -191,7 +195,6 @@ func TestSessionRegistry_NilDeleteReturnsErrNoKV(t *testing.T) {
 	}
 }
 
-
 func TestSessionRegistry_Ping_Healthy(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -229,4 +232,62 @@ func TestSessionRegistry_Ping_NilReceiver(t *testing.T) {
 	if err := reg.Ping(); err != ErrNoKV {
 		t.Fatalf("expected ErrNoKV, got %v", err)
 	}
+}
+
+func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
+	logs := captureSessionRegistryLogs(t)
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("OpenSessionRegistry: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const sessionID = "ses_malformed"
+	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "example-host", Dir: "/example"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	revision, err := reg.kv.Put(sessionID, []byte("{"))
+	if err != nil {
+		t.Fatalf("put malformed value: %v", err)
+	}
+	waitForSessionEviction(t, reg, sessionID, 5*time.Second)
+
+	for _, want := range []string{
+		"level=WARN",
+		"key=" + sessionID,
+		"revision=" + strconv.FormatUint(revision, 10),
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("malformed-value warning %q does not contain %q", logs.String(), want)
+		}
+	}
+	t.Logf("session watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
+}
+
+func waitForSessionEviction(t *testing.T, reg *SessionRegistry, sessionID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, getErr := reg.Get(sessionID)
+		entries, listErr := reg.List()
+		if getErr != nil && listErr == nil && len(entries) == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("malformed value left session %q route cached", sessionID)
+}
+
+func captureSessionRegistryLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
 }

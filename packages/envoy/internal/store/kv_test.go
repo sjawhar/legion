@@ -1,10 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1106,4 +1110,325 @@ func TestWaitForCacheReady_IdempotentAfterReady(t *testing.T) {
 			t.Fatalf("call %d: expected nil after readyCh closed, got %v", i, err)
 		}
 	}
+}
+
+func TestRemoveWritesThroughCache(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const sessionID = "ses_remove"
+	if _, err := reg.Upsert(
+		Interest{SessionID: sessionID, MachineID: "example-host"},
+		[]string{"notifications.a", "notifications.b"},
+	); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
+		t.Fatalf("unsubscribe failed: %v", err)
+	}
+	if _, err := reg.Upsert(
+		Interest{SessionID: sessionID, MachineID: "example-host"},
+		[]string{"notifications.a"},
+	); err != nil {
+		t.Fatalf("heartbeat re-registration failed: %v", err)
+	}
+
+	item, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get after unsubscribe and heartbeat: %v", err)
+	}
+	assertInterestTopics(t, item, "notifications.a")
+	if got := reg.Match("example-host", "notifications.b"); len(got) != 0 {
+		t.Fatalf("removed topic must not route after heartbeat, got %v", got)
+	}
+}
+
+func TestRemoveAllClearsCache(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const sessionID = "ses_remove_all"
+	if _, err := reg.Upsert(
+		Interest{SessionID: sessionID, MachineID: "example-host"},
+		[]string{"notifications.a", "notifications.b"},
+	); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+	if err := reg.Remove(sessionID, nil); err != nil {
+		t.Fatalf("unsubscribe all failed: %v", err)
+	}
+
+	if _, err := reg.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("Get after unsubscribe all error = %v, want ErrKeyNotFound", err)
+	}
+	if got := reg.Match("example-host", "notifications.a"); len(got) != 0 {
+		t.Fatalf("unsubscribed session must not route, got %v", got)
+	}
+}
+
+func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const (
+		oldSession = "ses_old"
+		newSession = "ses_new"
+		role       = "legion-controller"
+		roleTopic  = "notifications.role.legion-controller"
+	)
+	putInterest(t, kv, Interest{
+		SessionID: oldSession,
+		MachineID: "example-host",
+		Topics:    []string{roleTopic, "notifications.slack.>"},
+	})
+	if _, err := reg.roleKV.Put(role, []byte(oldSession)); err != nil {
+		t.Fatalf("seed role claim: %v", err)
+	}
+
+	reg.kv = &failingKeyValue{
+		KeyValue:  kv,
+		failPutAt: 1,
+		err:       errors.New("injected interest write failure"),
+	}
+	if _, err := reg.SetRole(newSession, "example-host", role); err == nil {
+		t.Fatal("SetRole must return the failed interest upsert")
+	}
+
+	assertRoleHolder(t, reg, role, oldSession)
+	assertInterestTopicsForSession(t, reg, oldSession, roleTopic, "notifications.slack.>")
+	assertInterestMissing(t, reg, newSession)
+}
+
+func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const (
+		oldSession = "ses_old"
+		newSession = "ses_new"
+		role       = "legion-controller"
+		roleTopic  = "notifications.role.legion-controller"
+	)
+	putInterest(t, kv, Interest{
+		SessionID: oldSession,
+		MachineID: "example-host",
+		Topics:    []string{roleTopic, "notifications.slack.>"},
+	})
+	if _, err := reg.roleKV.Put(role, []byte(oldSession)); err != nil {
+		t.Fatalf("seed role claim: %v", err)
+	}
+
+	reg.roleKV = &failingKeyValue{
+		KeyValue:     reg.roleKV,
+		failUpdateAt: 1,
+		err:          errors.New("injected role update failure"),
+	}
+	if _, err := reg.SetRole(newSession, "example-host", role); err == nil {
+		t.Fatal("SetRole must return the failed role update")
+	}
+
+	assertRoleHolder(t, reg, role, oldSession)
+	assertInterestTopicsForSession(t, reg, oldSession, roleTopic, "notifications.slack.>")
+	assertInterestMissing(t, reg, newSession)
+}
+
+func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		sessionID = "ses_new"
+		role      = "legion-controller"
+	)
+	reg.roleKV = &failingKeyValue{
+		KeyValue:     reg.roleKV,
+		failCreateAt: 1,
+		err:          errors.New("injected role create failure"),
+	}
+	if _, err := reg.SetRole(sessionID, "example-host", role); err == nil {
+		t.Fatal("SetRole must return the failed role create")
+	}
+
+	assertRoleHolder(t, reg, role, "")
+	assertInterestMissing(t, reg, sessionID)
+}
+
+func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	const (
+		oldSession = "ses_old"
+		newSession = "ses_new"
+		role       = "legion-controller"
+		roleTopic  = "notifications.role.legion-controller"
+	)
+	putInterest(t, kv, Interest{
+		SessionID: oldSession,
+		MachineID: "example-host",
+		Topics:    []string{roleTopic, "notifications.slack.>"},
+	})
+	if _, err := reg.roleKV.Put(role, []byte(oldSession)); err != nil {
+		t.Fatalf("seed role claim: %v", err)
+	}
+
+	reg.kv = &failingKeyValue{
+		KeyValue:  kv,
+		failPutAt: 2,
+		err:       errors.New("injected old-holder cleanup failure"),
+	}
+	if _, err := reg.SetRole(newSession, "example-host", role); err == nil {
+		t.Fatal("SetRole must return the failed old-holder cleanup")
+	}
+
+	assertRoleHolder(t, reg, role, newSession)
+	assertInterestTopicsForSession(t, reg, newSession, roleTopic)
+	assertInterestTopicsForSession(t, reg, oldSession, roleTopic, "notifications.slack.>")
+	for _, want := range []string{"level=WARN", "role=legion-controller", "old_session_id=ses_old", "new_session_id=ses_new"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("cleanup warning %q does not contain %q", logs.String(), want)
+		}
+	}
+	t.Logf("old-holder cleanup warning: %s", strings.TrimSpace(logs.String()))
+}
+
+func TestWatcherEvictsMalformedValue(t *testing.T) {
+	logs := captureRegistryLogs(t)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, err := Open(conn, WithReplicas(1))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+
+	const (
+		sessionID = "ses_malformed"
+		machineID = "example-host"
+		topic     = "notifications.malformed"
+	)
+	if _, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: machineID}, []string{topic}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	pollMatch(t, reg, machineID, topic, 1, 5*time.Second)
+
+	revision, err := reg.kv.Put(sessionID, []byte("{"))
+	if err != nil {
+		t.Fatalf("put malformed value: %v", err)
+	}
+	pollMatch(t, reg, machineID, topic, 0, 5*time.Second)
+	if _, err := reg.Get(sessionID); err == nil {
+		t.Fatal("Get must not return a route after its watched value is malformed")
+	}
+
+	for _, want := range []string{
+		"level=WARN",
+		"key=" + sessionID,
+		"revision=" + strconv.FormatUint(revision, 10),
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("malformed-value warning %q does not contain %q", logs.String(), want)
+		}
+	}
+	t.Logf("interest watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
+}
+
+type failingKeyValue struct {
+	natsgo.KeyValue
+
+	failPutAt    int
+	failCreateAt int
+	failUpdateAt int
+	puts         int
+	creates      int
+	updates      int
+	err          error
+}
+
+func (kv *failingKeyValue) Put(key string, value []byte) (uint64, error) {
+	kv.puts++
+	if kv.failPutAt == kv.puts {
+		return 0, kv.err
+	}
+	return kv.KeyValue.Put(key, value)
+}
+
+func (kv *failingKeyValue) Create(key string, value []byte) (uint64, error) {
+	kv.creates++
+	if kv.failCreateAt == kv.creates {
+		return 0, kv.err
+	}
+	return kv.KeyValue.Create(key, value)
+}
+
+func (kv *failingKeyValue) Update(key string, value []byte, revision uint64) (uint64, error) {
+	kv.updates++
+	if kv.failUpdateAt == kv.updates {
+		return 0, kv.err
+	}
+	return kv.KeyValue.Update(key, value, revision)
+}
+
+func assertRoleHolder(t *testing.T, reg *Registry, role, want string) {
+	t.Helper()
+	got, err := reg.RoleHolder(role)
+	if err != nil {
+		t.Fatalf("RoleHolder(%q): %v", role, err)
+	}
+	if got != want {
+		t.Fatalf("RoleHolder(%q) = %q, want %q", role, got, want)
+	}
+}
+
+func assertInterestTopicsForSession(t *testing.T, reg *Registry, sessionID string, want ...string) {
+	t.Helper()
+	item, err := reg.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", sessionID, err)
+	}
+	assertInterestTopics(t, item, want...)
+}
+
+func assertInterestTopics(t *testing.T, item Interest, want ...string) {
+	t.Helper()
+	got := append([]string(nil), item.Topics...)
+	sort.Strings(got)
+	sortedWant := append([]string(nil), want...)
+	sort.Strings(sortedWant)
+	if len(got) != len(sortedWant) {
+		t.Fatalf("topics = %v, want %v", got, sortedWant)
+	}
+	for i := range sortedWant {
+		if got[i] != sortedWant[i] {
+			t.Fatalf("topics = %v, want %v", got, sortedWant)
+		}
+	}
+}
+
+func assertInterestMissing(t *testing.T, reg *Registry, sessionID string) {
+	t.Helper()
+	if _, err := reg.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("Get(%q) error = %v, want ErrKeyNotFound", sessionID, err)
+	}
+}
+
+func captureRegistryLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
 }

@@ -186,7 +186,14 @@ func (r *SessionRegistry) watch() {
 			delete(r.cache, entry.Key())
 		} else {
 			var item SessionEntry
-			if err := json.Unmarshal(entry.Value(), &item); err == nil {
+			if err := json.Unmarshal(entry.Value(), &item); err != nil {
+				delete(r.cache, entry.Key())
+				slog.Warn("session registry watcher evicted malformed value",
+					slog.String("key", entry.Key()),
+					slog.Uint64("revision", entry.Revision()),
+					slog.String("error", err.Error()),
+				)
+			} else {
 				r.cache[entry.Key()] = cachedSession{
 					entry:     item,
 					expiresAt: r.expiryFor(entry.Created(), item.UpdatedAt),
