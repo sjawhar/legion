@@ -10,6 +10,7 @@ import {
   reduceGithubEvent,
   resetPrHead,
   settleCiVerdict,
+  uncertifyCiVerdict,
 } from "./reducers";
 
 export type ResyncAnomaly = {
@@ -198,10 +199,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     const verdict =
       status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
     if (verdict === null) {
-      if (status.ciStatus === "pending" && pr.verdict === "green") {
-        pr.verdict = null;
-        pr.failing = [];
-      }
+      if (status.ciStatus === "pending") uncertifyCiVerdict(pr);
       continue;
     }
     const effects = settleCiVerdict(

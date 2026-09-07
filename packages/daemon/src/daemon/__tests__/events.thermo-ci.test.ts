@@ -4,6 +4,7 @@ import type { DaemonConfig } from "../config";
 import { startEventPump } from "../events";
 import { newLegionState } from "../legion-state";
 import { reduceGithubEvent } from "../reducers";
+import { runResync } from "../resync";
 
 class FakeNats {
   private readonly subscriptions: Array<{
@@ -440,6 +441,69 @@ it("drops a lower check-run id settlement for the same head", async () => {
     verdict: "green",
     failing: [],
     ciLatestRunId: 2,
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
+it("preserves a live check-run fence through a same-head status-context resync", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ latest_check_run_id: 1000, settled_at: 1 }))
+  );
+  await pump.drain();
+
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "passing",
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: null,
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 2,
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        settled_at: 3,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "green",
+    failing: [],
+    ciLatestRunId: 1000,
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();

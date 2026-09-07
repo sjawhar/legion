@@ -102,7 +102,8 @@ async function runGraphqlQuery(
   variables: Record<string, string>,
   runner: CommandRunner,
   runnerOptions: CommandRunnerOptions | undefined,
-  maxAttempts: number
+  maxAttempts: number,
+  allowEmptyData: boolean = false
 ): Promise<Record<string, unknown>> {
   let lastError = new GitHubAPIError("All GraphQL query retry attempts failed");
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -122,6 +123,7 @@ async function runGraphqlQuery(
       const response = recordValue(JSON.parse(stdout));
       const data = recordValue(response?.data);
       if (data) return data;
+      if (allowEmptyData) return {};
       lastError = new GitHubAPIError("GitHub returned GraphQL data in an invalid shape");
     } catch (error) {
       lastError = new GitHubAPIError(`Failed to parse GraphQL response: ${error}`);
@@ -297,77 +299,28 @@ async function getPrReviewStateBatchWithOptions(
 
   const query = `query { ${queryParts.join(" ")} }`;
 
-  // Retry loop with exponential backoff (configurable attempts)
-  let lastError: GitHubAPIError = new GitHubAPIError("All retry attempts failed");
+  const dataObj = await runGraphqlQuery(query, {}, runner, runnerOptions, maxAttempts, true);
+  const result: Record<string, ReviewStateLiteral | null> = {};
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (attempt > 0) {
-      // Exponential backoff: 1s, 2s (min 1s, max 10s)
-      const waitMs = Math.min(2 ** (attempt - 1) * 1000, 10000);
-      await sleep(waitMs);
-    }
-
-    const { stdout, stderr, exitCode } = await runner(
-      ["gh", "api", "graphql", "-f", `query=${query}`],
-      runnerOptions
-    );
-
-    if (exitCode !== 0) {
-      lastError = new GitHubAPIError(`GraphQL query failed: ${stderr}`);
-      continue;
-    }
-
-    let response: { data?: unknown };
-    try {
-      response = JSON.parse(stdout);
-    } catch (e) {
-      lastError = new GitHubAPIError(`Failed to parse GraphQL response: ${e}`);
-      continue;
-    }
-
-    // Success - parse response
-    const rawData = response.data;
-    const dataObj: Record<string, unknown> =
-      rawData !== null &&
-      rawData !== undefined &&
-      typeof rawData === "object" &&
-      !Array.isArray(rawData)
-        ? (rawData as Record<string, unknown>)
-        : {};
-
-    const result: Record<string, ReviewStateLiteral | null> = {};
-
-    for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
-      const rawRepo = dataObj[repoAlias];
-      const repoData: Record<string, unknown> =
-        rawRepo !== null &&
-        rawRepo !== undefined &&
-        typeof rawRepo === "object" &&
-        !Array.isArray(rawRepo)
-          ? (rawRepo as Record<string, unknown>)
-          : {};
-      const prAliases = prAliasMap.get(repoAlias) ?? new Map();
-      for (const [prAlias, [issueId]] of prAliases) {
-        const rawPr = repoData[prAlias] as
-          | { latestReviews?: { nodes?: Array<{ state?: string }> } }
-          | null
-          | undefined;
-
-        const reviewState = rawPr?.latestReviews?.nodes?.[0]?.state ?? null;
-        if (reviewState === "APPROVED") {
-          result[issueId] = ReviewState.APPROVED;
-        } else if (reviewState === "CHANGES_REQUESTED") {
-          result[issueId] = ReviewState.CHANGES_REQUESTED;
-        } else {
-          result[issueId] = null;
-        }
+  for (const [repoAlias] of repoAliasMap) {
+    const repoData = recordValue(dataObj[repoAlias]);
+    const prAliases = prAliasMap.get(repoAlias) ?? new Map();
+    for (const [prAlias, [issueId]] of prAliases) {
+      const rawPr = recordValue(repoData?.[prAlias]);
+      const latestReviews = recordValue(rawPr?.latestReviews);
+      const nodes = latestReviews?.nodes;
+      const reviewState = Array.isArray(nodes) ? recordValue(nodes[0])?.state : undefined;
+      if (reviewState === "APPROVED") {
+        result[issueId] = ReviewState.APPROVED;
+      } else if (reviewState === "CHANGES_REQUESTED") {
+        result[issueId] = ReviewState.CHANGES_REQUESTED;
+      } else {
+        result[issueId] = null;
       }
     }
-
-    return result;
   }
 
-  throw lastError;
+  return result;
 }
 
 // =============================================================================

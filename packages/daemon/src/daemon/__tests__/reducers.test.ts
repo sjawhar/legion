@@ -7,6 +7,7 @@ import {
   type ReducerConfig,
   reduceCiEmission,
   reduceGithubEvent,
+  uncertifyCiVerdict,
 } from "../reducers";
 
 const repo = "acme/widgets" as const;
@@ -1024,5 +1025,27 @@ describe("reduceCiEmission", () => {
         payload: { type: "pr-blocked", pr: prNumber, attempts: 3 },
       },
     ]);
+  });
+});
+
+describe("uncertifyCiVerdict", () => {
+  it("clears a green verdict without changing CI settlement metadata", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, {
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 4,
+    });
+
+    uncertifyCiVerdict(state.prs[`${repo}#${prNumber}`]);
+
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      verdict: null,
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 4,
+    });
   });
 });

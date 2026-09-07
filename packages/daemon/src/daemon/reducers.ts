@@ -45,16 +45,19 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
+export function uncertifyCiVerdict(pr: PrState): void {
+  if (pr.verdict !== "green") return;
+  pr.verdict = null;
+  pr.failing = [];
+}
+
 function ciVerdictEmissions(
   pr: PrState,
   verdict: PrState["verdict"],
   failing: string[]
 ): CiEmission[] {
   if (verdict === null) {
-    if (pr.verdict === "green") {
-      pr.verdict = null;
-      pr.failing = [];
-    }
+    uncertifyCiVerdict(pr);
     return [];
   }
 
@@ -75,7 +78,12 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  if (input.latestCheckRunId !== undefined) pr.ciLatestRunId = input.latestCheckRunId;
+  if (input.latestCheckRunId !== null && input.latestCheckRunId !== undefined) {
+    pr.ciLatestRunId =
+      pr.ciLatestRunId === null
+        ? input.latestCheckRunId
+        : Math.max(pr.ciLatestRunId, input.latestCheckRunId);
+  }
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,

@@ -745,7 +745,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: null,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([
       [
@@ -795,7 +795,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: null,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([
       [
@@ -852,7 +852,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: null,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([]);
   });
