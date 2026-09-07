@@ -793,6 +793,7 @@ func TestGithubCIObservationsSkipMalformedPRNumbers(t *testing.T) {
 				"owner": map[string]any{"login": "example-org"},
 			},
 			"check_run": map[string]any{
+				"id":            42,
 				"name":          "build",
 				"head_sha":      "abcdef",
 				"pull_requests": []any{map[string]any{"number": number}},

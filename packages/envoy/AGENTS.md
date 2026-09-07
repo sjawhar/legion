@@ -81,8 +81,10 @@ caller must provide a field.
   be followed by a `superseded_settlement` with `latest_check_run_id`, the highest GitHub check-run ID
   in the settlement. Consumers order summaries for one SHA lexicographically by
   `(latest_check_run_id, generation)`; an equal pair uses the changed check set to distinguish a
-  duplicate delivery from a new settlement. `workflow.<file>.<action>` carries only runs without an
-  associated pull request.
+  duplicate delivery from a new settlement. Legacy checks without a `check_run_id` remain in the
+  status groups and failing names but not `latest_check_run_id`; a head publishes only when at least
+  one check has a positive run ID. `workflow.<file>.<action>` carries only runs without an associated
+  pull request.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.

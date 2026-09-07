@@ -594,6 +594,44 @@ func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
 		t.Fatalf("second settlement = %+v, want generation 1 red build at run 900", second)
 	}
 }
+func TestSummaryTickKeepsLegacyFailureAfterFreshCheckArrives(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	legacy := []byte(`{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef1234567890abcdef1234567890abcdef12",` +
+		`"checks":{"build":{"status":"completed","conclusion":"failure"},"lint":{"status":"in_progress"}}}`)
+	if _, err := store.kv.Create(Key(owner, repo, number, sha), legacy); err != nil {
+		t.Fatalf("write deployed-listener state: %v", err)
+	}
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "901", "https://example.test/901", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
+		t.Fatalf("record fresh lint: %v", err)
+	}
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("settlement count = %d, want 1", got)
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode settlement: %v", err)
+	}
+	if summary.LatestCheckRunID != 901 || summary.Failed.Count != 1 ||
+		strings.Join(summary.Failed.Checks, ",") != "build" {
+		t.Fatalf("legacy settlement = %+v, want red build with fresh lint run 901", summary)
+	}
+}
 
 func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	conn, cleanup := connectNATS(t)

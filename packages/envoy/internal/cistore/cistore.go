@@ -46,7 +46,7 @@ const recordBackoffCap = 50 * time.Millisecond
 
 // checkRunID is a GitHub check-run id. Records written before ids were
 // validated at ingress carry it as a decimal string; new records carry a
-// number. Both decode; it always encodes as a number.
+// number. Id-less legacy checks omit the field when they are persisted again.
 type checkRunID uint64
 
 func (id *checkRunID) UnmarshalJSON(raw []byte) error {
@@ -68,7 +68,7 @@ func (id *checkRunID) UnmarshalJSON(raw []byte) error {
 // Check is the last-known state of a single named check for a commit.
 type Check struct {
 	Name       string     `json:"name,omitempty"`
-	CheckRunID checkRunID `json:"check_run_id"`
+	CheckRunID checkRunID `json:"check_run_id,omitempty"`
 	URL        string     `json:"url"`
 	Status     string     `json:"status"`     // queued|in_progress|completed
 	Conclusion string     `json:"conclusion"` // success|failure|... ("" until completed)
@@ -109,10 +109,7 @@ type State struct {
 }
 
 // UnmarshalJSON maps the retired resettled marker to the generation that
-// publishes the equivalent re-settlement envelope, and drops checks recorded
-// before check-run ids existed: they cannot take part in a settlement, which
-// is ordered by the highest id and rejected by consumers when it is zero. A
-// head that loses them re-settles from its next check-run observations.
+// publishes the equivalent re-settlement envelope.
 func (state *State) UnmarshalJSON(data []byte) error {
 	type stateAlias State
 	*state = State{}
@@ -125,11 +122,6 @@ func (state *State) UnmarshalJSON(data []byte) error {
 	}
 	if wire.Resettled && state.Generation == 0 {
 		state.Generation = 1
-	}
-	for name, check := range state.Checks {
-		if check.CheckRunID == 0 {
-			delete(state.Checks, name)
-		}
 	}
 	return nil
 }
@@ -811,6 +803,16 @@ func (s *Store) durableHeadMatches(state State) (bool, error) {
 
 func settlementReady(st State) bool {
 	if !terminal(st) {
+		return false
+	}
+	hasCheckRunID := false
+	for _, check := range st.Checks {
+		if check.CheckRunID > 0 {
+			hasCheckRunID = true
+			break
+		}
+	}
+	if !hasCheckRunID {
 		return false
 	}
 	for _, suite := range st.Suites {
