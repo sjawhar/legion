@@ -173,18 +173,22 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 	return sender
 }
 
-func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (string, error) {
+func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (string, session.SessionEntry, error) {
 	if registry == nil || sessions == nil {
-		return "", fmt.Errorf("service starting")
+		return "", session.SessionEntry{}, fmt.Errorf("service starting")
 	}
 	holder, err := registry.RoleHolder(role)
 	if err != nil {
-		return "", err
+		return "", session.SessionEntry{}, err
 	}
-	if holder == "" || !isSessionLive(sessions, holder) {
-		return "", nil
+	if holder == "" {
+		return "", session.SessionEntry{}, nil
 	}
-	return holder, nil
+	entry, err := sessions.Get(holder)
+	if err != nil {
+		return "", session.SessionEntry{}, nil
+	}
+	return holder, entry, nil
 }
 
 // sendHandler publishes a direct message only while the target session has a
@@ -323,7 +327,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		holder := ""
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
-			holder, err = liveRoleHolder(d.registry, d.sessions, role)
+			holder, _, err = liveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -510,17 +514,12 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		holder, err := liveRoleHolder(d.registry, d.sessions, role)
+		holder, entry, err := liveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if holder == "" {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
-			return
-		}
-		entry, err := d.sessions.Get(holder)
-		if err != nil {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
 			return
 		}
@@ -535,9 +534,6 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 func (d *listenerDeps) streamInspector() streamInfoLookup {
 	if d.streamInfo != nil {
 		return d.streamInfo
-	}
-	if d.js != nil {
-		return d.js
 	}
 	if d.client != nil {
 		return d.client.JS()

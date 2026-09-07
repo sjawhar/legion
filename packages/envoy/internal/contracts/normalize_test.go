@@ -8,7 +8,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/core"
 )
 
-func decodeSummary(t *testing.T, raw string) map[string]string {
+func decodePayload(t *testing.T, raw string) map[string]string {
 	t.Helper()
 	var summary map[string]string
 	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
@@ -1214,7 +1214,7 @@ func TestGhostWisprEnvelopeSessionEnded(t *testing.T) {
 	if got, want := item.PayloadSummary, "ghostwispr session_ended for session 20260326041405"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
-	payload := decodeSummary(t, item.Payload)
+	payload := decodePayload(t, item.Payload)
 	if got, want := payload["duration"], "51.05"; got != want {
 		t.Fatalf("payload duration = %q, want %q", got, want)
 	}
@@ -1251,7 +1251,7 @@ func TestGhostWisprEnvelopeSummaryReady(t *testing.T) {
 	if got, want := item.PayloadSummary, "ghostwispr summary_ready for session 20260326041629: How are we gonna do the"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
-	payload := decodeSummary(t, item.Payload)
+	payload := decodePayload(t, item.Payload)
 	if got, want := payload["summary_preset"], "default"; got != want {
 		t.Fatalf("summary_preset = %q, want %q", got, want)
 	}
@@ -1390,7 +1390,7 @@ func TestGhostWisprSummaryTruncatesTitle(t *testing.T) {
 
 func TestGithubPayloadCapsBodyRunes(t *testing.T) {
 	body := strings.Repeat("🔥", 3000)
-	payload := decodeSummary(t, GithubEnvelope(GithubEnvelopeInput{
+	payload := decodePayload(t, GithubEnvelope(GithubEnvelopeInput{
 		Event:    "issue_comment",
 		Delivery: "d1",
 		EventID:  "e1",
@@ -1600,7 +1600,7 @@ func TestGithubPayloadDispatchSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := decodeSummary(t, githubPayload(tt.event, tt.body))
+			payload := decodePayload(t, githubPayload(tt.event, tt.body))
 			got, found := payload["dispatch_session"]
 			if tt.wantDispatchSession == "" {
 				if found {
@@ -1916,7 +1916,7 @@ func TestGithubPayloadFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := decodeSummary(t, GithubEnvelope(GithubEnvelopeInput{
+			payload := decodePayload(t, GithubEnvelope(GithubEnvelopeInput{
 				Event: tt.event, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: tt.body,
 			}).Payload)
 			for key, want := range tt.want {
@@ -2130,7 +2130,7 @@ func TestSlackPayload(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := decodeSummary(t, SlackEnvelope(SlackEnvelopeInput{Body: tt.body, EventID: "event", TraceID: "trace"}).Payload)
+			payload := decodePayload(t, SlackEnvelope(SlackEnvelopeInput{Body: tt.body, EventID: "event", TraceID: "trace"}).Payload)
 			for key, want := range tt.want {
 				if got := payload[key]; got != want {
 					t.Fatalf("payload[%q] = %q, want %q", key, got, want)
@@ -2248,7 +2248,7 @@ func TestGhostWisprPayload(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := decodeSummary(t, GhostWisprEnvelope(GhostWisprEnvelopeInput{
+			payload := decodePayload(t, GhostWisprEnvelope(GhostWisprEnvelopeInput{
 				EventType: tt.eventType, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: tt.body,
 			}).Payload)
 			for key, want := range tt.want {
@@ -2281,7 +2281,7 @@ func TestGithubSummaryUsesFullNameFallback(t *testing.T) {
 }
 
 func TestPayloadJSONOmitsEmptyFields(t *testing.T) {
-	got := summaryJSON(map[string]string{"present": "value", "empty": ""})
+	got := payloadJSON(map[string]string{"present": "value", "empty": ""})
 	const want = `{"present":"value"}`
 	if got != want {
 		t.Fatalf("payload = %s, want %s", got, want)
@@ -2289,7 +2289,7 @@ func TestPayloadJSONOmitsEmptyFields(t *testing.T) {
 }
 
 func TestGithubPayloadUsesRepositoryPartsFallback(t *testing.T) {
-	payload := decodeSummary(t, GithubEnvelope(GithubEnvelopeInput{
+	payload := decodePayload(t, GithubEnvelope(GithubEnvelopeInput{
 		Event: "issues",
 		Body: map[string]any{
 			"action":     "opened",

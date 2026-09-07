@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // Bucket is the JetStream KV bucket name for per-commit CI state.
@@ -378,37 +379,32 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 	}
 }
 
-// Record folds one check observation without a suite into the per-commit state via CAS.
-func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
-	return s.record(owner, repo, number, sha, checkName, "", checkRunID, url, status, conclusion, observedAt)
+// Record folds one check observation into the per-commit state via CAS.
+func (s *Store) Record(observation contracts.CIObservation) error {
+	return s.record(observation)
 }
 
-// RecordWithSuite folds one check observation into the per-commit state via CAS.
-func (s *Store) RecordWithSuite(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
-	return s.record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt)
-}
-
-func (s *Store) record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
-	return s.update(owner, repo, number, sha, func(st *State) bool {
+func (s *Store) record(observation contracts.CIObservation) error {
+	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
-		key := checkKey(suiteID, checkName)
+		key := checkKey(observation.SuiteID, observation.CheckName)
 		if current, ok := st.Checks[key]; ok {
-			if checkRunIDIsOlder(checkRunID, current.CheckRunID) ||
-				(checkRunID == current.CheckRunID && !observationMayReplace(observedAt, current.ObservedAt, status, current.Status)) {
+			if checkRunIDIsOlder(observation.CheckRunID, current.CheckRunID) ||
+				(observation.CheckRunID == current.CheckRunID && !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status)) {
 				return false
 			}
 		}
 		next := Check{
-			Name:       checkName,
-			CheckRunID: checkRunID,
-			URL:        url,
-			Status:     status,
-			Conclusion: conclusion,
-			ObservedAt: observedAt,
+			Name:       observation.CheckName,
+			CheckRunID: observation.CheckRunID,
+			URL:        observation.URL,
+			Status:     observation.Status,
+			Conclusion: observation.Conclusion,
+			ObservedAt: observation.ObservedAt,
 		}
-		if current, ok := st.Checks[key]; ok && sameCheck(current, next) {
+		if current, ok := st.Checks[key]; ok && current == next {
 			return false
 		}
 		st.Checks[key] = next
@@ -419,18 +415,24 @@ func (s *Store) record(owner, repo, number, sha, checkName, suiteID, checkRunID,
 }
 
 // RecordSuite folds a check_suite observation into the per-commit state.
-func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
-	return s.update(owner, repo, number, sha, func(st *State) bool {
+func (s *Store) RecordSuite(observation contracts.CIObservation) error {
+	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Suites == nil {
 			st.Suites = map[string]Suite{}
 		}
-		next := Suite{ID: suiteID, AppID: appID, Status: status, Conclusion: conclusion, ObservedAt: observedAt}
-		if current, ok := st.Suites[suiteID]; ok {
-			if !observationMayReplace(observedAt, current.ObservedAt, status, current.Status) || current == next {
+		next := Suite{
+			ID:         observation.SuiteID,
+			AppID:      observation.AppID,
+			Status:     observation.Status,
+			Conclusion: observation.Conclusion,
+			ObservedAt: observation.ObservedAt,
+		}
+		if current, ok := st.Suites[observation.SuiteID]; ok {
+			if !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status) || current == next {
 				return false
 			}
 		}
-		st.Suites[suiteID] = next
+		st.Suites[observation.SuiteID] = next
 		rearm(st)
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
@@ -488,15 +490,6 @@ func checkKey(suiteID, checkName string) string {
 		return checkName
 	}
 	return suiteID + "\x00" + checkName
-}
-
-func sameCheck(current, next Check) bool {
-	return current.Name == next.Name &&
-		current.CheckRunID == next.CheckRunID &&
-		current.URL == next.URL &&
-		current.Status == next.Status &&
-		current.Conclusion == next.Conclusion &&
-		current.ObservedAt == next.ObservedAt
 }
 
 func rearm(st *State) {

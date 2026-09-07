@@ -53,36 +53,36 @@ type StatusGroup struct {
 	Checks []string `json:"checks"`
 }
 
+// FailingCheck identifies a failed check and its GitHub URL.
+type FailingCheck struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
 // Summary is the JSON checks notification body. Every status is always present
 // (count 0, empty checks when none) so consumers see a stable schema.
 type Summary struct {
-	Kind                 string      `json:"kind"`
-	Repo                 string      `json:"repo"`
-	Number               string      `json:"number"`
-	SHA                  string      `json:"sha"`
-	Generation           uint64      `json:"generation"`
-	SettledAt            int64       `json:"settled_at,omitempty"`
-	SupersededSettlement string      `json:"superseded_settlement,omitempty"`
-	Failed               StatusGroup `json:"failed"`
-	Running              StatusGroup `json:"running"`
-	Passed               StatusGroup `json:"passed"`
-	Queued               StatusGroup `json:"queued"`
-	Cancelled            StatusGroup `json:"cancelled"`
-	Skipped              StatusGroup `json:"skipped"`
-	FailingChecks        []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	} `json:"failing_checks"`
+	Kind                 string         `json:"kind"`
+	Repo                 string         `json:"repo"`
+	Number               string         `json:"number"`
+	SHA                  string         `json:"sha"`
+	Generation           uint64         `json:"generation"`
+	SettledAt            int64          `json:"settled_at,omitempty"`
+	SupersededSettlement string         `json:"superseded_settlement,omitempty"`
+	Failed               StatusGroup    `json:"failed"`
+	Running              StatusGroup    `json:"running"`
+	Passed               StatusGroup    `json:"passed"`
+	Queued               StatusGroup    `json:"queued"`
+	Cancelled            StatusGroup    `json:"cancelled"`
+	Skipped              StatusGroup    `json:"skipped"`
+	FailingChecks        []FailingCheck `json:"failing_checks"`
 }
 
 // renderSummary derives the stable checks payload. Names within each group are
 // sorted; publication owns the settlement timestamp and JSON encoding.
 func renderSummary(s State) Summary {
 	groups := map[category][]string{}
-	failingChecks := make([]struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	}, 0)
+	failingChecks := make([]FailingCheck, 0)
 	for key, check := range s.Checks {
 		name := check.Name
 		if name == "" {
@@ -91,10 +91,7 @@ func renderSummary(s State) Summary {
 		category := classify(check)
 		groups[category] = append(groups[category], name)
 		if category == catFailed {
-			failingChecks = append(failingChecks, struct {
-				Name string `json:"name"`
-				URL  string `json:"url"`
-			}{Name: name, URL: check.URL})
+			failingChecks = append(failingChecks, FailingCheck{Name: name, URL: check.URL})
 		}
 	}
 	sort.Slice(failingChecks, func(i, j int) bool {

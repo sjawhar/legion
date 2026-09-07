@@ -230,7 +230,7 @@ func TestSummaryTickPublishesOneChecksEnvelopeWithoutSuites(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "800", "https://example-host/checks/800", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "800", "https://example-host/checks/800", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -273,7 +273,7 @@ func TestSummaryTickDoesNotPublishWhenHeadMovesBeforeClaim(t *testing.T) {
 		t.Fatalf("record initial head: %v", err)
 	}
 	waitHead(t, store, owner, repo, pr, shaA)
-	if err := store.Record(owner, repo, pr, shaA, "build", "800", "https://example.test/800", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, pr, shaA, "build", "800", "https://example.test/800", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, pr, shaA, 1)
@@ -321,7 +321,7 @@ func TestSummaryTickTreatsUnknownHeadAsStateHead(t *testing.T) {
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := store.Record(owner, repo, number, sha, "build", "806", "https://example-host/checks/806", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "806", "https://example-host/checks/806", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -350,10 +350,10 @@ func TestSummaryTickRequiresCompletedSuitesWhenRecorded(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "801", "https://example-host/checks/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "801", "https://example-host/checks/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
-	if err := store.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
 		t.Fatalf("record in-progress suite: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -363,7 +363,7 @@ func TestSummaryTickRequiresCompletedSuitesWhenRecorded(t *testing.T) {
 		t.Fatalf("in-progress suite allowed %d checks envelopes", pub.count())
 	}
 
-	if err := store.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
 		t.Fatalf("complete suite: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -372,7 +372,7 @@ func TestSummaryTickRequiresCompletedSuitesWhenRecorded(t *testing.T) {
 		t.Fatalf("completed suite published %d envelopes, want checks", pub.count())
 	}
 
-	if err := store.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
 		t.Fatalf("reopen suite: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -381,7 +381,7 @@ func TestSummaryTickRequiresCompletedSuitesWhenRecorded(t *testing.T) {
 		t.Fatalf("reopened suite published %d envelopes", pub.count())
 	}
 
-	if err := store.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
 		t.Fatalf("recomplete suite: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -420,7 +420,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "802", "https://example-host/checks/802", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "802", "https://example-host/checks/802", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -436,7 +436,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("initial settled state = %+v, want a positive generation and settled", initial)
 	}
 
-	if err := store.Record(owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success", ""); err != nil {
 		t.Fatalf("record rerun check: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -454,7 +454,7 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("check re-armed state = %+v, want generation %d and settled", rearmedForCheck, gen0+1)
 	}
 
-	if err := store.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "900", "completed", "success", "77", ""); err != nil {
 		t.Fatalf("record new suite: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -498,16 +498,16 @@ func TestSummaryTickIdentifiesChecksBySuiteAndName(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.RecordSuite(owner, repo, number, sha, "suite-a", "completed", "failure", "1", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "suite-a", "completed", "failure", "1", ""); err != nil {
 		t.Fatalf("record failing suite: %v", err)
 	}
-	if err := store.RecordSuite(owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
+	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record passing suite: %v", err)
 	}
-	if err := store.RecordWithSuite(owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "failure", ""); err != nil {
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "failure", ""); err != nil {
 		t.Fatalf("record failing check: %v", err)
 	}
-	if err := store.RecordWithSuite(owner, repo, number, sha, "test", "suite-b", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "802", "https://example.test/802", "completed", "success", ""); err != nil {
 		t.Fatalf("record passing check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
@@ -550,7 +550,7 @@ func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "901", "https://example.test/901", "completed", "success", ""); err != nil {
 		t.Fatalf("record first observation: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -573,7 +573,7 @@ func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
 	}
 	waitCacheStateMissing(t, store, owner, repo, number, sha)
 	clock = clock.Add(time.Millisecond)
-	if err := store.Record(owner, repo, number, sha, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
 		t.Fatalf("record post-expiration observation: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -608,7 +608,7 @@ func TestSummaryTickSkipsNonHeadState(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, head)
-	if err := store.Record(owner, repo, number, oldSHA, "build", "804", "https://example-host/checks/804", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, oldSHA, "build", "804", "https://example-host/checks/804", "completed", "success", ""); err != nil {
 		t.Fatalf("record old check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, oldSHA, 1)
@@ -641,7 +641,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -692,7 +692,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "806", "https://example.test/806", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "806", "https://example.test/806", "completed", "success", ""); err != nil {
 		t.Fatalf("record initial check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -735,7 +735,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("summary tick never acquired its settlement claim")
 	}
-	if err := store.Record(owner, repo, number, sha, "build", "807", "https://example.test/807", "completed", "failure", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "807", "https://example.test/807", "completed", "failure", ""); err != nil {
 		t.Fatalf("record rearming observation: %v", err)
 	}
 	close(releaseClaim)
@@ -783,7 +783,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 		t.Fatalf("record old head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, oldSHA)
-	if err := store.Record(owner, repo, number, oldSHA, "build", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, oldSHA, "build", "901", "https://example.test/901", "completed", "success", ""); err != nil {
 		t.Fatalf("record old-head check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, oldSHA, 1)
@@ -840,7 +840,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 		t.Fatalf("moved-head state retained claim: %+v", stale.Claim)
 	}
 	waitHead(t, store, owner, repo, number, newSHA)
-	if err := store.Record(owner, repo, number, newSHA, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, newSHA, "build", "902", "https://example.test/902", "completed", "success", ""); err != nil {
 		t.Fatalf("record new-head check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, newSHA, 1)
@@ -874,7 +874,7 @@ func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *
 			return
 		}
 		rearmed = true
-		if err := store.Record(
+		if err := recordCheck(store,
 			owner, repo, number, sha,
 			"late-check", "808", "https://example.test/808", "queued", "", "",
 		); err != nil {
@@ -885,7 +885,7 @@ func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(
+	if err := recordCheck(store,
 		owner, repo, number, sha,
 		"build", "807", "https://example.test/807", "completed", "success", "",
 	); err != nil {
@@ -915,7 +915,7 @@ func TestSummaryTickPublishesObsoleteSettlementThenGenerationOneSupersession(t *
 	}
 
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
-	if err := store.Record(
+	if err := recordCheck(store,
 		owner, repo, number, sha,
 		"late-check", "808", "https://example.test/808", "completed", "success", "",
 	); err != nil {
@@ -958,7 +958,7 @@ func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "810", "https://example.test/810", "in_progress", "", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "810", "https://example.test/810", "in_progress", "", ""); err != nil {
 		t.Fatalf("record in-progress check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -966,7 +966,7 @@ func TestSummaryTickWaitsForChecksThenPublishesOnce(t *testing.T) {
 	if pub.count() != 0 {
 		t.Fatalf("in-progress check published %d envelopes", pub.count())
 	}
-	if err := store.Record(owner, repo, number, sha, "build", "810", "https://example.test/810", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "810", "https://example.test/810", "completed", "success", ""); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
 	setLastEventAt(t, store, owner, repo, number, sha, 0)
@@ -992,7 +992,7 @@ func TestSummaryTickRetriesSettlementAfterPublishFailure(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "811", "https://example.test/811", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "811", "https://example.test/811", "completed", "success", ""); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1033,7 +1033,7 @@ func TestSummaryTickReclaimsStaleClaim(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "812", "https://example.test/812", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "812", "https://example.test/812", "completed", "success", ""); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1070,7 +1070,7 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, store, owner, repo, number, sha)
-	if err := store.Record(owner, repo, number, sha, "build", "813", "https://example.test/813", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "813", "https://example.test/813", "completed", "success", ""); err != nil {
 		t.Fatalf("record initial terminal check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -1081,7 +1081,7 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 	}
 	first := pub.last()
 
-	if err := store.Record(owner, repo, number, sha, "build", "813", "https://example.test/813-rerendered", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "build", "813", "https://example.test/813-rerendered", "completed", "success", ""); err != nil {
 		t.Fatalf("record changed terminal check: %v", err)
 	}
 	runSummaryTick(store, pub, debounce, logging.New("test"))

@@ -39,17 +39,16 @@ type listenerDeps struct {
 	sessions   *session.SessionRegistry
 	ciStore    *cistore.Store
 	streamName string
-	js         nats.JetStreamContext
 	streamInfo streamInfoLookup
 }
 
 func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
 	return webhook.CIRecorderFuncs{
-		RecordFunc: func(owner, repo, number, sha, name, suiteID, id, url, status, conclusion, observedAt string) error {
-			return deps.Load().ciStore.RecordWithSuite(owner, repo, number, sha, name, suiteID, id, url, status, conclusion, observedAt)
+		RecordFunc: func(observation contracts.CIObservation) error {
+			return deps.Load().ciStore.Record(observation)
 		},
-		RecordSuiteFunc: func(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
-			return deps.Load().ciStore.RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt)
+		RecordSuiteFunc: func(observation contracts.CIObservation) error {
+			return deps.Load().ciStore.RecordSuite(observation)
 		},
 		RecordHeadFunc: func(owner, repo, number, sha, updatedAt string) error {
 			return deps.Load().ciStore.RecordHead(owner, repo, number, sha, updatedAt)
@@ -576,7 +575,6 @@ func main() {
 		sessions:   sessions,
 		ciStore:    ciStore,
 		streamName: bus.Stream,
-		js:         client.JS(),
 	})
 	logger.Info("envoy-listener ready (NATS connected)")
 

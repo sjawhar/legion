@@ -8,6 +8,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -46,6 +47,50 @@ func openStore(t *testing.T, conn *natsgo.Conn) *Store {
 		t.Fatalf("cache not ready: %v", err)
 	}
 	return st
+}
+func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
+	return s.Record(contracts.CIObservation{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		SHA:        sha,
+		CheckName:  checkName,
+		CheckRunID: checkRunID,
+		URL:        url,
+		Status:     status,
+		Conclusion: conclusion,
+		ObservedAt: observedAt,
+	})
+}
+
+func recordCheckWithSuite(s *Store, owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
+	return s.Record(contracts.CIObservation{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		SHA:        sha,
+		CheckName:  checkName,
+		SuiteID:    suiteID,
+		CheckRunID: checkRunID,
+		URL:        url,
+		Status:     status,
+		Conclusion: conclusion,
+		ObservedAt: observedAt,
+	})
+}
+
+func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
+	return s.RecordSuite(contracts.CIObservation{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		SHA:        sha,
+		SuiteID:    suiteID,
+		AppID:      appID,
+		Status:     status,
+		Conclusion: conclusion,
+		ObservedAt: observedAt,
+	})
 }
 
 // getState reads the durable state directly (bypassing the eventually-consistent
@@ -90,11 +135,11 @@ func TestRecordAccumulatesChecks(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("sjawhar", "legion", "42", "abc123", "build", "", "", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "build", "", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record build: %v", err)
 	}
 	before := getState(t, s, "sjawhar", "legion", "42", "abc123")
-	if err := s.Record("sjawhar", "legion", "42", "abc123", "test", "", "", "in_progress", "", ""); err != nil {
+	if err := recordCheck(s, "sjawhar", "legion", "42", "abc123", "test", "", "", "in_progress", "", ""); err != nil {
 		t.Fatalf("record test: %v", err)
 	}
 	st := getState(t, s, "sjawhar", "legion", "42", "abc123")
@@ -121,7 +166,7 @@ func TestRecordSeedsGeneration(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("example-org", "example-repo", "42", "abcdef1234567", "build", "1", "https://example.test/1", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "1", "https://example.test/1", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	if generation := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Generation; generation == 0 {
@@ -142,7 +187,7 @@ func TestRecordConcurrentNoLostUpdate(t *testing.T) {
 		name := "check-" + string(rune('a'+i))
 		go func() {
 			defer wg.Done()
-			errs <- s.Record("o", "r", "1", "sha", name, "", "", "completed", "success", "")
+			errs <- recordCheck(s, "o", "r", "1", "sha", name, "", "", "completed", "success", "")
 		}()
 	}
 	wg.Wait()
@@ -185,7 +230,7 @@ func TestListReflectsRecords(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("o", "r", "7", "sha7", "build", "", "", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, "o", "r", "7", "sha7", "build", "", "", "completed", "success", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -207,13 +252,13 @@ func TestRecordIgnoresStaleCheckRunID(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record(
+	if err := recordCheck(s,
 		"example-org", "example-repo", "42", "abcdef1234567",
 		"unit-tests", "200", "https://example-host/checks/200", "completed", "failure", "",
 	); err != nil {
 		t.Fatalf("record latest attempt: %v", err)
 	}
-	if err := s.Record(
+	if err := recordCheck(s,
 		"example-org", "example-repo", "42", "abcdef1234567",
 		"unit-tests", "199", "https://example-host/checks/199", "in_progress", "", "",
 	); err != nil {
@@ -240,13 +285,13 @@ func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
 		completed  = "2026-09-07T03:00:00Z"
 		inProgress = "2026-09-07T02:00:00Z"
 	)
-	if err := s.Record(
+	if err := recordCheck(s,
 		owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200",
 		"completed", "failure", completed,
 	); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
-	if err := s.Record(
+	if err := recordCheck(s,
 		owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200",
 		"in_progress", "", inProgress,
 	); err != nil {
@@ -257,10 +302,10 @@ func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
 		t.Fatalf("delayed check re-armed state: %+v", check)
 	}
 
-	if err := s.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", completed); err != nil {
+	if err := recordSuite(s, owner, repo, number, sha, "900", "completed", "success", "77", completed); err != nil {
 		t.Fatalf("record completed suite: %v", err)
 	}
-	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
 		t.Fatalf("record delayed suite: %v", err)
 	}
 	suite := getState(t, s, owner, repo, number, sha).Suites["900"]
@@ -282,10 +327,10 @@ func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
 	if !marked {
 		t.Fatal("mark settled did not mark claimed state")
 	}
-	if err := s.Record(owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200", "in_progress", "", inProgress); err != nil {
+	if err := recordCheck(s, owner, repo, number, sha, "unit-tests", "200", "https://example-host/checks/200", "in_progress", "", inProgress); err != nil {
 		t.Fatalf("record delayed check after settlement: %v", err)
 	}
-	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", inProgress); err != nil {
 		t.Fatalf("record delayed suite after settlement: %v", err)
 	}
 	if !getState(t, s, owner, repo, number, sha).SettledEmitted {
@@ -379,7 +424,7 @@ func TestWatchEvictsMalformedState(t *testing.T) {
 		sha    = "abcdef1234567"
 	)
 
-	if err := s.Record(owner, repo, number, sha, "build", "300", "https://example-host/checks/300", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, number, sha, "build", "300", "https://example-host/checks/300", "completed", "success", ""); err != nil {
 		t.Fatalf("record valid state: %v", err)
 	}
 	waitCacheChecks(t, s, owner, repo, number, sha, 1)
@@ -412,7 +457,7 @@ func TestWatchDistinguishesHeadRecordsFromStateKeys(t *testing.T) {
 		sha        = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := s.Record(stateOwner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, stateOwner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success", ""); err != nil {
 		t.Fatalf("record state: %v", err)
 	}
 	waitCacheChecks(t, s, stateOwner, repo, number, sha, 1)
@@ -448,26 +493,26 @@ func TestRecordSameIDDoesNotRegressCompletedAtEqualOrMissingTimestamps(t *testin
 		sha       = "abcdef1234567"
 		timestamp = "2026-09-07T03:00:00Z"
 	)
-	if err := s.Record(owner, repo, number, sha, "build", "800", "https://example.test/800", "completed", "success", timestamp); err != nil {
+	if err := recordCheck(s, owner, repo, number, sha, "build", "800", "https://example.test/800", "completed", "success", timestamp); err != nil {
 		t.Fatalf("record completed check: %v", err)
 	}
-	if err := s.Record(owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", timestamp); err != nil {
+	if err := recordCheck(s, owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", timestamp); err != nil {
 		t.Fatalf("record equal-timestamp in-progress check: %v", err)
 	}
-	if err := s.Record(owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
+	if err := recordCheck(s, owner, repo, number, sha, "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
 		t.Fatalf("record timestamp-less in-progress check: %v", err)
 	}
 	if check := getState(t, s, owner, repo, number, sha).Checks["build"]; check.Status != "completed" || check.Conclusion != "success" {
 		t.Fatalf("completed check regressed: %+v", check)
 	}
 
-	if err := s.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", timestamp); err != nil {
+	if err := recordSuite(s, owner, repo, number, sha, "900", "completed", "success", "77", timestamp); err != nil {
 		t.Fatalf("record completed suite: %v", err)
 	}
-	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", timestamp); err != nil {
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", timestamp); err != nil {
 		t.Fatalf("record equal-timestamp in-progress suite: %v", err)
 	}
-	if err := s.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
+	if err := recordSuite(s, owner, repo, number, sha, "900", "in_progress", "", "77", ""); err != nil {
 		t.Fatalf("record timestamp-less in-progress suite: %v", err)
 	}
 	if suite := getState(t, s, owner, repo, number, sha).Suites["900"]; suite.Status != "completed" || suite.Conclusion != "success" {
@@ -480,10 +525,10 @@ func TestRecordTimestamplessObservationUpdatesTimestamplessState(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "queued", "", ""); err != nil {
+	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "queued", "", ""); err != nil {
 		t.Fatalf("record queued check: %v", err)
 	}
-	if err := s.Record("example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
+	if err := recordCheck(s, "example-org", "example-repo", "42", "abcdef1234567", "build", "800", "https://example.test/800", "in_progress", "", ""); err != nil {
 		t.Fatalf("record in-progress check: %v", err)
 	}
 	if check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["build"]; check.Status != "in_progress" {
@@ -533,7 +578,7 @@ func TestClaimSettlementRefusesWhenDurableHeadChanged(t *testing.T) {
 		shaA  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		shaB  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	)
-	if err := s.Record(owner, repo, pr, shaA, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, shaA, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	state := getState(t, s, owner, repo, pr, shaA)
@@ -562,11 +607,11 @@ func TestClaimSettlementRefusesWhenHashMoved(t *testing.T) {
 		pr    = "42"
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
-	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record initial check: %v", err)
 	}
 	initial := getState(t, s, owner, repo, pr, sha)
-	if err := s.Record(owner, repo, pr, sha, "build", "802", "https://example.test/802", "completed", "failure", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "802", "https://example.test/802", "completed", "failure", ""); err != nil {
 		t.Fatalf("record rerun: %v", err)
 	}
 
@@ -593,11 +638,11 @@ func TestClaimSettlementRechecksDurableDebounce(t *testing.T) {
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	debounce := time.Second
-	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record initial terminal check: %v", err)
 	}
 	stale := getState(t, s, owner, repo, pr, sha)
-	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801-rerendered", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801-rerendered", "completed", "success", ""); err != nil {
 		t.Fatalf("record changed terminal check: %v", err)
 	}
 	durable := getState(t, s, owner, repo, pr, sha)
@@ -637,7 +682,7 @@ func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	debounce := time.Second
-	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record terminal check: %v", err)
 	}
 	key := Key(owner, repo, pr, sha)
@@ -689,7 +734,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 		pr    = "42"
 		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
-	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(s, owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	state := getState(t, s, owner, repo, pr, sha)

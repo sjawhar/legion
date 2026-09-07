@@ -50,8 +50,8 @@ func githubSenderField(payload map[string]any, field string) string {
 
 // CIRecorder folds check-run, check-suite, and PR-head observations into CI state.
 type CIRecorder interface {
-	Record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error
-	RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error
+	Record(contracts.CIObservation) error
+	RecordSuite(contracts.CIObservation) error
 	RecordHead(owner, repo, number, sha, updatedAt string) error
 }
 
@@ -152,7 +152,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
 				if o.CheckName == "" {
-					if err := ci.RecordSuite(o.Owner, o.Repo, o.Number, o.SHA, o.SuiteID, o.Status, o.Conclusion, o.AppID, o.ObservedAt); err != nil {
+					if err := ci.RecordSuite(o); err != nil {
 						log.Printf("github ci suite record failed: %v", err)
 						http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 						return
@@ -169,7 +169,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 						continue
 					}
 				}
-				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.SuiteID, o.CheckRunID, o.URL, o.Status, o.Conclusion, o.ObservedAt); err != nil {
+				if err := ci.Record(o); err != nil {
 					log.Printf("github ci record failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return

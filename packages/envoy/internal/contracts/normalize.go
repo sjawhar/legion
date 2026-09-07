@@ -161,16 +161,12 @@ func githubRepo(body map[string]any) (string, string) {
 	owner := nestedString(body, "repository", "owner", "login")
 	repo := nestedString(body, "repository", "name")
 	if owner == "" || repo == "" {
-		if fullName := nestedString(body, "repository", "full_name"); fullName != "" {
-			fullOwner, fullRepo, found := strings.Cut(fullName, "/")
-			if found {
-				if owner == "" {
-					owner = fullOwner
-				}
-				if repo == "" {
-					repo = fullRepo
-				}
-			}
+		owner2, name2, found := strings.Cut(nestedString(body, "repository", "full_name"), "/")
+		if found && owner == "" {
+			owner = owner2
+		}
+		if found && repo == "" {
+			repo = name2
 		}
 	}
 	if owner == "" {
@@ -744,7 +740,7 @@ func githubPayload(event string, body map[string]any) string {
 	default:
 		return ""
 	}
-	return summaryJSON(data)
+	return payloadJSON(data)
 }
 
 func githubWorkflowPullRequestNumbers(body map[string]any) string {
@@ -879,19 +875,19 @@ func slackPayload(body map[string]any) string {
 	message := slackMessage(event)
 	subtype := stringValue(event["subtype"])
 	data := map[string]string{"kind": slackKind(body)}
-	addNonEmpty(data, "event_type", stringValue(event["type"]))
-	addNonEmpty(data, "subtype", subtype)
-	addNonEmpty(data, "team_id", stringValue(body["team_id"]))
-	addNonEmpty(data, "channel_id", slackEventString(event, message, "channel"))
-	addNonEmpty(data, "channel_type", slackEventString(event, message, "channel_type"))
-	addNonEmpty(data, "user_id", slackEventString(event, message, "user"))
-	addNonEmpty(data, "bot_id", slackEventString(event, message, "bot_id"))
-	addNonEmpty(data, "bot_name", slackBotName(event))
-	addNonEmpty(data, "ts", slackEventString(event, message, "ts"))
-	addNonEmpty(data, "event_ts", stringValue(event["event_ts"]))
-	addNonEmpty(data, "thread_ts", slackEventString(event, message, "thread_ts"))
+	data["event_type"] = stringValue(event["type"])
+	data["subtype"] = subtype
+	data["team_id"] = stringValue(body["team_id"])
+	data["channel_id"] = slackEventString(event, message, "channel")
+	data["channel_type"] = slackEventString(event, message, "channel_type")
+	data["user_id"] = slackEventString(event, message, "user")
+	data["bot_id"] = slackEventString(event, message, "bot_id")
+	data["bot_name"] = slackBotName(event)
+	data["ts"] = slackEventString(event, message, "ts")
+	data["event_ts"] = stringValue(event["event_ts"])
+	data["thread_ts"] = slackEventString(event, message, "thread_ts")
 	if subtype == "thread_broadcast" {
-		addNonEmpty(data, "root_ts", nestedString(event, "root", "ts"))
+		data["root_ts"] = nestedString(event, "root", "ts")
 	}
 	if subtype != "message_deleted" {
 		if text := slackEventString(event, message, "text"); text != "" {
@@ -903,10 +899,10 @@ func slackPayload(body map[string]any) string {
 		}
 	}
 	if subtype == "message_changed" {
-		addNonEmpty(data, "edited_by", nestedString(message, "edited", "user"))
+		data["edited_by"] = nestedString(message, "edited", "user")
 	}
 	if subtype == "message_deleted" {
-		addNonEmpty(data, "deleted_ts", stringValue(event["deleted_ts"]))
+		data["deleted_ts"] = stringValue(event["deleted_ts"])
 	}
 	files := slackFiles(event, message)
 	if len(files) > 0 {
@@ -922,7 +918,7 @@ func slackPayload(body map[string]any) string {
 			}
 			filePairs = append(filePairs, stringValue(fileData["name"])+"|"+stringValue(fileData["filetype"]))
 		}
-		addNonEmpty(data, "files", strings.Join(filePairs, ","))
+		data["files"] = strings.Join(filePairs, ",")
 	}
 	if attachments := sliceValue(message["attachments"]); len(attachments) > 0 {
 		data["attachment_count"] = strconv.Itoa(len(attachments))
@@ -931,7 +927,7 @@ func slackPayload(body map[string]any) string {
 			data["attachment_count"] = strconv.Itoa(len(attachments))
 		}
 	}
-	return summaryJSON(data)
+	return payloadJSON(data)
 }
 
 func slackMessage(event map[string]any) map[string]any {
@@ -982,13 +978,7 @@ func slackFilesSuffix(files []any) string {
 	return fmt.Sprintf(" (%d file(s): %s)", len(files), first(label, 80))
 }
 
-func addNonEmpty(data map[string]string, key, value string) {
-	if value != "" {
-		data[key] = value
-	}
-}
-
-func summaryJSON(data map[string]string) string {
+func payloadJSON(data map[string]string) string {
 	for key, value := range data {
 		if value == "" {
 			delete(data, key)
@@ -1038,7 +1028,7 @@ func first(s string, maxRunes int) string {
 }
 
 func firstNonEmptyLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimLeft(line, " \t\r")
 		if strings.TrimSpace(line) != "" {
 			return line
@@ -1157,12 +1147,12 @@ func ghostWisprSummary(eventType string, body map[string]any) string {
 func ghostWisprPayload(eventType string, body map[string]any) string {
 	normalizedEventType := normalizeGhostWisprEventType(eventType)
 	data := map[string]string{"event_type": normalizedEventType}
-	addNonEmpty(data, "session_id", ghostWisprSummarySessionID(body))
-	addNonEmpty(data, "title", nestedString(body, "payload", "title"))
-	addNonEmpty(data, "duration", nestedNumberString(body, "payload", "duration"))
-	addNonEmpty(data, "created_at", stringValue(body["created_at"]))
+	data["session_id"] = ghostWisprSummarySessionID(body)
+	data["title"] = nestedString(body, "payload", "title")
+	data["duration"] = nestedNumberString(body, "payload", "duration")
+	data["created_at"] = stringValue(body["created_at"])
 	if normalizedEventType == "summary_ready" {
-		addNonEmpty(data, "status", nestedString(body, "payload", "status"))
+		data["status"] = nestedString(body, "payload", "status")
 		if summary := nestedString(body, "payload", "summary"); summary != "" {
 			capped, truncated := capBody(summary)
 			data["summary"] = capped
@@ -1170,12 +1160,12 @@ func ghostWisprPayload(eventType string, body map[string]any) string {
 				data["body_truncated"] = "true"
 			}
 		}
-		addNonEmpty(data, "summary_preset", nestedString(body, "payload", "summary_preset"))
-		addNonEmpty(data, "timestamp", nestedString(body, "payload", "timestamp"))
-		addNonEmpty(data, "version", nestedNumberString(body, "payload", "version"))
-		addNonEmpty(data, "payload_type", nestedString(body, "payload", "type"))
+		data["summary_preset"] = nestedString(body, "payload", "summary_preset")
+		data["timestamp"] = nestedString(body, "payload", "timestamp")
+		data["version"] = nestedNumberString(body, "payload", "version")
+		data["payload_type"] = nestedString(body, "payload", "type")
 	}
-	return summaryJSON(data)
+	return payloadJSON(data)
 }
 
 func ghostWisprSummarySessionID(body map[string]any) string {

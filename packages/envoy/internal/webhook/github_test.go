@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/sjawhar/envoy/internal/cistore"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -395,14 +396,14 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 		if len(rec.calls) != 2 {
 			t.Fatalf("recorder calls = %d, want 2 (one per PR)", len(rec.calls))
 		}
-		if rec.calls[0].number != "42" || rec.calls[1].number != "43" {
-			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].number, rec.calls[1].number)
+		if rec.calls[0].Number != "42" || rec.calls[1].Number != "43" {
+			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].Number, rec.calls[1].Number)
 		}
-		if rec.calls[0].suiteID != "900" || rec.calls[1].suiteID != "900" {
-			t.Fatalf("recorded suite IDs = %q, %q", rec.calls[0].suiteID, rec.calls[1].suiteID)
+		if rec.calls[0].SuiteID != "900" || rec.calls[1].SuiteID != "900" {
+			t.Fatalf("recorded suite IDs = %q, %q", rec.calls[0].SuiteID, rec.calls[1].SuiteID)
 		}
-		if rec.calls[0].observedAt != "2026-09-07T03:00:00Z" || rec.calls[1].observedAt != "2026-09-07T03:00:00Z" {
-			t.Fatalf("check observation timestamps = %q, %q", rec.calls[0].observedAt, rec.calls[1].observedAt)
+		if rec.calls[0].ObservedAt != "2026-09-07T03:00:00Z" || rec.calls[1].ObservedAt != "2026-09-07T03:00:00Z" {
+			t.Fatalf("check observation timestamps = %q, %q", rec.calls[0].ObservedAt, rec.calls[1].ObservedAt)
 		}
 	})
 
@@ -439,10 +440,16 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 		if len(rec.suiteCalls) != 1 {
 			t.Fatalf("suite recorder calls = %d, want 1", len(rec.suiteCalls))
 		}
-		if got := rec.suiteCalls[0]; got != (suiteCall{
-			owner: "example-org", repo: "example-repo", number: "42",
-			sha: "abcdef1234567890abcdef1234567890abcdef12", suiteID: "900",
-			status: "completed", conclusion: "success", appID: "77", observedAt: "2026-09-07T03:01:00Z",
+		if got := rec.suiteCalls[0]; got != (contracts.CIObservation{
+			Owner:      "example-org",
+			Repo:       "example-repo",
+			Number:     "42",
+			SHA:        "abcdef1234567890abcdef1234567890abcdef12",
+			SuiteID:    "900",
+			AppID:      "77",
+			Status:     "completed",
+			Conclusion: "success",
+			ObservedAt: "2026-09-07T03:01:00Z",
 		}) {
 			t.Fatalf("suite recorder call = %+v", got)
 		}
@@ -531,7 +538,7 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 			if len(rec.calls) != 1 {
 				t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
 			}
-			if got := rec.calls[0]; got.checkName != name || got.conclusion != "success" {
+			if got := rec.calls[0]; got.CheckName != name || got.Conclusion != "success" {
 				t.Fatalf("unexpected recorded verdict: %+v", got)
 			}
 		})
@@ -571,7 +578,7 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 		if len(rec.calls) != 1 {
 			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
 		}
-		if got := rec.calls[0].checkName; got != "unit-tests" {
+		if got := rec.calls[0].CheckName; got != "unit-tests" {
 			t.Fatalf("recorded check name = %q, want unit-tests", got)
 		}
 		if len(pub.published) != 0 {

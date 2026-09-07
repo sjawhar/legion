@@ -133,9 +133,17 @@ func foreignSession(item contracts.Envelope) string {
 	if strings.HasPrefix(item.Topic, contracts.AgentTopicPrefix) {
 		recipient = strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	}
-	for _, candidate := range foreignSessionID.FindAllString(item.PayloadSummary+"\n"+item.Payload, -1) {
-		if candidate != item.SourceSession && candidate != recipient {
-			return candidate
+	for _, text := range [...]string{item.PayloadSummary, item.Payload} {
+		for {
+			match := foreignSessionID.FindStringIndex(text)
+			if match == nil {
+				break
+			}
+			candidate := text[match[0]:match[1]]
+			if candidate != item.SourceSession && candidate != recipient {
+				return candidate
+			}
+			text = text[match[1]:]
 		}
 	}
 	return ""
