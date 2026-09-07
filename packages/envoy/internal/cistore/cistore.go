@@ -64,6 +64,13 @@ type State struct {
 	SettledEmitted bool             `json:"settled_emitted"`
 }
 
+const headRecordKind = "head"
+
+type headRecord struct {
+	Kind string `json:"kind"`
+	SHA  string `json:"sha"`
+}
+
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
 // owner/repo/number/sha are already within the valid KV charset
 // ([-/_=.a-zA-Z0-9]); this only guards against stray wildcard/space/slash chars.
@@ -83,8 +90,16 @@ func Key(owner, repo, number, sha string) string {
 }
 
 func headKey(owner, repo, number string) string {
-	return "head-" + keyCleaner.Replace(owner) + "." +
+	return "head." + keyCleaner.Replace(owner) + "." +
 		keyCleaner.Replace(repo) + "." + keyCleaner.Replace(number)
+}
+
+func validHeadSHA(sha string) bool {
+	if len(sha) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(sha)
+	return err == nil
 }
 
 // Hash is a stable, order-independent fingerprint of the check set
@@ -208,21 +223,30 @@ func (s *Store) watch() {
 		case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
 			delete(s.cache, key)
 			delete(s.heads, key)
-		case strings.HasPrefix(key, "head-"):
-			sha := string(entry.Value())
-			if sha == "" {
-				delete(s.heads, key)
-				malformed = errors.New("empty head SHA")
-			} else {
-				s.heads[key] = sha
-			}
 		default:
-			var st State
-			if err := json.Unmarshal(entry.Value(), &st); err != nil {
-				delete(s.cache, key)
-				malformed = err
+			var marker struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == headRecordKind {
+				var head headRecord
+				if err := json.Unmarshal(entry.Value(), &head); err != nil {
+					delete(s.heads, key)
+					malformed = err
+				} else if !validHeadSHA(head.SHA) {
+					delete(s.heads, key)
+					malformed = errors.New("invalid head SHA")
+				} else {
+					delete(s.cache, key)
+					s.heads[key] = head.SHA
+				}
 			} else {
-				s.cache[key] = st
+				var st State
+				if err := json.Unmarshal(entry.Value(), &st); err != nil {
+					delete(s.cache, key)
+					malformed = err
+				} else {
+					s.cache[key] = st
+				}
 			}
 		}
 		s.mu.Unlock()
@@ -344,7 +368,14 @@ func checkRunIDIsOlder(incoming, stored string) bool {
 
 // RecordHead persists the current PR head SHA. The WatchAll cache serves Head.
 func (s *Store) RecordHead(owner, repo, number, sha string) error {
-	_, err := s.kv.Put(headKey(owner, repo, number), []byte(sha))
+	if !validHeadSHA(sha) {
+		return errors.New("cistore: invalid head SHA")
+	}
+	buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha})
+	if err != nil {
+		return err
+	}
+	_, err = s.kv.Put(headKey(owner, repo, number), buf)
 	return err
 }
 
@@ -425,6 +456,8 @@ func (s *Store) MarkEmitted(key, hash string, debounce time.Duration) (bool, err
 		return false, nil // a later event reopened the debounce window; too early
 	}
 	st.LastEmitHash = hash
+	pending := false
+	st.CIPublished = &pending
 	buf, err := json.Marshal(st)
 	if err != nil {
 		return false, err
@@ -450,7 +483,7 @@ func (s *Store) MarkCIPublished(key, expectedHash string, published bool) (bool,
 	if err := json.Unmarshal(entry.Value(), &st); err != nil {
 		return false, err
 	}
-	if st.Hash() != expectedHash {
+	if st.LastEmitHash != expectedHash || st.Hash() != expectedHash {
 		return false, nil
 	}
 	st.CIPublished = &published
@@ -481,7 +514,7 @@ func (s *Store) MarkSettled(key, expectedHash string) (bool, error) {
 	if err := json.Unmarshal(entry.Value(), &st); err != nil {
 		return false, err
 	}
-	if st.SettledEmitted || (st.CIPublished != nil && !*st.CIPublished) || st.Hash() != expectedHash || !terminal(st) {
+	if st.SettledEmitted || st.LastEmitHash != expectedHash || (st.CIPublished != nil && !*st.CIPublished) || st.Hash() != expectedHash || !terminal(st) {
 		return false, nil
 	}
 	st.SettledEmitted = true

@@ -295,8 +295,9 @@ func TestRecordHeadAndHead(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
+	const sha = "abcdef1234567890abcdef1234567890abcdef12"
 
-	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567"); err != nil {
+	if err := s.RecordHead("example-org", "example-repo", "42", sha); err != nil {
 		t.Fatalf("record head: %v", err)
 	}
 
@@ -304,8 +305,8 @@ func TestRecordHeadAndHead(t *testing.T) {
 	for {
 		head, ok := s.Head("example-org", "example-repo", "42")
 		if ok {
-			if head != "abcdef1234567" {
-				t.Fatalf("head = %q, want abcdef1234567", head)
+			if head != sha {
+				t.Fatalf("head = %q, want %q", head, sha)
 			}
 			return
 		}
@@ -349,28 +350,39 @@ func TestWatchEvictsMalformedState(t *testing.T) {
 	}
 }
 
-func TestWatchKeepsStateForOwnerNamedHead(t *testing.T) {
+func TestWatchDistinguishesHeadRecordsFromStateKeys(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
 	const (
-		owner  = "head"
-		repo   = "example-repo"
-		number = "42"
-		sha    = "abcdef1234567"
+		stateOwner = "head-x"
+		headOwner  = "x"
+		repo       = "example-repo"
+		number     = "42"
+		sha        = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := s.Record(owner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success"); err != nil {
+	if err := s.Record(stateOwner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success"); err != nil {
 		t.Fatalf("record state: %v", err)
 	}
-	waitCacheChecks(t, s, owner, repo, number, sha, 1)
-	if err := s.RecordHead(owner, repo, number, sha); err != nil {
+	waitCacheChecks(t, s, stateOwner, repo, number, sha, 1)
+	if err := s.RecordHead(headOwner, repo, number, sha); err != nil {
 		t.Fatalf("record head: %v", err)
 	}
 
-	waitHead(t, s, owner, repo, number, sha)
+	waitHead(t, s, headOwner, repo, number, sha)
 	states := s.List()
-	if len(states) != 1 || states[0].Owner != owner || states[0].SHA != sha {
-		t.Fatalf("owner named head state missing from cache: %+v", states)
+	if len(states) != 1 || states[0].Owner != stateOwner || states[0].SHA != sha {
+		t.Fatalf("head record or state key misclassified in cache: %+v", states)
+	}
+}
+
+func TestRecordHeadRejectsInvalidSHA(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567"); err == nil {
+		t.Fatal("RecordHead accepted an invalid SHA")
 	}
 }
