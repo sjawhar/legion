@@ -87,7 +87,6 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
   const {
     ciSettlementGeneration = null,
     ciSnapshot = null,
-    ciLatestCompletedAt = null,
     ciReconciled = false,
     ...rest
   } = overrides;
@@ -99,10 +98,9 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     verdict: null,
     failing: [],
     ciSettledAt: null,
-    ciLatestRunId: null,
+    ciCheckRuns: null,
     ciSettlementGeneration,
     ciSnapshot,
-    ciLatestCompletedAt,
     ciReconciled,
     fixAttempts: 0,
     ...rest,
@@ -731,7 +729,7 @@ describe("reduceGithubEvent", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1,
-      ciLatestRunId: 1,
+      ciCheckRuns: { build: 1 },
       reviewDecision: "approved",
     });
 
@@ -750,7 +748,7 @@ describe("reduceGithubEvent", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       fixAttempts: 1,
     });
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
@@ -1047,7 +1045,7 @@ describe("uncertifyCiVerdict", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
     });
 
     uncertifyCiVerdict(state.prs[`${repo}#${prNumber}`]);
@@ -1056,7 +1054,7 @@ describe("uncertifyCiVerdict", () => {
       verdict: null,
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
     });
   });
 });

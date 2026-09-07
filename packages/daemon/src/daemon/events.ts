@@ -13,7 +13,9 @@ import {
   type EnvelopeJson,
   type LegionEventPayload,
   reduceGithubEvent,
+  refreshCiIdentity,
   settleCiVerdict,
+  writeCiFence,
 } from "./reducers";
 
 const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
@@ -57,10 +59,9 @@ interface ChecksInput {
   failed: string[];
   cancelledCount: number;
   settledAt: number;
-  latestCheckRunId: number;
+  checkRuns: Record<string, number>;
   generation: number;
   snapshot: string;
-  latestCompletedAt: number;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -102,14 +103,6 @@ function statusGroup(
   return { count, checks };
 }
 
-const RFC3339_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-function rfc3339EpochMilliseconds(value: unknown): number | undefined {
-  if (typeof value !== "string" || !RFC3339_TIMESTAMP.test(value)) return undefined;
-  const milliseconds = Date.parse(value);
-  return Number.isNaN(milliseconds) ? undefined : milliseconds;
-}
-
 function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | undefined {
   const match = CHECKS_TOPIC.exec(subject);
   if (!match) return undefined;
@@ -127,12 +120,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     return undefined;
   }
   const sha = stringValue(payload.sha);
-  const latestCheckRunId =
-    typeof payload.latest_check_run_id === "number" &&
-    Number.isSafeInteger(payload.latest_check_run_id) &&
-    payload.latest_check_run_id > 0
-      ? payload.latest_check_run_id
-      : undefined;
+  const checkRuns = attemptSet(payload.check_runs);
   const generation =
     typeof payload.generation === "number" &&
     Number.isSafeInteger(payload.generation) &&
@@ -140,7 +128,6 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
       ? payload.generation
       : undefined;
   const snapshot = stringValue(payload.snapshot);
-  const latestCompletedAt = rfc3339EpochMilliseconds(payload.latest_completed_at);
   const settledAt =
     payload.settled_at === undefined
       ? envelope.issued_at
@@ -153,10 +140,9 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
   const cancelled = statusGroup(payload, "cancelled");
   if (
     !sha ||
-    latestCheckRunId === undefined ||
+    checkRuns === undefined ||
     generation === undefined ||
     !snapshot ||
-    latestCompletedAt === undefined ||
     settledAt === undefined ||
     !failed ||
     !cancelled
@@ -170,11 +156,33 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     failed: failed.checks,
     cancelledCount: cancelled.count,
     settledAt,
-    latestCheckRunId,
+    checkRuns,
     generation,
     snapshot,
-    latestCompletedAt,
   };
+}
+
+/** The payload's attempt set: a non-empty list of `{name, id}` with unique names and positive ids. */
+function attemptSet(value: unknown): Record<string, number> | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const runs: Record<string, number> = {};
+  for (const entry of value) {
+    const record = asRecord(entry);
+    const name = record?.name;
+    const id = record?.id;
+    if (
+      typeof name !== "string" ||
+      name === "" ||
+      typeof id !== "number" ||
+      !Number.isSafeInteger(id) ||
+      id <= 0 ||
+      name in runs
+    ) {
+      return undefined;
+    }
+    runs[name] = id;
+  }
+  return runs;
 }
 
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
@@ -410,21 +418,25 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
+    if (classification === "refresh") {
+      // Agrees with the verdict a terminal GitHub read holds at this attempt
+      // set: the listener identity moves, GitHub's authority stays.
+      refreshCiIdentity(pr, input.generation, input.snapshot, input.settledAt);
+      return true;
+    }
+    // A newer attempt set, or a later generation at a set GitHub has not read:
+    // the listener's view is authoritative until GitHub reads this set.
+    writeCiFence(pr, {
+      checkRuns: input.checkRuns,
+      generation: input.generation,
+      snapshot: input.snapshot,
+    });
+    pr.ciReconciled = false;
     await applyEffects(
       settleCiVerdict(
         deps.state,
         pr,
-        {
-          verdict,
-          failing: input.failed,
-          settledAt: input.settledAt,
-          fence: {
-            latestCheckRunId: input.latestCheckRunId,
-            generation: input.generation,
-            snapshot: input.snapshot,
-            latestCompletedAt: input.latestCompletedAt,
-          },
-        },
+        { verdict, failing: input.failed, settledAt: input.settledAt },
         deps.config
       ),
       envelope

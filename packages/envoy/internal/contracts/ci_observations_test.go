@@ -35,9 +35,6 @@ func TestGithubCIObservationsExtractCheckRunIdentity(t *testing.T) {
 	if observation.ObservedAt != "2026-09-07T03:00:00Z" {
 		t.Errorf("check run observation timestamp = %q", observation.ObservedAt)
 	}
-	if observation.CompletedAt != "2026-09-07T03:00:00Z" {
-		t.Errorf("check run completion timestamp = %q", observation.CompletedAt)
-	}
 }
 
 func TestGithubCIObservationsUsesCheckRunStartedAtBeforeCompletion(t *testing.T) {
@@ -62,39 +59,6 @@ func TestGithubCIObservationsUsesCheckRunStartedAtBeforeCompletion(t *testing.T)
 	}
 	if observations[0].ObservedAt != "2026-09-07T02:00:00Z" {
 		t.Errorf("check run started timestamp = %q", observations[0].ObservedAt)
-	}
-	// A start time orders observations; it is never a completion.
-	if observations[0].CompletedAt != "" {
-		t.Errorf("check run completion timestamp = %q, want empty", observations[0].CompletedAt)
-	}
-}
-
-func TestGithubCIObservationsCompletedRunWithoutCompletionKeepsStartForOrderingOnly(t *testing.T) {
-	body := map[string]any{
-		"repository": map[string]any{
-			"name":  "example-repo",
-			"owner": map[string]any{"login": "example-org"},
-		},
-		"check_run": map[string]any{
-			"id":            float64(987654321),
-			"name":          "unit-tests",
-			"status":        "completed",
-			"conclusion":    "success",
-			"head_sha":      "abcdef1234567",
-			"started_at":    "2026-09-07T02:00:00Z",
-			"pull_requests": []any{map[string]any{"number": float64(42)}},
-		},
-	}
-
-	observations := GithubCIObservations("check_run", body)
-	if len(observations) != 1 {
-		t.Fatalf("observations = %d, want 1", len(observations))
-	}
-	if observations[0].ObservedAt != "2026-09-07T02:00:00Z" {
-		t.Errorf("observation timestamp = %q, want the start time for ordering", observations[0].ObservedAt)
-	}
-	if observations[0].CompletedAt != "" {
-		t.Errorf("completion timestamp = %q, want empty: a start time must not enter the watermark", observations[0].CompletedAt)
 	}
 }
 

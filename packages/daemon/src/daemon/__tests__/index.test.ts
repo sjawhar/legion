@@ -460,10 +460,9 @@ describe("startDaemon", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 900,
+      ciCheckRuns: { build: 900 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -529,7 +528,7 @@ describe("startDaemon", () => {
 
       expect(state.prs["acme/widgets#7"]).toMatchObject({
         verdict: "green",
-        ciLatestRunId: 900,
+        ciCheckRuns: { build: 900 },
       });
       expect(logs).toContain(
         "[legion] resync complete: anomalies=0 healed=0 reconciled-labels=0 excluded-null-content-items=0 ciFetchFailures=1 ciFetchFailureDetails=owner=acme error=GitHub App token request failed"

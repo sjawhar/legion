@@ -300,10 +300,9 @@ describe("Legion HTTP API", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 0,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };

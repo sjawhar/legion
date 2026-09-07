@@ -515,11 +515,11 @@ func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *tes
 	}
 
 	type payload struct {
-		LatestCheckRunID     uint64      `json:"latest_check_run_id"`
-		Generation           *uint64     `json:"generation"`
-		SupersededSettlement string      `json:"superseded_settlement"`
-		Failed               StatusGroup `json:"failed"`
-		Passed               StatusGroup `json:"passed"`
+		CheckRuns            []CheckRunRef `json:"check_runs"`
+		Generation           *uint64       `json:"generation"`
+		SupersededSettlement string        `json:"superseded_settlement"`
+		Failed               StatusGroup   `json:"failed"`
+		Passed               StatusGroup   `json:"passed"`
 	}
 	var first, second payload
 	items := pub.all()
@@ -529,11 +529,11 @@ func TestSummaryTickCarriesGenerationWhenSettlementsShareLatestCheckRunID(t *tes
 	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
 		t.Fatalf("decode second settlement: %v", err)
 	}
-	if first.LatestCheckRunID != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
+	if maxCheckRunID(first.CheckRuns) != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
 		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
 		t.Fatalf("first settlement = %+v, want initial green build at run 900", first)
 	}
-	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
+	if maxCheckRunID(second.CheckRuns) != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
 		second.SupersededSettlement != "true" || second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "lint" ||
 		second.Passed.Count != 1 || strings.Join(second.Passed.Checks, ",") != "build" {
 		t.Fatalf("second settlement = %+v, want a newer red lint settlement with max run 900", second)
@@ -573,12 +573,11 @@ func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
 	}
 
 	type payload struct {
-		LatestCheckRunID     uint64      `json:"latest_check_run_id"`
-		Generation           *uint64     `json:"generation"`
-		LatestCompletedAt    string      `json:"latest_completed_at"`
-		SupersededSettlement string      `json:"superseded_settlement"`
-		Failed               StatusGroup `json:"failed"`
-		Passed               StatusGroup `json:"passed"`
+		CheckRuns            []CheckRunRef `json:"check_runs"`
+		Generation           *uint64       `json:"generation"`
+		SupersededSettlement string        `json:"superseded_settlement"`
+		Failed               StatusGroup   `json:"failed"`
+		Passed               StatusGroup   `json:"passed"`
 	}
 	var first, second payload
 	items := pub.all()
@@ -588,13 +587,12 @@ func TestSummaryTickCarriesGenerationForInPlaceCheckRunUpdate(t *testing.T) {
 	if err := json.Unmarshal([]byte(items[1].Payload), &second); err != nil {
 		t.Fatalf("decode second settlement: %v", err)
 	}
-	if first.LatestCheckRunID != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
-		first.LatestCompletedAt != "2026-09-07T03:00:00Z" ||
+	if maxCheckRunID(first.CheckRuns) != 900 || first.Generation == nil || first.SupersededSettlement != "" ||
 		first.Passed.Count != 1 || strings.Join(first.Passed.Checks, ",") != "build" || first.Failed.Count != 0 {
 		t.Fatalf("first settlement = %+v, want green build at run 900", first)
 	}
-	if second.LatestCheckRunID != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
-		second.SupersededSettlement != "true" || second.LatestCompletedAt != "2026-09-07T03:01:00Z" ||
+	if maxCheckRunID(second.CheckRuns) != 900 || second.Generation == nil || *second.Generation <= *first.Generation ||
+		second.SupersededSettlement != "true" ||
 		second.Failed.Count != 1 || strings.Join(second.Failed.Checks, ",") != "build" || second.Passed.Count != 0 {
 		t.Fatalf("second settlement = %+v, want a newer red build with later GitHub completion at run 900", second)
 	}
@@ -632,7 +630,7 @@ func TestSummaryTickKeepsLegacyFailureAfterFreshCheckArrives(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode settlement: %v", err)
 	}
-	if summary.LatestCheckRunID != 901 || summary.Failed.Count != 1 ||
+	if maxCheckRunID(summary.CheckRuns) != 901 || summary.Failed.Count != 1 ||
 		strings.Join(summary.Failed.Checks, ",") != "build" {
 		t.Fatalf("legacy settlement = %+v, want red build with fresh lint run 901", summary)
 	}
@@ -681,8 +679,8 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode settlement: %v", err)
 	}
-	if summary.LatestCheckRunID != 802 {
-		t.Fatalf("latest_check_run_id = %d, want 802", summary.LatestCheckRunID)
+	if maxCheckRunID(summary.CheckRuns) != 802 {
+		t.Fatalf("latest_check_run_id = %d, want 802", maxCheckRunID(summary.CheckRuns))
 	}
 	if summary.Failed.Count != 0 || len(summary.Failed.Checks) != 0 {
 		t.Fatalf("failed checks = %+v, want none", summary.Failed)
@@ -730,7 +728,7 @@ func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &first); err != nil {
 		t.Fatalf("decode suite A settlement: %v", err)
 	}
-	if first.LatestCheckRunID != 101 || first.Failed.Count != 0 {
+	if maxCheckRunID(first.CheckRuns) != 101 || first.Failed.Count != 0 {
 		t.Fatalf("suite A settlement = %+v, want green latest run 101", first)
 	}
 
@@ -752,7 +750,7 @@ func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &second); err != nil {
 		t.Fatalf("decode suite B settlement: %v", err)
 	}
-	if second.LatestCheckRunID != 201 || second.Failed.Count != 0 {
+	if maxCheckRunID(second.CheckRuns) != 201 || second.Failed.Count != 0 {
 		t.Fatalf("suite B settlement = %+v, want green latest run 201", second)
 	}
 
@@ -778,7 +776,7 @@ func TestSummaryTickAcceptsNewerRunFromEarlierSuite(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &third); err != nil {
 		t.Fatalf("decode suite A rerun settlement: %v", err)
 	}
-	if third.LatestCheckRunID != 300 || third.Failed.Count != 1 || strings.Join(third.Failed.Checks, ",") != "test" {
+	if maxCheckRunID(third.CheckRuns) != 300 || third.Failed.Count != 1 || strings.Join(third.Failed.Checks, ",") != "test" {
 		t.Fatalf("suite A rerun settlement = %+v, want failed test at latest run 300", third)
 	}
 }
@@ -819,8 +817,8 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &initialSummary); err != nil {
 		t.Fatalf("decode initial settlement: %v", err)
 	}
-	if initialSummary.LatestCheckRunID != 802 {
-		t.Fatalf("initial latest_check_run_id = %d, want 802", initialSummary.LatestCheckRunID)
+	if maxCheckRunID(initialSummary.CheckRuns) != 802 {
+		t.Fatalf("initial latest_check_run_id = %d, want 802", maxCheckRunID(initialSummary.CheckRuns))
 	}
 	initial := getState(t, store, owner, repo, number, sha)
 	if !initial.SettledEmitted || initial.EmittedCount != 1 {
@@ -874,8 +872,8 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	if summary.SupersededSettlement != "true" || summary.Failed.Count != 0 || len(summary.FailingChecks) != 0 {
 		t.Fatalf("re-settlement = %+v, want a green superseding settlement", summary)
 	}
-	if summary.LatestCheckRunID != 902 || summary.LatestCheckRunID <= initialSummary.LatestCheckRunID {
-		t.Fatalf("re-settlement latest_check_run_id = %d, want greater than %d", summary.LatestCheckRunID, initialSummary.LatestCheckRunID)
+	if maxCheckRunID(summary.CheckRuns) != 902 || maxCheckRunID(summary.CheckRuns) <= maxCheckRunID(initialSummary.CheckRuns) {
+		t.Fatalf("re-settlement latest_check_run_id = %d, want greater than %d", maxCheckRunID(summary.CheckRuns), maxCheckRunID(initialSummary.CheckRuns))
 	}
 
 	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "cancelled", ""); err != nil {
@@ -921,8 +919,8 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &first); err != nil {
 		t.Fatalf("decode first settlement: %v", err)
 	}
-	if first.LatestCheckRunID != 901 {
-		t.Fatalf("first latest_check_run_id = %d, want 901", first.LatestCheckRunID)
+	if maxCheckRunID(first.CheckRuns) != 901 {
+		t.Fatalf("first latest_check_run_id = %d, want 901", maxCheckRunID(first.CheckRuns))
 	}
 
 	key := Key(owner, repo, number, sha)
@@ -943,8 +941,8 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &second); err != nil {
 		t.Fatalf("decode post-expiration settlement: %v", err)
 	}
-	if second.LatestCheckRunID <= first.LatestCheckRunID {
-		t.Fatalf("post-expiration latest_check_run_id = %d, want greater than %d", second.LatestCheckRunID, first.LatestCheckRunID)
+	if maxCheckRunID(second.CheckRuns) <= maxCheckRunID(first.CheckRuns) {
+		t.Fatalf("post-expiration latest_check_run_id = %d, want greater than %d", maxCheckRunID(second.CheckRuns), maxCheckRunID(first.CheckRuns))
 	}
 }
 
@@ -1170,9 +1168,9 @@ replicaBReady:
 		t.Fatalf("replica publishes = %d, want exactly one red settlement", got)
 	}
 	type settlementIdentity struct {
-		LatestCheckRunID uint64 `json:"latest_check_run_id"`
-		Generation       uint64 `json:"generation"`
-		Snapshot         string `json:"snapshot"`
+		CheckRuns  []CheckRunRef `json:"check_runs"`
+		Generation uint64        `json:"generation"`
+		Snapshot   string        `json:"snapshot"`
 	}
 	seen := map[struct{ latestCheckRunID, generation uint64 }]string{}
 	for _, envelope := range pub.all() {
@@ -1183,7 +1181,7 @@ replicaBReady:
 		if settlement.Snapshot == "" {
 			t.Fatal("settlement snapshot is empty")
 		}
-		pair := struct{ latestCheckRunID, generation uint64 }{settlement.LatestCheckRunID, settlement.Generation}
+		pair := struct{ latestCheckRunID, generation uint64 }{maxCheckRunID(settlement.CheckRuns), settlement.Generation}
 		if previous, ok := seen[pair]; ok && previous != settlement.Snapshot {
 			t.Fatalf("settlements %v reused an identity for snapshots %q and %q", pair, previous, settlement.Snapshot)
 		}
@@ -1275,8 +1273,8 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
 		t.Fatalf("decode fresh settlement: %v", err)
 	}
-	if summary.LatestCheckRunID != 807 {
-		t.Fatalf("fresh settlement latest_check_run_id = %d, want 807", summary.LatestCheckRunID)
+	if maxCheckRunID(summary.CheckRuns) != 807 {
+		t.Fatalf("fresh settlement latest_check_run_id = %d, want 807", maxCheckRunID(summary.CheckRuns))
 	}
 }
 func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.T) {
@@ -1415,8 +1413,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 	if err := json.Unmarshal([]byte(pub.last().Payload), &firstPayload); err != nil {
 		t.Fatalf("decode first payload: %v", err)
 	}
-	if firstPayload.LatestCheckRunID != 807 {
-		t.Fatalf("first payload latest_check_run_id = %d, want 807", firstPayload.LatestCheckRunID)
+	if maxCheckRunID(firstPayload.CheckRuns) != 807 {
+		t.Fatalf("first payload latest_check_run_id = %d, want 807", maxCheckRunID(firstPayload.CheckRuns))
 	}
 	rearmedState := getState(t, store, owner, repo, number, sha)
 	if rearmedState.Generation <= gen0 || rearmedState.SettledEmitted {
@@ -1442,8 +1440,8 @@ func TestSummaryTickPublishesObsoleteSettlementThenSupersedingLatestCheckRunID(t
 	if err := json.Unmarshal([]byte(pub.last().Payload), &secondPayload); err != nil {
 		t.Fatalf("decode re-settled payload: %v", err)
 	}
-	if secondPayload.LatestCheckRunID <= firstPayload.LatestCheckRunID {
-		t.Fatalf("re-settled latest_check_run_id = %d, want greater than %d", secondPayload.LatestCheckRunID, firstPayload.LatestCheckRunID)
+	if maxCheckRunID(secondPayload.CheckRuns) <= maxCheckRunID(firstPayload.CheckRuns) {
+		t.Fatalf("re-settled latest_check_run_id = %d, want greater than %d", maxCheckRunID(secondPayload.CheckRuns), maxCheckRunID(firstPayload.CheckRuns))
 	}
 	if secondPayload.SupersededSettlement != "true" {
 		t.Fatalf("superseded settlement = %q, want true", secondPayload.SupersededSettlement)
@@ -1609,7 +1607,9 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 	}
 }
 
-func TestSummaryTickDoesNotPublishLegacyResettledWithoutCompletionTimestamp(t *testing.T) {
+func TestSummaryTickPublishesLegacyResettledRecordWithoutTimestamps(t *testing.T) {
+	// A record written by a deployed listener carries no timestamps at all;
+	// its attempt set is the settlement identity, so it settles like any other.
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -1641,11 +1641,14 @@ func TestSummaryTickDoesNotPublishLegacyResettledWithoutCompletionTimestamp(t *t
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 
 	runSummaryTick(store, pub, 0, logging.New("test"))
-	if got := pub.count(); got != 0 {
-		t.Fatalf("legacy resettled state without completion timestamp published %d envelopes, want none", got)
+	if got := pub.count(); got != 1 {
+		t.Fatalf("legacy resettled record published %d envelopes, want 1", got)
 	}
-	state := getState(t, store, owner, repo, number, sha)
-	if state.SettledEmitted || state.Claim != nil {
-		t.Fatalf("legacy resettled state without completion timestamp was marked emitted: %+v", state)
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode settlement: %v", err)
+	}
+	if len(summary.CheckRuns) != 1 || summary.CheckRuns[0] != (CheckRunRef{Name: "build", ID: 814}) {
+		t.Fatalf("check_runs = %+v, want [{build 814}]", summary.CheckRuns)
 	}
 }

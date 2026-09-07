@@ -271,8 +271,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -308,8 +307,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -379,8 +377,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -461,11 +458,11 @@ describe("getCiStatusBatch", () => {
     expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain(
       "pageInfo { hasNextPage endCursor }"
     );
-    expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain("completedAt");
+    expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain("databaseId");
     expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain(
       'object(oid: "head-1")'
     );
-    expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain("completedAt");
+    expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain("databaseId");
     expect(queries[1]).toContain("after=cursor-1");
     expect(result).toEqual({
       "ENG-21": {
@@ -476,8 +473,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
-        latestCheckRunId: 900,
-        latestCompletedAt: Date.parse("2026-08-24T00:00:02.000Z"),
+        checkRuns: { lint: 800, unit: 900 },
         isOpen: true,
       },
     });
@@ -550,8 +546,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
-        latestCheckRunId: 950,
-        latestCompletedAt: null,
+        checkRuns: { e2e: 950, unit: 900 },
         isOpen: true,
       },
     });
@@ -587,8 +582,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -621,8 +615,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -655,8 +648,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -689,8 +681,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -721,8 +712,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: null,
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -744,8 +734,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: null,
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -794,8 +783,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
       "ENG-22": {
@@ -806,8 +794,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -845,8 +832,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });
@@ -929,8 +915,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "unknown",
         headSha: null,
         updatedAt: null,
-        latestCheckRunId: null,
-        latestCompletedAt: null,
+        checkRuns: {},
         isOpen: false,
       },
     });

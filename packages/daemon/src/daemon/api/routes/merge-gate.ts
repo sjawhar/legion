@@ -76,10 +76,9 @@ async function recoverPrForMergeGate(
     verdict: null,
     failing: [],
     ciSettledAt: null,
-    ciLatestRunId: null,
+    ciCheckRuns: null,
     ciSettlementGeneration: null,
     ciSnapshot: null,
-    ciLatestCompletedAt: null,
 
     ciReconciled: false,
     fixAttempts: 0,

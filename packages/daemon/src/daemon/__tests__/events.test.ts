@@ -127,10 +127,9 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     verdict: null,
     failing: [],
     ciSettledAt: null,
-    ciLatestRunId: null,
+    ciCheckRuns: null,
     ciSettlementGeneration: null,
     ciSnapshot: null,
-    ciLatestCompletedAt: null,
     ciReconciled: false,
     fixAttempts: 0,
   };
@@ -181,10 +180,9 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     number: "7",
     sha: "head-1",
     is_head: true,
-    latest_check_run_id: 1,
+    check_runs: [{ name: "build", id: 1 }],
     generation: 0,
     snapshot: "state-hash-1",
-    latest_completed_at: "2026-09-07T00:00:01.000Z",
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },
@@ -489,13 +487,16 @@ describe("core-NATS event pump", () => {
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
       envelope(
-        settledChecks({ latest_check_run_id: 2, settled_at: 2_000 }),
+        settledChecks({ check_runs: [{ name: "build", id: 2 }], settled_at: 2_000 }),
         "settled-without-emission"
       )
     );
     await pump.drain();
     expect(saveState).toHaveBeenCalledTimes(savesAfterEmission + 1);
-    expect(state.prs["acme/widgets#7"]).toMatchObject({ ciSettledAt: 2_000, ciLatestRunId: 2 });
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      ciSettledAt: 2_000,
+      ciCheckRuns: { build: 2 },
+    });
     expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
     pump.stop();
   });
@@ -543,14 +544,17 @@ describe("core-NATS event pump", () => {
     try {
       nats.emit(
         "notifications.github.acme.widgets.pr.7.checks",
-        envelope(settledChecks({ latest_check_run_id: 2, settled_at: 2_000 }), "newer-green")
+        envelope(
+          settledChecks({ check_runs: [{ name: "build", id: 2 }], settled_at: 2_000 }),
+          "newer-green"
+        )
       );
       await pump.drain();
       nats.emit(
         "notifications.github.acme.widgets.pr.7.checks",
         envelope(
           settledChecks({
-            latest_check_run_id: 1,
+            check_runs: [{ name: "build", id: 1 }],
             settled_at: 1_000,
             failed: { count: 1, checks: ["unit"] },
             passed: { count: 0, checks: [] },
@@ -565,7 +569,7 @@ describe("core-NATS event pump", () => {
         verdict: "green",
         failing: [],
         ciSettledAt: 2_000,
-        ciLatestRunId: 2,
+        ciCheckRuns: { build: 2 },
       });
       expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
       expect(debug).toHaveBeenCalledWith(
@@ -653,7 +657,6 @@ describe("core-NATS event pump", () => {
         settledChecks({
           generation: 1,
           snapshot: "state-hash-2",
-          latest_completed_at: "2026-09-07T00:00:02.000Z",
           settled_at: 2_000,
           superseded_settlement: "true",
         })

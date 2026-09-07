@@ -343,11 +343,18 @@ wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks
 post_github check_run "${fixture_dir}/check-run-cancelled.json"
 wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks" 3
 
+# A newer build attempt (2004 > 2002) whose completion (03:19) predates the
+# cancelled integration run's (03:21): the attempt set advances while the
+# head's latest completion time falls. A consumer ordering by the set accepts
+# it; one ordering by a completion maximum would drop it forever.
+post_github check_run "${fixture_dir}/check-run-superseding.json"
+wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks" 4
+
 post_github pull_request "${fixture_dir}/pull-request-closed-merged.json"
 post_github workflow_run "${fixture_dir}/workflow-run-with-pr.json"
 post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_prompt_count 12
+wait_for_prompt_count 13
 
 (
   cd "$repo_root/packages/envoy-client"
@@ -428,15 +435,18 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     require(prComments[0].payload_summary === "comment on example-org/example-repo#42 by octocat: Please review the pull request." && prComment.kind === "comment" && prComment.parent_kind === "pr" && prComment.repo === "example-org/example-repo" && prComment.number === "42", "pr comment lacks prose or structured payload");
 
     const checks = withTopic(topic("pr.42.checks"));
-    require(checks.length === 3, `checks count = ${checks.length}, want 3`);
+    require(checks.length === 4, `checks count = ${checks.length}, want 4`);
     const checksBySHA = new Map();
+    const attemptSet = (data) => new Map(data.check_runs.map((run) => [run.name, run.id]));
     for (const item of checks) {
       const data = payload(item);
       require(data.kind === "checks", "checks envelope has wrong payload kind");
-      require(Number.isInteger(data.latest_check_run_id) && data.latest_check_run_id > 0, "checks payload lacks a positive integer latest_check_run_id");
+      require(Array.isArray(data.check_runs) && data.check_runs.length > 0, "checks payload lacks a non-empty check_runs attempt set");
+      require(data.check_runs.every((run) => typeof run.name === "string" && run.name.length > 0 && Number.isInteger(run.id) && run.id > 0), "check_runs entries need a name and a positive integer id");
+      require(data.check_runs.every((run, index) => index === 0 || data.check_runs[index - 1].name < run.name), "check_runs must be sorted by name with one entry per name");
+      require(data.latest_check_run_id === undefined && data.latest_completed_at === undefined, "checks payload still carries a scalar ordering field");
       require(Number.isInteger(data.generation) && data.generation >= 0, "checks payload lacks a non-negative integer generation");
       require(typeof data.snapshot === "string" && data.snapshot.length > 0, "checks payload lacks a snapshot");
-      require(Number.isFinite(Date.parse(data.latest_completed_at)), `checks latest_completed_at is not a GitHub timestamp: ${JSON.stringify(data.latest_completed_at)}`);
       const forSHA = checksBySHA.get(data.sha) ?? [];
       forSHA.push(data);
       checksBySHA.set(data.sha, forSHA);
@@ -445,19 +455,33 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     const firstSHA = "1111111111111111111111111111111111111111";
     const secondSHA = "2222222222222222222222222222222222222222";
     require(checksBySHA.get(firstSHA)?.length === 1, "first head must settle exactly once");
-    require(checksBySHA.get(secondSHA)?.length === 2, "second head must settle once then re-settle once");
+    require(checksBySHA.get(secondSHA)?.length === 3, "second head must settle once then re-settle twice");
+    // Consumers order same-head settlements by the attempt set: per-name ids
+    // never decrease, and at an equal set the generation must not decrease.
+    const compareSets = (previous, next) => {
+      let advanced = false;
+      for (const [name, id] of next) {
+        const before = previous.get(name);
+        if (before === undefined || id > before) advanced = true;
+        else if (id < before) return "regressed";
+      }
+      return advanced ? "advanced" : "equal";
+    };
     for (const [sha, values] of checksBySHA) {
       require(values.length === 1 || values.slice(1).every((value) => value.superseded_settlement === "true"), `duplicate checks for ${sha} lack superseded_settlement`);
-      // The pair orders lexicographically: a higher id is newer whatever its
-      // generation; an equal id needs a non-decreasing generation; a lower id
-      // is a regression.
-      const doesNotRegress = (previous, value) =>
-        value.latest_check_run_id > previous.latest_check_run_id ||
-        (value.latest_check_run_id === previous.latest_check_run_id && value.generation >= previous.generation);
-      require(values.every((value, index) => index === 0 || doesNotRegress(values[index - 1], value)), `checks (latest_check_run_id, generation) for ${sha} regressed`);
-      require(values.every((value, index) => index === 0 || Date.parse(value.latest_completed_at) >= Date.parse(values[index - 1].latest_completed_at)), `checks latest_completed_at for ${sha} regressed`);
+      for (let index = 1; index < values.length; index += 1) {
+        const order = compareSets(attemptSet(values[index - 1]), attemptSet(values[index]));
+        require(order !== "regressed", `checks attempt set for ${sha} regressed at settlement ${index}`);
+        require(order === "advanced" || values[index].generation > values[index - 1].generation, `checks generation for ${sha} did not advance at an equal attempt set`);
+      }
     }
-    require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 1, "second head re-settlement flag is missing");
+    // The superseding build attempt: the set advances (build 2002 -> 2004,
+    // integration unchanged) and the verdict turns red on the new attempt.
+    const secondHead = checksBySHA.get(secondSHA);
+    require(compareSets(attemptSet(secondHead[1]), attemptSet(secondHead[2])) === "advanced", "superseding attempt did not advance the attempt set");
+    require(attemptSet(secondHead[2]).get("build") === 2004 && attemptSet(secondHead[2]).get("integration") === 2003, `superseding settlement attempt set = ${JSON.stringify(secondHead[2].check_runs)}`);
+    require(secondHead[2].failed.checks.join(",") === "build", `superseding settlement failed = ${JSON.stringify(secondHead[2].failed)}`);
+    require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 2, "second head re-settlement flags are missing");
 
     const workflow = withTopic(topic("workflow.ci_yml.completed"));
     require(workflow.length === 1 && payload(workflow[0]).run_id === "3002", "only the PR-less workflow run may publish");

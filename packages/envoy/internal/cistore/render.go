@@ -2,7 +2,6 @@ package cistore
 
 import (
 	"sort"
-	"time"
 )
 
 // category buckets a check into one of the rollup groups.
@@ -69,11 +68,13 @@ type Summary struct {
 	Repo   string `json:"repo"`
 	Number string `json:"number"`
 	SHA    string `json:"sha"`
-	// LatestCheckRunID is the max over known check-run IDs in this settlement.
-	LatestCheckRunID     uint64         `json:"latest_check_run_id"`
+	// CheckRuns is the settlement's attempt set: the latest check-run id per
+	// check name, sorted by name. Consumers order same-head settlements by it
+	// (per-name ids never decrease within a head), then by Generation at an
+	// equal set.
+	CheckRuns            []CheckRunRef  `json:"check_runs"`
 	Generation           uint64         `json:"generation"`
 	Snapshot             string         `json:"snapshot"`
-	LatestCompletedAt    string         `json:"latest_completed_at"`
 	SettledAt            int64          `json:"settled_at,omitempty"`
 	SupersededSettlement string         `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup    `json:"failed"`
@@ -85,29 +86,25 @@ type Summary struct {
 	FailingChecks        []FailingCheck `json:"failing_checks"`
 }
 
+// CheckRunRef names one check and its latest GitHub check-run id.
+type CheckRunRef struct {
+	Name string `json:"name"`
+	ID   uint64 `json:"id"`
+}
+
 // renderSummary derives the stable checks payload. Names within each group are
 // sorted; publication owns the settlement timestamp and JSON encoding.
 func renderSummary(s State) Summary {
 	groups := map[category][]string{}
 	failingChecks := make([]FailingCheck, 0)
-	var latestCheckRunID uint64
-	var latestCompletedAt string
-	var latestCompleted time.Time
+	checkRuns := make([]CheckRunRef, 0)
 	for key, check := range s.Checks {
-		if check.CheckRunID > 0 && uint64(check.CheckRunID) > latestCheckRunID {
-			latestCheckRunID = uint64(check.CheckRunID)
-		}
-		if check.Status == "completed" {
-			if completedAt, err := time.Parse(time.RFC3339, check.CompletedAt); err == nil &&
-				(latestCompletedAt == "" || completedAt.After(latestCompleted) ||
-					(completedAt.Equal(latestCompleted) && check.CompletedAt > latestCompletedAt)) {
-				latestCompleted = completedAt
-				latestCompletedAt = check.CompletedAt
-			}
-		}
 		name := check.Name
 		if name == "" {
 			name = key
+		}
+		if check.CheckRunID > 0 {
+			checkRuns = append(checkRuns, CheckRunRef{Name: name, ID: uint64(check.CheckRunID)})
 		}
 		category := classify(check)
 		groups[category] = append(groups[category], name)
@@ -121,23 +118,23 @@ func renderSummary(s State) Summary {
 		}
 		return failingChecks[i].Name < failingChecks[j].Name
 	})
+	sort.Slice(checkRuns, func(i, j int) bool { return checkRuns[i].Name < checkRuns[j].Name })
 	failed := group(groups[catFailed])
 	sum := Summary{
-		Kind:              "checks",
-		Repo:              s.Owner + "/" + s.Repo,
-		Number:            s.Number,
-		SHA:               s.SHA,
-		LatestCheckRunID:  latestCheckRunID,
-		Generation:        s.Generation,
-		Snapshot:          s.Hash(),
-		LatestCompletedAt: latestCompletedAt,
-		Failed:            failed,
-		Running:           group(groups[catRunning]),
-		Passed:            group(groups[catPassed]),
-		Queued:            group(groups[catQueued]),
-		Cancelled:         group(groups[catCancelled]),
-		Skipped:           group(groups[catSkipped]),
-		FailingChecks:     failingChecks,
+		Kind:          "checks",
+		Repo:          s.Owner + "/" + s.Repo,
+		Number:        s.Number,
+		SHA:           s.SHA,
+		CheckRuns:     checkRuns,
+		Generation:    s.Generation,
+		Snapshot:      s.Hash(),
+		Failed:        failed,
+		Running:       group(groups[catRunning]),
+		Passed:        group(groups[catPassed]),
+		Queued:        group(groups[catQueued]),
+		Cancelled:     group(groups[catCancelled]),
+		Skipped:       group(groups[catSkipped]),
+		FailingChecks: failingChecks,
 	}
 	if s.EmittedCount > 0 {
 		sum.SupersededSettlement = "true"

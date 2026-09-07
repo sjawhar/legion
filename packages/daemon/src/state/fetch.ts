@@ -339,8 +339,8 @@ export interface CiAndMergeStatus {
   headSha: string | null;
   isOpen: boolean;
   updatedAt: string | null;
-  latestCheckRunId: number | null;
-  latestCompletedAt: number | null;
+  /** The rollup's attempt set: highest check-run id per check name. Status contexts have no run and are absent. */
+  checkRuns: Record<string, number>;
 }
 
 export interface CiFetchFailure {
@@ -391,31 +391,25 @@ function rollupOutcome(nodes: readonly unknown[]): RollupOutcome {
   return { failingChecks: [...failing], cancelledCount };
 }
 
-function latestCheckRunId(nodes: readonly unknown[]): number | null {
-  let latest: number | null = null;
+function checkRunSet(nodes: readonly unknown[]): Record<string, number> {
+  const runs: Record<string, number> = {};
   for (const node of nodes) {
-    const databaseId = recordValue(node)?.databaseId;
+    const record = recordValue(node);
+    const name = record?.name;
+    const databaseId = record?.databaseId;
     if (
-      typeof databaseId === "number" &&
-      Number.isSafeInteger(databaseId) &&
-      databaseId > 0 &&
-      (latest === null || databaseId > latest)
+      typeof name !== "string" ||
+      name === "" ||
+      typeof databaseId !== "number" ||
+      !Number.isSafeInteger(databaseId) ||
+      databaseId <= 0
     ) {
-      latest = databaseId;
+      continue;
     }
+    const known = runs[name];
+    if (known === undefined || databaseId > known) runs[name] = databaseId;
   }
-  return latest;
-}
-
-function latestCheckRunCompletedAt(nodes: readonly unknown[]): number | null {
-  let latest: number | null = null;
-  for (const node of nodes) {
-    const completedAt = recordValue(node)?.completedAt;
-    if (typeof completedAt !== "string") continue;
-    const timestamp = Date.parse(completedAt);
-    if (!Number.isNaN(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
-  }
-  return latest;
+  return runs;
 }
 
 interface RollupContextsPage {
@@ -456,7 +450,7 @@ async function fetchRemainingContextNodes(
     if (!page.endCursor) {
       throw new GitHubAPIError("GitHub returned a paginated check rollup without an end cursor");
     }
-    const query = `query($after: String!) { repository(owner: "${ref.owner}", name: "${ref.repo}") { object(oid: "${headSha}") { ... on Commit { statusCheckRollup { contexts(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId completedAt } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`;
+    const query = `query($after: String!) { repository(owner: "${ref.owner}", name: "${ref.repo}") { object(oid: "${headSha}") { ... on Commit { statusCheckRollup { contexts(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`;
     const data = await runGraphqlQuery(
       query,
       { after: page.endCursor },
@@ -571,7 +565,7 @@ async function getCiStatusBatchWithOptions(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { state updatedAt mergeable commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId completedAt } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { state updatedAt mergeable commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
       );
     }
 
@@ -598,8 +592,7 @@ async function getCiStatusBatchWithOptions(
           headSha: null,
           isOpen: false,
           updatedAt: null,
-          latestCheckRunId: null,
-          latestCompletedAt: null,
+          checkRuns: {},
         };
         continue;
       }
@@ -615,8 +608,7 @@ async function getCiStatusBatchWithOptions(
           headSha: null,
           isOpen: rawPr.state === "OPEN",
           updatedAt,
-          latestCheckRunId: null,
-          latestCompletedAt: null,
+          checkRuns: {},
         };
         continue;
       }
@@ -656,8 +648,7 @@ async function getCiStatusBatchWithOptions(
         headSha,
         isOpen: rawPr.state === "OPEN",
         updatedAt,
-        latestCheckRunId: latestCheckRunId(contextNodes),
-        latestCompletedAt: latestCheckRunCompletedAt(contextNodes),
+        checkRuns: checkRunSet(contextNodes),
       };
     }
   }

@@ -182,10 +182,9 @@ describe("thermonuclear API regressions", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1,
-      ciLatestRunId: 1,
+      ciCheckRuns: { build: 1 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       reviewDecision: "approved",
       fixAttempts: 1,
@@ -207,7 +206,7 @@ describe("thermonuclear API regressions", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       fixAttempts: 2,
     });
     expect(state.prs["acme/widgets#17"]?.reviewDecision).toBeUndefined();

@@ -45,7 +45,7 @@ describe("Envoy GitHub envelope goldens", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1,
-      ciLatestRunId: 1,
+      ciCheckRuns: { build: 1 },
       reviewDecision: "approved",
     });
 
@@ -67,7 +67,7 @@ describe("Envoy GitHub envelope goldens", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       fixAttempts: 1,
     });
 

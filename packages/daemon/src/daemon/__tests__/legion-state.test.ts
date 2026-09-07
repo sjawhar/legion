@@ -56,10 +56,9 @@ function stateWithTree() {
     verdict: "green",
     failing: [],
     ciSettledAt: 1_724_457_600_000,
-    ciLatestRunId: null,
+    ciCheckRuns: null,
     ciSettlementGeneration: null,
     ciSnapshot: null,
-    ciLatestCompletedAt: null,
     ciReconciled: false,
     fixAttempts: 1,
     reviewDecision: "approved",
@@ -77,10 +76,9 @@ function legacyV8State(pr: Record<string, unknown>) {
     verdict: _verdict,
     failing: _failing,
     ciSettledAt: _ciSettledAt,
-    ciLatestRunId: _ciLatestRunId,
+    ciCheckRuns: _ciCheckRuns,
     ciSettlementGeneration: _ciSettlementGeneration,
     ciSnapshot: _ciSnapshot,
-    ciLatestCompletedAt: _ciLatestCompletedAt,
     ciReconciled: _ciReconciled,
     ...legacyPr
   } = current.prs[prKey];
@@ -97,10 +95,9 @@ function legacyV8State(pr: Record<string, unknown>) {
 function legacyV11State() {
   const current = stateWithTree();
   const {
-    ciLatestRunId: _ciLatestRunId,
+    ciCheckRuns: _ciCheckRuns,
     ciSettlementGeneration: _ciSettlementGeneration,
     ciSnapshot: _ciSnapshot,
-    ciLatestCompletedAt: _ciLatestCompletedAt,
     ciReconciled: _ciReconciled,
     ...legacyPr
   } = current.prs[prKey];

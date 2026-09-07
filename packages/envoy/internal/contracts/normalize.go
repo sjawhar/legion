@@ -97,9 +97,6 @@ type CIObservation struct {
 	// ObservedAt orders observations of one run: completed_at, else started_at
 	// (check runs) or updated_at (suites).
 	ObservedAt string
-	// CompletedAt is the run's GitHub completion time and nothing else; it
-	// feeds the settlement's completion watermark. Empty until GitHub reports one.
-	CompletedAt string
 }
 
 // GithubCIObservations extracts one CI observation per associated PR. Both
@@ -141,8 +138,7 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		obs.CheckName = nestedString(body, key, "name")
 		obs.CheckRunID = checkRunID
 		obs.URL = nestedString(body, key, "html_url")
-		obs.CompletedAt = nestedString(body, key, "completed_at")
-		obs.ObservedAt = obs.CompletedAt
+		obs.ObservedAt = nestedString(body, key, "completed_at")
 		if obs.ObservedAt == "" {
 			obs.ObservedAt = nestedString(body, key, "started_at")
 		}

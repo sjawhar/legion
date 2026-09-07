@@ -60,11 +60,11 @@ export interface PrState {
   verdict: "green" | "red" | null;
   failing: string[];
   ciSettledAt: number | null;
-  ciLatestRunId: number | null;
+  /** The settlement's attempt set: latest check-run id per check name. Null until a settlement or a rollup with check runs is accepted. */
+  ciCheckRuns: Record<string, number> | null;
   ciSettlementGeneration: number | null;
   ciSnapshot: string | null;
-  ciLatestCompletedAt: number | null;
-  /** True while the stored verdict was last set from GitHub's rollup; a live settlement that ties on completion must agree with it. */
+  /** True while a terminal GitHub read holds the tie at the stored attempt set; cleared only when the set advances. */
   ciReconciled: boolean;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
@@ -192,10 +192,9 @@ const PrStateSchema = z
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     ciSettledAt: z.number().nullable(),
-    ciLatestRunId: z.number().int().positive().nullable(),
+    ciCheckRuns: z.record(z.string(), z.number().int().positive()).nullable(),
     ciSettlementGeneration: z.number().int().nonnegative().nullable(),
     ciSnapshot: z.string().nullable(),
-    ciLatestCompletedAt: z.number().nullable(),
     ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
@@ -457,25 +456,16 @@ function migrateV11State(state: unknown): unknown {
   const migratedPrs = recordValue(prs)
     ? Object.fromEntries(
         Object.entries(prs).map(([key, pr]) => {
-          if (
-            !recordValue(pr) ||
-            ("ciLatestRunId" in pr &&
-              "ciSettlementGeneration" in pr &&
-              "ciSnapshot" in pr &&
-              "ciLatestCompletedAt" in pr &&
-              "ciReconciled" in pr)
-          ) {
-            return [key, pr];
-          }
+          if (!recordValue(pr)) return [key, pr];
+          // v11 fenced nothing: every PR starts unfenced and unreconciled.
           return [
             key,
             {
               ...pr,
-              ...("ciLatestRunId" in pr ? {} : { ciLatestRunId: null }),
-              ...("ciSettlementGeneration" in pr ? {} : { ciSettlementGeneration: null }),
-              ...("ciSnapshot" in pr ? {} : { ciSnapshot: null }),
-              ...("ciLatestCompletedAt" in pr ? {} : { ciLatestCompletedAt: null }),
-              ...("ciReconciled" in pr ? {} : { ciReconciled: false }),
+              ciCheckRuns: null,
+              ciSettlementGeneration: null,
+              ciSnapshot: null,
+              ciReconciled: false,
             },
           ];
         })

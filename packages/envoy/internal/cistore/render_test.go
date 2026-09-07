@@ -61,8 +61,14 @@ func TestRenderSummaryJSON(t *testing.T) {
 	if got := string(payload["generation"]); got != "0" {
 		t.Fatalf("generation = %s, want 0", got)
 	}
-	if got := string(payload["latest_check_run_id"]); got != "1" {
-		t.Fatalf("latest_check_run_id = %s, want 1", got)
+	var checkRuns []CheckRunRef
+	if err := json.Unmarshal(payload["check_runs"], &checkRuns); err != nil || len(checkRuns) != 8 {
+		t.Fatalf("check_runs = %s, want one entry per check", payload["check_runs"])
+	}
+	for i := 1; i < len(checkRuns); i++ {
+		if checkRuns[i-1].Name >= checkRuns[i].Name {
+			t.Fatalf("check_runs not sorted by name: %+v", checkRuns)
+		}
 	}
 	assertGroup(t, "failed", sum.Failed, []string{"infra-tests"})
 	assertGroup(t, "running", sum.Running, []string{"build-image", "snapshots"})
@@ -71,45 +77,47 @@ func TestRenderSummaryJSON(t *testing.T) {
 	assertGroup(t, "skipped", sum.Skipped, []string{"docs", "lint"})
 }
 
-func TestRenderSummaryCarriesLatestCheckRunID(t *testing.T) {
+func TestRenderSummaryCarriesTheAttemptSetSortedByName(t *testing.T) {
 	_, sum := renderOrFail(t, State{
 		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: "abcdef",
 		Checks: map[string]Check{
-			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success"},
-			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "success"},
 			"test":  {CheckRunID: 1024, Status: "completed", Conclusion: "success"},
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success"},
+			"lint":  {CheckRunID: 901, Status: "in_progress"},
 		},
 	})
-	if sum.LatestCheckRunID != 1024 {
-		t.Fatalf("latest_check_run_id = %d, want 1024", sum.LatestCheckRunID)
+	want := []CheckRunRef{{Name: "build", ID: 900}, {Name: "lint", ID: 901}, {Name: "test", ID: 1024}}
+	if len(sum.CheckRuns) != len(want) {
+		t.Fatalf("check_runs = %+v, want %+v", sum.CheckRuns, want)
+	}
+	for i := range want {
+		if sum.CheckRuns[i] != want[i] {
+			t.Fatalf("check_runs[%d] = %+v, want %+v", i, sum.CheckRuns[i], want[i])
+		}
 	}
 }
 
-func TestRenderSummaryCarriesSnapshotAndLatestCompletedAt(t *testing.T) {
+func TestRenderSummaryCarriesSnapshot(t *testing.T) {
 	state := State{
 		Owner:  "example-org",
 		Repo:   "example-repo",
 		Number: "42",
 		SHA:    "abcdef",
 		Checks: map[string]Check{
-			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T03:00:00Z", CompletedAt: "2026-09-07T03:00:00Z"},
-			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "failure", ObservedAt: "2026-09-07T03:01:00Z", CompletedAt: "2026-09-07T03:01:00Z"},
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T03:00:00Z"},
+			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "failure", ObservedAt: "2026-09-07T03:01:00Z"},
 			"test":  {CheckRunID: 902, Status: "in_progress", ObservedAt: "2026-09-07T03:02:00Z"},
 		},
 	}
 	raw, _ := renderOrFail(t, state)
 	var payload struct {
-		Snapshot          string `json:"snapshot"`
-		LatestCompletedAt string `json:"latest_completed_at"`
+		Snapshot string `json:"snapshot"`
 	}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatalf("decode rendered summary: %v", err)
 	}
 	if payload.Snapshot != state.Hash() {
 		t.Fatalf("snapshot = %q, want state hash %q", payload.Snapshot, state.Hash())
-	}
-	if payload.LatestCompletedAt != "2026-09-07T03:01:00Z" {
-		t.Fatalf("latest_completed_at = %q, want latest completed GitHub timestamp", payload.LatestCompletedAt)
 	}
 }
 

@@ -74,15 +74,11 @@ type Check struct {
 	Conclusion string     `json:"conclusion"` // success|failure|... ("" until completed)
 	// ObservedAt orders observations of this run (completion, else start).
 	ObservedAt string `json:"observed_at"`
-	// CompletedAt is GitHub's completion time for this run; it is the only
-	// value that enters the settlement's completion watermark.
-	CompletedAt string `json:"completed_at,omitempty"`
 }
 
 // UnmarshalJSON reads records written by deployed listeners: their checks
-// carry updated_at instead of observed_at and no completed_at. The retired
-// updated_at becomes observed_at, and for a completed check also its
-// completion time (GitHub last updated a completed run when it completed).
+// carry updated_at instead of observed_at. The retired updated_at becomes
+// observed_at.
 func (check *Check) UnmarshalJSON(data []byte) error {
 	type checkAlias Check
 	*check = Check{}
@@ -99,9 +95,6 @@ func (check *Check) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	check.ObservedAt = wire.UpdatedAt
-	if check.Status == "completed" && check.CompletedAt == "" {
-		check.CompletedAt = wire.UpdatedAt
-	}
 	return nil
 }
 
@@ -447,13 +440,12 @@ func (s *Store) record(observation contracts.CIObservation) error {
 			}
 		}
 		next := Check{
-			Name:        observation.CheckName,
-			CheckRunID:  checkRunID(observation.CheckRunID),
-			URL:         observation.URL,
-			Status:      observation.Status,
-			Conclusion:  observation.Conclusion,
-			ObservedAt:  observation.ObservedAt,
-			CompletedAt: observation.CompletedAt,
+			Name:       observation.CheckName,
+			CheckRunID: checkRunID(observation.CheckRunID),
+			URL:        observation.URL,
+			Status:     observation.Status,
+			Conclusion: observation.Conclusion,
+			ObservedAt: observation.ObservedAt,
 		}
 		if current, ok := st.Checks[key]; ok && current == next {
 			return false
@@ -865,7 +857,7 @@ func settlementReady(st State) bool {
 			break
 		}
 	}
-	if !hasCheckRunID || !hasCompletedTimestamp(st.Checks) {
+	if !hasCheckRunID {
 		return false
 	}
 	for _, suite := range st.Suites {
@@ -874,23 +866,6 @@ func settlementReady(st State) bool {
 		}
 	}
 	return true
-}
-
-// hasCompletedTimestamp matches renderSummary's completion-time requirement
-// without constructing a payload during each reconciliation pass.
-// hasCompletedTimestamp is true when at least one completed check carries a
-// GitHub completion time: the value the settlement's watermark is built from,
-// never a start time.
-func hasCompletedTimestamp(checks map[string]Check) bool {
-	for _, check := range checks {
-		if check.Status != "completed" {
-			continue
-		}
-		if _, err := time.Parse(time.RFC3339, check.CompletedAt); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 func terminal(st State) bool {

@@ -422,10 +422,9 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
       reviewDecision: "approved",
@@ -444,8 +443,7 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
-            latestCheckRunId: null,
-            latestCompletedAt: null,
+            checkRuns: {},
             isOpen: true,
           },
         };
@@ -466,7 +464,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: now,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
     });
     expect(dispatched).toEqual([
       {
@@ -505,10 +503,9 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -523,8 +520,7 @@ describe("runResync", () => {
           failingChecks: ["lint", "unit"],
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: null,
-          latestCompletedAt: null,
+          checkRuns: {},
           isOpen: true,
         },
       }),
@@ -537,7 +533,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: null,
+      ciCheckRuns: null,
     });
     expect(dispatched).toEqual([
       {
@@ -570,10 +566,9 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
       reviewDecision: "approved",
@@ -591,8 +586,7 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-2",
             updatedAt: "2026-08-24T00:00:00.000Z",
-            latestCheckRunId: null,
-            latestCompletedAt: null,
+            checkRuns: {},
             isOpen: true,
           },
         };
@@ -608,7 +602,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       fixAttempts: 1,
     });
     expect(state.prs["sjawhar/legion#7"]?.reviewDecision).toBeUndefined();
@@ -648,10 +642,9 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -664,8 +657,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-2",
           updatedAt: "2026-08-24T00:00:02.000Z",
-          latestCheckRunId: 900,
-          latestCompletedAt: null,
+          checkRuns: { build: 900 },
           isOpen: true,
         },
       }),
@@ -692,7 +684,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       headSha: "head-2",
       headUpdatedAt: Date.parse("2026-08-24T00:00:02.000Z"),
-      ciLatestRunId: 900,
+      ciCheckRuns: { build: 900 },
     });
   });
 
@@ -706,10 +698,9 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -722,8 +713,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: 900,
-          latestCompletedAt: null,
+          checkRuns: { build: 900 },
           isOpen: true,
         },
       }),
@@ -731,7 +721,7 @@ describe("runResync", () => {
 
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
-      ciLatestRunId: 900,
+      ciCheckRuns: { build: 900 },
     });
   });
 
@@ -745,10 +735,9 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -762,8 +751,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: 5,
-          latestCompletedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+          checkRuns: { build: 5 },
           isOpen: true,
         },
       }),
@@ -776,7 +764,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 5,
+      ciCheckRuns: { build: 5 },
     });
     expect(dispatched).toEqual([
       [
@@ -799,10 +787,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -817,8 +804,7 @@ describe("runResync", () => {
           failingChecks: ["lint", "unit"],
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: 5,
-          latestCompletedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+          checkRuns: { build: 5 },
           isOpen: true,
         },
       }),
@@ -831,7 +817,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 5,
+      ciCheckRuns: { build: 5 },
     });
     expect(dispatched).toEqual([
       [
@@ -858,10 +844,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -878,8 +863,7 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
-            latestCheckRunId: 5,
-            latestCompletedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+            checkRuns: { build: 5 },
             isOpen: true,
           },
         };
@@ -893,7 +877,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 5,
+      ciCheckRuns: { build: 5 },
     });
     expect(dispatched).toEqual([]);
   });
@@ -908,10 +892,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 1_000,
+      ciCheckRuns: { build: 1_000 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -924,8 +907,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: 1_100,
-          latestCompletedAt: null,
+          checkRuns: { build: 1_100 },
           isOpen: true,
         },
       }),
@@ -936,7 +918,7 @@ describe("runResync", () => {
     // that arrives late is stale, exactly as if the daemon had seen 1100 live.
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: null,
-      ciLatestRunId: 1_100,
+      ciCheckRuns: { build: 1_100 },
       ciSettledAt: 1_000,
     });
   });
@@ -951,10 +933,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -970,8 +951,7 @@ describe("runResync", () => {
           cancelledCount: 2,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: 9,
-          latestCompletedAt: null,
+          checkRuns: { build: 9 },
           isOpen: true,
         },
       }),
@@ -985,7 +965,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: null,
       failing: [],
-      ciLatestRunId: 9,
+      ciCheckRuns: { build: 9 },
       fixAttempts: 0,
     });
     expect(dispatched).toEqual([]);
@@ -1001,10 +981,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -1021,8 +1000,7 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
-            latestCheckRunId: 5,
-            latestCompletedAt: null,
+            checkRuns: { build: 5 },
             isOpen: true,
           },
         };
@@ -1037,7 +1015,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 5,
+      ciCheckRuns: { build: 5 },
     });
     expect(dispatched).toEqual([]);
   });
@@ -1052,10 +1030,9 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciLatestRunId: 4,
+      ciCheckRuns: { build: 4 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -1069,8 +1046,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
-          latestCheckRunId: 5,
-          latestCompletedAt: null,
+          checkRuns: { build: 5 },
           isOpen: true,
         },
       }),
@@ -1083,7 +1059,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciLatestRunId: 5,
+      ciCheckRuns: { build: 5 },
     });
     expect(dispatched).toEqual([]);
   });
@@ -1098,10 +1074,9 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -1115,8 +1090,7 @@ describe("runResync", () => {
           mergeableStatus: null,
           headSha: "head-1",
           updatedAt: null,
-          latestCheckRunId: null,
-          latestCompletedAt: null,
+          checkRuns: {},
           isOpen: false,
         },
       }),
@@ -1129,7 +1103,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciLatestRunId: null,
+      ciCheckRuns: null,
     });
     expect(dispatched).toEqual([]);
   });
@@ -1144,10 +1118,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 900,
+      ciCheckRuns: { build: 900 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };
@@ -1179,10 +1152,9 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciLatestRunId: 900,
+      ciCheckRuns: { build: 900 },
       ciSettlementGeneration: null,
       ciSnapshot: null,
-      ciLatestCompletedAt: null,
       ciReconciled: false,
       fixAttempts: 0,
     };

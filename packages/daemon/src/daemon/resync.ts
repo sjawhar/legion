@@ -5,7 +5,6 @@ import type { DaemonConfig } from "./config";
 import type { LegionState } from "./legion-state";
 import {
   acceptGitHubFence,
-  type CiFence,
   type CiSnapshot,
   ciSnapshot,
   ciSnapshotEquals,
@@ -15,7 +14,6 @@ import {
   reduceGithubEvent,
   resetPrHead,
   settleCiVerdict,
-  takeGitHubWatermark,
   uncertifyCiVerdict,
   writeCiFence,
 } from "./reducers";
@@ -208,27 +206,18 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
     }
-    // GitHub's rollup authors a fence with no listener identity. It replaces
-    // the stored one, takes the tie at an equal id over a live fence, applies
-    // unfenced, or is an older view than the fence — acceptGitHubFence decides.
-    const fenceEffect = acceptGitHubFence(pr, status.latestCheckRunId, status.latestCompletedAt);
-    if (fenceEffect === "stale") {
+    // GitHub's rollup carries an attempt set with no listener identity. It
+    // replaces the stored fence, applies at an equal set, applies unfenced, or
+    // is an older or inconsistent view and is skipped — acceptGitHubFence decides.
+    const fenceEffect = acceptGitHubFence(pr, status.checkRuns);
+    if (fenceEffect === "stale" || fenceEffect === "conflict") {
       console.debug(
-        `[legion] ignored stale rollup for ${prKey} check_run_id=${status.latestCheckRunId} completed_at=${status.latestCompletedAt} fence=${pr.ciLatestRunId}@${pr.ciLatestCompletedAt}`
+        `[legion] ignored ${fenceEffect} rollup for ${prKey} check_runs=${JSON.stringify(status.checkRuns)} fence=${JSON.stringify(pr.ciCheckRuns)}`
       );
       continue;
     }
-    const fence: CiFence | undefined =
-      fenceEffect === "replace" && status.latestCheckRunId !== null
-        ? {
-            latestCheckRunId: status.latestCheckRunId,
-            generation: null,
-            snapshot: null,
-            latestCompletedAt: status.latestCompletedAt,
-          }
-        : undefined;
-    if (fenceEffect === "watermark" && status.latestCompletedAt !== null) {
-      takeGitHubWatermark(pr, status.latestCompletedAt);
+    if (fenceEffect === "replace") {
+      writeCiFence(pr, { checkRuns: status.checkRuns, generation: null, snapshot: null });
     }
     const failing = status.failingChecks ?? [];
     // Mirror live intake: red only for actual failures; a cancelled-only
@@ -239,15 +228,17 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
         : status.ciStatus === "failing" && failing.length > 0
           ? "red"
           : null;
+    // A terminal read holds the tie at this attempt set until the set advances;
+    // a pending or cancelled-only read carries no verdict and holds nothing.
+    pr.ciReconciled = fenceEffect !== "unfenced" && verdict !== null;
     if (verdict === null) {
-      if (fence) writeCiFence(pr, fence);
       if (status.ciStatus === "pending" || status.ciStatus === "failing") uncertifyCiVerdict(pr);
       continue;
     }
     const effects = settleCiVerdict(
       deps.state,
       pr,
-      { verdict, failing, settledAt: now, ...(fence ? { fence } : {}) },
+      { verdict, failing, settledAt: now },
       deps.config
     );
     if (effects.length === 0) continue;

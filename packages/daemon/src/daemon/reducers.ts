@@ -36,8 +36,6 @@ export interface CiSettlementInput {
   verdict: PrState["verdict"];
   failing: string[];
   settledAt: number;
-  /** The fence this settlement establishes; the caller has already accepted it. Omitted when the fence must not move. */
-  fence?: CiFence;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -46,114 +44,135 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
+/** An attempt set: the latest GitHub check-run id per check name. */
+export type AttemptSet = Readonly<Record<string, number>>;
+
+export type AttemptSetOrder = "newer" | "equal" | "older" | "mixed";
+
+/**
+ * Orders an incoming attempt set against the stored one, per shared name:
+ * `newer` when no shared id is lower and some id is higher or a name is new;
+ * `equal` when every shared id matches and no name is new; `older` when no
+ * shared id is higher and some is lower; `mixed` otherwise. Names only in the
+ * stored set are ignored (a check can vanish from GitHub's view; a recreated
+ * listener record starts sparse). Per-name ids never decrease within a head,
+ * so the fence moves in one direction without clocks: a superseded attempt is
+ * `newer` whatever its completion time; a delayed older observation is `equal`
+ * or `older`.
+ */
+export function compareAttemptSets(stored: AttemptSet, incoming: AttemptSet): AttemptSetOrder {
+  let higher = false;
+  let lower = false;
+  for (const [name, id] of Object.entries(incoming)) {
+    const known = stored[name];
+    if (known === undefined || id > known) higher = true;
+    else if (id < known) lower = true;
+  }
+  if (higher && lower) return "mixed";
+  if (higher) return "newer";
+  return lower ? "older" : "equal";
+}
+
 /** A live settlement offered to the per-head fence: its ordering identity and its outcome. */
 export interface SettlementCandidate {
-  readonly latestCheckRunId: number;
+  readonly checkRuns: AttemptSet;
   readonly generation: number;
   readonly snapshot: string;
-  readonly latestCompletedAt: number;
-  /** Compared only when GitHub holds the tie at an equal completion. */
+  /** Compared only when a terminal GitHub read holds the tie at an equal attempt set. */
   readonly verdict: PrState["verdict"];
   readonly failing: readonly string[];
 }
 
-export type SettlementClassification = "stale" | "duplicate" | "conflict" | "newer";
+export type SettlementClassification = "stale" | "duplicate" | "conflict" | "newer" | "refresh";
 
 /**
- * Classifies a live settlement against the per-head fence. Check-run ids order
- * every source. At an equal id two independent orderings apply and both must
- * pass: the listener's state generation (against a live fence: lower is stale,
- * equal is a duplicate or a conflict) and GitHub's completion watermark
- * (`ciLatestCompletedAt`, raised by every accepted settlement and by every
- * GitHub reconciliation): a settlement whose completion predates the watermark
- * is stale whatever its generation, because GitHub has since seen a later
- * completion. GitHub holds the tie at a watermark it set: against a
- * GitHub-authored fence an equal completion is stale; over a live fence whose
- * verdict was last reconciled from GitHub (`ciReconciled`), an equal completion
- * is accepted only when it agrees with that verdict and failing set.
+ * Classifies a live settlement against the per-head fence. The attempt set
+ * orders every source (`compareAttemptSets`); at an equal set the listener's
+ * generation orders its own settlements (a GitHub-authored fence has no
+ * generation and orders below every live one). When a terminal GitHub read
+ * holds the tie at that set (`ciReconciled`), a higher generation is accepted
+ * only when its verdict and failing multiset agree — a `refresh` of the
+ * listener identity that leaves GitHub's authority in place; a disagreeing one
+ * is stale until GitHub reads the set again. Authority clears only when the
+ * set advances.
  */
 export function classifySettlement(
   pr: PrState,
   incoming: SettlementCandidate
 ): SettlementClassification {
-  if (pr.ciLatestRunId === null) return "newer";
-  if (incoming.latestCheckRunId < pr.ciLatestRunId) return "stale";
-  if (incoming.latestCheckRunId > pr.ciLatestRunId) return "newer";
-
+  if (pr.ciCheckRuns === null) return "newer";
+  switch (compareAttemptSets(pr.ciCheckRuns, incoming.checkRuns)) {
+    case "newer":
+      return "newer";
+    case "older":
+      return "stale";
+    case "mixed":
+      return "conflict";
+    case "equal":
+      break;
+  }
   if (pr.ciSettlementGeneration !== null) {
     if (incoming.generation < pr.ciSettlementGeneration) return "stale";
     if (incoming.generation === pr.ciSettlementGeneration) {
       return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
     }
-    if (pr.ciLatestCompletedAt !== null && incoming.latestCompletedAt < pr.ciLatestCompletedAt) {
-      return "stale";
-    }
-    // Same completion second as a GitHub reconciliation: GitHub's view holds
-    // the tie. A settlement that agrees refreshes the listener identity; one
-    // that disagrees predates what GitHub already saw.
-    if (
-      pr.ciReconciled &&
-      incoming.latestCompletedAt === pr.ciLatestCompletedAt &&
-      (incoming.verdict !== pr.verdict || !sameStringMultiset(incoming.failing, pr.failing))
-    ) {
-      return "stale";
-    }
-    return "newer";
   }
-
-  if (pr.ciLatestCompletedAt === null || incoming.latestCompletedAt > pr.ciLatestCompletedAt) {
-    return "newer";
-  }
-  return "stale";
+  if (!pr.ciReconciled) return "newer";
+  return incoming.verdict === pr.verdict && sameStringMultiset(incoming.failing, pr.failing)
+    ? "refresh"
+    : "stale";
 }
 
 export interface CiFence {
-  readonly latestCheckRunId: number;
+  readonly checkRuns: AttemptSet;
   /** null for a fence GitHub's rollup authored (resync); the listener's state version otherwise. */
   readonly generation: number | null;
   readonly snapshot: string | null;
-  readonly latestCompletedAt: number | null;
 }
 
 /**
- * What a rollup read from GitHub may do to the stored fence: replace it (no
- * stored check-run id; a higher id; or an equal id, not older by completion,
- * when the stored fence is also GitHub's); take the tie at an equal id over a live fence (the listener
- * identity stays for duplicate detection; GitHub's completion becomes the
- * watermark and GitHub holds ties at it); apply its verdict unfenced (neither
- * side has a check run to order by); or nothing — the rollup is an older view
- * than the fence (a lower id; no id where one is fenced; or an equal id whose
- * completion is absent or predates the watermark) and its verdict is stale.
- * The live counterpart is `classifySettlement`.
+ * What a rollup read from GitHub may do to the stored fence: `replace` it (a
+ * newer attempt set, or nothing fenced yet); `apply` its verdict at an equal
+ * set, keeping the listener identity for duplicate detection; apply it
+ * `unfenced` when neither the rollup nor the stored fence has a check run; or
+ * be skipped as `stale` (an older set; or no check runs where some are fenced)
+ * or a `conflict` (a mixed set). The live counterpart is `classifySettlement`.
  */
-export type GitHubFenceEffect = "replace" | "watermark" | "unfenced" | "stale";
+export type GitHubFenceEffect = "replace" | "apply" | "unfenced" | "stale" | "conflict";
 
-export function acceptGitHubFence(
-  pr: PrState,
-  latestCheckRunId: number | null,
-  latestCompletedAt: number | null
-): GitHubFenceEffect {
-  if (latestCheckRunId === null) return pr.ciLatestRunId === null ? "unfenced" : "stale";
-  if (pr.ciLatestRunId === null || latestCheckRunId > pr.ciLatestRunId) return "replace";
-  if (latestCheckRunId < pr.ciLatestRunId) return "stale";
-  if (latestCompletedAt === null) return "stale";
-  if (pr.ciLatestCompletedAt !== null && latestCompletedAt < pr.ciLatestCompletedAt) return "stale";
-  return pr.ciSettlementGeneration === null ? "replace" : "watermark";
+export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFenceEffect {
+  const fenced = pr.ciCheckRuns !== null && Object.keys(pr.ciCheckRuns).length > 0;
+  if (Object.keys(checkRuns).length === 0) return fenced ? "stale" : "unfenced";
+  if (pr.ciCheckRuns === null) return "replace";
+  switch (compareAttemptSets(pr.ciCheckRuns, checkRuns)) {
+    case "newer":
+      return "replace";
+    case "equal":
+      return "apply";
+    case "older":
+      return "stale";
+    case "mixed":
+      return "conflict";
+  }
 }
 
 /** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */
 export function writeCiFence(pr: PrState, fence: CiFence): void {
-  pr.ciLatestRunId = fence.latestCheckRunId;
+  pr.ciCheckRuns = { ...fence.checkRuns };
   pr.ciSettlementGeneration = fence.generation;
   pr.ciSnapshot = fence.snapshot;
-  pr.ciLatestCompletedAt = fence.latestCompletedAt;
-  pr.ciReconciled = fence.generation === null;
 }
 
-/** GitHub takes the tie at an equal id over a live fence (`acceptGitHubFence` returned "watermark"). */
-export function takeGitHubWatermark(pr: PrState, latestCompletedAt: number): void {
-  pr.ciLatestCompletedAt = latestCompletedAt;
-  pr.ciReconciled = true;
+/** Refreshes the listener identity at an unchanged attempt set (`classifySettlement` returned "refresh"). */
+export function refreshCiIdentity(
+  pr: PrState,
+  generation: number,
+  snapshot: string,
+  settledAt: number
+): void {
+  pr.ciSettlementGeneration = generation;
+  pr.ciSnapshot = snapshot;
+  pr.ciSettledAt = settledAt;
 }
 
 /** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */
@@ -163,10 +182,9 @@ export type CiSnapshot = Pick<
   | "verdict"
   | "failing"
   | "ciSettledAt"
-  | "ciLatestRunId"
+  | "ciCheckRuns"
   | "ciSettlementGeneration"
   | "ciSnapshot"
-  | "ciLatestCompletedAt"
   | "ciReconciled"
 >;
 
@@ -176,12 +194,19 @@ export function ciSnapshot(pr: PrState): CiSnapshot {
     verdict: pr.verdict,
     failing: [...pr.failing],
     ciSettledAt: pr.ciSettledAt,
-    ciLatestRunId: pr.ciLatestRunId,
+    ciCheckRuns: pr.ciCheckRuns === null ? null : { ...pr.ciCheckRuns },
     ciSettlementGeneration: pr.ciSettlementGeneration,
     ciSnapshot: pr.ciSnapshot,
-    ciLatestCompletedAt: pr.ciLatestCompletedAt,
     ciReconciled: pr.ciReconciled,
   };
+}
+
+function sameAttemptSet(left: AttemptSet | null, right: AttemptSet | null): boolean {
+  if (left === null || right === null) return left === right;
+  const names = Object.keys(left);
+  return (
+    names.length === Object.keys(right).length && names.every((name) => left[name] === right[name])
+  );
 }
 
 export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
@@ -189,10 +214,9 @@ export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
     pr.headSha === snapshot.headSha &&
     pr.verdict === snapshot.verdict &&
     pr.ciSettledAt === snapshot.ciSettledAt &&
-    pr.ciLatestRunId === snapshot.ciLatestRunId &&
+    sameAttemptSet(pr.ciCheckRuns, snapshot.ciCheckRuns) &&
     pr.ciSettlementGeneration === snapshot.ciSettlementGeneration &&
     pr.ciSnapshot === snapshot.ciSnapshot &&
-    pr.ciLatestCompletedAt === snapshot.ciLatestCompletedAt &&
     pr.ciReconciled === snapshot.ciReconciled &&
     pr.failing.length === snapshot.failing.length &&
     pr.failing.every((name, index) => name === snapshot.failing[index])
@@ -233,7 +257,6 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  if (input.fence) writeCiFence(pr, input.fence);
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,
@@ -465,10 +488,9 @@ function registerPr(
     verdict: null,
     failing: [],
     ciSettledAt: null,
-    ciLatestRunId: null,
+    ciCheckRuns: null,
     ciSettlementGeneration: null,
     ciSnapshot: null,
-    ciLatestCompletedAt: null,
 
     ciReconciled: false,
     fixAttempts: 0,
@@ -484,10 +506,9 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.verdict = null;
   pr.failing = [];
   pr.ciSettledAt = null;
-  pr.ciLatestRunId = null;
+  pr.ciCheckRuns = null;
   pr.ciSettlementGeneration = null;
   pr.ciSnapshot = null;
-  pr.ciLatestCompletedAt = null;
   pr.ciReconciled = false;
   delete pr.reviewDecision;
 }
