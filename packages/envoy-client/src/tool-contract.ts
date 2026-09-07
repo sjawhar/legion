@@ -1,3 +1,4 @@
+import { EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
 import type { MessageMetadataInput } from "./transport";
 
@@ -22,9 +23,9 @@ const TOPIC_GUIDE =
 export const MessageMetadataSchema = z.object({
   in_reply_to: z.string().optional(),
   supersedes: z.string().optional(),
-  urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-  expects_reply: z.enum(["none", "optional", "required"]).optional(),
-  expires_at: z.number().int().optional(),
+  urgency: EnvelopeSchema.shape.urgency,
+  expects_reply: EnvelopeSchema.shape.expects_reply,
+  expires_at: EnvelopeSchema.shape.expires_at,
 });
 
 export type MessageMetadataArguments = z.output<typeof MessageMetadataSchema>;

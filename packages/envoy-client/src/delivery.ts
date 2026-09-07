@@ -1,16 +1,8 @@
-import { agentSubject } from "@legion/contracts";
+import { agentSubject, EnvelopeSchema } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
 
-const KNOWN_SOURCES: Record<string, true> = {
-  agent: true,
-  human: true,
-  envoy: true,
-  github: true,
-  slack: true,
-  whatsapp: true,
-  ghostwispr: true,
-};
+const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
 
 const InboundSenderSchema = z.object({
@@ -79,17 +71,18 @@ export function replyWith(envelope: DeliveryEnvelope): string | undefined {
   return `envoy_send(session_id="${envelope.source_session}", message="...")`;
 }
 
+function isOwnDispatchEchoPayload(payload: unknown, sessionID: string): boolean {
+  if (typeof payload !== "object" || payload === null || !("dispatch_session" in payload)) {
+    return false;
+  }
+  return payload.dispatch_session === sessionID;
+}
+
 export function isOwnDispatchEcho(envelope: DeliveryEnvelope, sessionID: string): boolean {
   if (envelope.source !== "github" || envelope.payload === undefined) return false;
 
   try {
-    const payload: unknown = JSON.parse(envelope.payload);
-    return (
-      typeof payload === "object" &&
-      payload !== null &&
-      "dispatch_session" in payload &&
-      payload.dispatch_session === sessionID
-    );
+    return isOwnDispatchEchoPayload(JSON.parse(envelope.payload), sessionID);
   } catch {
     return false;
   }
@@ -136,19 +129,26 @@ export function renderInbound(
     const data = tolerant.data as Partial<InboundEnvelope>;
     envelope = { ...data, source: data.source ?? "unknown" };
   }
-  if (isOwnDispatchEcho(envelope, sessionID)) {
+  let parsedPayload: unknown;
+  if (
+    envelope.payload !== undefined &&
+    (envelope.source === "github" || envelope.payload !== envelope.payload_summary)
+  ) {
+    try {
+      parsedPayload = JSON.parse(envelope.payload);
+    } catch {
+      parsedPayload = envelope.payload;
+    }
+  }
+  if (envelope.source === "github" && isOwnDispatchEchoPayload(parsedPayload, sessionID)) {
     return { skip: true, content: "", envelope };
   }
 
   const payloadSummary = envelope.payload_summary ?? "unknown";
-  let message: unknown;
-  if (envelope.payload !== undefined && envelope.payload !== envelope.payload_summary) {
-    try {
-      message = JSON.parse(envelope.payload);
-    } catch {
-      message = envelope.payload;
-    }
-  }
+  const message =
+    envelope.payload !== undefined && envelope.payload !== envelope.payload_summary
+      ? parsedPayload
+      : undefined;
   const body = `${envelope.payload_summary ?? ""}\n${envelope.payload ?? ""}`;
   let foreignSession: string | undefined;
   for (const match of body.matchAll(FOREIGN_SESSION_ID)) {
