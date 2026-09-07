@@ -602,10 +602,14 @@ export default function envoyExtension(pi: PiApi): void {
           );
         }
         case EnvoyToolOperation.unsubscribe: {
+          // The session's own inbox is not a subscription the tool manages:
+          // "remove all" and an explicit request alike leave it in place, or
+          // the session stays registered but deaf to direct messages.
+          const inbox = agentSubject(sessionID);
           const targets = topicsFor(parameters, [
             ...subscriptions.keys(),
             ...(claimedRoleTopic === undefined ? [] : [claimedRoleTopic]),
-          ]);
+          ]).filter((topic) => topic !== inbox);
           const removed = targets.filter(
             (topic) => closeIntentionally(topic) || topic === claimedRoleTopic
           );

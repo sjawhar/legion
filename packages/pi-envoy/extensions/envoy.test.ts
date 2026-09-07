@@ -1448,6 +1448,19 @@ describe("envoy OMP extension", () => {
       topics: ["notifications.agent.ses_registry"],
     });
     expect(result.details.interests).toEqual([{ topic: "notifications.agent.ses_registry", source: "both" }]);
+
+    // The session's own inbox survives "remove all" and an explicit request
+    // alike: it is how direct messages reach the session, not a subscription
+    // the tool manages.
+    await subscribeTool.execute("", { topics: [topic] });
+    const inbox = "notifications.agent.ses_registry";
+    const removeAll = await unsubscribeTool.execute("", {});
+    expect(removeAll.details.removed).toEqual([base, topic]);
+    expect(natsState.controls.get(inbox)?.active()).toBe(true);
+    const explicit = await unsubscribeTool.execute("", { topics: [inbox] });
+    expect(explicit.details.removed).toEqual([]);
+    expect(natsState.controls.get(inbox)?.active()).toBe(true);
+    expect(registrations.at(-1)?.topics).toEqual([inbox]);
   });
 
   test("merges locally live subscriptions into envoy_list before the next heartbeat", async () => {

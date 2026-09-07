@@ -109,7 +109,10 @@ type State struct {
 }
 
 // UnmarshalJSON maps the retired resettled marker to the generation that
-// publishes the equivalent re-settlement envelope.
+// publishes the equivalent re-settlement envelope, and drops checks recorded
+// before check-run ids existed: they cannot take part in a settlement, which
+// is ordered by the highest id and rejected by consumers when it is zero. A
+// head that loses them re-settles from its next check-run observations.
 func (state *State) UnmarshalJSON(data []byte) error {
 	type stateAlias State
 	*state = State{}
@@ -122,6 +125,11 @@ func (state *State) UnmarshalJSON(data []byte) error {
 	}
 	if wire.Resettled && state.Generation == 0 {
 		state.Generation = 1
+	}
+	for name, check := range state.Checks {
+		if check.CheckRunID == 0 {
+			delete(state.Checks, name)
+		}
 	}
 	return nil
 }

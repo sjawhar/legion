@@ -136,6 +136,33 @@ func TestStateUnmarshalJSONAcceptsLegacyAndNumericCheckRunIDs(t *testing.T) {
 	}
 }
 
+func TestStateUnmarshalJSONDropsChecksWithoutRunIDs(t *testing.T) {
+	// A record written by the previous listener: checks carry status,
+	// conclusion and updated_at but no check_run_id. It must not be able to
+	// settle (the daemon rejects latest_check_run_id 0), so those checks are
+	// dropped on load and the head re-settles from fresh observations.
+	legacy := `{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef1234567890abcdef1234567890abcdef12",` +
+		`"checks":{"build":{"status":"completed","conclusion":"failure","updated_at":"2026-09-01T00:00:00Z"},` +
+		`"lint":{"check_run_id":"31","status":"completed","conclusion":"success"}},"generation":3,"settled_emitted":true}`
+	var state State
+	if err := json.Unmarshal([]byte(legacy), &state); err != nil {
+		t.Fatalf("unmarshal legacy state: %v", err)
+	}
+	if _, ok := state.Checks["build"]; ok {
+		t.Fatalf("check without a run id survived decode: %+v", state.Checks["build"])
+	}
+	if got := state.Checks["lint"].CheckRunID; got != 31 {
+		t.Fatalf("lint check_run_id = %d, want 31", got)
+	}
+	if state.Generation != 3 || !state.SettledEmitted || state.SHA == "" {
+		t.Fatalf("other fields lost on decode: %+v", state)
+	}
+	if !settlementReady(state) {
+		// One id-bearing terminal check remains, so the head can settle again.
+		t.Fatalf("state with one id-bearing terminal check should be ready: %+v", state)
+	}
+}
+
 func TestRecordAccumulatesChecks(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
