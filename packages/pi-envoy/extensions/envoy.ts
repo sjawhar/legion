@@ -15,12 +15,13 @@ import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscri
 import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
-import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import {
-  createEnvoyClient,
-  expandSubscriptionTopics,
-  type MessageMetadataInput,
-} from "@legion/envoy-client/transport";
+  EnvoyToolOperation,
+  envoyToolSpecs,
+  toMessageMetadata,
+  type MessageMetadataArguments,
+} from "@legion/envoy-client/tool-contract";
+import { createEnvoyClient, expandSubscriptionTopics } from "@legion/envoy-client/transport";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
@@ -643,7 +644,7 @@ export default function envoyExtension(pi: PiApi): void {
             sourceSessionID: sessionID,
             targetSessionID,
             message: stringFor(parameters, "message"),
-            ...messageMetadataFor(parameters),
+            ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
           const confirmation = result.confirmed ? "" : " (recipient unconfirmed by listener)";
           return toolSuccess(`sent ${result.envelope.event_id} to ${result.recipient}${confirmation}`, {
@@ -658,7 +659,7 @@ export default function envoyExtension(pi: PiApi): void {
             sourceSessionID: sessionID,
             topic,
             message: stringFor(parameters, "message"),
-            ...messageMetadataFor(parameters),
+            ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
           return toolSuccess(
             result.holder === undefined
@@ -717,46 +718,9 @@ export default function envoyExtension(pi: PiApi): void {
 }
 
 function schemaFor(pi: PiApi, operation: EnvoyToolOperation): unknown {
-  const z = pi.zod;
-  switch (operation) {
-    case EnvoyToolOperation.subscribe:
-      return z.object({ topics: z.array(z.string()) });
-    case EnvoyToolOperation.unsubscribe:
-      return z.object({ topics: z.array(z.string()).optional() });
-    case EnvoyToolOperation.send:
-      return z.object({
-        session_id: z.string(),
-        message: z.string(),
-        in_reply_to: z.string().optional(),
-        supersedes: z.string().optional(),
-        urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-        expects_reply: z.enum(["none", "optional", "required"]).optional(),
-        expires_at: z.number().optional(),
-      });
-    case EnvoyToolOperation.publish:
-      return z.object({
-        topic: z.string(),
-        message: z.string(),
-        in_reply_to: z.string().optional(),
-        supersedes: z.string().optional(),
-        urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-        expects_reply: z.enum(["none", "optional", "required"]).optional(),
-        expires_at: z.number().optional(),
-      });
-    case EnvoyToolOperation.setRole:
-    case EnvoyToolOperation.getRole:
-      return z.object({ role: z.string() });
-    case EnvoyToolOperation.listSessions:
-      return z.object({
-        machine: z.string().optional(),
-        dir: z.string().optional(),
-        title: z.string().optional(),
-      });
-    case EnvoyToolOperation.listInterests:
-    case EnvoyToolOperation.inbox:
-    case EnvoyToolOperation.whoami:
-      return z.object({});
-  }
+  const spec = envoyToolSpecs.find((candidate) => candidate.operation === operation);
+  if (spec === undefined) throw new Error(`missing Envoy tool specification for ${operation}`);
+  return pi.zod.object(spec.arguments);
 }
 
 function stringFor(parameters: Record<string, unknown>, key: string): string {
@@ -770,41 +734,6 @@ function optionalStringFor(parameters: Record<string, unknown>, key: string): st
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw new TypeError(`${key} must be a string`);
   return value;
-}
-
-function messageMetadataFor(parameters: Record<string, unknown>): MessageMetadataInput {
-  const inReplyTo = optionalStringFor(parameters, "in_reply_to");
-  const supersedes = optionalStringFor(parameters, "supersedes");
-  const urgency = optionalStringFor(parameters, "urgency");
-  if (
-    urgency !== undefined &&
-    urgency !== "low" &&
-    urgency !== "med" &&
-    urgency !== "high" &&
-    urgency !== "blocking"
-  ) {
-    throw new TypeError("urgency must be low, med, high, or blocking");
-  }
-  const expectsReply = optionalStringFor(parameters, "expects_reply");
-  if (
-    expectsReply !== undefined &&
-    expectsReply !== "none" &&
-    expectsReply !== "optional" &&
-    expectsReply !== "required"
-  ) {
-    throw new TypeError("expects_reply must be none, optional, or required");
-  }
-  const expiresAt = parameters.expires_at;
-  if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isInteger(expiresAt))) {
-    throw new TypeError("expires_at must be an integer");
-  }
-  return {
-    ...(inReplyTo === undefined ? {} : { inReplyTo }),
-    ...(supersedes === undefined ? {} : { supersedes }),
-    ...(urgency === undefined ? {} : { urgency }),
-    ...(expectsReply === undefined ? {} : { expectsReply }),
-    ...(expiresAt === undefined ? {} : { expiresAt }),
-  };
 }
 
 function isStringArray(value: unknown): value is readonly string[] {

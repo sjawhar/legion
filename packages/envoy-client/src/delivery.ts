@@ -13,6 +13,14 @@ const KNOWN_SOURCES: Record<string, true> = {
 };
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
 
+const InboundSenderSchema = z.object({
+  session_id: z.string().optional(),
+  machine: z.string().optional(),
+  cwd: z.string().optional(),
+  title: z.string().optional(),
+  roles: z.array(z.string()).optional(),
+});
+
 const InboundEnvelopeSchema = z
   .object({
     event_id: z.string().optional(),
@@ -24,15 +32,7 @@ const InboundEnvelopeSchema = z
     expires_at: z.number().int().optional(),
     payload_summary: z.string().optional(),
     payload: z.string().optional(),
-    sender: z
-      .object({
-        session_id: z.string().optional(),
-        machine: z.string().optional(),
-        cwd: z.string().optional(),
-        title: z.string().optional(),
-        roles: z.array(z.string()).optional(),
-      })
-      .optional(),
+    sender: InboundSenderSchema.optional(),
     in_reply_to: z.string().optional(),
     supersedes: z.string().optional(),
     urgency: z.string().optional(),
@@ -40,31 +40,21 @@ const InboundEnvelopeSchema = z
   })
   .passthrough();
 
-const TolerantInboundEnvelopeSchema = InboundEnvelopeSchema.extend({
-  event_id: z.string().optional().catch(undefined),
-  source: z.string().optional().catch(undefined),
-  source_session: z.string().optional().catch(undefined),
-  topic: z.string().optional().catch(undefined),
-  dedupe_key: z.string().optional().catch(undefined),
-  issued_at: z.number().int().optional().catch(undefined),
-  expires_at: z.number().int().optional().catch(undefined),
-  payload_summary: z.string().optional().catch(undefined),
-  payload: z.string().optional().catch(undefined),
-  sender: z
-    .object({
-      session_id: z.string().optional().catch(undefined),
-      machine: z.string().optional().catch(undefined),
-      cwd: z.string().optional().catch(undefined),
-      title: z.string().optional().catch(undefined),
-      roles: z.array(z.string()).optional().catch(undefined),
-    })
-    .optional()
-    .catch(undefined),
-  in_reply_to: z.string().optional().catch(undefined),
-  supersedes: z.string().optional().catch(undefined),
-  urgency: z.string().optional().catch(undefined),
-  expects_reply: z.string().optional().catch(undefined),
-}).passthrough();
+function tolerantShape(shape: z.ZodRawShape): z.ZodRawShape {
+  return Object.fromEntries(
+    Object.entries(shape).map(([key, schema]) => [key, z.catch(schema, undefined)])
+  );
+}
+
+const TolerantInboundEnvelopeSchema = z
+  .object({
+    ...tolerantShape(InboundEnvelopeSchema.shape),
+    // `source` is required on valid envelopes but omitted/malformed frames still render as unknown.
+    source: InboundEnvelopeSchema.shape.source.optional().catch(undefined),
+    // A malformed sender member must not discard valid sender members.
+    sender: z.object(tolerantShape(InboundSenderSchema.shape)).optional().catch(undefined),
+  })
+  .passthrough();
 
 export type InboundEnvelope = z.infer<typeof InboundEnvelopeSchema>;
 
@@ -143,7 +133,8 @@ export function renderInbound(
         content: encode({ envoy: { unrecognised: parseIssues.join(", ") || "envelope" } }),
       };
     }
-    envelope = { ...tolerant.data, source: tolerant.data.source ?? "unknown" };
+    const data = tolerant.data as Partial<InboundEnvelope>;
+    envelope = { ...data, source: data.source ?? "unknown" };
   }
   if (isOwnDispatchEcho(envelope, sessionID)) {
     return { skip: true, content: "", envelope };

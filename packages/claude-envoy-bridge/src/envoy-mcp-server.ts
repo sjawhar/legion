@@ -10,13 +10,16 @@ import {
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
-import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
+import {
+  EnvoyToolOperation,
+  envoyToolSpecs,
+  toMessageMetadata,
+} from "@legion/envoy-client/tool-contract"
 import {
   createEnvoyClient,
   type EnvoyClient,
   expandSubscriptionTopics,
   type Interest,
-  type MessageMetadataInput,
 } from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
@@ -64,22 +67,6 @@ function mcpResult(value: unknown): {
   readonly content: readonly [{ readonly type: "text"; readonly text: string }]
 } {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
-}
-
-function messageMetadataFor(input: {
-  readonly in_reply_to?: string | undefined
-  readonly supersedes?: string | undefined
-  readonly urgency?: "low" | "med" | "high" | "blocking" | undefined
-  readonly expects_reply?: "none" | "optional" | "required" | undefined
-  readonly expires_at?: number | undefined
-}): MessageMetadataInput {
-  return {
-    ...(input.in_reply_to === undefined ? {} : { inReplyTo: input.in_reply_to }),
-    ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
-    ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
-    ...(input.expects_reply === undefined ? {} : { expectsReply: input.expects_reply }),
-    ...(input.expires_at === undefined ? {} : { expiresAt: input.expires_at }),
-  }
 }
 
 // One NATS connection per server process, opened by the first topic a tool
@@ -241,7 +228,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
         sourceSessionID: sessionId,
         targetSessionID: args.session_id,
         message: args.message,
-        ...messageMetadataFor(args),
+        ...toMessageMetadata(args),
       })
       return {
         message: `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`,
@@ -257,7 +244,7 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
         sourceSessionID: sessionId,
         topic: args.topic,
         message: args.message,
-        ...messageMetadataFor(args),
+        ...toMessageMetadata(args),
       })
     }
     case EnvoyToolOperation.subscribe: {

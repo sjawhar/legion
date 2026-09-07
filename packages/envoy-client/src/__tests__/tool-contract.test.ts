@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { envoyToolSpecs } from "../tool-contract";
+import { envoyToolSpecs, MessageMetadataSchema, toMessageMetadata } from "../tool-contract";
 
 describe("envoyToolSpecs", () => {
   test("defines the ten canonical Envoy tool names", () => {
@@ -98,5 +98,37 @@ describe("envoyToolSpecs", () => {
     expect(subscribe?.description).toContain("envoy.exceptions.<original-topic>");
     expect(publish?.description).toContain("at-least-once, possibly out of order across topics");
     expect(publish?.description).toContain("id for dedupe and at for freshness");
+  });
+});
+
+describe("message metadata", () => {
+  test("maps validated wire fields to the client input shape", () => {
+    const metadata = MessageMetadataSchema.parse({
+      in_reply_to: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: 1_788_956_000_000,
+    });
+
+    expect(toMessageMetadata(metadata)).toEqual({
+      inReplyTo: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expectsReply: "required",
+      expiresAt: 1_788_956_000_000,
+    });
+  });
+
+  test("identifies an invalid metadata enum by field", () => {
+    const parsed = MessageMetadataSchema.safeParse({ urgency: "urgent" });
+    if (parsed.success) throw new Error("invalid urgency unexpectedly parsed");
+
+    expect(parsed.error.issues).toEqual([
+      expect.objectContaining({
+        path: ["urgency"],
+        message: 'Invalid option: expected one of "low"|"med"|"high"|"blocking"',
+      }),
+    ]);
   });
 });

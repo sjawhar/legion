@@ -127,9 +127,20 @@ function fakeEnvoy(status = 200): FakeEnvoy {
 
 test("reports a legacy listener send as recipient-unconfirmed", async () => {
   const server = Bun.serve({
-    port: 0,
-    fetch: (request) => {
+    fetch: async (request) => {
       expect(new URL(request.url).pathname).toBe("/v1/messages/send")
+      expect(await request.json()).toEqual({
+        source: "agent",
+        source_session: "ses_claude",
+        target_session: "ses_target",
+        message: "hello",
+        in_reply_to: "event-before",
+        supersedes: "event-obsolete",
+        urgency: "blocking",
+        expects_reply: "required",
+        expires_at: 1_788_956_000_000,
+        idempotency_key: expect.any(String),
+      })
       return Response.json({
         event_id: "event-legacy",
         source: "agent",
@@ -153,6 +164,11 @@ test("reports a legacy listener send as recipient-unconfirmed", async () => {
     const result = await module.executeEnvoyTool("envoy_send", {
       session_id: "ses_target",
       message: "hello",
+      in_reply_to: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: 1_788_956_000_000,
     })
 
     expect(result).toEqual({
@@ -163,6 +179,33 @@ test("reports a legacy listener send as recipient-unconfirmed", async () => {
     })
   } finally {
     server.stop(true)
+    process.env = { ...previous }
+  }
+})
+
+test("rejects an invalid urgency with the shared field validation error", async () => {
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  try {
+    const module = await loadServer("shared-metadata-validation")
+    const spec = envoyToolSpecs.find((candidate) => candidate.name === "envoy_send")
+    if (spec === undefined) throw new Error("envoy_send specification is missing")
+    const parsed = z.object(spec.arguments).safeParse({
+      session_id: "ses_target",
+      message: "hello",
+      urgency: "urgent",
+    })
+    if (parsed.success) throw new Error("invalid urgency unexpectedly parsed")
+
+    await expect(
+      module.executeEnvoyTool("envoy_send", {
+        session_id: "ses_target",
+        message: "hello",
+        urgency: "urgent",
+      }),
+    ).rejects.toThrow(parsed.error.message)
+  } finally {
     process.env = { ...previous }
   }
 })

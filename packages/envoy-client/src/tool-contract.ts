@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { MessageMetadataInput } from "./transport";
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
@@ -18,13 +19,30 @@ const TOPIC_GUIDE =
   "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " +
   "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 
-const messageArguments = {
-  message: z.string(),
+export const MessageMetadataSchema = z.object({
   in_reply_to: z.string().optional(),
   supersedes: z.string().optional(),
   urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
   expects_reply: z.enum(["none", "optional", "required"]).optional(),
   expires_at: z.number().int().optional(),
+});
+
+export type MessageMetadataArguments = z.output<typeof MessageMetadataSchema>;
+
+/** Converts validated tool-wire metadata into the Envoy client's camel-case input. */
+export function toMessageMetadata(args: MessageMetadataArguments): MessageMetadataInput {
+  return {
+    ...(args.in_reply_to === undefined ? {} : { inReplyTo: args.in_reply_to }),
+    ...(args.supersedes === undefined ? {} : { supersedes: args.supersedes }),
+    ...(args.urgency === undefined ? {} : { urgency: args.urgency }),
+    ...(args.expects_reply === undefined ? {} : { expectsReply: args.expects_reply }),
+    ...(args.expires_at === undefined ? {} : { expiresAt: args.expires_at }),
+  };
+}
+
+const messageArguments = {
+  message: z.string(),
+  ...MessageMetadataSchema.shape,
 };
 
 export const EnvoyToolOperation = {

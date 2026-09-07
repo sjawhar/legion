@@ -371,6 +371,11 @@ describe("envoy OMP extension", () => {
     const sent = await fixture.tools.find((tool) => tool.name === "envoy_send")?.execute("", {
       session_id: "ses_target",
       message: "direct",
+      in_reply_to: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: 1_788_956_000_000,
     });
     expect(sent?.content[0]?.text).toBe("sent evt_1 to ses_target (recipient unconfirmed by listener)");
     expect(sent?.details).toMatchObject({
@@ -407,6 +412,11 @@ describe("envoy OMP extension", () => {
           source_session: "ses_omp",
           target_session: "ses_target",
           message: "direct",
+          in_reply_to: "event-before",
+          supersedes: "event-obsolete",
+          urgency: "blocking",
+          expects_reply: "required",
+          expires_at: 1_788_956_000_000,
           idempotency_key: expect.any(String),
         },
       },
@@ -422,6 +432,22 @@ describe("envoy OMP extension", () => {
       },
       { path: "/v1/sessions", body: undefined },
     ]);
+  });
+
+  test("uses the shared metadata schema to reject an invalid urgency", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?shared-metadata-validation");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const send = fixture.tools.find((tool) => tool.name === "envoy_send");
+    const spec = envoyToolSpecs.find((candidate) => candidate.name === "envoy_send");
+    if (send === undefined || spec === undefined) throw new Error("envoy_send was not registered");
+
+    const input = { session_id: "ses_target", message: "direct", urgency: "urgent" };
+    const expected = z.object(spec.arguments).safeParse(input);
+    const actual = (send.parameters as z.ZodType).safeParse(input);
+    if (expected.success || actual.success) throw new Error("invalid urgency unexpectedly parsed");
+
+    expect(actual.error.message).toBe(expected.error.message);
   });
 
   test("surfaces a missing target session as an envoy_send tool error", async () => {
