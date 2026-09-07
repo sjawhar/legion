@@ -478,7 +478,7 @@ async function getCiStatusBatchWithOptions(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name conclusion detailsUrl } ... on StatusContext { name: context statusConclusion: state detailsUrl: targetUrl } } } } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name conclusion } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
       );
     }
 

@@ -348,7 +348,9 @@ describe("getCiStatusBatch", () => {
     );
 
     expect(query).toContain("contexts(first: 100)");
-    expect(query).toContain("name conclusion detailsUrl");
+    expect(query).toContain("name conclusion");
+    expect(query).not.toContain("detailsUrl");
+    expect(query).not.toContain("targetUrl");
     expect(result).toEqual({
       "ENG-21": {
         ciStatus: "failing",

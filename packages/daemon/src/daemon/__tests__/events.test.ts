@@ -351,6 +351,42 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("persists only accepted checks settlements, including ones without a CI emission", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const saveState = vi.fn(async () => {});
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      }),
+      saveState,
+    });
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(settledChecks({ sha: "stale-head" }), "ignored")
+    );
+    await pump.drain();
+    expect(saveState).not.toHaveBeenCalled();
+
+    nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(settledChecks()));
+    await pump.drain();
+    expect(saveState).toHaveBeenCalled();
+    const savesAfterEmission = saveState.mock.calls.length;
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(settledChecks({ generation: 1, settled_at: 2_000 }), "settled-without-emission")
+    );
+    await pump.drain();
+    expect(saveState).toHaveBeenCalledTimes(savesAfterEmission + 1);
+    expect(state.prs["acme/widgets#7"]).toMatchObject({ ciSettledAt: 2_000, ciGeneration: 1 });
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+    pump.stop();
+  });
   it("ignores checks for a SHA that is not the current head", async () => {
     const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = checkPr(issue, "current-head");

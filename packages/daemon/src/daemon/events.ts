@@ -397,34 +397,36 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     }
   };
 
-  const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<void> => {
+  const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<boolean> => {
     const input = checksInput(subject, envelope);
     if (!input) {
       console.debug(
         `[legion] ignored malformed or non-head checks event ${envelope.event_id} subject=${subject}`
       );
-      return;
+      return false;
     }
     const pr = deps.state.prs[`${input.repo}#${input.number}`];
-    if (!pr) return;
+    if (!pr) return false;
     if (pr.headSha !== input.sha) {
       console.debug(
         `[legion] ignored non-head checks event ${envelope.event_id} subject=${subject} sha=${input.sha} head_sha=${pr.headSha}`
       );
-      return;
+      return false;
     }
     if (pr.ciGeneration !== null && input.generation < pr.ciGeneration) {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );
-      return;
+      return false;
     }
     await publishCiEmissions(pr, ciEmissions(pr, input), envelope);
+    return true;
   };
 
   const handleMessage = async (subject: string, data: string): Promise<void> => {
     const envelope = EnvelopeSchema.parse(JSON.parse(data)) as EnvelopeJson;
-    if (CHECKS_TOPIC.test(subject)) await handleChecks(subject, envelope);
+    let shouldSave = true;
+    if (CHECKS_TOPIC.test(subject)) shouldSave = await handleChecks(subject, envelope);
     else if (isMention(subject)) {
       await publishController(
         typeof envelope.payload === "string" ? envelope.payload : "{}",
@@ -445,7 +447,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await applyEffects(reduceGithubEvent(deps.state, subject, envelope, deps.config), envelope);
       }
     }
-    await deps.saveState();
+    if (shouldSave) await deps.saveState();
     console.log(`[legion] consumed event ${envelope.event_id} subject=${subject}`);
   };
 
