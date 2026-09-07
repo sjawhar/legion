@@ -1,4 +1,7 @@
 # Envoy Signal Quality Implementation Plan
+> **Superseded during implementation:** the owner ruled mid-flight to remove `pr.<n>.check`/`pr.<n>.ci`,
+> not add `pr.<n>.merged`/`.closed`/`workflow.….branch.…`, and to publish one settled `pr.<n>.checks` event;
+> the shipped surface is documented in `packages/envoy/AGENTS.md` and `skills/envoy/SKILL.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

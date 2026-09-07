@@ -31,7 +31,7 @@ func TestNATSMultiTokenWildcardRequiresSuffix(t *testing.T) {
 		{topic: "pr.42", ok: false},
 		{topic: "pr.42.checks", ok: true},
 		{topic: "pr.43.checks", ok: false},
-		{topic: "pr.42.checks.settled", ok: true},
+		{topic: "pr.42.comment", ok: true},
 	}
 	for _, item := range cases {
 		if got := Match(pattern, item.topic); got != item.ok {
@@ -207,17 +207,17 @@ func TestWhatsappPerJIDFiltering(t *testing.T) {
 	}
 }
 
-func TestCITopicFiltering(t *testing.T) {
+func TestPRTopicFiltering(t *testing.T) {
 	pattern := "notifications.github.acme.widgets.pr.42.>"
 	cases := []struct {
 		topic string
 		ok    bool
 	}{
-		{topic: "notifications.github.acme.widgets.pr.42.ci", ok: true},
+		{topic: "notifications.github.acme.widgets.pr.42.checks", ok: true},
 		{topic: "notifications.github.acme.widgets.pr.42.comment", ok: true},
 		{topic: "notifications.github.acme.widgets.pr.42.review", ok: true},
-		{topic: "notifications.github.acme.widgets.pr.43.ci", ok: false},
-		{topic: "notifications.github.acme.widgets.ci", ok: false},
+		{topic: "notifications.github.acme.widgets.pr.43.checks", ok: false},
+		{topic: "notifications.github.acme.widgets.checks", ok: false},
 	}
 	for _, item := range cases {
 		got := Match(pattern, item.topic)

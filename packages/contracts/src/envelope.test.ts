@@ -112,7 +112,7 @@ describe("EnvelopeSchema", () => {
         source_event_id: "gw-delivery-1",
         topic: ghostWisprSubject("20260326041405", "session.ended"),
         dedupe_key: "ghostwispr.gw-delivery-1",
-        payload_summary: '{"event_type":"session_ended","session_id":"20260326041405"}',
+        payload_summary: "ghostwispr session_ended for session 20260326041405",
         trace_id: "trace-2",
       })
     );

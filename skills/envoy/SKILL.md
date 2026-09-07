@@ -48,7 +48,8 @@ envoy:
   re: agent-message-1
   reply_with: "envoy_send(session_id=\"01a0bbbb-cccc-7ddd-eeee-0123456789ab\", message=\"...\")"
   reply_role: "envoy_publish(topic=\"notifications.role.legion-reviewer\", message=\"...\")"
-  summary: "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+  summary: "First paragraph."
+  message: "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
 ```
 
 - `to: you` means this is in your inbox. `from` and the generated `reply_with` identify the reply

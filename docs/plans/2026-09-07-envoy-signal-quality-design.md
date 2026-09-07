@@ -1,4 +1,7 @@
 # Envoy signal quality: what agents receive, what they can trust, and what they can find
+> **Superseded during implementation:** the owner ruled mid-flight to remove `pr.<n>.check`/`pr.<n>.ci`,
+> not add `pr.<n>.merged`/`.closed`/`workflow.….branch.…`, and to publish one settled `pr.<n>.checks` event;
+> the shipped surface is documented in `packages/envoy/AGENTS.md` and `skills/envoy/SKILL.md`.
 
 **Status:** draft, ready for review. Written while the owner was offline; every decision made in his
 absence is listed in §9 as an assumption to confirm or overturn. Nothing here is implemented.

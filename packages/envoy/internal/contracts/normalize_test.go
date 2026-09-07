@@ -819,7 +819,7 @@ func TestGhostWisprSourceValidation(t *testing.T) {
 		Topic:          "notifications.ghostwispr.20260326041405.session.ended",
 		DedupeKey:      "ghostwispr.gw-delivery-1",
 		IssuedAt:       NowMillis(),
-		PayloadSummary: `{"event_type":"session_ended","session_id":"20260326041405"}`,
+		PayloadSummary: "ghostwispr session_ended for session 20260326041405",
 		TraceID:        "trace-1",
 	}
 	if err := env.Validate(); err != nil {

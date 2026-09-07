@@ -700,7 +700,7 @@ describe("envoy OMP extension", () => {
         { check: "typecheck", conclusion: "failure" },
         { check: "unit", conclusion: "failure" },
       ],
-      kind: "ci_summary",
+      kind: "checks",
       number: 42,
     };
     // Query isolation gives this stateful extension its own NATS subscription.
