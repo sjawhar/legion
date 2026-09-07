@@ -288,6 +288,29 @@ Out of scope here: channel/user display names, permalinks, reaction aggregates (
 
 ---
 
+### Task 8: Envoy skill — guidance that matches the new defaults
+
+**Files:**
+- Modify: `skills/envoy/SKILL.md` (sole owner)
+- Modify: `skills/dispatch/SKILL.md` only where it names Envoy topics or tools
+
+**Interfaces:** consumes the topic set and rendered shape produced by Tasks 2, 3, 5, 6 (see the owner rulings in the ledger): under `pr.<n>.>` exactly `pr.<n>` (lifecycle; `closed` carries `merged`, `merge_commit_sha`, `merged_by`, `head_sha`), `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, `pr.<n>.checks` (one event per settled head; re-fires with `superseded_settlement`); `workflow.<file>.<action>` only for runs with no associated PR; rendered block fields `to/from/at/id/by/urgency/expects_reply/re/supersedes/reply_with/reply_role/summary/message/note`; tools `envoy_send` (returns `event_id` + `recipient`; args `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, `expires_at`), `envoy_publish` (role → `holder` or error), `envoy_role_get`, `envoy_inbox` (Pi only), subscribe `warnings`.
+
+**Behaviour — the skill teaches defaults, not menus:**
+- Opening section "The one subscription you need for a PR": `notifications.github.<owner>.<repo>.pr.<n>.>` and what arrives on it, in order, for a typical push (synchronize → comments/reviews → one `checks`). State plainly that `pr.<n>.check`, `pr.<n>.ci`, `pr.<n>.merged`, `pr.<n>.closed` no longer exist and why.
+- "How to read a notification": one annotated rendered block; `to: you` means your inbox; `from` + `reply_with` is the reply target — never a session id quoted in the body (the misrouting incident, described without identifiers); `at` for freshness; `id` for `in_reply_to`.
+- "Talking to another session": use `in_reply_to` for every answer; `expects_reply: none` for FYIs; `urgency` only when true; put the artefact URL in the message, not the prose; never address a session by tmux pane.
+- "Waiting for CI or a merge": subscribe to `pr.<n>.>`, then end the turn — `pr.<n>.checks` wakes you when the head settles, `pr.<n>` `closed` with `merged: true` tells you it merged. No `gh` pollers. Explain re-arm (`superseded_settlement`).
+- "When a subscription is silent": the `warnings` on subscribe; `envoy_list`; the App must be installed on the repository (generic wording, no private repo names).
+- "Roles": publish to a role returns the holder or an error; `envoy_role_get` to find one.
+- Keep the Slack, Ghost Wispr, WhatsApp, Legion role-token, and exception-lane sections but update Slack to describe prose summaries and structured payloads (subtype, thread, bot label).
+- Delete stale patterns and the WhatsApp synthetic smoke-test section if it no longer reflects the runtime (verify against packages/envoy; if still accurate, keep it, shortened).
+- No private identifiers: `example-org/example-repo`, `T01234567`, `C01234567`.
+
+- [ ] Steps: read the four task reports for the exact produced strings; rewrite; verify every topic named in the skill exists in `packages/contracts/src/subject.ts` or the normalizer at the integrated head and every tool named exists in `packages/envoy-client/src/tool-contract.ts`; commit `docs(envoy): skill teaches the pr.<n>.> default, the rendered block, and reply etiquette`.
+
+---
+
 ## Self-review (coordinator)
 
 - Spec coverage: Phase 1 → Tasks 2, 5, 6; Phase 2 → Tasks 2, 3; Phase 3 minus `on_behalf_of` → Tasks 1, 5, 6; unwired repo, role 404, retry, error bodies → Tasks 5, 6; inbox → Task 6; discoverability → Task 6; Slack/Ghost Wispr → Task 2 (research-slack F1–F3, F6, F7, F9); sweep F1/F10/F11 → Task 4; F2/F3/F4/F6 → Task 5; F5/F7/F9/F8-doc → Task 6.
