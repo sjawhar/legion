@@ -88,10 +88,9 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     repo,
     number: prNumber,
     headSha: "old-sha",
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: 0,
+    verdict: null,
+    failing: [],
+    settledAt: null,
     fixAttempts: 0,
     ...overrides,
   };
@@ -678,14 +677,14 @@ describe("reduceGithubEvent", () => {
     expect(state.prByBranch[`${repo}@legion/issue-2`]).toBe(`${repo}#${prNumber}`);
   });
 
-  it("resets PR CI verdict and approval state on synchronization, counts a red-head retry, and rechecks approval", () => {
+  it("resets a red CI verdict and approval state on synchronization, counts the retry, and rechecks approval", () => {
     const state = rootState();
     attachChild(state);
     addPr(state, {
       headSha: "old-sha",
-      firstRedEmitted: true,
-      settledRedEmitted: true,
-      greenEmitted: true,
+      verdict: "red",
+      failing: ["unit"],
+      settledAt: 1,
       reviewDecision: "approved",
     });
 
@@ -700,9 +699,9 @@ describe("reduceGithubEvent", () => {
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "new-sha" }]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       headSha: "new-sha",
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: false,
+      verdict: null,
+      failing: [],
+      settledAt: null,
       fixAttempts: 1,
     });
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
@@ -726,9 +725,9 @@ describe("reduceGithubEvent", () => {
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "head-b" }]);
     Object.assign(state.prs[`${repo}#${prNumber}`], {
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: true,
+      verdict: "green",
+      failing: [],
+      settledAt: 1,
       reviewDecision: "approved",
     });
 
@@ -745,9 +744,9 @@ describe("reduceGithubEvent", () => {
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       headSha: "head-b",
       headUpdatedAt: Date.parse("2026-09-07T03:02:00Z"),
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: true,
+      verdict: "green",
+      failing: [],
+      settledAt: 1,
       reviewDecision: "approved",
       fixAttempts: 0,
     });
@@ -759,7 +758,8 @@ describe("reduceGithubEvent", () => {
     const implementer = claim(state, child, "implementer");
     const architect = claim(state, child, "architect");
     addPr(state, {
-      greenEmitted: true,
+      verdict: "green",
+      settledAt: 0,
     });
 
     expect(
@@ -826,7 +826,8 @@ describe("reduceGithubEvent", () => {
     const implementer = claim(state, child, "implementer");
     const architect = claim(state, child, "architect");
     addPr(state, {
-      greenEmitted: true,
+      verdict: "green",
+      settledAt: 0,
     });
 
     expect(
@@ -950,7 +951,7 @@ describe("reduceCiEmission", () => {
   it("notifies the architect when the CI edge turns green for an approved PR", () => {
     const state = rootState();
     attachChild(state);
-    addPr(state, { reviewDecision: "approved" });
+    addPr(state, { reviewDecision: "approved", verdict: "green", settledAt: 0 });
     const architect = claim(state, child, "architect");
 
     expect(
@@ -967,7 +968,7 @@ describe("reduceCiEmission", () => {
   it("notifies the architect when settled CI red exhausts the retry budget", () => {
     const state = rootState();
     attachChild(state);
-    addPr(state, { fixAttempts: 3 });
+    addPr(state, { fixAttempts: 3, verdict: "red", settledAt: 0 });
     const architect = claim(state, child, "architect");
 
     expect(

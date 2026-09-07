@@ -239,7 +239,6 @@ function registerPr(
   number: number,
   branch: string | undefined,
   sha: string | undefined,
-  issuedAt: number,
   headUpdatedAt: number | undefined
 ): PrState | undefined {
   const key = branch ? issueForBranch(repo, branch) : undefined;
@@ -251,10 +250,9 @@ function registerPr(
     number,
     headSha: sha,
     ...(headUpdatedAt === undefined ? {} : { headUpdatedAt }),
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: issuedAt,
+    verdict: null,
+    failing: [],
+    settledAt: null,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -544,7 +542,7 @@ function review(
     envelope
   );
   result.push({ kind: "approval-status", repo, pr: number, sha: pr.headSha });
-  if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.greenEmitted) {
+  if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
     result.push(...route(state, pr.key, "architect", { type: "pr-ready", pr: number }, envelope));
   }
   return result;
@@ -568,7 +566,7 @@ function pullRequest(
   const headUpdatedAt = updatedAt(raw);
 
   if (payload.action === "opened") {
-    const pr = registerPr(state, repo, number, branch, sha, envelope.issued_at, headUpdatedAt);
+    const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
     if (!pr) return [];
     return route(
       state,
@@ -581,7 +579,7 @@ function pullRequest(
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
-    pr = registerPr(state, repo, number, branch, sha, envelope.issued_at, headUpdatedAt);
+    pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
@@ -593,13 +591,22 @@ function pullRequest(
     ) {
       return [];
     }
-    if (pr.settledRedEmitted) pr.fixAttempts += 1;
+    if (pr.headSha === sha) {
+      if (
+        headUpdatedAt !== undefined &&
+        (pr.headUpdatedAt === undefined || headUpdatedAt > pr.headUpdatedAt)
+      ) {
+        pr.headUpdatedAt = headUpdatedAt;
+      }
+      return [{ kind: "approval-status", repo, pr: number, sha }];
+    }
+    if (pr.verdict === "red") pr.fixAttempts += 1;
     pr.headSha = sha;
     if (headUpdatedAt === undefined) delete pr.headUpdatedAt;
     else pr.headUpdatedAt = headUpdatedAt;
-    pr.firstRedEmitted = false;
-    pr.settledRedEmitted = false;
-    pr.greenEmitted = false;
+    pr.verdict = null;
+    pr.failing = [];
+    pr.settledAt = null;
     delete pr.reviewDecision;
     return [{ kind: "approval-status", repo, pr: number, sha }];
   }
@@ -643,10 +650,10 @@ export function reduceCiEmission(
   config: ReducerConfig
 ): Effect[] {
   const pr = state.prs[`${repo}#${number}`];
-  if (!pr || pr.headSha !== emission.sha) return [];
+  if (!pr || pr.headSha !== emission.sha || pr.settledAt === null) return [];
   const envelope = {
     event_id: `ci:${repo}#${number}:${emission.sha}`,
-    issued_at: pr.lastEventAt,
+    issued_at: pr.settledAt,
   };
   if (emission.type === "ci-green") {
     return pr.reviewDecision === "approved"

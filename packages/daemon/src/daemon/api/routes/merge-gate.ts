@@ -72,10 +72,9 @@ async function recoverPrForMergeGate(
     repo,
     number,
     headSha: head.sha,
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: ctx.now(),
+    verdict: null,
+    failing: [],
+    settledAt: null,
     fixAttempts: 0,
   };
   ctx.deps.state.prs[prKey] = pr;
@@ -114,11 +113,11 @@ export async function handleMergeGate(
     throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
   }
   if (pr.headSha !== snapshot.head.sha) {
-    if (pr.settledRedEmitted) pr.fixAttempts += 1;
+    if (pr.verdict === "red") pr.fixAttempts += 1;
     pr.headSha = snapshot.head.sha;
-    pr.firstRedEmitted = false;
-    pr.settledRedEmitted = false;
-    pr.greenEmitted = false;
+    pr.verdict = null;
+    pr.failing = [];
+    pr.settledAt = null;
     delete pr.reviewDecision;
     await ctx.save();
   }

@@ -297,10 +297,9 @@ describe("Legion HTTP API", () => {
       repo: "acme/widgets",
       number: 17,
       headSha: "approved-head",
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: true,
-      lastEventAt: 0,
+      verdict: "green",
+      failing: [],
+      settledAt: 0,
       fixAttempts: 0,
     };
     state.roles[roleToken(state.project, child, "architect")] = {

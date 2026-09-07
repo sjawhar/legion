@@ -49,10 +49,9 @@ function prState(issue: IssueKey): PrState {
     repo: "acme/widgets",
     number: 7,
     headSha: "head-7",
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: true,
-    lastEventAt: 3_000,
+    verdict: "green",
+    failing: [],
+    settledAt: 3_000,
     fixAttempts: 1,
     reviewDecision: "approved",
   };

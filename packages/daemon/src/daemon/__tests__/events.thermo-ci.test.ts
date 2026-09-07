@@ -119,10 +119,9 @@ function stateForCi() {
     repo: "acme/widgets",
     number: 7,
     headSha: "head-1",
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: false,
-    lastEventAt: 0,
+    verdict: null,
+    failing: [],
+    settledAt: null,
     fixAttempts: 0,
   };
   return { state, architect, implementer };
@@ -183,7 +182,7 @@ it("routes an approved PR immediately when its head's checks settle green", asyn
   pump.stop();
 });
 
-it("emits first-red and settled-red together for one failed settlement", async () => {
+it("emits settled-red when CI first settles red", async () => {
   const { state, implementer } = stateForCi();
   const nats = new FakeNats();
   const published: string[] = [];
@@ -217,12 +216,58 @@ it("emits first-red and settled-red together for one failed settlement", async (
   await pump.drain();
 
   expect(published).toEqual([
-    JSON.stringify({ type: "ci-first-red", check: "lint", sha: "head-1" }),
     JSON.stringify({
       type: "ci-settled-red",
       failing: ["lint", "unit"],
       sha: "head-1",
     }),
+  ]);
+  expect(state.roles[implementer]).toBeDefined();
+  pump.stop();
+});
+
+it("emits settled-red when a green head re-settles red", async () => {
+  const { state, implementer } = stateForCi();
+  state.prs["acme/widgets#7"] = {
+    ...state.prs["acme/widgets#7"],
+    verdict: "green",
+    settledAt: 1,
+  };
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        failed: { count: 1, checks: ["lint"] },
+        passed: { count: 0, checks: [] },
+        failing_checks: [{ name: "lint", url: "https://example.test/checks/lint" }],
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["lint"],
+    settledAt: 0,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["lint"], sha: "head-1" }),
   ]);
   expect(state.roles[implementer]).toBeDefined();
   pump.stop();

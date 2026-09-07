@@ -95,8 +95,7 @@ function stateTree(state: LegionState, tree: IssueKey): Set<IssueKey> {
 }
 
 function ciVerdict(pr: PrState): CiVerdict {
-  if (pr.firstRedEmitted || pr.settledRedEmitted) return "red";
-  return pr.greenEmitted ? "green" : "pending";
+  return pr.verdict ?? "pending";
 }
 
 export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<LegionEventPayload> {

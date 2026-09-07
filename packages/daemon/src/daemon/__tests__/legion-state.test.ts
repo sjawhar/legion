@@ -52,10 +52,9 @@ function stateWithTree() {
     repo: "sjawhar/legion",
     number: 7,
     headSha: "abc123",
-    firstRedEmitted: false,
-    settledRedEmitted: false,
-    greenEmitted: true,
-    lastEventAt: 1_724_457_600_000,
+    verdict: "green",
+    failing: [],
+    settledAt: 1_724_457_600_000,
     fixAttempts: 1,
     reviewDecision: "approved",
   };
@@ -77,9 +76,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v9 state with a valid project and admission capacity", () => {
+  it("initializes empty v10 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 9,
+      version: 10,
       project: "omp",
       issues: {},
       trees: {},
@@ -228,6 +227,36 @@ describe("legion state", () => {
         [prKey]: {
           ...current.prs[prKey],
           checks: { unit: { status: "completed", conclusion: "success" } },
+        },
+      },
+    };
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v9 PR emission flags to the current CI verdict", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v9-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const prKey = "sjawhar/legion#7";
+    const {
+      failing: _failing,
+      settledAt: _settledAt,
+      verdict: _verdict,
+      ...legacyPr
+    } = current.prs[prKey];
+    const legacy = {
+      ...current,
+      version: 9,
+      prs: {
+        ...current.prs,
+        [prKey]: {
+          ...legacyPr,
+          firstRedEmitted: false,
+          settledRedEmitted: false,
+          greenEmitted: true,
+          lastEventAt: 1_724_457_600_000,
         },
       },
     };

@@ -179,11 +179,10 @@ describe("thermonuclear API regressions", () => {
       repo: "acme/widgets",
       number: 17,
       headSha: "cached-head",
-      firstRedEmitted: true,
-      settledRedEmitted: true,
-      greenEmitted: true,
+      verdict: "red",
+      failing: ["unit"],
+      settledAt: 1,
       reviewDecision: "approved",
-      lastEventAt: 1,
       fixAttempts: 1,
     };
     api = startApi(state);
@@ -200,9 +199,9 @@ describe("thermonuclear API regressions", () => {
     expect(await gate.json()).toEqual({ approved: true, pr: 17, headSha: "live-head" });
     expect(state.prs["acme/widgets#17"]).toMatchObject({
       headSha: "live-head",
-      firstRedEmitted: false,
-      settledRedEmitted: false,
-      greenEmitted: false,
+      verdict: null,
+      failing: [],
+      settledAt: null,
       fixAttempts: 2,
     });
     expect(state.prs["acme/widgets#17"]?.reviewDecision).toBeUndefined();
