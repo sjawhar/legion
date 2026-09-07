@@ -4,6 +4,7 @@ import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { LegionState } from "./legion-state";
 import {
+  advanceCiFence,
   type Effect,
   type EnvelopeJson,
   type ReducerConfig,
@@ -196,21 +197,27 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
     }
+    // The fetched max check-run id is ordering information whatever the
+    // rollup state: a pending rerun already has newer runs, and a delayed
+    // older live settlement must not pass the fence.
+    advanceCiFence(pr, status.latestCheckRunId);
+    const failing = status.failingChecks ?? [];
+    // Mirror live intake: red only for actual failures; a cancelled-only
+    // failing rollup, like a pending one, uncertifies a green head.
     const verdict =
-      status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
+      status.ciStatus === "passing"
+        ? "green"
+        : status.ciStatus === "failing" && failing.length > 0
+          ? "red"
+          : null;
     if (verdict === null) {
-      if (status.ciStatus === "pending") uncertifyCiVerdict(pr);
+      if (status.ciStatus === "pending" || status.ciStatus === "failing") uncertifyCiVerdict(pr);
       continue;
     }
     const effects = settleCiVerdict(
       deps.state,
       pr,
-      {
-        verdict,
-        failing: status.failingChecks ?? [],
-        settledAt: now,
-        latestCheckRunId: status.latestCheckRunId,
-      },
+      { verdict, failing, settledAt: now, latestCheckRunId: status.latestCheckRunId },
       deps.config
     );
     if (effects.length === 0) continue;

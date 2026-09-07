@@ -45,6 +45,14 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
+/** Raises the same-head ordering fence; never lowers it (a null/undefined id is no information). */
+export function advanceCiFence(pr: PrState, latestCheckRunId: number | null | undefined): void {
+  if (latestCheckRunId === null || latestCheckRunId === undefined) return;
+  pr.ciLatestRunId =
+    pr.ciLatestRunId === null ? latestCheckRunId : Math.max(pr.ciLatestRunId, latestCheckRunId);
+}
+
+/** A rerun in flight, or a cancelled-only settlement: a green verdict is no longer certified. Red is preserved. */
 export function uncertifyCiVerdict(pr: PrState): void {
   if (pr.verdict !== "green") return;
   pr.verdict = null;
@@ -78,12 +86,7 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  if (input.latestCheckRunId !== null && input.latestCheckRunId !== undefined) {
-    pr.ciLatestRunId =
-      pr.ciLatestRunId === null
-        ? input.latestCheckRunId
-        : Math.max(pr.ciLatestRunId, input.latestCheckRunId);
-  }
+  advanceCiFence(pr, input.latestCheckRunId);
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,

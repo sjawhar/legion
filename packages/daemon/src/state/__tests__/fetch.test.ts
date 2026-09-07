@@ -303,6 +303,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: [],
+
+        cancelledCount: 0,
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
@@ -371,6 +373,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: ["lint", "legacy"],
+
+        cancelledCount: 0,
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
@@ -449,6 +453,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: ["lint", "unit"],
+
+        cancelledCount: 0,
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
         latestCheckRunId: 900,
@@ -556,6 +562,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: [],
+
+        cancelledCount: 0,
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
@@ -766,6 +774,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "conflicting",
         failingChecks: [],
+
+        cancelledCount: 0,
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,

@@ -334,6 +334,8 @@ export interface CiAndMergeStatus {
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
   failingChecks?: string[];
+  /** Check runs GitHub reports as CANCELLED; present with failingChecks when the rollup is failing. */
+  cancelledCount?: number;
   headSha: string | null;
   isOpen: boolean;
   updatedAt: string | null;
@@ -351,9 +353,11 @@ export function isCiFetchFailure(result: CiFetchResult): result is CiFetchFailur
   return "error" in result;
 }
 
+// Cancelled is not failure: the listener's settlement keeps the two apart and
+// live intake uncertifies a green head on a cancelled-only settlement instead
+// of turning it red. The rollup reader draws the same line.
 const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
   ACTION_REQUIRED: true,
-  CANCELLED: true,
   ERROR: true,
   FAILURE: true,
   STALE: true,
@@ -361,8 +365,14 @@ const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
   TIMED_OUT: true,
 };
 
-function failingCheckNames(nodes: readonly unknown[]): string[] {
+interface RollupOutcome {
+  readonly failingChecks: string[];
+  readonly cancelledCount: number;
+}
+
+function rollupOutcome(nodes: readonly unknown[]): RollupOutcome {
   const failing = new Set<string>();
+  let cancelledCount = 0;
   for (const node of nodes) {
     if (typeof node !== "object" || node === null || Array.isArray(node) || !("name" in node)) {
       continue;
@@ -373,15 +383,11 @@ function failingCheckNames(nodes: readonly unknown[]): string[] {
         : "statusConclusion" in node
           ? node.statusConclusion
           : undefined;
-    if (
-      typeof node.name === "string" &&
-      typeof conclusion === "string" &&
-      FAILING_CHECK_CONCLUSIONS[conclusion]
-    ) {
-      failing.add(node.name);
-    }
+    if (typeof node.name !== "string" || typeof conclusion !== "string") continue;
+    if (conclusion === "CANCELLED") cancelledCount += 1;
+    else if (FAILING_CHECK_CONCLUSIONS[conclusion]) failing.add(node.name);
   }
-  return [...failing];
+  return { failingChecks: [...failing], cancelledCount };
 }
 
 function latestCheckRunId(nodes: readonly unknown[]): number | null {
@@ -632,9 +638,7 @@ async function getCiStatusBatchWithOptions(
         mergeableStatus: mapMergeableState(
           typeof mergeable === "string" || mergeable === null ? mergeable : null
         ),
-        ...(ciStatus === CiStatus.FAILING
-          ? { failingChecks: failingCheckNames(contextNodes) }
-          : {}),
+        ...(ciStatus === CiStatus.FAILING ? rollupOutcome(contextNodes) : {}),
         headSha,
         isOpen: rawPr.state === "OPEN",
         updatedAt,

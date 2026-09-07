@@ -857,6 +857,89 @@ describe("runResync", () => {
     expect(dispatched).toEqual([]);
   });
 
+  it("a pending rollup advances the check-run fence so a delayed older live settlement is ignored", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 1_000,
+      fixAttempts: 0,
+    };
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "pending" as const,
+          mergeableStatus: null,
+          headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: 1_100,
+          isOpen: true,
+        },
+      }),
+      applyEffects: async () => {},
+    });
+
+    // The rerun's newer run id is the fence now: an old settlement at 1050
+    // that arrives late is stale, exactly as if the daemon had seen 1100 live.
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: null,
+      ciLatestRunId: 1_100,
+      ciSettledAt: 1_000,
+    });
+  });
+
+  it("a cancelled-only failing rollup uncertifies a green head instead of settling red", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 4,
+      fixAttempts: 0,
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "failing" as const,
+          mergeableStatus: null,
+          failingChecks: [],
+          cancelledCount: 2,
+          headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: 9,
+          isOpen: true,
+        },
+      }),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    // Live intake treats a cancelled-only settlement as "no longer certified",
+    // never as red; resync must read GitHub's rollup the same way.
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: null,
+      failing: [],
+      ciLatestRunId: 9,
+      fixAttempts: 0,
+    });
+    expect(dispatched).toEqual([]);
+  });
+
   it("clears a stored green verdict when GitHub reports a pending rollup", async () => {
     const state = newLegionState("omp", 1);
     state.prs["sjawhar/legion#7"] = {
