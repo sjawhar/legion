@@ -126,7 +126,7 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     headSha,
     verdict: null,
     failing: [],
-    settledAt: null,
+    ciSettledAt: null,
     fixAttempts: 0,
   };
 }
@@ -301,14 +301,14 @@ describe("core-NATS event pump", () => {
     }
   });
 
-  it("creates and routes a PR from a settled failed checks envelope", async () => {
-    const { state, implementer } = stateForIssue();
+  it("does not derive a PR head from checks without a synchronize event", async () => {
+    const { state } = stateForIssue();
     state.prByBranch["acme/widgets@legion/issue-1"] = "acme/widgets#7";
     const nats = new FakeNats();
-    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const published: string[] = [];
     const pump = startEventPump(
-      deps(state, nats, async (topic, payloadJson) => {
-        published.push({ topic, payloadJson });
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
       })
     );
 
@@ -318,65 +318,146 @@ describe("core-NATS event pump", () => {
         settledChecks({
           failed: { count: 1, checks: ["unit"] },
           passed: { count: 0, checks: [] },
-          failing_checks: [{ name: "unit", url: "https://example.test/checks/unit" }],
         })
       )
     );
-    await flush();
+    await pump.drain();
 
-    expect(state.prs["acme/widgets#7"]).toMatchObject({
-      key: formatIssueKey("acme", "widgets", 1),
-      headSha: "head-1",
-      verdict: "red",
-      failing: ["unit"],
-      settledAt: 1_000,
-    });
-    expect(published).toEqual([
-      {
-        topic: roleTopic(implementer),
-        payloadJson: JSON.stringify({
-          type: "ci-settled-red",
-          failing: ["unit"],
-          sha: "head-1",
-        }),
-      },
-    ]);
+    expect(state.prs["acme/widgets#7"]).toBeUndefined();
+    expect(published).toEqual([]);
     pump.stop();
   });
 
-  it("uses the settled checks SHA as the current head before routing green CI", async () => {
-    const { state, issue, implementer } = stateForIssue();
+  it("ignores checks for a SHA that is not the current head", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue, "current-head");
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks({ sha: "settled-head" }))
+      );
+      await pump.drain();
+
+      expect(state.prs["acme/widgets#7"]).toEqual(checkPr(issue, "current-head"));
+      expect(published).toEqual([]);
+      expect(debug).toHaveBeenCalledWith(
+        "[legion] ignored non-head checks event event-1 subject=notifications.github.acme.widgets.pr.7.checks sha=settled-head head_sha=current-head"
+      );
+    } finally {
+      pump.stop();
+      debug.mockRestore();
+    }
+  });
+  it("keeps a newer green settlement when an older redelivery for the same SHA arrives", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(settledChecks({ settled_at: 2_000 }), "newer-green")
+      );
+      await pump.drain();
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(
+          settledChecks({
+            settled_at: 1_000,
+            failed: { count: 1, checks: ["unit"] },
+            passed: { count: 0, checks: [] },
+          }),
+          "older-red"
+        )
+      );
+      await pump.drain();
+
+      expect(state.prs["acme/widgets#7"]).toMatchObject({
+        headSha: "head-1",
+        verdict: "green",
+        failing: [],
+        ciSettledAt: 2_000,
+      });
+      expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+      expect(debug).toHaveBeenCalledWith(
+        "[legion] ignored stale checks event older-red subject=notifications.github.acme.widgets.pr.7.checks sha=head-1"
+      );
+    } finally {
+      pump.stop();
+      debug.mockRestore();
+    }
+  });
+
+  it("accepts a newer synchronize despite an earlier checks wall-clock settlement", async () => {
+    const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = {
-      ...checkPr(issue, "stale-head"),
-      reviewDecision: "approved",
+      ...checkPr(issue),
+      headUpdatedAt: 1_000,
     };
     const nats = new FakeNats();
-    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const published: string[] = [];
     const pump = startEventPump(
-      deps(state, nats, async (topic, payloadJson) => {
-        published.push({ topic, payloadJson });
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
       })
     );
 
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
-      envelope(settledChecks({ sha: "settled-head" }))
+      envelope(
+        settledChecks({
+          sha: "head-2",
+          settled_at: 10_000,
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        }),
+        "head-2-settled"
+      )
     );
-    await flush();
+    await pump.drain();
+    nats.emit(
+      "notifications.github.acme.widgets.pull_request.synchronize",
+      envelope({
+        action: "synchronize",
+        repository: { full_name: "acme/widgets" },
+        pull_request: {
+          number: 7,
+          head: { sha: "head-3", ref: "legion/issue-1" },
+          updated_at: "1970-01-01T00:00:02.000Z",
+        },
+      })
+    );
+    await pump.drain();
 
-    expect(state.prs["acme/widgets#7"]?.headSha).toBe("settled-head");
-    expect(state.prs["acme/widgets#7"]?.reviewDecision).toBeUndefined();
-    expect(published).toEqual([
-      {
-        topic: roleTopic(implementer),
-        payloadJson: JSON.stringify({ type: "ci-green", sha: "settled-head" }),
-      },
-    ]);
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-3",
+      headUpdatedAt: 2_000,
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+    });
+    expect(published).toEqual([]);
     pump.stop();
   });
   it("clears a re-settled head's red flags before tracking the next head", async () => {
     const { state, issue, implementer } = stateForIssue();
-    state.prByBranch["acme/widgets@legion/issue-1"] = "acme/widgets#7";
+    state.prs["acme/widgets#7"] = checkPr(issue);
     const nats = new FakeNats();
     const published: Array<{ topic: string; payloadJson: string }> = [];
     const pump = startEventPump(
@@ -398,7 +479,7 @@ describe("core-NATS event pump", () => {
     await flush();
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
-      envelope(settledChecks({ superseded_settlement: "true" }))
+      envelope(settledChecks({ settled_at: 2_000, superseded_settlement: "true" }))
     );
     await flush();
 
@@ -406,7 +487,7 @@ describe("core-NATS event pump", () => {
       headSha: "head-1",
       verdict: "green",
       failing: [],
-      settledAt: 1_000,
+      ciSettledAt: 2_000,
       fixAttempts: 0,
     });
     expect(await overseerCatchup(state, issue)).toMatchObject({
@@ -433,7 +514,7 @@ describe("core-NATS event pump", () => {
       headSha: "head-2",
       verdict: null,
       failing: [],
-      settledAt: null,
+      ciSettledAt: null,
       fixAttempts: 0,
     });
     expect(published).toEqual([
@@ -459,7 +540,7 @@ describe("core-NATS event pump", () => {
       ...checkPr(issue),
       verdict: "red",
       failing: ["unit"],
-      settledAt: 500,
+      ciSettledAt: 500,
     };
     const nats = new FakeNats();
     const published: string[] = [];
@@ -483,7 +564,7 @@ describe("core-NATS event pump", () => {
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
       failing: ["unit"],
-      settledAt: 500,
+      ciSettledAt: 1_000,
     });
     expect(published).toEqual([]);
     pump.stop();
@@ -508,7 +589,7 @@ describe("core-NATS event pump", () => {
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
       failing: [],
-      settledAt: 1_000,
+      ciSettledAt: 1_000,
     });
     expect(published).toEqual([
       {
@@ -564,13 +645,13 @@ describe("core-NATS event pump", () => {
     }
   });
 
-  it("ignores a redelivered older-head checks event and logs the decision", async () => {
+  it("ignores a checks event for a non-head SHA and logs the decision", async () => {
     const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = {
       ...checkPr(issue, "newer-head"),
       headUpdatedAt: 2_000,
       verdict: "green",
-      settledAt: 1_500,
+      ciSettledAt: 1_500,
     };
     const nats = new FakeNats();
     const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
@@ -588,10 +669,10 @@ describe("core-NATS event pump", () => {
         headUpdatedAt: 2_000,
         verdict: "green",
         failing: [],
-        settledAt: 1_500,
+        ciSettledAt: 1_500,
       });
       expect(debug).toHaveBeenCalledWith(
-        "[legion] ignored stale checks event old-head subject=notifications.github.acme.widgets.pr.7.checks sha=older-head"
+        "[legion] ignored non-head checks event old-head subject=notifications.github.acme.widgets.pr.7.checks sha=older-head head_sha=newer-head"
       );
     } finally {
       pump.stop();
@@ -599,9 +680,13 @@ describe("core-NATS event pump", () => {
     }
   });
 
-  it("uses payload settled_at before envelope issued_at when ordering a checks head", async () => {
+  it("uses payload settled_at before envelope issued_at for the current head", async () => {
     const { state, issue } = stateForIssue();
-    state.prs["acme/widgets#7"] = { ...checkPr(issue, "old-head"), headUpdatedAt: 1_500 };
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue),
+      verdict: "green",
+      ciSettledAt: 1_500,
+    };
     const nats = new FakeNats();
     const pump = startEventPump(deps(state, nats, async () => {}));
 
@@ -609,23 +694,21 @@ describe("core-NATS event pump", () => {
       "notifications.github.acme.widgets.pr.7.checks",
       envelope(
         settledChecks({
-          sha: "new-head",
           settled_at: 2_000,
           failed: { count: 1, checks: ["unit"] },
           passed: { count: 0, checks: [] },
         }),
-        "new-head",
+        "newer-settlement",
         1_000
       )
     );
     await pump.drain();
 
     expect(state.prs["acme/widgets#7"]).toMatchObject({
-      headSha: "new-head",
-      headUpdatedAt: 2_000,
+      headSha: "head-1",
       verdict: "red",
       failing: ["unit"],
-      settledAt: 2_000,
+      ciSettledAt: 2_000,
     });
     pump.stop();
   });

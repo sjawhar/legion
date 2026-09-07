@@ -299,7 +299,7 @@ describe("Legion HTTP API", () => {
       headSha: "approved-head",
       verdict: "green",
       failing: [],
-      settledAt: 0,
+      ciSettledAt: 0,
       fixAttempts: 0,
     };
     state.roles[roleToken(state.project, child, "architect")] = {

@@ -1,7 +1,6 @@
 import {
   controllerToken,
   EnvelopeSchema,
-  formatIssueKey,
   type IssueKey,
   parseRoleToken,
   roleToken,
@@ -138,66 +137,14 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
   };
 }
 
-function issueForBranch(repo: string, branch: string): IssueKey | undefined {
-  const match = /^legion\/issue-(\d+)$/.exec(branch);
-  if (!match) return undefined;
-  const [owner, name, ...extra] = repo.split("/");
-  const number = Number(match[1]);
-  if (!owner || !name || extra.length > 0 || !Number.isSafeInteger(number)) return undefined;
-  return formatIssueKey(owner, name, number);
-}
-
-function findOrCreatePr(state: LegionState, input: ChecksInput): PrState | undefined {
-  const prKey = `${input.repo}#${input.number}`;
-  const existing = state.prs[prKey];
-  if (existing) return existing;
-  const mapping = Object.entries(state.prByBranch).find(
-    ([branchKey, mappedPrKey]) => mappedPrKey === prKey && branchKey.startsWith(`${input.repo}@`)
-  );
-  const branch = mapping?.[0].slice(input.repo.length + 1);
-  if (!branch) return undefined;
-
-  const mappedPrKey = state.prByBranch[`${input.repo}@${branch}`];
-  if (mappedPrKey !== prKey) return undefined;
-  const issue = issueForBranch(input.repo, branch);
-  if (!issue || !state.issues[issue]) return undefined;
-
-  const pr: PrState = {
-    key: issue,
-    repo: input.repo,
-    number: input.number,
-    headSha: input.sha,
-    headUpdatedAt: input.settledAt,
-    verdict: null,
-    failing: [],
-    settledAt: null,
-    fixAttempts: 0,
-  };
-  state.prs[prKey] = pr;
-  return pr;
-}
-
-function updatePrHead(pr: PrState, input: ChecksInput): boolean {
-  if (pr.headSha === input.sha) return true;
-  if (pr.headUpdatedAt !== undefined && input.settledAt < pr.headUpdatedAt) return false;
-  if (pr.verdict === "red") pr.fixAttempts += 1;
-  pr.headSha = input.sha;
-  pr.headUpdatedAt = input.settledAt;
-  pr.verdict = null;
-  pr.failing = [];
-  pr.settledAt = null;
-  delete pr.reviewDecision;
-  return true;
-}
-
 function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
   const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
+  pr.ciSettledAt = input.settledAt;
   if (verdict === null) return [];
 
   const priorVerdict = pr.verdict;
   pr.verdict = verdict;
   pr.failing = verdict === "red" ? input.failed : [];
-  pr.settledAt = input.settledAt;
   if (priorVerdict === verdict) return [];
   return verdict === "red"
     ? [{ type: "ci-settled-red", failing: input.failed, sha: pr.headSha }]
@@ -428,9 +375,15 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return;
     }
-    const pr = findOrCreatePr(deps.state, input);
+    const pr = deps.state.prs[`${input.repo}#${input.number}`];
     if (!pr) return;
-    if (!updatePrHead(pr, input)) {
+    if (pr.headSha !== input.sha) {
+      console.debug(
+        `[legion] ignored non-head checks event ${envelope.event_id} subject=${subject} sha=${input.sha} head_sha=${pr.headSha}`
+      );
+      return;
+    }
+    if (pr.ciSettledAt !== null && input.settledAt <= pr.ciSettledAt) {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );

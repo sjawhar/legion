@@ -90,7 +90,7 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     headSha: "old-sha",
     verdict: null,
     failing: [],
-    settledAt: null,
+    ciSettledAt: null,
     fixAttempts: 0,
     ...overrides,
   };
@@ -684,7 +684,7 @@ describe("reduceGithubEvent", () => {
       headSha: "old-sha",
       verdict: "red",
       failing: ["unit"],
-      settledAt: 1,
+      ciSettledAt: 1,
       reviewDecision: "approved",
     });
 
@@ -701,7 +701,7 @@ describe("reduceGithubEvent", () => {
       headSha: "new-sha",
       verdict: null,
       failing: [],
-      settledAt: null,
+      ciSettledAt: null,
       fixAttempts: 1,
     });
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
@@ -727,7 +727,7 @@ describe("reduceGithubEvent", () => {
     Object.assign(state.prs[`${repo}#${prNumber}`], {
       verdict: "green",
       failing: [],
-      settledAt: 1,
+      ciSettledAt: 1,
       reviewDecision: "approved",
     });
 
@@ -746,7 +746,7 @@ describe("reduceGithubEvent", () => {
       headUpdatedAt: Date.parse("2026-09-07T03:02:00Z"),
       verdict: "green",
       failing: [],
-      settledAt: 1,
+      ciSettledAt: 1,
       reviewDecision: "approved",
       fixAttempts: 0,
     });
@@ -759,7 +759,7 @@ describe("reduceGithubEvent", () => {
     const architect = claim(state, child, "architect");
     addPr(state, {
       verdict: "green",
-      settledAt: 0,
+      ciSettledAt: 0,
     });
 
     expect(
@@ -827,7 +827,7 @@ describe("reduceGithubEvent", () => {
     const architect = claim(state, child, "architect");
     addPr(state, {
       verdict: "green",
-      settledAt: 0,
+      ciSettledAt: 0,
     });
 
     expect(
@@ -951,7 +951,7 @@ describe("reduceCiEmission", () => {
   it("notifies the architect when the CI edge turns green for an approved PR", () => {
     const state = rootState();
     attachChild(state);
-    addPr(state, { reviewDecision: "approved", verdict: "green", settledAt: 0 });
+    addPr(state, { reviewDecision: "approved", verdict: "green", ciSettledAt: 0 });
     const architect = claim(state, child, "architect");
 
     expect(
@@ -968,7 +968,7 @@ describe("reduceCiEmission", () => {
   it("notifies the architect when settled CI red exhausts the retry budget", () => {
     const state = rootState();
     attachChild(state);
-    addPr(state, { fixAttempts: 3, verdict: "red", settledAt: 0 });
+    addPr(state, { fixAttempts: 3, verdict: "red", ciSettledAt: 0 });
     const architect = claim(state, child, "architect");
 
     expect(

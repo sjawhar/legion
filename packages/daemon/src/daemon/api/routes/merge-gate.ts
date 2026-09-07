@@ -74,7 +74,7 @@ async function recoverPrForMergeGate(
     headSha: head.sha,
     verdict: null,
     failing: [],
-    settledAt: null,
+    ciSettledAt: null,
     fixAttempts: 0,
   };
   ctx.deps.state.prs[prKey] = pr;
@@ -117,7 +117,7 @@ export async function handleMergeGate(
     pr.headSha = snapshot.head.sha;
     pr.verdict = null;
     pr.failing = [];
-    pr.settledAt = null;
+    pr.ciSettledAt = null;
     delete pr.reviewDecision;
     await ctx.save();
   }

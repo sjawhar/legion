@@ -54,7 +54,7 @@ function stateWithTree() {
     headSha: "abc123",
     verdict: "green",
     failing: [],
-    settledAt: 1_724_457_600_000,
+    ciSettledAt: 1_724_457_600_000,
     fixAttempts: 1,
     reviewDecision: "approved",
   };
@@ -76,9 +76,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v10 state with a valid project and admission capacity", () => {
+  it("initializes empty v11 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 10,
+      version: 11,
       project: "omp",
       issues: {},
       trees: {},
@@ -219,13 +219,15 @@ describe("legion state", () => {
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
     const prKey = "sjawhar/legion#7";
+    const { ciSettledAt, ...legacyPr } = current.prs[prKey];
     const legacy = {
       ...current,
       version: 8,
       prs: {
         ...current.prs,
         [prKey]: {
-          ...current.prs[prKey],
+          ...legacyPr,
+          settledAt: ciSettledAt,
           checks: { unit: { status: "completed", conclusion: "success" } },
         },
       },
@@ -242,7 +244,7 @@ describe("legion state", () => {
     const prKey = "sjawhar/legion#7";
     const {
       failing: _failing,
-      settledAt: _settledAt,
+      ciSettledAt: _ciSettledAt,
       verdict: _verdict,
       ...legacyPr
     } = current.prs[prKey];
@@ -258,6 +260,25 @@ describe("legion state", () => {
           greenEmitted: true,
           lastEventAt: 1_724_457_600_000,
         },
+      },
+    };
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v10 settlement timestamps into the CI ordering domain", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v10-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const prKey = "sjawhar/legion#7";
+    const { ciSettledAt, ...legacyPr } = current.prs[prKey];
+    const legacy = {
+      ...current,
+      version: 10,
+      prs: {
+        ...current.prs,
+        [prKey]: { ...legacyPr, settledAt: ciSettledAt },
       },
     };
     await writeFile(file, JSON.stringify(legacy), "utf8");

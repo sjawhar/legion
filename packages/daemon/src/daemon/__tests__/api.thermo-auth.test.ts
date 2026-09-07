@@ -181,7 +181,7 @@ describe("thermonuclear API regressions", () => {
       headSha: "cached-head",
       verdict: "red",
       failing: ["unit"],
-      settledAt: 1,
+      ciSettledAt: 1,
       reviewDecision: "approved",
       fixAttempts: 1,
     };
@@ -201,7 +201,7 @@ describe("thermonuclear API regressions", () => {
       headSha: "live-head",
       verdict: null,
       failing: [],
-      settledAt: null,
+      ciSettledAt: null,
       fixAttempts: 2,
     });
     expect(state.prs["acme/widgets#17"]?.reviewDecision).toBeUndefined();

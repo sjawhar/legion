@@ -121,7 +121,7 @@ function stateForCi() {
     headSha: "head-1",
     verdict: null,
     failing: [],
-    settledAt: null,
+    ciSettledAt: null,
     fixAttempts: 0,
   };
   return { state, architect, implementer };
@@ -231,7 +231,7 @@ it("emits settled-red when a green head re-settles red", async () => {
   state.prs["acme/widgets#7"] = {
     ...state.prs["acme/widgets#7"],
     verdict: "green",
-    settledAt: 1,
+    ciSettledAt: 1,
   };
   const nats = new FakeNats();
   const published: string[] = [];
@@ -253,6 +253,7 @@ it("emits settled-red when a green head re-settles red", async () => {
     "notifications.github.acme.widgets.pr.7.checks",
     envelope(
       settledChecks({
+        settled_at: 2,
         failed: { count: 1, checks: ["lint"] },
         passed: { count: 0, checks: [] },
         failing_checks: [{ name: "lint", url: "https://example.test/checks/lint" }],
@@ -264,7 +265,7 @@ it("emits settled-red when a green head re-settles red", async () => {
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["lint"],
-    settledAt: 0,
+    ciSettledAt: 2,
   });
   expect(published).toEqual([
     JSON.stringify({ type: "ci-settled-red", failing: ["lint"], sha: "head-1" }),

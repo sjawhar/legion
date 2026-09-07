@@ -252,7 +252,7 @@ function registerPr(
     ...(headUpdatedAt === undefined ? {} : { headUpdatedAt }),
     verdict: null,
     failing: [],
-    settledAt: null,
+    ciSettledAt: null,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -606,7 +606,7 @@ function pullRequest(
     else pr.headUpdatedAt = headUpdatedAt;
     pr.verdict = null;
     pr.failing = [];
-    pr.settledAt = null;
+    pr.ciSettledAt = null;
     delete pr.reviewDecision;
     return [{ kind: "approval-status", repo, pr: number, sha }];
   }
@@ -650,10 +650,10 @@ export function reduceCiEmission(
   config: ReducerConfig
 ): Effect[] {
   const pr = state.prs[`${repo}#${number}`];
-  if (!pr || pr.headSha !== emission.sha || pr.settledAt === null) return [];
+  if (!pr || pr.headSha !== emission.sha || pr.ciSettledAt === null) return [];
   const envelope = {
     event_id: `ci:${repo}#${number}:${emission.sha}`,
-    issued_at: pr.settledAt,
+    issued_at: pr.ciSettledAt,
   };
   if (emission.type === "ci-green") {
     return pr.reviewDecision === "approved"
