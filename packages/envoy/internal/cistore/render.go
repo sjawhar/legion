@@ -1,6 +1,9 @@
 package cistore
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // category buckets a check into one of the rollup groups.
 type category int
@@ -69,6 +72,8 @@ type Summary struct {
 	// LatestCheckRunID is the max over known check-run IDs in this settlement.
 	LatestCheckRunID     uint64         `json:"latest_check_run_id"`
 	Generation           uint64         `json:"generation"`
+	Snapshot             string         `json:"snapshot"`
+	LatestCompletedAt    string         `json:"latest_completed_at"`
 	SettledAt            int64          `json:"settled_at,omitempty"`
 	SupersededSettlement string         `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup    `json:"failed"`
@@ -86,9 +91,19 @@ func renderSummary(s State) Summary {
 	groups := map[category][]string{}
 	failingChecks := make([]FailingCheck, 0)
 	var latestCheckRunID uint64
+	var latestCompletedAt string
+	var latestCompleted time.Time
 	for key, check := range s.Checks {
 		if check.CheckRunID > 0 && uint64(check.CheckRunID) > latestCheckRunID {
 			latestCheckRunID = uint64(check.CheckRunID)
+		}
+		if check.Status == "completed" {
+			if observedAt, err := time.Parse(time.RFC3339, check.ObservedAt); err == nil &&
+				(latestCompletedAt == "" || observedAt.After(latestCompleted) ||
+					(observedAt.Equal(latestCompleted) && check.ObservedAt > latestCompletedAt)) {
+				latestCompleted = observedAt
+				latestCompletedAt = check.ObservedAt
+			}
 		}
 		name := check.Name
 		if name == "" {
@@ -108,21 +123,23 @@ func renderSummary(s State) Summary {
 	})
 	failed := group(groups[catFailed])
 	sum := Summary{
-		Kind:             "checks",
-		Repo:             s.Owner + "/" + s.Repo,
-		Number:           s.Number,
-		SHA:              s.SHA,
-		LatestCheckRunID: latestCheckRunID,
-		Generation:       s.Generation,
-		Failed:           failed,
-		Running:          group(groups[catRunning]),
-		Passed:           group(groups[catPassed]),
-		Queued:           group(groups[catQueued]),
-		Cancelled:        group(groups[catCancelled]),
-		Skipped:          group(groups[catSkipped]),
-		FailingChecks:    failingChecks,
+		Kind:              "checks",
+		Repo:              s.Owner + "/" + s.Repo,
+		Number:            s.Number,
+		SHA:               s.SHA,
+		LatestCheckRunID:  latestCheckRunID,
+		Generation:        s.Generation,
+		Snapshot:          s.Hash(),
+		LatestCompletedAt: latestCompletedAt,
+		Failed:            failed,
+		Running:           group(groups[catRunning]),
+		Passed:            group(groups[catPassed]),
+		Queued:            group(groups[catQueued]),
+		Cancelled:         group(groups[catCancelled]),
+		Skipped:           group(groups[catSkipped]),
+		FailingChecks:     failingChecks,
 	}
-	if s.Generation > s.InitialGeneration {
+	if s.EmittedCount > 0 {
 		sum.SupersededSettlement = "true"
 	}
 	return sum

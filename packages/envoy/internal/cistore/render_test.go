@@ -85,25 +85,60 @@ func TestRenderSummaryCarriesLatestCheckRunID(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryMarksOnlyRearmedGenerationSuperseded(t *testing.T) {
+func TestRenderSummaryCarriesSnapshotAndLatestCompletedAt(t *testing.T) {
 	state := State{
-		Owner:             "example-org",
-		Repo:              "example-repo",
-		Number:            "42",
-		SHA:               "abcdef",
-		InitialGeneration: 0,
-		Generation:        0,
-		Checks:            mkChecks(map[string][2]string{"build": {"completed", "success"}}),
+		Owner:  "example-org",
+		Repo:   "example-repo",
+		Number: "42",
+		SHA:    "abcdef",
+		Checks: map[string]Check{
+			"build": {CheckRunID: 900, Status: "completed", Conclusion: "success", ObservedAt: "2026-09-07T03:00:00Z"},
+			"lint":  {CheckRunID: 901, Status: "completed", Conclusion: "failure", ObservedAt: "2026-09-07T03:01:00Z"},
+			"test":  {CheckRunID: 902, Status: "in_progress", ObservedAt: "2026-09-07T03:02:00Z"},
+		},
 	}
-	_, initialSummary := renderOrFail(t, state)
-	if initialSummary.SupersededSettlement != "" {
-		t.Fatalf("initial superseded_settlement = %q, want empty", initialSummary.SupersededSettlement)
+	raw, _ := renderOrFail(t, state)
+	var payload struct {
+		Snapshot          string `json:"snapshot"`
+		LatestCompletedAt string `json:"latest_completed_at"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode rendered summary: %v", err)
+	}
+	if payload.Snapshot != state.Hash() {
+		t.Fatalf("snapshot = %q, want state hash %q", payload.Snapshot, state.Hash())
+	}
+	if payload.LatestCompletedAt != "2026-09-07T03:01:00Z" {
+		t.Fatalf("latest_completed_at = %q, want latest completed GitHub timestamp", payload.LatestCompletedAt)
+	}
+}
+
+func TestRenderSummaryMarksOnlyPreviouslyEmittedSettlementSuperseded(t *testing.T) {
+	state := State{
+		Owner:      "example-org",
+		Repo:       "example-repo",
+		Number:     "42",
+		SHA:        "abcdef",
+		Generation: 7,
+		Checks:     mkChecks(map[string][2]string{"build": {"completed", "success"}}),
+	}
+	_, neverEmittedSummary := renderOrFail(t, state)
+	if neverEmittedSummary.SupersededSettlement != "" {
+		t.Fatalf("never-emitted superseded_settlement = %q, want empty", neverEmittedSummary.SupersededSettlement)
 	}
 
 	state.Generation++
-	_, rearmedSummary := renderOrFail(t, state)
-	if rearmedSummary.SupersededSettlement != "true" {
-		t.Fatalf("rearmed superseded_settlement = %q, want true", rearmedSummary.SupersededSettlement)
+	_, changedButNeverEmitted := renderOrFail(t, state)
+	if changedButNeverEmitted.SupersededSettlement != "" {
+		t.Fatalf("generation-only superseded_settlement = %q, want empty", changedButNeverEmitted.SupersededSettlement)
+	}
+
+	if err := json.Unmarshal([]byte(`{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef","generation":9,"emitted_count":1,"checks":{"build":{"check_run_id":900,"status":"completed","conclusion":"success"}}}`), &state); err != nil {
+		t.Fatalf("decode previously emitted state: %v", err)
+	}
+	_, previouslyEmitted := renderOrFail(t, state)
+	if previouslyEmitted.SupersededSettlement != "true" {
+		t.Fatalf("previously emitted superseded_settlement = %q, want true", previouslyEmitted.SupersededSettlement)
 	}
 }
 

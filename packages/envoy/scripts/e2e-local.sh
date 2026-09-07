@@ -435,10 +435,13 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
       require(data.kind === "checks", "checks envelope has wrong payload kind");
       require(Number.isInteger(data.latest_check_run_id) && data.latest_check_run_id > 0, "checks payload lacks a positive integer latest_check_run_id");
       require(Number.isInteger(data.generation) && data.generation >= 0, "checks payload lacks a non-negative integer generation");
+      require(typeof data.snapshot === "string" && data.snapshot.length > 0, "checks payload lacks a snapshot");
+      require(typeof data.latest_completed_at === "string", "checks payload lacks latest_completed_at");
       const forSHA = checksBySHA.get(data.sha) ?? [];
       forSHA.push(data);
       checksBySHA.set(data.sha, forSHA);
     }
+    require(new Set(checks.map((item) => payload(item).snapshot)).size === checks.length, "checks settlements must carry distinct snapshots");
     const firstSHA = "1111111111111111111111111111111111111111";
     const secondSHA = "2222222222222222222222222222222222222222";
     require(checksBySHA.get(firstSHA)?.length === 1, "first head must settle exactly once");
