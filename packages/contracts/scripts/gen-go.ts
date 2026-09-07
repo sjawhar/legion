@@ -97,8 +97,15 @@ function name(key: string) {
 }
 
 function envelopeKind(prop: Prop, req: Set<string>, key: string) {
-  if (prop.type === "array" || prop.type === "object") {
-    throw new Error(`unsupported envelope schema type for ${key}`);
+  if (prop.type === "object") {
+    if (!prop.properties) throw new Error(`missing object properties for ${key}`);
+    return `*Envelope${name(key)}`;
+  }
+  if (prop.type === "array") {
+    if (prop.items?.type !== "string") {
+      throw new Error(`unsupported array items for ${key}`);
+    }
+    return "[]string";
   }
   const base = map[prop.type];
   if (req.has(key) || prop.type === "string") return base;
@@ -136,6 +143,25 @@ function enums(key: string, prop: Prop) {
   ].join("\n");
 }
 
+function renderEnvelopeObject(key: string, prop: Prop) {
+  if (prop.type !== "object" || !prop.properties) {
+    throw new Error(`missing object properties for ${key}`);
+  }
+  const properties = prop.properties;
+  const keys = Object.keys(properties);
+  const req = new Set(prop.required ?? []);
+  const wide = Math.max(...keys.map((nestedKey) => name(nestedKey).length));
+  const types = Math.max(
+    ...keys.map((nestedKey) => envelopeKind(properties[nestedKey], req, nestedKey).length)
+  );
+  const body = keys
+    .map((nestedKey) => envelopeField(nestedKey, properties[nestedKey], req, wide, types))
+    .join("\n");
+  return `type Envelope${name(key)} struct {
+${body}
+}`;
+}
+
 function renderEnvelope(schema: Schema) {
   if (schema.type !== "object") throw new Error("envelope schema must be an object");
   const keys = Object.keys(schema.properties);
@@ -155,9 +181,15 @@ function renderEnvelope(schema: Schema) {
   const source = schema.properties.source;
   const extra = source ? enums("source", source) : "";
   const validate = [checks, extra, "\treturn nil"].filter(Boolean).join("\n");
+  const nested = keys
+    .filter((key) => schema.properties[key].type === "object")
+    .map((key) => renderEnvelopeObject(key, schema.properties[key]))
+    .join("\n\n");
   return `type Envelope struct {
 ${body}
 }
+
+${nested}
 
 func (e Envelope) Validate() error {
 ${validate}

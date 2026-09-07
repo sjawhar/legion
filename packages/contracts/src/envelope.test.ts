@@ -66,6 +66,44 @@ describe("EnvelopeSchema", () => {
     expect(typeof item.expires_at).toBe("number");
   });
 
+  test("accepts signal-quality envelope fields", () => {
+    const item = EnvelopeSchema.parse(
+      buildEnvelope({
+        sender: {
+          session_id: "session-1",
+          machine: "example-host",
+          cwd: "/workspace",
+          title: "Controller",
+          roles: ["legion-controller"],
+        },
+        in_reply_to: "evt-0",
+        supersedes: "evt-old",
+        urgency: "blocking",
+        expects_reply: "required",
+        expires_at: 1_725_686_400_000,
+      })
+    );
+
+    expect(item.sender).toEqual({
+      session_id: "session-1",
+      machine: "example-host",
+      cwd: "/workspace",
+      title: "Controller",
+      roles: ["legion-controller"],
+    });
+    expect(item).toMatchObject({
+      in_reply_to: "evt-0",
+      supersedes: "evt-old",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: 1_725_686_400_000,
+    });
+  });
+
+  test("rejects unrecognized urgency", () => {
+    expectInvalidFields({ urgency: "urgent" }, ["urgency"]);
+  });
+
   test("accepts ghostwispr source", () => {
     const item = EnvelopeSchema.parse(
       buildEnvelope({
