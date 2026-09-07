@@ -155,7 +155,13 @@ function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
   const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
   pr.ciSettledAt = input.settledAt;
   pr.ciGeneration = input.generation;
-  if (verdict === null) return [];
+  if (verdict === null) {
+    if (pr.verdict === "green") {
+      pr.verdict = null;
+      pr.failing = [];
+    }
+    return [];
+  }
 
   const priorVerdict = pr.verdict;
   const priorFailing = pr.failing;

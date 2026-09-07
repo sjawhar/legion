@@ -538,6 +538,41 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("uncertifies a green CI verdict for a cancelled-only settled envelope", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/widgets#7"] = {
+      ...checkPr(issue),
+      verdict: "green",
+      ciSettledAt: 500,
+    };
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump(
+      deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          passed: { count: 0, checks: [] },
+          cancelled: { count: 1, checks: ["cancelled-job"] },
+        })
+      )
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: null,
+      failing: [],
+      ciSettledAt: 1_000,
+    });
+    expect(published).toEqual([]);
+    pump.stop();
+  });
+
   it("does not change a red CI verdict for a cancelled-only settled envelope", async () => {
     const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = {
