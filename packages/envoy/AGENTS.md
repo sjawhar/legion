@@ -80,10 +80,13 @@ caller must provide a field.
   `pr.<n>.checks` when the head's checks settle. Check settlement is at-least-once: a settlement can
   be followed by a `superseded_settlement` with `latest_check_run_id`, the highest GitHub check-run ID
   in the settlement. Consumers order summaries for one SHA lexicographically by
-  `(latest_check_run_id, generation)`; an equal pair uses the changed check set to distinguish a
-  duplicate delivery from a new settlement. Legacy checks without a `check_run_id` remain in the
-  status groups and failing names but not `latest_check_run_id`; a head publishes only when at least
-  one check has a positive run ID. `workflow.<file>.<action>` carries only runs without an associated
+  `(latest_check_run_id, generation)`; an equal pair is a duplicate only when its `snapshot` matches.
+  Legacy checks without a `check_run_id` remain in the status groups and failing names but not
+  `latest_check_run_id`; a head publishes only when at least one check has a positive run ID. After
+  the seven-day KV TTL recreates a record, its generation restarts at 0; if its first observation
+  updates an existing lower-ID run, both are dropped by consumers until resync reads GitHub. A legacy
+  in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun
+  the affected check to release it. `workflow.<file>.<action>` carries only runs without an associated
   pull request.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended

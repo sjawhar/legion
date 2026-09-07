@@ -101,8 +101,13 @@ for the head, not GitHub's required-checks set; until then, a silent subscriptio
 
 Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"`
 payload with `latest_check_run_id`, the highest GitHub check-run ID in the settlement. Consumers order
-summaries for one SHA lexicographically by `(latest_check_run_id, generation)`; an equal pair uses the
-changed check set to distinguish a duplicate delivery from a new settlement.
+summaries for one SHA lexicographically by `(latest_check_run_id, generation)`; an equal pair is a
+duplicate only when its `snapshot` matches.
+
+After the seven-day KV TTL recreates a record, its generation restarts at 0; if the first observation
+updates an existing lower-ID run, consumers drop both until resync reads GitHub. A legacy in-progress
+check whose completion is never observed holds its head unsettled until it reruns; rerun the affected
+check to release it.
 
 ## When a subscription is silent
 

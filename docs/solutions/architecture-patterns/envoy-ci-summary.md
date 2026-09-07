@@ -7,24 +7,23 @@ suites are aggregated first; raw CI observations are not published.
 
 Each commit uses the KV key `<owner>.<repo>.pr<number>.<sha>` in
 `envoy_ci_state`; the PR head is a separate durable `head.<owner>.<repo>.<number>`
-record. State contains checks, suites, `Generation`, `SettledEmitted`, and an
-optional claim `{hash, generation, claimed_at}`.
+record. State contains checks, suites, a state-version `Generation`, `EmittedCount`,
+`SettledEmitted`, and an optional claim `{hash, generation, claimed_at}`.
 
-1. `Record` and `RecordSuite` CAS-update the aggregate. A terminal-picture
-   change while settled or claimed re-arms it: increment `Generation`, clear
-   `SettledEmitted`, and clear the claim. A generation above zero marks a
-   re-settlement.
+1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
+   generation 0; every later aggregate-hash change and every re-arm advances the
+   state version, then clears `SettledEmitted`.
 2. The reconcile loop reads its rebuildable cache and selects only a quiet,
    terminal, current-head state without an emitted or live claim. A claim older
    than twice the debounce interval is reclaimed.
-3. `ClaimSettlement` re-reads durable state and head, verifies hash,
-   generation, terminality, and head identity, then CAS-writes the claim.
-   A mismatch publishes nothing.
+3. `ClaimSettlement` re-reads durable state and head, verifies the expected hash,
+   generation, terminality, and head identity, then CAS-writes the hash-bound
+   claim. A mismatch publishes nothing.
 4. The claimant renders that durable snapshot and publishes with
    `github.checks.<owner>/<repo>.pr.<number>.<sha>.g<generation>`.
-5. `MarkSettled` CAS-marks the same generation emitted and clears its claim.
-   A publish failure calls `ReleaseClaim`, so the next tick retries. A
-   generation change makes either cleanup refuse the obsolete claim.
+5. `MarkSettled` records the emission in `EmittedCount` and clears its claim. A
+   publish failure calls `ReleaseClaim`, which advances the state version; a
+   generation or hash change makes cleanup refuse an obsolete claim.
 
 All local cache write-through and watcher updates carry a KV revision and only
 apply at or above the cached revision. This prevents an older claim/mark write
@@ -32,9 +31,17 @@ from replacing a newer watcher state.
 
 ## Envelope
 
-The payload is the full status summary: every check group and failing check URLs.
-Consumers order summaries for one SHA lexicographically by `(latest_check_run_id, generation)`, with
-the former the largest known check-run ID in the settlement. Equal pairs rely on the changed check set
-to distinguish duplicate delivery from a new settlement. The summary waits for `ENVOY_CI_DEBOUNCE`
-(default `5s`), all check runs to be terminal, and every observed suite to be `completed`; heads with
-no suite still settle after terminal checks.
+The payload is the full status summary: every check group and failing check URLs,
+the durable `snapshot` hash, and `latest_completed_at`, the maximum RFC3339
+`ObservedAt` among its completed checks. Consumers order summaries for one SHA
+lexicographically by `(latest_check_run_id, generation)`, with the former the
+largest known check-run ID in the settlement. An equal pair is a duplicate only
+when its `snapshot` matches. The summary waits for `ENVOY_CI_DEBOUNCE` (default
+`5s`), all check runs to be terminal, and every observed suite to be `completed`;
+heads with no suite still settle after terminal checks.
+
+After the seven-day KV TTL recreates a record, its generation restarts at 0. If
+its first observation updates an existing lower-ID run, both are dropped by
+consumers until resync reads GitHub. A legacy check that was in progress at
+cutover and whose completion is never observed keeps the head unsettled until
+the check reruns; rerun the affected check to release it.
