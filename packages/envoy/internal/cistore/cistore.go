@@ -104,6 +104,8 @@ func (state *State) UnmarshalJSON(data []byte) error {
 
 const headRecordKind = "head"
 
+var ErrInvalidHeadSHA = errors.New("cistore: invalid head SHA")
+
 type headRecord struct {
 	Kind      string `json:"kind"`
 	SHA       string `json:"sha"`
@@ -526,7 +528,7 @@ func checkRunIDIsOlder(incoming, stored string) bool {
 // RecordHead persists the current PR head SHA. The WatchAll cache serves Head.
 func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 	if !validHeadSHA(sha) {
-		return errors.New("cistore: invalid head SHA")
+		return ErrInvalidHeadSHA
 	}
 	var incomingAt time.Time
 	if updatedAt != "" {

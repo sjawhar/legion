@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/sjawhar/envoy/internal/cistore"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -646,4 +647,56 @@ func TestGitHubHandlerRecordsHeadWithoutPullRequestUpdatedAt(t *testing.T) {
 	if len(pub.published) != 1 {
 		t.Fatalf("published = %d, want 1", len(pub.published))
 	}
+}
+func TestGitHubHandlerTreatsMalformedHeadFieldsAsCallerData(t *testing.T) {
+	const secret = "s"
+	post := func(t *testing.T, body string, recorder *mockRecorder) (*httptest.ResponseRecorder, *mockPublisher) {
+		t.Helper()
+		pub := &mockPublisher{}
+		handler := GitHubHandler(secret, "@legion", "", pub, recorder)
+		req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", "delivery-malformed-head")
+		req.Header.Set("X-GitHub-Event", "pull_request")
+		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr, pub
+	}
+
+	t.Run("invalid updated_at is absent", func(t *testing.T) {
+		body := `{
+			"action":"synchronize",
+			"number":42,
+			"pull_request":{"head":{"sha":"abcdef1234567"},"updated_at":"not-a-timestamp"},
+			"repository":{"name":"example-repo","owner":{"login":"example-org"}}
+		}`
+		recorder := &mockRecorder{}
+		rr, pub := post(t, body, recorder)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		if len(recorder.headCalls) != 1 || recorder.headCalls[0].updatedAt != "" {
+			t.Fatalf("head calls = %+v, want one timestamp-less call", recorder.headCalls)
+		}
+		if len(pub.published) != 1 {
+			t.Fatalf("published = %d, want 1", len(pub.published))
+		}
+	})
+
+	t.Run("invalid sha skips head recording", func(t *testing.T) {
+		body := `{
+			"action":"synchronize",
+			"number":42,
+			"pull_request":{"head":{"sha":"not-a-sha"},"updated_at":"2026-09-07T03:00:00Z"},
+			"repository":{"name":"example-repo","owner":{"login":"example-org"}}
+		}`
+		recorder := &mockRecorder{headErr: cistore.ErrInvalidHeadSHA}
+		rr, pub := post(t, body, recorder)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		if len(pub.published) != 1 {
+			t.Fatalf("published = %d, want 1", len(pub.published))
+		}
+	})
 }

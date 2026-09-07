@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/verify"
@@ -87,6 +90,11 @@ func githubPullRequestHead(event string, payload map[string]any) (owner, repo, n
 	}
 	sha, _ = head["sha"].(string)
 	updatedAt, _ = pullRequest["updated_at"].(string)
+	if updatedAt != "" {
+		if _, err := time.Parse(time.RFC3339, updatedAt); err != nil {
+			updatedAt = ""
+		}
+	}
 	value, ok := payload["number"].(float64)
 	if !ok || value != math.Trunc(value) {
 		return "", "", "", "", "", false
@@ -136,9 +144,13 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		}
 		if owner, repo, number, sha, updatedAt, ok := githubPullRequestHead(event, payload); ok {
 			if err := ci.RecordHead(owner, repo, number, sha, updatedAt); err != nil {
-				log.Printf("github ci head record failed: %v", err)
-				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-				return
+				if errors.Is(err, cistore.ErrInvalidHeadSHA) {
+					log.Printf("github ci head skipped: invalid sha=%q pr=%s", sha, number)
+				} else {
+					log.Printf("github ci head record failed: %v", err)
+					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					return
+				}
 			}
 		}
 		// CI events only update durable state. The summary loop publishes one
