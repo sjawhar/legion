@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -45,15 +47,52 @@ func githubSenderField(payload map[string]any, field string) string {
 	return s
 }
 
-// CIRecorder folds a single check_run observation into the per-commit CI state.
+// CIRecorder folds check_run observations and PR head updates into CI state.
 // The listener's cistore.Store satisfies this interface; the debounced summary
 // is emitted separately after the handler publishes the raw observation.
 type CIRecorder interface {
-	Record(owner, repo, number, sha, checkName, status, conclusion string) error
+	Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error
+	RecordHead(owner, repo, number, sha string) error
 }
 
 func reviewerVerdict(name string) bool {
 	return name == "tester" || name == "architect"
+}
+
+func githubPullRequestHead(event string, payload map[string]any) (owner, repo, number, sha string, ok bool) {
+	if event != "pull_request" {
+		return "", "", "", "", false
+	}
+	switch payload["action"] {
+	case "opened", "synchronize", "reopened":
+	default:
+		return "", "", "", "", false
+	}
+	repository, ok := payload["repository"].(map[string]any)
+	if !ok {
+		return "", "", "", "", false
+	}
+	repositoryOwner, ok := repository["owner"].(map[string]any)
+	if !ok {
+		return "", "", "", "", false
+	}
+	owner, _ = repositoryOwner["login"].(string)
+	repo, _ = repository["name"].(string)
+	pullRequest, ok := payload["pull_request"].(map[string]any)
+	if !ok {
+		return "", "", "", "", false
+	}
+	head, ok := pullRequest["head"].(map[string]any)
+	if !ok {
+		return "", "", "", "", false
+	}
+	sha, _ = head["sha"].(string)
+	value, ok := payload["number"].(float64)
+	if !ok || value != math.Trunc(value) {
+		return "", "", "", "", false
+	}
+	number = strconv.FormatInt(int64(value), 10)
+	return owner, repo, number, sha, owner != "" && repo != "" && number != "" && sha != ""
 }
 
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
@@ -95,6 +134,13 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			_, _ = w.Write([]byte("ok"))
 			return
 		}
+		if owner, repo, number, sha, ok := githubPullRequestHead(event, payload); ok {
+			if err := ci.RecordHead(owner, repo, number, sha); err != nil {
+				log.Printf("github ci head record failed: %v", err)
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		// CI events fold into per-commit state instead of being published raw.
 		// A check_run associated with multiple PRs records once per PR. check_suite
 		// yields no observations (ignored — see contracts.GithubCIObservations).
@@ -110,7 +156,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 						continue
 					}
 				}
-				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.Status, o.Conclusion); err != nil {
+				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.CheckRunID, o.URL, o.Status, o.Conclusion); err != nil {
 					log.Printf("github ci record failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return

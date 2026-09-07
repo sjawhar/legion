@@ -2,6 +2,7 @@ package cistore
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +71,21 @@ func waitCacheChecks(t *testing.T, s *Store, owner, repo, number, sha string, n 
 	}
 }
 
+func waitHead(t *testing.T, s *Store, owner, repo, number, sha string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		if head, ok := s.Head(owner, repo, number); ok && head == sha {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("head never reached %s for %s/%s#%s", sha, owner, repo, number)
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+}
+
 func TestSummaryTickEmitsOnceThenOnChange(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -77,10 +93,10 @@ func TestSummaryTickEmitsOnceThenOnChange(t *testing.T) {
 	pub := &recPub{}
 	logger := logging.New("test")
 
-	if err := s.Record("o", "r", "13", "sha13", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "13", "sha13", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record build: %v", err)
 	}
-	if err := s.Record("o", "r", "13", "sha13", "test", "in_progress", ""); err != nil {
+	if err := s.Record("o", "r", "13", "sha13", "test", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record test: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "13", "sha13", 2)
@@ -94,8 +110,8 @@ func TestSummaryTickEmitsOnceThenOnChange(t *testing.T) {
 	if env.Topic != "notifications.github.o.r.pr.13.ci" {
 		t.Errorf("topic = %q", env.Topic)
 	}
-	if !strings.Contains(env.PayloadSummary, "build") || !strings.Contains(env.PayloadSummary, "test") {
-		t.Errorf("summary should mention both checks: %q", env.PayloadSummary)
+	if !strings.Contains(env.Payload, "build") || !strings.Contains(env.Payload, "test") {
+		t.Errorf("payload should mention both checks: %q", env.Payload)
 	}
 
 	// Unchanged set → no re-emit.
@@ -105,7 +121,7 @@ func TestSummaryTickEmitsOnceThenOnChange(t *testing.T) {
 	}
 
 	// Changed set → exactly one more emit.
-	if err := s.Record("o", "r", "13", "sha13", "lint", "completed", "failure"); err != nil {
+	if err := s.Record("o", "r", "13", "sha13", "lint", "", "", "completed", "failure"); err != nil {
 		t.Fatalf("record lint: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "13", "sha13", 3)
@@ -127,7 +143,7 @@ func TestSummaryTickRespectsDebounce(t *testing.T) {
 	pub := &recPub{}
 	logger := logging.New("test")
 
-	if err := s.Record("o", "r", "1", "sha", "build", "in_progress", ""); err != nil {
+	if err := s.Record("o", "r", "1", "sha", "build", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "1", "sha", 1)
@@ -145,7 +161,7 @@ func TestSummaryTickPublishFailureDoesNotReemit(t *testing.T) {
 	pub := &recPub{}
 	logger := logging.New("test")
 
-	if err := s.Record("o", "r", "2", "sha", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "2", "sha", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "2", "sha", 1)
@@ -172,7 +188,7 @@ func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	pub := &recPub{}
 	logger := logging.New("test")
 
-	if err := s.Record("o", "r", "3", "sha", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "3", "sha", "build", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "3", "sha", 1)
@@ -200,7 +216,7 @@ func TestStartSummaryLoopBackground(t *testing.T) {
 	pub := &recPub{}
 	logger := logging.New("test")
 
-	if err := s.Record("o", "r", "4", "sha", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "4", "sha", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "4", "sha", 1)
@@ -219,8 +235,8 @@ func TestStartSummaryLoopBackground(t *testing.T) {
 	}
 	// Give it extra ticks to prove it does not re-emit an unchanged set.
 	time.Sleep(200 * time.Millisecond)
-	if pub.count() != 1 {
-		t.Fatalf("background loop should emit exactly once for a stable set, got %d", pub.count())
+	if pub.count() != 2 {
+		t.Fatalf("background loop should emit ci and checks.settled exactly once, got %d", pub.count())
 	}
 }
 
@@ -241,10 +257,10 @@ func TestSummaryDedupeKeyDistinctPerPR(t *testing.T) {
 	pub := &recPub{}
 	logger := logging.New("test")
 
-	if err := s.Record("o", "r", "1", "shaX", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "1", "shaX", "build", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record pr1: %v", err)
 	}
-	if err := s.Record("o", "r", "2", "shaX", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "2", "shaX", "build", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record pr2: %v", err)
 	}
 	waitCacheChecks(t, s, "o", "r", "1", "shaX", 1)
@@ -263,5 +279,128 @@ func TestSummaryDedupeKeyDistinctPerPR(t *testing.T) {
 		if !strings.Contains(e.DedupeKey, ".pr.1.") && !strings.Contains(e.DedupeKey, ".pr.2.") {
 			t.Fatalf("DedupeKey missing PR identity: %s", e.DedupeKey)
 		}
+	}
+}
+
+func TestSummaryTickSkipsNonHeadState(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	pub := &recPub{}
+	logger := logging.New("test")
+
+	if err := s.Record(
+		"example-org", "example-repo", "42", "oldabcdef1234",
+		"build", "300", "https://example-host/checks/300", "completed", "success",
+	); err != nil {
+		t.Fatalf("record old head: %v", err)
+	}
+	if err := s.RecordHead("example-org", "example-repo", "42", "newabcdef1234"); err != nil {
+		t.Fatalf("record new head: %v", err)
+	}
+	waitCacheChecks(t, s, "example-org", "example-repo", "42", "oldabcdef1234", 1)
+	waitHead(t, s, "example-org", "example-repo", "42", "newabcdef1234")
+	time.Sleep(10 * time.Millisecond)
+
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 0 {
+		t.Fatalf("non-head state published %d envelopes", pub.count())
+	}
+	if got := getState(t, s, "example-org", "example-repo", "42", "oldabcdef1234").LastEmitHash; got != "" {
+		t.Fatalf("non-head state was marked emitted: %q", got)
+	}
+}
+
+func TestSummaryTickPublishesSettledOncePerHead(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	pub := &recPub{}
+	logger := logging.New("test")
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567"
+	)
+
+	if err := s.RecordHead(owner, repo, number, sha); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, s, owner, repo, number, sha)
+	for _, check := range []struct {
+		name, id, url, status, conclusion string
+	}{
+		{"build", "300", "https://example-host/checks/300", "completed", "success"},
+		{"lint", "301", "https://example-host/checks/301", "completed", "failure"},
+		{"cancelled-check", "302", "https://example-host/checks/302", "completed", "cancelled"},
+	} {
+		if err := s.Record(owner, repo, number, sha, check.name, check.id, check.url, check.status, check.conclusion); err != nil {
+			t.Fatalf("record %s: %v", check.name, err)
+		}
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 3)
+	time.Sleep(10 * time.Millisecond)
+
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 2 {
+		t.Fatalf("initial head state published %d envelopes, want ci and checks.settled", pub.count())
+	}
+	envelopes := pub.all()
+	ci, settled := envelopes[0], envelopes[1]
+	if ci.Topic != "notifications.github.example-org.example-repo.pr.42.ci" {
+		t.Fatalf("ci topic = %q", ci.Topic)
+	}
+	if ci.PayloadSummary != "CI for example-org/example-repo#42 @ abcdef1: 1 passed, 1 failed, 0 running, 0 queued, 1 cancelled, 0 skipped" {
+		t.Fatalf("ci payload_summary = %q", ci.PayloadSummary)
+	}
+	var ciSummary Summary
+	if err := json.Unmarshal([]byte(ci.Payload), &ciSummary); err != nil {
+		t.Fatalf("ci payload must be summary JSON: %v\n%s", err, ci.Payload)
+	}
+	if !ciSummary.IsHead || ciSummary.Cancelled.Count != 1 {
+		t.Fatalf("unexpected ci summary: %+v", ciSummary)
+	}
+	if settled.Topic != "notifications.github.example-org.example-repo.pr.42.checks.settled" {
+		t.Fatalf("settled topic = %q", settled.Topic)
+	}
+	if settled.PayloadSummary != "checks settled on example-org/example-repo#42 @ abcdef1: 1 passed, 1 failed, 1 cancelled, 0 skipped; failing: lint" {
+		t.Fatalf("settled payload_summary = %q", settled.PayloadSummary)
+	}
+	var settledSummary Summary
+	if err := json.Unmarshal([]byte(settled.Payload), &settledSummary); err != nil {
+		t.Fatalf("settled payload must be summary JSON: %v\n%s", err, settled.Payload)
+	}
+	if settledSummary.Kind != "checks_settled" || len(settledSummary.FailingChecks) != 1 ||
+		settledSummary.FailingChecks[0].Name != "lint" ||
+		settledSummary.FailingChecks[0].URL != "https://example-host/checks/301" {
+		t.Fatalf("unexpected settled payload: %+v", settledSummary)
+	}
+	t.Logf("pr.42.ci payload_summary: %s", ci.PayloadSummary)
+	t.Logf("pr.42.ci payload: %s", ci.Payload)
+	t.Logf("pr.42.checks.settled payload_summary: %s", settled.PayloadSummary)
+	t.Logf("pr.42.checks.settled payload: %s", settled.Payload)
+
+	if !getState(t, s, owner, repo, number, sha).SettledEmitted {
+		t.Fatal("settled state was not marked emitted")
+	}
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 2 {
+		t.Fatalf("no-op tick re-emitted settled state: %d publishes", pub.count())
+	}
+
+	const newSHA = "0123456789abcdef"
+	if err := s.RecordHead(owner, repo, number, newSHA); err != nil {
+		t.Fatalf("record new head: %v", err)
+	}
+	waitHead(t, s, owner, repo, number, newSHA)
+	if err := s.Record(owner, repo, number, newSHA, "build", "303", "https://example-host/checks/303", "completed", "success"); err != nil {
+		t.Fatalf("record new head check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, repo, number, newSHA, 1)
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 4 {
+		t.Fatalf("new head did not publish ci and settled envelopes: %d publishes", pub.count())
 	}
 }

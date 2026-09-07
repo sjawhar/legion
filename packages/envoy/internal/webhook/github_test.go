@@ -532,3 +532,65 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 		}
 	})
 }
+
+func TestGitHubHandlerRecordsHeadOnPullRequestSynchronize(t *testing.T) {
+	const (
+		secret = "s"
+		body   = `{
+			"action": "synchronize",
+			"number": 42,
+			"pull_request": {
+				"head": {"sha": "abcdef1234567"},
+				"title": "Synchronize CI"
+			},
+			"sender": {"login": "ci-user", "type": "User"},
+			"repository": {
+				"name": "example-repo",
+				"owner": {"login": "example-org"},
+				"full_name": "example-org/example-repo"
+			}
+		}`
+	)
+	post := func(t *testing.T, rec *mockRecorder) (*httptest.ResponseRecorder, *mockPublisher) {
+		t.Helper()
+		pub := &mockPublisher{}
+		handler := GitHubHandler(secret, "@legion", "", pub, rec)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", "delivery-head-sync")
+		req.Header.Set("X-GitHub-Event", "pull_request")
+		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr, pub
+	}
+
+	t.Run("records the new head before publishing", func(t *testing.T) {
+		rec := &mockRecorder{}
+		rr, pub := post(t, rec)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+		}
+		if len(rec.headCalls) != 1 {
+			t.Fatalf("head calls = %d, want 1", len(rec.headCalls))
+		}
+		if got := rec.headCalls[0]; got != (headCall{
+			owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567",
+		}) {
+			t.Fatalf("head call = %+v", got)
+		}
+		if len(pub.published) != 1 {
+			t.Fatalf("published = %d, want 1", len(pub.published))
+		}
+	})
+
+	t.Run("returns 503 when recording the head fails", func(t *testing.T) {
+		rec := &mockRecorder{headErr: fmt.Errorf("kv down")}
+		rr, pub := post(t, rec)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rr.Code)
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0 after head recording failure", len(pub.published))
+		}
+	})
+}

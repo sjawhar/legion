@@ -13,6 +13,7 @@ const (
 	catFailed
 	catRunning
 	catQueued
+	catCancelled
 	catSkipped
 )
 
@@ -26,8 +27,10 @@ const (
 func classify(c Check) category {
 	if c.Status == "completed" {
 		switch c.Conclusion {
-		case "failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale":
+		case "failure", "timed_out", "action_required", "startup_failure", "stale":
 			return catFailed
+		case "cancelled":
+			return catCancelled
 		case "skipped":
 			return catSkipped
 		case "neutral", "success", "":
@@ -57,41 +60,66 @@ type StatusGroup struct {
 // always present (count 0, empty checks when none) so consumers see a stable
 // schema.
 type Summary struct {
-	Kind    string      `json:"kind"`
-	Repo    string      `json:"repo"`
-	Number  string      `json:"number"`
-	SHA     string      `json:"sha"`
-	Failed  StatusGroup `json:"failed"`
-	Running StatusGroup `json:"running"`
-	Passed  StatusGroup `json:"passed"`
-	Queued  StatusGroup `json:"queued"`
-	Skipped StatusGroup `json:"skipped"`
+	Kind          string      `json:"kind"`
+	Repo          string      `json:"repo"`
+	Number        string      `json:"number"`
+	SHA           string      `json:"sha"`
+	IsHead        bool        `json:"is_head"`
+	Failed        StatusGroup `json:"failed"`
+	Running       StatusGroup `json:"running"`
+	Passed        StatusGroup `json:"passed"`
+	Queued        StatusGroup `json:"queued"`
+	Cancelled     StatusGroup `json:"cancelled"`
+	Skipped       StatusGroup `json:"skipped"`
+	FailingChecks []struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	} `json:"failing_checks"`
 }
 
 // RenderSummary produces the JSON notification body for a commit's CI state.
 // Pure and deterministic: names within each group are sorted.
-func RenderSummary(s State) (string, error) {
+func RenderSummary(s State, head string) (string, error) {
+	_, raw, err := renderSummary(s, head)
+	return raw, err
+}
+
+func renderSummary(s State, head string) (Summary, string, error) {
 	groups := map[category][]string{}
 	for name, c := range s.Checks {
 		cat := classify(c)
 		groups[cat] = append(groups[cat], name)
 	}
+	failed := group(groups[catFailed])
+	failingChecks := make([]struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}, len(failed.Checks))
+	for i, name := range failed.Checks {
+		failingChecks[i] = struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		}{Name: name, URL: s.Checks[name].URL}
+	}
 	sum := Summary{
-		Kind:    "ci_summary",
-		Repo:    s.Owner + "/" + s.Repo,
-		Number:  s.Number,
-		SHA:     s.SHA,
-		Failed:  group(groups[catFailed]),
-		Running: group(groups[catRunning]),
-		Passed:  group(groups[catPassed]),
-		Queued:  group(groups[catQueued]),
-		Skipped: group(groups[catSkipped]),
+		Kind:          "ci_summary",
+		Repo:          s.Owner + "/" + s.Repo,
+		Number:        s.Number,
+		SHA:           s.SHA,
+		IsHead:        s.SHA == head,
+		Failed:        failed,
+		Running:       group(groups[catRunning]),
+		Passed:        group(groups[catPassed]),
+		Queued:        group(groups[catQueued]),
+		Cancelled:     group(groups[catCancelled]),
+		Skipped:       group(groups[catSkipped]),
+		FailingChecks: failingChecks,
 	}
 	buf, err := json.Marshal(sum)
 	if err != nil {
-		return "", err
+		return Summary{}, "", err
 	}
-	return string(buf), nil
+	return sum, string(buf), nil
 }
 
 // group builds a StatusGroup from a name list: sorted names, explicit count, and

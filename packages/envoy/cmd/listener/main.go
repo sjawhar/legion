@@ -360,9 +360,10 @@ func main() {
 	})
 	// CI recorder folds check_run events into cistore behind the same readiness
 	// gate (deps is non-nil once init completes, so ciStore is set).
-	ciRecorder := webhook.CIRecorderFunc(func(owner, repo, number, sha, checkName, status, conclusion string) error {
-		return deps.Load().ciStore.Record(owner, repo, number, sha, checkName, status, conclusion)
-	})
+	ciRecorder := webhook.CIRecorderFuncs{
+		RecordFunc:     deps.Load().ciStore.Record,
+		RecordHeadFunc: deps.Load().ciStore.RecordHead,
+	}
 	if webhookCfg.GitHub != nil {
 		mux.Handle("/webhook/github", readinessGate(
 			func() bool { return deps.Load() != nil },

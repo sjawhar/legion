@@ -2,8 +2,12 @@ package cistore
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
@@ -47,15 +51,23 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		if now-st.LastEventAt < debounce.Milliseconds() {
 			continue // still within the quiet window; let more checks accumulate
 		}
-		h := st.Hash()
-		if h == st.LastEmitHash {
-			continue // nothing changed since the last emit
+		head, knownHead := store.Head(st.Owner, st.Repo, st.Number)
+		if !knownHead {
+			head = st.SHA // states recorded before head tracking are treated as current
 		}
-		text, err := RenderSummary(st)
+		sum, text, err := renderSummary(st, head)
 		if err != nil {
 			logger.Error("ci summary render failed", slog.String("error", err.Error()))
 			continue
 		}
+		if knownHead && !sum.IsHead {
+			continue
+		}
+		h := st.Hash()
+		if h == st.LastEmitHash {
+			continue // nothing changed since the last emit
+		}
+		key := Key(st.Owner, st.Repo, st.Number, st.SHA)
 		env := contracts.Envelope{
 			EventID:        id.New(),
 			Source:         "github",
@@ -63,7 +75,8 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			Topic:          contracts.GithubSubject(st.Owner, st.Repo, "pr."+st.Number+".ci"),
 			DedupeKey:      "github.ci." + st.Owner + "/" + st.Repo + ".pr." + st.Number + "." + st.SHA + "." + h,
 			IssuedAt:       contracts.NowMillis(),
-			PayloadSummary: text,
+			PayloadSummary: ciPayloadSummary(sum),
+			Payload:        text,
 			TraceID:        id.New(),
 		}
 		if err := env.Validate(); err != nil {
@@ -75,7 +88,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		// which is acceptable for a status summary — the next check event advances
 		// the hash and re-opens emission. MarkEmitted re-validates hash + debounce
 		// against fresh KV, so a stale/premature summary can never win the CAS.
-		ok, err := store.MarkEmitted(Key(st.Owner, st.Repo, st.Number, st.SHA), h, debounce)
+		ok, err := store.MarkEmitted(key, h, debounce)
 		if err != nil {
 			logger.Warn("ci summary mark-emitted failed", slog.String("error", err.Error()))
 			continue
@@ -92,6 +105,84 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 				slog.String("sha", st.SHA),
 				slog.String("hash", h),
 			)
+			continue
+		}
+		if sum.Running.Count != 0 || sum.Queued.Count != 0 || len(st.Checks) == 0 {
+			continue
+		}
+
+		settled := sum
+		settled.Kind = "checks_settled"
+		payload, err := json.Marshal(settled)
+		if err != nil {
+			logger.Error("checks settled payload failed", slog.String("error", err.Error()))
+			continue
+		}
+		settledEnv := contracts.Envelope{
+			EventID:        id.New(),
+			Source:         "github",
+			SourceEventID:  id.New(),
+			Topic:          contracts.GithubSubject(st.Owner, st.Repo, "pr."+st.Number+".checks.settled"),
+			DedupeKey:      "github.checks-settled." + st.Owner + "/" + st.Repo + ".pr." + st.Number + "." + st.SHA,
+			IssuedAt:       contracts.NowMillis(),
+			PayloadSummary: settledPayloadSummary(settled),
+			Payload:        string(payload),
+			TraceID:        id.New(),
+		}
+		if err := settledEnv.Validate(); err != nil {
+			logger.Error("checks settled invalid envelope", slog.String("error", err.Error()))
+			continue
+		}
+		ok, err = store.MarkSettled(key)
+		if err != nil {
+			logger.Warn("checks settled mark-emitted failed", slog.String("error", err.Error()))
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if err := pub.Publish(settledEnv); err != nil {
+			logger.Warn("checks settled publish failed (dropped)",
+				slog.String("error", err.Error()),
+				slog.String("topic", settledEnv.Topic),
+				slog.String("sha", st.SHA),
+			)
 		}
 	}
+}
+
+func ciPayloadSummary(sum Summary) string {
+	return payloadSummary(fmt.Sprintf(
+		"CI for %s#%s @ %s: %d passed, %d failed, %d running, %d queued, %d cancelled, %d skipped",
+		sum.Repo, sum.Number, sha7(sum.SHA), sum.Passed.Count, sum.Failed.Count,
+		sum.Running.Count, sum.Queued.Count, sum.Cancelled.Count, sum.Skipped.Count,
+	))
+}
+
+func settledPayloadSummary(sum Summary) string {
+	summary := fmt.Sprintf(
+		"checks settled on %s#%s @ %s: %d passed, %d failed, %d cancelled, %d skipped",
+		sum.Repo, sum.Number, sha7(sum.SHA), sum.Passed.Count, sum.Failed.Count,
+		sum.Cancelled.Count, sum.Skipped.Count,
+	)
+	if sum.Failed.Count > 0 {
+		summary += "; failing: " + strings.Join(sum.Failed.Checks, ", ")
+	}
+	return payloadSummary(summary)
+}
+
+func sha7(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+func payloadSummary(summary string) string {
+	summary = strings.NewReplacer("\r", " ", "\n", " ").Replace(summary)
+	if utf8.RuneCountInString(summary) <= 160 {
+		return summary
+	}
+	runes := []rune(summary)
+	return string(runes[:159]) + "…"
 }

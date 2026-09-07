@@ -16,8 +16,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,8 @@ const recordBackoffCap = 50 * time.Millisecond
 
 // Check is the last-known state of a single named check for a commit.
 type Check struct {
+	CheckRunID string `json:"check_run_id"`
+	URL        string `json:"url"`
 	Status     string `json:"status"`     // queued|in_progress|completed
 	Conclusion string `json:"conclusion"` // success|failure|... ("" until completed)
 	UpdatedAt  int64  `json:"updated_at"`
@@ -50,13 +53,14 @@ type Check struct {
 
 // State is the aggregated set of checks for one (owner, repo, PR number, head SHA).
 type State struct {
-	Owner        string           `json:"owner"`
-	Repo         string           `json:"repo"`
-	Number       string           `json:"number"`
-	SHA          string           `json:"sha"`
-	Checks       map[string]Check `json:"checks"`
-	LastEventAt  int64            `json:"last_event_at"`
-	LastEmitHash string           `json:"last_emit_hash"`
+	Owner          string           `json:"owner"`
+	Repo           string           `json:"repo"`
+	Number         string           `json:"number"`
+	SHA            string           `json:"sha"`
+	Checks         map[string]Check `json:"checks"`
+	LastEventAt    int64            `json:"last_event_at"`
+	LastEmitHash   string           `json:"last_emit_hash"`
+	SettledEmitted bool             `json:"settled_emitted"`
 }
 
 // keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
@@ -75,6 +79,11 @@ func Key(owner, repo, number, sha string) string {
 		keyCleaner.Replace(repo) + ".pr" +
 		keyCleaner.Replace(number) + "." +
 		keyCleaner.Replace(sha)
+}
+
+func headKey(owner, repo, number string) string {
+	return "head." + keyCleaner.Replace(owner) + "." +
+		keyCleaner.Replace(repo) + "." + keyCleaner.Replace(number)
 }
 
 // Hash is a stable, order-independent fingerprint of the check set
@@ -100,6 +109,7 @@ type Store struct {
 	kv        nats.KeyValue
 	mu        sync.RWMutex
 	cache     map[string]State
+	heads     map[string]string
 	readyCh   chan struct{}
 	readyOnce sync.Once
 	// watchErr is non-nil once the WatchAll watcher fails to start or its update
@@ -159,7 +169,7 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{kv: kv, cache: map[string]State{}, readyCh: make(chan struct{})}
+	s := &Store{kv: kv, cache: map[string]State{}, heads: map[string]string{}, readyCh: make(chan struct{})}
 	go s.watch()
 	return s, nil
 }
@@ -189,16 +199,40 @@ func (s *Store) watch() {
 			s.signalReady()
 			continue
 		}
+
+		key := entry.Key()
+		var malformed error
 		s.mu.Lock()
-		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-			delete(s.cache, entry.Key())
-		} else {
+		switch {
+		case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
+			delete(s.cache, key)
+			delete(s.heads, key)
+		case strings.HasPrefix(key, "head."):
+			sha := string(entry.Value())
+			if sha == "" {
+				delete(s.heads, key)
+				malformed = errors.New("empty head SHA")
+			} else {
+				s.heads[key] = sha
+			}
+		default:
 			var st State
-			if err := json.Unmarshal(entry.Value(), &st); err == nil {
-				s.cache[entry.Key()] = st
+			if err := json.Unmarshal(entry.Value(), &st); err != nil {
+				delete(s.cache, key)
+				malformed = err
+			} else {
+				s.cache[key] = st
 			}
 		}
 		s.mu.Unlock()
+
+		if malformed != nil {
+			slog.Warn("cistore watch evicted malformed value",
+				slog.String("key", key),
+				slog.Uint64("revision", entry.Revision()),
+				slog.String("error", malformed.Error()),
+			)
+		}
 	}
 	// Updates() closed unexpectedly (e.g. conn lost). The cache will now go stale
 	// with no updates; surface it via Ping so the self-health watchdog restarts
@@ -238,7 +272,7 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 // Record folds one check observation into the per-commit state via CAS.
 // It retries on revision conflict so concurrent writers (or replicas) racing on
 // the same commit never lose an update.
-func (s *Store) Record(owner, repo, number, sha, checkName, status, conclusion string) error {
+func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error {
 	key := Key(owner, repo, number, sha)
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
@@ -259,8 +293,17 @@ func (s *Store) Record(owner, repo, number, sha, checkName, status, conclusion s
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
+		if current, ok := st.Checks[checkName]; ok && checkRunIDIsOlder(checkRunID, current.CheckRunID) {
+			return nil
+		}
 		now := time.Now().UnixMilli()
-		st.Checks[checkName] = Check{Status: status, Conclusion: conclusion, UpdatedAt: now}
+		st.Checks[checkName] = Check{
+			CheckRunID: checkRunID,
+			URL:        url,
+			Status:     status,
+			Conclusion: conclusion,
+			UpdatedAt:  now,
+		}
 		st.LastEventAt = now
 		buf, err := json.Marshal(st)
 		if err != nil {
@@ -289,13 +332,36 @@ func (s *Store) Record(owner, repo, number, sha, checkName, status, conclusion s
 	}
 }
 
+func checkRunIDIsOlder(incoming, stored string) bool {
+	incomingID, err := strconv.ParseUint(incoming, 10, 64)
+	if err != nil {
+		return false
+	}
+	storedID, err := strconv.ParseUint(stored, 10, 64)
+	return err == nil && incomingID < storedID
+}
+
+// RecordHead persists the current PR head SHA. The WatchAll cache serves Head.
+func (s *Store) RecordHead(owner, repo, number, sha string) error {
+	_, err := s.kv.Put(headKey(owner, repo, number), []byte(sha))
+	return err
+}
+
+// Head returns the current PR head SHA when one has been observed.
+func (s *Store) Head(owner, repo, number string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	sha, ok := s.heads[headKey(owner, repo, number)]
+	return sha, ok
+}
+
 // casBackoff returns a full-jitter, capped-exponential backoff for CAS retries.
 func casBackoff(attempt int) time.Duration {
 	base := time.Millisecond << attempt
 	if base <= 0 || base > recordBackoffCap {
 		base = recordBackoffCap
 	}
-	return time.Duration(rand.Int63n(int64(base) + 1))
+	return time.Duration(rand.Int64N(int64(base) + 1))
 }
 
 // isCASConflict reports whether err is a compare-and-swap revision conflict
@@ -358,6 +424,35 @@ func (s *Store) MarkEmitted(key, hash string, debounce time.Duration) (bool, err
 		return false, nil // a later event reopened the debounce window; too early
 	}
 	st.LastEmitHash = hash
+	buf, err := json.Marshal(st)
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.kv.Update(key, buf, entry.Revision()); err != nil {
+		if isCASConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// MarkSettled claims the right to emit checks.settled for a commit. Like
+// MarkEmitted, it updates the durable state with a compare-and-swap so multiple
+// listeners cannot publish the settled envelope more than once.
+func (s *Store) MarkSettled(key string) (bool, error) {
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	var st State
+	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+		return false, err
+	}
+	if st.SettledEmitted {
+		return false, nil
+	}
+	st.SettledEmitted = true
 	buf, err := json.Marshal(st)
 	if err != nil {
 		return false, err

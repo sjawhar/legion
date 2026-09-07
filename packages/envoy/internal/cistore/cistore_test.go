@@ -68,11 +68,11 @@ func TestRecordAccumulatesChecks(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("sjawhar", "legion", "42", "abc123", "build", "completed", "success"); err != nil {
+	if err := s.Record("sjawhar", "legion", "42", "abc123", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record build: %v", err)
 	}
 	before := getState(t, s, "sjawhar", "legion", "42", "abc123")
-	if err := s.Record("sjawhar", "legion", "42", "abc123", "test", "in_progress", ""); err != nil {
+	if err := s.Record("sjawhar", "legion", "42", "abc123", "test", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record test: %v", err)
 	}
 	st := getState(t, s, "sjawhar", "legion", "42", "abc123")
@@ -107,7 +107,7 @@ func TestRecordConcurrentNoLostUpdate(t *testing.T) {
 		name := "check-" + string(rune('a'+i))
 		go func() {
 			defer wg.Done()
-			errs <- s.Record("o", "r", "1", "sha", name, "completed", "success")
+			errs <- s.Record("o", "r", "1", "sha", name, "", "", "completed", "success")
 		}()
 	}
 	wg.Wait()
@@ -150,7 +150,7 @@ func TestListReflectsRecords(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("o", "r", "7", "sha7", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "7", "sha7", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -172,7 +172,7 @@ func TestMarkEmittedCAS(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("o", "r", "5", "sha5", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "5", "sha5", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	key := Key("o", "r", "5", "sha5")
@@ -194,7 +194,7 @@ func TestMarkEmittedCAS(t *testing.T) {
 		t.Fatalf("re-marking the same hash should return false (already emitted)")
 	}
 	// A new hash after a state change emits again.
-	if err := s.Record("o", "r", "5", "sha5", "test", "completed", "failure"); err != nil {
+	if err := s.Record("o", "r", "5", "sha5", "test", "", "", "completed", "failure"); err != nil {
 		t.Fatalf("record 2: %v", err)
 	}
 	h2 := getState(t, s, "o", "r", "5", "sha5").Hash()
@@ -218,14 +218,14 @@ func TestMarkEmittedRejectsStaleHash(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("o", "r", "8", "sha8", "build", "in_progress", ""); err != nil {
+	if err := s.Record("o", "r", "8", "sha8", "build", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record build: %v", err)
 	}
 	key := Key("o", "r", "8", "sha8")
 	stale := getState(t, s, "o", "r", "8", "sha8").Hash()
 
 	// A new check lands after `stale` was computed but before MarkEmitted.
-	if err := s.Record("o", "r", "8", "sha8", "test", "in_progress", ""); err != nil {
+	if err := s.Record("o", "r", "8", "sha8", "test", "", "", "in_progress", ""); err != nil {
 		t.Fatalf("record test: %v", err)
 	}
 	ok, err := s.MarkEmitted(key, stale, 0)
@@ -248,13 +248,13 @@ func TestMarkEmittedRespectsDebounceReopen(t *testing.T) {
 	defer cleanup()
 	s := openStore(t, conn)
 
-	if err := s.Record("o", "r", "9", "sha9", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "9", "sha9", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	key := Key("o", "r", "9", "sha9")
 	h := getState(t, s, "o", "r", "9", "sha9").Hash()
 
-	if err := s.Record("o", "r", "9", "sha9", "build", "completed", "success"); err != nil {
+	if err := s.Record("o", "r", "9", "sha9", "build", "", "", "completed", "success"); err != nil {
 		t.Fatalf("re-record: %v", err)
 	}
 	ok, err := s.MarkEmitted(key, h, time.Hour)
@@ -263,5 +263,88 @@ func TestMarkEmittedRespectsDebounceReopen(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("MarkEmitted must defer while within the debounce window")
+	}
+}
+
+func TestRecordIgnoresStaleCheckRunID(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := s.Record(
+		"example-org", "example-repo", "42", "abcdef1234567",
+		"unit-tests", "200", "https://example-host/checks/200", "completed", "failure",
+	); err != nil {
+		t.Fatalf("record latest attempt: %v", err)
+	}
+	if err := s.Record(
+		"example-org", "example-repo", "42", "abcdef1234567",
+		"unit-tests", "199", "https://example-host/checks/199", "in_progress", "",
+	); err != nil {
+		t.Fatalf("record stale attempt: %v", err)
+	}
+
+	check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["unit-tests"]
+	if check.CheckRunID != "200" || check.URL != "https://example-host/checks/200" ||
+		check.Status != "completed" || check.Conclusion != "failure" {
+		t.Fatalf("stale attempt overwrote latest check: %+v", check)
+	}
+}
+
+func TestRecordHeadAndHead(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+
+	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		head, ok := s.Head("example-org", "example-repo", "42")
+		if ok {
+			if head != "abcdef1234567" {
+				t.Fatalf("head = %q, want abcdef1234567", head)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("head never reached watch cache")
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+}
+
+func TestWatchEvictsMalformedState(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567"
+	)
+
+	if err := s.Record(owner, repo, number, sha, "build", "300", "https://example-host/checks/300", "completed", "success"); err != nil {
+		t.Fatalf("record valid state: %v", err)
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	if _, err := s.kv.Put(Key(owner, repo, number, sha), []byte("{")); err != nil {
+		t.Fatalf("put malformed state: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if len(s.List()) == 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("malformed state remained in cache: %+v", s.List())
+		case <-time.After(15 * time.Millisecond):
+		}
 	}
 }

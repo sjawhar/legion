@@ -23,7 +23,7 @@ import (
 
 // TestEndToEndCheckRunToSummary drives the fully-wired path exactly as the
 // listener wires it: a signed check_run webhook hits the real GitHubHandler,
-// which records into a real cistore (via CIRecorderFunc) instead of publishing;
+// which records into a real cistore via CIRecorderFuncs instead of publishing;
 // the real StartSummaryLoop then debounces and publishes one rendered summary to
 // pr.<n>.ci, which a live NATS subscriber receives. A second wave produces a
 // second, grown summary; a quiet period produces none.
@@ -56,7 +56,7 @@ func TestEndToEndCheckRunToSummary(t *testing.T) {
 	}
 
 	const secret = "s"
-	ci := webhook.CIRecorderFunc(store.Record)
+	ci := webhook.CIRecorderFuncs{RecordFunc: store.Record, RecordHeadFunc: store.RecordHead}
 	handler := webhook.GitHubHandler(secret, "@legion", "", client, ci)
 
 	loopCtx, loopCancel := context.WithCancel(ctx)
@@ -120,8 +120,8 @@ func TestEndToEndCheckRunToSummary(t *testing.T) {
 		t.Fatalf("wave-2 envelope not JSON: %v", err)
 	}
 	var sum cistore.Summary
-	if err := json.Unmarshal([]byte(env2.PayloadSummary), &sum); err != nil {
-		t.Fatalf("wave-2 payload_summary not JSON: %v\n%s", err, env2.PayloadSummary)
+	if err := json.Unmarshal([]byte(env2.Payload), &sum); err != nil {
+		t.Fatalf("wave-2 payload not JSON: %v\n%s", err, env2.Payload)
 	}
 	inPassed := false
 	for _, c := range sum.Passed.Checks {
