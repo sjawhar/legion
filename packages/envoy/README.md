@@ -56,6 +56,32 @@ Current secret names:
 - `docs` — architecture, constraints, external repo touchpoints
 - `.envoy` — local execution notes and machine-readable work tracker
 
+## Local end-to-end
+
+Run the reusable local acceptance driver from the repository root:
+
+```bash
+packages/envoy/scripts/e2e-local.sh
+```
+
+It builds `cmd/listener`, starts a throwaway `nats:2.10-alpine` container, and
+submits signed public GitHub fixtures plus a direct agent message. The driver
+asserts the settled pull-request checks topic, lifecycle and comment topics,
+PR-less workflow behavior, absence of obsolete GitHub topics, and direct
+delivery metadata.
+
+Evidence remains in `packages/envoy/out/e2e/` after the run:
+
+- `envelopes.jsonl` captures the raw NATS frames.
+- `session-prompts.jsonl` captures raw fake-session `prompt_async` bodies.
+- `rendered-ts.txt` is every frame rendered by
+  `@legion/envoy-client`'s `renderInbound`.
+- `rendered-go.txt` is the equivalent Go `Deliverer.Text` output.
+
+Set `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` when the default local
+ports are occupied. The driver removes only its literal `envoy-e2e-nats`
+container.
+
 ## Contract source of truth
 
 The authoritative event contract lives in `packages/contracts/`.

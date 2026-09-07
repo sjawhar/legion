@@ -1,0 +1,17 @@
+{
+  "ref": "refs/heads/main",
+  "before": "4444444444444444444444444444444444444444",
+  "after": "5555555555555555555555555555555555555555",
+  "compare": "https://example.invalid/example-org/example-repo/compare/4444444...5555555",
+  "head_commit": {
+    "message": "Exercise the local acceptance driver"
+  },
+  "commits": [{ "id": "5555555555555555555555555555555555555555" }],
+  "pusher": { "name": "octocat" },
+  "sender": { "login": "octocat", "type": "User" },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "owner": { "login": "example-org" }
+  }
+}
