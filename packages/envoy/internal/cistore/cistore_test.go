@@ -63,22 +63,6 @@ func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url,
 	})
 }
 
-func recordCheckWithSuite(s *Store, owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
-	return s.Record(contracts.CIObservation{
-		Owner:      owner,
-		Repo:       repo,
-		Number:     number,
-		SHA:        sha,
-		CheckName:  checkName,
-		SuiteID:    suiteID,
-		CheckRunID: checkRunID,
-		URL:        url,
-		Status:     status,
-		Conclusion: conclusion,
-		ObservedAt: observedAt,
-	})
-}
-
 func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
 	return s.RecordSuite(contracts.CIObservation{
 		Owner:      owner,

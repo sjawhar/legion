@@ -736,7 +736,6 @@ func TestGithubCIObservations(t *testing.T) {
 				"status":        "completed",
 				"conclusion":    "failure",
 				"head_sha":      "deadbeef",
-				"check_suite":   map[string]any{"id": 9001},
 				"app":           map[string]any{"id": float64(12345)},
 				"pull_requests": prs,
 			},
@@ -750,7 +749,7 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 		o := obs[0]
 		if o.Owner != "sjawhar" || o.Repo != "legion" || o.Number != "42" || o.SHA != "deadbeef" ||
-			o.AppID != "12345" || o.CheckName != "unit-tests" || o.SuiteID != "9001" ||
+			o.AppID != "12345" || o.CheckName != "unit-tests" ||
 			o.Status != "completed" || o.Conclusion != "failure" {
 			t.Fatalf("unexpected observation: %+v", o)
 		}

@@ -80,7 +80,7 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 }
 
 // CIObservation is a per-PR check_run or check_suite fact for the CI state
-// aggregator. A check run carries its parent SuiteID when GitHub provides it.
+// aggregator.
 type CIObservation struct {
 	Owner      string
 	Repo       string
@@ -129,7 +129,6 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 	if event == "check_run" {
 		obs.CheckName = nestedString(body, key, "name")
 		obs.CheckRunID = nestedNumberString(body, key, "id")
-		obs.SuiteID = nestedNumberString(body, key, "check_suite", "id")
 		obs.URL = nestedString(body, key, "html_url")
 		obs.ObservedAt = nestedString(body, key, "completed_at")
 		if obs.ObservedAt == "" {

@@ -504,10 +504,10 @@ func TestSummaryTickKeepsLatestCheckRunAcrossSuites(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record passing suite: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "failure", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "failure", ""); err != nil {
 		t.Fatalf("record failing check: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "802", "https://example.test/802", "completed", "success", ""); err != nil {
 		t.Fatalf("record passing check: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)
@@ -646,10 +646,10 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-a", "completed", "success", "1", ""); err != nil {
 		t.Fatalf("record first suite: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "success", ""); err != nil {
 		t.Fatalf("record first test: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "lint", "suite-a", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "802", "https://example.test/802", "completed", "success", ""); err != nil {
 		t.Fatalf("record first lint: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 2)
@@ -674,10 +674,10 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "in_progress", "", "1", ""); err != nil {
 		t.Fatalf("record retargeted suite: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "901", "https://example.test/901", "in_progress", "", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "901", "https://example.test/901", "in_progress", "", ""); err != nil {
 		t.Fatalf("record retargeted test: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "lint", "suite-b", "902", "https://example.test/902", "in_progress", "", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "902", "https://example.test/902", "in_progress", "", ""); err != nil {
 		t.Fatalf("record retargeted lint: %v", err)
 	}
 	rearmed := getState(t, store, owner, repo, number, sha)
@@ -693,10 +693,10 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 		t.Fatalf("retargeted in-progress suite published %d settlements, want 1", got)
 	}
 
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-b", "901", "https://example.test/901", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "901", "https://example.test/901", "completed", "success", ""); err != nil {
 		t.Fatalf("complete retargeted test: %v", err)
 	}
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "lint", "suite-b", "902", "https://example.test/902", "completed", "success", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "lint", "902", "https://example.test/902", "completed", "success", ""); err != nil {
 		t.Fatalf("complete retargeted lint: %v", err)
 	}
 	if err := recordSuite(store, owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
@@ -722,7 +722,7 @@ func TestSummaryTickIgnoresCancelledRunFromRetargetedSuite(t *testing.T) {
 		t.Fatalf("re-settlement latest_check_run_id = %d, want greater than %d", summary.LatestCheckRunID, initialSummary.LatestCheckRunID)
 	}
 
-	if err := recordCheckWithSuite(store, owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "cancelled", ""); err != nil {
+	if err := recordCheck(store, owner, repo, number, sha, "test", "801", "https://example.test/801", "completed", "cancelled", ""); err != nil {
 		t.Fatalf("record late cancelled test: %v", err)
 	}
 	afterLate := getState(t, store, owner, repo, number, sha)

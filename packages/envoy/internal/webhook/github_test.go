@@ -399,9 +399,6 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 		if rec.calls[0].Number != "42" || rec.calls[1].Number != "43" {
 			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].Number, rec.calls[1].Number)
 		}
-		if rec.calls[0].SuiteID != "900" || rec.calls[1].SuiteID != "900" {
-			t.Fatalf("recorded suite IDs = %q, %q", rec.calls[0].SuiteID, rec.calls[1].SuiteID)
-		}
 		if rec.calls[0].ObservedAt != "2026-09-07T03:00:00Z" || rec.calls[1].ObservedAt != "2026-09-07T03:00:00Z" {
 			t.Fatalf("check observation timestamps = %q, %q", rec.calls[0].ObservedAt, rec.calls[1].ObservedAt)
 		}
