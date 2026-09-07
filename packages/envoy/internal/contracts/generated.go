@@ -95,6 +95,8 @@ func (e Envelope) Validate() error {
 	return nil
 }
 
+// UnmarshalJSON decodes an Envelope.
+// Do not embed Envelope in a struct that is itself json-unmarshalled: the promoted UnmarshalJSON skips the outer fields. Compose it as a named field instead.
 func (e *Envelope) UnmarshalJSON(data []byte) error {
 	type envelopeAlias Envelope
 	var decoded envelopeAlias

@@ -176,7 +176,9 @@ function renderOptionalStringUnmarshal(keys: string[]) {
         `\tif wire.${name(key)} != nil {\n\t\te.${name(key)} = *wire.${name(key)}\n\t\te.${emptyFlag(key)} = *wire.${name(key)} == ""\n\t}`
     )
     .join("\n");
-  return `func (e *Envelope) UnmarshalJSON(data []byte) error {
+  return `// UnmarshalJSON decodes an Envelope.
+// Do not embed Envelope in a struct that is itself json-unmarshalled: the promoted UnmarshalJSON skips the outer fields. Compose it as a named field instead.
+func (e *Envelope) UnmarshalJSON(data []byte) error {
 \ttype envelopeAlias Envelope
 \tvar decoded envelopeAlias
 \tvar wire struct {
