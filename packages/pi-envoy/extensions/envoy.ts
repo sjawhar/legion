@@ -147,13 +147,6 @@ export default function envoyExtension(pi: PiApi): void {
     const rendered = renderInbound(raw, sessionID, subject);
     const dedupeKey = rendered.envelope?.dedupe_key;
     const duplicate = dedupeKey !== undefined && dedupeKeys.has(dedupeKey);
-    if (!duplicate && dedupeKey !== undefined) {
-      dedupeKeys.add(dedupeKey);
-      if (dedupeKeys.size > 1000) {
-        const oldest = dedupeKeys.values().next();
-        if (!oldest.done) dedupeKeys.delete(oldest.value);
-      }
-    }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
@@ -168,10 +161,22 @@ export default function envoyExtension(pi: PiApi): void {
         });
         if (inbox.length > 50) inbox.pop();
       }
-      pi.sendMessage(
-        { customType: "envoy-message", content: rendered.content, display: true },
-        { deliverAs: "steer", triggerTurn: true }
-      );
+      try {
+        pi.sendMessage(
+          { customType: "envoy-message", content: rendered.content, display: true },
+          { deliverAs: "steer", triggerTurn: true }
+        );
+      } catch (error) {
+        console.warn(`[envoy] failed to inject envelope ${envelope?.event_id ?? "unknown"}`, error);
+        throw error;
+      }
+      if (dedupeKey !== undefined) {
+        dedupeKeys.add(dedupeKey);
+        if (dedupeKeys.size > 1000) {
+          const oldest = dedupeKeys.values().next();
+          if (!oldest.done) dedupeKeys.delete(oldest.value);
+        }
+      }
     }
     if (reply !== "" && subject === agentSubject(sessionID)) {
       (await ensureConnection()).publish(reply);
@@ -219,9 +224,8 @@ export default function envoyExtension(pi: PiApi): void {
         try {
           await deliver(message.subject, codec.decode(message.data), message.reply ?? "");
         } catch {
-          // A single failed injection (e.g. sendMessage during compaction)
-          // must not tear down the subscription; drop the message and keep
-          // pumping.
+          // A failed injection is logged by deliver and must not tear down the
+          // subscription; a redelivery can inject it after the host recovers.
         }
       }
     } catch {

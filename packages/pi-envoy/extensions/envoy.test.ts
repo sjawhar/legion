@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -971,15 +971,15 @@ describe("envoy OMP extension", () => {
       summary: "note to self",
     });
   });
-  test("records and skips a dispatch echo for this session", async () => {
+  test("skips a dispatch echo without suppressing a later non-echo envelope", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
     const fixture = createPi();
-    const delivered = Promise.withResolvers<void>();
+    const afterEcho = Promise.withResolvers<void>();
     envoyExtension({
       ...fixture.pi,
       sendMessage: (message, options) => {
         fixture.pi.sendMessage(message, options);
-        delivered.resolve();
+        if (message.content.includes("new message")) afterEcho.resolve();
       },
     });
     await fixture.handlers.get("session_start")?.({}, sessionContext());
@@ -1024,10 +1024,11 @@ describe("envoy OMP extension", () => {
         trace_id: "trace-after-dispatch-echo",
       })
     );
-    await delivered.promise;
+    await afterEcho.promise;
 
-    expect(fixture.messages).toHaveLength(1);
-    expect(fixture.messages[0]).toContain("new message");
+    expect(fixture.messages).toHaveLength(2);
+    expect(fixture.messages[0]).toContain("Keep the thread open?");
+    expect(fixture.messages[1]).toContain("new message");
   });
 
   test("never exposes a malformed envelope frame", async () => {
@@ -1883,39 +1884,103 @@ describe("envoy OMP extension", () => {
     expect(fixture.messages.some((m) => m.includes("delivered after a genuine iterator death"))).toBe(true);
   });
 
-  test("a failed message injection does not tear down the subscription", async () => {
+  test("permits redelivery after a failed injection and warns with the envelope id", async () => {
+    // Query isolation gives this stateful extension its own NATS subscription.
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-throw");
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-retry");
     const fixture = createPi();
     let throwNext = true;
+    const failedInjection = Promise.withResolvers<void>();
+    const followingDelivery = Promise.withResolvers<void>();
     const delivered: string[] = [];
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
     const pi: TestPi = {
       ...fixture.pi,
       sendMessage: (message) => {
         if (throwNext) {
           throwNext = false;
+          failedInjection.resolve();
           throw new Error("injection rejected mid-compaction");
         }
         delivered.push(message.content);
+        if (message.content.includes("the following message proves the pump continued")) {
+          followingDelivery.resolve();
+        }
       },
     };
 
-    envoyExtension(pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pump"));
-    const controls = natsState.controls.get("notifications.agent.ses_pump");
-    expect(controls).toBeDefined();
+    try {
+      envoyExtension(pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pump"));
+      const controls = natsState.controls.get("notifications.agent.ses_pump");
+      expect(controls).toBeDefined();
 
-    controls?.push(
-      forwardedRoleEnvelope("legion-controller", "first message hits the throwing window", "throwing-first")
-    );
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    controls?.push(
-      forwardedRoleEnvelope("legion-controller", "second message must still deliver", "throwing-second")
-    );
-    await new Promise((resolve) => setTimeout(resolve, 10));
+      const envelope = forwardedRoleEnvelope(
+        "legion-controller",
+        "the redelivery repairs the failed injection",
+        "retry-after-failure"
+      );
+      controls?.push(envelope);
+      await failedInjection.promise;
+      controls?.push(envelope);
+      controls?.push(
+        forwardedRoleEnvelope(
+          "legion-controller",
+          "the following message proves the pump continued",
+          "after-retry"
+        )
+      );
+      await followingDelivery.promise;
 
-    expect(delivered.length).toBe(1);
-    expect(delivered[0]).toContain("second message must still deliver");
+      expect(delivered).toHaveLength(2);
+      expect(delivered[0]).toContain("the redelivery repairs the failed injection");
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("evt-retry-after-failure"),
+        expect.any(Error)
+      );
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  test("deduplicates a redelivery after successful injection", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-dedupe");
+    const fixture = createPi();
+    const deliveryAfterDuplicate = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (message.content.includes("the next unique delivery proves the duplicate was skipped")) {
+          deliveryAfterDuplicate.resolve();
+        }
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_dedupe"));
+    const controls = natsState.controls.get("notifications.agent.ses_dedupe");
+    if (controls === undefined) throw new Error("agent subject was not subscribed");
+
+    const envelope = forwardedRoleEnvelope(
+      "legion-controller",
+      "only the first delivery injects",
+      "dedupe-after-success"
+    );
+    controls.push(envelope);
+    controls.push(envelope);
+    controls.push(
+      forwardedRoleEnvelope(
+        "legion-controller",
+        "the next unique delivery proves the duplicate was skipped",
+        "after-dedupe"
+      )
+    );
+    await deliveryAfterDuplicate.promise;
+
+    expect(fixture.messages).toHaveLength(2);
+    expect(fixture.messages[0]).toContain("only the first delivery injects");
   });
 
   test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
