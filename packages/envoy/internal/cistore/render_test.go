@@ -54,7 +54,7 @@ func TestRenderSummaryJSON(t *testing.T) {
 	}
 	_, sum := renderOrFail(t, s, s.SHA)
 
-	if sum.Kind != "ci_summary" || sum.Repo != "sjawhar/legion" || sum.Number != "13728" || sum.SHA != "a1b2c3d9999999" {
+	if sum.Kind != "checks" || sum.Repo != "sjawhar/legion" || sum.Number != "13728" || sum.SHA != "a1b2c3d9999999" {
 		t.Fatalf("identity wrong: %+v", sum)
 	}
 	assertGroup(t, "failed", sum.Failed, []string{"infra-tests"})
@@ -159,7 +159,7 @@ func TestRenderSummaryCancelledAndHead(t *testing.T) {
 }
 
 // TestRenderSummaryExample prints the JSON for a realistic full CI run so the
-// exact notification shape is visible in test output (go test -run Example -v).
+// exact checks notification shape is visible in test output (go test -run Example -v).
 func TestRenderSummaryExample(t *testing.T) {
 	spec := map[string][2]string{
 		"infra-tests":      {"completed", "failure"},
@@ -179,5 +179,5 @@ func TestRenderSummaryExample(t *testing.T) {
 	raw, _ := renderOrFail(t, State{Owner: "citest", Repo: "citest", Number: "13728", SHA: "a1b2c3d9999999", Checks: mkChecks(spec)}, "a1b2c3d9999999")
 	var pretty bytes.Buffer
 	_ = json.Indent(&pretty, []byte(raw), "", "  ")
-	t.Logf("EXAMPLE ci_summary notification:\n%s", pretty.String())
+	t.Logf("EXAMPLE checks notification:\n%s", pretty.String())
 }

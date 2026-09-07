@@ -44,10 +44,8 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 		return nil
 	}
 	if githubCIEvent(input.Event) {
-		// CI events (check_run/check_suite) are no longer published raw. They fold
-		// into envoy_ci_state via the webhook handler's CIRecorder (see
-		// GithubCIObservations) and are re-emitted as a debounced per-commit summary
-		// on pr.<n>.ci by the listener's summary loop. See internal/cistore.
+		// CI events fold into envoy_ci_state through the webhook handler's
+		// CIRecorder. The listener emits one settled pr.<n>.checks envelope.
 		return nil
 	}
 	if !githubCommentEvent(input.Event) {
@@ -81,8 +79,8 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	return append(mentions, item)
 }
 
-// CIObservation is the per-(PR, check) fact the CI summary aggregator needs,
-// extracted from a check_run webhook.
+// CIObservation is a per-PR check_run or check_suite fact for the CI state
+// aggregator. A suite observation has SuiteID set and no CheckName.
 type CIObservation struct {
 	Owner      string
 	Repo       string
@@ -91,93 +89,61 @@ type CIObservation struct {
 	AppID      string
 	CheckName  string
 	CheckRunID string
+	SuiteID    string
 	URL        string
 	Status     string
 	Conclusion string
 }
 
-// GithubCIObservations extracts one CIObservation per associated PR from a
-// check_run webhook. It returns nil when the event is not a check_run, has no
-// associated PR, or lacks the head SHA / check name needed to summarize.
-//
-// check_suite is intentionally ignored: it is a per-app rollup with no
-// per-check name, so it would add a redundant row next to the check_runs it
-// aggregates. The per-check view is built from check_run only. GitHub Actions
-// emits per-job check_runs, so nothing is lost for the current CI.
+// GithubCIObservations extracts one CI observation per associated PR. Both
+// check runs and suites are folded into durable per-head state; neither emits a
+// raw webhook envelope.
 func GithubCIObservations(event string, body map[string]any) []CIObservation {
-	if event != "check_run" {
+	var key string
+	switch event {
+	case "check_run":
+		key = "check_run"
+	case "check_suite":
+		key = "check_suite"
+	default:
 		return nil
 	}
 	prs := githubCIPullRequests(event, body)
 	if len(prs) == 0 {
 		return nil
 	}
-	sha := nestedString(body, "check_run", "head_sha")
-	name := nestedString(body, "check_run", "name")
-	if sha == "" || name == "" {
+	sha := nestedString(body, key, "head_sha")
+	if sha == "" {
 		return nil
 	}
 	owner, repo := githubRepo(body)
-	appID := nestedNumberString(body, "check_run", "app", "id")
-	checkRunID := nestedNumberString(body, "check_run", "id")
-	url := nestedString(body, "check_run", "html_url")
-	status := nestedString(body, "check_run", "status")
-	conclusion := nestedString(body, "check_run", "conclusion")
+	obs := CIObservation{
+		Owner:      owner,
+		Repo:       repo,
+		SHA:        sha,
+		AppID:      nestedNumberString(body, key, "app", "id"),
+		Status:     nestedString(body, key, "status"),
+		Conclusion: nestedString(body, key, "conclusion"),
+	}
+	if event == "check_run" {
+		obs.CheckName = nestedString(body, key, "name")
+		obs.CheckRunID = nestedNumberString(body, key, "id")
+		obs.URL = nestedString(body, key, "html_url")
+		if obs.CheckName == "" {
+			return nil
+		}
+	} else {
+		obs.SuiteID = nestedNumberString(body, key, "id")
+		if obs.SuiteID == "" {
+			return nil
+		}
+	}
 	out := make([]CIObservation, 0, len(prs))
 	for _, pr := range prs {
-		out = append(out, CIObservation{
-			Owner:      owner,
-			Repo:       repo,
-			Number:     pr,
-			SHA:        sha,
-			AppID:      appID,
-			CheckName:  name,
-			CheckRunID: checkRunID,
-			URL:        url,
-			Status:     status,
-			Conclusion: conclusion,
-		})
+		obs.Number = pr
+		out = append(out, obs)
 	}
 	return out
-}
-
-type GithubCIEnvelopeInput struct {
-	Observation CIObservation
-	Delivery    string
-	EventID     string
-	TraceID     string
-}
-
-// GithubCIEnvelope creates the per-PR raw CI observation envelope that feeds
-// wildcard subscribers and the CI summary reducer.
-func GithubCIEnvelope(input GithubCIEnvelopeInput) (Envelope, error) {
-	observation := input.Observation
-	payload, err := json.Marshal(struct {
-		SHA        string `json:"sha"`
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	}{
-		SHA:        observation.SHA,
-		Name:       observation.CheckName,
-		Status:     observation.Status,
-		Conclusion: observation.Conclusion,
-	})
-	if err != nil {
-		return Envelope{}, err
-	}
-	sha7 := observation.SHA[:min(7, len(observation.SHA))]
-	return Envelope{
-		EventID:        input.EventID,
-		Source:         "github",
-		SourceEventID:  input.Delivery,
-		Topic:          GithubSubject(observation.Owner, observation.Repo, "pr."+observation.Number+".check"),
-		DedupeKey:      "ghck." + input.Delivery + ".pr." + observation.Number + "." + observation.CheckName,
-		IssuedAt:       NowMillis(),
-		PayloadSummary: fmt.Sprintf("check %s: %s/%s @ %s", observation.CheckName, observation.Status, observation.Conclusion, sha7),
-		Payload:        string(payload),
-		TraceID:        input.TraceID,
-	}, nil
 }
 
 func GithubIsBotSender(body map[string]any) bool {

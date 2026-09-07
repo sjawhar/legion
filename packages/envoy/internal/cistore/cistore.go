@@ -1,12 +1,12 @@
-// Package cistore holds the ingest-side aggregation of GitHub check_run events.
-//
-// Each check_run webhook folds into a per-commit State record in a JetStream KV
-// bucket via compare-and-swap, instead of being published raw to pr.<n>.ci. A
-// reconcile ticker (see loop.go) emits one rendered, debounced summary per
-// commit once its checks have been quiet for the debounce window. All
-// coordination state lives in KV so the aggregation is durable, restart-safe,
-// and correct across multiple listener replicas; the only in-memory state is a
-// rebuildable WatchAll read-cache.
+// Package cistore holds the ingest-side aggregation of GitHub CI observations.
+
+// Each check_run and check_suite webhook folds into a per-commit State record
+// in a JetStream KV bucket via compare-and-swap rather than being published
+// raw. A reconcile ticker (see loop.go) emits one checks envelope when the
+// current head is quiet and its recorded CI work is complete. All coordination
+// state lives in KV, so aggregation is durable, restart-safe, and correct
+// across listener replicas; the only in-memory state is a rebuildable WatchAll
+// read-cache.
 package cistore
 
 import (
@@ -51,17 +51,26 @@ type Check struct {
 	UpdatedAt  int64  `json:"updated_at"`
 }
 
-// State is the aggregated set of checks for one (owner, repo, PR number, head SHA).
+// Suite is the last-known state of one GitHub check suite for a commit.
+type Suite struct {
+	ID         string `json:"id"`
+	AppID      string `json:"app_id"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+// State is the aggregated set of checks and suites for one (owner, repo, PR
+// number, head SHA).
 type State struct {
 	Owner          string           `json:"owner"`
 	Repo           string           `json:"repo"`
 	Number         string           `json:"number"`
 	SHA            string           `json:"sha"`
 	Checks         map[string]Check `json:"checks"`
+	Suites         map[string]Suite `json:"suites"`
 	LastEventAt    int64            `json:"last_event_at"`
-	LastEmitHash   string           `json:"last_emit_hash"`
-	CIPublished    *bool            `json:"ci_published,omitempty"`
 	SettledEmitted bool             `json:"settled_emitted"`
+	Resettled      bool             `json:"resettled"`
 }
 
 const headRecordKind = "head"
@@ -102,20 +111,28 @@ func validHeadSHA(sha string) bool {
 	return err == nil
 }
 
-// Hash is a stable, order-independent fingerprint of the check set
-// (name+status+conclusion). It decides whether a newly-observed state is worth
-// emitting: an unchanged hash since the last emit means nothing user-visible
-// changed, so the summary loop stays quiet.
+// Hash is a stable, order-independent fingerprint of the CI state. It includes
+// check-run attempts and check-suite state so a re-run becomes a distinct
+// delivery even when it resolves to the same conclusion.
 func (s State) Hash() string {
-	names := make([]string, 0, len(s.Checks))
-	for n := range s.Checks {
-		names = append(names, n)
-	}
-	sort.Strings(names)
 	h := sha256.New()
-	for _, n := range names {
-		c := s.Checks[n]
-		h.Write([]byte(n + "\x00" + c.Status + "\x00" + c.Conclusion + "\x01"))
+	checkNames := make([]string, 0, len(s.Checks))
+	for name := range s.Checks {
+		checkNames = append(checkNames, name)
+	}
+	sort.Strings(checkNames)
+	for _, name := range checkNames {
+		check := s.Checks[name]
+		h.Write([]byte("check\x00" + name + "\x00" + check.CheckRunID + "\x00" + check.Status + "\x00" + check.Conclusion + "\x01"))
+	}
+	suiteIDs := make([]string, 0, len(s.Suites))
+	for id := range s.Suites {
+		suiteIDs = append(suiteIDs, id)
+	}
+	sort.Strings(suiteIDs)
+	for _, id := range suiteIDs {
+		suite := s.Suites[id]
+		h.Write([]byte("suite\x00" + id + "\x00" + suite.AppID + "\x00" + suite.Status + "\x00" + suite.Conclusion + "\x01"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -295,9 +312,50 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 }
 
 // Record folds one check observation into the per-commit state via CAS.
-// It retries on revision conflict so concurrent writers (or replicas) racing on
-// the same commit never lose an update.
 func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error {
+	return s.update(owner, repo, number, sha, func(st *State) bool {
+		if st.Checks == nil {
+			st.Checks = map[string]Check{}
+		}
+		if current, ok := st.Checks[checkName]; ok && checkRunIDIsOlder(checkRunID, current.CheckRunID) {
+			return false
+		}
+		next := Check{CheckRunID: checkRunID, URL: url, Status: status, Conclusion: conclusion}
+		if current, ok := st.Checks[checkName]; ok && sameCheck(current, next) {
+			return false
+		}
+		next.UpdatedAt = time.Now().UnixMilli()
+		st.Checks[checkName] = next
+		rearm(st)
+		st.LastEventAt = next.UpdatedAt
+		return true
+	})
+}
+
+// RecordSuite folds a check_suite observation into the per-commit state. appID
+// is optional so callers that only have GitHub's suite identity can still use
+// the exact suite-state contract.
+func (s *Store) RecordSuite(owner, repo, number, sha, suiteID, status, conclusion string, appIDs ...string) error {
+	appID := ""
+	if len(appIDs) > 0 {
+		appID = appIDs[0]
+	}
+	return s.update(owner, repo, number, sha, func(st *State) bool {
+		if st.Suites == nil {
+			st.Suites = map[string]Suite{}
+		}
+		next := Suite{ID: suiteID, AppID: appID, Status: status, Conclusion: conclusion}
+		if current, ok := st.Suites[suiteID]; ok && current == next {
+			return false
+		}
+		st.Suites[suiteID] = next
+		rearm(st)
+		st.LastEventAt = time.Now().UnixMilli()
+		return true
+	})
+}
+
+func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool) error {
 	key := Key(owner, repo, number, sha)
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
@@ -315,21 +373,9 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 		default:
 			return getErr
 		}
-		if st.Checks == nil {
-			st.Checks = map[string]Check{}
-		}
-		if current, ok := st.Checks[checkName]; ok && checkRunIDIsOlder(checkRunID, current.CheckRunID) {
+		if !mutate(&st) {
 			return nil
 		}
-		now := time.Now().UnixMilli()
-		st.Checks[checkName] = Check{
-			CheckRunID: checkRunID,
-			URL:        url,
-			Status:     status,
-			Conclusion: conclusion,
-			UpdatedAt:  now,
-		}
-		st.LastEventAt = now
 		buf, err := json.Marshal(st)
 		if err != nil {
 			return err
@@ -347,13 +393,24 @@ func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, sta
 				return err
 			}
 		}
-		// Conflict — another writer advanced the revision. Back off with jitter
-		// so racing writers serialize instead of thundering, then retry with
-		// fresh state until the budget expires.
 		if time.Now().After(deadline) {
 			return errors.New("cistore: record exceeded CAS budget")
 		}
 		time.Sleep(casBackoff(attempt))
+	}
+}
+
+func sameCheck(current, next Check) bool {
+	return current.CheckRunID == next.CheckRunID &&
+		current.URL == next.URL &&
+		current.Status == next.Status &&
+		current.Conclusion == next.Conclusion
+}
+
+func rearm(st *State) {
+	if st.SettledEmitted {
+		st.SettledEmitted = false
+		st.Resettled = true
 	}
 }
 
@@ -419,25 +476,10 @@ func (s *Store) List() []State {
 	return out
 }
 
-// MarkEmitted claims the right to emit the summary for `hash` on a commit, via a
-// compare-and-swap that stamps LastEmitHash. It reads fresh from KV so it is
-// correct even when the caller acted on a slightly-stale WatchAll cache, and
-// re-validates the caller's decision against that fresh state before committing.
-//
-// Returns (false, nil) — not an error — when emitting would be wrong:
-//   - the entry already carries this hash (already emitted);
-//   - the fresh check set no longer hashes to `hash` (a Record landed after the
-//     caller rendered → its summary is stale, skip it);
-//   - the commit is no longer past the debounce window (that same late Record
-//     reopened the quiet window → too early to emit);
-//   - the revision moved under a concurrent writer (CAS conflict).
-//
-// These guards are what make emit-once AND debounce hold against the
-// eventually-consistent read-cache: a stale/premature summary can never win the
-// CAS. On success the durable state's hash still equals `hash`, so the caller's
-// already-rendered summary (which depends only on the hashed check set + stable
-// identity) faithfully represents what was marked.
-func (s *Store) MarkEmitted(key, hash string, debounce time.Duration) (bool, error) {
+// MarkSettled claims the right to emit one checks envelope for the current
+// settled episode. It reloads state and rechecks the rendered hash, debounce,
+// check terminality, and check-suite gate before its CAS update.
+func (s *Store) MarkSettled(key, expectedHash string, debounce time.Duration) (bool, error) {
 	entry, err := s.kv.Get(key)
 	if err != nil {
 		return false, err
@@ -446,75 +488,10 @@ func (s *Store) MarkEmitted(key, hash string, debounce time.Duration) (bool, err
 	if err := json.Unmarshal(entry.Value(), &st); err != nil {
 		return false, err
 	}
-	if st.LastEmitHash == hash {
-		return false, nil // already emitted this exact check set
-	}
-	if st.Hash() != hash {
-		return false, nil // set changed since the caller rendered; that summary is stale
-	}
-	if time.Now().UnixMilli()-st.LastEventAt < debounce.Milliseconds() {
-		return false, nil // a later event reopened the debounce window; too early
-	}
-	st.LastEmitHash = hash
-	pending := false
-	st.CIPublished = &pending
-	buf, err := json.Marshal(st)
-	if err != nil {
-		return false, err
-	}
-	if _, err := s.kv.Update(key, buf, entry.Revision()); err != nil {
-		if isCASConflict(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-// MarkCIPublished records the outcome of a claimed CI publish. A nil value is
-// legacy state from before this marker existed and is treated as published when
-// deciding whether a terminal state can emit checks.settled.
-func (s *Store) MarkCIPublished(key, expectedHash string, published bool) (bool, error) {
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		return false, err
-	}
-	var st State
-	if err := json.Unmarshal(entry.Value(), &st); err != nil {
-		return false, err
-	}
-	if st.LastEmitHash != expectedHash || st.Hash() != expectedHash {
-		return false, nil
-	}
-	st.CIPublished = &published
-	buf, err := json.Marshal(st)
-	if err != nil {
-		return false, err
-	}
-	if _, err := s.kv.Update(key, buf, entry.Revision()); err != nil {
-		if isCASConflict(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-// MarkSettled claims the right to emit checks.settled for a commit. Like
-// MarkEmitted, it updates the durable state with a compare-and-swap so multiple
-// listeners cannot publish the settled envelope more than once. The expected
-// hash and terminal-state check reject a claim when work arrived after the
-// summary was rendered.
-func (s *Store) MarkSettled(key, expectedHash string) (bool, error) {
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		return false, err
-	}
-	var st State
-	if err := json.Unmarshal(entry.Value(), &st); err != nil {
-		return false, err
-	}
-	if st.SettledEmitted || st.LastEmitHash != expectedHash || (st.CIPublished != nil && !*st.CIPublished) || st.Hash() != expectedHash || !terminal(st) {
+	if st.SettledEmitted ||
+		st.Hash() != expectedHash ||
+		time.Now().UnixMilli()-st.LastEventAt < debounce.Milliseconds() ||
+		!settlementReady(st) {
 		return false, nil
 	}
 	st.SettledEmitted = true
@@ -529,6 +506,18 @@ func (s *Store) MarkSettled(key, expectedHash string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func settlementReady(st State) bool {
+	if !terminal(st) {
+		return false
+	}
+	for _, suite := range st.Suites {
+		if suite.Status != "completed" {
+			return false
+		}
+	}
+	return true
 }
 
 func terminal(st State) bool {

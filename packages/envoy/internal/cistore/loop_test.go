@@ -1,7 +1,6 @@
 package cistore
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -92,237 +91,242 @@ func waitHead(t *testing.T, s *Store, owner, repo, number, sha string) {
 	}
 }
 
-func TestSummaryTickEmitsOnceThenOnChange(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-
-	if err := s.Record("o", "r", "13", "sha13", "build", "", "", "completed", "success"); err != nil {
-		t.Fatalf("record build: %v", err)
-	}
-	if err := s.Record("o", "r", "13", "sha13", "test", "", "", "in_progress", ""); err != nil {
-		t.Fatalf("record test: %v", err)
-	}
-	waitCacheChecks(t, s, "o", "r", "13", "sha13", 2)
-	time.Sleep(10 * time.Millisecond) // exceed the 1ms debounce quiet window
-
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 1 {
-		t.Fatalf("expected exactly 1 publish, got %d", pub.count())
-	}
-	env := pub.last()
-	if env.Topic != "notifications.github.o.r.pr.13.ci" {
-		t.Errorf("topic = %q", env.Topic)
-	}
-	if !strings.Contains(env.Payload, "build") || !strings.Contains(env.Payload, "test") {
-		t.Errorf("payload should mention both checks: %q", env.Payload)
-	}
-
-	// Unchanged set → no re-emit.
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 1 {
-		t.Fatalf("unchanged set re-emitted: got %d publishes", pub.count())
-	}
-
-	// Changed set → exactly one more emit.
-	if err := s.Record("o", "r", "13", "sha13", "lint", "", "", "completed", "failure"); err != nil {
-		t.Fatalf("record lint: %v", err)
-	}
-	waitCacheChecks(t, s, "o", "r", "13", "sha13", 3)
-	time.Sleep(10 * time.Millisecond)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 2 {
-		t.Fatalf("changed set should emit once more: got %d", pub.count())
-	}
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 2 {
-		t.Fatalf("second unchanged tick re-emitted: got %d", pub.count())
-	}
-}
-
-func TestSummaryTickRespectsDebounce(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-
-	if err := s.Record("o", "r", "1", "sha", "build", "", "", "in_progress", ""); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	waitCacheChecks(t, s, "o", "r", "1", "sha", 1)
-	// Just recorded — a 10s debounce means it is still within the quiet window.
-	runSummaryTick(s, pub, 10*time.Second, logger)
-	if pub.count() != 0 {
-		t.Fatalf("expected no emit within debounce window, got %d", pub.count())
-	}
-}
-
-func TestSummaryTickPublishFailureDoesNotReemit(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-
-	if err := s.Record("o", "r", "2", "sha", "build", "", "", "completed", "success"); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	waitCacheChecks(t, s, "o", "r", "2", "sha", 1)
-	time.Sleep(10 * time.Millisecond)
-
-	// Publish fails, but MarkEmitted already advanced the hash (emit-once favored
-	// over at-least-once). The dropped summary is NOT retried on the next tick.
-	pub.setErr(errFake)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 0 {
-		t.Fatalf("failed publish should record nothing, got %d", pub.count())
-	}
-	pub.setErr(nil)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 0 {
-		t.Fatalf("dropped summary must not re-emit after MarkEmitted advanced, got %d", pub.count())
-	}
-}
-
-func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-
-	if err := s.Record("o", "r", "3", "sha", "build", "", "", "in_progress", ""); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	waitCacheChecks(t, s, "o", "r", "3", "sha", 1)
-	time.Sleep(10 * time.Millisecond)
-
-	const loops = 6
-	var wg sync.WaitGroup
-	for i := 0; i < loops; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runSummaryTick(s, pub, time.Millisecond, logger)
-		}()
-	}
-	wg.Wait()
-	if pub.count() != 1 {
-		t.Fatalf("concurrent ticks must emit exactly once (CAS), got %d", pub.count())
-	}
-}
-
-func TestStartSummaryLoopBackground(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-
-	if err := s.Record("o", "r", "4", "sha", "build", "", "", "completed", "success"); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	waitCacheChecks(t, s, "o", "r", "4", "sha", 1)
-
-	loopCtx, loopCancel := context.WithCancel(context.Background())
-	defer loopCancel()
-	StartSummaryLoop(loopCtx, s, pub, 50*time.Millisecond, 10*time.Millisecond, logger)
-
-	deadline := time.After(3 * time.Second)
-	for pub.count() == 0 {
+func waitCacheSuites(t *testing.T, s *Store, owner, repo, number, sha string, n int) {
+	t.Helper()
+	key := Key(owner, repo, number, sha)
+	deadline := time.After(5 * time.Second)
+	for {
+		for _, st := range s.List() {
+			if Key(st.Owner, st.Repo, st.Number, st.SHA) == key && len(st.Suites) == n {
+				return
+			}
+		}
 		select {
 		case <-deadline:
-			t.Fatalf("background loop never emitted")
-		case <-time.After(20 * time.Millisecond):
+			t.Fatalf("cache never reached %d suites for %s", n, key)
+		case <-time.After(15 * time.Millisecond):
 		}
-	}
-	// Give it extra ticks to prove it does not re-emit an unchanged set.
-	time.Sleep(200 * time.Millisecond)
-	if pub.count() != 2 {
-		t.Fatalf("background loop should emit ci and checks.settled exactly once, got %d", pub.count())
 	}
 }
 
-var errFake = &fakeErr{}
-
-type fakeErr struct{}
-
-func (*fakeErr) Error() string { return "fake publish error" }
-
-// TestSummaryDedupeKeyDistinctPerPR guards the SEV2 fix: a check_run can attach
-// to multiple PRs, so two PRs sharing a head SHA + identical check set must emit
-// summaries with DISTINCT DedupeKeys — otherwise a wildcard subscriber's
-// (DedupeKey, SessionID) dedupe would suppress the second PR's summary.
-func TestSummaryDedupeKeyDistinctPerPR(t *testing.T) {
+func TestSummaryTickPublishesOneChecksEnvelopeWithoutSuites(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	s := openStore(t, conn)
+	store := openStore(t, conn)
 	pub := &recPub{}
-	logger := logging.New("test")
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
 
-	if err := s.Record("o", "r", "1", "shaX", "build", "", "", "in_progress", ""); err != nil {
-		t.Fatalf("record pr1: %v", err)
+	if err := store.RecordHead(owner, repo, number, sha); err != nil {
+		t.Fatalf("record head: %v", err)
 	}
-	if err := s.Record("o", "r", "2", "shaX", "build", "", "", "in_progress", ""); err != nil {
-		t.Fatalf("record pr2: %v", err)
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "800", "https://example-host/checks/800", "completed", "success"); err != nil {
+		t.Fatalf("record check: %v", err)
 	}
-	waitCacheChecks(t, s, "o", "r", "1", "shaX", 1)
-	waitCacheChecks(t, s, "o", "r", "2", "shaX", 1)
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	time.Sleep(10 * time.Millisecond)
-	runSummaryTick(s, pub, time.Millisecond, logger)
 
-	env := pub.all()
-	if len(env) != 2 {
-		t.Fatalf("expected 2 summaries (one per PR), got %d", len(env))
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 1 {
+		t.Fatalf("published %d envelopes, want one checks envelope", pub.count())
 	}
-	if env[0].DedupeKey == env[1].DedupeKey {
-		t.Fatalf("PRs sharing a SHA must not share a DedupeKey: %s", env[0].DedupeKey)
+	env := pub.last()
+	if env.Topic != "notifications.github.example-org.example-repo.pr.42.checks" {
+		t.Fatalf("topic = %q, want checks", env.Topic)
 	}
-	for _, e := range env {
-		if !strings.Contains(e.DedupeKey, ".pr.1.") && !strings.Contains(e.DedupeKey, ".pr.2.") {
-			t.Fatalf("DedupeKey missing PR identity: %s", e.DedupeKey)
-		}
+	if strings.Contains(env.Topic, ".ci") || strings.Contains(env.Topic, ".check.") {
+		t.Fatalf("obsolete CI topic published: %q", env.Topic)
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(env.Payload), &summary); err != nil {
+		t.Fatalf("decode checks payload: %v", err)
+	}
+	if summary.Kind != "checks" {
+		t.Fatalf("payload kind = %q, want checks", summary.Kind)
+	}
+	t.Logf("topic: %s", env.Topic)
+	t.Logf("payload_summary: %s", env.PayloadSummary)
+	t.Logf("payload: %s", env.Payload)
+}
+
+func TestSummaryTickRequiresCurrentHead(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.Record(owner, repo, number, sha, "build", "806", "https://example-host/checks/806", "completed", "success"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 0 {
+		t.Fatalf("unknown PR head published %d checks envelopes", pub.count())
+	}
+}
+
+func TestSummaryTickRequiresCompletedSuitesWhenRecorded(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "801", "https://example-host/checks/801", "completed", "success"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	if err := store.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77"); err != nil {
+		t.Fatalf("record in-progress suite: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	waitCacheSuites(t, store, owner, repo, number, sha, 1)
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 0 {
+		t.Fatalf("in-progress suite allowed %d checks envelopes", pub.count())
+	}
+
+	if err := store.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77"); err != nil {
+		t.Fatalf("complete suite: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 1 {
+		t.Fatalf("completed suite published %d envelopes, want checks", pub.count())
+	}
+
+	if err := store.RecordSuite(owner, repo, number, sha, "900", "in_progress", "", "77"); err != nil {
+		t.Fatalf("reopen suite: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 1 {
+		t.Fatalf("reopened suite published %d envelopes", pub.count())
+	}
+
+	if err := store.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77"); err != nil {
+		t.Fatalf("recomplete suite: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 2 {
+		t.Fatalf("recompleted suite published %d envelopes, want 2", pub.count())
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode re-settled payload: %v", err)
+	}
+	if !strings.HasSuffix(pub.last().PayloadSummary, " (re-settled)") {
+		t.Fatalf("re-settled summary = %q", pub.last().PayloadSummary)
+	}
+	t.Logf("re-settled topic: %s", pub.last().Topic)
+	t.Logf("re-settled payload_summary: %s", pub.last().PayloadSummary)
+	t.Logf("re-settled payload: %s", pub.last().Payload)
+	if summary.SupersededSettlement != "true" {
+		t.Fatalf("superseded_settlement = %q, want true", summary.SupersededSettlement)
+	}
+}
+
+func TestSummaryTickRearmsChecks(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "802", "https://example-host/checks/802", "completed", "success"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 1 {
+		t.Fatalf("initial checks publish = %d, want 1", pub.count())
+	}
+
+	if err := store.Record(owner, repo, number, sha, "build", "803", "https://example-host/checks/803", "completed", "success"); err != nil {
+		t.Fatalf("record rerun check: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+	if pub.count() != 2 {
+		t.Fatalf("rearmed checks publish = %d, want 2", pub.count())
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode re-settled payload: %v", err)
+	}
+	if summary.SupersededSettlement != "true" {
+		t.Fatalf("superseded_settlement = %q, want true", summary.SupersededSettlement)
+	}
+	if !strings.HasSuffix(pub.last().PayloadSummary, " (re-settled)") {
+		t.Fatalf("re-settled summary = %q", pub.last().PayloadSummary)
 	}
 }
 
 func TestSummaryTickSkipsNonHeadState(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	s := openStore(t, conn)
+	store := openStore(t, conn)
 	pub := &recPub{}
-	logger := logging.New("test")
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		oldSHA = "oldabcdef1234"
+		head   = "0123456789abcdef0123456789abcdef01234567"
+	)
 
-	if err := s.Record(
-		"example-org", "example-repo", "42", "oldabcdef1234",
-		"build", "300", "https://example-host/checks/300", "completed", "success",
-	); err != nil {
-		t.Fatalf("record old head: %v", err)
+	if err := store.RecordHead(owner, repo, number, head); err != nil {
+		t.Fatalf("record head: %v", err)
 	}
-	if err := s.RecordHead("example-org", "example-repo", "42", "0123456789abcdef0123456789abcdef01234567"); err != nil {
-		t.Fatalf("record new head: %v", err)
+	waitHead(t, store, owner, repo, number, head)
+	if err := store.Record(owner, repo, number, oldSHA, "build", "804", "https://example-host/checks/804", "completed", "success"); err != nil {
+		t.Fatalf("record old check: %v", err)
 	}
-	waitCacheChecks(t, s, "example-org", "example-repo", "42", "oldabcdef1234", 1)
-	waitHead(t, s, "example-org", "example-repo", "42", "0123456789abcdef0123456789abcdef01234567")
+	waitCacheChecks(t, store, owner, repo, number, oldSHA, 1)
 	time.Sleep(10 * time.Millisecond)
-
-	runSummaryTick(s, pub, time.Millisecond, logger)
+	runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
 	if pub.count() != 0 {
-		t.Fatalf("non-head state published %d envelopes", pub.count())
-	}
-	if got := getState(t, s, "example-org", "example-repo", "42", "oldabcdef1234").LastEmitHash; got != "" {
-		t.Fatalf("non-head state was marked emitted: %q", got)
+		t.Fatalf("stale head published %d checks envelopes", pub.count())
 	}
 }
 
-func TestSummaryTickPublishesSettledOncePerHead(t *testing.T) {
+func TestSummaryTickConcurrentExactlyOnce(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	s := openStore(t, conn)
+	store := openStore(t, conn)
 	pub := &recPub{}
-	logger := logging.New("test")
 	const (
 		owner  = "example-org"
 		repo   = "example-repo"
@@ -330,277 +334,26 @@ func TestSummaryTickPublishesSettledOncePerHead(t *testing.T) {
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 
-	if err := s.RecordHead(owner, repo, number, sha); err != nil {
+	if err := store.RecordHead(owner, repo, number, sha); err != nil {
 		t.Fatalf("record head: %v", err)
 	}
-	waitHead(t, s, owner, repo, number, sha)
-	for _, check := range []struct {
-		name, id, url, status, conclusion string
-	}{
-		{"build", "300", "https://example-host/checks/300", "completed", "success"},
-		{"lint", "301", "https://example-host/checks/301", "completed", "failure"},
-		{"cancelled-check", "302", "https://example-host/checks/302", "completed", "cancelled"},
-	} {
-		if err := s.Record(owner, repo, number, sha, check.name, check.id, check.url, check.status, check.conclusion); err != nil {
-			t.Fatalf("record %s: %v", check.name, err)
-		}
-	}
-	waitCacheChecks(t, s, owner, repo, number, sha, 3)
-	time.Sleep(10 * time.Millisecond)
-
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 2 {
-		t.Fatalf("initial head state published %d envelopes, want ci and checks.settled", pub.count())
-	}
-	envelopes := pub.all()
-	ci, settled := envelopes[0], envelopes[1]
-	if ci.Topic != "notifications.github.example-org.example-repo.pr.42.ci" {
-		t.Fatalf("ci topic = %q", ci.Topic)
-	}
-	if ci.PayloadSummary != "CI for example-org/example-repo#42 @ abcdef1: 1 passed, 1 failed, 0 running, 0 queued, 1 cancelled, 0 skipped" {
-		t.Fatalf("ci payload_summary = %q", ci.PayloadSummary)
-	}
-	var ciSummary Summary
-	if err := json.Unmarshal([]byte(ci.Payload), &ciSummary); err != nil {
-		t.Fatalf("ci payload must be summary JSON: %v\n%s", err, ci.Payload)
-	}
-	if !ciSummary.IsHead || ciSummary.Cancelled.Count != 1 {
-		t.Fatalf("unexpected ci summary: %+v", ciSummary)
-	}
-	if settled.Topic != "notifications.github.example-org.example-repo.pr.42.checks.settled" {
-		t.Fatalf("settled topic = %q", settled.Topic)
-	}
-	if settled.PayloadSummary != "checks settled on example-org/example-repo#42 @ abcdef1: 1 passed, 1 failed, 1 cancelled, 0 skipped; failing: lint" {
-		t.Fatalf("settled payload_summary = %q", settled.PayloadSummary)
-	}
-	var settledSummary Summary
-	if err := json.Unmarshal([]byte(settled.Payload), &settledSummary); err != nil {
-		t.Fatalf("settled payload must be summary JSON: %v\n%s", err, settled.Payload)
-	}
-	if settledSummary.Kind != "checks_settled" || len(settledSummary.FailingChecks) != 1 ||
-		settledSummary.FailingChecks[0].Name != "lint" ||
-		settledSummary.FailingChecks[0].URL != "https://example-host/checks/301" {
-		t.Fatalf("unexpected settled payload: %+v", settledSummary)
-	}
-	t.Logf("pr.42.ci payload_summary: %s", ci.PayloadSummary)
-	t.Logf("pr.42.ci payload: %s", ci.Payload)
-	t.Logf("pr.42.checks.settled payload_summary: %s", settled.PayloadSummary)
-	t.Logf("pr.42.checks.settled payload: %s", settled.Payload)
-
-	if !getState(t, s, owner, repo, number, sha).SettledEmitted {
-		t.Fatal("settled state was not marked emitted")
-	}
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 2 {
-		t.Fatalf("no-op tick re-emitted settled state: %d publishes", pub.count())
-	}
-
-	const newSHA = "0123456789abcdef0123456789abcdef01234567"
-	if err := s.RecordHead(owner, repo, number, newSHA); err != nil {
-		t.Fatalf("record new head: %v", err)
-	}
-	waitHead(t, s, owner, repo, number, newSHA)
-	if err := s.Record(owner, repo, number, newSHA, "build", "303", "https://example-host/checks/303", "completed", "success"); err != nil {
-		t.Fatalf("record new head check: %v", err)
-	}
-	waitCacheChecks(t, s, owner, repo, number, newSHA, 1)
-	time.Sleep(10 * time.Millisecond)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 4 {
-		t.Fatalf("new head did not publish ci and settled envelopes: %d publishes", pub.count())
-	}
-}
-
-func TestSummaryTickSettlesPreviouslyEmittedTerminalState(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-	const (
-		owner  = "example-org"
-		repo   = "example-repo"
-		number = "42"
-		sha    = "abcdef1234567890abcdef1234567890abcdef12"
-	)
-
-	if err := s.RecordHead(owner, repo, number, sha); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	waitHead(t, s, owner, repo, number, sha)
-	if err := s.Record(owner, repo, number, sha, "build", "400", "https://example-host/checks/400", "completed", "success"); err != nil {
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.Record(owner, repo, number, sha, "build", "805", "https://example-host/checks/805", "completed", "success"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
-	waitCacheChecks(t, s, owner, repo, number, sha, 1)
-	key := Key(owner, repo, number, sha)
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		t.Fatalf("get state: %v", err)
-	}
-	var state State
-	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		t.Fatalf("decode state: %v", err)
-	}
-	state.LastEmitHash = state.Hash()
-	raw, err := json.Marshal(state)
-	if err != nil {
-		t.Fatalf("encode state: %v", err)
-	}
-	if _, err := s.kv.Update(key, raw, entry.Revision()); err != nil {
-		t.Fatalf("seed emitted state: %v", err)
-	}
-	deadline := time.After(5 * time.Second)
-	for {
-		for _, cached := range s.List() {
-			if Key(cached.Owner, cached.Repo, cached.Number, cached.SHA) == key &&
-				cached.LastEmitHash == state.LastEmitHash {
-				goto cacheReady
-			}
-		}
-		select {
-		case <-deadline:
-			t.Fatal("cache never reflected seeded emitted state")
-		case <-time.After(15 * time.Millisecond):
-		}
-	}
-
-cacheReady:
-	time.Sleep(10 * time.Millisecond)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 1 {
-		t.Fatalf("previously emitted terminal state published %d envelopes, want settlement only", pub.count())
-	}
-	if env := pub.last(); env.Topic != "notifications.github.example-org.example-repo.pr.42.checks.settled" {
-		t.Fatalf("topic = %q, want checks.settled", env.Topic)
-	}
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 1 {
-		t.Fatalf("settled state re-emitted: %d publishes", pub.count())
-	}
-}
-
-func TestSummaryTickDoesNotSettleAfterQueuedWorkArrives(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	logger := logging.New("test")
-	const (
-		owner  = "example-org"
-		repo   = "example-repo"
-		number = "42"
-		sha    = "abcdef1234567890abcdef1234567890abcdef12"
-	)
-
-	if err := s.RecordHead(owner, repo, number, sha); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	waitHead(t, s, owner, repo, number, sha)
-	if err := s.Record(owner, repo, number, sha, "build", "500", "https://example-host/checks/500", "completed", "success"); err != nil {
-		t.Fatalf("record initial check: %v", err)
-	}
-	waitCacheChecks(t, s, owner, repo, number, sha, 1)
-
-	var once sync.Once
-	pub := &recPub{
-		onPublish: func(env contracts.Envelope) {
-			if env.Topic != "notifications.github.example-org.example-repo.pr.42.ci" {
-				return
-			}
-			once.Do(func() {
-				if err := s.Record(owner, repo, number, sha, "late-check", "501", "https://example-host/checks/501", "queued", ""); err != nil {
-					t.Errorf("record queued work: %v", err)
-				}
-			})
-		},
-	}
-	time.Sleep(10 * time.Millisecond)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 1 {
-		t.Fatalf("queued work arriving after ci summary allowed %d publishes, want ci only", pub.count())
-	}
-	waitCacheChecks(t, s, owner, repo, number, sha, 2)
-
-	if err := s.Record(owner, repo, number, sha, "late-check", "501", "https://example-host/checks/501", "completed", "success"); err != nil {
-		t.Fatalf("complete late check: %v", err)
-	}
-	time.Sleep(10 * time.Millisecond)
-	runSummaryTick(s, pub, time.Millisecond, logger)
-	if pub.count() != 3 {
-		t.Fatalf("terminal state after queued work published %d envelopes, want ci and settlement", pub.count())
-	}
-}
-
-func TestSummaryTickWaitsForCIOutcomeAcrossReplicas(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	first := openStore(t, conn)
-	second := openStore(t, conn)
-	pub := &recPub{}
-	logger := logging.New("test")
-	const (
-		owner  = "example-org"
-		repo   = "example-repo"
-		number = "42"
-		sha    = "abcdef1234567890abcdef1234567890abcdef12"
-	)
-
-	if err := first.RecordHead(owner, repo, number, sha); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	waitHead(t, first, owner, repo, number, sha)
-	waitHead(t, second, owner, repo, number, sha)
-	if err := first.Record(owner, repo, number, sha, "build", "700", "https://example-host/checks/700", "completed", "success"); err != nil {
-		t.Fatalf("record check: %v", err)
-	}
-	waitCacheChecks(t, first, owner, repo, number, sha, 1)
-	waitCacheChecks(t, second, owner, repo, number, sha, 1)
+	waitCacheChecks(t, store, owner, repo, number, sha, 1)
 	time.Sleep(10 * time.Millisecond)
 
-	key := Key(owner, repo, number, sha)
-	state := getState(t, first, owner, repo, number, sha)
-	ok, err := first.MarkEmitted(key, state.Hash(), time.Millisecond)
-	if err != nil {
-		t.Fatalf("first replica mark emitted: %v", err)
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runSummaryTick(store, pub, time.Millisecond, logging.New("test"))
+		}()
 	}
-	if !ok {
-		t.Fatal("first replica did not claim CI summary")
-	}
-	waitCacheEmitted(t, second, key, state.Hash())
-
-	runSummaryTick(second, pub, time.Millisecond, logger)
-	if pub.count() != 0 {
-		t.Fatalf("second replica settled before CI outcome: %d publishes", pub.count())
-	}
-
-	ok, err = first.MarkCIPublished(key, state.Hash(), true)
-	if err != nil {
-		t.Fatalf("record CI publish outcome: %v", err)
-	}
-	if !ok {
-		t.Fatal("CI publish outcome did not update durable state")
-	}
-	runSummaryTick(second, pub, time.Millisecond, logger)
+	wg.Wait()
 	if pub.count() != 1 {
-		t.Fatalf("settled after CI outcome = %d publishes, want 1", pub.count())
-	}
-	if env := pub.last(); env.Topic != "notifications.github.example-org.example-repo.pr.42.checks.settled" {
-		t.Fatalf("settled topic = %q", env.Topic)
-	}
-}
-
-func waitCacheEmitted(t *testing.T, s *Store, key, hash string) {
-	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		for _, state := range s.List() {
-			if Key(state.Owner, state.Repo, state.Number, state.SHA) == key && state.LastEmitHash == hash {
-				return
-			}
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("cache never reflected emitted state for %s", key)
-		case <-time.After(15 * time.Millisecond):
-		}
+		t.Fatalf("concurrent checks publishes = %d, want 1", pub.count())
 	}
 }

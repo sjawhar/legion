@@ -4,13 +4,11 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -200,16 +198,15 @@ func TestGitHubHandler(t *testing.T) {
 			wantPublished: 1,
 		},
 		{
-			name:          "check_run records and publishes the raw observation",
+			name:          "check_run records without publishing a raw observation",
 			method:        "POST",
 			body:          checkRun,
 			delivery:      "d-ci-table",
 			event:         "check_run",
 			secret:        "s",
 			wantStatus:    200,
-			wantPublished: 1,
+			wantPublished: 0,
 			wantRecorded:  1,
-			wantTopics:    []string{"notifications.github.sjawhar.legion.pr.42.check"},
 		},
 		{
 			name:          "publish failure returns 503",
@@ -326,10 +323,9 @@ func TestGitHubHandlerSubIssuesFixture(t *testing.T) {
 	}
 }
 
-// TestGitHubHandlerCIRecordsAndPublishesObservations asserts a check_run webhook
-// records into the CIRecorder and publishes one raw observation per associated PR,
-// while a non-CI event publishes as before and does not touch the recorder.
-func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
+// TestGitHubHandlerCIRecordsObservations asserts a check_run webhook records
+// one state fact per associated PR and never publishes the obsolete raw topic.
+func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 	checkRun := `{
 		"action": "completed",
 		"check_run": {
@@ -343,7 +339,7 @@ func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
 		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
 	}`
 
-	t.Run("check_run records and publishes raw observations per PR", func(t *testing.T) {
+	t.Run("check_run records without publishing raw observations", func(t *testing.T) {
 		pub := &mockPublisher{}
 		rec := &mockRecorder{}
 		handler := GitHubHandler("s", "@legion", "", pub, rec)
@@ -358,8 +354,8 @@ func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
 		if rr.Code != 200 {
 			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 		}
-		if len(pub.published) != 2 {
-			t.Fatalf("published = %d, want 2 (one raw observation per PR)", len(pub.published))
+		if len(pub.published) != 0 {
+			t.Fatalf("raw CI envelope published: %+v", pub.published)
 		}
 		if len(rec.calls) != 2 {
 			t.Fatalf("recorder calls = %d, want 2 (one per PR)", len(rec.calls))
@@ -367,34 +363,46 @@ func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
 		if rec.calls[0].number != "42" || rec.calls[1].number != "43" {
 			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].number, rec.calls[1].number)
 		}
-		if rec.calls[0].checkName != "unit-tests" || rec.calls[0].conclusion != "failure" || rec.calls[0].sha != "deadbeef" {
-			t.Fatalf("unexpected recorded call: %+v", rec.calls[0])
+	})
+
+	t.Run("check_suite records without publishing raw observations", func(t *testing.T) {
+		checkSuite := `{
+			"action": "completed",
+			"check_suite": {
+				"id": 900,
+				"status": "completed",
+				"conclusion": "success",
+				"head_sha": "abcdef1234567890abcdef1234567890abcdef12",
+				"app": {"id": 77},
+				"pull_requests": [{"number": 42}]
+			},
+			"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+		}`
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler("s", "@legion", "", pub, rec)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(checkSuite))
+		req.Header.Set("X-GitHub-Delivery", "d-ci-suite")
+		req.Header.Set("X-GitHub-Event", "check_suite")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", []byte(checkSuite)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 		}
-		for i, number := range []string{"42", "43"} {
-			item := pub.published[i]
-			if item.Topic != "notifications.github.sjawhar.legion.pr."+number+".check" {
-				t.Errorf("published[%d].Topic = %q", i, item.Topic)
-			}
-			wantDedupeKey := "ghck.d-ci-1.pr." + number + ".unit-tests"
-			if item.Source != "github" || item.SourceEventID != "d-ci-1" || item.DedupeKey != wantDedupeKey {
-				t.Errorf("published[%d] has unexpected metadata: %+v", i, item)
-			}
-			if item.PayloadSummary != "check unit-tests: completed/failure @ deadbee" {
-				t.Errorf("published[%d].PayloadSummary = %q", i, item.PayloadSummary)
-			}
-			var payload map[string]string
-			if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
-				t.Fatalf("published[%d] payload: %v", i, err)
-			}
-			wantPayload := map[string]string{
-				"sha":        "deadbeef",
-				"name":       "unit-tests",
-				"status":     "completed",
-				"conclusion": "failure",
-			}
-			if !reflect.DeepEqual(payload, wantPayload) {
-				t.Errorf("published[%d].Payload = %v, want %v", i, payload, wantPayload)
-			}
+		if len(pub.published) != 0 {
+			t.Fatalf("raw CI envelope published: %+v", pub.published)
+		}
+		if len(rec.suiteCalls) != 1 {
+			t.Fatalf("suite recorder calls = %d, want 1", len(rec.suiteCalls))
+		}
+		if got := rec.suiteCalls[0]; got != (suiteCall{
+			owner: "example-org", repo: "example-repo", number: "42",
+			sha: "abcdef1234567890abcdef1234567890abcdef12", suiteID: "900",
+			status: "completed", conclusion: "success", appID: "77",
+		}) {
+			t.Fatalf("suite recorder call = %+v", got)
 		}
 	})
 
@@ -410,7 +418,7 @@ func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if rr.Code != 503 {
-			t.Fatalf("status = %d, want 503 on recorder failure", rr.Code)
+			t.Fatalf("status = %d, want 503", rr.Code)
 		}
 	})
 
@@ -429,11 +437,8 @@ func TestGitHubHandlerCIRecordsAndPublishesObservations(t *testing.T) {
 		if rr.Code != 200 {
 			t.Fatalf("status = %d, want 200", rr.Code)
 		}
-		if len(pub.published) != 1 {
-			t.Fatalf("published = %d, want 1", len(pub.published))
-		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("recorder calls = %d, want 0 for non-CI event", len(rec.calls))
+		if len(pub.published) != 1 || len(rec.calls) != 0 {
+			t.Fatalf("non-CI published=%d recorded=%d", len(pub.published), len(rec.calls))
 		}
 	})
 }
@@ -472,14 +477,14 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 	}
 
 	for _, name := range []string{"tester", "architect"} {
-		t.Run("right-App "+name+" verdict is recorded and published", func(t *testing.T) {
+		t.Run("right-App "+name+" verdict is recorded without raw publication", func(t *testing.T) {
 			pub := &mockPublisher{}
 			rec := &mockRecorder{}
 			handler := GitHubHandler(secret, "@legion", reviewerAppID, pub, rec)
 			post(t, handler, checkRun(name, reviewerAppID))
 
-			if len(pub.published) != 1 {
-				t.Fatalf("published = %d, want 1", len(pub.published))
+			if len(pub.published) != 0 {
+				t.Fatalf("published = %d, want 0", len(pub.published))
 			}
 			if len(rec.calls) != 1 {
 				t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
@@ -527,8 +532,8 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 		if got := rec.calls[0].checkName; got != "unit-tests" {
 			t.Fatalf("recorded check name = %q, want unit-tests", got)
 		}
-		if len(pub.published) != 1 {
-			t.Fatalf("published = %d, want 1", len(pub.published))
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0", len(pub.published))
 		}
 	})
 }

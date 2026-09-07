@@ -56,22 +56,22 @@ type StatusGroup struct {
 	Checks []string `json:"checks"`
 }
 
-// Summary is the JSON notification body published to pr.<n>.ci. Every status is
-// always present (count 0, empty checks when none) so consumers see a stable
-// schema.
+// Summary is the JSON checks notification body. Every status is always present
+// (count 0, empty checks when none) so consumers see a stable schema.
 type Summary struct {
-	Kind          string      `json:"kind"`
-	Repo          string      `json:"repo"`
-	Number        string      `json:"number"`
-	SHA           string      `json:"sha"`
-	IsHead        bool        `json:"is_head"`
-	Failed        StatusGroup `json:"failed"`
-	Running       StatusGroup `json:"running"`
-	Passed        StatusGroup `json:"passed"`
-	Queued        StatusGroup `json:"queued"`
-	Cancelled     StatusGroup `json:"cancelled"`
-	Skipped       StatusGroup `json:"skipped"`
-	FailingChecks []struct {
+	Kind                 string      `json:"kind"`
+	Repo                 string      `json:"repo"`
+	Number               string      `json:"number"`
+	SHA                  string      `json:"sha"`
+	IsHead               bool        `json:"is_head"`
+	SupersededSettlement string      `json:"superseded_settlement,omitempty"`
+	Failed               StatusGroup `json:"failed"`
+	Running              StatusGroup `json:"running"`
+	Passed               StatusGroup `json:"passed"`
+	Queued               StatusGroup `json:"queued"`
+	Cancelled            StatusGroup `json:"cancelled"`
+	Skipped              StatusGroup `json:"skipped"`
+	FailingChecks        []struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
 	} `json:"failing_checks"`
@@ -102,7 +102,7 @@ func renderSummary(s State, head string) (Summary, string, error) {
 		}{Name: name, URL: s.Checks[name].URL}
 	}
 	sum := Summary{
-		Kind:          "ci_summary",
+		Kind:          "checks",
 		Repo:          s.Owner + "/" + s.Repo,
 		Number:        s.Number,
 		SHA:           s.SHA,
@@ -114,6 +114,9 @@ func renderSummary(s State, head string) (Summary, string, error) {
 		Cancelled:     group(groups[catCancelled]),
 		Skipped:       group(groups[catSkipped]),
 		FailingChecks: failingChecks,
+	}
+	if s.Resettled {
+		sum.SupersededSettlement = "true"
 	}
 	buf, err := json.Marshal(sum)
 	if err != nil {

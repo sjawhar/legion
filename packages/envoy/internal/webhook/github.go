@@ -47,11 +47,10 @@ func githubSenderField(payload map[string]any, field string) string {
 	return s
 }
 
-// CIRecorder folds check_run observations and PR head updates into CI state.
-// The listener's cistore.Store satisfies this interface; the debounced summary
-// is emitted separately after the handler publishes the raw observation.
+// CIRecorder folds check-run, check-suite, and PR-head observations into CI state.
 type CIRecorder interface {
 	Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion string) error
+	RecordSuite(owner, repo, number, sha, suiteID, status, conclusion string, appID ...string) error
 	RecordHead(owner, repo, number, sha string) error
 }
 
@@ -141,11 +140,18 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				return
 			}
 		}
-		// CI events fold into per-commit state instead of being published raw.
-		// A check_run associated with multiple PRs records once per PR. check_suite
-		// yields no observations (ignored — see contracts.GithubCIObservations).
+		// CI events only update durable state. The summary loop publishes one
+		// settled checks envelope when the head's suites and check runs are done.
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
+				if o.SuiteID != "" {
+					if err := ci.RecordSuite(o.Owner, o.Repo, o.Number, o.SHA, o.SuiteID, o.Status, o.Conclusion, o.AppID); err != nil {
+						log.Printf("github ci suite record failed: %v", err)
+						http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					continue
+				}
 				if reviewerVerdict(o.CheckName) {
 					if reviewerAppID == "" {
 						log.Printf("WARN github ci verdict dropped: ENVOY_REVIEWER_APP_ID is not configured check=%q app_id=%q pr=%s", o.CheckName, o.AppID, o.Number)
@@ -158,26 +164,6 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				}
 				if err := ci.Record(o.Owner, o.Repo, o.Number, o.SHA, o.CheckName, o.CheckRunID, o.URL, o.Status, o.Conclusion); err != nil {
 					log.Printf("github ci record failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-					return
-				}
-				item, err := contracts.GithubCIEnvelope(contracts.GithubCIEnvelopeInput{
-					Observation: o,
-					Delivery:    delivery,
-					EventID:     id.New(),
-					TraceID:     id.New(),
-				})
-				if err != nil {
-					log.Printf("github ci observation envelope failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-					return
-				}
-				if err := item.Validate(); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := publisher.Publish(item); err != nil {
-					log.Printf("github ci observation publish failed: %v", err)
 					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 					return
 				}

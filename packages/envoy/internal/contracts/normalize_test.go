@@ -662,11 +662,9 @@ func TestGithubEnvelopesCICheckRunNoPRsDropsEnvelope(t *testing.T) {
 	}
 }
 
-// CI events (check_run/check_suite) are no longer published raw to pr.<n>.ci.
-// They fold into envoy_ci_state via the webhook handler's CIRecorder and are
-// re-emitted as a debounced per-commit summary by the listener. GithubEnvelopes
-// therefore returns no envelope for them; extraction is covered by
-// TestGithubCIObservations below.
+// CI events (check_run/check_suite) are not published raw. They fold into
+// envoy_ci_state via the webhook handler's CIRecorder; the summary loop emits
+// one settled checks envelope when the head's CI is complete.
 func TestGithubEnvelopesCheckRunNotPublished(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "check_run",
@@ -783,50 +781,6 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 	})
 
-	t.Run("check_suite ignored", func(t *testing.T) {
-		body := map[string]any{
-			"action":     "completed",
-			"repository": map[string]any{"name": "legion", "owner": map[string]any{"login": "sjawhar"}},
-			"check_suite": map[string]any{
-				"status":        "completed",
-				"conclusion":    "success",
-				"head_sha":      "abc",
-				"pull_requests": []any{map[string]any{"number": 99}},
-			},
-		}
-		if obs := GithubCIObservations("check_suite", body); len(obs) != 0 {
-			t.Fatalf("check_suite must be ignored, got %d observations", len(obs))
-		}
-	})
-}
-
-func TestGithubCIEnvelopeCarriesPRInDedupeIdentity(t *testing.T) {
-	item, err := GithubCIEnvelope(GithubCIEnvelopeInput{
-		Observation: CIObservation{
-			Owner:      "sjawhar",
-			Repo:       "legion",
-			Number:     "42",
-			SHA:        "deadbeef",
-			CheckName:  "unit-tests",
-			Status:     "completed",
-			Conclusion: "failure",
-		},
-		Delivery: "delivery-123",
-		EventID:  "evt-ci-123",
-		TraceID:  "trace-ci-123",
-	})
-	if err != nil {
-		t.Fatalf("build CI envelope: %v", err)
-	}
-	if item.Topic != "notifications.github.sjawhar.legion.pr.42.check" {
-		t.Fatalf("topic = %q", item.Topic)
-	}
-	if item.DedupeKey != "ghck.delivery-123.pr.42.unit-tests" {
-		t.Fatalf("dedupe key = %q", item.DedupeKey)
-	}
-	if item.PayloadSummary != "check unit-tests: completed/failure @ deadbee" {
-		t.Fatalf("payload summary = %q", item.PayloadSummary)
-	}
 }
 
 func TestGhostWisprSubject(t *testing.T) {
