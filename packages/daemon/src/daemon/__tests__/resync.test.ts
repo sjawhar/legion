@@ -30,6 +30,7 @@ function resyncDeps(state: LegionState, items: Record<string, unknown>[]): RunRe
       maxFixAttempts: 3,
     },
     fetchGitHubProjectItems: async () => ({ items }),
+    fetchCiStatusBatch: async () => ({}),
     applyEffects: async () => {},
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
   };
@@ -370,6 +371,158 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 1,
+    });
+  });
+  it("reconciles an unsettled green PR once from its GitHub check rollup", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+      ciGeneration: null,
+      fixAttempts: 0,
+    };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+    let now = Date.parse("2026-08-24T00:00:00.000Z");
+    const fetches: Record<string, unknown>[] = [];
+    const deps: RunResyncDeps = {
+      ...resyncDeps(state, []),
+      now: () => now,
+      fetchCiStatusBatch: async (refs: Record<string, unknown>) => {
+        fetches.push(refs);
+        return {
+          "sjawhar/legion#7": { ciStatus: "passing" as const, mergeableStatus: null },
+        };
+      },
+      applyEffects: async (effects: Effect[], envelope: EnvelopeJson) => {
+        dispatched.push({ effects, envelope });
+      },
+    };
+
+    await runResync(deps);
+
+    expect(fetches).toEqual([
+      {
+        "sjawhar/legion#7": { owner: "sjawhar", repo: "legion", number: 7 },
+      },
+    ]);
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "green",
+      failing: [],
+      ciSettledAt: null,
+      ciGeneration: null,
+    });
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "publish",
+            role: roleToken("omp", issue, "implementer"),
+            payload: { type: "ci-green", sha: "head-1" },
+          },
+        ],
+        envelope: {
+          event_id: "resync:sjawhar/legion#7:ci",
+          issued_at: now,
+        },
+      },
+    ]);
+
+    dispatched.length = 0;
+    now += 600_000;
+    await runResync(deps);
+    expect(dispatched).toEqual([]);
+  });
+
+  it("reconciles an unsettled red PR with failing check names", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+      ciGeneration: null,
+      fixAttempts: 0,
+    };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "failing" as const,
+          mergeableStatus: null,
+          failingChecks: ["lint", "unit"],
+        },
+      }),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "red",
+      failing: ["lint", "unit"],
+      ciSettledAt: null,
+      ciGeneration: null,
+    });
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "publish",
+            role: roleToken("omp", issue, "implementer"),
+            payload: {
+              type: "ci-settled-red",
+              failing: ["lint", "unit"],
+              sha: "head-1",
+            },
+          },
+        ],
+        envelope: {
+          event_id: "resync:sjawhar/legion#7:ci",
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      },
+    ]);
+  });
+
+  it("does not fetch or alter a PR with an existing CI verdict", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciGeneration: 4,
+      fixAttempts: 0,
+    };
+    let fetches = 0;
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => {
+        fetches += 1;
+        return {};
+      },
+    });
+
+    expect(fetches).toBe(0);
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciGeneration: 4,
     });
   });
 });

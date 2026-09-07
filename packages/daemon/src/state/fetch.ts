@@ -337,11 +337,50 @@ async function getPrReviewStateBatchWithOptions(
 // =============================================================================
 
 /**
- * Combined CI and mergeable status for a PR.
+ * Combined CI, mergeable, and failed-check status for a PR.
  */
-interface CiAndMergeStatus {
+export interface CiAndMergeStatus {
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
+  failingChecks?: string[];
+}
+
+const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
+  ACTION_REQUIRED: true,
+  CANCELLED: true,
+  ERROR: true,
+  FAILURE: true,
+  STALE: true,
+  STARTUP_FAILURE: true,
+  TIMED_OUT: true,
+};
+
+function failingCheckNames(rollup: Record<string, unknown> | undefined): string[] {
+  if (!rollup || !("contexts" in rollup)) return [];
+  const contexts = rollup.contexts;
+  if (typeof contexts !== "object" || contexts === null || Array.isArray(contexts)) return [];
+  if (!("nodes" in contexts) || !Array.isArray(contexts.nodes)) return [];
+
+  const failing = new Set<string>();
+  for (const node of contexts.nodes) {
+    if (typeof node !== "object" || node === null || Array.isArray(node) || !("name" in node)) {
+      continue;
+    }
+    const conclusion =
+      "conclusion" in node
+        ? node.conclusion
+        : "statusConclusion" in node
+          ? node.statusConclusion
+          : undefined;
+    if (
+      typeof node.name === "string" &&
+      typeof conclusion === "string" &&
+      FAILING_CHECK_CONCLUSIONS[conclusion]
+    ) {
+      failing.add(node.name);
+    }
+  }
+  return [...failing];
 }
 
 /**
@@ -439,7 +478,7 @@ async function getCiStatusBatchWithOptions(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name conclusion detailsUrl } ... on StatusContext { name: context statusConclusion: state detailsUrl: targetUrl } } } } } } } }`
       );
     }
 
@@ -514,24 +553,49 @@ async function getCiStatusBatchWithOptions(
         }
 
         // Navigate: pr.commits.nodes[0].commit.statusCheckRollup.state
-        const commits = rawPr.commits as { nodes?: unknown[] } | null | undefined;
-        const nodes = commits?.nodes;
-        if (!Array.isArray(nodes) || nodes.length === 0) {
+        const commits = rawPr.commits;
+        if (
+          typeof commits !== "object" ||
+          commits === null ||
+          Array.isArray(commits) ||
+          !("nodes" in commits) ||
+          !Array.isArray(commits.nodes) ||
+          commits.nodes.length === 0
+        ) {
           result[issueId] = { ciStatus: null, mergeableStatus: null };
           continue;
         }
 
-        const firstNode = nodes[0] as {
-          commit?: { statusCheckRollup?: { state?: string | null } | null };
-        } | null;
-        const rollupState = firstNode?.commit?.statusCheckRollup?.state ?? null;
+        const firstNode = commits.nodes[0];
+        const commit =
+          typeof firstNode === "object" &&
+          firstNode !== null &&
+          !Array.isArray(firstNode) &&
+          "commit" in firstNode &&
+          typeof firstNode.commit === "object" &&
+          firstNode.commit !== null &&
+          !Array.isArray(firstNode.commit)
+            ? firstNode.commit
+            : undefined;
+        const rollup =
+          commit &&
+          "statusCheckRollup" in commit &&
+          typeof commit.statusCheckRollup === "object" &&
+          commit.statusCheckRollup !== null &&
+          !Array.isArray(commit.statusCheckRollup)
+            ? commit.statusCheckRollup
+            : undefined;
+        const rollupState = rollup && "state" in rollup ? rollup.state : null;
+        const ciStatus = mapCiRollupState(
+          typeof rollupState === "string" || rollupState === null ? rollupState : null
+        );
+        const mergeable = rawPr.mergeable;
         result[issueId] = {
-          ciStatus: mapCiRollupState(rollupState),
+          ciStatus,
           mergeableStatus: mapMergeableState(
-            typeof rawPr === "object" && rawPr !== null && "mergeable" in rawPr
-              ? ((rawPr as { mergeable?: string | null }).mergeable ?? null)
-              : null
+            typeof mergeable === "string" || mergeable === null ? mergeable : null
           ),
+          ...(ciStatus === CiStatus.FAILING ? { failingChecks: failingCheckNames(rollup) } : {}),
         };
       }
     }

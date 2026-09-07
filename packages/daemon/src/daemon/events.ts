@@ -151,10 +151,11 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   return left.length === right.length && left.every((value) => right.includes(value));
 }
 
-function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
-  const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
-  pr.ciSettledAt = input.settledAt;
-  pr.ciGeneration = input.generation;
+export function ciVerdictEmissions(
+  pr: PrState,
+  verdict: PrState["verdict"],
+  failing: string[]
+): CiEmission[] {
   if (verdict === null) {
     if (pr.verdict === "green") {
       pr.verdict = null;
@@ -166,11 +167,18 @@ function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
   const priorVerdict = pr.verdict;
   const priorFailing = pr.failing;
   pr.verdict = verdict;
-  pr.failing = verdict === "red" ? input.failed : [];
+  pr.failing = verdict === "red" ? failing : [];
   if (priorVerdict === verdict && sameStringSet(priorFailing, pr.failing)) return [];
   return verdict === "red"
-    ? [{ type: "ci-settled-red", failing: input.failed, sha: pr.headSha }]
+    ? [{ type: "ci-settled-red", failing, sha: pr.headSha }]
     : [{ type: "ci-green", sha: pr.headSha }];
+}
+
+function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
+  const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
+  pr.ciSettledAt = input.settledAt;
+  pr.ciGeneration = input.generation;
+  return ciVerdictEmissions(pr, verdict, input.failed);
 }
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
   let current = issue;

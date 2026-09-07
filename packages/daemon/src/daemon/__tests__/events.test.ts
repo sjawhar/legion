@@ -189,6 +189,27 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
   };
 }
 
+function prPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "pr",
+    action: "synchronize",
+    repo: "acme/widgets",
+    number: "7",
+    title: "PR title",
+    author: "author",
+    url: "https://github.com/acme/widgets/pull/7",
+    head_sha: "head-1",
+    head_ref: "legion/issue-1",
+    base_ref: "main",
+    merged: "false",
+    merge_commit_sha: "",
+    merged_by: "",
+    body: "",
+    updated_at: "2026-09-07T03:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("core-NATS event pump", () => {
   it("reduces a GitHub envelope and publishes the resulting role event", async () => {
     const { state, architect } = stateForIssue();
@@ -437,15 +458,12 @@ describe("core-NATS event pump", () => {
     await pump.drain();
     nats.emit(
       "notifications.github.acme.widgets.pull_request.synchronize",
-      envelope({
-        action: "synchronize",
-        repository: { full_name: "acme/widgets" },
-        pull_request: {
-          number: 7,
-          head: { sha: "head-3", ref: "legion/issue-1" },
+      envelope(
+        prPayload({
+          head_sha: "head-3",
           updated_at: "1970-01-01T00:00:02.000Z",
-        },
-      })
+        })
+      )
     );
     await pump.drain();
 
@@ -502,15 +520,12 @@ describe("core-NATS event pump", () => {
 
     nats.emit(
       "notifications.github.acme.widgets.pull_request.synchronize",
-      envelope({
-        action: "synchronize",
-        repository: { full_name: "acme/widgets" },
-        pull_request: {
-          number: 7,
-          head: { sha: "head-2", ref: "legion/issue-1" },
+      envelope(
+        prPayload({
+          head_sha: "head-2",
           updated_at: "2026-09-07T03:02:00Z",
-        },
-      })
+        })
+      )
     );
     await flush();
 
@@ -961,14 +976,7 @@ describe("core-NATS event pump", () => {
     );
     nats.emit(
       "notifications.github.acme.widgets.pull_request.synchronize",
-      envelope({
-        action: "synchronize",
-        repository: { full_name: "acme/widgets" },
-        pull_request: {
-          number: 7,
-          head: { sha: "head-2", ref: "legion/issue-1" },
-        },
-      })
+      envelope(prPayload({ head_sha: "head-2" }))
     );
     await flush();
 

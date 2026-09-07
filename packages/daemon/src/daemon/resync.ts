@@ -1,5 +1,8 @@
-import { formatIssueKey, type IssueKey } from "@legion/contracts";
+import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import type { CiAndMergeStatus } from "../state/fetch";
+import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
+import { ciVerdictEmissions } from "./events";
 import type { LegionState } from "./legion-state";
 import { type Effect, type EnvelopeJson, type ReducerConfig, reduceGithubEvent } from "./reducers";
 
@@ -24,6 +27,9 @@ export interface RunResyncDeps {
     items: Record<string, unknown>[];
     excludedNullContentItems?: number;
   }>;
+  fetchCiStatusBatch(
+    prRefs: Record<string, GitHubPRRef>
+  ): Promise<Record<string, CiAndMergeStatus>>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   now(): number;
 }
@@ -145,10 +151,47 @@ function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
   return false;
 }
 
+async function reconcileUnsettledPrs(deps: RunResyncDeps, now: number): Promise<void> {
+  const refs: Record<string, GitHubPRRef> = {};
+  const heads = new Map<string, string>();
+  for (const [prKey, pr] of Object.entries(deps.state.prs)) {
+    if (pr.verdict !== null) continue;
+    const [owner, repo] = pr.repo.split("/");
+    refs[prKey] = { owner, repo, number: pr.number };
+    heads.set(prKey, pr.headSha);
+  }
+  if (Object.keys(refs).length === 0) return;
+
+  const statuses = await deps.fetchCiStatusBatch(refs);
+  for (const [prKey, ref] of Object.entries(refs)) {
+    const pr = deps.state.prs[prKey];
+    const status = statuses[prKey];
+    if (!pr || !status || pr.verdict !== null || pr.headSha !== heads.get(prKey)) continue;
+
+    const verdict =
+      status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
+    const emissions = ciVerdictEmissions(pr, verdict, status.failingChecks ?? []);
+    for (const emission of emissions) {
+      await deps.applyEffects(
+        [
+          {
+            kind: "publish",
+            role: roleToken(deps.state.project, pr.key, "implementer"),
+            payload: emission,
+          },
+        ],
+        {
+          event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
+          issued_at: now,
+        }
+      );
+    }
+  }
+}
+
 /**
- * Reads board artifacts and mechanically converges missed-open items and
- * label drift through the same reducer and effect executor that processes
- * live board events.
+ * Reads board artifacts and unsettled PR check rollups, mechanically converging
+ * missed-open items, CI verdicts, and label drift through existing effects.
  */
 export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload> {
   const now = deps.now();
@@ -165,6 +208,7 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
 
   lastRunAt.set(deps.state, now);
   const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
+  await reconcileUnsettledPrs(deps, now);
   if (
     items.length > 0 &&
     deps.config.boardProjectIds.length === 0 &&

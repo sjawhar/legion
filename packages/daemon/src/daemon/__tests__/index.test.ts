@@ -259,6 +259,50 @@ describe("startDaemon", () => {
       else process.env.XDG_STATE_HOME = originalEnvironment.XDG_STATE_HOME;
     }
   });
+  it("runs CI reconciliation queries with each PR owner's implementer App token", async () => {
+    const commandOptions: CommandRunnerOptions[] = [];
+    const runner: CommandRunner = async (_command, options) => {
+      if (options) commandOptions.push(options);
+      return {
+        stdout: JSON.stringify({ data: { repo0: { pr0: null } } }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const tokenCalls: Array<{ role: string; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: "implement" | "review", owner: string) => {
+        tokenCalls.push({ role, owner });
+        return {
+          token: `ghs_${owner}_app_token`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "3202636+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+
+    await daemonIndex.createCiStatusFetcher(
+      tokenManager,
+      runner
+    )({
+      "acme/api#1": { owner: "acme", repo: "api", number: 1 },
+      "other/web#2": { owner: "other", repo: "web", number: 2 },
+    });
+
+    expect(tokenCalls).toEqual([
+      { role: "implement", owner: "acme" },
+      { role: "implement", owner: "other" },
+    ]);
+    expect(commandOptions).toHaveLength(2);
+    expect(commandOptions.map((options) => options.env?.GH_TOKEN)).toEqual([
+      "ghs_acme_app_token",
+      "ghs_other_app_token",
+    ]);
+  });
+
   it("heals missed board items and executes reconciled human approval wakes through the event pump", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);

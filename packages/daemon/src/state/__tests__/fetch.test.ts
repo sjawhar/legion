@@ -292,7 +292,69 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable" },
+      "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable", failingChecks: [] },
+    });
+  });
+
+  it("returns failed check names from capped rollup contexts", async () => {
+    let query = "";
+    const runner: CommandRunner = async (cmd: string[]) => {
+      query = cmd.find((argument) => argument.startsWith("query=")) ?? "";
+      const response = {
+        data: {
+          repo0: {
+            pr0: {
+              mergeable: "MERGEABLE",
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      statusCheckRollup: {
+                        state: "FAILURE",
+                        contexts: {
+                          nodes: [
+                            {
+                              name: "lint",
+                              conclusion: "FAILURE",
+                              detailsUrl: "https://example.test/checks/lint",
+                            },
+                            {
+                              name: "unit",
+                              conclusion: "SUCCESS",
+                              detailsUrl: "https://example.test/checks/unit",
+                            },
+                            {
+                              name: "legacy",
+                              conclusion: "ERROR",
+                              detailsUrl: "https://example.test/checks/legacy",
+                            },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+
+    expect(query).toContain("contexts(first: 100)");
+    expect(query).toContain("name conclusion detailsUrl");
+    expect(result).toEqual({
+      "ENG-21": {
+        ciStatus: "failing",
+        mergeableStatus: "mergeable",
+        failingChecks: ["lint", "legacy"],
+      },
     });
   });
 
@@ -318,7 +380,7 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable" },
+      "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable", failingChecks: [] },
     });
   });
 
@@ -478,7 +540,7 @@ describe("getCiStatusBatch", () => {
     expect(queriesReceived).toHaveLength(1);
     expect(result).toEqual({
       "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" },
-      "ENG-22": { ciStatus: "failing", mergeableStatus: "conflicting" },
+      "ENG-22": { ciStatus: "failing", mergeableStatus: "conflicting", failingChecks: [] },
     });
   });
 
