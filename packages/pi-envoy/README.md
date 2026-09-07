@@ -16,6 +16,18 @@ claimant.
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so
 temporary registration drift does not hide the extension's actual delivery state.
 
+## Inbound delivery
+
+Pi renders every Envoy envelope through the shared `@legion/envoy-client/delivery` renderer. The
+result is one TOON block with recognized routing and delivery fields such as `to`, `from`, `at`,
+`id`, and `summary`; a structured `payload` appears once as `message`. Invalid JSON is represented
+as a safe `unrecognised` value rather than exposed as raw bytes.
+
+`envoy_inbox` returns the 50 most recent delivered envelopes as metadata (`event_id`, `at`, `from`,
+and `summary`) for recovery after an interrupt. `envoy_role_get` returns the current holder and
+last-seen timestamp for a role. `envoy_subscribe` reports listener warnings in both its text and
+details result, including subscriptions whose stream currently has no matching event.
+
 ## Session identity
 
 Run `/whoami` to copy the active session ID to the clipboard. OMP copies through its host

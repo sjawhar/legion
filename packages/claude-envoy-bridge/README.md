@@ -23,10 +23,21 @@ integration to deliver Envoy traffic into a live session, including idle session
   for every topic the session follows — a dispatch thread, or anything passed to
   `envoy_subscribe` — the server subscribes NATS (`ENVOY_NATS_URL`, the monitor's broker) and
   republishes each envelope on the session's agent subject, where the monitor renders it.
-  `envoy_unsubscribe` stops the forwarding; closing the session drains the connection. Without a
-  broker address the registry interest is still recorded and the gap is noted once on stderr.
+  `envoy_unsubscribe` stops the forwarding; closing the session drains the connection. A manual
+  `envoy_subscribe` rejects before recording an interest if its NATS forwarder is unavailable;
+  dispatch thread auto-subscription remains best-effort and reports the gap on stderr.
 - `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
   `dispatch` skill (when to raise a question) alongside the tool itself.
+
+## Inbound rendering
+
+The monitor uses the same tolerant `@legion/envoy-client/delivery` renderer as other Envoy hosts.
+It emits one TOON block containing recognized delivery fields (`to`, `from`, `at`, `id`, expiry,
+reply metadata, and `summary`) and a structured payload only once as `message`. Unknown sources
+and malformed frames become safe `unrecognised` fields; raw frame bytes are never emitted.
+
+The shared MCP tool list intentionally omits `envoy_inbox`, which is Pi-specific local recovery
+state. It includes `envoy_role_get` for the listener's current role holder.
 
 ## Enable
 

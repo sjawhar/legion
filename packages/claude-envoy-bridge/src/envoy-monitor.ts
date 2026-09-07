@@ -1,55 +1,15 @@
 import { createConnection } from "node:net"
-import { agentSubject, type Envelope, EnvelopeSchema } from "@legion/contracts"
+import { agentSubject } from "@legion/contracts"
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
-import { isOwnDispatchEcho, replyWith, senderLabel } from "@legion/envoy-client/delivery"
+import { renderInbound } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport"
-import { encode } from "@toon-format/toon"
 import { connect, StringCodec } from "nats"
 
 import { monitorSessionId } from "./monitor-identity"
 import { subscriptionTopics } from "./subscription-topics"
 
-const EnvoyEnvelopeSchema = EnvelopeSchema.pick({
-  source: true,
-  source_session: true,
-  topic: true,
-  payload_summary: true,
-  payload: true,
-}).extend({
-  dedupe_key: EnvelopeSchema.shape.dedupe_key.optional(),
-  event_id: EnvelopeSchema.shape.event_id.optional(),
-})
-
-type EnvoyEnvelope = Pick<
-  Envelope,
-  "source" | "source_session" | "topic" | "payload_summary" | "payload"
-> & {
-  readonly dedupe_key?: string | undefined
-  readonly event_id?: string | undefined
-}
-
 const SEEN_KEYS_LIMIT = 1_000
-
-function parseEnvoyEnvelope(input: string): EnvoyEnvelope {
-  return EnvoyEnvelopeSchema.parse(JSON.parse(input))
-}
-
-function inboundMessage(
-  envelope: EnvoyEnvelope,
-  sessionId: string | undefined,
-): string | undefined {
-  if (sessionId !== undefined && isOwnDispatchEcho(envelope, sessionId)) return undefined
-  const reply = replyWith(envelope)
-  return encode({
-    envoy: {
-      topic: envelope.topic,
-      from: senderLabel(envelope),
-      ...(reply === undefined ? {} : { reply_with: reply }),
-      summary: envelope.payload_summary,
-    },
-  })
-}
 
 type NativeMessageInput = {
   readonly token: string
@@ -82,8 +42,13 @@ export function nativeMessageFrames(input: NativeMessageInput): readonly [string
   ]
 }
 
-export function envoyInboundMessage(input: string, sessionId?: string): string | undefined {
-  return inboundMessage(parseEnvoyEnvelope(input), sessionId)
+export function envoyInboundMessage(
+  input: string,
+  sessionId?: string,
+  subject?: string,
+): string | undefined {
+  const rendered = renderInbound(input, sessionId ?? "", subject)
+  return rendered.skip ? undefined : rendered.content
 }
 
 export function nativeMessagingCredentials(
@@ -187,8 +152,8 @@ export async function runEnvoyMonitor(): Promise<void> {
   }, defaults.heartbeatMs)
   const forwarding = subscriptions.map(async (subscription) => {
     for await (const message of subscription) {
-      const envelope = parseEnvoyEnvelope(codec.decode(message.data))
-      const key = envelope.dedupe_key ?? envelope.event_id
+      const rendered = renderInbound(codec.decode(message.data), sessionId, message.subject)
+      const key = rendered.envelope?.dedupe_key ?? rendered.envelope?.event_id
       if (key !== undefined) {
         if (seen.has(key)) continue
         seen.add(key)
@@ -197,8 +162,7 @@ export async function runEnvoyMonitor(): Promise<void> {
           if (!oldest.done) seen.delete(oldest.value)
         }
       }
-      const inbound = inboundMessage(envelope, sessionId)
-      if (inbound !== undefined) await sendNativeMessage(credentials, inbound)
+      if (!rendered.skip) await sendNativeMessage(credentials, rendered.content)
     }
   })
   try {

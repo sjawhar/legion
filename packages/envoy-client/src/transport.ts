@@ -3,6 +3,7 @@ import { z } from "zod";
 import { normalizeEnvoyUrl } from "./defaults";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+const RETRY_DELAY_MS = 250;
 
 const InterestWireSchema = z.object({
   session_id: z.string(),
@@ -10,6 +11,7 @@ const InterestWireSchema = z.object({
   dir: z.string(),
   topics: z.array(z.string()),
   updated_at: z.number().int().optional(),
+  warnings: z.array(z.string()).optional(),
 });
 
 const SessionWireSchema = z.object({
@@ -19,7 +21,25 @@ const SessionWireSchema = z.object({
   port: z.number().int(),
   title: z.string(),
   topics: z.array(z.string()),
+  roles: z.array(z.string()).optional(),
   self_subscribed: z.boolean(),
+  last_seen: z.number().int().optional(),
+});
+
+const RoleWireSchema = z.object({
+  role: z.string(),
+  holder: z.string(),
+  last_seen: z.number().int(),
+});
+
+const ErrorWireSchema = z.object({
+  error: z.string(),
+  expected: z.array(z.string()).optional(),
+});
+
+const EnvelopeResponseSchema = EnvelopeSchema.extend({
+  recipient: z.string().optional(),
+  holder: z.string().optional(),
 });
 
 export type EnvoyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -33,6 +53,8 @@ export type EnvoyClientConfig = {
 export type Interest = z.infer<typeof InterestWireSchema>;
 
 export type SessionInfo = z.infer<typeof SessionWireSchema>;
+
+export type RoleInfo = z.infer<typeof RoleWireSchema>;
 
 export type SubscribeInput = {
   readonly sessionID: string;
@@ -61,26 +83,52 @@ export type HumanSourceInput = {
   readonly sourceSessionID?: string;
 };
 
-export type SendInput = (AgentSourceInput | HumanSourceInput) & {
-  readonly targetSessionID: string;
-  readonly message: string;
-  readonly idempotencyKey?: string;
+export type MessageMetadataInput = {
+  readonly inReplyTo?: string;
+  readonly supersedes?: string;
+  readonly urgency?: "low" | "med" | "high" | "blocking";
+  readonly expectsReply?: "none" | "optional" | "required";
+  readonly expiresAt?: number;
 };
 
-export type PublishInput = (AgentSourceInput | HumanSourceInput) & {
-  readonly topic: string;
-  readonly message: string;
-  readonly payload?: string;
-  readonly idempotencyKey?: string;
-};
+export type SendInput = (AgentSourceInput | HumanSourceInput) &
+  MessageMetadataInput & {
+    readonly targetSessionID: string;
+    readonly message: string;
+    readonly idempotencyKey?: string;
+  };
+
+export type PublishInput = (AgentSourceInput | HumanSourceInput) &
+  MessageMetadataInput & {
+    readonly topic: string;
+    readonly message: string;
+    readonly payload?: string;
+    readonly idempotencyKey?: string;
+  };
 
 export type SetRoleInput = {
   readonly sessionID: string;
   readonly role: string;
 };
 
+export type ListSessionsInput = {
+  readonly directory?: string;
+  readonly title?: string;
+};
+
+export type SendResult = {
+  readonly envelope: Envelope;
+  readonly recipient: string;
+};
+
+export type PublishResult = {
+  readonly envelope: Envelope;
+  readonly holder?: string;
+};
+
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
+  readonly expected: readonly string[] | undefined;
 
   constructor(
     readonly details: {
@@ -90,9 +138,19 @@ export class EnvoyApiError extends Error {
       readonly responseBody: string;
     }
   ) {
+    let parsed: z.infer<typeof ErrorWireSchema> | undefined;
+    try {
+      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
+      if (result.success) parsed = result.data;
+    } catch {
+      // A non-JSON error remains useful in the transport diagnostic.
+    }
     super(
-      `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}`
+      parsed === undefined
+        ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}`
+        : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
     );
+    this.expected = parsed?.expected;
   }
 }
 
@@ -100,11 +158,12 @@ export type EnvoyClient = {
   readonly subscribe: (input: SubscribeInput) => Promise<Interest>;
   readonly unsubscribe: (input: UnsubscribeInput) => Promise<void>;
   readonly getInterest: (sessionID: string) => Promise<Interest>;
-  readonly send: (input: SendInput) => Promise<Envelope>;
-  readonly publish: (input: PublishInput) => Promise<Envelope>;
+  readonly send: (input: SendInput) => Promise<SendResult>;
+  readonly publish: (input: PublishInput) => Promise<PublishResult>;
   readonly unregisterSession: (sessionID: string) => Promise<void>;
   readonly setRole: (input: SetRoleInput) => Promise<Interest>;
-  readonly listSessions: () => Promise<readonly SessionInfo[]>;
+  readonly getRole: (role: string) => Promise<RoleInfo>;
+  readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
 };
 
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
@@ -113,17 +172,33 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
 
   const request = async (path: string, init: RequestInit): Promise<string> => {
     const url = `${baseUrl}${path}`;
-    const response = await config.fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-    const responseBody = await response.text();
-    if (!response.ok) {
-      throw new EnvoyApiError({
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let response: Response;
+      try {
+        response = await config.fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      } catch (error) {
+        if (attempt === 0) {
+          await waitForRetry();
+          continue;
+        }
+        throw error;
+      }
+      const responseBody = await response.text();
+      if (response.ok) return responseBody;
+
+      const error = new EnvoyApiError({
         method: init.method ?? "GET",
         url,
         status: response.status,
         responseBody,
       });
+      if (response.status >= 500 && attempt === 0) {
+        await waitForRetry();
+        continue;
+      }
+      throw error;
     }
-    return responseBody;
+    throw new Error("Envoy request exhausted retries");
   };
 
   const post = (path: string, body: object) =>
@@ -158,27 +233,50 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     },
     getInterest: async (sessionID) =>
       InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
-    send: async (input) =>
-      toEnvelope(
-        await post("/v1/messages/send", {
-          source: input.source ?? "agent",
-          ...(input.sourceSessionID === undefined ? {} : { source_session: input.sourceSessionID }),
-          target_session: input.targetSessionID,
-          message: input.message,
-          ...(input.idempotencyKey === undefined ? {} : { idempotency_key: input.idempotencyKey }),
-        })
-      ),
-    publish: async (input) =>
-      toEnvelope(
-        await post("/v1/messages/publish", {
-          source: input.source ?? "agent",
-          ...(input.sourceSessionID === undefined ? {} : { source_session: input.sourceSessionID }),
-          topic: input.topic,
-          message: input.message,
-          ...(input.payload === undefined ? {} : { payload: input.payload }),
-          ...(input.idempotencyKey === undefined ? {} : { idempotency_key: input.idempotencyKey }),
-        })
-      ),
+    send: async (input) => {
+      const response = EnvelopeResponseSchema.parse(
+        JSON.parse(
+          await post("/v1/messages/send", {
+            source: input.source ?? "agent",
+            ...(input.sourceSessionID === undefined
+              ? {}
+              : { source_session: input.sourceSessionID }),
+            target_session: input.targetSessionID,
+            message: input.message,
+            ...(input.idempotencyKey === undefined
+              ? {}
+              : { idempotency_key: input.idempotencyKey }),
+            ...messageMetadata(input),
+          })
+        )
+      );
+      if (response.recipient === undefined)
+        throw new Error("listener send response missing recipient");
+      return { envelope: response, recipient: response.recipient };
+    },
+    publish: async (input) => {
+      const response = EnvelopeResponseSchema.parse(
+        JSON.parse(
+          await post("/v1/messages/publish", {
+            source: input.source ?? "agent",
+            ...(input.sourceSessionID === undefined
+              ? {}
+              : { source_session: input.sourceSessionID }),
+            topic: input.topic,
+            message: input.message,
+            ...(input.payload === undefined ? {} : { payload: input.payload }),
+            ...(input.idempotencyKey === undefined
+              ? {}
+              : { idempotency_key: input.idempotencyKey }),
+            ...messageMetadata(input),
+          })
+        )
+      );
+      return {
+        envelope: response,
+        ...(response.holder === undefined ? {} : { holder: response.holder }),
+      };
+    },
     unregisterSession: async (sessionID) => {
       await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
     },
@@ -186,11 +284,32 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       InterestWireSchema.parse(
         JSON.parse(await post("/v1/roles/set", { session_id: input.sessionID, role: input.role }))
       ),
-    listSessions: async () =>
-      SessionWireSchema.array().parse(JSON.parse(await request("/v1/sessions", {}))),
+    getRole: async (role) =>
+      RoleWireSchema.parse(
+        JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))
+      ),
+    listSessions: async (input = {}) => {
+      const search = new URLSearchParams();
+      if (input.directory !== undefined) search.set("dir", input.directory);
+      if (input.title !== undefined) search.set("title", input.title);
+      const query = search.size === 0 ? "" : `?${search.toString()}`;
+      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
+    },
   };
 }
 
-function toEnvelope(value: string): Envelope {
-  return EnvelopeSchema.parse(JSON.parse(value));
+function waitForRetry(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, RETRY_DELAY_MS);
+  return promise;
+}
+
+function messageMetadata(input: MessageMetadataInput) {
+  return {
+    ...(input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo }),
+    ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+    ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
+    ...(input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply }),
+    ...(input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }),
+  };
 }

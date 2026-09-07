@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { createServer } from "node:net"
 import { agentSubject } from "@legion/contracts"
 import { decode } from "@toon-format/toon"
-import { runEnvoyMonitor } from "../src/envoy-monitor"
+import { envoyInboundMessage, runEnvoyMonitor } from "../src/envoy-monitor"
 import { FakeNatsServer } from "./fake-nats-server"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -71,7 +71,6 @@ test("writes native delivery frames to Claude Code's Unix socket", async () => {
 })
 
 test("renders an agent envelope with its sender and reply instruction", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
   const rendered = envoyInboundMessage(
     JSON.stringify({
       source: "agent",
@@ -80,11 +79,11 @@ test("renders an agent envelope with its sender and reply instruction", async ()
       payload_summary: "Please report the deployment result.",
     }),
   )
-
   expect(decode(rendered ?? "")).toEqual({
     envoy: {
-      topic: "notifications.agent.ses_reader",
       from: "ses_sender",
+      at: "unknown",
+      id: "unknown",
       reply_with: 'envoy_send(session_id="ses_sender", message="...")',
       summary: "Please report the deployment result.",
     },
@@ -92,7 +91,6 @@ test("renders an agent envelope with its sender and reply instruction", async ()
 })
 
 test("renders a human envelope without a reply instruction", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
   const rendered = envoyInboundMessage(
     JSON.stringify({
       source: "human",
@@ -100,18 +98,17 @@ test("renders a human envelope without a reply instruction", async () => {
       payload_summary: "Please report the deployment result.",
     }),
   )
-
   expect(decode(rendered ?? "")).toEqual({
     envoy: {
-      topic: "notifications.agent.ses_reader",
       from: "human",
+      at: "unknown",
+      id: "unknown",
       summary: "Please report the deployment result.",
     },
   })
 })
 
 test("renders a GitHub envelope without a reply instruction", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
   const rendered = envoyInboundMessage(
     JSON.stringify({
       source: "github",
@@ -119,18 +116,17 @@ test("renders a GitHub envelope without a reply instruction", async () => {
       payload_summary: "The human answered.",
     }),
   )
-
   expect(decode(rendered ?? "")).toEqual({
     envoy: {
-      topic: "notifications.github.example-org.example-repo.issue.42.comment",
       from: "github",
+      at: "unknown",
+      id: "unknown",
       summary: "The human answered.",
     },
   })
 })
 
 test("skips a GitHub dispatch echo for the originating session", async () => {
-  const { envoyInboundMessage } = await import("../src/envoy-monitor")
   const envelope = JSON.stringify({
     source: "github",
     topic: "notifications.agent.ses_origin",
@@ -275,4 +271,35 @@ test("reports a registry outage once and clears it on the next successful heartb
     }
     Object.assign(process.env, previous)
   }
+})
+
+test("uses the shared renderer output for a direct agent delivery", async () => {
+  const reader = "01a01111-2222-7333-4444-555555555555"
+  const sender = "01a00000-0000-7000-0000-000000000001"
+  const rendered = envoyInboundMessage(
+    JSON.stringify({
+      event_id: "agent-message-1",
+      source: "agent",
+      source_session: sender,
+      topic: `notifications.agent.${reader}`,
+      issued_at: Date.parse("2026-09-07T04:41:12Z"),
+      payload_summary: "Please review this.",
+      sender: { session_id: sender, title: "Reviewer", roles: ["legion-reviewer"] },
+    }),
+    reader,
+    `notifications.agent.${reader}`,
+  )
+
+  expect(rendered).toBe(
+    [
+      "envoy:",
+      "  to: you (01a0…)",
+      `  from: ${sender} (Reviewer)`,
+      '  at: "2026-09-07T04:41:12Z"',
+      "  id: agent-message-1",
+      `  reply_with: "envoy_send(session_id=\\"${sender}\\", message=\\"...\\")"`,
+      '  reply_role: "envoy_publish(topic=\\"notifications.role.legion-reviewer\\", message=\\"...\\")"',
+      "  summary: Please review this.",
+    ].join("\n"),
+  )
 })

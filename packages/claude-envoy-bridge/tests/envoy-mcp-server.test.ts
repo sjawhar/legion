@@ -38,9 +38,10 @@ test("exposes the shared Envoy contract plus dispatch when dispatch is enabled",
 
     // then
     expect(definitions.map((definition) => definition.name)).toEqual([
-      ...envoyToolSpecs.map(({ name }) => name),
+      ...envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
       "dispatch",
     ])
+    expect(definitions.map((definition) => definition.name)).not.toContain("envoy_inbox")
     const dispatch = definitions.find((definition) => definition.name === "dispatch")
     const schema = ObjectJsonSchema.parse(dispatch?.inputSchema)
     expect(schema.required).toEqual(["context", "question"])
@@ -71,7 +72,7 @@ test("omits dispatch when it is not enabled", async () => {
 
     // then
     expect(module.envoyMcpToolDefinitions.map((definition) => definition.name)).toEqual(
-      envoyToolSpecs.map(({ name }) => name),
+      envoyToolSpecs.filter((spec) => spec.name !== "envoy_inbox").map(({ name }) => name),
     )
   } finally {
     if (previousUrl !== undefined) process.env["DISPATCH_MCP_URL"] = previousUrl
@@ -123,6 +124,40 @@ function fakeEnvoy(status = 200): FakeEnvoy {
   })
   return { server, subscribes, unsubscribes }
 }
+
+test("returns the role holder through envoy_role_get", async () => {
+  let receivedPath = ""
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      receivedPath = new URL(request.url).pathname
+      return Response.json({
+        role: "reviewer",
+        holder: "01a01234-1234-7123-8123-123456789abc",
+        last_seen: 1_789_026_472,
+      })
+    },
+  })
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${server.port}`
+  try {
+    const module = await loadServer("role-get")
+
+    const result = await module.executeEnvoyTool("envoy_role_get", { role: "reviewer" })
+
+    expect(receivedPath).toBe("/v1/roles/reviewer")
+    expect(result).toEqual({
+      role: "reviewer",
+      holder: "01a01234-1234-7123-8123-123456789abc",
+      last_seen: 1_789_026_472,
+    })
+  } finally {
+    server.stop(true)
+    process.env = { ...previous }
+  }
+})
 
 test("dispatch posts one stateless call stamped with the Claude session id and host, then subscribes to the thread", async () => {
   // given
@@ -285,7 +320,7 @@ test("a failed auto-subscribe does not fail the dispatch", async () => {
 
     // then
     expect(result).toEqual({ thread: 3, url: "https://github.com/acme-org/example-repo/issues/3" })
-    expect(envoy.subscribes).toHaveLength(1)
+    expect(envoy.subscribes).toHaveLength(2)
   } finally {
     service.stop(true)
     envoy.server.stop(true)
@@ -357,7 +392,7 @@ const INBOX = "notifications.agent.ses_claude"
 const envelope = (dedupeKey: string): string =>
   JSON.stringify({ dedupe_key: dedupeKey, payload_summary: "Sami answered: option A" })
 
-test("an unreachable broker is reported on stderr, retried on the next call, and never fails a tool", async () => {
+test("a manual subscription fails without a reachable NATS forwarder while dispatch stays best-effort", async () => {
   // given
   const envoy = fakeEnvoy()
   const service = Bun.serve({
@@ -395,12 +430,13 @@ test("an unreachable broker is reported on stderr, retried on the next call, and
       context: "c",
       question: "q",
     })
-    const interest = await module.executeEnvoyTool("envoy_subscribe", { topics: [THREAD] })
+    await expect(module.executeEnvoyTool("envoy_subscribe", { topics: [THREAD] })).rejects.toThrow(
+      "ENVOY_NATS_URL",
+    )
 
-    // then: both calls succeeded, the registry heard both, and each call tried the broker afresh
+    // then: dispatch recorded its best-effort interest; manual subscription did not.
     expect(result).toEqual({ thread: 3, url: "https://github.com/acme-org/example-repo/issues/3" })
-    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [THREAD] })
-    expect(envoy.subscribes).toHaveLength(2)
+    expect(envoy.subscribes).toHaveLength(1)
     expect(stderr.lines).toHaveLength(2)
     for (const line of stderr.lines) {
       expect(line).toStartWith(
@@ -508,7 +544,7 @@ test("a broker connection nats.js gave up on is replaced by the next envoy_subsc
   }
 })
 
-test("a replacement connection still opening when stdin ends is closed, not left to hold the process", async () => {
+test("closes a replacement connection when shutdown races a manual subscription", async () => {
   // given: a session whose broker connection was given up on, and a broker that
   // accepts the replacement but leaves its handshake hanging
   const nats = new FakeNatsServer()
@@ -532,11 +568,10 @@ test("a replacement connection still opening when stdin ends is closed, not left
     // when: stdin ends while that connect is pending, then the handshake completes
     const shutdown = module.shutdownForwarder()
     nats.release()
-    const interest = await reopening
+    await expect(reopening).rejects.toThrow("ENVOY_NATS_URL")
     await shutdown
 
-    // then: the tool still succeeded, and the broker saw the late connection close
-    expect(interest).toMatchObject({ session_id: "ses_claude", topics: [other] })
+    // then: no new registry interest is accepted after shutdown, and the broker saw the late connection close.
     await nats.until(() => nats.liveConnections === 0)
     expect(nats.connections).toBe(2)
     expect(stderr.lines).toEqual([
@@ -545,6 +580,26 @@ test("a replacement connection still opening when stdin ends is closed, not left
   } finally {
     stderr.restore()
     await nats.stop()
+    envoy.server.stop(true)
+    process.env = { ...previous }
+  }
+})
+
+test("rejects a manual envoy_subscribe without ENVOY_NATS_URL before recording the interest", async () => {
+  const envoy = fakeEnvoy()
+  const previous = { ...process.env }
+  process.env["CLAUDE_CODE_SESSION_ID"] = "ses_claude"
+  delete process.env["ENVOY_SESSION_ID"]
+  delete process.env["ENVOY_NATS_URL"]
+  process.env["ENVOY_URL"] = `http://127.0.0.1:${envoy.server.port}`
+  try {
+    const module = await loadServer("manual-subscribe-no-nats")
+
+    await expect(
+      module.executeEnvoyTool("envoy_subscribe", { topics: [THREAD] }),
+    ).rejects.toThrow("ENVOY_NATS_URL")
+    expect(envoy.subscribes).toEqual([])
+  } finally {
     envoy.server.stop(true)
     process.env = { ...previous }
   }

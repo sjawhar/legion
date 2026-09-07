@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentSubject, EnvelopeSchema, ROLE_TOPIC_PREFIX } from "@legion/contracts";
+import { agentSubject, ROLE_TOPIC_PREFIX } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { executeDispatch } from "@legion/envoy-client/dispatch-call";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
@@ -12,11 +12,11 @@ import {
   parseDispatchCall,
 } from "@legion/envoy-client/dispatch-contract";
 import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
-import { isOwnDispatchEcho, replyWith, senderLabel } from "@legion/envoy-client/delivery";
+import { inboundTimestamp, renderInbound, senderLabel } from "@legion/envoy-client/delivery";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract";
-import { createEnvoyClient } from "@legion/envoy-client/transport";
+import { createEnvoyClient, type MessageMetadataInput } from "@legion/envoy-client/transport";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
@@ -115,6 +115,12 @@ export default function envoyExtension(pi: PiApi): void {
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
   let activeSessionContext: SessionContext | undefined;
+  const inbox: {
+    event_id: string;
+    at: string;
+    from: string;
+    summary: string;
+  }[] = [];
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
 
@@ -133,62 +139,32 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
-    let content = "";
-    let duplicate = false;
-    let dispatchEcho = false;
-    try {
-      const envelope = EnvelopeSchema.parse(JSON.parse(raw));
-      duplicate = dedupeKeys.has(envelope.dedupe_key);
-      if (!duplicate) {
-        dedupeKeys.add(envelope.dedupe_key);
-        if (dedupeKeys.size > 1000) {
-          const oldest = dedupeKeys.values().next();
-          if (!oldest.done) dedupeKeys.delete(oldest.value);
-        }
-        dispatchEcho = isOwnDispatchEcho(envelope, sessionID);
-        let message: unknown;
-        if (envelope.payload !== undefined) {
-          try {
-            message = JSON.parse(envelope.payload);
-          } catch {
-            message = envelope.payload;
-          }
-        }
-        if (!dispatchEcho) {
-          const reply = replyWith(envelope);
-          // One structured TOON note per delivery. The topic only names where
-          // the message was delivered — for an agent message that is the
-          // reader's own inbox topic, never the sender — so the sender is named
-          // explicitly, and a message that looped back to its own sender is
-          // flagged so it cannot pass for a delivery receipt.
-          const echo =
-            envelope.source_session !== undefined && envelope.source_session === sessionID;
-          content = encode({
-            envoy: {
-              topic: envelope.topic,
-              from: senderLabel(envelope),
-              ...(echo
-                ? {
-                    echo: `your own message, sent by this session (${sessionID}) — not an incoming reply`,
-                  }
-                : reply === undefined
-                  ? {}
-                  : { reply_with: reply }),
-              summary: envelope.payload_summary,
-              ...(message === undefined ? {} : { message }),
-            },
-          });
-        }
+    const rendered = renderInbound(raw, sessionID, subject);
+    const dedupeKey = rendered.envelope?.dedupe_key;
+    const duplicate = dedupeKey !== undefined && dedupeKeys.has(dedupeKey);
+    if (!duplicate && dedupeKey !== undefined) {
+      dedupeKeys.add(dedupeKey);
+      if (dedupeKeys.size > 1000) {
+        const oldest = dedupeKeys.values().next();
+        if (!oldest.done) dedupeKeys.delete(oldest.value);
       }
-    } catch {
-      content = encode({ envoy: { topic: subject, message: raw } });
     }
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    if (!duplicate && !dispatchEcho) {
+    if (!duplicate && !rendered.skip) {
+      const envelope = rendered.envelope;
+      if (envelope !== undefined) {
+        inbox.unshift({
+          event_id: envelope.event_id ?? "unknown",
+          at: inboundTimestamp(envelope.issued_at),
+          from: senderLabel(envelope),
+          summary: envelope.payload_summary ?? "unknown",
+        });
+        if (inbox.length > 50) inbox.pop();
+      }
       pi.sendMessage(
-        { customType: "envoy-message", content, display: true },
+        { customType: "envoy-message", content: rendered.content, display: true },
         { deliverAs: "steer", triggerTurn: true }
       );
     }
@@ -283,8 +259,8 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
-  const registerSession = async (): Promise<void> => {
-    await client.subscribe({
+  const registerSession = () =>
+    client.subscribe({
       sessionID,
       directory: sessionDirectory,
       topics: [...new Set([agentSubject(sessionID), ...subscriptions.keys()])],
@@ -295,7 +271,6 @@ export default function envoyExtension(pi: PiApi): void {
       driving: false,
       selfSubscribed: true,
     });
-  };
 
   const ensureHeartbeat = (context: SessionContext): void => {
     if (heartbeatRegistered) return;
@@ -589,15 +564,27 @@ export default function envoyExtension(pi: PiApi): void {
           for (const topic of topicsFor(parameters)) {
             (await subscribe(topic) ? added : already).push(topic);
           }
-          const registrationError =
-            added.length === 0
-              ? undefined
-              : await registerSession().then(() => undefined, messageFor);
-          return toolSuccess(`Subscribed: ${added.join(", ") || "(none new)"}`, {
-            added,
-            already,
-            ...(registrationError === undefined ? {} : { registrationError }),
-          });
+          let warnings: readonly string[] | undefined;
+          let registrationError: string | undefined;
+          if (added.length > 0) {
+            try {
+              warnings = (await registerSession()).warnings;
+            } catch (error) {
+              registrationError = messageFor(error);
+            }
+          }
+          const subscribed = `Subscribed: ${added.join(", ") || "(none new)"}`;
+          return toolSuccess(
+            warnings === undefined || warnings.length === 0
+              ? subscribed
+              : `${subscribed}\nWarnings: ${warnings.join("; ")}`,
+            {
+              added,
+              already,
+              ...(warnings === undefined || warnings.length === 0 ? {} : { warnings }),
+              ...(registrationError === undefined ? {} : { registrationError }),
+            }
+          );
         }
         case EnvoyToolOperation.unsubscribe: {
           const targets = topicsFor(parameters, [
@@ -638,28 +625,48 @@ export default function envoyExtension(pi: PiApi): void {
             }
           );
         }
+        case EnvoyToolOperation.inbox:
+          return toolSuccess(JSON.stringify(inbox, null, 2), { count: inbox.length });
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
-          await client.send({
+          const result = await client.send({
             sourceSessionID: sessionID,
             targetSessionID,
             message: stringFor(parameters, "message"),
+            ...messageMetadataFor(parameters),
           });
-          return toolSuccess(`Sent to ${targetSessionID}`, { target: targetSessionID });
+          return toolSuccess(`sent ${result.envelope.event_id} to ${result.recipient}`, {
+            event_id: result.envelope.event_id,
+            recipient: result.recipient,
+          });
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
-          await client.publish({
+          const result = await client.publish({
             sourceSessionID: sessionID,
             topic,
             message: stringFor(parameters, "message"),
+            ...messageMetadataFor(parameters),
           });
-          return toolSuccess(`Published to ${topic}`, { topic });
+          return toolSuccess(
+            result.holder === undefined
+              ? `published ${result.envelope.event_id}`
+              : `published ${result.envelope.event_id}; holder ${result.holder}`,
+            {
+              event_id: result.envelope.event_id,
+              topic,
+              ...(result.holder === undefined ? {} : { holder: result.holder }),
+            }
+          );
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
           await setEnvoyRole(role);
           return toolSuccess(`Now holding role: ${role}`, { role });
+        }
+        case EnvoyToolOperation.getRole: {
+          const role = await client.getRole(stringFor(parameters, "role"));
+          return toolSuccess(JSON.stringify(role, null, 2), role);
         }
         case EnvoyToolOperation.whoami: {
           return toolSuccess(
@@ -675,16 +682,20 @@ export default function envoyExtension(pi: PiApi): void {
           );
         }
         case EnvoyToolOperation.listSessions: {
-          const machine = parameters.machine;
-          if (machine !== undefined && typeof machine !== "string") {
-            throw new TypeError("machine must be a string");
-          }
-          const sessions = await client.listSessions();
+          const machine = optionalStringFor(parameters, "machine");
+          const directory = optionalStringFor(parameters, "dir");
+          const title = optionalStringFor(parameters, "title");
+          const sessions = await client.listSessions({ directory, title });
           const result =
             machine === undefined
               ? sessions
               : sessions.filter((session) => session.machine_id === machine);
-          return toolSuccess(JSON.stringify(result, null, 2), { count: result.length, machine });
+          return toolSuccess(JSON.stringify(result, null, 2), {
+            count: result.length,
+            machine,
+            dir: directory,
+            title,
+          });
         }
       }
     } catch (error) {
@@ -701,14 +712,36 @@ function schemaFor(pi: PiApi, operation: EnvoyToolOperation): unknown {
     case EnvoyToolOperation.unsubscribe:
       return z.object({ topics: z.array(z.string()).optional() });
     case EnvoyToolOperation.send:
-      return z.object({ session_id: z.string(), message: z.string() });
+      return z.object({
+        session_id: z.string(),
+        message: z.string(),
+        in_reply_to: z.string().optional(),
+        supersedes: z.string().optional(),
+        urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
+        expects_reply: z.enum(["none", "optional", "required"]).optional(),
+        expires_at: z.number().optional(),
+      });
     case EnvoyToolOperation.publish:
-      return z.object({ topic: z.string(), message: z.string() });
+      return z.object({
+        topic: z.string(),
+        message: z.string(),
+        in_reply_to: z.string().optional(),
+        supersedes: z.string().optional(),
+        urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
+        expects_reply: z.enum(["none", "optional", "required"]).optional(),
+        expires_at: z.number().optional(),
+      });
     case EnvoyToolOperation.setRole:
+    case EnvoyToolOperation.getRole:
       return z.object({ role: z.string() });
     case EnvoyToolOperation.listSessions:
-      return z.object({ machine: z.string().optional() });
+      return z.object({
+        machine: z.string().optional(),
+        dir: z.string().optional(),
+        title: z.string().optional(),
+      });
     case EnvoyToolOperation.listInterests:
+    case EnvoyToolOperation.inbox:
     case EnvoyToolOperation.whoami:
       return z.object({});
   }
@@ -718,6 +751,48 @@ function stringFor(parameters: Record<string, unknown>, key: string): string {
   const value = parameters[key];
   if (typeof value !== "string") throw new TypeError(`${key} must be a string`);
   return value;
+}
+
+function optionalStringFor(parameters: Record<string, unknown>, key: string): string | undefined {
+  const value = parameters[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new TypeError(`${key} must be a string`);
+  return value;
+}
+
+function messageMetadataFor(parameters: Record<string, unknown>): MessageMetadataInput {
+  const inReplyTo = optionalStringFor(parameters, "in_reply_to");
+  const supersedes = optionalStringFor(parameters, "supersedes");
+  const urgency = optionalStringFor(parameters, "urgency");
+  if (
+    urgency !== undefined &&
+    urgency !== "low" &&
+    urgency !== "med" &&
+    urgency !== "high" &&
+    urgency !== "blocking"
+  ) {
+    throw new TypeError("urgency must be low, med, high, or blocking");
+  }
+  const expectsReply = optionalStringFor(parameters, "expects_reply");
+  if (
+    expectsReply !== undefined &&
+    expectsReply !== "none" &&
+    expectsReply !== "optional" &&
+    expectsReply !== "required"
+  ) {
+    throw new TypeError("expects_reply must be none, optional, or required");
+  }
+  const expiresAt = parameters.expires_at;
+  if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isInteger(expiresAt))) {
+    throw new TypeError("expires_at must be an integer");
+  }
+  return {
+    ...(inReplyTo === undefined ? {} : { inReplyTo }),
+    ...(supersedes === undefined ? {} : { supersedes }),
+    ...(urgency === undefined ? {} : { urgency }),
+    ...(expectsReply === undefined ? {} : { expectsReply }),
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+  };
 }
 
 function isStringArray(value: unknown): value is readonly string[] {

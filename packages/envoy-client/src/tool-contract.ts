@@ -1,12 +1,29 @@
 import { z } from "zod";
 
+const DELIVERY_CONTRACT =
+  "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+
+const TOPIC_GUIDE =
+  "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> (publish-to; holders claim via envoy_role_set); github.<owner>.<repo>.pr.<n>, pr.<n>.check, pr.<n>.ci, pr.<n>.checks.settled, pr.<n>.merged, pr.<n>.closed, pr.<n>.review, pr.<n>.comment, pr.<n>.mention, issue.<n>, issue.<n>.comment, issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action>, workflow.<file>.<action>.branch.<name>; slack.<team>.<channel>.message|mention and slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
+
+const messageArguments = {
+  message: z.string(),
+  in_reply_to: z.string().optional(),
+  supersedes: z.string().optional(),
+  urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
+  expects_reply: z.enum(["none", "optional", "required"]).optional(),
+  expires_at: z.number().int().optional(),
+};
+
 export const EnvoyToolOperation = {
   subscribe: "subscribe",
   unsubscribe: "unsubscribe",
   listInterests: "listInterests",
+  inbox: "inbox",
   send: "send",
   publish: "publish",
   setRole: "setRole",
+  getRole: "getRole",
   whoami: "whoami",
   listSessions: "listSessions",
 } as const;
@@ -24,8 +41,7 @@ export type ToolSpec = {
 export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description:
-      "Subscribe this session to Envoy notification topics. GitHub topics are resource-scoped: notifications.github.<owner>.<repo>.pr.<number>, notifications.github.<owner>.<repo>.issue.<number>.comment, etc. Use NATS wildcards for broad subscriptions: notifications.github.<owner>.<repo>.pr.> (all PR events). Other topics: notifications.agent.<session_id>, notifications.slack.<team_id>.<channel_id>.message, notifications.slack.<team_id>.<channel_id>.mention. Use this when a session should RECEIVE future events.",
+    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
     arguments: {
       topics: z.array(z.string()).describe("NATS-style topic patterns to subscribe to."),
     },
@@ -49,23 +65,28 @@ export const envoyToolSpecs = [
     requiresSubscriptionCapability: false,
   },
   {
+    name: "envoy_inbox",
+    description: "List this Pi session's 50 most recent rendered Envoy deliveries, newest first.",
+    arguments: {},
+    operation: EnvoyToolOperation.inbox,
+    requiresSubscriptionCapability: false,
+  },
+  {
     name: "envoy_send",
-    description:
-      "Send an Envoy agent-to-agent message directly to another session by session ID. Use this for coordination or to notify a known controller or worker session.",
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT}`,
     arguments: {
       session_id: z
         .string()
-        .describe("Target session ID (ses_…); find it with envoy_sessions or envoy_whoami."),
-      message: z.string(),
+        .describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
+      ...messageArguments,
     },
     operation: EnvoyToolOperation.send,
     requiresSubscriptionCapability: false,
   },
   {
     name: "envoy_publish",
-    description:
-      "Publish an Envoy message to any topic. Use for broadcast to named topics like notifications.role.legion-controller, team channels, or custom routing.",
-    arguments: { topic: z.string(), message: z.string() },
+    description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
+    arguments: { topic: z.string(), ...messageArguments },
     operation: EnvoyToolOperation.publish,
     requiresSubscriptionCapability: false,
   },
@@ -75,6 +96,13 @@ export const envoyToolSpecs = [
       "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session.",
     arguments: { role: z.string() },
     operation: EnvoyToolOperation.setRole,
+    requiresSubscriptionCapability: false,
+  },
+  {
+    name: "envoy_role_get",
+    description: "Get the live holder of a named Envoy role.",
+    arguments: { role: z.string() },
+    operation: EnvoyToolOperation.getRole,
     requiresSubscriptionCapability: false,
   },
   {
@@ -88,8 +116,12 @@ export const envoyToolSpecs = [
   {
     name: "envoy_sessions",
     description:
-      "List all live sessions registered with Envoy. Use the optional machine filter to show only sessions on a specific host.",
-    arguments: { machine: z.string().optional() },
+      "List all live sessions registered with Envoy. Filter by optional machine, directory, or title.",
+    arguments: {
+      machine: z.string().optional(),
+      dir: z.string().optional(),
+      title: z.string().optional(),
+    },
     operation: EnvoyToolOperation.listSessions,
     requiresSubscriptionCapability: false,
   },

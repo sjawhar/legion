@@ -82,6 +82,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@legion/contracts": "workspace:*",
+        "@toon-format/toon": "^4.1.1",
         "zod": "^4.1.8",
       },
       "devDependencies": {

@@ -11,7 +11,12 @@ import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscri
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { EnvoyToolOperation, envoyToolSpecs } from "@legion/envoy-client/tool-contract"
-import { createEnvoyClient, type EnvoyClient, type Interest } from "@legion/envoy-client/transport"
+import {
+  createEnvoyClient,
+  type EnvoyClient,
+  type Interest,
+  type MessageMetadataInput,
+} from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -36,11 +41,13 @@ const dispatchToolDefinition = {
 }
 
 export const envoyMcpToolDefinitions = [
-  ...envoyToolSpecs.map((spec) => ({
-    name: spec.name,
-    description: spec.description,
-    inputSchema: z.toJSONSchema(z.object(spec.arguments)),
-  })),
+  ...envoyToolSpecs
+    .filter((spec) => spec.operation !== EnvoyToolOperation.inbox)
+    .map((spec) => ({
+      name: spec.name,
+      description: spec.description,
+      inputSchema: z.toJSONSchema(z.object(spec.arguments)),
+    })),
   ...(dispatchConfig.url === null ? [] : [dispatchToolDefinition]),
 ]
 
@@ -58,12 +65,29 @@ function mcpResult(value: unknown): {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
 
+function messageMetadataFor(input: {
+  readonly in_reply_to?: string | undefined
+  readonly supersedes?: string | undefined
+  readonly urgency?: "low" | "med" | "high" | "blocking" | undefined
+  readonly expects_reply?: "none" | "optional" | "required" | undefined
+  readonly expires_at?: number | undefined
+}): MessageMetadataInput {
+  return {
+    ...(input.in_reply_to === undefined ? {} : { inReplyTo: input.in_reply_to }),
+    ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+    ...(input.urgency === undefined ? {} : { urgency: input.urgency }),
+    ...(input.expects_reply === undefined ? {} : { expectsReply: input.expects_reply }),
+    ...(input.expires_at === undefined ? {} : { expiresAt: input.expires_at }),
+  }
+}
+
 // One NATS connection per server process, opened by the first topic a tool
 // follows, with pi-envoy's connect options: nats.js rides out broker outages
 // on its own and re-subscribes when the broker returns. A connection it has
 // given up on for good is replaced by the next follow, carrying every followed
-// topic over. Without a broker address the registry interest is still recorded
-// and the gap reported once on stderr; nothing on this leg fails a tool call.
+// topic over. Manual envoy_subscribe first establishes that forwarding leg and
+// rejects rather than recording an undeliverable interest. Dispatch auto-
+// subscription remains best-effort and reports its forwarding gap on stderr.
 let forwarder: Promise<ThreadForwarder | null> | undefined
 let shuttingDown = false
 
@@ -94,8 +118,8 @@ async function openThreadForwarder(sessionId: string): Promise<ThreadForwarder |
   }
 }
 
-async function followTopics(sessionId: string, topics: readonly string[]): Promise<void> {
-  if (shuttingDown) return
+async function followTopics(sessionId: string, topics: readonly string[]): Promise<boolean> {
+  if (shuttingDown) return false
   try {
     forwarder ??= openThreadForwarder(sessionId)
     const attempt = forwarder
@@ -112,12 +136,18 @@ async function followTopics(sessionId: string, topics: readonly string[]): Promi
       forwarder ??= openThreadForwarder(sessionId)
       active = await forwarder
     }
-    if (active === null || shuttingDown) return
+    if (active === null) {
+      if (forwarder === attempt) forwarder = undefined
+      return false
+    }
+    if (shuttingDown) return false
     for (const topic of pending) active.follow(topic)
+    return true
   } catch (error) {
     process.stderr.write(
       `envoy-mcp: cannot forward ${topics.join(", ")} to ${sessionId} — ${messageFor(error)}\n`,
     )
+    return false
   }
 }
 
@@ -142,7 +172,11 @@ async function subscribeAndFollow(
   client: EnvoyClient,
   sessionId: string,
   topics: readonly string[],
+  requireForwarder = false,
 ): Promise<Interest> {
+  if (requireForwarder && !(await followTopics(sessionId, topics))) {
+    throw new Error("envoy_subscribe requires a live ENVOY_NATS_URL forwarder")
+  }
   const interest = await client.subscribe({
     sessionID: sessionId,
     directory: process.cwd(),
@@ -152,7 +186,7 @@ async function subscribeAndFollow(
     driving: true,
     selfSubscribed: true,
   })
-  await followTopics(sessionId, topics)
+  if (!requireForwarder) await followTopics(sessionId, topics)
   return interest
 }
 
@@ -201,22 +235,26 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     case EnvoyToolOperation.send: {
       const args = z.object(spec.arguments).parse(input)
       return client.send({
+        source: "agent",
         sourceSessionID: sessionId,
         targetSessionID: args.session_id,
         message: args.message,
+        ...messageMetadataFor(args),
       })
     }
     case EnvoyToolOperation.publish: {
       const args = z.object(spec.arguments).parse(input)
       return client.publish({
+        source: "agent",
         sourceSessionID: sessionId,
         topic: args.topic,
         message: args.message,
+        ...messageMetadataFor(args),
       })
     }
     case EnvoyToolOperation.subscribe: {
       const args = z.object(spec.arguments).parse(input)
-      return subscribeAndFollow(client, sessionId, args.topics)
+      return subscribeAndFollow(client, sessionId, args.topics, true)
     }
     case EnvoyToolOperation.unsubscribe: {
       const args = z.object(spec.arguments).parse(input)
@@ -240,7 +278,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
       }
     case EnvoyToolOperation.listSessions: {
       const args = z.object(spec.arguments).parse(input)
-      const sessions = await client.listSessions()
+      const sessions = await client.listSessions({
+        ...(args.dir === undefined ? {} : { directory: args.dir }),
+        ...(args.title === undefined ? {} : { title: args.title }),
+      })
       if (!args.machine) {
         return sessions
       }
@@ -249,6 +290,10 @@ export async function executeEnvoyTool(name: string, input: unknown): Promise<un
     case EnvoyToolOperation.setRole: {
       const args = z.object(spec.arguments).parse(input)
       return client.setRole({ sessionID: sessionId, role: args.role })
+    }
+    case EnvoyToolOperation.getRole: {
+      const args = z.object(spec.arguments).parse(input)
+      return client.getRole(args.role)
     }
     default:
       throw new UnsupportedEnvoyToolError(name)

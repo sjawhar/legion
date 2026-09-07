@@ -113,17 +113,19 @@ describe("EnvoyClient", () => {
         issued_at: 1,
         payload_summary: "hello",
         trace_id: "trace-1",
+        recipient: "ses_target",
       }),
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
-    const envelope = await client.send({
+    const result = await client.send({
       sourceSessionID: "ses_sender",
       targetSessionID: "ses_target",
       message: "hello",
     });
 
-    expect(envelope.topic).toBe("notifications.agent.ses_target");
+    expect(result.envelope.topic).toBe("notifications.agent.ses_target");
+    expect(result.recipient).toBe("ses_target");
     expect(await recorded.requests[0]?.json()).toEqual({
       source: "agent",
       source_session: "ses_sender",
@@ -143,6 +145,7 @@ describe("EnvoyClient", () => {
         issued_at: 1,
         payload_summary: "hello",
         trace_id: "trace-human",
+        recipient: "ses_target",
       }),
     ]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
@@ -269,5 +272,136 @@ describe("EnvoyClient", () => {
         responseBody: "invalid role",
       })
     );
+  });
+
+  test("retries one 503 response and keeps the direct-send recipient", async () => {
+    const recorded = recordFetch([
+      Response.json({ error: "listener is starting" }, { status: 503 }),
+      jsonResponse({
+        event_id: "event-retried",
+        source: "agent",
+        source_event_id: "agent.sender.event-retried",
+        source_session: "01a00000-0000-7000-0000-000000000001",
+        topic: "notifications.agent.01a01111-2222-7333-4444-555555555555",
+        dedupe_key: "event-retried",
+        issued_at: 1,
+        payload_summary: "hello",
+        trace_id: "trace-retried",
+        recipient: "01a01111-2222-7333-4444-555555555555",
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.send({
+      sourceSessionID: "01a00000-0000-7000-0000-000000000001",
+      targetSessionID: "01a01111-2222-7333-4444-555555555555",
+      message: "hello",
+    });
+
+    expect(recorded.requests).toHaveLength(2);
+    expect(result).toMatchObject({
+      recipient: "01a01111-2222-7333-4444-555555555555",
+      envelope: { event_id: "event-retried" },
+    });
+  });
+
+  test("serializes all additive message fields and retains role holder results", async () => {
+    const recorded = recordFetch([
+      jsonResponse({
+        event_id: "event-role",
+        source: "agent",
+        source_event_id: "agent.sender.event-role",
+        source_session: "01a00000-0000-7000-0000-000000000001",
+        topic: "notifications.role.legion-reviewer",
+        dedupe_key: "event-role",
+        issued_at: 1,
+        payload_summary: "review this",
+        trace_id: "trace-role",
+        holder: "01a01111-2222-7333-4444-555555555555",
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.publish({
+      sourceSessionID: "01a00000-0000-7000-0000-000000000001",
+      topic: "notifications.role.legion-reviewer",
+      message: "review this",
+      inReplyTo: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expectsReply: "required",
+      expiresAt: Date.parse("2026-09-07T05:00:00Z"),
+    });
+
+    expect(await recorded.requests[0]?.json()).toMatchObject({
+      in_reply_to: "event-before",
+      supersedes: "event-obsolete",
+      urgency: "blocking",
+      expects_reply: "required",
+      expires_at: Date.parse("2026-09-07T05:00:00Z"),
+    });
+    expect(result).toMatchObject({
+      envelope: { event_id: "event-role" },
+      holder: "01a01111-2222-7333-4444-555555555555",
+    });
+  });
+
+  test("uses listener directory and title session filters and gets a live role holder", async () => {
+    const recorded = recordFetch([
+      jsonResponse([
+        {
+          session_id: "01a00000-0000-7000-0000-000000000001",
+          machine_id: "example-host",
+          dir: "/work/example",
+          port: 0,
+          title: "Reviewer",
+          topics: ["notifications.role.legion-reviewer"],
+          roles: ["legion-reviewer"],
+          self_subscribed: true,
+          last_seen: 42,
+        },
+      ]),
+      jsonResponse({
+        role: "legion-reviewer",
+        holder: "01a00000-0000-7000-0000-000000000001",
+        last_seen: 42,
+      }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions({ directory: "example", title: "Review" });
+    const role = await client.getRole("legion-reviewer");
+
+    expect(sessions[0]).toMatchObject({ roles: ["legion-reviewer"], last_seen: 42 });
+    expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions?dir=example&title=Review");
+    expect(role).toEqual({
+      role: "legion-reviewer",
+      holder: "01a00000-0000-7000-0000-000000000001",
+      last_seen: 42,
+    });
+    expect(recorded.requests[1]?.url).toBe("http://listener/v1/roles/legion-reviewer");
+  });
+
+  test("surfaces listener error text and expected fields without retrying a 400", async () => {
+    const recorded = recordFetch([
+      Response.json(
+        {
+          error: "message must not be empty",
+          expected: ["message"],
+        },
+        { status: 400 }
+      ),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await expect(
+      client.publish({
+        sourceSessionID: "01a00000-0000-7000-0000-000000000001",
+        topic: "notifications.role.legion-reviewer",
+        message: "",
+        urgency: "low",
+      })
+    ).rejects.toThrow("message must not be empty (expected: message)");
+    expect(recorded.requests).toHaveLength(1);
   });
 });

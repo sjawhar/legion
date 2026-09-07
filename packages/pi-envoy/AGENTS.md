@@ -5,9 +5,10 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 ## Overview
 
 This package owns Pi-specific tool registration, direct NATS subscriptions, steering delivery,
-and self-subscription registration for every session. HTTP transport, tool metadata, envelope
-parsing, and subject construction come from the Envoy core packages. Role claims are routed by
-the listener:
+and self-subscription registration for every session. HTTP transport, tool metadata, and subject
+construction come from the Envoy core packages. `@legion/envoy-client/delivery` is the sole
+inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. Role
+claims are routed by the listener:
 this extension receives a receipt-backed request on its direct agent subject instead of subscribing
 to a role subject itself. The agent pump replies after it accepts the envelope, so the listener can
 turn a claimed-but-deaf holder into a `delivery_failed` exception after two seconds.
@@ -28,5 +29,6 @@ turn a claimed-but-deaf holder into a `delivery_failed` exception after two seco
 
 - Register schemas through the injected `pi.zod`, or as plain JSON Schema (the path OMP's MCP tools take — `dispatch` serialises the shared contract's zod shape this way). A schema object built from another Zod instance is not rejected: OMP misreads it as JSON Schema, silently, and the model sees a wrong parameter shape.
 - Keep direct NATS subscription lifecycle and Pi steering delivery adapter-local. Inbound messages deliver as `steer` so they interrupt an in-flight turn; `triggerTurn` still wakes idle sessions.
+- Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
