@@ -418,10 +418,12 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
           verdict,
           failing: input.failed,
           settledAt: input.settledAt,
-          latestCheckRunId: input.latestCheckRunId,
-          generation: input.generation,
-          snapshot: input.snapshot,
-          latestCompletedAt: input.latestCompletedAt,
+          fence: {
+            latestCheckRunId: input.latestCheckRunId,
+            generation: input.generation,
+            snapshot: input.snapshot,
+            latestCompletedAt: input.latestCompletedAt,
+          },
         },
         deps.config
       ),

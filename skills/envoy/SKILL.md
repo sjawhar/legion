@@ -102,7 +102,7 @@ for the head, not GitHub's required-checks set; until then, a silent subscriptio
 Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"`
 payload with `latest_check_run_id`, the highest GitHub check-run ID in the settlement. Consumers order
 summaries for one SHA lexicographically by `(latest_check_run_id, generation)`; an equal pair is a
-duplicate only when its `snapshot` matches.
+duplicate only when its `snapshot` matches. A verdict a consumer reconciled from GitHub's rollup carries no generation; against it an equal-id settlement is ordered by `latest_completed_at` (GitHub's clock), and on a tie GitHub's view wins.
 
 After the seven-day KV TTL recreates a record, its generation restarts at 0; if the first observation
 updates an existing lower-ID run, consumers drop both until resync reads GitHub. A legacy in-progress

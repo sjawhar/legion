@@ -80,7 +80,7 @@ caller must provide a field.
   `pr.<n>.checks` when the head's checks settle. Check settlement is at-least-once: a settlement can
   be followed by a `superseded_settlement` with `latest_check_run_id`, the highest GitHub check-run ID
   in the settlement. Consumers order summaries for one SHA lexicographically by
-  `(latest_check_run_id, generation)`; an equal pair is a duplicate only when its `snapshot` matches.
+  `(latest_check_run_id, generation)`; an equal pair is a duplicate only when its `snapshot` matches. A verdict a consumer reconciled from GitHub's rollup carries no generation; against it an equal-id settlement is ordered by `latest_completed_at` (GitHub's clock), and on a tie GitHub's view wins.
   Legacy checks without a `check_run_id` remain in the status groups and failing names but not
   `latest_check_run_id`; a head publishes only when at least one check has a positive run ID. After
   the seven-day KV TTL recreates a record, its generation restarts at 0; if its first observation

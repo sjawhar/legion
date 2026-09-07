@@ -4,7 +4,8 @@ import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { LegionState } from "./legion-state";
 import {
-  advanceCiFence,
+  acceptGitHubFence,
+  type CiFence,
   type CiSnapshot,
   ciSnapshot,
   ciSnapshotEquals,
@@ -15,6 +16,7 @@ import {
   resetPrHead,
   settleCiVerdict,
   uncertifyCiVerdict,
+  writeCiFence,
 } from "./reducers";
 
 export type ResyncAnomaly = {
@@ -205,12 +207,17 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
     }
-    const fence = {
-      latestCheckRunId: status.latestCheckRunId,
-      generation: null,
-      snapshot: null,
-      latestCompletedAt: status.latestCompletedAt,
-    };
+    // GitHub's rollup authors a fence with no listener identity; it replaces
+    // the stored one only where acceptGitHubFence allows.
+    const fence: CiFence | undefined =
+      status.latestCheckRunId !== null && acceptGitHubFence(pr, status.latestCheckRunId)
+        ? {
+            latestCheckRunId: status.latestCheckRunId,
+            generation: null,
+            snapshot: null,
+            latestCompletedAt: status.latestCompletedAt,
+          }
+        : undefined;
     const failing = status.failingChecks ?? [];
     // Mirror live intake: red only for actual failures; a cancelled-only
     // failing rollup, like a pending one, uncertifies a green head.
@@ -221,22 +228,14 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
           ? "red"
           : null;
     if (verdict === null) {
-      advanceCiFence(pr, fence);
+      if (fence) writeCiFence(pr, fence);
       if (status.ciStatus === "pending" || status.ciStatus === "failing") uncertifyCiVerdict(pr);
       continue;
     }
     const effects = settleCiVerdict(
       deps.state,
       pr,
-      {
-        verdict,
-        failing,
-        settledAt: now,
-        latestCheckRunId: status.latestCheckRunId,
-        snapshot: null,
-        latestCompletedAt: status.latestCompletedAt,
-        generation: null,
-      },
+      { verdict, failing, settledAt: now, ...(fence ? { fence } : {}) },
       deps.config
     );
     if (effects.length === 0) continue;

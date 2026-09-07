@@ -36,10 +36,8 @@ export interface CiSettlementInput {
   verdict: PrState["verdict"];
   failing: string[];
   settledAt: number;
-  latestCheckRunId: number | null;
-  generation: number | null;
-  snapshot: string | null;
-  latestCompletedAt: number | null;
+  /** The fence this settlement establishes; the caller has already accepted it. Omitted when the fence must not move. */
+  fence?: CiFence;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -83,29 +81,32 @@ export function classifySettlement(
   return "stale";
 }
 
-interface CiFence {
-  readonly latestCheckRunId: number | null | undefined;
+export interface CiFence {
+  readonly latestCheckRunId: number;
+  /** null for a fence GitHub's rollup authored (resync); the listener's state version otherwise. */
   readonly generation: number | null;
   readonly snapshot: string | null;
   readonly latestCompletedAt: number | null;
 }
 
-/** Records an accepted fence without letting a same-id resync erase live identity. */
-export function advanceCiFence(pr: PrState, incoming: CiFence): void {
-  const latestCheckRunId = incoming.latestCheckRunId;
-  if (latestCheckRunId === null || latestCheckRunId === undefined) return;
-  if (pr.ciLatestRunId !== null && latestCheckRunId < pr.ciLatestRunId) return;
-  if (
-    latestCheckRunId === pr.ciLatestRunId &&
-    pr.ciSettlementGeneration !== null &&
-    incoming.generation === null
-  ) {
-    return;
-  }
-  pr.ciLatestRunId = latestCheckRunId;
-  pr.ciSettlementGeneration = incoming.generation;
-  pr.ciSnapshot = incoming.snapshot;
-  pr.ciLatestCompletedAt = incoming.latestCompletedAt;
+/**
+ * Whether a fence read from GitHub's rollup may replace the stored one: a
+ * higher id always; an equal id only when the stored fence is also GitHub's
+ * (a live fence's identity is never erased by a same-id refresh); a lower id
+ * never. The live counterpart is `classifySettlement`.
+ */
+export function acceptGitHubFence(pr: PrState, latestCheckRunId: number | null): boolean {
+  if (latestCheckRunId === null) return false;
+  if (pr.ciLatestRunId === null || latestCheckRunId > pr.ciLatestRunId) return true;
+  return latestCheckRunId === pr.ciLatestRunId && pr.ciSettlementGeneration === null;
+}
+
+/** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */
+export function writeCiFence(pr: PrState, fence: CiFence): void {
+  pr.ciLatestRunId = fence.latestCheckRunId;
+  pr.ciSettlementGeneration = fence.generation;
+  pr.ciSnapshot = fence.snapshot;
+  pr.ciLatestCompletedAt = fence.latestCompletedAt;
 }
 
 /** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */
@@ -182,7 +183,7 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  advanceCiFence(pr, input);
+  if (input.fence) writeCiFence(pr, input.fence);
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,

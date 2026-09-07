@@ -36,7 +36,9 @@ the durable `snapshot` hash, and `latest_completed_at`, the maximum RFC3339
 `ObservedAt` among its completed checks. Consumers order summaries for one SHA
 lexicographically by `(latest_check_run_id, generation)`, with the former the
 largest known check-run ID in the settlement. An equal pair is a duplicate only
-when its `snapshot` matches. The summary waits for `ENVOY_CI_DEBOUNCE` (default
+when its `snapshot` matches. A verdict a consumer reconciled from GitHub's rollup
+carries no generation; against it an equal-id settlement is ordered by
+`latest_completed_at` (GitHub's clock), and on a tie GitHub's view wins. The summary waits for `ENVOY_CI_DEBOUNCE` (default
 `5s`), all check runs to be terminal, and every observed suite to be `completed`;
 heads with no suite still settle after terminal checks.
 
