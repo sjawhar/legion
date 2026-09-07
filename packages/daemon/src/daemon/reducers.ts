@@ -36,7 +36,7 @@ export interface CiSettlementInput {
   verdict: PrState["verdict"];
   failing: string[];
   settledAt: number;
-  generation?: number;
+  latestCheckRunId?: number | null;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -75,8 +75,7 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  if (input.generation !== undefined) pr.ciGeneration = input.generation;
-
+  if (input.latestCheckRunId !== undefined) pr.ciLatestRunId = input.latestCheckRunId;
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,
@@ -308,7 +307,7 @@ function registerPr(
     verdict: null,
     failing: [],
     ciSettledAt: null,
-    ciGeneration: null,
+    ciLatestRunId: null,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -322,7 +321,7 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.verdict = null;
   pr.failing = [];
   pr.ciSettledAt = null;
-  pr.ciGeneration = null;
+  pr.ciLatestRunId = null;
   delete pr.reviewDecision;
 }
 

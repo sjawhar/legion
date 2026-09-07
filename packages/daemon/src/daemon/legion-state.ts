@@ -56,10 +56,11 @@ export interface PrState {
   number: number;
   headSha: string;
   headUpdatedAt?: number;
+  /** The last SETTLED verdict for this head; a rerun in flight makes it unknown at the next resync. */
   verdict: "green" | "red" | null;
   failing: string[];
   ciSettledAt: number | null;
-  ciGeneration: number | null;
+  ciLatestRunId: number | null;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
 }
@@ -186,7 +187,7 @@ const PrStateSchema = z
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     ciSettledAt: z.number().nullable(),
-    ciGeneration: z.number().int().nonnegative().nullable(),
+    ciLatestRunId: z.number().int().positive().nullable(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
@@ -447,8 +448,8 @@ function migrateV11State(state: unknown): unknown {
   const migratedPrs = recordValue(prs)
     ? Object.fromEntries(
         Object.entries(prs).map(([key, pr]) => {
-          if (!recordValue(pr) || "ciGeneration" in pr) return [key, pr];
-          return [key, { ...pr, ciGeneration: null }];
+          if (!recordValue(pr) || "ciLatestRunId" in pr) return [key, pr];
+          return [key, { ...pr, ciLatestRunId: null }];
         })
       )
     : undefined;

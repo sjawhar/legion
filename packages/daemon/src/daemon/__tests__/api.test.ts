@@ -300,7 +300,7 @@ describe("Legion HTTP API", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 0,
-      ciGeneration: null,
+      ciLatestRunId: null,
       fixAttempts: 0,
     };
     state.roles[roleToken(state.project, child, "architect")] = {

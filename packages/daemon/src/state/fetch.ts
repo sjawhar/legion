@@ -345,6 +345,8 @@ export interface CiAndMergeStatus {
   failingChecks?: string[];
   headSha: string | null;
   isOpen: boolean;
+  updatedAt?: string;
+  latestCheckRunId?: number | null;
 }
 
 const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {

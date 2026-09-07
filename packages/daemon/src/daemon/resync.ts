@@ -174,7 +174,17 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
     if (!pr || !status || pr.headSha !== heads.get(prKey) || !status.isOpen || !status.headSha)
       continue;
 
-    if (pr.headSha !== status.headSha) resetPrHead(pr, status.headSha);
+    if (pr.headSha !== status.headSha) {
+      if (!status.updatedAt) {
+        throw new Error(`GitHub CI status is missing updatedAt for ${prKey}`);
+      }
+      const headUpdatedAt = Date.parse(status.updatedAt);
+      if (Number.isNaN(headUpdatedAt)) {
+        throw new Error(`GitHub CI status has an invalid updatedAt for ${prKey}`);
+      }
+      resetPrHead(pr, status.headSha);
+      pr.headUpdatedAt = headUpdatedAt;
+    }
     const verdict =
       status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
     if (verdict === null) continue;
@@ -185,6 +195,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
         verdict,
         failing: status.failingChecks ?? [],
         settledAt: now,
+        latestCheckRunId: status.latestCheckRunId,
       },
       deps.config
     );

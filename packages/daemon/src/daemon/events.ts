@@ -56,7 +56,7 @@ interface ChecksInput {
   failed: string[];
   cancelledCount: number;
   settledAt: number;
-  generation: number;
+  latestCheckRunId: number;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -115,11 +115,11 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     return undefined;
   }
   const sha = stringValue(payload.sha);
-  const generation =
-    typeof payload.generation === "number" &&
-    Number.isSafeInteger(payload.generation) &&
-    payload.generation >= 0
-      ? payload.generation
+  const latestCheckRunId =
+    typeof payload.latest_check_run_id === "number" &&
+    Number.isSafeInteger(payload.latest_check_run_id) &&
+    payload.latest_check_run_id > 0
+      ? payload.latest_check_run_id
       : undefined;
   const settledAt =
     payload.settled_at === undefined
@@ -131,7 +131,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
         : undefined;
   const failed = statusGroup(payload, "failed");
   const cancelled = statusGroup(payload, "cancelled");
-  if (!sha || generation === undefined || settledAt === undefined || !failed || !cancelled) {
+  if (!sha || latestCheckRunId === undefined || settledAt === undefined || !failed || !cancelled) {
     return undefined;
   }
   return {
@@ -141,7 +141,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     failed: failed.checks,
     cancelledCount: cancelled.count,
     settledAt,
-    generation,
+    latestCheckRunId,
   };
 }
 
@@ -363,7 +363,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    if (pr.ciGeneration !== null && input.generation < pr.ciGeneration) {
+    if (pr.ciLatestRunId !== null && input.latestCheckRunId < pr.ciLatestRunId) {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );
@@ -378,7 +378,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
           verdict,
           failing: input.failed,
           settledAt: input.settledAt,
-          generation: input.generation,
+          latestCheckRunId: input.latestCheckRunId,
         },
         deps.config
       ),

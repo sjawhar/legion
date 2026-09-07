@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { formatIssueKey, roleToken } from "@legion/contracts";
 import { type LegionState, newLegionState } from "../legion-state";
-import type { Effect, EnvelopeJson } from "../reducers";
+import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
 
 const issue = formatIssueKey("sjawhar", "legion", 42);
@@ -399,7 +399,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciGeneration: null,
+      ciLatestRunId: null,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -436,7 +436,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: now,
-      ciGeneration: null,
+      ciLatestRunId: null,
     });
     expect(dispatched).toEqual([
       {
@@ -475,7 +475,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciGeneration: null,
+      ciLatestRunId: null,
       fixAttempts: 0,
     };
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
@@ -500,7 +500,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciGeneration: null,
+      ciLatestRunId: null,
     });
     expect(dispatched).toEqual([
       {
@@ -533,7 +533,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciGeneration: 4,
+      ciLatestRunId: 4,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -549,6 +549,7 @@ describe("runResync", () => {
             ciStatus: "passing" as const,
             mergeableStatus: null,
             headSha: "head-2",
+            updatedAt: "2026-08-24T00:00:00.000Z",
             isOpen: true,
           },
         };
@@ -564,7 +565,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciGeneration: null,
+      ciLatestRunId: null,
       fixAttempts: 1,
     });
     expect(state.prs["sjawhar/legion#7"]?.reviewDecision).toBeUndefined();
@@ -585,6 +586,102 @@ describe("runResync", () => {
     ]);
   });
 
+  it("fences a resynced head against a redelivered older synchronize", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Resync this Legion tree",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      headUpdatedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+      ciLatestRunId: null,
+      fixAttempts: 0,
+    };
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-2",
+          updatedAt: "2026-08-24T00:00:02.000Z",
+          latestCheckRunId: 900,
+          isOpen: true,
+        },
+      }),
+    });
+
+    reduceGithubEvent(
+      state,
+      "notifications.github.sjawhar.legion.pull_request.synchronize",
+      {
+        event_id: "redelivered-head-1",
+        issued_at: Date.parse("2026-08-24T00:00:01.000Z"),
+        payload: {
+          kind: "pr",
+          action: "synchronize",
+          repo: "sjawhar/legion",
+          number: "7",
+          head_sha: "head-1",
+          updated_at: "2026-08-24T00:00:01.000Z",
+        },
+      },
+      resyncDeps(state, []).config
+    );
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      headSha: "head-2",
+      headUpdatedAt: Date.parse("2026-08-24T00:00:02.000Z"),
+      ciLatestRunId: 900,
+    });
+  });
+
+  it("records the resynced check-run id to fence delayed live settlements", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+      ciLatestRunId: null,
+      fixAttempts: 0,
+    };
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: 900,
+          isOpen: true,
+        },
+      }),
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "green",
+      ciLatestRunId: 900,
+    });
+  });
+
   it("reconciles a stored red verdict to green", async () => {
     const state = newLegionState("omp", 1);
     state.prs["sjawhar/legion#7"] = {
@@ -595,7 +692,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1_000,
-      ciGeneration: 4,
+      ciLatestRunId: 4,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -619,7 +716,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciGeneration: 4,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([
       [
@@ -642,7 +739,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciGeneration: 4,
+      ciLatestRunId: 4,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -667,7 +764,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciGeneration: 4,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([
       [
@@ -694,7 +791,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciGeneration: 4,
+      ciLatestRunId: 4,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -722,7 +819,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciGeneration: 4,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([]);
   });
@@ -737,7 +834,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciGeneration: 4,
+      ciLatestRunId: 4,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -766,7 +863,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciGeneration: 4,
+      ciLatestRunId: 4,
     });
     expect(dispatched).toEqual([]);
   });
@@ -781,7 +878,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciGeneration: null,
+      ciLatestRunId: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -805,7 +902,7 @@ describe("runResync", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
-      ciGeneration: null,
+      ciLatestRunId: null,
     });
     expect(dispatched).toEqual([]);
   });
