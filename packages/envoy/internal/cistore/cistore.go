@@ -44,14 +44,35 @@ const Bucket = "envoy_ci_state"
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
 
+// checkRunID is a GitHub check-run id. Records written before ids were
+// validated at ingress carry it as a decimal string; new records carry a
+// number. Both decode; it always encodes as a number.
+type checkRunID uint64
+
+func (id *checkRunID) UnmarshalJSON(raw []byte) error {
+	var n uint64
+	if err := json.Unmarshal(raw, &n); err == nil && n > 0 {
+		*id = checkRunID(n)
+		return nil
+	}
+	var legacy string
+	if err := json.Unmarshal(raw, &legacy); err == nil {
+		if n, err := strconv.ParseUint(legacy, 10, 64); err == nil && n > 0 {
+			*id = checkRunID(n)
+			return nil
+		}
+	}
+	return fmt.Errorf("cistore: check run ID %s is not a positive integer", raw)
+}
+
 // Check is the last-known state of a single named check for a commit.
 type Check struct {
-	Name       string `json:"name,omitempty"`
-	CheckRunID uint64 `json:"check_run_id"`
-	URL        string `json:"url"`
-	Status     string `json:"status"`     // queued|in_progress|completed
-	Conclusion string `json:"conclusion"` // success|failure|... ("" until completed)
-	ObservedAt string `json:"observed_at"`
+	Name       string     `json:"name,omitempty"`
+	CheckRunID checkRunID `json:"check_run_id"`
+	URL        string     `json:"url"`
+	Status     string     `json:"status"`     // queued|in_progress|completed
+	Conclusion string     `json:"conclusion"` // success|failure|... ("" until completed)
+	ObservedAt string     `json:"observed_at"`
 }
 
 // Suite is the last-known state of one GitHub check suite for a commit.
@@ -88,84 +109,21 @@ type State struct {
 }
 
 // UnmarshalJSON maps the retired resettled marker to the generation that
-// publishes the equivalent re-settlement envelope. It also accepts the decimal
-// string check-run IDs used by existing records alongside the numeric IDs used
-// by new records.
+// publishes the equivalent re-settlement envelope.
 func (state *State) UnmarshalJSON(data []byte) error {
-	type checkWire struct {
-		Name       string          `json:"name,omitempty"`
-		CheckRunID json.RawMessage `json:"check_run_id"`
-		URL        string          `json:"url"`
-		Status     string          `json:"status"`
-		Conclusion string          `json:"conclusion"`
-		ObservedAt string          `json:"observed_at"`
-	}
-	var wire struct {
-		Owner             string               `json:"owner"`
-		Repo              string               `json:"repo"`
-		Number            string               `json:"number"`
-		SHA               string               `json:"sha"`
-		Checks            map[string]checkWire `json:"checks"`
-		Suites            map[string]Suite     `json:"suites"`
-		LastEventAt       int64                `json:"last_event_at"`
-		InitialGeneration uint64               `json:"initial_generation"`
-		Generation        uint64               `json:"generation"`
-		SettledEmitted    bool                 `json:"settled_emitted"`
-		Claim             *SettlementClaim     `json:"claim,omitempty"`
-		Resettled         bool                 `json:"resettled"`
-	}
+	type stateAlias State
+	*state = State{}
+	wire := struct {
+		*stateAlias
+		Resettled bool `json:"resettled"`
+	}{stateAlias: (*stateAlias)(state)}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	next := State{
-		Owner:             wire.Owner,
-		Repo:              wire.Repo,
-		Number:            wire.Number,
-		SHA:               wire.SHA,
-		Suites:            wire.Suites,
-		LastEventAt:       wire.LastEventAt,
-		InitialGeneration: wire.InitialGeneration,
-		Generation:        wire.Generation,
-		SettledEmitted:    wire.SettledEmitted,
-		Claim:             wire.Claim,
+	if wire.Resettled && state.Generation == 0 {
+		state.Generation = 1
 	}
-	if wire.Checks != nil {
-		next.Checks = make(map[string]Check, len(wire.Checks))
-		for name, check := range wire.Checks {
-			checkRunID, err := decodeCheckRunID(check.CheckRunID)
-			if err != nil {
-				return fmt.Errorf("cistore: decode check run ID for %q: %w", name, err)
-			}
-			next.Checks[name] = Check{
-				Name:       check.Name,
-				CheckRunID: checkRunID,
-				URL:        check.URL,
-				Status:     check.Status,
-				Conclusion: check.Conclusion,
-				ObservedAt: check.ObservedAt,
-			}
-		}
-	}
-	if wire.Resettled && next.Generation == 0 {
-		next.Generation = 1
-	}
-	*state = next
 	return nil
-}
-
-func decodeCheckRunID(raw json.RawMessage) (uint64, error) {
-	var id uint64
-	if err := json.Unmarshal(raw, &id); err == nil && id > 0 {
-		return id, nil
-	}
-	var legacy string
-	if err := json.Unmarshal(raw, &legacy); err == nil {
-		id, err := strconv.ParseUint(legacy, 10, 64)
-		if err == nil && id > 0 {
-			return id, nil
-		}
-	}
-	return 0, fmt.Errorf("invalid positive integer %s", raw)
 }
 
 const headRecordKind = "head"
@@ -221,7 +179,7 @@ func (s State) Hash() string {
 	sort.Strings(checkNames)
 	for _, name := range checkNames {
 		check := s.Checks[name]
-		h.Write([]byte("check\x00" + name + "\x00" + strconv.FormatUint(check.CheckRunID, 10) + "\x00" + check.Status + "\x00" + check.Conclusion + "\x01"))
+		h.Write([]byte("check\x00" + name + "\x00" + strconv.FormatUint(uint64(check.CheckRunID), 10) + "\x00" + check.Status + "\x00" + check.Conclusion + "\x01"))
 	}
 	suiteIDs := make([]string, 0, len(s.Suites))
 	for id := range s.Suites {
@@ -452,14 +410,14 @@ func (s *Store) record(observation contracts.CIObservation) error {
 		}
 		key := observation.CheckName
 		if current, ok := st.Checks[key]; ok {
-			if checkRunIDIsOlder(observation.CheckRunID, current.CheckRunID) ||
-				(observation.CheckRunID == current.CheckRunID && !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status)) {
+			if checkRunIDIsOlder(observation.CheckRunID, uint64(current.CheckRunID)) ||
+				(observation.CheckRunID == uint64(current.CheckRunID) && !observationMayReplace(observation.ObservedAt, current.ObservedAt, observation.Status, current.Status)) {
 				return false
 			}
 		}
 		next := Check{
 			Name:       observation.CheckName,
-			CheckRunID: observation.CheckRunID,
+			CheckRunID: checkRunID(observation.CheckRunID),
 			URL:        observation.URL,
 			Status:     observation.Status,
 			Conclusion: observation.Conclusion,

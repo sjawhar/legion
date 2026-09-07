@@ -457,7 +457,7 @@ describe("getCiStatusBatch", () => {
     });
   });
 
-  it("does not fetch later context pages for a passing rollup", async () => {
+  it("pages a passing rollup for the fence but returns no failing names", async () => {
     const queries: string[][] = [];
     let calls = 0;
     const runner: CommandRunner = async (cmd: string[]) => {
@@ -495,20 +495,12 @@ describe("getCiStatusBatch", () => {
           : {
               data: {
                 repository: {
-                  pullRequest: {
-                    commits: {
-                      nodes: [
-                        {
-                          commit: {
-                            statusCheckRollup: {
-                              contexts: {
-                                pageInfo: { hasNextPage: false, endCursor: null },
-                                nodes: [],
-                              },
-                            },
-                          },
-                        },
-                      ],
+                  object: {
+                    statusCheckRollup: {
+                      contexts: {
+                        pageInfo: { hasNextPage: false, endCursor: null },
+                        nodes: [{ name: "e2e", conclusion: "SUCCESS", databaseId: 950 }],
+                      },
                     },
                   },
                 },
@@ -522,14 +514,17 @@ describe("getCiStatusBatch", () => {
       runner
     );
 
-    expect(queries).toHaveLength(1);
+    // The second page is fetched from the head commit for the fence; the
+    // highest id lives there.
+    expect(queries).toHaveLength(2);
+    expect(queries[1]?.join(" ")).toContain('object(oid: "head-1")');
     expect(result).toEqual({
       "ENG-21": {
         ciStatus: "passing",
         mergeableStatus: "mergeable",
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
-        latestCheckRunId: 900,
+        latestCheckRunId: 950,
         isOpen: true,
       },
     });

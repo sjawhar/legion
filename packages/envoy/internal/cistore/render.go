@@ -86,8 +86,8 @@ func renderSummary(s State) Summary {
 	failingChecks := make([]FailingCheck, 0)
 	var latestCheckRunID uint64
 	for key, check := range s.Checks {
-		if check.CheckRunID > latestCheckRunID {
-			latestCheckRunID = check.CheckRunID
+		if uint64(check.CheckRunID) > latestCheckRunID {
+			latestCheckRunID = uint64(check.CheckRunID)
 		}
 		name := check.Name
 		if name == "" {

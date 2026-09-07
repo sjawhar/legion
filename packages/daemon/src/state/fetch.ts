@@ -609,7 +609,9 @@ async function getCiStatusBatchWithOptions(
       );
       const initialContexts = contextsPage(rollup);
       let contextNodes = initialContexts.nodes;
-      if (ciStatus === CiStatus.FAILING && initialContexts.hasNextPage) {
+      // Every page is needed for the ordering fence (the highest check-run id
+      // may sit on a later page); failing names are only read when failing.
+      if (initialContexts.hasNextPage) {
         if (!headSha) {
           throw new GitHubAPIError(
             `GitHub returned a paginated check rollup without an oid for ${issueId}`
