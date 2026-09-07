@@ -71,7 +71,21 @@ describe("envoyToolSpecs", () => {
 
     expect(subscribe?.description).toContain("agent.<session_id>");
     expect(subscribe?.description).toContain("role.<role>");
-    expect(subscribe?.description).toContain("pr.<n>.checks.settled");
+    expect(subscribe?.description).toContain(
+      "Default PR subscription: github.<owner>.<repo>.pr.<n>.>"
+    );
+    expect(subscribe?.description).toContain(
+      "pr.<n> (lifecycle: opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks"
+    );
+    expect(subscribe?.description).toContain(
+      "workflow.<file>.<action> (only runs without an associated PR)"
+    );
+    expect(subscribe?.description).not.toContain("pr.<n>.check,");
+    expect(subscribe?.description).not.toContain("pr.<n>.ci");
+    expect(subscribe?.description).not.toContain("pr.<n>.checks.settled");
+    expect(subscribe?.description).not.toContain("pr.<n>.merged");
+    expect(subscribe?.description).not.toContain("pr.<n>.closed");
+    expect(subscribe?.description).not.toContain("workflow.<file>.<action>.branch.");
     expect(subscribe?.description).toContain("slack.<team>.<channel>.thread.<ts>.message|mention");
     expect(subscribe?.description).toContain("ghostwispr.<session>.<kind>");
     expect(subscribe?.description).toContain("whatsapp.<phone>.<jid>.<kind>");
