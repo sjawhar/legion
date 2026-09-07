@@ -2,6 +2,7 @@
   "action": "completed",
   "check_run": {
     "id": 2001,
+    "check_suite": { "id": 1001 },
     "name": "build",
     "status": "completed",
     "conclusion": "success",

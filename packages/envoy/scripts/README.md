@@ -74,6 +74,9 @@ posts signed public GitHub fixtures and a direct message, captures the raw
 notification envelopes, and proves both the Go prompt text and the shared
 TypeScript renderer.
 
+Docker downloads `nats:2.10-alpine` automatically on the first run when it is
+not already cached.
+
 ```bash
 packages/envoy/scripts/e2e-local.sh
 ```

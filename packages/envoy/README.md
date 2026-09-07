@@ -70,6 +70,9 @@ asserts the settled pull-request checks topic, lifecycle and comment topics,
 PR-less workflow behavior, absence of obsolete GitHub topics, and direct
 delivery metadata.
 
+Docker downloads `nats:2.10-alpine` automatically on the first run when it is
+not already cached.
+
 Evidence remains in `packages/envoy/out/e2e/` after the run:
 
 - `envelopes.jsonl` captures the raw NATS frames.

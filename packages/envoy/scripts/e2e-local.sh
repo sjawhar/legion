@@ -104,10 +104,6 @@ if docker container inspect envoy-e2e-nats >/dev/null 2>&1; then
   printf 'ERR: envoy-e2e-nats already exists; leave it untouched and choose a free Docker daemon.\n' >&2
   exit 3
 fi
-docker image inspect nats:2.10-alpine >/dev/null || {
-  printf 'ERR: required image nats:2.10-alpine is unavailable.\n' >&2
-  exit 3
-}
 
 mkdir -p "$out_dir"
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
@@ -289,6 +285,7 @@ jq -e --arg recipient "$session_id" \
 
 post_github issue_comment "${fixture_dir}/issue-comment-created.json"
 post_github issue_comment "${fixture_dir}/issue-comment-edited.json"
+post_github issue_comment "${fixture_dir}/issue-comment-pr-created.json"
 post_github pull_request "${fixture_dir}/pull-request-opened.json"
 post_github check_suite "${fixture_dir}/check-suite-first.json"
 post_github check_run "${fixture_dir}/check-run-first.json"
@@ -306,7 +303,7 @@ post_github pull_request "${fixture_dir}/pull-request-closed-merged.json"
 post_github workflow_run "${fixture_dir}/workflow-run-with-pr.json"
 post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_prompt_count 11
+wait_for_prompt_count 12
 
 (
   cd "$repo_root/packages/envoy-client"
@@ -378,6 +375,11 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
       const data = payload(item);
       require(item.payload_summary.startsWith("comment ") && data.kind === "comment" && data.repo === "example-org/example-repo" && data.number === "7", "issue comment lacks prose or structured payload");
     }
+
+    const prComments = withTopic(topic("pr.42.comment"));
+    require(prComments.length === 1, `pr comment count = ${prComments.length}, want 1`);
+    const prComment = payload(prComments[0]);
+    require(prComments[0].payload_summary === "comment on example-org/example-repo#42 by octocat: Please review the pull request." && prComment.kind === "comment" && prComment.parent_kind === "pr" && prComment.repo === "example-org/example-repo" && prComment.number === "42", "pr comment lacks prose or structured payload");
 
     const checks = withTopic(topic("pr.42.checks"));
     require(checks.length === 3, `checks count = ${checks.length}, want 3`);
