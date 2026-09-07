@@ -104,7 +104,8 @@ function effects(
   topic = `notifications.github.acme.widgets.issue.1`,
   eventId?: string
 ): Effect[] {
-  return reduceGithubEvent(state, topic, github(payload, eventId), config);
+  const input = payload.kind === "pr" ? envelope(payload, eventId) : github(payload, eventId);
+  return reduceGithubEvent(state, topic, input, config);
 }
 
 describe("reduceGithubEvent", () => {
@@ -638,12 +639,14 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "opened",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "head-sha" },
-          html_url: "pr-url",
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-sha",
+        url: "pr-url",
+        updated_at: "2026-09-07T03:00:00Z",
       })
     ).toEqual([
       {
@@ -656,6 +659,7 @@ describe("reduceGithubEvent", () => {
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       key: child,
       headSha: "head-sha",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
     });
   });
   it("registers a Legion PR on synchronization when its opened event was missed", () => {
@@ -664,11 +668,12 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "synchronize",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "recovered-head" },
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "recovered-head",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "recovered-head" }]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
@@ -692,11 +697,12 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "synchronize",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "new-sha" },
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "new-sha",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "new-sha" }]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
@@ -719,12 +725,13 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "synchronize",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "head-b" },
-          updated_at: "2026-09-07T03:02:00Z",
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-b",
+        updated_at: "2026-09-07T03:02:00Z",
       })
     ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "head-b" }]);
     Object.assign(state.prs[`${repo}#${prNumber}`], {
@@ -736,12 +743,13 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "synchronize",
-        pull_request: {
-          number: prNumber,
-          head: { ref: "legion/issue-2", sha: "head-a" },
-          updated_at: "2026-09-07T03:01:00Z",
-        },
+        repo,
+        number: String(prNumber),
+        head_ref: "legion/issue-2",
+        head_sha: "head-a",
+        updated_at: "2026-09-07T03:01:00Z",
       })
     ).toEqual([]);
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
@@ -805,12 +813,11 @@ describe("reduceGithubEvent", () => {
 
     expect(
       effects(state, {
+        kind: "pr",
         action: "closed",
-        pull_request: {
-          number: prNumber,
-          merged: false,
-          head: { ref: "legion/issue-2" },
-        },
+        repo,
+        number: String(prNumber),
+        merged: "false",
       })
     ).toEqual([
       {

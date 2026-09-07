@@ -241,7 +241,7 @@ function registerPr(
   sha: string | undefined,
   headUpdatedAt: number | undefined
 ): PrState | undefined {
-  const key = branch ? issueForBranch(repo, branch) : undefined;
+  const key = (branch ? issueForBranch(repo, branch) : undefined) ?? keyFor(repo, number);
   if (!key || !state.issues[key] || !sha) return undefined;
   const prKey = `${repo}#${number}`;
   const pr: PrState = {
@@ -554,17 +554,14 @@ function pullRequest(
   payload: JsonRecord,
   envelope: EnvelopeJson
 ): Effect[] | undefined {
-  const raw = asRecord(payload.pull_request);
-  if (!raw || payload.review !== undefined || payload.comment !== undefined) return undefined;
-  const repo = repository(payload);
-  const number = numberValue(raw.number);
+  if (payload.kind !== "pr") return undefined;
+  const repo = stringValue(payload.repo);
+  const number = numberValue(payload.number);
   if (!repo || number === undefined) return [];
   const prKey = `${repo}#${number}`;
-  const head = asRecord(raw.head);
-  const branch = stringValue(head?.ref);
-  const sha = stringValue(head?.sha);
-
-  const headUpdatedAt = updatedAt(raw);
+  const branch = stringValue(payload.head_ref);
+  const sha = stringValue(payload.head_sha);
+  const headUpdatedAt = updatedAt(payload);
 
   if (payload.action === "opened") {
     const pr = registerPr(state, repo, number, branch, sha, headUpdatedAt);
@@ -573,7 +570,7 @@ function pullRequest(
       state,
       pr.key,
       "implementer",
-      { type: "pr-opened", pr: number, url: stringValue(raw.html_url) ?? "" },
+      { type: "pr-opened", pr: number, url: stringValue(payload.url) ?? "" },
       envelope
     );
   }
@@ -584,7 +581,6 @@ function pullRequest(
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
-    if (!sha) return [];
     if (
       headUpdatedAt !== undefined &&
       pr.headUpdatedAt !== undefined &&
@@ -592,6 +588,7 @@ function pullRequest(
     ) {
       return [];
     }
+    if (!sha) return [];
     if (pr.headSha === sha) {
       if (
         headUpdatedAt !== undefined &&
@@ -612,7 +609,7 @@ function pullRequest(
     delete pr.reviewDecision;
     return [{ kind: "approval-status", repo, pr: number, sha }];
   }
-  if (payload.action === "closed" && raw.merged === false) {
+  if (payload.action === "closed" && payload.merged === "false") {
     delete state.prs[prKey];
     removeBranchMappings(state, prKey);
     return route(state, pr.key, "architect", { type: "pr-closed-unmerged", pr: number }, envelope);
@@ -632,6 +629,8 @@ export function reduceGithubEvent(
   const repo = repository(payload);
   // Pushes to legion issue branches carry no reducer-visible state transitions.
   if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/issue-")) return [];
+  // Only pullRequest understands Envoy's normalized GitHub envelopes. The issue, issue-comment,
+  // review, and projects_v2_item reducers still require raw GitHub nesting and ignore Envoy payloads.
   return (
     ingress(state, payload, config) ??
     subIssue(state, payload, envelope) ??
