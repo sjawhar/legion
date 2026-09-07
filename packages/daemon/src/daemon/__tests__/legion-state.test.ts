@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmod, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, formatIssueKey, roleToken } from "@legion/contracts";
@@ -143,6 +143,36 @@ describe("legion state", () => {
     await writeFile(file, JSON.stringify(legacy), "utf8");
 
     expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("keeps the original v8 state bytes in a rollback backup", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v8-backup-"));
+    const file = path.join(tempDir, "state.json");
+    const { legacy } = legacyV8State({
+      firstRedEmitted: true,
+      settledRedEmitted: false,
+      greenEmitted: false,
+      lastEventAt: 1_724_457_600_000,
+    });
+    const original = JSON.stringify(legacy, null, 2);
+    await writeFile(file, original, "utf8");
+
+    await loadState(file, initialState);
+
+    const backup = `${file}.v8.bak`;
+    expect(await readFile(backup, "utf8")).toBe(original);
+
+    const laterLegacy = {
+      ...legacy,
+      trees: {
+        ...legacy.trees,
+        [issue]: { ...legacy.trees[issue], launchFailures: 4 },
+      },
+    };
+    await writeFile(file, JSON.stringify(laterLegacy, null, 2), "utf8");
+    await loadState(file, initialState);
+
+    expect(await readFile(backup, "utf8")).toBe(original);
   });
 
   it("migrates v5 name-only locators by clearing their unsafe identities", async () => {

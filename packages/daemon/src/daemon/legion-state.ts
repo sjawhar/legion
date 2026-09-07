@@ -466,8 +466,10 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
+  const source = JSON.parse(raw);
+  const sourceVersion = recordValue(source) ? source.version : undefined;
   const state = migrateV11State(
-    migrateV8State(migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw)))))
+    migrateV8State(migrateV7State(migrateV6State(migrateV5State(source))))
   );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
@@ -485,6 +487,17 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   // Zod v3 infers validated records as partial despite every mapped value being required.
   const validatedState = parsed.data as LegionState;
+  if (
+    typeof sourceVersion === "number" &&
+    Number.isSafeInteger(sourceVersion) &&
+    sourceVersion < validatedState.version
+  ) {
+    try {
+      await writeFile(`${file}.v${sourceVersion}.bak`, raw, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if (!hasErrnoCode(error, "EEXIST")) throw error;
+    }
+  }
   return validatedState;
 }
 
