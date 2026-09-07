@@ -171,6 +171,21 @@ describe("renderInbound", () => {
     expect(rendered.content).not.toContain("unknown_field");
   });
 
+  test("keeps a literal unknown payload when the summary is absent", async () => {
+    const rendered = await renderInbound(
+      JSON.stringify({
+        event_id: "payload-unknown-1",
+        source: "agent",
+        topic: "notifications.agent.ses_target",
+        payload: "unknown",
+      }),
+      reader
+    );
+
+    expect(rendered.content).toContain("  summary: unknown");
+    expect(rendered.content).toContain("  message: unknown");
+  });
+
   test("keeps recognized fields when a JSON envelope omits its source", async () => {
     const rendered = await renderInbound(
       JSON.stringify({
@@ -214,6 +229,24 @@ describe("renderInbound", () => {
         "  unrecognised: issued_at",
       ].join("\n")
     );
+  });
+
+  test("keeps valid sender fields when sender.roles is malformed", async () => {
+    const sender = "01a00000-0000-7000-0000-000000000001";
+    const rendered = await renderInbound(
+      JSON.stringify({
+        event_id: "invalid-sender-1",
+        source: "agent",
+        source_session: sender,
+        topic: "notifications.agent.ses_target",
+        payload_summary: "The sender role was malformed.",
+        sender: { title: "Reviewer", roles: "reviewer" },
+      }),
+      reader
+    );
+
+    expect(rendered.content).toContain(`  from: ${sender} (Reviewer)`);
+    expect(rendered.content).toContain("  unrecognised: sender.roles");
   });
 
   test("hides a non-JSON frame and identifies its delivery subject", async () => {

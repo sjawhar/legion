@@ -52,11 +52,11 @@ const TolerantInboundEnvelopeSchema = InboundEnvelopeSchema.extend({
   payload: z.string().optional().catch(undefined),
   sender: z
     .object({
-      session_id: z.string().optional(),
-      machine: z.string().optional(),
-      cwd: z.string().optional(),
-      title: z.string().optional(),
-      roles: z.array(z.string()).optional(),
+      session_id: z.string().optional().catch(undefined),
+      machine: z.string().optional().catch(undefined),
+      cwd: z.string().optional().catch(undefined),
+      title: z.string().optional().catch(undefined),
+      roles: z.array(z.string()).optional().catch(undefined),
     })
     .optional()
     .catch(undefined),
@@ -151,7 +151,7 @@ export function renderInbound(
 
   const payloadSummary = envelope.payload_summary ?? "unknown";
   let message: unknown;
-  if (envelope.payload !== undefined && envelope.payload !== payloadSummary) {
+  if (envelope.payload !== undefined && envelope.payload !== envelope.payload_summary) {
     try {
       message = JSON.parse(envelope.payload);
     } catch {

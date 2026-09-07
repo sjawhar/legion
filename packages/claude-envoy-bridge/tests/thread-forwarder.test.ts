@@ -7,6 +7,7 @@ import {
   type ForwarderConnection,
   type TopicSubscription,
 } from "../src/thread-forwarder"
+import { envoyInboundMessage } from "../src/envoy-monitor"
 import { FakeNatsServer } from "./fake-nats-server"
 
 interface Queue {
@@ -169,6 +170,30 @@ test("republishes thread-topic envelopes verbatim on the session's agent subject
   expect(nats.published.map((m) => [m.subject, decode(m.data)])).toEqual([
     [agentSubject("ses_claude"), reply],
   ])
+})
+
+test("forwards and renders a future-source envelope", async () => {
+  const nats = new FakeNats()
+  const sessionId = "ses_claude"
+  const forwarder = createThreadForwarder(nats, sessionId)
+  const topic = "notifications.github.example-org.example-repo.pr.7.>"
+  const raw = JSON.stringify({
+    event_id: "future-source-1",
+    source: "newkind",
+    topic: "notifications.github.example-org.example-repo.pr.7.comment",
+    payload_summary: "A future producer delivered this.",
+  })
+  forwarder.follow(topic)
+
+  const published = nats.nextPublish()
+  nats.emit("notifications.github.example-org.example-repo.pr.7.comment", raw)
+  await published
+
+  const forwarded = decode(nats.published[0]?.data ?? new Uint8Array())
+  expect(forwarded).toBe(raw)
+  expect(envoyInboundMessage(forwarded, sessionId, agentSubject(sessionId))).toContain(
+    "  unrecognised: source=newkind",
+  )
 })
 
 test("records and skips a dispatch echo for the originating session", async () => {

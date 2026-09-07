@@ -11,7 +11,7 @@
 // patterns match it, a failure on one message or one subscription never ends
 // delivery for the rest, and shutdown never hangs on a dead broker.
 
-import { agentSubject, EnvelopeSchema } from "@legion/contracts"
+import { agentSubject } from "@legion/contracts"
 import { isOwnDispatchEcho } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { z } from "zod"
@@ -64,7 +64,7 @@ interface Following {
 const DedupeIdentity = z.object({
   dedupe_key: z.string().min(1).optional(),
   event_id: z.string().min(1).optional(),
-  source: EnvelopeSchema.shape.source.optional(),
+  source: z.string().optional(),
   payload: z.string().optional(),
 })
 
