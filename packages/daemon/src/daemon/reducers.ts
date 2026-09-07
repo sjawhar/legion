@@ -253,6 +253,7 @@ function registerPr(
     verdict: null,
     failing: [],
     ciSettledAt: null,
+    ciGeneration: null,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -607,6 +608,7 @@ function pullRequest(
     pr.verdict = null;
     pr.failing = [];
     pr.ciSettledAt = null;
+    pr.ciGeneration = null;
     delete pr.reviewDecision;
     return [{ kind: "approval-status", repo, pr: number, sha }];
   }

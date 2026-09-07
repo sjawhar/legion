@@ -56,6 +56,7 @@ function stateWithTree() {
     verdict: "green",
     failing: [],
     ciSettledAt: 1_724_457_600_000,
+    ciGeneration: null,
     fixAttempts: 1,
     reviewDecision: "approved",
   };
@@ -72,6 +73,7 @@ function legacyV8State(pr: Record<string, unknown>) {
     verdict: _verdict,
     failing: _failing,
     ciSettledAt: _ciSettledAt,
+    ciGeneration: _ciGeneration,
     ...legacyPr
   } = current.prs[prKey];
   return {
@@ -80,6 +82,19 @@ function legacyV8State(pr: Record<string, unknown>) {
       ...current,
       version: 8,
       prs: { ...current.prs, [prKey]: { ...legacyPr, ...pr } },
+    },
+  };
+}
+
+function legacyV11State() {
+  const current = stateWithTree();
+  const { ciGeneration: _ciGeneration, ...legacyPr } = current.prs[prKey];
+  return {
+    current,
+    legacy: {
+      ...current,
+      version: 11,
+      prs: { ...current.prs, [prKey]: legacyPr },
     },
   };
 }
@@ -95,9 +110,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v11 state with a valid project and admission capacity", () => {
+  it("initializes empty v12 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 11,
+      version: 12,
       project: "omp",
       issues: {},
       trees: {},
@@ -119,6 +134,15 @@ describe("legion state", () => {
     await saveState(file, state);
 
     expect(await loadState(file, initialState)).toEqual(state);
+  });
+
+  it("migrates v11 CI state by defaulting settlement generation to null", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v11-"));
+    const file = path.join(tempDir, "state.json");
+    const { current, legacy } = legacyV11State();
+    await writeFile(file, JSON.stringify(legacy), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
   });
 
   it("migrates v5 name-only locators by clearing their unsafe identities", async () => {

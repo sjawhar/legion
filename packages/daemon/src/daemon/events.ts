@@ -58,6 +58,7 @@ interface ChecksInput {
   failed: string[];
   cancelledCount: number;
   settledAt: number;
+  generation: number;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -116,6 +117,12 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     return undefined;
   }
   const sha = stringValue(payload.sha);
+  const generation =
+    typeof payload.generation === "number" &&
+    Number.isSafeInteger(payload.generation) &&
+    payload.generation >= 0
+      ? payload.generation
+      : undefined;
   const settledAt =
     payload.settled_at === undefined
       ? envelope.issued_at
@@ -126,7 +133,9 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
         : undefined;
   const failed = statusGroup(payload, "failed");
   const cancelled = statusGroup(payload, "cancelled");
-  if (!sha || settledAt === undefined || !failed || !cancelled) return undefined;
+  if (!sha || generation === undefined || settledAt === undefined || !failed || !cancelled) {
+    return undefined;
+  }
   return {
     repo,
     number,
@@ -134,6 +143,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     failed: failed.checks,
     cancelledCount: cancelled.count,
     settledAt,
+    generation,
   };
 }
 
@@ -144,6 +154,7 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
   const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
   pr.ciSettledAt = input.settledAt;
+  pr.ciGeneration = input.generation;
   if (verdict === null) return [];
 
   const priorVerdict = pr.verdict;
@@ -388,7 +399,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return;
     }
-    if (pr.ciSettledAt !== null && input.settledAt <= pr.ciSettledAt) {
+    if (pr.ciGeneration !== null && input.generation < pr.ciGeneration) {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );

@@ -75,6 +75,7 @@ async function recoverPrForMergeGate(
     verdict: null,
     failing: [],
     ciSettledAt: null,
+    ciGeneration: null,
     fixAttempts: 0,
   };
   ctx.deps.state.prs[prKey] = pr;
@@ -118,6 +119,7 @@ export async function handleMergeGate(
     pr.verdict = null;
     pr.failing = [];
     pr.ciSettledAt = null;
+    pr.ciGeneration = null;
     delete pr.reviewDecision;
     await ctx.save();
   }

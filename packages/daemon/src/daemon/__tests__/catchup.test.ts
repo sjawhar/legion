@@ -52,6 +52,7 @@ function prState(issue: IssueKey): PrState {
     verdict: "green",
     failing: [],
     ciSettledAt: 3_000,
+    ciGeneration: 3,
     fixAttempts: 1,
     reviewDecision: "approved",
   };

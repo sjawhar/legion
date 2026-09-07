@@ -91,6 +91,7 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     verdict: null,
     failing: [],
     ciSettledAt: null,
+    ciGeneration: null,
     fixAttempts: 0,
     ...overrides,
   };
@@ -685,6 +686,7 @@ describe("reduceGithubEvent", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1,
+      ciGeneration: 1,
       reviewDecision: "approved",
     });
 
@@ -702,6 +704,7 @@ describe("reduceGithubEvent", () => {
       verdict: null,
       failing: [],
       ciSettledAt: null,
+      ciGeneration: null,
       fixAttempts: 1,
     });
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();

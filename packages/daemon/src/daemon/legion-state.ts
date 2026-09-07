@@ -59,6 +59,7 @@ export interface PrState {
   verdict: "green" | "red" | null;
   failing: string[];
   ciSettledAt: number | null;
+  ciGeneration: number | null;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
 }
@@ -83,7 +84,7 @@ export interface SpawnCapability {
 }
 
 export interface LegionState {
-  version: 11;
+  version: 12;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -185,6 +186,7 @@ const PrStateSchema = z
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     ciSettledAt: z.number().nullable(),
+    ciGeneration: z.number().int().nonnegative().nullable(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
@@ -219,7 +221,7 @@ const PhaseSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(11),
+    version: z.literal(12),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -260,7 +262,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 11,
+    version: 12,
     project,
     issues: {},
     trees: {},
@@ -439,6 +441,20 @@ function migrateV8State(state: unknown): unknown {
   return { ...rest, version: 11, ...(migratedPrs ? { prs: migratedPrs } : {}) };
 }
 
+function migrateV11State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 11) return state;
+  const { prs, ...rest } = state;
+  const migratedPrs = recordValue(prs)
+    ? Object.fromEntries(
+        Object.entries(prs).map(([key, pr]) => {
+          if (!recordValue(pr) || "ciGeneration" in pr) return [key, pr];
+          return [key, { ...pr, ciGeneration: null }];
+        })
+      )
+    : undefined;
+  return { ...rest, version: 12, ...(migratedPrs ? { prs: migratedPrs } : {}) };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -450,12 +466,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     throw error;
   }
 
-  const state = migrateV8State(migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw)))));
+  const state = migrateV11State(
+    migrateV8State(migrateV7State(migrateV6State(migrateV5State(JSON.parse(raw)))))
+  );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 11) {
+  if (version !== 12) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

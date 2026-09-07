@@ -127,6 +127,7 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     verdict: null,
     failing: [],
     ciSettledAt: null,
+    ciGeneration: null,
     fixAttempts: 0,
   };
 }
@@ -176,6 +177,7 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     number: "7",
     sha: "head-1",
     is_head: true,
+    generation: 0,
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },
@@ -357,7 +359,7 @@ describe("core-NATS event pump", () => {
       debug.mockRestore();
     }
   });
-  it("keeps a newer green settlement when an older redelivery for the same SHA arrives", async () => {
+  it("keeps a higher-generation green settlement when a lower generation arrives for the same SHA", async () => {
     const { state, issue } = stateForIssue();
     state.prs["acme/widgets#7"] = checkPr(issue);
     const nats = new FakeNats();
@@ -372,13 +374,14 @@ describe("core-NATS event pump", () => {
     try {
       nats.emit(
         "notifications.github.acme.widgets.pr.7.checks",
-        envelope(settledChecks({ settled_at: 2_000 }), "newer-green")
+        envelope(settledChecks({ generation: 1, settled_at: 2_000 }), "newer-green")
       );
       await pump.drain();
       nats.emit(
         "notifications.github.acme.widgets.pr.7.checks",
         envelope(
           settledChecks({
+            generation: 0,
             settled_at: 1_000,
             failed: { count: 1, checks: ["unit"] },
             passed: { count: 0, checks: [] },
@@ -393,6 +396,7 @@ describe("core-NATS event pump", () => {
         verdict: "green",
         failing: [],
         ciSettledAt: 2_000,
+        ciGeneration: 1,
       });
       expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
       expect(debug).toHaveBeenCalledWith(

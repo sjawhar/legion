@@ -81,6 +81,7 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     number: "7",
     sha: "head-1",
     is_head: true,
+    generation: 0,
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },
@@ -122,6 +123,7 @@ function stateForCi() {
     verdict: null,
     failing: [],
     ciSettledAt: null,
+    ciGeneration: null,
     fixAttempts: 0,
   };
   return { state, architect, implementer };
@@ -321,6 +323,7 @@ it("does not re-emit when a red head re-settles with the same failing set", asyn
     ...state.prs["acme/widgets#7"],
     verdict: "red",
     failing: ["unit"],
+    ciGeneration: 0,
     ciSettledAt: 1,
   };
   const nats = new FakeNats();
@@ -350,7 +353,192 @@ it("does not re-emit when a red head re-settles with the same failing set", asyn
     )
   );
   await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({ ciGeneration: 0, ciSettledAt: 2 });
 
   expect(published).toEqual([]);
+  pump.stop();
+});
+it("drops a lower-generation settlement for the same head", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ generation: 1, settled_at: 1 }))
+  );
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        generation: 0,
+        settled_at: 2,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "green",
+    failing: [],
+    ciGeneration: 1,
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
+
+it("emits when a higher generation changes the failing set", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        generation: 0,
+        settled_at: 2,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        generation: 1,
+        settled_at: 1,
+        failed: { count: 1, checks: ["lint"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["lint"],
+    ciGeneration: 1,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
+    JSON.stringify({ type: "ci-settled-red", failing: ["lint"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
+it("ignores a settlement without a generation", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+  const { generation: _generation, ...withoutGeneration } = settledChecks();
+
+  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(withoutGeneration));
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: null,
+    failing: [],
+    ciGeneration: null,
+  });
+  expect(published).toEqual([]);
+  pump.stop();
+});
+
+it("accepts a settlement for a new head at generation zero", async () => {
+  const { state } = stateForCi();
+  state.prs["acme/widgets#7"] = {
+    ...state.prs["acme/widgets#7"],
+    ciGeneration: 1,
+  };
+  reduceGithubEvent(
+    state,
+    "notifications.github.acme.widgets.pull_request.synchronize",
+    {
+      event_id: "synchronize-1",
+      issued_at: 0,
+      payload: {
+        action: "synchronize",
+        repository: { full_name: "acme/widgets" },
+        pull_request: {
+          number: 7,
+          head: { sha: "head-2", ref: "legion/issue-1" },
+        },
+      },
+    },
+    config
+  );
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ sha: "head-2", generation: 0 }))
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    headSha: "head-2",
+    verdict: "green",
+    ciGeneration: 0,
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-2" })]);
   pump.stop();
 });
