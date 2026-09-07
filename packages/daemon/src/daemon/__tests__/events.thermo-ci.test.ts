@@ -85,6 +85,8 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     is_head: true,
     latest_check_run_id: 1,
     generation: 0,
+    snapshot: "state-hash-1",
+    latest_completed_at: "2026-09-07T00:00:01.000Z",
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },
@@ -128,6 +130,8 @@ function stateForCi() {
     ciSettledAt: null,
     ciLatestRunId: null,
     ciSettlementGeneration: null,
+    ciSnapshot: null,
+    ciLatestCompletedAt: null,
     fixAttempts: 0,
   };
   return { state, architect, implementer };
@@ -524,6 +528,195 @@ it("keeps an equal check-run and generation settlement with an identical set qui
   pump.stop();
 });
 
+it("does not revive an uncertified verdict when an exact live settlement is replayed", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+  const green = settledChecks({
+    latest_check_run_id: 900,
+    generation: 1,
+    snapshot: "hash-a",
+    latest_completed_at: "2026-09-07T00:00:02.000Z",
+    settled_at: 1,
+  });
+
+  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(green));
+  await pump.drain();
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "pending",
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 900,
+        latestCompletedAt: Date.parse("2026-09-07T00:00:02.000Z"),
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 2,
+  });
+  const afterResync = structuredClone(state.prs["acme/widgets#7"]);
+
+  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(green));
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toEqual(afterResync);
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
+
+it("uses GitHub completion time to order a live settlement against a GitHub-authored fence", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  try {
+    await runResync({
+      state,
+      config,
+      fetchGitHubProjectItems: async () => ({ items: [] }),
+      fetchCiStatusBatch: async () => ({
+        "acme/widgets#7": {
+          ciStatus: "failing",
+          mergeableStatus: null,
+          failingChecks: ["unit"],
+          headSha: "head-1",
+          isOpen: true,
+          updatedAt: "2026-09-07T00:00:00.000Z",
+          latestCheckRunId: 900,
+          latestCompletedAt: Date.parse("2026-09-07T00:00:02.000Z"),
+        },
+      }),
+      applyEffects: async () => {},
+      now: () => 1,
+    });
+    const afterGithub = structuredClone(state.prs["acme/widgets#7"]);
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          latest_check_run_id: 900,
+          generation: 0,
+          snapshot: "old-hash",
+          latest_completed_at: "2026-09-07T00:00:01.000Z",
+        })
+      )
+    );
+    await pump.drain();
+    expect(state.prs["acme/widgets#7"]).toEqual(afterGithub);
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          latest_check_run_id: 900,
+          generation: 2,
+          snapshot: "new-hash",
+          latest_completed_at: "2026-09-07T00:00:03.000Z",
+        })
+      )
+    );
+    await pump.drain();
+    const afterNewerLive = structuredClone(state.prs["acme/widgets#7"]);
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          latest_check_run_id: 900,
+          generation: 2,
+          snapshot: "conflicting-hash",
+          latest_completed_at: "2026-09-07T00:00:03.000Z",
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        })
+      )
+    );
+    await pump.drain();
+
+    expect(state.prs["acme/widgets#7"]).toEqual(afterNewerLive);
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  } finally {
+    warn.mockRestore();
+    pump.stop();
+  }
+});
+
+it("warns and drops a same-generation settlement with a different snapshot", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  try {
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          latest_check_run_id: 900,
+          generation: 1,
+          snapshot: "hash-a",
+          latest_completed_at: "2026-09-07T00:00:02.000Z",
+        })
+      )
+    );
+    await pump.drain();
+    const beforeConflict = structuredClone(state.prs["acme/widgets#7"]);
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          latest_check_run_id: 900,
+          generation: 1,
+          snapshot: "hash-b",
+          latest_completed_at: "2026-09-07T00:00:02.000Z",
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        })
+      )
+    );
+    await pump.drain();
+
+    expect(state.prs["acme/widgets#7"]).toEqual(beforeConflict);
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.join(" ")).toContain("hash-a");
+    expect(warn.mock.calls[0]?.join(" ")).toContain("hash-b");
+  } finally {
+    warn.mockRestore();
+    pump.stop();
+  }
+});
+
+it("requires a nonempty snapshot and RFC3339 latest completion time", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ snapshot: "" }))
+  );
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ latest_completed_at: "not-a-timestamp" }))
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: null,
+    failing: [],
+    ciLatestRunId: null,
+  });
+  expect(published).toEqual([]);
+  pump.stop();
+});
+
 it("applies an equal-id live settlement after a resync fence without a generation", async () => {
   const { state } = stateForCi();
 
@@ -539,6 +732,7 @@ it("applies an equal-id live settlement after a resync fence without a generatio
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
         latestCheckRunId: 900,
+        latestCompletedAt: Date.parse("2026-09-07T00:00:00.000Z"),
       },
     }),
     applyEffects: async () => {},
@@ -686,6 +880,7 @@ it("does not apply a fetched green rollup after a live red settlement advances C
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
         latestCheckRunId: 850,
+        latestCompletedAt: null,
       },
     });
     await resync;
@@ -742,6 +937,7 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
       isOpen: true,
       updatedAt: "2026-09-07T00:00:00.000Z",
       latestCheckRunId: 850,
+      latestCompletedAt: null,
     },
   });
   await resync;
@@ -837,6 +1033,7 @@ it("preserves a live check-run fence through a same-head status-context resync",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
         latestCheckRunId: null,
+        latestCompletedAt: null,
       },
     }),
     applyEffects: async () => {},
@@ -906,6 +1103,7 @@ it("a same-head resync refresh at an equal check-run id never erases the known g
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
         latestCheckRunId: 900,
+        latestCompletedAt: null,
       },
     }),
     applyEffects: async () => {},

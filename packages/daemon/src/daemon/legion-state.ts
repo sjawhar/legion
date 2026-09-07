@@ -62,6 +62,8 @@ export interface PrState {
   ciSettledAt: number | null;
   ciLatestRunId: number | null;
   ciSettlementGeneration: number | null;
+  ciSnapshot: string | null;
+  ciLatestCompletedAt: number | null;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
 }
@@ -190,6 +192,8 @@ const PrStateSchema = z
     ciSettledAt: z.number().nullable(),
     ciLatestRunId: z.number().int().positive().nullable(),
     ciSettlementGeneration: z.number().int().nonnegative().nullable(),
+    ciSnapshot: z.string().nullable(),
+    ciLatestCompletedAt: z.number().nullable(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
   })
@@ -450,7 +454,13 @@ function migrateV11State(state: unknown): unknown {
   const migratedPrs = recordValue(prs)
     ? Object.fromEntries(
         Object.entries(prs).map(([key, pr]) => {
-          if (!recordValue(pr) || ("ciLatestRunId" in pr && "ciSettlementGeneration" in pr)) {
+          if (
+            !recordValue(pr) ||
+            ("ciLatestRunId" in pr &&
+              "ciSettlementGeneration" in pr &&
+              "ciSnapshot" in pr &&
+              "ciLatestCompletedAt" in pr)
+          ) {
             return [key, pr];
           }
           return [
@@ -459,6 +469,8 @@ function migrateV11State(state: unknown): unknown {
               ...pr,
               ...("ciLatestRunId" in pr ? {} : { ciLatestRunId: null }),
               ...("ciSettlementGeneration" in pr ? {} : { ciSettlementGeneration: null }),
+              ...("ciSnapshot" in pr ? {} : { ciSnapshot: null }),
+              ...("ciLatestCompletedAt" in pr ? {} : { ciLatestCompletedAt: null }),
             },
           ];
         })

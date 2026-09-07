@@ -340,6 +340,7 @@ export interface CiAndMergeStatus {
   isOpen: boolean;
   updatedAt: string | null;
   latestCheckRunId: number | null;
+  latestCompletedAt: number | null;
 }
 
 export interface CiFetchFailure {
@@ -406,6 +407,17 @@ function latestCheckRunId(nodes: readonly unknown[]): number | null {
   return latest;
 }
 
+function latestCheckRunCompletedAt(nodes: readonly unknown[]): number | null {
+  let latest: number | null = null;
+  for (const node of nodes) {
+    const completedAt = recordValue(node)?.completedAt;
+    if (typeof completedAt !== "string") continue;
+    const timestamp = Date.parse(completedAt);
+    if (!Number.isNaN(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+  }
+  return latest;
+}
+
 interface RollupContextsPage {
   nodes: unknown[];
   hasNextPage: boolean;
@@ -444,7 +456,7 @@ async function fetchRemainingContextNodes(
     if (!page.endCursor) {
       throw new GitHubAPIError("GitHub returned a paginated check rollup without an end cursor");
     }
-    const query = `query($after: String!) { repository(owner: "${ref.owner}", name: "${ref.repo}") { object(oid: "${headSha}") { ... on Commit { statusCheckRollup { contexts(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`;
+    const query = `query($after: String!) { repository(owner: "${ref.owner}", name: "${ref.repo}") { object(oid: "${headSha}") { ... on Commit { statusCheckRollup { contexts(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId completedAt } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`;
     const data = await runGraphqlQuery(
       query,
       { after: page.endCursor },
@@ -559,7 +571,7 @@ async function getCiStatusBatchWithOptions(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { state updatedAt mergeable commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { state updatedAt mergeable commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion databaseId completedAt } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
       );
     }
 
@@ -587,6 +599,7 @@ async function getCiStatusBatchWithOptions(
           isOpen: false,
           updatedAt: null,
           latestCheckRunId: null,
+          latestCompletedAt: null,
         };
         continue;
       }
@@ -603,6 +616,7 @@ async function getCiStatusBatchWithOptions(
           isOpen: rawPr.state === "OPEN",
           updatedAt,
           latestCheckRunId: null,
+          latestCompletedAt: null,
         };
         continue;
       }
@@ -643,6 +657,7 @@ async function getCiStatusBatchWithOptions(
         isOpen: rawPr.state === "OPEN",
         updatedAt,
         latestCheckRunId: latestCheckRunId(contextNodes),
+        latestCompletedAt: latestCheckRunCompletedAt(contextNodes),
       };
     }
   }

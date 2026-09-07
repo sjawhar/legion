@@ -423,6 +423,8 @@ describe("runResync", () => {
       ciSettledAt: null,
       ciLatestRunId: null,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -441,6 +443,7 @@ describe("runResync", () => {
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
             latestCheckRunId: null,
+            latestCompletedAt: null,
             isOpen: true,
           },
         };
@@ -502,6 +505,8 @@ describe("runResync", () => {
       ciSettledAt: null,
       ciLatestRunId: null,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
@@ -516,6 +521,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: null,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -563,6 +569,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -580,6 +588,7 @@ describe("runResync", () => {
             headSha: "head-2",
             updatedAt: "2026-08-24T00:00:00.000Z",
             latestCheckRunId: null,
+            latestCompletedAt: null,
             isOpen: true,
           },
         };
@@ -637,6 +646,8 @@ describe("runResync", () => {
       ciSettledAt: null,
       ciLatestRunId: null,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
 
@@ -649,6 +660,7 @@ describe("runResync", () => {
           headSha: "head-2",
           updatedAt: "2026-08-24T00:00:02.000Z",
           latestCheckRunId: 900,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -691,6 +703,8 @@ describe("runResync", () => {
       ciSettledAt: null,
       ciLatestRunId: null,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
 
@@ -703,6 +717,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: 900,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -726,6 +741,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -739,6 +756,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: null,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -776,6 +794,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -790,6 +810,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: null,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -831,6 +852,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -847,6 +870,7 @@ describe("runResync", () => {
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
             latestCheckRunId: null,
+            latestCompletedAt: null,
             isOpen: true,
           },
         };
@@ -877,6 +901,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 1_000,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
 
@@ -889,6 +915,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: 1_100,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -916,6 +943,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -931,6 +960,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: 9,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -962,6 +992,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -978,6 +1010,7 @@ describe("runResync", () => {
             headSha: "head-1",
             updatedAt: "2026-08-24T00:00:00.000Z",
             latestCheckRunId: null,
+            latestCompletedAt: null,
             isOpen: true,
           },
         };
@@ -1009,6 +1042,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -1022,6 +1057,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: "2026-08-24T00:00:00.000Z",
           latestCheckRunId: null,
+          latestCompletedAt: null,
           isOpen: true,
         },
       }),
@@ -1051,6 +1087,8 @@ describe("runResync", () => {
       ciSettledAt: null,
       ciLatestRunId: null,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -1064,6 +1102,7 @@ describe("runResync", () => {
           headSha: "head-1",
           updatedAt: null,
           latestCheckRunId: null,
+          latestCompletedAt: null,
           isOpen: false,
         },
       }),
@@ -1093,6 +1132,8 @@ describe("runResync", () => {
       ciSettledAt: 1_000,
       ciLatestRunId: 900,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       fixAttempts: 0,
     };
     const before = structuredClone(state.prs["sjawhar/legion#7"]);

@@ -36,8 +36,10 @@ export interface CiSettlementInput {
   verdict: PrState["verdict"];
   failing: string[];
   settledAt: number;
-  latestCheckRunId?: number | null;
+  latestCheckRunId: number | null;
   generation: number | null;
+  snapshot: string | null;
+  latestCompletedAt: number | null;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -46,56 +48,77 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
-/** The same-head ordering pair a settlement carries: GitHub's highest check-run id, then the listener's sequence. */
+/** A listener-authored, same-head settlement identity. */
 export interface SettlementOrder {
   readonly latestCheckRunId: number;
-  /** null when the pair came from GitHub's rollup (resync), which has no listener sequence. */
-  readonly generation: number | null;
+  readonly generation: number;
+  readonly snapshot: string;
+  readonly latestCompletedAt: number;
 }
 
-/**
- * Whether `incoming` is older than the stored pair: a lower id, or an equal id
- * with a lower generation. A null generation on either side carries no
- * ordering information, so equal ids then compare as equal (the changed-set
- * guard decides). With no stored id nothing is older.
- */
-export function isOlderSettlement(pr: PrState, incoming: SettlementOrder): boolean {
-  if (pr.ciLatestRunId === null) return false;
-  if (incoming.latestCheckRunId !== pr.ciLatestRunId) {
-    return incoming.latestCheckRunId < pr.ciLatestRunId;
-  }
-  return (
-    pr.ciSettlementGeneration !== null &&
-    incoming.generation !== null &&
-    incoming.generation < pr.ciSettlementGeneration
-  );
-}
+export type SettlementClassification = "stale" | "duplicate" | "conflict" | "newer";
 
 /**
- * Records a same-head ordering fence from an accepted pair. Never moves
- * backwards: an older pair is ignored, and at an equal id a null generation
- * (a resync refresh) never erases a known one.
+ * Classifies a live settlement against the per-head fence. Check-run ids order
+ * every source; a live fence uses the listener's state generation and snapshot,
+ * while a GitHub fence uses GitHub's completed-at clock.
  */
-export function advanceCiFence(
+export function classifySettlement(
   pr: PrState,
-  latestCheckRunId: number | null | undefined,
-  generation: number | null
-): void {
+  incoming: SettlementOrder
+): SettlementClassification {
+  if (pr.ciLatestRunId === null) return "newer";
+  if (incoming.latestCheckRunId < pr.ciLatestRunId) return "stale";
+  if (incoming.latestCheckRunId > pr.ciLatestRunId) return "newer";
+
+  if (pr.ciSettlementGeneration !== null) {
+    if (incoming.generation < pr.ciSettlementGeneration) return "stale";
+    if (incoming.generation > pr.ciSettlementGeneration) return "newer";
+    return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
+  }
+
+  if (pr.ciLatestCompletedAt === null || incoming.latestCompletedAt > pr.ciLatestCompletedAt) {
+    return "newer";
+  }
+  return "stale";
+}
+
+interface CiFence {
+  readonly latestCheckRunId: number | null | undefined;
+  readonly generation: number | null;
+  readonly snapshot: string | null;
+  readonly latestCompletedAt: number | null;
+}
+
+/** Records an accepted fence without letting a same-id resync erase live identity. */
+export function advanceCiFence(pr: PrState, incoming: CiFence): void {
+  const latestCheckRunId = incoming.latestCheckRunId;
   if (latestCheckRunId === null || latestCheckRunId === undefined) return;
-  const incoming = { latestCheckRunId, generation };
-  if (isOlderSettlement(pr, incoming)) return;
-  if (pr.ciLatestRunId === latestCheckRunId) {
-    if (generation !== null) pr.ciSettlementGeneration = generation;
+  if (pr.ciLatestRunId !== null && latestCheckRunId < pr.ciLatestRunId) return;
+  if (
+    latestCheckRunId === pr.ciLatestRunId &&
+    pr.ciSettlementGeneration !== null &&
+    incoming.generation === null
+  ) {
     return;
   }
   pr.ciLatestRunId = latestCheckRunId;
-  pr.ciSettlementGeneration = generation;
+  pr.ciSettlementGeneration = incoming.generation;
+  pr.ciSnapshot = incoming.snapshot;
+  pr.ciLatestCompletedAt = incoming.latestCompletedAt;
 }
 
 /** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */
 export type CiSnapshot = Pick<
   PrState,
-  "headSha" | "verdict" | "failing" | "ciSettledAt" | "ciLatestRunId" | "ciSettlementGeneration"
+  | "headSha"
+  | "verdict"
+  | "failing"
+  | "ciSettledAt"
+  | "ciLatestRunId"
+  | "ciSettlementGeneration"
+  | "ciSnapshot"
+  | "ciLatestCompletedAt"
 >;
 
 export function ciSnapshot(pr: PrState): CiSnapshot {
@@ -106,6 +129,8 @@ export function ciSnapshot(pr: PrState): CiSnapshot {
     ciSettledAt: pr.ciSettledAt,
     ciLatestRunId: pr.ciLatestRunId,
     ciSettlementGeneration: pr.ciSettlementGeneration,
+    ciSnapshot: pr.ciSnapshot,
+    ciLatestCompletedAt: pr.ciLatestCompletedAt,
   };
 }
 
@@ -116,6 +141,8 @@ export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
     pr.ciSettledAt === snapshot.ciSettledAt &&
     pr.ciLatestRunId === snapshot.ciLatestRunId &&
     pr.ciSettlementGeneration === snapshot.ciSettlementGeneration &&
+    pr.ciSnapshot === snapshot.ciSnapshot &&
+    pr.ciLatestCompletedAt === snapshot.ciLatestCompletedAt &&
     pr.failing.length === snapshot.failing.length &&
     pr.failing.every((name, index) => name === snapshot.failing[index])
   );
@@ -155,7 +182,7 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  advanceCiFence(pr, input.latestCheckRunId, input.generation);
+  advanceCiFence(pr, input);
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,
@@ -389,6 +416,8 @@ function registerPr(
     ciSettledAt: null,
     ciLatestRunId: null,
     ciSettlementGeneration: null,
+    ciSnapshot: null,
+    ciLatestCompletedAt: null,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -404,6 +433,8 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.ciSettledAt = null;
   pr.ciLatestRunId = null;
   pr.ciSettlementGeneration = null;
+  pr.ciSnapshot = null;
+  pr.ciLatestCompletedAt = null;
   delete pr.reviewDecision;
 }
 

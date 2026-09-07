@@ -272,6 +272,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -308,6 +309,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -378,6 +380,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -407,7 +410,14 @@ describe("getCiStatusBatch", () => {
                               state: "FAILURE",
                               contexts: {
                                 pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
-                                nodes: [{ name: "lint", conclusion: "FAILURE", databaseId: 800 }],
+                                nodes: [
+                                  {
+                                    name: "lint",
+                                    conclusion: "FAILURE",
+                                    databaseId: 800,
+                                    completedAt: "2026-08-24T00:00:01.000Z",
+                                  },
+                                ],
                               },
                             },
                           },
@@ -425,7 +435,14 @@ describe("getCiStatusBatch", () => {
                     statusCheckRollup: {
                       contexts: {
                         pageInfo: { hasNextPage: false, endCursor: null },
-                        nodes: [{ name: "unit", conclusion: "ERROR", databaseId: 900 }],
+                        nodes: [
+                          {
+                            name: "unit",
+                            conclusion: "ERROR",
+                            databaseId: 900,
+                            completedAt: "2026-08-24T00:00:02.000Z",
+                          },
+                        ],
                       },
                     },
                   },
@@ -444,9 +461,11 @@ describe("getCiStatusBatch", () => {
     expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain(
       "pageInfo { hasNextPage endCursor }"
     );
+    expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain("completedAt");
     expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain(
       'object(oid: "head-1")'
     );
+    expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain("completedAt");
     expect(queries[1]).toContain("after=cursor-1");
     expect(result).toEqual({
       "ENG-21": {
@@ -458,6 +477,7 @@ describe("getCiStatusBatch", () => {
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
         latestCheckRunId: 900,
+        latestCompletedAt: Date.parse("2026-08-24T00:00:02.000Z"),
         isOpen: true,
       },
     });
@@ -531,6 +551,7 @@ describe("getCiStatusBatch", () => {
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
         latestCheckRunId: 950,
+        latestCompletedAt: null,
         isOpen: true,
       },
     });
@@ -567,6 +588,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -600,6 +622,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -633,6 +656,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -666,6 +690,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -697,6 +722,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -719,6 +745,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -768,6 +795,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
       "ENG-22": {
@@ -779,6 +807,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -817,6 +846,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });
@@ -900,6 +930,7 @@ describe("getCiStatusBatch", () => {
         headSha: null,
         updatedAt: null,
         latestCheckRunId: null,
+        latestCompletedAt: null,
         isOpen: false,
       },
     });

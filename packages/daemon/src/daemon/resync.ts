@@ -205,10 +205,12 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
     }
-    // The fetched max check-run id is ordering information whatever the
-    // rollup state: a pending rerun already has newer runs, and a delayed
-    // older live settlement must not pass the fence.
-    advanceCiFence(pr, status.latestCheckRunId, null);
+    const fence = {
+      latestCheckRunId: status.latestCheckRunId,
+      generation: null,
+      snapshot: null,
+      latestCompletedAt: status.latestCompletedAt,
+    };
     const failing = status.failingChecks ?? [];
     // Mirror live intake: red only for actual failures; a cancelled-only
     // failing rollup, like a pending one, uncertifies a green head.
@@ -219,6 +221,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
           ? "red"
           : null;
     if (verdict === null) {
+      advanceCiFence(pr, fence);
       if (status.ciStatus === "pending" || status.ciStatus === "failing") uncertifyCiVerdict(pr);
       continue;
     }
@@ -230,6 +233,8 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
         failing,
         settledAt: now,
         latestCheckRunId: status.latestCheckRunId,
+        snapshot: null,
+        latestCompletedAt: status.latestCompletedAt,
         generation: null,
       },
       deps.config

@@ -8,9 +8,9 @@ import {
 import type { DaemonConfig } from "./config";
 import type { HeldEvent, LegionState, TreeState } from "./legion-state";
 import {
+  classifySettlement,
   type Effect,
   type EnvelopeJson,
-  isOlderSettlement,
   type LegionEventPayload,
   reduceGithubEvent,
   settleCiVerdict,
@@ -59,6 +59,8 @@ interface ChecksInput {
   settledAt: number;
   latestCheckRunId: number;
   generation: number;
+  snapshot: string;
+  latestCompletedAt: number;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -100,6 +102,14 @@ function statusGroup(
   return { count, checks };
 }
 
+const RFC3339_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function rfc3339EpochMilliseconds(value: unknown): number | undefined {
+  if (typeof value !== "string" || !RFC3339_TIMESTAMP.test(value)) return undefined;
+  const milliseconds = Date.parse(value);
+  return Number.isNaN(milliseconds) ? undefined : milliseconds;
+}
+
 function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | undefined {
   const match = CHECKS_TOPIC.exec(subject);
   if (!match) return undefined;
@@ -129,6 +139,8 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     payload.generation >= 0
       ? payload.generation
       : undefined;
+  const snapshot = stringValue(payload.snapshot);
+  const latestCompletedAt = rfc3339EpochMilliseconds(payload.latest_completed_at);
   const settledAt =
     payload.settled_at === undefined
       ? envelope.issued_at
@@ -143,6 +155,8 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     !sha ||
     latestCheckRunId === undefined ||
     generation === undefined ||
+    !snapshot ||
+    latestCompletedAt === undefined ||
     settledAt === undefined ||
     !failed ||
     !cancelled
@@ -158,6 +172,8 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     settledAt,
     latestCheckRunId,
     generation,
+    snapshot,
+    latestCompletedAt,
   };
 }
 
@@ -379,9 +395,17 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    if (isOlderSettlement(pr, input)) {
+    const classification = classifySettlement(pr, input);
+    if (classification === "stale") {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
+      );
+      return false;
+    }
+    if (classification === "duplicate") return false;
+    if (classification === "conflict") {
+      console.warn(
+        `[legion] conflicting checks settlement ${envelope.event_id} subject=${subject} sha=${input.sha} stored_snapshot=${pr.ciSnapshot ?? "<none>"} incoming_snapshot=${input.snapshot}`
       );
       return false;
     }
@@ -396,6 +420,8 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
           settledAt: input.settledAt,
           latestCheckRunId: input.latestCheckRunId,
           generation: input.generation,
+          snapshot: input.snapshot,
+          latestCompletedAt: input.latestCompletedAt,
         },
         deps.config
       ),

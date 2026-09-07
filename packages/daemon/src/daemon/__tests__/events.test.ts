@@ -129,6 +129,8 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     ciSettledAt: null,
     ciLatestRunId: null,
     ciSettlementGeneration: null,
+    ciSnapshot: null,
+    ciLatestCompletedAt: null,
     fixAttempts: 0,
   };
 }
@@ -180,6 +182,8 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     is_head: true,
     latest_check_run_id: 1,
     generation: 0,
+    snapshot: "state-hash-1",
+    latest_completed_at: "2026-09-07T00:00:01.000Z",
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },
@@ -644,7 +648,15 @@ describe("core-NATS event pump", () => {
     await flush();
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
-      envelope(settledChecks({ settled_at: 2_000, superseded_settlement: "true" }))
+      envelope(
+        settledChecks({
+          generation: 1,
+          snapshot: "state-hash-2",
+          latest_completed_at: "2026-09-07T00:00:02.000Z",
+          settled_at: 2_000,
+          superseded_settlement: "true",
+        })
+      )
     );
     await flush();
 

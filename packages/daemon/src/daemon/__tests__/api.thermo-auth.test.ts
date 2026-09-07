@@ -184,6 +184,8 @@ describe("thermonuclear API regressions", () => {
       ciSettledAt: 1,
       ciLatestRunId: 1,
       ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
       reviewDecision: "approved",
       fixAttempts: 1,
     };
