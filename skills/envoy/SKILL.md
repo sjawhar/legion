@@ -95,8 +95,8 @@ Settlement waits for the head to be quiet for a few seconds, every reported chec
 and every recorded GitHub check suite to be `completed`; until then, a silent subscription is
 normal, not a failure.
 
-If another check run appears after a head settled, Envoy re-arms that settlement and sends a new
-`checks` payload with `superseded_settlement: "true"`. Treat it as the current verdict.
+Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"`
+payload with a higher `generation` for the same head. Consumers keep the highest generation per SHA.
 
 ## When a subscription is silent
 
