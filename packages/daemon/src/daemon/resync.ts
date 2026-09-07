@@ -1,10 +1,15 @@
-import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
+import { formatIssueKey, type IssueKey } from "@legion/contracts";
 import type { CiAndMergeStatus } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
-import { ciVerdictEmissions } from "./events";
 import type { LegionState } from "./legion-state";
-import { type Effect, type EnvelopeJson, type ReducerConfig, reduceGithubEvent } from "./reducers";
+import {
+  type Effect,
+  type EnvelopeJson,
+  type ReducerConfig,
+  reduceGithubEvent,
+  settleCiVerdict,
+} from "./reducers";
 
 export type ResyncAnomaly = {
   kind: "zero-owner-tree" | "erroring-issue" | "missed-open" | "untriaged-open" | "launch-failed";
@@ -170,22 +175,23 @@ async function reconcileUnsettledPrs(deps: RunResyncDeps, now: number): Promise<
 
     const verdict =
       status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
-    const emissions = ciVerdictEmissions(pr, verdict, status.failingChecks ?? []);
-    for (const emission of emissions) {
-      await deps.applyEffects(
-        [
-          {
-            kind: "publish",
-            role: roleToken(deps.state.project, pr.key, "implementer"),
-            payload: emission,
-          },
-        ],
+    if (verdict === null) continue;
+    await deps.applyEffects(
+      settleCiVerdict(
+        deps.state,
+        pr,
         {
-          event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
-          issued_at: now,
-        }
-      );
-    }
+          verdict,
+          failing: status.failingChecks ?? [],
+          settledAt: now,
+        },
+        deps.config
+      ),
+      {
+        event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
+        issued_at: now,
+      }
+    );
   }
 }
 

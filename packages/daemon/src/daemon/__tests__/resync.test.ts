@@ -373,8 +373,24 @@ describe("runResync", () => {
       excludedNullContentItems: 1,
     });
   });
-  it("reconciles an unsettled green PR once from its GitHub check rollup", async () => {
+  it("settles a reconciled green PR and notifies its approved architect", async () => {
     const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Resync this Legion tree",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+      heldEvents: [],
+    };
+    state.roles[roleToken("omp", issue, "architect")] = { issue, role: "architect" };
     state.prs["sjawhar/legion#7"] = {
       key: issue,
       repo: "sjawhar/legion",
@@ -385,6 +401,7 @@ describe("runResync", () => {
       ciSettledAt: null,
       ciGeneration: null,
       fixAttempts: 0,
+      reviewDecision: "approved",
     };
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
     let now = Date.parse("2026-08-24T00:00:00.000Z");
@@ -413,7 +430,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       failing: [],
-      ciSettledAt: null,
+      ciSettledAt: now,
       ciGeneration: null,
     });
     expect(dispatched).toEqual([
@@ -423,6 +440,11 @@ describe("runResync", () => {
             kind: "publish",
             role: roleToken("omp", issue, "implementer"),
             payload: { type: "ci-green", sha: "head-1" },
+          },
+          {
+            kind: "publish",
+            role: roleToken("omp", issue, "architect"),
+            payload: { type: "pr-ready", pr: 7 },
           },
         ],
         envelope: {
@@ -470,7 +492,7 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "red",
       failing: ["lint", "unit"],
-      ciSettledAt: null,
+      ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
       ciGeneration: null,
     });
     expect(dispatched).toEqual([

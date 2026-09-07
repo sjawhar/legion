@@ -32,6 +32,58 @@ export type CiEmission =
   | { type: "ci-green"; sha: string }
   | { type: "ci-settled-red"; sha: string; failing: string[] };
 
+export interface CiSettlementInput {
+  verdict: PrState["verdict"];
+  failing: string[];
+  settledAt: number;
+  generation?: number;
+}
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+function ciVerdictEmissions(
+  pr: PrState,
+  verdict: PrState["verdict"],
+  failing: string[]
+): CiEmission[] {
+  if (verdict === null) {
+    if (pr.verdict === "green") {
+      pr.verdict = null;
+      pr.failing = [];
+    }
+    return [];
+  }
+
+  const priorVerdict = pr.verdict;
+  const priorFailing = pr.failing;
+  pr.verdict = verdict;
+  pr.failing = verdict === "red" ? failing : [];
+  if (priorVerdict === verdict && sameStringSet(priorFailing, pr.failing)) return [];
+  return verdict === "red"
+    ? [{ type: "ci-settled-red", failing, sha: pr.headSha }]
+    : [{ type: "ci-green", sha: pr.headSha }];
+}
+
+export function settleCiVerdict(
+  state: LegionState,
+  pr: PrState,
+  input: CiSettlementInput,
+  config: ReducerConfig
+): Effect[] {
+  pr.ciSettledAt = input.settledAt;
+  if (input.generation !== undefined) pr.ciGeneration = input.generation;
+
+  return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
+    {
+      kind: "publish" as const,
+      role: roleToken(state.project, pr.key, "implementer"),
+      payload: emission,
+    },
+    ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
+  ]);
+}
+
 type JsonRecord = Record<string, unknown>;
 type RoutedRole = "architect" | "implementer";
 

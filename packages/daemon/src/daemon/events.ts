@@ -3,18 +3,16 @@ import {
   EnvelopeSchema,
   type IssueKey,
   parseRoleToken,
-  roleToken,
   roleTopic,
 } from "@legion/contracts";
 import type { DaemonConfig } from "./config";
-import type { HeldEvent, LegionState, PrState, TreeState } from "./legion-state";
+import type { HeldEvent, LegionState, TreeState } from "./legion-state";
 import {
-  type CiEmission,
   type Effect,
   type EnvelopeJson,
   type LegionEventPayload,
-  reduceCiEmission,
   reduceGithubEvent,
+  settleCiVerdict,
 } from "./reducers";
 
 const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
@@ -147,39 +145,6 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
   };
 }
 
-function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value) => right.includes(value));
-}
-
-export function ciVerdictEmissions(
-  pr: PrState,
-  verdict: PrState["verdict"],
-  failing: string[]
-): CiEmission[] {
-  if (verdict === null) {
-    if (pr.verdict === "green") {
-      pr.verdict = null;
-      pr.failing = [];
-    }
-    return [];
-  }
-
-  const priorVerdict = pr.verdict;
-  const priorFailing = pr.failing;
-  pr.verdict = verdict;
-  pr.failing = verdict === "red" ? failing : [];
-  if (priorVerdict === verdict && sameStringSet(priorFailing, pr.failing)) return [];
-  return verdict === "red"
-    ? [{ type: "ci-settled-red", failing, sha: pr.headSha }]
-    : [{ type: "ci-green", sha: pr.headSha }];
-}
-
-function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
-  const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
-  pr.ciSettledAt = input.settledAt;
-  pr.ciGeneration = input.generation;
-  return ciVerdictEmissions(pr, verdict, input.failed);
-}
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {
   let current = issue;
   const visited = new Set<IssueKey>();
@@ -382,21 +347,6 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     await deps.saveState();
   };
 
-  const publishCiEmissions = async (
-    pr: PrState,
-    emissions: CiEmission[],
-    envelope: EnvelopeJson
-  ): Promise<void> => {
-    const role = roleToken(deps.state.project, pr.key, "implementer");
-    for (const emission of emissions) {
-      await publishEffect(role, emission, envelope);
-      await applyEffects(
-        reduceCiEmission(deps.state, pr.repo, pr.number, emission, deps.config),
-        envelope
-      );
-    }
-  };
-
   const handleChecks = async (subject: string, envelope: EnvelopeJson): Promise<boolean> => {
     const input = checksInput(subject, envelope);
     if (!input) {
@@ -419,7 +369,21 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    await publishCiEmissions(pr, ciEmissions(pr, input), envelope);
+    const verdict = input.failed.length > 0 ? "red" : input.cancelledCount === 0 ? "green" : null;
+    await applyEffects(
+      settleCiVerdict(
+        deps.state,
+        pr,
+        {
+          verdict,
+          failing: input.failed,
+          settledAt: input.settledAt,
+          generation: input.generation,
+        },
+        deps.config
+      ),
+      envelope
+    );
     return true;
   };
 
