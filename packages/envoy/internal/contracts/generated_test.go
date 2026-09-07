@@ -132,3 +132,28 @@ func TestEnvelopeSignalQualityFieldsOmitEmpty(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateWireRejectsEmptyOptionalEnvelopeStrings(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "in reply to", raw: `{"in_reply_to":""}`},
+		{name: "supersedes", raw: `{"supersedes":""}`},
+		{name: "urgency", raw: `{"urgency":""}`},
+		{name: "expects reply", raw: `{"expects_reply":""}`},
+		{name: "sender session ID", raw: `{"sender":{"session_id":""}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateWire([]byte(test.raw)); err == nil {
+				t.Fatalf("ValidateWire(%s) succeeded, want empty string rejected", test.raw)
+			}
+		})
+	}
+	for _, raw := range []string{`{}`, `{"sender":{}}`} {
+		if err := ValidateWire([]byte(raw)); err != nil {
+			t.Errorf("ValidateWire(%s) error = %v, want nil for absent optional fields", raw, err)
+		}
+	}
+}
