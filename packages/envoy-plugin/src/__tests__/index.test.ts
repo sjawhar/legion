@@ -464,8 +464,11 @@ describe("tool.execute.after auto-subscribes the caller to dispatch threads (AC#
       url: "https://github.com/sjawhar/legion/issues/742",
     });
     const subscribed = await runHook("dispatch", output);
+    // `>` needs at least one more token, so the client registers the thread's own
+    // subject beside the wildcard: lifecycle events and comments both arrive.
     expect(subscribed).toContainEqual([
       "ses_dispatch",
+      "notifications.github.sjawhar.legion.issue.742",
       "notifications.github.sjawhar.legion.issue.742.>",
     ]);
   });
