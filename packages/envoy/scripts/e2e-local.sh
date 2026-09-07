@@ -448,7 +448,10 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
       // The pair orders lexicographically: a higher id is newer whatever its
       // generation; an equal id needs a non-decreasing generation; a lower id
       // is a regression.
-      require(values.every((value, index) => index === 0 || value.latest_check_run_id > values[index - 1].latest_check_run_id || (value.latest_check_run_id === values[index - 1].latest_check_run_id && value.generation >= values[index - 1].generation)), `checks (latest_check_run_id, generation) for ${sha} regressed`);
+      const doesNotRegress = (previous, value) =>
+        value.latest_check_run_id > previous.latest_check_run_id ||
+        (value.latest_check_run_id === previous.latest_check_run_id && value.generation >= previous.generation);
+      require(values.every((value, index) => index === 0 || doesNotRegress(values[index - 1], value)), `checks (latest_check_run_id, generation) for ${sha} regressed`);
     }
     require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 1, "second head re-settlement flag is missing");
 
