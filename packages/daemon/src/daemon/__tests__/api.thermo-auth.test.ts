@@ -183,6 +183,7 @@ describe("thermonuclear API regressions", () => {
       failing: ["unit"],
       ciSettledAt: 1,
       ciLatestRunId: 1,
+      ciSettlementGeneration: null,
       reviewDecision: "approved",
       fixAttempts: 1,
     };

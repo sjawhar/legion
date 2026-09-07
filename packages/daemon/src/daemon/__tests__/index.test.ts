@@ -461,6 +461,7 @@ describe("startDaemon", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 900,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const logs: string[] = [];

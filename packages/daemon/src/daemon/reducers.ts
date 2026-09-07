@@ -37,6 +37,7 @@ export interface CiSettlementInput {
   failing: string[];
   settledAt: number;
   latestCheckRunId?: number | null;
+  generation: number | null;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
@@ -45,11 +46,16 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
-/** Raises the same-head ordering fence; never lowers it (a null/undefined id is no information). */
-export function advanceCiFence(pr: PrState, latestCheckRunId: number | null | undefined): void {
+/** Records a same-head ordering fence; a null or undefined id carries no ordering information. */
+export function advanceCiFence(
+  pr: PrState,
+  latestCheckRunId: number | null | undefined,
+  generation: number | null
+): void {
   if (latestCheckRunId === null || latestCheckRunId === undefined) return;
-  pr.ciLatestRunId =
-    pr.ciLatestRunId === null ? latestCheckRunId : Math.max(pr.ciLatestRunId, latestCheckRunId);
+  if (pr.ciLatestRunId !== null && latestCheckRunId < pr.ciLatestRunId) return;
+  pr.ciLatestRunId = latestCheckRunId;
+  pr.ciSettlementGeneration = generation;
 }
 
 /** A rerun in flight, or a cancelled-only settlement: a green verdict is no longer certified. Red is preserved. */
@@ -86,7 +92,7 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  advanceCiFence(pr, input.latestCheckRunId);
+  advanceCiFence(pr, input.latestCheckRunId, input.generation);
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,
@@ -319,6 +325,7 @@ function registerPr(
     failing: [],
     ciSettledAt: null,
     ciLatestRunId: null,
+    ciSettlementGeneration: null,
     fixAttempts: 0,
   };
   state.prs[prKey] = pr;
@@ -333,6 +340,7 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.failing = [];
   pr.ciSettledAt = null;
   pr.ciLatestRunId = null;
+  pr.ciSettlementGeneration = null;
   delete pr.reviewDecision;
 }
 

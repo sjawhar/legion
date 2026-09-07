@@ -57,6 +57,7 @@ function stateWithTree() {
     failing: [],
     ciSettledAt: 1_724_457_600_000,
     ciLatestRunId: null,
+    ciSettlementGeneration: null,
     fixAttempts: 1,
     reviewDecision: "approved",
   };
@@ -74,6 +75,7 @@ function legacyV8State(pr: Record<string, unknown>) {
     failing: _failing,
     ciSettledAt: _ciSettledAt,
     ciLatestRunId: _ciLatestRunId,
+    ciSettlementGeneration: _ciSettlementGeneration,
     ...legacyPr
   } = current.prs[prKey];
   return {
@@ -88,7 +90,11 @@ function legacyV8State(pr: Record<string, unknown>) {
 
 function legacyV11State() {
   const current = stateWithTree();
-  const { ciLatestRunId: _ciLatestRunId, ...legacyPr } = current.prs[prKey];
+  const {
+    ciLatestRunId: _ciLatestRunId,
+    ciSettlementGeneration: _ciSettlementGeneration,
+    ...legacyPr
+  } = current.prs[prKey];
   return {
     current,
     legacy: {
@@ -136,7 +142,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(state);
   });
 
-  it("migrates v11 CI state by defaulting the latest check-run id to null", async () => {
+  it("migrates v11 CI state by defaulting both ordering fence fields to null", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v11-"));
     const file = path.join(tempDir, "state.json");
     const { current, legacy } = legacyV11State();

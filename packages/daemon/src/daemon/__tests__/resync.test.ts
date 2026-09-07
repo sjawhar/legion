@@ -422,6 +422,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: null,
       ciLatestRunId: null,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -500,6 +501,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: null,
       ciLatestRunId: null,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
@@ -560,6 +562,7 @@ describe("runResync", () => {
       failing: ["unit"],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
       reviewDecision: "approved",
     };
@@ -633,6 +636,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: null,
       ciLatestRunId: null,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
 
@@ -686,6 +690,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: null,
       ciLatestRunId: null,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
 
@@ -720,6 +725,7 @@ describe("runResync", () => {
       failing: ["unit"],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -769,6 +775,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -823,6 +830,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -868,6 +876,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 1_000,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
 
@@ -906,6 +915,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -951,6 +961,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     let fetches = 0;
@@ -997,6 +1008,7 @@ describe("runResync", () => {
       failing: ["unit"],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -1038,6 +1050,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: null,
       ciLatestRunId: null,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const dispatched: Effect[][] = [];
@@ -1079,6 +1092,7 @@ describe("runResync", () => {
       failing: [],
       ciSettledAt: 1_000,
       ciLatestRunId: 900,
+      ciSettlementGeneration: null,
       fixAttempts: 0,
     };
     const before = structuredClone(state.prs["sjawhar/legion#7"]);

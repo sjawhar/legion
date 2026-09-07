@@ -57,6 +57,7 @@ interface ChecksInput {
   cancelledCount: number;
   settledAt: number;
   latestCheckRunId: number;
+  generation: number;
 }
 
 function asRecord(value: unknown): JsonRecord | undefined {
@@ -121,6 +122,12 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     payload.latest_check_run_id > 0
       ? payload.latest_check_run_id
       : undefined;
+  const generation =
+    typeof payload.generation === "number" &&
+    Number.isSafeInteger(payload.generation) &&
+    payload.generation >= 0
+      ? payload.generation
+      : undefined;
   const settledAt =
     payload.settled_at === undefined
       ? envelope.issued_at
@@ -131,7 +138,14 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
         : undefined;
   const failed = statusGroup(payload, "failed");
   const cancelled = statusGroup(payload, "cancelled");
-  if (!sha || latestCheckRunId === undefined || settledAt === undefined || !failed || !cancelled) {
+  if (
+    !sha ||
+    latestCheckRunId === undefined ||
+    generation === undefined ||
+    settledAt === undefined ||
+    !failed ||
+    !cancelled
+  ) {
     return undefined;
   }
   return {
@@ -142,6 +156,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     cancelledCount: cancelled.count,
     settledAt,
     latestCheckRunId,
+    generation,
   };
 }
 
@@ -363,7 +378,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    if (pr.ciLatestRunId !== null && input.latestCheckRunId < pr.ciLatestRunId) {
+    if (
+      pr.ciLatestRunId !== null &&
+      (input.latestCheckRunId < pr.ciLatestRunId ||
+        (input.latestCheckRunId === pr.ciLatestRunId &&
+          pr.ciSettlementGeneration !== null &&
+          input.generation < pr.ciSettlementGeneration))
+    ) {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );
@@ -379,6 +400,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
           failing: input.failed,
           settledAt: input.settledAt,
           latestCheckRunId: input.latestCheckRunId,
+          generation: input.generation,
         },
         deps.config
       ),

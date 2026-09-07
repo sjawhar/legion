@@ -128,6 +128,7 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     failing: [],
     ciSettledAt: null,
     ciLatestRunId: null,
+    ciSettlementGeneration: null,
     fixAttempts: 0,
   };
 }
@@ -178,6 +179,7 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     sha: "head-1",
     is_head: true,
     latest_check_run_id: 1,
+    generation: 0,
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },

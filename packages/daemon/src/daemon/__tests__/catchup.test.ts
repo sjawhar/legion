@@ -53,6 +53,7 @@ function prState(issue: IssueKey): PrState {
     failing: [],
     ciSettledAt: 3_000,
     ciLatestRunId: 3,
+    ciSettlementGeneration: null,
     fixAttempts: 1,
     reviewDecision: "approved",
   };

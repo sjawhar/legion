@@ -2,7 +2,7 @@ import { expect, it } from "bun:test";
 import { formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
 import type { DaemonConfig } from "../config";
 import { startEventPump } from "../events";
-import { newLegionState } from "../legion-state";
+import { newLegionState, type LegionState } from "../legion-state";
 import { reduceGithubEvent } from "../reducers";
 import { runResync } from "../resync";
 
@@ -83,6 +83,7 @@ function settledChecks(overrides: Record<string, unknown> = {}): Record<string, 
     sha: "head-1",
     is_head: true,
     latest_check_run_id: 1,
+    generation: 0,
     failed: { count: 0, checks: [] },
     running: { count: 0, checks: [] },
     passed: { count: 1, checks: ["unit"] },
@@ -125,9 +126,29 @@ function stateForCi() {
     failing: [],
     ciSettledAt: null,
     ciLatestRunId: null,
+    ciSettlementGeneration: null,
     fixAttempts: 0,
   };
   return { state, architect, implementer };
+}
+
+function startCiPump(state: LegionState) {
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+  return { nats, published, pump };
 }
 
 it("routes an approved PR immediately when its head's checks settle green", async () => {
@@ -401,6 +422,212 @@ it("does not re-emit when a red head re-settles with the same failing set", asyn
   expect(published).toEqual([]);
   pump.stop();
 });
+it("drops a lower-generation same-check-run settlement after a newer delivery", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 1,
+        settled_at: 2,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ latest_check_run_id: 900, generation: 0, settled_at: 1 }))
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["unit"],
+    ciSettledAt: 2,
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
+it("emits an in-order higher-generation settlement for the same check run", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ latest_check_run_id: 900, generation: 0, settled_at: 1 }))
+  );
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 1,
+        settled_at: 2,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["unit"],
+    ciSettledAt: 2,
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-green", sha: "head-1" }),
+    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
+it("keeps an equal check-run and generation settlement with an identical set quiet", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+  const red = settledChecks({
+    latest_check_run_id: 900,
+    generation: 1,
+    settled_at: 2,
+    failed: { count: 1, checks: ["unit"] },
+    passed: { count: 0, checks: [] },
+  });
+
+  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(red));
+  await pump.drain();
+  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(red));
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["unit"],
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
+it("applies an equal-id live settlement after a resync fence without a generation", async () => {
+  const { state } = stateForCi();
+
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "pending",
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 900,
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 1,
+  });
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: null,
+    ciLatestRunId: 900,
+    ciSettlementGeneration: null,
+  });
+
+  const { nats, published, pump } = startCiPump(state);
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 0,
+        settled_at: 2,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["unit"],
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 0,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
+it("accepts a higher check-run id after the listener generation restarts", async () => {
+  const { state } = stateForCi();
+  state.prs["acme/widgets#7"] = {
+    ...state.prs["acme/widgets#7"],
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 5,
+  };
+  const { nats, published, pump } = startCiPump(state);
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 901,
+        generation: 0,
+        settled_at: 2,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "red",
+    failing: ["unit"],
+    ciLatestRunId: 901,
+    ciSettlementGeneration: 0,
+  });
+  expect(published).toEqual([
+    JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
+  ]);
+  pump.stop();
+});
+
+it("ignores a settlement without a listener generation", async () => {
+  const { state } = stateForCi();
+  const { nats, published, pump } = startCiPump(state);
+  const { generation: _generation, ...withoutGeneration } = settledChecks();
+
+  nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(withoutGeneration));
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: null,
+    failing: [],
+    ciLatestRunId: null,
+  });
+  expect(published).toEqual([]);
+  pump.stop();
+});
+
 it("drops a lower check-run id settlement for the same head", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();

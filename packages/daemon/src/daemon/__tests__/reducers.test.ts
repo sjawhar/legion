@@ -84,6 +84,7 @@ function attachChild(state: LegionState, released = true): void {
 }
 
 function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
+  const { ciSettlementGeneration = null, ...rest } = overrides;
   state.prs[`${repo}#${prNumber}`] = {
     key: child,
     repo,
@@ -93,8 +94,9 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     failing: [],
     ciSettledAt: null,
     ciLatestRunId: null,
+    ciSettlementGeneration,
     fixAttempts: 0,
-    ...overrides,
+    ...rest,
   };
   state.prByBranch[`${repo}@legion/issue-2`] = `${repo}#${prNumber}`;
 }
