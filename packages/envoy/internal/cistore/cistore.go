@@ -60,6 +60,7 @@ type State struct {
 	Checks         map[string]Check `json:"checks"`
 	LastEventAt    int64            `json:"last_event_at"`
 	LastEmitHash   string           `json:"last_emit_hash"`
+	CIPublished    *bool            `json:"ci_published,omitempty"`
 	SettledEmitted bool             `json:"settled_emitted"`
 }
 
@@ -82,7 +83,7 @@ func Key(owner, repo, number, sha string) string {
 }
 
 func headKey(owner, repo, number string) string {
-	return "head." + keyCleaner.Replace(owner) + "." +
+	return "head-" + keyCleaner.Replace(owner) + "." +
 		keyCleaner.Replace(repo) + "." + keyCleaner.Replace(number)
 }
 
@@ -207,7 +208,7 @@ func (s *Store) watch() {
 		case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
 			delete(s.cache, key)
 			delete(s.heads, key)
-		case strings.HasPrefix(key, "head."):
+		case strings.HasPrefix(key, "head-"):
 			sha := string(entry.Value())
 			if sha == "" {
 				delete(s.heads, key)
@@ -437,10 +438,10 @@ func (s *Store) MarkEmitted(key, hash string, debounce time.Duration) (bool, err
 	return true, nil
 }
 
-// MarkSettled claims the right to emit checks.settled for a commit. Like
-// MarkEmitted, it updates the durable state with a compare-and-swap so multiple
-// listeners cannot publish the settled envelope more than once.
-func (s *Store) MarkSettled(key string) (bool, error) {
+// MarkCIPublished records the outcome of a claimed CI publish. A nil value is
+// legacy state from before this marker existed and is treated as published when
+// deciding whether a terminal state can emit checks.settled.
+func (s *Store) MarkCIPublished(key, expectedHash string, published bool) (bool, error) {
 	entry, err := s.kv.Get(key)
 	if err != nil {
 		return false, err
@@ -449,7 +450,38 @@ func (s *Store) MarkSettled(key string) (bool, error) {
 	if err := json.Unmarshal(entry.Value(), &st); err != nil {
 		return false, err
 	}
-	if st.SettledEmitted {
+	if st.Hash() != expectedHash {
+		return false, nil
+	}
+	st.CIPublished = &published
+	buf, err := json.Marshal(st)
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.kv.Update(key, buf, entry.Revision()); err != nil {
+		if isCASConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// MarkSettled claims the right to emit checks.settled for a commit. Like
+// MarkEmitted, it updates the durable state with a compare-and-swap so multiple
+// listeners cannot publish the settled envelope more than once. The expected
+// hash and terminal-state check reject a claim when work arrived after the
+// summary was rendered.
+func (s *Store) MarkSettled(key, expectedHash string) (bool, error) {
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		return false, err
+	}
+	var st State
+	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+		return false, err
+	}
+	if st.SettledEmitted || (st.CIPublished != nil && !*st.CIPublished) || st.Hash() != expectedHash || !terminal(st) {
 		return false, nil
 	}
 	st.SettledEmitted = true
@@ -464,4 +496,17 @@ func (s *Store) MarkSettled(key string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func terminal(st State) bool {
+	if len(st.Checks) == 0 {
+		return false
+	}
+	for _, check := range st.Checks {
+		switch classify(check) {
+		case catRunning, catQueued:
+			return false
+		}
+	}
+	return true
 }

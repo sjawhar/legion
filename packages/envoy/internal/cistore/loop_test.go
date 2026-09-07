@@ -13,18 +13,24 @@ import (
 )
 
 type recPub struct {
-	mu    sync.Mutex
-	items []contracts.Envelope
-	err   error
+	mu        sync.Mutex
+	items     []contracts.Envelope
+	err       error
+	onPublish func(contracts.Envelope)
 }
 
 func (p *recPub) Publish(e contracts.Envelope) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.err != nil {
+		p.mu.Unlock()
 		return p.err
 	}
 	p.items = append(p.items, e)
+	onPublish := p.onPublish
+	p.mu.Unlock()
+	if onPublish != nil {
+		onPublish(e)
+	}
 	return nil
 }
 
@@ -402,5 +408,124 @@ func TestSummaryTickPublishesSettledOncePerHead(t *testing.T) {
 	runSummaryTick(s, pub, time.Millisecond, logger)
 	if pub.count() != 4 {
 		t.Fatalf("new head did not publish ci and settled envelopes: %d publishes", pub.count())
+	}
+}
+
+func TestSummaryTickSettlesPreviouslyEmittedTerminalState(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	pub := &recPub{}
+	logger := logging.New("test")
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567"
+	)
+
+	if err := s.RecordHead(owner, repo, number, sha); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, s, owner, repo, number, sha)
+	if err := s.Record(owner, repo, number, sha, "build", "400", "https://example-host/checks/400", "completed", "success"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	key := Key(owner, repo, number, sha)
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	state.LastEmitHash = state.Hash()
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("encode state: %v", err)
+	}
+	if _, err := s.kv.Update(key, raw, entry.Revision()); err != nil {
+		t.Fatalf("seed emitted state: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		for _, cached := range s.List() {
+			if Key(cached.Owner, cached.Repo, cached.Number, cached.SHA) == key &&
+				cached.LastEmitHash == state.LastEmitHash {
+				goto cacheReady
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("cache never reflected seeded emitted state")
+		case <-time.After(15 * time.Millisecond):
+		}
+	}
+
+cacheReady:
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 1 {
+		t.Fatalf("previously emitted terminal state published %d envelopes, want settlement only", pub.count())
+	}
+	if env := pub.last(); env.Topic != "notifications.github.example-org.example-repo.pr.42.checks.settled" {
+		t.Fatalf("topic = %q, want checks.settled", env.Topic)
+	}
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 1 {
+		t.Fatalf("settled state re-emitted: %d publishes", pub.count())
+	}
+}
+
+func TestSummaryTickDoesNotSettleAfterQueuedWorkArrives(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	logger := logging.New("test")
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567"
+	)
+
+	if err := s.RecordHead(owner, repo, number, sha); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, s, owner, repo, number, sha)
+	if err := s.Record(owner, repo, number, sha, "build", "500", "https://example-host/checks/500", "completed", "success"); err != nil {
+		t.Fatalf("record initial check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 1)
+
+	var once sync.Once
+	pub := &recPub{
+		onPublish: func(env contracts.Envelope) {
+			if env.Topic != "notifications.github.example-org.example-repo.pr.42.ci" {
+				return
+			}
+			once.Do(func() {
+				if err := s.Record(owner, repo, number, sha, "late-check", "501", "https://example-host/checks/501", "queued", ""); err != nil {
+					t.Errorf("record queued work: %v", err)
+				}
+			})
+		},
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 1 {
+		t.Fatalf("queued work arriving after ci summary allowed %d publishes, want ci only", pub.count())
+	}
+	waitCacheChecks(t, s, owner, repo, number, sha, 2)
+
+	if err := s.Record(owner, repo, number, sha, "late-check", "501", "https://example-host/checks/501", "completed", "success"); err != nil {
+		t.Fatalf("complete late check: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	runSummaryTick(s, pub, time.Millisecond, logger)
+	if pub.count() != 3 {
+		t.Fatalf("terminal state after queued work published %d envelopes, want ci and settlement", pub.count())
 	}
 }
