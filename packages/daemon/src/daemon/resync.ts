@@ -2,7 +2,7 @@ import { formatIssueKey, type IssueKey } from "@legion/contracts";
 import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
-import type { LegionState } from "./legion-state";
+import type { LegionState, PrState } from "./legion-state";
 import {
   advanceCiFence,
   type Effect,
@@ -161,11 +161,24 @@ function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
 
 async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFailure[]> {
   const refs: Record<string, GitHubPRRef> = {};
-  const heads = new Map<string, string>();
+  const snapshots = new Map<
+    string,
+    Pick<
+      PrState,
+      "headSha" | "verdict" | "failing" | "ciSettledAt" | "ciLatestRunId" | "ciSettlementGeneration"
+    >
+  >();
   for (const [prKey, pr] of Object.entries(deps.state.prs)) {
     const [owner, repo] = pr.repo.split("/");
     refs[prKey] = { owner, repo, number: pr.number };
-    heads.set(prKey, pr.headSha);
+    snapshots.set(prKey, {
+      headSha: pr.headSha,
+      verdict: pr.verdict,
+      failing: [...pr.failing],
+      ciSettledAt: pr.ciSettledAt,
+      ciLatestRunId: pr.ciLatestRunId,
+      ciSettlementGeneration: pr.ciSettlementGeneration,
+    });
   }
   if (Object.keys(refs).length === 0) return [];
 
@@ -175,7 +188,20 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
   for (const [prKey, ref] of Object.entries(refs)) {
     const pr = deps.state.prs[prKey];
     const status = statuses[prKey];
-    if (!pr || !status || pr.headSha !== heads.get(prKey)) continue;
+    const snapshot = snapshots.get(prKey);
+    if (!pr || !status || !snapshot) continue;
+    if (
+      pr.headSha !== snapshot.headSha ||
+      pr.verdict !== snapshot.verdict ||
+      pr.ciSettledAt !== snapshot.ciSettledAt ||
+      pr.ciLatestRunId !== snapshot.ciLatestRunId ||
+      pr.ciSettlementGeneration !== snapshot.ciSettlementGeneration ||
+      pr.failing.length !== snapshot.failing.length ||
+      pr.failing.some((failing, index) => failing !== snapshot.failing[index])
+    ) {
+      console.debug(`[legion] skipped stale resync CI result ${prKey}`);
+      continue;
+    }
     if (isCiFetchFailure(status)) {
       const failureKey = `${status.owner}\u0000${status.error}`;
       if (!reportedFailures.has(failureKey)) {

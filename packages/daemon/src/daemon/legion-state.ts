@@ -450,10 +450,7 @@ function migrateV11State(state: unknown): unknown {
   const migratedPrs = recordValue(prs)
     ? Object.fromEntries(
         Object.entries(prs).map(([key, pr]) => {
-          if (
-            !recordValue(pr) ||
-            ("ciLatestRunId" in pr && "ciSettlementGeneration" in pr)
-          ) {
+          if (!recordValue(pr) || ("ciLatestRunId" in pr && "ciSettlementGeneration" in pr)) {
             return [key, pr];
           }
           return [

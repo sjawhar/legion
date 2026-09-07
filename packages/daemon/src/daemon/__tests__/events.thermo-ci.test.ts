@@ -1,8 +1,9 @@
-import { expect, it } from "bun:test";
+import { expect, it, vi } from "bun:test";
 import { formatIssueKey, roleToken, roleTopic } from "@legion/contracts";
+import type { CiFetchResult } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
 import { startEventPump } from "../events";
-import { newLegionState, type LegionState } from "../legion-state";
+import { type LegionState, newLegionState } from "../legion-state";
 import { reduceGithubEvent } from "../reducers";
 import { runResync } from "../resync";
 
@@ -611,12 +612,22 @@ it("accepts a higher check-run id after the listener generation restarts", async
   pump.stop();
 });
 
-it("ignores a settlement without a listener generation", async () => {
+it("ignores a settlement without a valid listener generation", async () => {
   const { state } = stateForCi();
   const { nats, published, pump } = startCiPump(state);
   const { generation: _generation, ...withoutGeneration } = settledChecks();
 
   nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(withoutGeneration));
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ generation: -1 }))
+  );
+  await pump.drain();
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ generation: Number.MAX_SAFE_INTEGER + 1 }))
+  );
   await pump.drain();
 
   expect(state.prs["acme/widgets#7"]).toMatchObject({
@@ -625,6 +636,124 @@ it("ignores a settlement without a listener generation", async () => {
     ciLatestRunId: null,
   });
   expect(published).toEqual([]);
+  pump.stop();
+});
+
+it("does not apply a fetched green rollup after a live red settlement advances CI state", async () => {
+  const { state } = stateForCi();
+  const { nats, pump } = startCiPump(state);
+  const fetchStarted = Promise.withResolvers<void>();
+  const fetchedStatuses = Promise.withResolvers<Record<string, CiFetchResult>>();
+  const resyncEffects: unknown[] = [];
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+  try {
+    const resync = runResync({
+      state,
+      config,
+      fetchGitHubProjectItems: async () => ({ items: [] }),
+      fetchCiStatusBatch: async () => {
+        fetchStarted.resolve();
+        return fetchedStatuses.promise;
+      },
+      applyEffects: async (effects) => {
+        resyncEffects.push(effects);
+      },
+      now: () => 3,
+    });
+    await fetchStarted.promise;
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          latest_check_run_id: 900,
+          generation: 1,
+          settled_at: 2,
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+        })
+      )
+    );
+    await pump.drain();
+    const ciSettledAt = state.prs["acme/widgets#7"]?.ciSettledAt;
+
+    fetchedStatuses.resolve({
+      "acme/widgets#7": {
+        ciStatus: "passing",
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 850,
+      },
+    });
+    await resync;
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: "red",
+      failing: ["unit"],
+      ciSettledAt,
+      ciLatestRunId: 900,
+      ciSettlementGeneration: 1,
+    });
+    expect(resyncEffects).toEqual([]);
+    expect(debug).toHaveBeenCalledWith("[legion] skipped stale resync CI result acme/widgets#7");
+  } finally {
+    pump.stop();
+    debug.mockRestore();
+  }
+});
+
+it("does not uncertify a live green settlement with a stale pending rollup", async () => {
+  const { state } = stateForCi();
+  const { nats, pump } = startCiPump(state);
+  const fetchStarted = Promise.withResolvers<void>();
+  const fetchedStatuses = Promise.withResolvers<Record<string, CiFetchResult>>();
+  const resyncEffects: unknown[] = [];
+
+  const resync = runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => {
+      fetchStarted.resolve();
+      return fetchedStatuses.promise;
+    },
+    applyEffects: async (effects) => {
+      resyncEffects.push(effects);
+    },
+    now: () => 3,
+  });
+  await fetchStarted.promise;
+
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ latest_check_run_id: 900, generation: 1, settled_at: 2 }))
+  );
+  await pump.drain();
+  const ciSettledAt = state.prs["acme/widgets#7"]?.ciSettledAt;
+
+  fetchedStatuses.resolve({
+    "acme/widgets#7": {
+      ciStatus: "pending",
+      mergeableStatus: null,
+      headSha: "head-1",
+      isOpen: true,
+      updatedAt: "2026-09-07T00:00:00.000Z",
+      latestCheckRunId: 850,
+    },
+  });
+  await resync;
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "green",
+    failing: [],
+    ciSettledAt,
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+  expect(resyncEffects).toEqual([]);
   pump.stop();
 });
 
