@@ -278,7 +278,7 @@ func TestRecordHeadAndHead(t *testing.T) {
 	}
 }
 
-func TestRecordHeadKeepsNewerHeadForLateAndEqualUpdates(t *testing.T) {
+func TestRecordHeadOrdersTimestampedUpdatesAndAcceptsMissingTimestamp(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
@@ -289,26 +289,40 @@ func TestRecordHeadKeepsNewerHeadForLateAndEqualUpdates(t *testing.T) {
 		headA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		headB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		headC = "cccccccccccccccccccccccccccccccccccccccc"
+		headD = "dddddddddddddddddddddddddddddddddddddddd"
 	)
+	readHead := func(t *testing.T) headRecord {
+		t.Helper()
+		entry, err := s.kv.Get(headKey(owner, repo, pr))
+		if err != nil {
+			t.Fatalf("get durable head: %v", err)
+		}
+		var head headRecord
+		if err := json.Unmarshal(entry.Value(), &head); err != nil {
+			t.Fatalf("decode durable head: %v", err)
+		}
+		return head
+	}
 	if err := s.RecordHead(owner, repo, pr, headB, "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record current head: %v", err)
 	}
 	if err := s.RecordHead(owner, repo, pr, headA, "2026-09-07T02:00:00Z"); err != nil {
 		t.Fatalf("record delayed head: %v", err)
 	}
-	if err := s.RecordHead(owner, repo, pr, headC, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record equal-time head: %v", err)
+	if got := readHead(t).SHA; got != headB {
+		t.Fatalf("older timestamp replaced head with %q, want %q", got, headB)
 	}
-	entry, err := s.kv.Get(headKey(owner, repo, pr))
-	if err != nil {
-		t.Fatalf("get durable head: %v", err)
+	if err := s.RecordHead(owner, repo, pr, headD, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record equal-timestamp head: %v", err)
 	}
-	var head headRecord
-	if err := json.Unmarshal(entry.Value(), &head); err != nil {
-		t.Fatalf("decode durable head: %v", err)
+	if got := readHead(t).SHA; got != headB {
+		t.Fatalf("equal timestamp replaced head with %q, want %q", got, headB)
 	}
-	if head.SHA != headB {
-		t.Fatalf("head regressed to %q, want %q", head.SHA, headB)
+	if err := s.RecordHead(owner, repo, pr, headC, ""); err != nil {
+		t.Fatalf("record head without timestamp: %v", err)
+	}
+	if got := readHead(t); got.SHA != headC || got.UpdatedAt != "" {
+		t.Fatalf("untimestamped head = %+v, want SHA %q with no timestamp", got, headC)
 	}
 }
 

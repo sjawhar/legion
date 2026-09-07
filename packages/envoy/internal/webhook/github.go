@@ -92,7 +92,7 @@ func githubPullRequestHead(event string, payload map[string]any) (owner, repo, n
 		return "", "", "", "", "", false
 	}
 	number = strconv.FormatInt(int64(value), 10)
-	return owner, repo, number, sha, updatedAt, owner != "" && repo != "" && number != "" && sha != "" && updatedAt != ""
+	return owner, repo, number, sha, updatedAt, owner != "" && repo != "" && number != "" && sha != ""
 }
 
 // GitHubHandler returns the HTTP handler for GitHub webhook events.

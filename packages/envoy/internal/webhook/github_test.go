@@ -605,3 +605,45 @@ func TestGitHubHandlerRecordsHeadOnPullRequestSynchronize(t *testing.T) {
 		}
 	})
 }
+
+func TestGitHubHandlerRecordsHeadWithoutPullRequestUpdatedAt(t *testing.T) {
+	const (
+		secret = "s"
+		body   = `{
+			"action": "synchronize",
+			"number": 42,
+			"pull_request": {
+				"head": {"sha": "abcdef1234567"}
+			},
+			"repository": {
+				"name": "example-repo",
+				"owner": {"login": "example-org"}
+			}
+		}`
+	)
+	pub := &mockPublisher{}
+	recorder := &mockRecorder{}
+	handler := GitHubHandler(secret, "@legion", "", pub, recorder)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", "delivery-head-without-updated-at")
+	req.Header.Set("X-GitHub-Event", "pull_request")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if len(recorder.headCalls) != 1 {
+		t.Fatalf("head calls = %d, want 1", len(recorder.headCalls))
+	}
+	if got := recorder.headCalls[0]; got != (headCall{
+		owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567",
+	}) {
+		t.Fatalf("head call = %+v", got)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(pub.published))
+	}
+}

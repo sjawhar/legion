@@ -450,9 +450,13 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 	if !validHeadSHA(sha) {
 		return errors.New("cistore: invalid head SHA")
 	}
-	incomingAt, err := time.Parse(time.RFC3339, updatedAt)
-	if err != nil {
-		return fmt.Errorf("cistore: invalid head updated_at: %w", err)
+	var incomingAt time.Time
+	if updatedAt != "" {
+		var err error
+		incomingAt, err = time.Parse(time.RFC3339, updatedAt)
+		if err != nil {
+			return fmt.Errorf("cistore: invalid head updated_at: %w", err)
+		}
 	}
 	key := headKey(owner, repo, number)
 	deadline := time.Now().Add(recordBudget)
@@ -471,7 +475,7 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 		default:
 			return getErr
 		}
-		if current.UpdatedAt != "" {
+		if current.UpdatedAt != "" && updatedAt != "" {
 			storedAt, err := time.Parse(time.RFC3339, current.UpdatedAt)
 			if err == nil && !incomingAt.After(storedAt) {
 				return nil
