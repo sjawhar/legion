@@ -46,16 +46,79 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
-/** Records a same-head ordering fence; a null or undefined id carries no ordering information. */
+/** The same-head ordering pair a settlement carries: GitHub's highest check-run id, then the listener's sequence. */
+export interface SettlementOrder {
+  readonly latestCheckRunId: number;
+  /** null when the pair came from GitHub's rollup (resync), which has no listener sequence. */
+  readonly generation: number | null;
+}
+
+/**
+ * Whether `incoming` is older than the stored pair: a lower id, or an equal id
+ * with a lower generation. A null generation on either side carries no
+ * ordering information, so equal ids then compare as equal (the changed-set
+ * guard decides). With no stored id nothing is older.
+ */
+export function isOlderSettlement(pr: PrState, incoming: SettlementOrder): boolean {
+  if (pr.ciLatestRunId === null) return false;
+  if (incoming.latestCheckRunId !== pr.ciLatestRunId) {
+    return incoming.latestCheckRunId < pr.ciLatestRunId;
+  }
+  return (
+    pr.ciSettlementGeneration !== null &&
+    incoming.generation !== null &&
+    incoming.generation < pr.ciSettlementGeneration
+  );
+}
+
+/**
+ * Records a same-head ordering fence from an accepted pair. Never moves
+ * backwards: an older pair is ignored, and at an equal id a null generation
+ * (a resync refresh) never erases a known one.
+ */
 export function advanceCiFence(
   pr: PrState,
   latestCheckRunId: number | null | undefined,
   generation: number | null
 ): void {
   if (latestCheckRunId === null || latestCheckRunId === undefined) return;
-  if (pr.ciLatestRunId !== null && latestCheckRunId < pr.ciLatestRunId) return;
+  const incoming = { latestCheckRunId, generation };
+  if (isOlderSettlement(pr, incoming)) return;
+  if (pr.ciLatestRunId === latestCheckRunId) {
+    if (generation !== null) pr.ciSettlementGeneration = generation;
+    return;
+  }
   pr.ciLatestRunId = latestCheckRunId;
   pr.ciSettlementGeneration = generation;
+}
+
+/** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */
+export type CiSnapshot = Pick<
+  PrState,
+  "headSha" | "verdict" | "failing" | "ciSettledAt" | "ciLatestRunId" | "ciSettlementGeneration"
+>;
+
+export function ciSnapshot(pr: PrState): CiSnapshot {
+  return {
+    headSha: pr.headSha,
+    verdict: pr.verdict,
+    failing: [...pr.failing],
+    ciSettledAt: pr.ciSettledAt,
+    ciLatestRunId: pr.ciLatestRunId,
+    ciSettlementGeneration: pr.ciSettlementGeneration,
+  };
+}
+
+export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
+  return (
+    pr.headSha === snapshot.headSha &&
+    pr.verdict === snapshot.verdict &&
+    pr.ciSettledAt === snapshot.ciSettledAt &&
+    pr.ciLatestRunId === snapshot.ciLatestRunId &&
+    pr.ciSettlementGeneration === snapshot.ciSettlementGeneration &&
+    pr.failing.length === snapshot.failing.length &&
+    pr.failing.every((name, index) => name === snapshot.failing[index])
+  );
 }
 
 /** A rerun in flight, or a cancelled-only settlement: a green verdict is no longer certified. Red is preserved. */

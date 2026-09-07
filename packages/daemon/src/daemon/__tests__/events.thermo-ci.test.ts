@@ -864,6 +864,82 @@ it("preserves a live check-run fence through a same-head status-context resync",
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
 });
+it("a same-head resync refresh at an equal check-run id never erases the known generation", async () => {
+  const { state } = stateForCi();
+  const nats = new FakeNats();
+  const published: string[] = [];
+  const pump = startEventPump({
+    nats,
+    state,
+    config,
+    envoyPublish: async (_topic, payloadJson) => {
+      published.push(payloadJson);
+    },
+    saveState: async () => {},
+    onException: async () => {},
+    onLinger: async () => {},
+    onProbe: async () => {},
+    onApprovalStatus: async () => {},
+  });
+
+  // Live: (900, gen 1) green settles the head.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(settledChecks({ latest_check_run_id: 900, generation: 1, settled_at: 1 }))
+  );
+  await pump.drain();
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+
+  // Resync reads the same rollup (max id 900; GitHub has no generation).
+  await runResync({
+    state,
+    config,
+    fetchGitHubProjectItems: async () => ({ items: [] }),
+    fetchCiStatusBatch: async () => ({
+      "acme/widgets#7": {
+        ciStatus: "passing",
+        mergeableStatus: null,
+        headSha: "head-1",
+        isOpen: true,
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        latestCheckRunId: 900,
+      },
+    }),
+    applyEffects: async () => {},
+    now: () => 2,
+  });
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+
+  // A delayed older snapshot (900, gen 0) must still be stale.
+  nats.emit(
+    "notifications.github.acme.widgets.pr.7.checks",
+    envelope(
+      settledChecks({
+        latest_check_run_id: 900,
+        generation: 0,
+        settled_at: 3,
+        failed: { count: 1, checks: ["unit"] },
+        passed: { count: 0, checks: [] },
+      })
+    )
+  );
+  await pump.drain();
+
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    verdict: "green",
+    failing: [],
+    ciLatestRunId: 900,
+    ciSettlementGeneration: 1,
+  });
+  expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+  pump.stop();
+});
 it("drops a delayed lower check-run id and accepts a higher check-run id for the same head", async () => {
   const { state } = stateForCi();
   const nats = new FakeNats();

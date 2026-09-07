@@ -10,6 +10,7 @@ import type { HeldEvent, LegionState, TreeState } from "./legion-state";
 import {
   type Effect,
   type EnvelopeJson,
+  isOlderSettlement,
   type LegionEventPayload,
   reduceGithubEvent,
   settleCiVerdict,
@@ -378,13 +379,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       );
       return false;
     }
-    if (
-      pr.ciLatestRunId !== null &&
-      (input.latestCheckRunId < pr.ciLatestRunId ||
-        (input.latestCheckRunId === pr.ciLatestRunId &&
-          pr.ciSettlementGeneration !== null &&
-          input.generation < pr.ciSettlementGeneration))
-    ) {
+    if (isOlderSettlement(pr, input)) {
       console.debug(
         `[legion] ignored stale checks event ${envelope.event_id} subject=${subject} sha=${input.sha}`
       );
