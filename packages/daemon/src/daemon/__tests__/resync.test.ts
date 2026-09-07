@@ -416,6 +416,8 @@ describe("runResync", () => {
             ciStatus: "passing" as const,
             mergeableStatus: null,
             headSha: "head-1",
+            updatedAt: "2026-08-24T00:00:00.000Z",
+            latestCheckRunId: null,
             isOpen: true,
           },
         };
@@ -488,6 +490,8 @@ describe("runResync", () => {
           mergeableStatus: null,
           failingChecks: ["lint", "unit"],
           headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: null,
           isOpen: true,
         },
       }),
@@ -550,6 +554,7 @@ describe("runResync", () => {
             mergeableStatus: null,
             headSha: "head-2",
             updatedAt: "2026-08-24T00:00:00.000Z",
+            latestCheckRunId: null,
             isOpen: true,
           },
         };
@@ -704,6 +709,8 @@ describe("runResync", () => {
           ciStatus: "passing" as const,
           mergeableStatus: null,
           headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: null,
           isOpen: true,
         },
       }),
@@ -716,7 +723,7 @@ describe("runResync", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 4,
+      ciLatestRunId: null,
     });
     expect(dispatched).toEqual([
       [
@@ -752,6 +759,8 @@ describe("runResync", () => {
           mergeableStatus: null,
           failingChecks: ["lint", "unit"],
           headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: null,
           isOpen: true,
         },
       }),
@@ -764,7 +773,7 @@ describe("runResync", () => {
       verdict: "red",
       failing: ["lint", "unit"],
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 4,
+      ciLatestRunId: null,
     });
     expect(dispatched).toEqual([
       [
@@ -806,6 +815,8 @@ describe("runResync", () => {
             ciStatus: "passing" as const,
             mergeableStatus: null,
             headSha: "head-1",
+            updatedAt: "2026-08-24T00:00:00.000Z",
+            latestCheckRunId: null,
             isOpen: true,
           },
         };
@@ -819,12 +830,12 @@ describe("runResync", () => {
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      ciLatestRunId: 4,
+      ciLatestRunId: null,
     });
     expect(dispatched).toEqual([]);
   });
 
-  it("leaves a pending GitHub rollup untouched", async () => {
+  it("clears a stored green verdict when GitHub reports a pending rollup", async () => {
     const state = newLegionState("omp", 1);
     state.prs["sjawhar/legion#7"] = {
       key: issue,
@@ -849,6 +860,8 @@ describe("runResync", () => {
             ciStatus: "pending" as const,
             mergeableStatus: null,
             headSha: "head-1",
+            updatedAt: "2026-08-24T00:00:00.000Z",
+            latestCheckRunId: null,
             isOpen: true,
           },
         };
@@ -860,8 +873,49 @@ describe("runResync", () => {
 
     expect(fetches).toBe(1);
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
-      verdict: "green",
+      verdict: null,
       failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 4,
+    });
+    expect(dispatched).toEqual([]);
+  });
+
+  it("preserves a stored red verdict when GitHub reports a pending rollup", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "red",
+      failing: ["unit"],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 4,
+      fixAttempts: 0,
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "pending" as const,
+          mergeableStatus: null,
+          headSha: "head-1",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          latestCheckRunId: null,
+          isOpen: true,
+        },
+      }),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "red",
+      failing: ["unit"],
       ciSettledAt: 1_000,
       ciLatestRunId: 4,
     });
@@ -890,6 +944,8 @@ describe("runResync", () => {
           ciStatus: "passing" as const,
           mergeableStatus: null,
           headSha: "head-1",
+          updatedAt: null,
+          latestCheckRunId: null,
           isOpen: false,
         },
       }),

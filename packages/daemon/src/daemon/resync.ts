@@ -187,7 +187,13 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
     }
     const verdict =
       status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
-    if (verdict === null) continue;
+    if (verdict === null) {
+      if (status.ciStatus === "pending" && pr.verdict === "green") {
+        pr.verdict = null;
+        pr.failing = [];
+      }
+      continue;
+    }
     const effects = settleCiVerdict(
       deps.state,
       pr,

@@ -270,6 +270,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "passing",
         mergeableStatus: "mergeable",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -302,6 +304,8 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         failingChecks: [],
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -368,12 +372,14 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         failingChecks: ["lint", "legacy"],
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
   });
 
-  it("collects failing checks from every rollup contexts page", async () => {
+  it("collects every failing context page from the originally fetched head", async () => {
     const queries: string[][] = [];
     let calls = 0;
     const runner: CommandRunner = async (cmd: string[]) => {
@@ -386,6 +392,7 @@ describe("getCiStatusBatch", () => {
                 repo0: {
                   pr0: {
                     state: "OPEN",
+                    updatedAt: "2026-08-24T00:00:00.000Z",
                     mergeable: "MERGEABLE",
                     commits: {
                       nodes: [
@@ -396,7 +403,85 @@ describe("getCiStatusBatch", () => {
                               state: "FAILURE",
                               contexts: {
                                 pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
-                                nodes: [{ name: "lint", conclusion: "FAILURE" }],
+                                nodes: [{ name: "lint", conclusion: "FAILURE", databaseId: 800 }],
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            }
+          : {
+              data: {
+                repository: {
+                  object: {
+                    statusCheckRollup: {
+                      contexts: {
+                        pageInfo: { hasNextPage: false, endCursor: null },
+                        nodes: [{ name: "unit", conclusion: "ERROR", databaseId: 900 }],
+                      },
+                    },
+                  },
+                },
+              },
+            };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+
+    expect(queries).toHaveLength(2);
+    expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain(
+      "pageInfo { hasNextPage endCursor }"
+    );
+    expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain(
+      'object(oid: "head-1")'
+    );
+    expect(queries[1]).toContain("after=cursor-1");
+    expect(result).toEqual({
+      "ENG-21": {
+        ciStatus: "failing",
+        mergeableStatus: "mergeable",
+        failingChecks: ["lint", "unit"],
+        headSha: "head-1",
+        updatedAt: "2026-08-24T00:00:00.000Z",
+        latestCheckRunId: 900,
+        isOpen: true,
+      },
+    });
+  });
+
+  it("does not fetch later context pages for a passing rollup", async () => {
+    const queries: string[][] = [];
+    let calls = 0;
+    const runner: CommandRunner = async (cmd: string[]) => {
+      queries.push(cmd);
+      calls += 1;
+      const response =
+        calls === 1
+          ? {
+              data: {
+                repo0: {
+                  pr0: {
+                    state: "OPEN",
+                    updatedAt: "2026-08-24T00:00:00.000Z",
+                    mergeable: "MERGEABLE",
+                    commits: {
+                      nodes: [
+                        {
+                          commit: {
+                            oid: "head-1",
+                            statusCheckRollup: {
+                              state: "SUCCESS",
+                              contexts: {
+                                pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+                                nodes: [{ name: "unit", conclusion: "SUCCESS", databaseId: 900 }],
                               },
                             },
                           },
@@ -418,7 +503,7 @@ describe("getCiStatusBatch", () => {
                             statusCheckRollup: {
                               contexts: {
                                 pageInfo: { hasNextPage: false, endCursor: null },
-                                nodes: [{ name: "unit", conclusion: "ERROR" }],
+                                nodes: [],
                               },
                             },
                           },
@@ -437,20 +522,14 @@ describe("getCiStatusBatch", () => {
       runner
     );
 
-    expect(queries).toHaveLength(2);
-    expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain(
-      "pageInfo { hasNextPage endCursor }"
-    );
-    expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain(
-      "contexts(first: 100, after: $after)"
-    );
-    expect(queries[1]).toContain("after=cursor-1");
+    expect(queries).toHaveLength(1);
     expect(result).toEqual({
       "ENG-21": {
-        ciStatus: "failing",
+        ciStatus: "passing",
         mergeableStatus: "mergeable",
-        failingChecks: ["lint", "unit"],
         headSha: "head-1",
+        updatedAt: "2026-08-24T00:00:00.000Z",
+        latestCheckRunId: 900,
         isOpen: true,
       },
     });
@@ -483,6 +562,8 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         failingChecks: [],
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -514,6 +595,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "pending",
         mergeableStatus: "mergeable",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -545,6 +628,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "pending",
         mergeableStatus: "mergeable",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -576,6 +661,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: null,
         mergeableStatus: "mergeable",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -605,6 +692,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: null,
         mergeableStatus: null,
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -625,6 +714,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: null,
         mergeableStatus: null,
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -672,6 +763,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "passing",
         mergeableStatus: "mergeable",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
       "ENG-22": {
@@ -679,6 +772,8 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "conflicting",
         failingChecks: [],
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -715,6 +810,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: "passing",
         mergeableStatus: "mergeable",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
@@ -774,6 +871,8 @@ describe("getCiStatusBatch", () => {
         ciStatus: null,
         mergeableStatus: "unknown",
         headSha: null,
+        updatedAt: null,
+        latestCheckRunId: null,
         isOpen: false,
       },
     });
