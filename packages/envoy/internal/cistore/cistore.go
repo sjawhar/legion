@@ -656,7 +656,7 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 	state.Claim = &SettlementClaim{
 		Hash:       expectedHash,
 		Generation: expectedGeneration,
-		ClaimedAt:  now,
+		ClaimedAt:  time.Now().UnixMilli(),
 	}
 	buf, err := json.Marshal(state)
 	if err != nil {

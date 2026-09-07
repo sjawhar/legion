@@ -613,6 +613,59 @@ func TestClaimSettlementRechecksDurableDebounce(t *testing.T) {
 	}
 }
 
+func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner = "example-org"
+		repo  = "example-repo"
+		pr    = "42"
+		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	debounce := time.Second
+	if err := s.Record(owner, repo, pr, sha, "build", "801", "https://example.test/801", "completed", "success", ""); err != nil {
+		t.Fatalf("record terminal check: %v", err)
+	}
+	key := Key(owner, repo, pr, sha)
+	entry, err := s.kv.Get(key)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	var state State
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	state.LastEventAt = 0
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("encode old state: %v", err)
+	}
+	if _, err := s.kv.Update(key, raw, entry.Revision()); err != nil {
+		t.Fatalf("write old state: %v", err)
+	}
+
+	tickNow := time.Now().Add(-3 * debounce).UnixMilli()
+	claimedState, claimed, err := s.ClaimSettlement(key, state.Hash(), state.Generation, tickNow, debounce)
+	if err != nil {
+		t.Fatalf("claim settlement: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimSettlement did not claim an already quiet state")
+	}
+	staleBefore := time.Now().Add(-2 * debounce).UnixMilli()
+	if claimedState.Claim == nil || claimedState.Claim.ClaimedAt < staleBefore {
+		t.Fatalf("claim timestamp = %+v, want a fresh non-reclaimable claim", claimedState.Claim)
+	}
+	reclaimed, err := s.ReclaimSettlement(key, claimedState.Generation, staleBefore)
+	if err != nil {
+		t.Fatalf("reclaim fresh claim: %v", err)
+	}
+	if reclaimed {
+		t.Fatal("ReclaimSettlement reclaimed a claim stamped at CAS time")
+	}
+}
+
 func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
