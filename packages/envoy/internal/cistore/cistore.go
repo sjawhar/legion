@@ -610,6 +610,45 @@ func isCASConflict(err error) bool {
 	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
 }
 
+func (s *Store) casState(key string, apply func(st *State) (ok bool, err error)) (State, bool, error) {
+	deadline := time.Now().Add(recordBudget)
+	for attempt := 0; ; attempt++ {
+		entry, err := s.kv.Get(key)
+		if err != nil {
+			return State{}, false, err
+		}
+		var state State
+		if err := json.Unmarshal(entry.Value(), &state); err != nil {
+			return State{}, false, err
+		}
+		ok, err := apply(&state)
+		if err != nil {
+			return State{}, false, err
+		}
+		if !ok {
+			return state, false, nil
+		}
+		buf, err := json.Marshal(state)
+		if err != nil {
+			return State{}, false, err
+		}
+		revision, err := s.kv.Update(key, buf, entry.Revision())
+		if err == nil {
+			s.mu.Lock()
+			s.cacheStateLocked(key, state, revision)
+			s.mu.Unlock()
+			return state, true, nil
+		}
+		if !isCASConflict(err) {
+			return State{}, false, err
+		}
+		if time.Now().After(deadline) {
+			return State{}, false, errors.New("cistore: state transition exceeded CAS budget")
+		}
+		time.Sleep(casBackoff(attempt))
+	}
+}
+
 // List returns a snapshot copy of the current cached states.
 func (s *Store) List() []State {
 	s.mu.RLock()
@@ -629,48 +668,29 @@ func (s *Store) List() []State {
 // generation after re-reading the durable state and head record. It applies
 // the debounce window to the durable LastEventAt value, not the cache snapshot.
 func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64, now int64, debounce time.Duration) (State, bool, error) {
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		return State{}, false, err
-	}
-	var state State
-	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		return State{}, false, err
-	}
-	if state.SettledEmitted ||
-		state.Claim != nil ||
-		state.Generation != expectedGeneration ||
-		state.Hash() != expectedHash ||
-		!settlementReady(state) ||
-		state.LastEventAt+debounce.Milliseconds() > now {
-		return State{}, false, nil
-	}
-	headMatches, err := s.durableHeadMatches(state)
-	if err != nil {
-		return State{}, false, err
-	}
-	if !headMatches {
-		return State{}, false, nil
-	}
-	state.Claim = &SettlementClaim{
-		Hash:       expectedHash,
-		Generation: expectedGeneration,
-		ClaimedAt:  time.Now().UnixMilli(),
-	}
-	buf, err := json.Marshal(state)
-	if err != nil {
-		return State{}, false, err
-	}
-	revision, err := s.kv.Update(key, buf, entry.Revision())
-	if err != nil {
-		if isCASConflict(err) {
-			return State{}, false, nil
+	state, claimed, err := s.casState(key, func(state *State) (bool, error) {
+		if state.SettledEmitted ||
+			state.Claim != nil ||
+			state.Generation != expectedGeneration ||
+			state.Hash() != expectedHash ||
+			!settlementReady(*state) ||
+			state.LastEventAt+debounce.Milliseconds() > now {
+			return false, nil
 		}
+		headMatches, err := s.durableHeadMatches(*state)
+		if err != nil || !headMatches {
+			return headMatches, err
+		}
+		state.Claim = &SettlementClaim{
+			Hash:       expectedHash,
+			Generation: expectedGeneration,
+			ClaimedAt:  time.Now().UnixMilli(),
+		}
+		return true, nil
+	})
+	if err != nil || !claimed {
 		return State{}, false, err
 	}
-	s.mu.Lock()
-	s.cacheStateLocked(key, state, revision)
-	s.mu.Unlock()
 	return state, true, nil
 }
 
@@ -695,103 +715,46 @@ func (s *Store) ClaimStillHeld(key string, generation uint64) (bool, error) {
 // ReclaimSettlement releases a claim from a replica that died before publish.
 // The caller determines the stale threshold from its configured debounce.
 func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int64) (bool, error) {
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		return false, err
-	}
-	var state State
-	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		return false, err
-	}
-	if state.Claim == nil ||
-		state.Claim.Generation != generation ||
-		(state.Generation == generation && state.Claim.ClaimedAt >= staleBefore) {
-		return false, nil
-	}
-	state.Claim = nil
-	buf, err := json.Marshal(state)
-	if err != nil {
-		return false, err
-	}
-	revision, err := s.kv.Update(key, buf, entry.Revision())
-	if err != nil {
-		if isCASConflict(err) {
+	_, reclaimed, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Claim == nil ||
+			state.Claim.Generation != generation ||
+			(state.Generation == generation && state.Claim.ClaimedAt >= staleBefore) {
 			return false, nil
 		}
-		return false, err
-	}
-	s.mu.Lock()
-	s.cacheStateLocked(key, state, revision)
-	s.mu.Unlock()
-	return true, nil
+		state.Claim = nil
+		return true, nil
+	})
+	return reclaimed, err
 }
 
 // ReleaseClaim clears this generation's claim after a failed publication.
 func (s *Store) ReleaseClaim(key string, generation uint64) (bool, error) {
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		return false, err
-	}
-	var state State
-	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		return false, err
-	}
-	if state.Claim == nil || state.Claim.Generation != generation {
-		return false, nil
-	}
-	state.Claim = nil
-	buf, err := json.Marshal(state)
-	if err != nil {
-		return false, err
-	}
-	revision, err := s.kv.Update(key, buf, entry.Revision())
-	if err != nil {
-		if isCASConflict(err) {
+	_, released, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Claim == nil || state.Claim.Generation != generation {
 			return false, nil
 		}
-		return false, err
-	}
-	s.mu.Lock()
-	s.cacheStateLocked(key, state, revision)
-	s.mu.Unlock()
-	return true, nil
+		state.Claim = nil
+		return true, nil
+	})
+	return released, err
 }
 
 // MarkSettled marks a successfully published claim as emitted. A re-arm moves
 // Generation, causing this CAS to refuse the obsolete publisher.
 func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
-	entry, err := s.kv.Get(key)
-	if err != nil {
-		return false, err
-	}
-	var state State
-	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		return false, err
-	}
-	if state.SettledEmitted ||
-		state.Generation != generation ||
-		state.Claim == nil ||
-		state.Claim.Generation != generation ||
-		state.Claim.Hash != state.Hash() {
-		return false, nil
-	}
-	state.SettledEmitted = true
-	state.Claim = nil
-	buf, err := json.Marshal(state)
-	if err != nil {
-		return false, err
-	}
-	revision, err := s.kv.Update(key, buf, entry.Revision())
-	if err != nil {
-		if isCASConflict(err) {
+	_, marked, err := s.casState(key, func(state *State) (bool, error) {
+		if state.SettledEmitted ||
+			state.Generation != generation ||
+			state.Claim == nil ||
+			state.Claim.Generation != generation ||
+			state.Claim.Hash != state.Hash() {
 			return false, nil
 		}
-		return false, err
-	}
-	s.mu.Lock()
-	s.cacheStateLocked(key, state, revision)
-	s.mu.Unlock()
-	return true, nil
+		state.SettledEmitted = true
+		state.Claim = nil
+		return true, nil
+	})
+	return marked, err
 }
 
 func (s *Store) durableHeadMatches(state State) (bool, error) {

@@ -693,7 +693,7 @@ func githubPayload(event string, body map[string]any) string {
 			"after":        stringValue(body["after"]),
 			"before":       stringValue(body["before"]),
 			"pusher":       nestedString(body, "pusher", "name"),
-			"head_subject": firstLine(nestedString(body, "head_commit", "message")),
+			"head_subject": firstNonEmptyLine(nestedString(body, "head_commit", "message")),
 			"commit_count": strconv.Itoa(len(sliceValue(body["commits"]))),
 			"compare_url":  stringValue(body["compare"]),
 		}
@@ -1010,32 +1010,29 @@ func stringValue(value any) string {
 }
 
 func first(s string, maxRunes int) string {
-	return truncateWithEllipsis(firstLine(s), maxRunes)
+	return truncateWithEllipsis(firstNonEmptyLine(s), maxRunes)
 }
 
-func firstLine(s string) string {
-	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
-		s = s[:idx]
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimLeft(line, " \t\r")
+		if strings.TrimSpace(line) != "" {
+			return line
+		}
 	}
-	return strings.TrimSuffix(s, "\r")
+	return ""
 }
 
 // OneLineSummary returns the first non-empty message line, capped at 160 runes
 // including its ellipsis. It is the common human-facing summary contract for
 // normalized webhooks, listener API messages, and settled CI notifications.
 func OneLineSummary(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimLeft(line, " \t\r")
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		runes := []rune(line)
-		if len(runes) <= 160 {
-			return line
-		}
-		return string(runes[:159]) + "…"
+	line := firstNonEmptyLine(s)
+	runes := []rune(line)
+	if len(runes) <= 160 {
+		return line
 	}
-	return ""
+	return string(runes[:159]) + "…"
 }
 
 func truncateWithEllipsis(s string, maxRunes int) string {

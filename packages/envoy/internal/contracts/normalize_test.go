@@ -2288,3 +2288,8 @@ func TestOneLineSummarySkipsLeadingBlankLinesAndCapsRunes(t *testing.T) {
 		t.Fatalf("rune-safe summary = %q", got)
 	}
 }
+func TestFirstSkipsLeadingBlankLines(t *testing.T) {
+	if got := first("\n \r\n\tfirst useful line\nsecond line", 160); got != "first useful line" {
+		t.Fatalf("first = %q, want first useful line", got)
+	}
+}
