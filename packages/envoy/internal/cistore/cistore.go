@@ -504,7 +504,7 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 			return nil
 		}
 		if rev != 0 && st.Hash() != beforeHash && st.Generation == generation {
-			st.Generation++
+			bumpGeneration(&st)
 		}
 		buf, err := json.Marshal(st)
 		if err != nil {
@@ -534,8 +534,16 @@ func rearm(st *State) {
 	if !st.SettledEmitted && (st.Claim == nil || st.Claim.Generation != st.Generation) {
 		return
 	}
-	st.Generation++
+	bumpGeneration(st)
 	st.SettledEmitted = false
+}
+
+// bumpGeneration advances the delivery identity after a mutation invalidates a
+// settlement snapshot. ClaimSettlement and MarkSettled deliberately do not
+// call it: claiming reserves the current snapshot, while marking preserves the
+// identity of the snapshot that was published.
+func bumpGeneration(st *State) {
+	st.Generation++
 }
 
 func observationMayReplace(incomingAt, storedAt, incomingStatus, storedStatus string) bool {
@@ -721,8 +729,9 @@ func (s *Store) List() []State {
 }
 
 // ClaimSettlement atomically acquires the right to publish a ready state
-// generation after re-reading the durable state and head record. It applies
-// the debounce window to the durable LastEventAt value, not the cache snapshot.
+// generation without changing that generation, after re-reading the durable
+// state and head record. It applies the debounce window to the durable
+// LastEventAt value, not the cache snapshot.
 func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64, now int64, debounce time.Duration) (State, bool, error) {
 	state, claimed, err := s.casState(key, func(state *State) (bool, error) {
 		if state.SettledEmitted ||
@@ -783,7 +792,7 @@ func (s *Store) ReclaimSettlement(key string, generation uint64, staleBefore int
 			return false, nil
 		}
 		state.Claim = nil
-		state.Generation++
+		bumpGeneration(state)
 		return true, nil
 	})
 	return reclaimed, err
@@ -796,15 +805,15 @@ func (s *Store) ReleaseClaim(key string, generation uint64) (bool, error) {
 			return false, nil
 		}
 		state.Claim = nil
-		state.Generation++
+		bumpGeneration(state)
 		return true, nil
 	})
 	return released, err
 }
 
-// MarkSettled records a successfully published claim. A re-arm that happened
-// after publication keeps its newer snapshot unsettled, but it must not erase
-// the fact that the obsolete snapshot was emitted.
+// MarkSettled records a successfully published claim without changing its
+// generation. A re-arm that happened after publication keeps its newer snapshot
+// unsettled, but it must not erase the fact that the obsolete snapshot emitted.
 func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
 	_, marked, err := s.casState(key, func(state *State) (bool, error) {
 		if state.Claim == nil || state.Claim.Generation != generation {
