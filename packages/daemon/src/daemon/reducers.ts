@@ -116,9 +116,9 @@ export interface CiFence {
 }
 
 /**
- * What a rollup read from GitHub may do to the stored fence: replace it (a
- * higher id; or an equal id, not older by completion, when the stored fence is
- * also GitHub's); take the tie at an equal id over a live fence (the listener
+ * What a rollup read from GitHub may do to the stored fence: replace it (no
+ * stored check-run id; a higher id; or an equal id, not older by completion,
+ * when the stored fence is also GitHub's); take the tie at an equal id over a live fence (the listener
  * identity stays for duplicate detection; GitHub's completion becomes the
  * watermark and GitHub holds ties at it); apply its verdict unfenced (neither
  * side has a check run to order by); or nothing — the rollup is an older view
