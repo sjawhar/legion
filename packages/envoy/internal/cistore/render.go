@@ -60,7 +60,7 @@ type Summary struct {
 	Repo                 string      `json:"repo"`
 	Number               string      `json:"number"`
 	SHA                  string      `json:"sha"`
-	Generation           int         `json:"generation"`
+	Generation           uint64      `json:"generation"`
 	SettledAt            int64       `json:"settled_at,omitempty"`
 	SupersededSettlement string      `json:"superseded_settlement,omitempty"`
 	Failed               StatusGroup `json:"failed"`
@@ -99,6 +99,7 @@ func renderSummary(s State) Summary {
 		Repo:          s.Owner + "/" + s.Repo,
 		Number:        s.Number,
 		SHA:           s.SHA,
+		Generation:    s.Generation,
 		Failed:        failed,
 		Running:       group(groups[catRunning]),
 		Passed:        group(groups[catPassed]),

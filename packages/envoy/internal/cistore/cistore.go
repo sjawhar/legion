@@ -171,6 +171,7 @@ func (s State) Hash() string {
 
 type Store struct {
 	kv             nats.KeyValue
+	now            func() time.Time
 	mu             sync.RWMutex
 	cache          map[string]State
 	heads          map[string]string
@@ -236,6 +237,7 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	}
 	s := &Store{
 		kv:             kv,
+		now:            time.Now,
 		cache:          map[string]State{},
 		heads:          map[string]string{},
 		cacheRevisions: map[string]uint64{},
@@ -436,7 +438,7 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 			}
 			rev = entry.Revision()
 		case errors.Is(getErr, nats.ErrKeyNotFound):
-			st = State{Owner: owner, Repo: repo, Number: number, SHA: sha}
+			st = State{Owner: owner, Repo: repo, Number: number, SHA: sha, Generation: uint64(s.now().UnixMilli())}
 		default:
 			return getErr
 		}
@@ -705,6 +707,10 @@ func (s *Store) ClaimStillHeld(key string, generation uint64) (bool, error) {
 	}
 	var state State
 	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		return false, err
+	}
+	headMatches, err := s.durableHeadMatches(state)
+	if err != nil || !headMatches {
 		return false, err
 	}
 	return !state.SettledEmitted &&

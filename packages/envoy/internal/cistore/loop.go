@@ -77,7 +77,6 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			continue
 		}
 		sum := renderSummary(state)
-		sum.Generation = int(state.Generation)
 		issuedAt := contracts.NowMillis()
 		sum.SettledAt = issuedAt
 		payload, err := json.Marshal(sum)
@@ -116,6 +115,14 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			continue
 		}
 		if !held {
+			headMatches, headErr := store.durableHeadMatches(state)
+			if headErr != nil {
+				logger.Warn("checks head verification failed", slog.String("error", headErr.Error()), slog.String("sha", state.SHA))
+			} else if !headMatches {
+				if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
+					logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
+				}
+			}
 			continue
 		}
 		if err := pub.Publish(env); err != nil {

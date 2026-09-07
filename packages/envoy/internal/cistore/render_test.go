@@ -3,6 +3,7 @@ package cistore
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -58,14 +59,24 @@ func TestRenderSummaryJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatalf("decode rendered summary: %v", err)
 	}
-	if got := string(payload["generation"]); got != "0" {
-		t.Fatalf("generation = %s, want 0", got)
+	if got := string(payload["generation"]); got != strconv.FormatUint(s.Generation, 10) {
+		t.Fatalf("generation = %s, want state generation %d", got, s.Generation)
 	}
 	assertGroup(t, "failed", sum.Failed, []string{"infra-tests"})
 	assertGroup(t, "running", sum.Running, []string{"build-image", "snapshots"})
 	assertGroup(t, "passed", sum.Passed, []string{"classify", "review"})
 	assertGroup(t, "queued", sum.Queued, []string{"task-tests"})
 	assertGroup(t, "skipped", sum.Skipped, []string{"docs", "lint"})
+}
+
+func TestRenderSummaryCarriesStateGeneration(t *testing.T) {
+	_, sum := renderOrFail(t, State{
+		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: "abcdef", Generation: 1725753600000,
+		Checks: mkChecks(map[string][2]string{"build": {"completed", "success"}}),
+	})
+	if got := strconv.FormatUint(uint64(sum.Generation), 10); got != "1725753600000" {
+		t.Fatalf("generation = %s, want state generation 1725753600000", got)
+	}
 }
 
 func TestRenderSummarySkippedKeepsAllNames(t *testing.T) {
