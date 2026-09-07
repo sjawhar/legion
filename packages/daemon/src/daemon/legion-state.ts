@@ -50,6 +50,12 @@ export interface TreeState {
   recoveryEvents?: RecoveryEvent[];
 }
 
+/** One check and its latest GitHub check-run id: the unit of a settlement's attempt set. */
+export interface CheckRunRef {
+  name: string;
+  id: number;
+}
+
 export interface PrState {
   key: IssueKey;
   repo: `${string}/${string}`;
@@ -60,8 +66,8 @@ export interface PrState {
   verdict: "green" | "red" | null;
   failing: string[];
   ciSettledAt: number | null;
-  /** The settlement's attempt set: latest check-run id per check name. Null until a settlement or a rollup with check runs is accepted. */
-  ciCheckRuns: Record<string, number> | null;
+  /** The settlement's attempt set: the latest check-run id per check name, sorted by name. Null until a settlement or a rollup with check runs is accepted. */
+  ciCheckRuns: CheckRunRef[] | null;
   ciSettlementGeneration: number | null;
   ciSnapshot: string | null;
   /** True while a terminal GitHub read holds the tie at the stored attempt set; cleared only when the set advances. */
@@ -182,6 +188,8 @@ const TreeStateSchema = z
     recoveryEvents: z.array(RecoveryEventSchema).optional(),
   })
   .strict();
+const CheckRunRefSchema = z.object({ name: z.string().min(1), id: z.number().int().positive() });
+
 const PrStateSchema = z
   .object({
     key: IssueKeySchema,
@@ -192,7 +200,7 @@ const PrStateSchema = z
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     ciSettledAt: z.number().nullable(),
-    ciCheckRuns: z.record(z.string(), z.number().int().positive()).nullable(),
+    ciCheckRuns: z.array(CheckRunRefSchema).nullable(),
     ciSettlementGeneration: z.number().int().nonnegative().nullable(),
     ciSnapshot: z.string().nullable(),
     ciReconciled: z.boolean(),

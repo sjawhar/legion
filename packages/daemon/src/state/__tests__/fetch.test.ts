@@ -271,7 +271,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -307,7 +307,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -377,7 +377,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -473,7 +473,10 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
-        checkRuns: { lint: 800, unit: 900 },
+        checkRuns: [
+          { name: "lint", id: 800 },
+          { name: "unit", id: 900 },
+        ],
         isOpen: true,
       },
     });
@@ -546,7 +549,10 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: "head-1",
         updatedAt: "2026-08-24T00:00:00.000Z",
-        checkRuns: { e2e: 950, unit: 900 },
+        checkRuns: [
+          { name: "e2e", id: 950 },
+          { name: "unit", id: 900 },
+        ],
         isOpen: true,
       },
     });
@@ -582,7 +588,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -615,7 +621,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -648,7 +654,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -681,7 +687,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -712,7 +718,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: null,
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -734,7 +740,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: null,
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -783,7 +789,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
       "ENG-22": {
@@ -794,7 +800,7 @@ describe("getCiStatusBatch", () => {
         cancelledCount: 0,
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -832,7 +838,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "mergeable",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });
@@ -915,7 +921,7 @@ describe("getCiStatusBatch", () => {
         mergeableStatus: "unknown",
         headSha: null,
         updatedAt: null,
-        checkRuns: {},
+        checkRuns: [],
         isOpen: false,
       },
     });

@@ -148,6 +148,23 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(state);
   });
 
+  it("persists and reloads an attempt set whose check names collide with Object.prototype", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-proto-"));
+    const file = path.join(tempDir, "state.json");
+    const state = stateWithTree();
+    const pr = state.prs[prKey];
+    if (!pr) throw new Error("fixture PR missing");
+    pr.ciCheckRuns = [
+      { name: "__proto__", id: 100 },
+      { name: "constructor", id: 200 },
+      { name: "toString", id: 300 },
+    ];
+
+    await saveState(file, state);
+
+    expect((await loadState(file, initialState)).prs[prKey]?.ciCheckRuns).toEqual(pr.ciCheckRuns);
+  });
+
   it("migrates v11 CI state by defaulting all ordering fence fields to null", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v11-"));
     const file = path.join(tempDir, "state.json");

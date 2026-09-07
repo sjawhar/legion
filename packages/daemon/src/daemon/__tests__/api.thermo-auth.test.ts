@@ -182,7 +182,7 @@ describe("thermonuclear API regressions", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1,
-      ciCheckRuns: { build: 1 },
+      ciCheckRuns: [{ name: "build", id: 1 }],
       ciSettlementGeneration: null,
       ciSnapshot: null,
       ciReconciled: false,

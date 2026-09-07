@@ -391,7 +391,7 @@ it("does not re-emit when a red head re-settles with the same failing set", asyn
     ...state.prs["acme/widgets#7"],
     verdict: "red",
     failing: ["unit"],
-    ciCheckRuns: { build: 1 },
+    ciCheckRuns: [{ name: "build", id: 1 }],
     ciSettledAt: 1,
   };
   const nats = new FakeNats();
@@ -421,7 +421,10 @@ it("does not re-emit when a red head re-settles with the same failing set", asyn
     )
   );
   await pump.drain();
-  expect(state.prs["acme/widgets#7"]).toMatchObject({ ciCheckRuns: { build: 1 }, ciSettledAt: 2 });
+  expect(state.prs["acme/widgets#7"]).toMatchObject({
+    ciCheckRuns: [{ name: "build", id: 1 }],
+    ciSettledAt: 2,
+  });
 
   expect(published).toEqual([]);
   pump.stop();
@@ -455,7 +458,7 @@ it("drops a lower-generation same-check-run settlement after a newer delivery", 
     verdict: "red",
     failing: ["unit"],
     ciSettledAt: 2,
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
   expect(published).toEqual([
@@ -493,7 +496,7 @@ it("emits an in-order higher-generation settlement for the same check run", asyn
     verdict: "red",
     failing: ["unit"],
     ciSettledAt: 2,
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
   expect(published).toEqual([
@@ -522,7 +525,7 @@ it("keeps an equal check-run and generation settlement with an identical set qui
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["unit"],
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
   expect(published).toEqual([
@@ -554,7 +557,7 @@ it("does not revive an uncertified verdict when an exact live settlement is repl
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: { build: 900 },
+        checkRuns: [{ name: "build", id: 900 }],
       },
     }),
     applyEffects: async () => {},
@@ -588,7 +591,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
           headSha: "head-1",
           isOpen: true,
           updatedAt: "2026-09-07T00:00:00.000Z",
-          checkRuns: { build: 900 },
+          checkRuns: [{ name: "build", id: 900 }],
         },
       }),
       applyEffects: async () => {},
@@ -596,7 +599,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
     });
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
-      ciCheckRuns: { build: 900 },
+      ciCheckRuns: [{ name: "build", id: 900 }],
       ciSettlementGeneration: null,
       ciReconciled: true,
     });
@@ -632,7 +635,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
-      ciCheckRuns: { build: 900 },
+      ciCheckRuns: [{ name: "build", id: 900 }],
       ciSettlementGeneration: 5,
       ciSnapshot: "red-hash",
       ciReconciled: true,
@@ -653,7 +656,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
-      ciCheckRuns: { build: 901 },
+      ciCheckRuns: [{ name: "build", id: 901 }],
       ciSettlementGeneration: 6,
       ciReconciled: false,
     });
@@ -760,7 +763,7 @@ it("applies a same-set live settlement after a pending resync fence without a ge
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: { build: 900 },
+        checkRuns: [{ name: "build", id: 900 }],
       },
     }),
     applyEffects: async () => {},
@@ -768,7 +771,7 @@ it("applies a same-set live settlement after a pending resync fence without a ge
   });
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: null,
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: null,
   });
 
@@ -790,7 +793,7 @@ it("applies a same-set live settlement after a pending resync fence without a ge
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["unit"],
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 0,
   });
   expect(published).toEqual([
@@ -803,7 +806,7 @@ it("accepts a newer attempt set after the listener generation restarts", async (
   const { state } = stateForCi();
   state.prs["acme/widgets#7"] = {
     ...state.prs["acme/widgets#7"],
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 5,
   };
   const { nats, published, pump } = startCiPump(state);
@@ -825,7 +828,7 @@ it("accepts a newer attempt set after the listener generation restarts", async (
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["unit"],
-    ciCheckRuns: { build: 901 },
+    ciCheckRuns: [{ name: "build", id: 901 }],
     ciSettlementGeneration: 0,
   });
   expect(published).toEqual([
@@ -907,7 +910,7 @@ it("does not apply a fetched green rollup after a live red settlement advances C
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: { build: 850 },
+        checkRuns: [{ name: "build", id: 850 }],
       },
     });
     await resync;
@@ -916,7 +919,7 @@ it("does not apply a fetched green rollup after a live red settlement advances C
       verdict: "red",
       failing: ["unit"],
       ciSettledAt,
-      ciCheckRuns: { build: 900 },
+      ciCheckRuns: [{ name: "build", id: 900 }],
       ciSettlementGeneration: 1,
     });
     expect(resyncEffects).toEqual([]);
@@ -965,7 +968,7 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
       headSha: "head-1",
       isOpen: true,
       updatedAt: "2026-09-07T00:00:00.000Z",
-      checkRuns: { build: 850 },
+      checkRuns: [{ name: "build", id: 850 }],
     },
   });
   await resync;
@@ -974,7 +977,7 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
     verdict: "green",
     failing: [],
     ciSettledAt,
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
   expect(resyncEffects).toEqual([]);
@@ -1020,7 +1023,7 @@ it("drops an older attempt set for the same head", async () => {
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     failing: [],
-    ciCheckRuns: { build: 2 },
+    ciCheckRuns: [{ name: "build", id: 2 }],
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
@@ -1060,7 +1063,7 @@ it("preserves a live check-run fence through a same-head status-context resync",
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: {},
+        checkRuns: [],
       },
     }),
     applyEffects: async () => {},
@@ -1083,7 +1086,7 @@ it("preserves a live check-run fence through a same-head status-context resync",
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     failing: [],
-    ciCheckRuns: { build: 1000 },
+    ciCheckRuns: [{ name: "build", id: 1000 }],
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
   pump.stop();
@@ -1103,7 +1106,9 @@ function rollup(
       headSha: "head-1",
       isOpen: true,
       updatedAt: "2026-09-07T00:00:00.000Z",
-      checkRuns,
+      checkRuns: Object.entries(checkRuns)
+        .sort(([left], [right]) => (left < right ? -1 : 1))
+        .map(([name, id]) => ({ name, id })),
     },
   };
 }
@@ -1139,7 +1144,7 @@ it("a pending GitHub read holds no tie: the terminal live settlement at the same
     await resyncWith(state, rollup("pending", { build: 900 }));
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: null,
-      ciCheckRuns: { build: 900 },
+      ciCheckRuns: [{ name: "build", id: 900 }],
       ciSettlementGeneration: null,
       ciReconciled: false,
     });
@@ -1154,7 +1159,7 @@ it("a pending GitHub read holds no tie: the terminal live settlement at the same
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
-      ciCheckRuns: { build: 900 },
+      ciCheckRuns: [{ name: "build", id: 900 }],
       ciSettlementGeneration: 3,
       ciReconciled: false,
     });
@@ -1202,7 +1207,10 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   await resyncWith(state, rollup("failing", { build: 200, lint: 900 }, ["build"]), applied);
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
-    ciCheckRuns: { build: 200, lint: 900 },
+    ciCheckRuns: [
+      { name: "build", id: 200 },
+      { name: "lint", id: 900 },
+    ],
     ciSettlementGeneration: null,
     ciReconciled: true,
   });
@@ -1214,19 +1222,28 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   await resyncWith(state, rollup("passing", { build: 100, lint: 900 }), applied);
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
-    ciCheckRuns: { build: 200, lint: 900 },
+    ciCheckRuns: [
+      { name: "build", id: 200 },
+      { name: "lint", id: 900 },
+    ],
   });
   // A view with no check runs at all where some are fenced: ignored.
   await resyncWith(state, rollup("passing", {}), applied);
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
-    ciCheckRuns: { build: 200, lint: 900 },
+    ciCheckRuns: [
+      { name: "build", id: 200 },
+      { name: "lint", id: 900 },
+    ],
   });
   // A mixed view (build newer, lint older) cannot come from one consistent read: ignored.
   await resyncWith(state, rollup("passing", { build: 300, lint: 800 }), applied);
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
-    ciCheckRuns: { build: 200, lint: 900 },
+    ciCheckRuns: [
+      { name: "build", id: 200 },
+      { name: "lint", id: 900 },
+    ],
   });
   expect(publishedEmissions(applied)).toHaveLength(1);
 
@@ -1234,7 +1251,10 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   await resyncWith(state, rollup("passing", { build: 300, lint: 900 }), applied);
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
-    ciCheckRuns: { build: 300, lint: 900 },
+    ciCheckRuns: [
+      { name: "build", id: 300 },
+      { name: "lint", id: 900 },
+    ],
     ciReconciled: true,
   });
   expect(publishedEmissions(applied).at(-1)).toEqual({ type: "ci-green", sha: "head-1" });
@@ -1287,7 +1307,7 @@ it("a rollup whose highest check run is lower than the live fence is an older vi
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: { build: 900 },
+        checkRuns: [{ name: "build", id: 900 }],
       },
     }),
     applyEffects: async () => {},
@@ -1296,7 +1316,7 @@ it("a rollup whose highest check run is lower than the live fence is an older vi
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     failing: [],
-    ciCheckRuns: { build: 901 },
+    ciCheckRuns: [{ name: "build", id: 901 }],
     ciSettlementGeneration: 1,
     ciReconciled: false,
   });
@@ -1387,7 +1407,7 @@ it("GitHub's authority at an attempt set survives an agreeing live refresh and c
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
-      ciCheckRuns: { build: 901 },
+      ciCheckRuns: [{ name: "build", id: 901 }],
       ciSettlementGeneration: 5,
       ciReconciled: false,
     });
@@ -1460,7 +1480,7 @@ for (const order of orders) {
       expect(state.prs["acme/widgets#7"]).toMatchObject({
         verdict: "red",
         failing: ["build"],
-        ciCheckRuns: { build: 900 },
+        ciCheckRuns: [{ name: "build", id: 900 }],
         ciReconciled: true,
       });
     } finally {
@@ -1526,11 +1546,11 @@ it("check names that collide with Object.prototype are ordinary attempt-set memb
       envelope(settledChecks({ check_runs: first, generation: 1, settled_at: 1 }))
     );
     await pump.drain();
-    const storedSet = () => Object.entries(state.prs["acme/widgets#7"]?.ciCheckRuns ?? {}).sort();
+    const storedSet = () => state.prs["acme/widgets#7"]?.ciCheckRuns;
     expect(storedSet()).toEqual([
-      ["__proto__", 100],
-      ["constructor", 200],
-      ["toString", 300],
+      { name: "__proto__", id: 100 },
+      { name: "constructor", id: 200 },
+      { name: "toString", id: 300 },
     ]);
     expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
 
@@ -1564,9 +1584,9 @@ it("check names that collide with Object.prototype are ordinary attempt-set memb
       ciReconciled: false,
     });
     expect(storedSet()).toEqual([
-      ["__proto__", 100],
-      ["constructor", 201],
-      ["toString", 300],
+      { name: "__proto__", id: 100 },
+      { name: "constructor", id: 201 },
+      { name: "toString", id: 300 },
     ]);
   } finally {
     pump.stop();
@@ -1600,7 +1620,10 @@ it("a superseding attempt with an earlier completion is a newer set: accepted li
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
-      ciCheckRuns: { build: 100, lint: 900 },
+      ciCheckRuns: [
+        { name: "build", id: 100 },
+        { name: "lint", id: 900 },
+      ],
     });
 
     nats.emit(
@@ -1622,7 +1645,10 @@ it("a superseding attempt with an earlier completion is a newer set: accepted li
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
-      ciCheckRuns: { build: 200, lint: 900 },
+      ciCheckRuns: [
+        { name: "build", id: 200 },
+        { name: "lint", id: 900 },
+      ],
       ciSettlementGeneration: 8,
       ciReconciled: false,
     });
@@ -1674,7 +1700,7 @@ it("a disagreeing live settlement at a GitHub-authored fence's set is stale: Git
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: { build: 900 },
+        checkRuns: [{ name: "build", id: 900 }],
       },
     }),
     applyEffects: async () => {},
@@ -1732,7 +1758,7 @@ it("a same-head resync read at an equal attempt set never erases the known gener
   );
   await pump.drain();
   expect(state.prs["acme/widgets#7"]).toMatchObject({
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
 
@@ -1748,14 +1774,14 @@ it("a same-head resync read at an equal attempt set never erases the known gener
         headSha: "head-1",
         isOpen: true,
         updatedAt: "2026-09-07T00:00:00.000Z",
-        checkRuns: { build: 900 },
+        checkRuns: [{ name: "build", id: 900 }],
       },
     }),
     applyEffects: async () => {},
     now: () => 2,
   });
   expect(state.prs["acme/widgets#7"]).toMatchObject({
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
 
@@ -1777,7 +1803,7 @@ it("a same-head resync read at an equal attempt set never erases the known gener
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     failing: [],
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
@@ -1822,7 +1848,7 @@ it("drops a delayed older attempt set and accepts a newer one for the same head"
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "green",
     failing: [],
-    ciCheckRuns: { build: 900 },
+    ciCheckRuns: [{ name: "build", id: 900 }],
   });
 
   nats.emit(
@@ -1841,7 +1867,7 @@ it("drops a delayed older attempt set and accepts a newer one for the same head"
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["unit"],
-    ciCheckRuns: { build: 950 },
+    ciCheckRuns: [{ name: "build", id: 950 }],
   });
   expect(published).toEqual([
     JSON.stringify({ type: "ci-green", sha: "head-1" }),
@@ -1896,7 +1922,7 @@ it("emits when a newer attempt set changes the failing set", async () => {
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["lint"],
-    ciCheckRuns: { build: 2 },
+    ciCheckRuns: [{ name: "build", id: 2 }],
   });
   expect(published).toEqual([
     JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),
@@ -1940,7 +1966,7 @@ it("accepts a settlement for a new head with lower check-run ids", async () => {
   const { state } = stateForCi();
   state.prs["acme/widgets#7"] = {
     ...state.prs["acme/widgets#7"],
-    ciCheckRuns: { build: 2 },
+    ciCheckRuns: [{ name: "build", id: 2 }],
   };
   reduceGithubEvent(
     state,
@@ -1993,7 +2019,7 @@ it("accepts a settlement for a new head with lower check-run ids", async () => {
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     headSha: "head-2",
     verdict: "green",
-    ciCheckRuns: { build: 1 },
+    ciCheckRuns: [{ name: "build", id: 1 }],
   });
   expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-2" })]);
   pump.stop();

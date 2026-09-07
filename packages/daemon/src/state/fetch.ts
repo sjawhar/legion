@@ -1,3 +1,4 @@
+import type { CheckRunRef } from "../daemon/legion-state";
 import {
   CiStatus,
   type CiStatusLiteral,
@@ -339,8 +340,8 @@ export interface CiAndMergeStatus {
   headSha: string | null;
   isOpen: boolean;
   updatedAt: string | null;
-  /** The rollup's attempt set: highest check-run id per check name. Status contexts have no run and are absent. */
-  checkRuns: Record<string, number>;
+  /** The rollup's attempt set: the highest check-run id per check name, sorted by name. Status contexts have no run and are absent. */
+  checkRuns: CheckRunRef[];
 }
 
 export interface CiFetchFailure {
@@ -391,9 +392,8 @@ function rollupOutcome(nodes: readonly unknown[]): RollupOutcome {
   return { failingChecks: [...failing], cancelledCount };
 }
 
-function checkRunSet(nodes: readonly unknown[]): Record<string, number> {
-  // Check names are arbitrary strings ("constructor", "__proto__"): own keys only.
-  const runs: Record<string, number> = Object.create(null);
+function checkRunSet(nodes: readonly unknown[]): CheckRunRef[] {
+  const runs = new Map<string, number>();
   for (const node of nodes) {
     const record = recordValue(node);
     const name = record?.name;
@@ -407,9 +407,12 @@ function checkRunSet(nodes: readonly unknown[]): Record<string, number> {
     ) {
       continue;
     }
-    if (!Object.hasOwn(runs, name) || databaseId > runs[name]) runs[name] = databaseId;
+    const known = runs.get(name);
+    if (known === undefined || databaseId > known) runs.set(name, databaseId);
   }
-  return runs;
+  return [...runs]
+    .sort(([left], [right]) => (left < right ? -1 : 1))
+    .map(([name, id]) => ({ name, id }));
 }
 
 interface RollupContextsPage {
@@ -592,7 +595,7 @@ async function getCiStatusBatchWithOptions(
           headSha: null,
           isOpen: false,
           updatedAt: null,
-          checkRuns: {},
+          checkRuns: [],
         };
         continue;
       }
@@ -608,7 +611,7 @@ async function getCiStatusBatchWithOptions(
           headSha: null,
           isOpen: rawPr.state === "OPEN",
           updatedAt,
-          checkRuns: {},
+          checkRuns: [],
         };
         continue;
       }

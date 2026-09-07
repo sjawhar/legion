@@ -1,5 +1,5 @@
 import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
-import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
+import type { CheckRunRef, IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
 export interface LegionEventPayload {
   type: string;
@@ -44,8 +44,8 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
-/** An attempt set: the latest GitHub check-run id per check name. */
-export type AttemptSet = Readonly<Record<string, number>>;
+/** An attempt set: the latest GitHub check-run id per check name, sorted by name. */
+export type AttemptSet = readonly CheckRunRef[];
 
 export type AttemptSetOrder = "newer" | "equal" | "older" | "mixed";
 
@@ -61,12 +61,13 @@ export type AttemptSetOrder = "newer" | "equal" | "older" | "mixed";
  * or `older`.
  */
 export function compareAttemptSets(stored: AttemptSet, incoming: AttemptSet): AttemptSetOrder {
+  const known = new Map(stored.map((run) => [run.name, run.id]));
   let higher = false;
   let lower = false;
-  for (const [name, id] of Object.entries(incoming)) {
-    const known = stored[name];
-    if (known === undefined || id > known) higher = true;
-    else if (id < known) lower = true;
+  for (const run of incoming) {
+    const id = known.get(run.name);
+    if (id === undefined || run.id > id) higher = true;
+    else if (run.id < id) lower = true;
   }
   if (higher && lower) return "mixed";
   if (higher) return "newer";
@@ -141,8 +142,8 @@ export interface CiFence {
 export type GitHubFenceEffect = "replace" | "apply" | "unfenced" | "stale" | "conflict";
 
 export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFenceEffect {
-  const fenced = pr.ciCheckRuns !== null && Object.keys(pr.ciCheckRuns).length > 0;
-  if (Object.keys(checkRuns).length === 0) return fenced ? "stale" : "unfenced";
+  const fenced = pr.ciCheckRuns !== null && pr.ciCheckRuns.length > 0;
+  if (checkRuns.length === 0) return fenced ? "stale" : "unfenced";
   if (pr.ciCheckRuns === null) return "replace";
   switch (compareAttemptSets(pr.ciCheckRuns, checkRuns)) {
     case "newer":
@@ -158,7 +159,7 @@ export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFen
 
 /** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */
 export function writeCiFence(pr: PrState, fence: CiFence): void {
-  pr.ciCheckRuns = { ...fence.checkRuns };
+  pr.ciCheckRuns = fence.checkRuns.map((run) => ({ ...run }));
   pr.ciSettlementGeneration = fence.generation;
   pr.ciSnapshot = fence.snapshot;
 }
@@ -194,7 +195,7 @@ export function ciSnapshot(pr: PrState): CiSnapshot {
     verdict: pr.verdict,
     failing: [...pr.failing],
     ciSettledAt: pr.ciSettledAt,
-    ciCheckRuns: pr.ciCheckRuns === null ? null : { ...pr.ciCheckRuns },
+    ciCheckRuns: pr.ciCheckRuns === null ? null : pr.ciCheckRuns.map((run) => ({ ...run })),
     ciSettlementGeneration: pr.ciSettlementGeneration,
     ciSnapshot: pr.ciSnapshot,
     ciReconciled: pr.ciReconciled,
@@ -203,9 +204,9 @@ export function ciSnapshot(pr: PrState): CiSnapshot {
 
 function sameAttemptSet(left: AttemptSet | null, right: AttemptSet | null): boolean {
   if (left === null || right === null) return left === right;
-  const names = Object.keys(left);
   return (
-    names.length === Object.keys(right).length && names.every((name) => left[name] === right[name])
+    left.length === right.length &&
+    left.every((run, index) => run.name === right[index]?.name && run.id === right[index]?.id)
   );
 }
 

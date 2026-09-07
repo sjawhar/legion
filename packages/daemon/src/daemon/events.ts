@@ -6,7 +6,7 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import type { DaemonConfig } from "./config";
-import type { HeldEvent, LegionState, TreeState } from "./legion-state";
+import type { CheckRunRef, HeldEvent, LegionState, TreeState } from "./legion-state";
 import {
   classifySettlement,
   type Effect,
@@ -59,7 +59,7 @@ interface ChecksInput {
   failed: string[];
   cancelledCount: number;
   settledAt: number;
-  checkRuns: Record<string, number>;
+  checkRuns: CheckRunRef[];
   generation: number;
   snapshot: string;
 }
@@ -162,11 +162,10 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
   };
 }
 
-/** The payload's attempt set: a non-empty list of `{name, id}` with unique names and positive ids. */
-function attemptSet(value: unknown): Record<string, number> | undefined {
+/** The payload's attempt set: a non-empty list of `{name, id}` with unique names and positive ids, normalized to name order. */
+function attemptSet(value: unknown): CheckRunRef[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined;
-  // Check names are arbitrary strings ("constructor", "__proto__"): own keys only.
-  const runs: Record<string, number> = Object.create(null);
+  const runs = new Map<string, number>();
   for (const entry of value) {
     const record = asRecord(entry);
     const name = record?.name;
@@ -177,13 +176,15 @@ function attemptSet(value: unknown): Record<string, number> | undefined {
       typeof id !== "number" ||
       !Number.isSafeInteger(id) ||
       id <= 0 ||
-      Object.hasOwn(runs, name)
+      runs.has(name)
     ) {
       return undefined;
     }
-    runs[name] = id;
+    runs.set(name, id);
   }
-  return runs;
+  return [...runs]
+    .sort(([left], [right]) => (left < right ? -1 : 1))
+    .map(([name, id]) => ({ name, id }));
 }
 
 function treeFor(state: LegionState, issue: IssueKey): TreeState | undefined {

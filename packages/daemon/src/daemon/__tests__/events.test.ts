@@ -495,7 +495,7 @@ describe("core-NATS event pump", () => {
     expect(saveState).toHaveBeenCalledTimes(savesAfterEmission + 1);
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       ciSettledAt: 2_000,
-      ciCheckRuns: { build: 2 },
+      ciCheckRuns: [{ name: "build", id: 2 }],
     });
     expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
     pump.stop();
@@ -569,7 +569,7 @@ describe("core-NATS event pump", () => {
         verdict: "green",
         failing: [],
         ciSettledAt: 2_000,
-        ciCheckRuns: { build: 2 },
+        ciCheckRuns: [{ name: "build", id: 2 }],
       });
       expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
       expect(debug).toHaveBeenCalledWith(

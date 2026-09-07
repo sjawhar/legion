@@ -52,7 +52,7 @@ function prState(issue: IssueKey): PrState {
     verdict: "green",
     failing: [],
     ciSettledAt: 3_000,
-    ciCheckRuns: { build: 3 },
+    ciCheckRuns: [{ name: "build", id: 3 }],
     ciSettlementGeneration: null,
     ciSnapshot: null,
     ciReconciled: false,

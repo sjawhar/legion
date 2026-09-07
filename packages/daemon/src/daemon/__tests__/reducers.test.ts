@@ -729,7 +729,7 @@ describe("reduceGithubEvent", () => {
       verdict: "red",
       failing: ["unit"],
       ciSettledAt: 1,
-      ciCheckRuns: { build: 1 },
+      ciCheckRuns: [{ name: "build", id: 1 }],
       reviewDecision: "approved",
     });
 
@@ -1045,7 +1045,7 @@ describe("uncertifyCiVerdict", () => {
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
-      ciCheckRuns: { build: 4 },
+      ciCheckRuns: [{ name: "build", id: 4 }],
     });
 
     uncertifyCiVerdict(state.prs[`${repo}#${prNumber}`]);
@@ -1054,7 +1054,7 @@ describe("uncertifyCiVerdict", () => {
       verdict: null,
       failing: [],
       ciSettledAt: 1_000,
-      ciCheckRuns: { build: 4 },
+      ciCheckRuns: [{ name: "build", id: 4 }],
     });
   });
 });
