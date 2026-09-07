@@ -119,28 +119,45 @@ function envelopeField(key: string, prop: Prop, req: Set<string>, wide: number, 
   return `\t${n.padEnd(wide)} ${t.padEnd(types)} \`json:"${tag}"\``;
 }
 
-function check(key: string, prop: Prop) {
-  const n = name(key);
+function check(access: string, path: string, prop: Prop, depth = 1) {
+  const indent = "\t".repeat(depth);
   if (prop.type === "string") {
-    return `\tif strings.TrimSpace(e.${n}) == "" {\n\t\treturn fmt.Errorf("${key} is required")\n\t}`;
+    return `${indent}if strings.TrimSpace(${access}) == "" {\n${indent}\treturn fmt.Errorf("${path} is required")\n${indent}}`;
   }
   if (prop.type === "integer") {
-    return `\tif e.${n} == 0 {\n\t\treturn fmt.Errorf("${key} must be set")\n\t}`;
+    return `${indent}if ${access} == 0 {\n${indent}\treturn fmt.Errorf("${path} must be set")\n${indent}}`;
   }
-  throw new Error(`unsupported required envelope type for ${key}`);
+  throw new Error(`unsupported required envelope type for ${path}`);
 }
 
-function enums(key: string, prop: Prop) {
+function enums(key: string, prop: Prop, optional: boolean) {
   if (!prop.enum?.length) return "";
   const n = name(key);
+  const indent = optional ? "\t\t" : "\t";
   const list = prop.enum.map((item) => `"${item}"`).join(", ");
-  return [
-    `\tswitch e.${n} {`,
-    `\tcase ${list}:`,
-    `\tdefault:`,
-    `\t\treturn fmt.Errorf("${key} must be one of: ${prop.enum.join(", ")}")`,
-    `\t}`,
+  const body = [
+    `${indent}switch e.${n} {`,
+    `${indent}case ${list}:`,
+    `${indent}default:`,
+    `${indent}\treturn fmt.Errorf("${key} must be one of: ${prop.enum.join(", ")}")`,
+    `${indent}}`,
   ].join("\n");
+  if (!optional) return body;
+  return `\tif e.${n} != "" {\n${body}\n\t}`;
+}
+
+function objectChecks(key: string, prop: Prop) {
+  if (prop.type !== "object" || !prop.properties) {
+    throw new Error(`missing object properties for ${key}`);
+  }
+  const access = `e.${name(key)}`;
+  const checks = (prop.required ?? []).map((nestedKey) => {
+    const nestedProp = prop.properties?.[nestedKey];
+    if (!nestedProp) throw new Error(`missing property for required field ${key}.${nestedKey}`);
+    return check(`${access}.${name(nestedKey)}`, `${key}.${nestedKey}`, nestedProp, 2);
+  });
+  if (!checks.length) return "";
+  return `\tif ${access} != nil {\n${checks.join("\n")}\n\t}`;
 }
 
 function renderEnvelopeObject(key: string, prop: Prop) {
@@ -175,12 +192,19 @@ function renderEnvelope(schema: Schema) {
     .map((key) => {
       const prop = schema.properties[key];
       if (!prop) throw new Error(`missing property for required field ${key}`);
-      return check(key, prop);
+      return check(`e.${name(key)}`, key, prop);
     })
     .join("\n");
-  const source = schema.properties.source;
-  const extra = source ? enums("source", source) : "";
-  const validate = [checks, extra, "\treturn nil"].filter(Boolean).join("\n");
+  const enumChecks = keys
+    .map((key) => enums(key, schema.properties[key], !req.has(key)))
+    .filter(Boolean)
+    .join("\n");
+  const nestedChecks = keys
+    .filter((key) => schema.properties[key].type === "object")
+    .map((key) => objectChecks(key, schema.properties[key]))
+    .filter(Boolean)
+    .join("\n");
+  const validate = [checks, enumChecks, nestedChecks, "\treturn nil"].filter(Boolean).join("\n");
   const nested = keys
     .filter((key) => schema.properties[key].type === "object")
     .map((key) => renderEnvelopeObject(key, schema.properties[key]))

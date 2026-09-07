@@ -64,6 +64,25 @@ func (e Envelope) Validate() error {
 	default:
 		return fmt.Errorf("source must be one of: agent, human, envoy, github, slack, whatsapp, ghostwispr")
 	}
+	if e.Urgency != "" {
+		switch e.Urgency {
+		case "low", "med", "high", "blocking":
+		default:
+			return fmt.Errorf("urgency must be one of: low, med, high, blocking")
+		}
+	}
+	if e.ExpectsReply != "" {
+		switch e.ExpectsReply {
+		case "none", "optional", "required":
+		default:
+			return fmt.Errorf("expects_reply must be one of: none, optional, required")
+		}
+	}
+	if e.Sender != nil {
+		if strings.TrimSpace(e.Sender.SessionID) == "" {
+			return fmt.Errorf("sender.session_id is required")
+		}
+	}
 	return nil
 }
 

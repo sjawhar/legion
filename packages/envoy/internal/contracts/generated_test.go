@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func TestEnvelopeSignalQualityFieldsRoundTrip(t *testing.T) {
-	want := Envelope{
+func validSignalQualityEnvelope() Envelope {
+	return Envelope{
 		EventID:        "evt-1",
 		Source:         "agent",
 		SourceEventID:  "source-1",
@@ -29,6 +29,10 @@ func TestEnvelopeSignalQualityFieldsRoundTrip(t *testing.T) {
 		Urgency:      "blocking",
 		ExpectsReply: "required",
 	}
+}
+
+func TestEnvelopeSignalQualityFieldsRoundTrip(t *testing.T) {
+	want := validSignalQualityEnvelope()
 
 	encoded, err := json.Marshal(want)
 	if err != nil {
@@ -42,6 +46,54 @@ func TestEnvelopeSignalQualityFieldsRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("signal-quality fields did not round trip: got %#v, want %#v", got, want)
+	}
+}
+
+func TestEnvelopeValidateRejectsInvalidSignalQualityFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Envelope)
+		want   string
+	}{
+		{
+			name: "unrecognized urgency",
+			mutate: func(envelope *Envelope) {
+				envelope.Urgency = "urgent"
+			},
+			want: "urgency must be one of: low, med, high, blocking",
+		},
+		{
+			name: "unrecognized expects reply",
+			mutate: func(envelope *Envelope) {
+				envelope.ExpectsReply = "later"
+			},
+			want: "expects_reply must be one of: none, optional, required",
+		},
+		{
+			name: "empty sender session ID",
+			mutate: func(envelope *Envelope) {
+				envelope.Sender.SessionID = ""
+			},
+			want: "sender.session_id is required",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			envelope := validSignalQualityEnvelope()
+			test.mutate(&envelope)
+
+			err := envelope.Validate()
+			if err == nil || err.Error() != test.want {
+				t.Errorf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEnvelopeValidateAcceptsSignalQualityFields(t *testing.T) {
+	if err := validSignalQualityEnvelope().Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want nil", err)
 	}
 }
 
