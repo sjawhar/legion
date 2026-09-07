@@ -6,6 +6,7 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
+import { overseerCatchup } from "../catchup";
 import type { DaemonConfig } from "../config";
 import { type EventPumpDeps, startEventPump } from "../events";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
@@ -373,6 +374,88 @@ describe("core-NATS event pump", () => {
       {
         topic: roleTopic(implementer),
         payloadJson: JSON.stringify({ type: "ci-green", sha: "settled-head" }),
+      },
+    ]);
+    pump.stop();
+  });
+  it("clears a re-settled head's red flags before tracking the next head", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.prByBranch["acme/widgets@legion/issue-1"] = "acme/widgets#7";
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          failed: { count: 1, checks: ["unit"] },
+          passed: { count: 0, checks: [] },
+          failing_checks: [{ name: "unit", url: "https://example.test/checks/unit" }],
+        })
+      )
+    );
+    await flush();
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(settledChecks({ superseded_settlement: "true" }))
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-1",
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: true,
+      fixAttempts: 0,
+    });
+    expect(await overseerCatchup(state, issue)).toMatchObject({
+      prVerdicts: {
+        "acme/widgets#7": { sha: "head-1", ci: "green", fixAttempts: 0 },
+      },
+    });
+
+    nats.emit(
+      "notifications.github.acme.widgets.pull_request.synchronize",
+      envelope({
+        action: "synchronize",
+        repository: { full_name: "acme/widgets" },
+        pull_request: {
+          number: 7,
+          head: { sha: "head-2", ref: "legion/issue-1" },
+          updated_at: "2026-09-07T03:02:00Z",
+        },
+      })
+    );
+    await flush();
+
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      headSha: "head-2",
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: false,
+      fixAttempts: 0,
+    });
+    expect(published).toEqual([
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({ type: "ci-first-red", check: "unit", sha: "head-1" }),
+      },
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({
+          type: "ci-settled-red",
+          failing: ["unit"],
+          sha: "head-1",
+        }),
+      },
+      {
+        topic: roleTopic(implementer),
+        payloadJson: JSON.stringify({ type: "ci-green", sha: "head-1" }),
       },
     ]);
     pump.stop();

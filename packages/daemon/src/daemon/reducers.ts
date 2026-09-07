@@ -226,13 +226,21 @@ function issueForBranch(repo: string, branch: string): IssueKey | undefined {
   return match ? keyFor(repo, Number(match[1])) : undefined;
 }
 
+function updatedAt(raw: JsonRecord): number | undefined {
+  const value = stringValue(raw.updated_at);
+  if (!value) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? undefined : timestamp;
+}
+
 function registerPr(
   state: LegionState,
   repo: string,
   number: number,
   branch: string | undefined,
   sha: string | undefined,
-  issuedAt: number
+  issuedAt: number,
+  headUpdatedAt: number | undefined
 ): PrState | undefined {
   const key = branch ? issueForBranch(repo, branch) : undefined;
   if (!key || !state.issues[key] || !sha) return undefined;
@@ -242,6 +250,7 @@ function registerPr(
     repo: repo as `${string}/${string}`,
     number,
     headSha: sha,
+    ...(headUpdatedAt === undefined ? {} : { headUpdatedAt }),
     firstRedEmitted: false,
     settledRedEmitted: false,
     greenEmitted: false,
@@ -556,8 +565,10 @@ function pullRequest(
   const branch = stringValue(head?.ref);
   const sha = stringValue(head?.sha);
 
+  const headUpdatedAt = updatedAt(raw);
+
   if (payload.action === "opened") {
-    const pr = registerPr(state, repo, number, branch, sha, envelope.issued_at);
+    const pr = registerPr(state, repo, number, branch, sha, envelope.issued_at, headUpdatedAt);
     if (!pr) return [];
     return route(
       state,
@@ -570,13 +581,22 @@ function pullRequest(
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
-    pr = registerPr(state, repo, number, branch, sha, envelope.issued_at);
+    pr = registerPr(state, repo, number, branch, sha, envelope.issued_at, headUpdatedAt);
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
     if (!sha) return [];
+    if (
+      headUpdatedAt !== undefined &&
+      pr.headUpdatedAt !== undefined &&
+      headUpdatedAt < pr.headUpdatedAt
+    ) {
+      return [];
+    }
     if (pr.settledRedEmitted) pr.fixAttempts += 1;
     pr.headSha = sha;
+    if (headUpdatedAt === undefined) delete pr.headUpdatedAt;
+    else pr.headUpdatedAt = headUpdatedAt;
     pr.firstRedEmitted = false;
     pr.settledRedEmitted = false;
     pr.greenEmitted = false;

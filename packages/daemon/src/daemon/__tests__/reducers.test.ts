@@ -707,6 +707,51 @@ describe("reduceGithubEvent", () => {
     });
     expect(state.prs[`${repo}#${prNumber}`].reviewDecision).toBeUndefined();
   });
+  it("keeps a newer head and its verdict when synchronize arrives out of order", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, {
+      headSha: "head-a",
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+    });
+
+    expect(
+      effects(state, {
+        action: "synchronize",
+        pull_request: {
+          number: prNumber,
+          head: { ref: "legion/issue-2", sha: "head-b" },
+          updated_at: "2026-09-07T03:02:00Z",
+        },
+      })
+    ).toEqual([{ kind: "approval-status", repo, pr: prNumber, sha: "head-b" }]);
+    Object.assign(state.prs[`${repo}#${prNumber}`], {
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: true,
+      reviewDecision: "approved",
+    });
+
+    expect(
+      effects(state, {
+        action: "synchronize",
+        pull_request: {
+          number: prNumber,
+          head: { ref: "legion/issue-2", sha: "head-a" },
+          updated_at: "2026-09-07T03:01:00Z",
+        },
+      })
+    ).toEqual([]);
+    expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
+      headSha: "head-b",
+      headUpdatedAt: Date.parse("2026-09-07T03:02:00Z"),
+      firstRedEmitted: false,
+      settledRedEmitted: false,
+      greenEmitted: true,
+      reviewDecision: "approved",
+      fixAttempts: 0,
+    });
+  });
 
   it("treats a settled green PR as ready after an approved review", () => {
     const state = rootState();

@@ -55,6 +55,7 @@ export interface PrState {
   repo: `${string}/${string}`;
   number: number;
   headSha: string;
+  headUpdatedAt?: number;
   firstRedEmitted: boolean;
   settledRedEmitted: boolean;
   greenEmitted: boolean;
@@ -181,6 +182,7 @@ const PrStateSchema = z
     repo: RepositorySchema,
     number: z.number().int().nonnegative(),
     headSha: z.string(),
+    headUpdatedAt: z.number().optional(),
     firstRedEmitted: z.boolean(),
     settledRedEmitted: z.boolean(),
     greenEmitted: z.boolean(),

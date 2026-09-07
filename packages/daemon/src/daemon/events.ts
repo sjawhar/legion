@@ -180,6 +180,8 @@ function ciEmissions(pr: PrState, input: ChecksInput): CiEmission[] {
     return emissions;
   }
   if (input.cancelledCount === 0 && !pr.greenEmitted) {
+    pr.firstRedEmitted = false;
+    pr.settledRedEmitted = false;
     pr.greenEmitted = true;
     return [{ type: "ci-green", sha: pr.headSha }];
   }
