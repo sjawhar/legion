@@ -75,6 +75,12 @@ describe("envoyToolSpecs", () => {
       "Default PR subscription: github.<owner>.<repo>.pr.<n>.>"
     );
     expect(subscribe?.description).toContain(
+      "> matches one or more trailing tokens and does not match the base subject"
+    );
+    expect(subscribe?.description).toContain(
+      "Envoy registers the concrete base when you subscribe to <subject>.>"
+    );
+    expect(subscribe?.description).toContain(
       "pr.<n> (lifecycle: opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks"
     );
     expect(subscribe?.description).toContain(

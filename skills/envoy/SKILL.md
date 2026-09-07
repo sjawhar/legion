@@ -18,6 +18,11 @@ envoy_subscribe([
 ])
 ```
 
+NATS `>` matches **one or more** trailing tokens, so it does not match the lifecycle base
+`pr.42` itself. Envoy registers that concrete base automatically when you subscribe to
+`<subject>.>`, making `pr.<n>.>` the recommended default: one call receives both the lifecycle
+subject and its child events.
+
 For a typical push, this receives `pr.42` with `synchronize`, then any comments or reviews, then
 one `pr.42.checks` event when that head's checks settle. The family is `pr.42` (lifecycle),
 `pr.42.comment`, `pr.42.review`, `pr.42.mention`, and `pr.42.checks`. A closed lifecycle payload

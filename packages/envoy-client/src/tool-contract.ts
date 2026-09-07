@@ -4,7 +4,19 @@ const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
 
 const TOPIC_GUIDE =
-  'Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> (publish-to; holders claim via envoy_role_set). Default PR subscription: github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one head-checks settlement event: passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" when new runs appear for the same head). Other GitHub: issue.<n>, issue.<n>.comment, issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only runs without an associated PR); slack.<team>.<channel>.message|mention and slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.';
+  "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
+  "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " +
+  "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " +
+  "the recommended default remains github.<owner>.<repo>.pr.<n>.>. Default PR subscription: " +
+  "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " +
+  "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " +
+  "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one head-checks settlement event: " +
+  'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' +
+  "when new runs appear for the same head). Other GitHub: issue.<n>, issue.<n>.comment, " +
+  "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " +
+  "runs without an associated PR); slack.<team>.<channel>.message|mention and " +
+  "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " +
+  "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 
 const messageArguments = {
   message: z.string(),

@@ -80,6 +80,9 @@ caller must provide a field.
   `pr.<n>.checks` when the head's checks settle. Check settlement re-fires with
   `superseded_settlement` when new runs appear. `workflow.<file>.<action>`
   carries only runs without an associated pull request.
+- NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
+  `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
+  per-PR default receives lifecycle plus child events.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
   rather than subscribed to by role holders.
