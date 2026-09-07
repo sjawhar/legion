@@ -736,6 +736,7 @@ func TestGithubCIObservations(t *testing.T) {
 				"status":        "completed",
 				"conclusion":    "failure",
 				"head_sha":      "deadbeef",
+				"check_suite":   map[string]any{"id": 9001},
 				"app":           map[string]any{"id": float64(12345)},
 				"pull_requests": prs,
 			},
@@ -749,7 +750,8 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 		o := obs[0]
 		if o.Owner != "sjawhar" || o.Repo != "legion" || o.Number != "42" || o.SHA != "deadbeef" ||
-			o.AppID != "12345" || o.CheckName != "unit-tests" || o.Status != "completed" || o.Conclusion != "failure" {
+			o.AppID != "12345" || o.CheckName != "unit-tests" || o.SuiteID != "9001" ||
+			o.Status != "completed" || o.Conclusion != "failure" {
 			t.Fatalf("unexpected observation: %+v", o)
 		}
 	})
@@ -781,6 +783,25 @@ func TestGithubCIObservations(t *testing.T) {
 		}
 	})
 
+}
+
+func TestGithubCIObservationsSkipMalformedPRNumbers(t *testing.T) {
+	for _, number := range []any{42.5, "abc"} {
+		body := map[string]any{
+			"repository": map[string]any{
+				"name":  "example-repo",
+				"owner": map[string]any{"login": "example-org"},
+			},
+			"check_run": map[string]any{
+				"name":          "build",
+				"head_sha":      "abcdef",
+				"pull_requests": []any{map[string]any{"number": number}},
+			},
+		}
+		if observations := GithubCIObservations("check_run", body); len(observations) != 0 {
+			t.Fatalf("PR number %v yielded observations: %+v", number, observations)
+		}
+	}
 }
 
 func TestGhostWisprSubject(t *testing.T) {

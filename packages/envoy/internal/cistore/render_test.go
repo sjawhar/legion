@@ -79,6 +79,29 @@ func TestRenderSummaryCarriesStateGeneration(t *testing.T) {
 	}
 }
 
+func TestRenderSummaryMarksOnlyRearmedGenerationSuperseded(t *testing.T) {
+	initial := uint64(1725753600000)
+	state := State{
+		Owner:             "example-org",
+		Repo:              "example-repo",
+		Number:            "42",
+		SHA:               "abcdef",
+		InitialGeneration: initial,
+		Generation:        initial,
+		Checks:            mkChecks(map[string][2]string{"build": {"completed", "success"}}),
+	}
+	_, initialSummary := renderOrFail(t, state)
+	if initialSummary.SupersededSettlement != "" {
+		t.Fatalf("initial superseded_settlement = %q, want empty", initialSummary.SupersededSettlement)
+	}
+
+	state.Generation++
+	_, rearmedSummary := renderOrFail(t, state)
+	if rearmedSummary.SupersededSettlement != "true" {
+		t.Fatalf("rearmed superseded_settlement = %q, want true", rearmedSummary.SupersededSettlement)
+	}
+}
+
 func TestRenderSummarySkippedKeepsAllNames(t *testing.T) {
 	// Regression: skipped must list every name, never collapse to a bare count.
 	spec := map[string][2]string{}

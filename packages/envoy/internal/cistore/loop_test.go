@@ -482,6 +482,55 @@ func TestSummaryTickRearmsGenerationForCheckAndNewSuite(t *testing.T) {
 		t.Fatalf("re-settled summary = %q", third.PayloadSummary)
 	}
 }
+func TestSummaryTickIdentifiesChecksBySuiteAndName(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+
+	if err := store.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record head: %v", err)
+	}
+	waitHead(t, store, owner, repo, number, sha)
+	if err := store.RecordSuite(owner, repo, number, sha, "suite-a", "completed", "failure", "1", ""); err != nil {
+		t.Fatalf("record failing suite: %v", err)
+	}
+	if err := store.RecordSuite(owner, repo, number, sha, "suite-b", "completed", "success", "1", ""); err != nil {
+		t.Fatalf("record passing suite: %v", err)
+	}
+	if err := store.RecordWithSuite(owner, repo, number, sha, "test", "suite-a", "801", "https://example.test/801", "completed", "failure", ""); err != nil {
+		t.Fatalf("record failing check: %v", err)
+	}
+	if err := store.RecordWithSuite(owner, repo, number, sha, "test", "suite-b", "802", "https://example.test/802", "completed", "success", ""); err != nil {
+		t.Fatalf("record passing check: %v", err)
+	}
+	waitCacheChecks(t, store, owner, repo, number, sha, 2)
+	waitCacheSuites(t, store, owner, repo, number, sha, 2)
+	setLastEventAt(t, store, owner, repo, number, sha, 0)
+	runSummaryTick(store, pub, time.Second, logging.New("test"))
+	if got := pub.count(); got != 1 {
+		t.Fatalf("settlement count = %d, want 1", got)
+	}
+	var summary Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &summary); err != nil {
+		t.Fatalf("decode settlement: %v", err)
+	}
+	if summary.Failed.Count != 1 || len(summary.Failed.Checks) != 1 || summary.Failed.Checks[0] != "test" {
+		t.Fatalf("failed checks = %+v, want one failed test", summary.Failed)
+	}
+	if summary.Passed.Count != 1 || len(summary.Passed.Checks) != 1 || summary.Passed.Checks[0] != "test" {
+		t.Fatalf("passed checks = %+v, want one passed test", summary.Passed)
+	}
+	if len(summary.FailingChecks) != 1 || summary.FailingChecks[0].Name != "test" || summary.FailingChecks[0].URL != "https://example.test/801" {
+		t.Fatalf("failing_checks = %+v, want the failing suite's test URL", summary.FailingChecks)
+	}
+}
 
 func TestSummaryTickReseedsGenerationAfterStateExpiration(t *testing.T) {
 	conn, cleanup := connectNATS(t)

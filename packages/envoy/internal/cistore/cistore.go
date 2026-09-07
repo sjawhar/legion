@@ -45,6 +45,7 @@ const recordBackoffCap = 50 * time.Millisecond
 
 // Check is the last-known state of a single named check for a commit.
 type Check struct {
+	Name       string `json:"name,omitempty"`
 	CheckRunID string `json:"check_run_id"`
 	URL        string `json:"url"`
 	Status     string `json:"status"`     // queued|in_progress|completed
@@ -72,16 +73,17 @@ type SettlementClaim struct {
 // State is the aggregated set of checks and suites for one (owner, repo, PR
 // number, head SHA).
 type State struct {
-	Owner          string           `json:"owner"`
-	Repo           string           `json:"repo"`
-	Number         string           `json:"number"`
-	SHA            string           `json:"sha"`
-	Checks         map[string]Check `json:"checks"`
-	Suites         map[string]Suite `json:"suites"`
-	LastEventAt    int64            `json:"last_event_at"`
-	Generation     uint64           `json:"generation"`
-	SettledEmitted bool             `json:"settled_emitted"`
-	Claim          *SettlementClaim `json:"claim,omitempty"`
+	Owner             string           `json:"owner"`
+	Repo              string           `json:"repo"`
+	Number            string           `json:"number"`
+	SHA               string           `json:"sha"`
+	Checks            map[string]Check `json:"checks"`
+	Suites            map[string]Suite `json:"suites"`
+	LastEventAt       int64            `json:"last_event_at"`
+	InitialGeneration uint64           `json:"initial_generation"`
+	Generation        uint64           `json:"generation"`
+	SettledEmitted    bool             `json:"settled_emitted"`
+	Claim             *SettlementClaim `json:"claim,omitempty"`
 }
 
 // UnmarshalJSON maps the retired resettled marker to the generation that
@@ -376,29 +378,40 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 	}
 }
 
-// Record folds one check observation into the per-commit state via CAS.
+// Record folds one check observation without a suite into the per-commit state via CAS.
 func (s *Store) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
+	return s.record(owner, repo, number, sha, checkName, "", checkRunID, url, status, conclusion, observedAt)
+}
+
+// RecordWithSuite folds one check observation into the per-commit state via CAS.
+func (s *Store) RecordWithSuite(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
+	return s.record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt)
+}
+
+func (s *Store) record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
 	return s.update(owner, repo, number, sha, func(st *State) bool {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
-		if current, ok := st.Checks[checkName]; ok {
+		key := checkKey(suiteID, checkName)
+		if current, ok := st.Checks[key]; ok {
 			if checkRunIDIsOlder(checkRunID, current.CheckRunID) ||
 				(checkRunID == current.CheckRunID && !observationMayReplace(observedAt, current.ObservedAt, status, current.Status)) {
 				return false
 			}
 		}
 		next := Check{
+			Name:       checkName,
 			CheckRunID: checkRunID,
 			URL:        url,
 			Status:     status,
 			Conclusion: conclusion,
 			ObservedAt: observedAt,
 		}
-		if current, ok := st.Checks[checkName]; ok && sameCheck(current, next) {
+		if current, ok := st.Checks[key]; ok && sameCheck(current, next) {
 			return false
 		}
-		st.Checks[checkName] = next
+		st.Checks[key] = next
 		rearm(st)
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
@@ -438,7 +451,8 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 			}
 			rev = entry.Revision()
 		case errors.Is(getErr, nats.ErrKeyNotFound):
-			st = State{Owner: owner, Repo: repo, Number: number, SHA: sha, Generation: uint64(s.now().UnixMilli())}
+			initialGeneration := uint64(s.now().UnixMilli())
+			st = State{Owner: owner, Repo: repo, Number: number, SHA: sha, InitialGeneration: initialGeneration, Generation: initialGeneration}
 		default:
 			return getErr
 		}
@@ -469,8 +483,16 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 	}
 }
 
+func checkKey(suiteID, checkName string) string {
+	if suiteID == "" {
+		return checkName
+	}
+	return suiteID + "\x00" + checkName
+}
+
 func sameCheck(current, next Check) bool {
-	return current.CheckRunID == next.CheckRunID &&
+	return current.Name == next.Name &&
+		current.CheckRunID == next.CheckRunID &&
 		current.URL == next.URL &&
 		current.Status == next.Status &&
 		current.Conclusion == next.Conclusion &&

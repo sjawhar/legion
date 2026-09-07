@@ -55,7 +55,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 		secret = "s"
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
-	ci := webhook.CIRecorderFuncs{RecordFunc: store.Record, RecordSuiteFunc: store.RecordSuite, RecordHeadFunc: store.RecordHead}
+	ci := webhook.CIRecorderFuncs{RecordFunc: store.RecordWithSuite, RecordSuiteFunc: store.RecordSuite, RecordHeadFunc: store.RecordHead}
 	handler := webhook.GitHubHandler(secret, "@legion", "", client, ci)
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()

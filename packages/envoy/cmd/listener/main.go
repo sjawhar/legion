@@ -45,8 +45,8 @@ type listenerDeps struct {
 
 func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
 	return webhook.CIRecorderFuncs{
-		RecordFunc: func(owner, repo, number, sha, name, id, url, status, conclusion, observedAt string) error {
-			return deps.Load().ciStore.Record(owner, repo, number, sha, name, id, url, status, conclusion, observedAt)
+		RecordFunc: func(owner, repo, number, sha, name, suiteID, id, url, status, conclusion, observedAt string) error {
+			return deps.Load().ciStore.RecordWithSuite(owner, repo, number, sha, name, suiteID, id, url, status, conclusion, observedAt)
 		},
 		RecordSuiteFunc: func(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
 			return deps.Load().ciStore.RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt)

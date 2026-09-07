@@ -19,13 +19,13 @@ func (f PublisherFunc) Publish(item contracts.Envelope) error {
 
 // CIRecorderFuncs adapts cistore functions required by CIRecorder.
 type CIRecorderFuncs struct {
-	RecordFunc      func(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error
+	RecordFunc      func(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error
 	RecordSuiteFunc func(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error
 	RecordHeadFunc  func(owner, repo, number, sha, updatedAt string) error
 }
 
-func (f CIRecorderFuncs) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
-	return f.RecordFunc(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt)
+func (f CIRecorderFuncs) Record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
+	return f.RecordFunc(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt)
 }
 
 func (f CIRecorderFuncs) RecordSuite(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {

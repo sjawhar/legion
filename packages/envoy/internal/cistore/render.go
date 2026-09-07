@@ -79,21 +79,31 @@ type Summary struct {
 // sorted; publication owns the settlement timestamp and JSON encoding.
 func renderSummary(s State) Summary {
 	groups := map[category][]string{}
-	for name, c := range s.Checks {
-		cat := classify(c)
-		groups[cat] = append(groups[cat], name)
-	}
-	failed := group(groups[catFailed])
 	failingChecks := make([]struct {
 		Name string `json:"name"`
 		URL  string `json:"url"`
-	}, len(failed.Checks))
-	for i, name := range failed.Checks {
-		failingChecks[i] = struct {
-			Name string `json:"name"`
-			URL  string `json:"url"`
-		}{Name: name, URL: s.Checks[name].URL}
+	}, 0)
+	for key, check := range s.Checks {
+		name := check.Name
+		if name == "" {
+			name = key
+		}
+		category := classify(check)
+		groups[category] = append(groups[category], name)
+		if category == catFailed {
+			failingChecks = append(failingChecks, struct {
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			}{Name: name, URL: check.URL})
+		}
 	}
+	sort.Slice(failingChecks, func(i, j int) bool {
+		if failingChecks[i].Name == failingChecks[j].Name {
+			return failingChecks[i].URL < failingChecks[j].URL
+		}
+		return failingChecks[i].Name < failingChecks[j].Name
+	})
+	failed := group(groups[catFailed])
 	sum := Summary{
 		Kind:          "checks",
 		Repo:          s.Owner + "/" + s.Repo,
@@ -108,7 +118,7 @@ func renderSummary(s State) Summary {
 		Skipped:       group(groups[catSkipped]),
 		FailingChecks: failingChecks,
 	}
-	if s.Generation > 0 {
+	if s.Generation > s.InitialGeneration {
 		sum.SupersededSettlement = "true"
 	}
 	return sum

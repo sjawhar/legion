@@ -80,7 +80,7 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 }
 
 // CIObservation is a per-PR check_run or check_suite fact for the CI state
-// aggregator. A suite observation has SuiteID set and no CheckName.
+// aggregator. A check run carries its parent SuiteID when GitHub provides it.
 type CIObservation struct {
 	Owner      string
 	Repo       string
@@ -129,6 +129,7 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 	if event == "check_run" {
 		obs.CheckName = nestedString(body, key, "name")
 		obs.CheckRunID = nestedNumberString(body, key, "id")
+		obs.SuiteID = nestedNumberString(body, key, "check_suite", "id")
 		obs.URL = nestedString(body, key, "html_url")
 		obs.ObservedAt = nestedString(body, key, "completed_at")
 		if obs.ObservedAt == "" {
@@ -381,28 +382,51 @@ func githubKind(event string) string {
 	}
 }
 
+// GithubPRNumber returns a non-negative integer encoded as a JSON number or decimal-digit string.
+func GithubPRNumber(value any) string {
+	switch number := value.(type) {
+	case float64:
+		if math.IsNaN(number) || math.IsInf(number, 0) || number < 0 || number != math.Trunc(number) {
+			return ""
+		}
+		return strconv.FormatFloat(number, 'f', -1, 64)
+	case int:
+		if number < 0 {
+			return ""
+		}
+		return strconv.Itoa(number)
+	case int64:
+		if number < 0 {
+			return ""
+		}
+		return strconv.FormatInt(number, 10)
+	case uint64:
+		return strconv.FormatUint(number, 10)
+	case string:
+		if number == "" {
+			return ""
+		}
+		for _, character := range number {
+			if character < '0' || character > '9' {
+				return ""
+			}
+		}
+		return number
+	default:
+		return ""
+	}
+}
+
 func githubNumber(event string, body map[string]any) string {
 	switch event {
 	case "pull_request", "pull_request_review", "pull_request_review_comment":
-		n := nested(body, "pull_request", "number")
-		if n != nil {
-			return fmt.Sprintf("%v", n)
-		}
+		return GithubPRNumber(nested(body, "pull_request", "number"))
 	case "issues":
-		n := nested(body, "issue", "number")
-		if n != nil {
-			return fmt.Sprintf("%v", n)
-		}
+		return GithubPRNumber(nested(body, "issue", "number"))
 	case "sub_issues":
-		n := nested(body, "parent_issue", "number")
-		if n != nil {
-			return fmt.Sprintf("%v", n)
-		}
+		return GithubPRNumber(nested(body, "parent_issue", "number"))
 	case "issue_comment":
-		n := nested(body, "issue", "number")
-		if n != nil {
-			return fmt.Sprintf("%v", n)
-		}
+		return GithubPRNumber(nested(body, "issue", "number"))
 	case "check_run", "check_suite":
 		if nums := githubCIPullRequests(event, body); len(nums) > 0 {
 			return nums[0]
@@ -448,9 +472,8 @@ func githubCIPullRequests(event string, body map[string]any) []string {
 		if prMap == nil {
 			continue
 		}
-		n := prMap["number"]
-		if n != nil {
-			nums = append(nums, fmt.Sprintf("%v", n))
+		if number := GithubPRNumber(prMap["number"]); number != "" {
+			nums = append(nums, number)
 		}
 	}
 	return nums

@@ -604,7 +604,7 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 			slog.String("stream", streamName),
 			slog.String("subjects_filter", subjectsFilter),
 			slog.String("error", err.Error()))
-		return ""
+		return fmt.Sprintf("could not verify GitHub wiring for %s/%s: %v", owner, repo, err)
 	}
 	if info == nil || len(info.State.Subjects) == 0 {
 		return fmt.Sprintf("no GitHub event for %s/%s in the stream's retention window; is the App installed there?", owner, repo)

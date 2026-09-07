@@ -406,6 +406,39 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	}
 }
 
+func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	inspector := &fakeStreamInfo{err: errors.New("nats unavailable")}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{
+		client:     client,
+		registry:   registry,
+		sessions:   sessions,
+		streamName: "notifications",
+		streamInfo: inspector,
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
+		"session_id":"ses_subscriber",
+		"self_subscribed":true,
+		"topics":["notifications.github.example-org.example-repo.pr.>"]
+	}`))
+	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+
+	var response struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode subscribe response: %v", err)
+	}
+	const want = "could not verify GitHub wiring for example-org/example-repo: nats unavailable"
+	if len(response.Warnings) != 1 || response.Warnings[0] != want {
+		t.Fatalf("warnings = %#v, want [%q]", response.Warnings, want)
+	}
+}
+
 func TestUnwiredRepositoryWarningSkipsWildcardRepositorySegment(t *testing.T) {
 	inspector := &fakeStreamInfo{info: &nats.StreamInfo{}}
 	deps := &listenerDeps{streamName: "notifications", streamInfo: inspector}
@@ -451,8 +484,9 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode subscribe response: %v", err)
 	}
-	if len(response.Warnings) != 0 {
-		t.Fatalf("warnings = %#v, want no warning after timed-out inspection", response.Warnings)
+	const want = "could not verify GitHub wiring for example-org/example-repo: context deadline exceeded"
+	if len(response.Warnings) != 1 || response.Warnings[0] != want {
+		t.Fatalf("warnings = %#v, want [%q]", response.Warnings, want)
 	}
 }
 

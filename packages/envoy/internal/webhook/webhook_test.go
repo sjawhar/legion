@@ -19,7 +19,7 @@ func (m *mockPublisher) Publish(item contracts.Envelope) error {
 
 // ciCall records one CIRecorder.Record invocation.
 type ciCall struct {
-	owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string
+	owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string
 }
 
 // headCall records one CIRecorder.RecordHead invocation.
@@ -41,8 +41,8 @@ type mockRecorder struct {
 	headErr    error
 }
 
-func (m *mockRecorder) Record(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
-	m.calls = append(m.calls, ciCall{owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt})
+func (m *mockRecorder) Record(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
+	m.calls = append(m.calls, ciCall{owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt})
 	return m.err
 }
 
@@ -61,8 +61,8 @@ func TestCIRecorderFuncs(t *testing.T) {
 	var suite suiteCall
 	var head headCall
 	recorder := CIRecorderFuncs{
-		RecordFunc: func(owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
-			record = ciCall{owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt}
+		RecordFunc: func(owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt string) error {
+			record = ciCall{owner, repo, number, sha, checkName, suiteID, checkRunID, url, status, conclusion, observedAt}
 			return nil
 		},
 		RecordSuiteFunc: func(owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
@@ -74,8 +74,7 @@ func TestCIRecorderFuncs(t *testing.T) {
 			return nil
 		},
 	}
-
-	if err := recorder.Record("example-org", "example-repo", "42", "abcdef1234567", "unit-tests", "987654321", "https://example-host/checks/987654321", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+	if err := recorder.Record("example-org", "example-repo", "42", "abcdef1234567", "unit-tests", "900", "987654321", "https://example-host/checks/987654321", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if err := recorder.RecordSuite("example-org", "example-repo", "42", "abcdef1234567", "900", "completed", "success", "77", "2026-09-07T03:00:00Z"); err != nil {
@@ -84,7 +83,7 @@ func TestCIRecorderFuncs(t *testing.T) {
 	if err := recorder.RecordHead("example-org", "example-repo", "42", "abcdef1234567", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record head: %v", err)
 	}
-	if record.checkRunID != "987654321" || record.url != "https://example-host/checks/987654321" ||
+	if record.suiteID != "900" || record.checkRunID != "987654321" || record.url != "https://example-host/checks/987654321" ||
 		record.observedAt != "2026-09-07T03:00:00Z" {
 		t.Fatalf("record adapter lost check identity: %+v", record)
 	}

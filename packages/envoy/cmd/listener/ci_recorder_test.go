@@ -32,7 +32,7 @@ func TestCIRecorderDefersDependencyLoadUntilInvocation(t *testing.T) {
 		number = "42"
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
-	if err := recorder.Record(owner, repo, number, sha, "build", "800", "https://example-host/checks/800", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+	if err := recorder.Record(owner, repo, number, sha, "build", "900", "800", "https://example-host/checks/800", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}
 	if err := recorder.RecordSuite(owner, repo, number, sha, "900", "completed", "success", "77", "2026-09-07T03:00:00Z"); err != nil {

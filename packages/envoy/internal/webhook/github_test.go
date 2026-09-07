@@ -14,6 +14,38 @@ import (
 	"testing"
 )
 
+func TestGithubPullRequestHeadRequiresStrictPRNumber(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		number     any
+		wantNumber string
+		wantOK     bool
+	}{
+		{name: "integer number", number: float64(42), wantNumber: "42", wantOK: true},
+		{name: "decimal digit string", number: "42", wantNumber: "42", wantOK: true},
+		{name: "fractional number", number: 42.5},
+		{name: "non-numeric string", number: "abc"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := map[string]any{
+				"action": "opened",
+				"number": test.number,
+				"repository": map[string]any{
+					"name":  "example-repo",
+					"owner": map[string]any{"login": "example-org"},
+				},
+				"pull_request": map[string]any{
+					"head": map[string]any{"sha": "abcdef"},
+				},
+			}
+			_, _, number, _, _, ok := githubPullRequestHead("pull_request", payload)
+			if number != test.wantNumber || ok != test.wantOK {
+				t.Fatalf("githubPullRequestHead() = number %q, ok %t; want number %q, ok %t", number, ok, test.wantNumber, test.wantOK)
+			}
+		})
+	}
+}
+
 func TestGitHubHandler(t *testing.T) {
 	// Minimal issue_comment payload (no mention)
 	issueCommentNoMention := `{
@@ -335,6 +367,7 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 			"conclusion": "failure",
 			"completed_at": "2026-09-07T03:00:00Z",
 			"head_sha": "deadbeef",
+			"check_suite": {"id": 900},
 			"pull_requests": [{"number": 42}, {"number": 43}]
 		},
 		"sender": {"login": "github-actions[bot]", "type": "Bot"},
@@ -364,6 +397,9 @@ func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
 		}
 		if rec.calls[0].number != "42" || rec.calls[1].number != "43" {
 			t.Fatalf("recorded PR numbers = %q, %q", rec.calls[0].number, rec.calls[1].number)
+		}
+		if rec.calls[0].suiteID != "900" || rec.calls[1].suiteID != "900" {
+			t.Fatalf("recorded suite IDs = %q, %q", rec.calls[0].suiteID, rec.calls[1].suiteID)
 		}
 		if rec.calls[0].observedAt != "2026-09-07T03:00:00Z" || rec.calls[1].observedAt != "2026-09-07T03:00:00Z" {
 			t.Fatalf("check observation timestamps = %q, %q", rec.calls[0].observedAt, rec.calls[1].observedAt)

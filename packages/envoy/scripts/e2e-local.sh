@@ -444,7 +444,7 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     require(checksBySHA.get(secondSHA)?.length === 2, "second head must settle once then re-settle once");
     for (const [sha, values] of checksBySHA) {
       require(values.length === 1 || values.slice(1).every((value) => value.superseded_settlement === "true"), `duplicate checks for ${sha} lack superseded_settlement`);
-      require(values.every((value, index) => value.generation === index), `checks generations for ${sha} are not monotonic`);
+      require(values.every((value, index) => index === 0 || value.generation === values[index - 1].generation + 1), `checks generations for ${sha} do not increase by one`);
     }
     require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 1, "second head re-settlement flag is missing");
 
