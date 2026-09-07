@@ -400,8 +400,11 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       const rawPayload = recordPayload(envelope);
       if (
         subject.startsWith("notifications.github.") &&
-        rawPayload?.kind === undefined &&
-        asRecord(rawPayload?.pull_request)
+        rawPayload &&
+        rawPayload.kind === undefined &&
+        asRecord(rawPayload.pull_request) &&
+        !("review" in rawPayload) &&
+        !("comment" in rawPayload)
       ) {
         console.warn(
           "legion: ignored raw-shaped GitHub payload (nested pull_request); Envoy emits kind/action/head_sha"

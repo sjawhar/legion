@@ -432,12 +432,103 @@ describe("startDaemon", () => {
             healed: 1,
             reconciledLabels: 2,
             excludedNullContentItems: 0,
+            ciFetchFailures: 0,
+            ciFetchFailureDetails: [],
           },
         },
       ]);
       expect(saves).toBeGreaterThan(0);
       expect(logs).toContain(
-        "[legion] resync complete: anomalies=0 healed=1 reconciled-labels=2 excluded-null-content-items=0"
+        "[legion] resync complete: anomalies=0 healed=1 reconciled-labels=2 excluded-null-content-items=0 ciFetchFailures=0"
+      );
+    } finally {
+      await daemon?.stop();
+      console.log = originalLog;
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("logs an owner CI fetch failure instead of treating its PR as closed", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const prIssue = formatIssueKey("acme", "widgets", 42);
+    state.prs["acme/widgets#7"] = {
+      key: prIssue,
+      repo: "acme/widgets",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 900,
+      fixAttempts: 0,
+    };
+    const logs: string[] = [];
+    const originalLog = console.log;
+    let resync: (() => void) | undefined;
+    let resyncComplete: Promise<void> | undefined;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    let tokenCalls = 0;
+    console.log = (...values: unknown[]) => logs.push(values.join(" "));
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => ({
+            stdout: command[0] === "sh" ? "LEGION_OMP_AGENTS=available\n" : "",
+            stderr: "",
+            exitCode: 0,
+          }),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          fetchGitHubProjectItems: async () => ({
+            items: [],
+            excludedNullContentItems: 0,
+          }),
+          tokenManager: {
+            getToken: async () => {
+              tokenCalls += 1;
+              if (tokenCalls > 2) throw new Error("GitHub App token request failed");
+              return {
+                token: "test-token",
+                expiresAt: "2026-08-25T00:00:00.000Z",
+                gitIdentity: {
+                  name: "legion-implement[bot]",
+                  email: "1+legion-implement[bot]@users.noreply.github.com",
+                },
+              };
+            },
+          },
+          setTimeout: (callback) => {
+            resync = () => {
+              resyncComplete = Promise.resolve().then(callback);
+            };
+            return 1 as never;
+          },
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      if (!resync) throw new Error("Daemon did not schedule resync");
+      resync();
+      if (!resyncComplete) throw new Error("Daemon did not start resync");
+      await resyncComplete;
+
+      expect(state.prs["acme/widgets#7"]).toMatchObject({
+        verdict: "green",
+        ciLatestRunId: 900,
+      });
+      expect(logs).toContain(
+        "[legion] resync complete: anomalies=0 healed=0 reconciled-labels=0 excluded-null-content-items=0 ciFetchFailures=1 ciFetchFailureDetails=owner=acme error=GitHub App token request failed"
       );
     } finally {
       await daemon?.stop();

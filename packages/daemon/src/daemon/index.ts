@@ -5,7 +5,7 @@ import path from "node:path";
 import { type IssueKey, roleToken, roleTopic } from "@legion/contracts";
 import { connect, StringCodec, type Subscription } from "nats";
 import {
-  type CiAndMergeStatus,
+  type CiFetchResult,
   type CommandRunner,
   defaultRunner,
   getCiStatusBatch,
@@ -122,7 +122,7 @@ export function createBoardProjectItemsFetcher(
 export function createCiStatusFetcher(
   tokenManager: Pick<TokenManager, "getToken">,
   runner: CommandRunner = defaultRunner
-): (prRefs: Record<string, GitHubPRRef>) => Promise<Record<string, CiAndMergeStatus>> {
+): (prRefs: Record<string, GitHubPRRef>) => Promise<Record<string, CiFetchResult>> {
   return (prRefs) =>
     getCiStatusBatch(prRefs, runner, async (owner) => {
       const lease = await tokenManager.getToken("implement", owner);
@@ -376,7 +376,13 @@ export async function startDaemon(
       now: deps.now,
     });
     console.log(
-      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems}`
+      `[legion] resync complete: anomalies=${payload.anomalies.length} healed=${payload.healed} reconciled-labels=${payload.reconciledLabels} excluded-null-content-items=${payload.excludedNullContentItems} ciFetchFailures=${payload.ciFetchFailures}${
+        payload.ciFetchFailureDetails.length === 0
+          ? ""
+          : ` ciFetchFailureDetails=${payload.ciFetchFailureDetails
+              .map(({ owner, error }) => `owner=${owner} error=${error}`)
+              .join(" ")}`
+      }`
     );
     await eventPump.publishControllerEvent(payload, {
       event_id: `resync:${randomUUID()}`,

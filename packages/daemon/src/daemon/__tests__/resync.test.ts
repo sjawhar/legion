@@ -70,6 +70,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
   it("reports and re-emits triage for an unadmitted tracked open issue without a tree", async () => {
@@ -96,6 +98,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
     expect(dispatched).toEqual([
       {
@@ -135,6 +139,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
     expect(dispatched).toEqual([]);
   });
@@ -151,6 +157,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
 
@@ -195,6 +203,8 @@ describe("runResync", () => {
       healed: 1,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
 
@@ -260,6 +270,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 2,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
 
@@ -284,6 +296,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
     expect(state.issues[issue]).toBeUndefined();
     expect(effects).toEqual([]);
@@ -306,6 +320,8 @@ describe("runResync", () => {
       healed: 1,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
 
@@ -333,6 +349,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
 
@@ -353,6 +371,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
   it("completes the resync while reporting board items excluded for null content", async () => {
@@ -371,6 +391,8 @@ describe("runResync", () => {
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 1,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     });
   });
   it("settles a reconciled green PR and notifies its approved architect", async () => {
@@ -961,5 +983,37 @@ describe("runResync", () => {
       ciLatestRunId: null,
     });
     expect(dispatched).toEqual([]);
+  });
+
+  it("leaves a PR untouched and reports an owner CI fetch failure", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 900,
+      fixAttempts: 0,
+    };
+    const before = structuredClone(state.prs["sjawhar/legion#7"]);
+
+    const event = await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          owner: "sjawhar",
+          error: "GitHub App token request failed",
+        },
+      }),
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toEqual(before);
+    expect(event).toMatchObject({
+      ciFetchFailures: 1,
+      ciFetchFailureDetails: [{ owner: "sjawhar", error: "GitHub App token request failed" }],
+    });
   });
 });

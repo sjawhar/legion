@@ -387,6 +387,17 @@ export interface CiAndMergeStatus {
   latestCheckRunId: number | null;
 }
 
+export interface CiFetchFailure {
+  owner: string;
+  error: string;
+}
+
+export type CiFetchResult = CiAndMergeStatus | CiFetchFailure;
+
+export function isCiFetchFailure(result: CiFetchResult): result is CiFetchFailure {
+  return "error" in result;
+}
+
 const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
   ACTION_REQUIRED: true,
   CANCELLED: true,
@@ -482,7 +493,9 @@ async function fetchRemainingContextNodes(
       runnerOptions,
       maxAttempts
     );
-    const rollup = recordValue(recordValue(recordValue(data.repository)?.object)?.statusCheckRollup);
+    const rollup = recordValue(
+      recordValue(recordValue(data.repository)?.object)?.statusCheckRollup
+    );
     if (!rollup) {
       throw new GitHubAPIError("GitHub returned an invalid paginated check rollup");
     }
@@ -509,7 +522,7 @@ export async function getCiStatusBatch(
   prRefs: Record<string, GitHubPRRefType>,
   runner: CommandRunner = defaultRunner,
   runnerOptionsForOwner?: OwnerCommandRunnerOptionsProvider
-): Promise<Record<string, CiAndMergeStatus>> {
+): Promise<Record<string, CiFetchResult>> {
   if (!runnerOptionsForOwner) {
     if (runner === defaultRunner) {
       throw new Error("Owner-scoped GitHub App runner options are required for GraphQL reads");
@@ -528,7 +541,7 @@ export async function getCiStatusBatch(
     }
   }
 
-  const result: Record<string, CiAndMergeStatus> = {};
+  const result: Record<string, CiFetchResult> = {};
   for (const batch of batches.values()) {
     try {
       Object.assign(
@@ -536,20 +549,13 @@ export async function getCiStatusBatch(
         await getCiStatusBatchWithOptions(
           batch.refs,
           runner,
-          await runnerOptionsForOwner(batch.owner),
-          1
+          await runnerOptionsForOwner(batch.owner)
         )
       );
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       for (const issueId of Object.keys(batch.refs)) {
-        result[issueId] = {
-          ciStatus: null,
-          mergeableStatus: null,
-          headSha: null,
-          isOpen: false,
-          updatedAt: null,
-          latestCheckRunId: null,
-        };
+        result[issueId] = { owner: batch.owner, error: message };
       }
     }
   }
@@ -652,7 +658,9 @@ async function getCiStatusBatchWithOptions(
       let contextNodes = initialContexts.nodes;
       if (ciStatus === CiStatus.FAILING && initialContexts.hasNextPage) {
         if (!headSha) {
-          throw new GitHubAPIError(`GitHub returned a paginated check rollup without an oid for ${issueId}`);
+          throw new GitHubAPIError(
+            `GitHub returned a paginated check rollup without an oid for ${issueId}`
+          );
         }
         contextNodes = await fetchRemainingContextNodes(
           initialContexts,
@@ -669,7 +677,9 @@ async function getCiStatusBatchWithOptions(
         mergeableStatus: mapMergeableState(
           typeof mergeable === "string" || mergeable === null ? mergeable : null
         ),
-        ...(ciStatus === CiStatus.FAILING ? { failingChecks: failingCheckNames(contextNodes) } : {}),
+        ...(ciStatus === CiStatus.FAILING
+          ? { failingChecks: failingCheckNames(contextNodes) }
+          : {}),
         headSha,
         isOpen: rawPr.state === "OPEN",
         updatedAt,

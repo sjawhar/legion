@@ -1,5 +1,5 @@
 import { formatIssueKey, type IssueKey } from "@legion/contracts";
-import type { CiAndMergeStatus } from "../state/fetch";
+import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { LegionState } from "./legion-state";
@@ -24,6 +24,8 @@ export interface LegionEventPayload {
   healed: number;
   reconciledLabels: number;
   excludedNullContentItems: number;
+  ciFetchFailures: number;
+  ciFetchFailureDetails: CiFetchFailure[];
 }
 
 export interface RunResyncDeps {
@@ -33,9 +35,7 @@ export interface RunResyncDeps {
     items: Record<string, unknown>[];
     excludedNullContentItems?: number;
   }>;
-  fetchCiStatusBatch(
-    prRefs: Record<string, GitHubPRRef>
-  ): Promise<Record<string, CiAndMergeStatus>>;
+  fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   now(): number;
 }
@@ -157,7 +157,7 @@ function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
   return false;
 }
 
-async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
+async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFailure[]> {
   const refs: Record<string, GitHubPRRef> = {};
   const heads = new Map<string, string>();
   for (const [prKey, pr] of Object.entries(deps.state.prs)) {
@@ -165,14 +165,24 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
     refs[prKey] = { owner, repo, number: pr.number };
     heads.set(prKey, pr.headSha);
   }
-  if (Object.keys(refs).length === 0) return;
+  if (Object.keys(refs).length === 0) return [];
 
   const statuses = await deps.fetchCiStatusBatch(refs);
+  const ciFetchFailures: CiFetchFailure[] = [];
+  const reportedFailures = new Set<string>();
   for (const [prKey, ref] of Object.entries(refs)) {
     const pr = deps.state.prs[prKey];
     const status = statuses[prKey];
-    if (!pr || !status || pr.headSha !== heads.get(prKey) || !status.isOpen || !status.headSha)
+    if (!pr || !status || pr.headSha !== heads.get(prKey)) continue;
+    if (isCiFetchFailure(status)) {
+      const failureKey = `${status.owner}\u0000${status.error}`;
+      if (!reportedFailures.has(failureKey)) {
+        reportedFailures.add(failureKey);
+        ciFetchFailures.push(status);
+      }
       continue;
+    }
+    if (!status.isOpen || !status.headSha) continue;
 
     if (pr.headSha !== status.headSha) {
       if (!status.updatedAt) {
@@ -211,6 +221,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
       issued_at: now,
     });
   }
+  return ciFetchFailures;
 }
 
 /**
@@ -227,12 +238,14 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
       healed: 0,
       reconciledLabels: 0,
       excludedNullContentItems: 0,
+      ciFetchFailures: 0,
+      ciFetchFailureDetails: [],
     };
   }
 
   lastRunAt.set(deps.state, now);
   const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
-  await reconcilePrs(deps, now);
+  const ciFetchFailureDetails = await reconcilePrs(deps, now);
   if (
     items.length > 0 &&
     deps.config.boardProjectIds.length === 0 &&
@@ -368,5 +381,7 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
     healed,
     reconciledLabels,
     excludedNullContentItems,
+    ciFetchFailures: ciFetchFailureDetails.length,
+    ciFetchFailureDetails,
   };
 }

@@ -833,6 +833,28 @@ describe("getCiStatusBatch", () => {
     expect(callCount).toBe(3);
   });
 
+  it("returns a typed owner failure after retrying its owner-scoped batch", async () => {
+    let callCount = 0;
+    const runner: CommandRunner = async () => {
+      callCount += 1;
+      return { stdout: "", stderr: "owner request failed", exitCode: 1 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "acme", repo: "repo", number: 1 } },
+      runner,
+      async () => ({ env: { GH_TOKEN: "owner-token" } })
+    );
+
+    expect(callCount).toBe(3);
+    expect(result).toEqual({
+      "ENG-21": {
+        owner: "acme",
+        error: "GraphQL query failed: owner request failed",
+      },
+    });
+  });
+
   it("returns empty result for empty pr_refs", async () => {
     let callCount = 0;
     const runner: CommandRunner = async (_cmd: string[]) => {

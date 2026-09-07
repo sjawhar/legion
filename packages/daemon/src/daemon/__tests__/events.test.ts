@@ -267,6 +267,79 @@ describe("core-NATS event pump", () => {
     }
   });
 
+  it("routes raw review and review-comment payloads with a nested pull request", async () => {
+    const { state, issue, implementer } = stateForIssue();
+    state.prs["acme/widgets#7"] = checkPr(issue);
+    const nats = new FakeNats();
+    const published: Array<{ topic: string; payloadJson: string }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pump = startEventPump(
+      deps(state, nats, async (topic, payloadJson) => {
+        published.push({ topic, payloadJson });
+      })
+    );
+
+    try {
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request_review.submitted",
+        envelope({
+          action: "submitted",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 7, head: { sha: "head-1" } },
+          review: {
+            user: { login: "reviewer" },
+            state: "approved",
+            commit_id: "head-1",
+            body: "Looks good",
+          },
+        })
+      );
+      await pump.drain();
+      nats.emit(
+        "notifications.github.acme.widgets.pull_request_review_comment.created",
+        envelope({
+          action: "created",
+          repository: { full_name: "acme/widgets" },
+          pull_request: { number: 7, head: { sha: "head-1" } },
+          comment: {
+            user: { login: "reviewer" },
+            body: "Please rename this",
+            path: "src/index.ts",
+            html_url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+          },
+        })
+      );
+      await pump.drain();
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(state.prs["acme/widgets#7"]?.reviewDecision).toBe("approved");
+      expect(published).toEqual([
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({
+            type: "pr-review",
+            state: "approved",
+            author: "reviewer",
+            body: "Looks good",
+          }),
+        },
+        {
+          topic: roleTopic(implementer),
+          payloadJson: JSON.stringify({
+            type: "pr-review-comment",
+            author: "reviewer",
+            body: "Please rename this",
+            path: "src/index.ts",
+            url: "https://github.com/acme/widgets/pull/7#discussion_r1",
+          }),
+        },
+      ]);
+    } finally {
+      pump.stop();
+      warn.mockRestore();
+    }
+  });
+
   it("logs the subject and event ID after consuming a GitHub envelope", async () => {
     const { state, architect } = stateForIssue();
     const nats = new FakeNats();
@@ -408,7 +481,10 @@ describe("core-NATS event pump", () => {
 
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
-      envelope(settledChecks({ latest_check_run_id: 2, settled_at: 2_000 }), "settled-without-emission")
+      envelope(
+        settledChecks({ latest_check_run_id: 2, settled_at: 2_000 }),
+        "settled-without-emission"
+      )
     );
     await pump.drain();
     expect(saveState).toHaveBeenCalledTimes(savesAfterEmission + 1);
