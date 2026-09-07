@@ -32,9 +32,9 @@ carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`.
 base PR topic and CI arrives as one settled `checks` event, so this default receives the useful
 signals without redundant subscriptions.
 
-## How to read a notification
+## Inbound deliveries
 
-Envoy renders delivery metadata before the source summary and payload:
+Envoy renders an annotated delivery before its source summary and complete payload:
 
 ```text
 envoy:
@@ -46,17 +46,28 @@ envoy:
   urgency: high
   expects_reply: required
   re: agent-message-1
+  supersedes: agent-message-0
   reply_with: "envoy_send(session_id=\"01a0bbbb-cccc-7ddd-eeee-0123456789ab\", message=\"...\")"
   reply_role: "envoy_publish(topic=\"notifications.role.legion-reviewer\", message=\"...\")"
-  summary: "First paragraph."
-  message: "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+  summary: Deployment needs confirmation.
+  message: "Confirm the listener health check passed.\n\nThen publish the release."
+  note: body names session 01a0cccc-dddd-7eee-ffff-0123456789ab; the sender is 01a0bbbb-cccc-7ddd-eeee-0123456789ab
 ```
 
-- `to: you` means this is in your inbox. `from` and the generated `reply_with` identify the reply
-target.
-- Use `at` for freshness and `id` as `in_reply_to`.
-- Never use a session ID quoted in `message` as the recipient. A reply was once misrouted that
-way; delivery metadata is authoritative.
+- `to` identifies the local inbox receiving this delivery.
+- `from` identifies the sender; it is the authoritative direct-reply target.
+- `at` is the envelope timestamp used to judge freshness.
+- `id` is the delivery identifier; supply it as `in_reply_to` when replying.
+- `by` is the expiry deadline, when the sender supplied one.
+- `urgency` is the sender's priority classification.
+- `expects_reply` states whether a reply is `none`, `optional`, or `required`.
+- `re` names the delivery this message replies to.
+- `supersedes` names an earlier delivery this one replaces.
+- `reply_with` is the direct-reply call for the sender.
+- `reply_role` is the role-publish reply call when the sender has a role.
+- `summary` is the one-line source summary.
+- `message` is the complete payload; it can contain multiple paragraphs.
+- `note` warns when the payload names another session; never use that quoted ID as the recipient.
 
 ## Talking to another session
 
