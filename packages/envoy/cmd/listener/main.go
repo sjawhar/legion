@@ -585,9 +585,9 @@ func main() {
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 
-	// Phase 6b2: Start the CI summary loop. It emits one debounced, per-commit CI
-	// summary to pr.<n>.ci once a commit's checks have been quiet for the debounce
-	// window (ENVOY_CI_DEBOUNCE, default 5s). Emit-once is guarded by a KV CAS.
+	// Phase 6b2: Start the CI summary loop. It emits one pr.<n>.checks event
+	// once the head commit's checks settle; new runs re-arm settlement. The
+	// debounce window is ENVOY_CI_DEBOUNCE (default 5s).
 	ciDebounce := 5 * time.Second
 	if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
 		if d, perr := time.ParseDuration(v); perr == nil {
