@@ -8,6 +8,7 @@ import {
   type EnvelopeJson,
   type ReducerConfig,
   reduceGithubEvent,
+  resetPrHead,
   settleCiVerdict,
 } from "./reducers";
 
@@ -156,11 +157,10 @@ function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
   return false;
 }
 
-async function reconcileUnsettledPrs(deps: RunResyncDeps, now: number): Promise<void> {
+async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<void> {
   const refs: Record<string, GitHubPRRef> = {};
   const heads = new Map<string, string>();
   for (const [prKey, pr] of Object.entries(deps.state.prs)) {
-    if (pr.verdict !== null) continue;
     const [owner, repo] = pr.repo.split("/");
     refs[prKey] = { owner, repo, number: pr.number };
     heads.set(prKey, pr.headSha);
@@ -171,27 +171,28 @@ async function reconcileUnsettledPrs(deps: RunResyncDeps, now: number): Promise<
   for (const [prKey, ref] of Object.entries(refs)) {
     const pr = deps.state.prs[prKey];
     const status = statuses[prKey];
-    if (!pr || !status || pr.verdict !== null || pr.headSha !== heads.get(prKey)) continue;
+    if (!pr || !status || pr.headSha !== heads.get(prKey) || !status.isOpen || !status.headSha)
+      continue;
 
+    if (pr.headSha !== status.headSha) resetPrHead(pr, status.headSha);
     const verdict =
       status.ciStatus === "passing" ? "green" : status.ciStatus === "failing" ? "red" : null;
     if (verdict === null) continue;
-    await deps.applyEffects(
-      settleCiVerdict(
-        deps.state,
-        pr,
-        {
-          verdict,
-          failing: status.failingChecks ?? [],
-          settledAt: now,
-        },
-        deps.config
-      ),
+    const effects = settleCiVerdict(
+      deps.state,
+      pr,
       {
-        event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
-        issued_at: now,
-      }
+        verdict,
+        failing: status.failingChecks ?? [],
+        settledAt: now,
+      },
+      deps.config
     );
+    if (effects.length === 0) continue;
+    await deps.applyEffects(effects, {
+      event_id: `resync:${ref.owner}/${ref.repo}#${ref.number}:ci`,
+      issued_at: now,
+    });
   }
 }
 
@@ -214,7 +215,7 @@ export async function runResync(deps: RunResyncDeps): Promise<LegionEventPayload
 
   lastRunAt.set(deps.state, now);
   const { items, excludedNullContentItems = 0 } = await deps.fetchGitHubProjectItems();
-  await reconcileUnsettledPrs(deps, now);
+  await reconcilePrs(deps, now);
   if (
     items.length > 0 &&
     deps.config.boardProjectIds.length === 0 &&

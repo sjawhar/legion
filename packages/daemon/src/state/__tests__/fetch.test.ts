@@ -266,7 +266,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" },
+      "ENG-21": {
+        ciStatus: "passing",
+        mergeableStatus: "mergeable",
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -292,7 +297,13 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable", failingChecks: [] },
+      "ENG-21": {
+        ciStatus: "failing",
+        mergeableStatus: "mergeable",
+        failingChecks: [],
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -356,6 +367,91 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: ["lint", "legacy"],
+        headSha: null,
+        isOpen: false,
+      },
+    });
+  });
+
+  it("collects failing checks from every rollup contexts page", async () => {
+    const queries: string[][] = [];
+    let calls = 0;
+    const runner: CommandRunner = async (cmd: string[]) => {
+      queries.push(cmd);
+      calls += 1;
+      const response =
+        calls === 1
+          ? {
+              data: {
+                repo0: {
+                  pr0: {
+                    state: "OPEN",
+                    mergeable: "MERGEABLE",
+                    commits: {
+                      nodes: [
+                        {
+                          commit: {
+                            oid: "head-1",
+                            statusCheckRollup: {
+                              state: "FAILURE",
+                              contexts: {
+                                pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+                                nodes: [{ name: "lint", conclusion: "FAILURE" }],
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            }
+          : {
+              data: {
+                repository: {
+                  pullRequest: {
+                    commits: {
+                      nodes: [
+                        {
+                          commit: {
+                            statusCheckRollup: {
+                              contexts: {
+                                pageInfo: { hasNextPage: false, endCursor: null },
+                                nodes: [{ name: "unit", conclusion: "ERROR" }],
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            };
+      return { stdout: JSON.stringify(response), stderr: "", exitCode: 0 };
+    };
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+
+    expect(queries).toHaveLength(2);
+    expect(queries[0]?.find((argument) => argument.startsWith("query="))).toContain(
+      "pageInfo { hasNextPage endCursor }"
+    );
+    expect(queries[1]?.find((argument) => argument.startsWith("query="))).toContain(
+      "contexts(first: 100, after: $after)"
+    );
+    expect(queries[1]).toContain("after=cursor-1");
+    expect(result).toEqual({
+      "ENG-21": {
+        ciStatus: "failing",
+        mergeableStatus: "mergeable",
+        failingChecks: ["lint", "unit"],
+        headSha: "head-1",
+        isOpen: true,
       },
     });
   });
@@ -382,7 +478,13 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "failing", mergeableStatus: "mergeable", failingChecks: [] },
+      "ENG-21": {
+        ciStatus: "failing",
+        mergeableStatus: "mergeable",
+        failingChecks: [],
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -408,7 +510,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "pending", mergeableStatus: "mergeable" },
+      "ENG-21": {
+        ciStatus: "pending",
+        mergeableStatus: "mergeable",
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -434,7 +541,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "pending", mergeableStatus: "mergeable" },
+      "ENG-21": {
+        ciStatus: "pending",
+        mergeableStatus: "mergeable",
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -460,7 +572,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: null, mergeableStatus: "mergeable" },
+      "ENG-21": {
+        ciStatus: null,
+        mergeableStatus: "mergeable",
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -484,7 +601,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: null, mergeableStatus: null },
+      "ENG-21": {
+        ciStatus: null,
+        mergeableStatus: null,
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -499,7 +621,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: null, mergeableStatus: null },
+      "ENG-21": {
+        ciStatus: null,
+        mergeableStatus: null,
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -541,8 +668,19 @@ describe("getCiStatusBatch", () => {
 
     expect(queriesReceived).toHaveLength(1);
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" },
-      "ENG-22": { ciStatus: "failing", mergeableStatus: "conflicting", failingChecks: [] },
+      "ENG-21": {
+        ciStatus: "passing",
+        mergeableStatus: "mergeable",
+        headSha: null,
+        isOpen: false,
+      },
+      "ENG-22": {
+        ciStatus: "failing",
+        mergeableStatus: "conflicting",
+        failingChecks: [],
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 
@@ -573,7 +711,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: "passing", mergeableStatus: "mergeable" },
+      "ENG-21": {
+        ciStatus: "passing",
+        mergeableStatus: "mergeable",
+        headSha: null,
+        isOpen: false,
+      },
     });
     expect(callCount).toBe(3);
   });
@@ -627,7 +770,12 @@ describe("getCiStatusBatch", () => {
       runner
     );
     expect(result).toEqual({
-      "ENG-21": { ciStatus: null, mergeableStatus: "unknown" },
+      "ENG-21": {
+        ciStatus: null,
+        mergeableStatus: "unknown",
+        headSha: null,
+        isOpen: false,
+      },
     });
   });
 });

@@ -1,6 +1,7 @@
 import { formatIssueKey, type IssueKey, LegionDaemonApi, parseIssueKey } from "@legion/contracts";
 import { getApprovalState } from "../../approval-check";
 import type { LegionState } from "../../legion-state";
+import { resetPrHead } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import { asRecord, HttpError, requiredNumber, validateContractResponse } from "../http";
 
@@ -114,13 +115,7 @@ export async function handleMergeGate(
     throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
   }
   if (pr.headSha !== snapshot.head.sha) {
-    if (pr.verdict === "red") pr.fixAttempts += 1;
-    pr.headSha = snapshot.head.sha;
-    pr.verdict = null;
-    pr.failing = [];
-    pr.ciSettledAt = null;
-    pr.ciGeneration = null;
-    delete pr.reviewDecision;
+    resetPrHead(pr, snapshot.head.sha);
     await ctx.save();
   }
   const approval = await getApprovalState(

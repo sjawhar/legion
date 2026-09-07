@@ -313,6 +313,16 @@ function registerPr(
   return pr;
 }
 
+export function resetPrHead(pr: PrState, headSha: string): void {
+  if (pr.verdict === "red") pr.fixAttempts += 1;
+  pr.headSha = headSha;
+  pr.verdict = null;
+  pr.failing = [];
+  pr.ciSettledAt = null;
+  pr.ciGeneration = null;
+  delete pr.reviewDecision;
+}
+
 function removeBranchMappings(state: LegionState, prKey: string): void {
   for (const [branch, mapped] of Object.entries(state.prByBranch)) {
     if (mapped === prKey) delete state.prByBranch[branch];
@@ -650,15 +660,9 @@ function pullRequest(
       }
       return [{ kind: "approval-status", repo, pr: number, sha }];
     }
-    if (pr.verdict === "red") pr.fixAttempts += 1;
-    pr.headSha = sha;
+    resetPrHead(pr, sha);
     if (headUpdatedAt === undefined) delete pr.headUpdatedAt;
     else pr.headUpdatedAt = headUpdatedAt;
-    pr.verdict = null;
-    pr.failing = [];
-    pr.ciSettledAt = null;
-    pr.ciGeneration = null;
-    delete pr.reviewDecision;
     return [{ kind: "approval-status", repo, pr: number, sha }];
   }
   if (payload.action === "closed" && payload.merged === "false") {

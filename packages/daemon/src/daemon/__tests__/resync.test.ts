@@ -412,7 +412,12 @@ describe("runResync", () => {
       fetchCiStatusBatch: async (refs: Record<string, unknown>) => {
         fetches.push(refs);
         return {
-          "sjawhar/legion#7": { ciStatus: "passing" as const, mergeableStatus: null },
+          "sjawhar/legion#7": {
+            ciStatus: "passing" as const,
+            mergeableStatus: null,
+            headSha: "head-1",
+            isOpen: true,
+          },
         };
       },
       applyEffects: async (effects: Effect[], envelope: EnvelopeJson) => {
@@ -482,6 +487,8 @@ describe("runResync", () => {
           ciStatus: "failing" as const,
           mergeableStatus: null,
           failingChecks: ["lint", "unit"],
+          headSha: "head-1",
+          isOpen: true,
         },
       }),
       applyEffects: async (effects, envelope) => {
@@ -516,7 +523,168 @@ describe("runResync", () => {
     ]);
   });
 
-  it("does not fetch or alter a PR with an existing CI verdict", async () => {
+  it("moves a stale local head before applying GitHub's green rollup", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "red",
+      failing: ["unit"],
+      ciSettledAt: 1_000,
+      ciGeneration: 4,
+      fixAttempts: 0,
+      reviewDecision: "approved",
+    };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+    let fetches = 0;
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => {
+        fetches += 1;
+        return {
+          "sjawhar/legion#7": {
+            ciStatus: "passing" as const,
+            mergeableStatus: null,
+            headSha: "head-2",
+            isOpen: true,
+          },
+        };
+      },
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
+
+    expect(fetches).toBe(1);
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      headSha: "head-2",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      ciGeneration: null,
+      fixAttempts: 1,
+    });
+    expect(state.prs["sjawhar/legion#7"]?.reviewDecision).toBeUndefined();
+    expect(dispatched).toEqual([
+      {
+        effects: [
+          {
+            kind: "publish",
+            role: roleToken("omp", issue, "implementer"),
+            payload: { type: "ci-green", sha: "head-2" },
+          },
+        ],
+        envelope: {
+          event_id: "resync:sjawhar/legion#7:ci",
+          issued_at: Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      },
+    ]);
+  });
+
+  it("reconciles a stored red verdict to green", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "red",
+      failing: ["unit"],
+      ciSettledAt: 1_000,
+      ciGeneration: 4,
+      fixAttempts: 0,
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-1",
+          isOpen: true,
+        },
+      }),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "green",
+      failing: [],
+      ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      ciGeneration: 4,
+    });
+    expect(dispatched).toEqual([
+      [
+        {
+          kind: "publish",
+          role: roleToken("omp", issue, "implementer"),
+          payload: { type: "ci-green", sha: "head-1" },
+        },
+      ],
+    ]);
+  });
+
+  it("reconciles a stored green verdict to red with GitHub's failing checks", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciGeneration: 4,
+      fixAttempts: 0,
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "failing" as const,
+          mergeableStatus: null,
+          failingChecks: ["lint", "unit"],
+          headSha: "head-1",
+          isOpen: true,
+        },
+      }),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "red",
+      failing: ["lint", "unit"],
+      ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      ciGeneration: 4,
+    });
+    expect(dispatched).toEqual([
+      [
+        {
+          kind: "publish",
+          role: roleToken("omp", issue, "implementer"),
+          payload: {
+            type: "ci-settled-red",
+            failing: ["lint", "unit"],
+            sha: "head-1",
+          },
+        },
+      ],
+    ]);
+  });
+
+  it("quietly refreshes an unchanged green verdict", async () => {
     const state = newLegionState("omp", 1);
     state.prs["sjawhar/legion#7"] = {
       key: issue,
@@ -530,21 +698,115 @@ describe("runResync", () => {
       fixAttempts: 0,
     };
     let fetches = 0;
+    const dispatched: Effect[][] = [];
 
     await runResync({
       ...resyncDeps(state, []),
       fetchCiStatusBatch: async () => {
         fetches += 1;
-        return {};
+        return {
+          "sjawhar/legion#7": {
+            ciStatus: "passing" as const,
+            mergeableStatus: null,
+            headSha: "head-1",
+            isOpen: true,
+          },
+        };
+      },
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
       },
     });
 
-    expect(fetches).toBe(0);
+    expect(fetches).toBe(1);
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: "green",
+      ciSettledAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      ciGeneration: 4,
+    });
+    expect(dispatched).toEqual([]);
+  });
+
+  it("leaves a pending GitHub rollup untouched", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciGeneration: 4,
+      fixAttempts: 0,
+    };
+    let fetches = 0;
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => {
+        fetches += 1;
+        return {
+          "sjawhar/legion#7": {
+            ciStatus: "pending" as const,
+            mergeableStatus: null,
+            headSha: "head-1",
+            isOpen: true,
+          },
+        };
+      },
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(fetches).toBe(1);
     expect(state.prs["sjawhar/legion#7"]).toMatchObject({
       verdict: "green",
       failing: [],
       ciSettledAt: 1_000,
       ciGeneration: 4,
     });
+    expect(dispatched).toEqual([]);
+  });
+
+  it("skips a closed GitHub PR", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+      ciGeneration: null,
+      fixAttempts: 0,
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-1",
+          isOpen: false,
+        },
+      }),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({
+      verdict: null,
+      failing: [],
+      ciSettledAt: null,
+      ciGeneration: null,
+    });
+    expect(dispatched).toEqual([]);
   });
 });

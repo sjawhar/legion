@@ -343,6 +343,8 @@ export interface CiAndMergeStatus {
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
   failingChecks?: string[];
+  headSha: string | null;
+  isOpen: boolean;
 }
 
 const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
@@ -355,14 +357,9 @@ const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
   TIMED_OUT: true,
 };
 
-function failingCheckNames(rollup: Record<string, unknown> | undefined): string[] {
-  if (!rollup || !("contexts" in rollup)) return [];
-  const contexts = rollup.contexts;
-  if (typeof contexts !== "object" || contexts === null || Array.isArray(contexts)) return [];
-  if (!("nodes" in contexts) || !Array.isArray(contexts.nodes)) return [];
-
+function failingCheckNames(nodes: readonly unknown[]): string[] {
   const failing = new Set<string>();
-  for (const node of contexts.nodes) {
+  for (const node of nodes) {
     if (typeof node !== "object" || node === null || Array.isArray(node) || !("name" in node)) {
       continue;
     }
@@ -381,6 +378,126 @@ function failingCheckNames(rollup: Record<string, unknown> | undefined): string[
     }
   }
   return [...failing];
+}
+
+interface RollupContextsPage {
+  nodes: unknown[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+function contextsPage(rollup: Record<string, unknown> | undefined): RollupContextsPage {
+  const rawContexts = rollup?.contexts;
+  if (typeof rawContexts !== "object" || rawContexts === null || Array.isArray(rawContexts)) {
+    return { nodes: [], hasNextPage: false, endCursor: null };
+  }
+  const contexts = rawContexts as Record<string, unknown>;
+  const rawPageInfo = contexts.pageInfo;
+  const pageInfo: Record<string, unknown> | undefined =
+    typeof rawPageInfo === "object" && rawPageInfo !== null && !Array.isArray(rawPageInfo)
+      ? (rawPageInfo as Record<string, unknown>)
+      : undefined;
+  return {
+    nodes: Array.isArray(contexts.nodes) ? contexts.nodes : [],
+    hasNextPage: pageInfo?.hasNextPage === true,
+    endCursor: typeof pageInfo?.endCursor === "string" ? pageInfo.endCursor : null,
+  };
+}
+
+async function fetchRemainingContextNodes(
+  initialPage: RollupContextsPage,
+  ref: GitHubPRRefType,
+  runner: CommandRunner,
+  runnerOptions: CommandRunnerOptions | undefined,
+  maxAttempts: number
+): Promise<unknown[]> {
+  const nodes = [...initialPage.nodes];
+  let page = initialPage;
+  while (page.hasNextPage) {
+    if (!page.endCursor) {
+      throw new GitHubAPIError("GitHub returned a paginated check rollup without an end cursor");
+    }
+    const query = `query($after: String!) { repository(owner: "${ref.owner}", name: "${ref.repo}") { pullRequest(number: ${ref.number}) { commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion } ... on StatusContext { name: context statusConclusion: state } } } } } } } } }`;
+    let nextPage: RollupContextsPage | undefined;
+    let lastError: GitHubAPIError = new GitHubAPIError("All context page retry attempts failed");
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (attempt > 0) {
+        await sleep(Math.min(2 ** (attempt - 1) * 1000, 10000));
+      }
+      const { stdout, stderr, exitCode } = await runner(
+        ["gh", "api", "graphql", "-f", `query=${query}`, "-f", `after=${page.endCursor}`],
+        runnerOptions
+      );
+      if (exitCode !== 0) {
+        lastError = new GitHubAPIError(`GraphQL check contexts query failed: ${stderr}`);
+        continue;
+      }
+      try {
+        const response = JSON.parse(stdout) as { data?: unknown };
+        const data: Record<string, unknown> | undefined =
+          typeof response.data === "object" &&
+          response.data !== null &&
+          !Array.isArray(response.data)
+            ? (response.data as Record<string, unknown>)
+            : undefined;
+        const repository: Record<string, unknown> | undefined =
+          data &&
+          typeof data.repository === "object" &&
+          data.repository !== null &&
+          !Array.isArray(data.repository)
+            ? (data.repository as Record<string, unknown>)
+            : undefined;
+        const pullRequest: Record<string, unknown> | undefined =
+          repository &&
+          typeof repository.pullRequest === "object" &&
+          repository.pullRequest !== null &&
+          !Array.isArray(repository.pullRequest)
+            ? (repository.pullRequest as Record<string, unknown>)
+            : undefined;
+        const commits: Record<string, unknown> | undefined =
+          pullRequest &&
+          typeof pullRequest.commits === "object" &&
+          pullRequest.commits !== null &&
+          !Array.isArray(pullRequest.commits)
+            ? (pullRequest.commits as Record<string, unknown>)
+            : undefined;
+        const firstCommit =
+          commits && Array.isArray(commits.nodes) && commits.nodes.length > 0
+            ? commits.nodes[0]
+            : undefined;
+        const commit =
+          typeof firstCommit === "object" &&
+          firstCommit !== null &&
+          !Array.isArray(firstCommit) &&
+          "commit" in firstCommit &&
+          typeof firstCommit.commit === "object" &&
+          firstCommit.commit !== null &&
+          !Array.isArray(firstCommit.commit)
+            ? firstCommit.commit
+            : undefined;
+        const rollup =
+          commit &&
+          "statusCheckRollup" in commit &&
+          typeof commit.statusCheckRollup === "object" &&
+          commit.statusCheckRollup !== null &&
+          !Array.isArray(commit.statusCheckRollup)
+            ? commit.statusCheckRollup
+            : undefined;
+        if (!rollup) {
+          lastError = new GitHubAPIError("GitHub returned an invalid paginated check rollup");
+          continue;
+        }
+        nextPage = contextsPage(rollup);
+        break;
+      } catch (error) {
+        lastError = new GitHubAPIError(`Failed to parse paginated check rollup: ${error}`);
+      }
+    }
+    if (!nextPage) throw lastError;
+    nodes.push(...nextPage.nodes);
+    page = nextPage;
+  }
+  return nodes;
 }
 
 /**
@@ -433,7 +550,7 @@ export async function getCiStatusBatch(
       );
     } catch {
       for (const issueId of Object.keys(batch.refs)) {
-        result[issueId] = { ciStatus: null, mergeableStatus: null };
+        result[issueId] = { ciStatus: null, mergeableStatus: null, headSha: null, isOpen: false };
       }
     }
   }
@@ -478,7 +595,7 @@ async function getCiStatusBatchWithOptions(
       const prAlias = `pr${prIdx}`;
       prAliasMap.get(repoAlias)?.set(prAlias, [issueId, prNumber]);
       prParts.push(
-        `${prAlias}: pullRequest(number: ${prNumber}) { mergeable commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name conclusion } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
+        `${prAlias}: pullRequest(number: ${prNumber}) { state mergeable commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ... on CheckRun { name conclusion } ... on StatusContext { name: context statusConclusion: state } } } } } } } }`
       );
     }
 
@@ -529,7 +646,7 @@ async function getCiStatusBatchWithOptions(
 
     const result: Record<string, CiAndMergeStatus> = {};
 
-    for (const [repoAlias, [_owner, _repo]] of repoAliasMap) {
+    for (const [repoAlias, [owner, repo]] of repoAliasMap) {
       const rawRepo = dataObj[repoAlias];
       const repoData: Record<string, unknown> =
         rawRepo !== null &&
@@ -540,7 +657,7 @@ async function getCiStatusBatchWithOptions(
           : {};
 
       const prAliases = prAliasMap.get(repoAlias) ?? new Map();
-      for (const [prAlias, [issueId]] of prAliases) {
+      for (const [prAlias, [issueId, prNumber]] of prAliases) {
         const rawPr = repoData[prAlias] as Record<string, unknown> | null | undefined;
         if (
           rawPr === null ||
@@ -548,7 +665,12 @@ async function getCiStatusBatchWithOptions(
           typeof rawPr !== "object" ||
           Array.isArray(rawPr)
         ) {
-          result[issueId] = { ciStatus: null, mergeableStatus: null };
+          result[issueId] = {
+            ciStatus: null,
+            mergeableStatus: null,
+            headSha: null,
+            isOpen: false,
+          };
           continue;
         }
 
@@ -562,7 +684,12 @@ async function getCiStatusBatchWithOptions(
           !Array.isArray(commits.nodes) ||
           commits.nodes.length === 0
         ) {
-          result[issueId] = { ciStatus: null, mergeableStatus: null };
+          result[issueId] = {
+            ciStatus: null,
+            mergeableStatus: null,
+            headSha: null,
+            isOpen: rawPr.state === "OPEN",
+          };
           continue;
         }
 
@@ -577,6 +704,7 @@ async function getCiStatusBatchWithOptions(
           !Array.isArray(firstNode.commit)
             ? firstNode.commit
             : undefined;
+        const headSha = typeof commit?.oid === "string" ? commit.oid : null;
         const rollup =
           commit &&
           "statusCheckRollup" in commit &&
@@ -589,13 +717,27 @@ async function getCiStatusBatchWithOptions(
         const ciStatus = mapCiRollupState(
           typeof rollupState === "string" || rollupState === null ? rollupState : null
         );
+        const initialContexts = contextsPage(rollup);
+        const contextNodes = initialContexts.hasNextPage
+          ? await fetchRemainingContextNodes(
+              initialContexts,
+              { owner, repo, number: prNumber },
+              runner,
+              runnerOptions,
+              maxAttempts
+            )
+          : initialContexts.nodes;
         const mergeable = rawPr.mergeable;
         result[issueId] = {
           ciStatus,
           mergeableStatus: mapMergeableState(
             typeof mergeable === "string" || mergeable === null ? mergeable : null
           ),
-          ...(ciStatus === CiStatus.FAILING ? { failingChecks: failingCheckNames(rollup) } : {}),
+          ...(ciStatus === CiStatus.FAILING
+            ? { failingChecks: failingCheckNames(contextNodes) }
+            : {}),
+          headSha,
+          isOpen: rawPr.state === "OPEN",
         };
       }
     }
