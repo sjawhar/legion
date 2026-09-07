@@ -12,10 +12,10 @@ import {
   type Effect,
   type EnvelopeJson,
   type ReducerConfig,
-  raiseCompletionWatermark,
   reduceGithubEvent,
   resetPrHead,
   settleCiVerdict,
+  takeGitHubWatermark,
   uncertifyCiVerdict,
   writeCiFence,
 } from "./reducers";
@@ -209,10 +209,15 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       pr.headUpdatedAt = headUpdatedAt;
     }
     // GitHub's rollup authors a fence with no listener identity. It replaces
-    // the stored one, or only raises its completion watermark (an equal id over
-    // a live fence keeps the listener identity for duplicate detection), or
-    // does nothing — acceptGitHubFence decides.
-    const fenceEffect = acceptGitHubFence(pr, status.latestCheckRunId);
+    // the stored one, takes the tie at an equal id over a live fence, applies
+    // unfenced, or is an older view than the fence — acceptGitHubFence decides.
+    const fenceEffect = acceptGitHubFence(pr, status.latestCheckRunId, status.latestCompletedAt);
+    if (fenceEffect === "stale") {
+      console.debug(
+        `[legion] ignored stale rollup for ${prKey} check_run_id=${status.latestCheckRunId} completed_at=${status.latestCompletedAt} fence=${pr.ciLatestRunId}@${pr.ciLatestCompletedAt}`
+      );
+      continue;
+    }
     const fence: CiFence | undefined =
       fenceEffect === "replace" && status.latestCheckRunId !== null
         ? {
@@ -222,10 +227,8 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
             latestCompletedAt: status.latestCompletedAt,
           }
         : undefined;
-    if (fenceEffect === "watermark") {
-      raiseCompletionWatermark(pr, status.latestCompletedAt);
-      // GitHub's view now decides ties at this id until a live settlement is accepted.
-      pr.ciReconciled = true;
+    if (fenceEffect === "watermark" && status.latestCompletedAt !== null) {
+      takeGitHubWatermark(pr, status.latestCompletedAt);
     }
     const failing = status.failingChecks ?? [];
     // Mirror live intake: red only for actual failures; a cancelled-only

@@ -47,12 +47,13 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
 }
 
 /** A listener-authored, same-head settlement identity. */
-export interface SettlementOrder {
+/** A live settlement offered to the per-head fence: its ordering identity and its outcome. */
+export interface SettlementCandidate {
   readonly latestCheckRunId: number;
   readonly generation: number;
   readonly snapshot: string;
   readonly latestCompletedAt: number;
-  /** The settlement's outcome, compared when only GitHub's tie authority can decide. */
+  /** Compared only when GitHub holds the tie at an equal completion. */
   readonly verdict: PrState["verdict"];
   readonly failing: readonly string[];
 }
@@ -74,7 +75,7 @@ export type SettlementClassification = "stale" | "duplicate" | "conflict" | "new
  */
 export function classifySettlement(
   pr: PrState,
-  incoming: SettlementOrder
+  incoming: SettlementCandidate
 ): SettlementClassification {
   if (pr.ciLatestRunId === null) return "newer";
   if (incoming.latestCheckRunId < pr.ciLatestRunId) return "stale";
@@ -116,20 +117,29 @@ export interface CiFence {
 }
 
 /**
- * What a fence read from GitHub's rollup may do to the stored one: replace it
- * (a higher id; or an equal id when the stored fence is also GitHub's); raise
- * only the completion watermark (an equal id over a live fence — the listener
- * identity stays for duplicate detection, GitHub's later completion still
- * orders later live settlements); or nothing (a lower id). The live
- * counterpart is `classifySettlement`.
+ * What a rollup read from GitHub may do to the stored fence: replace it (a
+ * higher id; or an equal id when the stored fence is also GitHub's); take the
+ * tie at an equal id over a live fence (the listener identity stays for
+ * duplicate detection; GitHub's completion becomes the watermark and GitHub
+ * holds ties at it); apply its verdict unfenced (GitHub reports no check runs);
+ * or nothing — the rollup is an older view than the fence (a lower id, or an
+ * equal id whose completion is absent or predates the watermark) and its
+ * verdict is stale. The live counterpart is `classifySettlement`.
  */
-export type GitHubFenceEffect = "replace" | "watermark" | "none";
+export type GitHubFenceEffect = "replace" | "watermark" | "unfenced" | "stale";
 
-export function acceptGitHubFence(pr: PrState, latestCheckRunId: number | null): GitHubFenceEffect {
-  if (latestCheckRunId === null) return "none";
+export function acceptGitHubFence(
+  pr: PrState,
+  latestCheckRunId: number | null,
+  latestCompletedAt: number | null
+): GitHubFenceEffect {
+  if (latestCheckRunId === null) return "unfenced";
   if (pr.ciLatestRunId === null || latestCheckRunId > pr.ciLatestRunId) return "replace";
-  if (latestCheckRunId < pr.ciLatestRunId) return "none";
-  return pr.ciSettlementGeneration === null ? "replace" : "watermark";
+  if (latestCheckRunId < pr.ciLatestRunId) return "stale";
+  if (pr.ciSettlementGeneration === null) return "replace";
+  if (latestCompletedAt === null) return "stale";
+  if (pr.ciLatestCompletedAt !== null && latestCompletedAt < pr.ciLatestCompletedAt) return "stale";
+  return "watermark";
 }
 
 /** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */
@@ -138,14 +148,13 @@ export function writeCiFence(pr: PrState, fence: CiFence): void {
   pr.ciSettlementGeneration = fence.generation;
   pr.ciSnapshot = fence.snapshot;
   pr.ciLatestCompletedAt = fence.latestCompletedAt;
+  pr.ciReconciled = fence.generation === null;
 }
 
-/** Raises the completion watermark from a GitHub reconciliation at the stored id; never lowers it. */
-export function raiseCompletionWatermark(pr: PrState, latestCompletedAt: number | null): void {
-  if (latestCompletedAt === null) return;
-  if (pr.ciLatestCompletedAt === null || latestCompletedAt > pr.ciLatestCompletedAt) {
-    pr.ciLatestCompletedAt = latestCompletedAt;
-  }
+/** GitHub takes the tie at an equal id over a live fence (`acceptGitHubFence` returned "watermark"). */
+export function takeGitHubWatermark(pr: PrState, latestCompletedAt: number): void {
+  pr.ciLatestCompletedAt = latestCompletedAt;
+  pr.ciReconciled = true;
 }
 
 /** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */
@@ -225,10 +234,7 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  if (input.fence) {
-    writeCiFence(pr, input.fence);
-    pr.ciReconciled = input.fence.generation === null;
-  }
+  if (input.fence) writeCiFence(pr, input.fence);
   return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
     {
       kind: "publish" as const,
