@@ -1169,26 +1169,14 @@ replicaBReady:
 	if got := pub.count(); got != 1 {
 		t.Fatalf("replica publishes = %d, want exactly one red settlement", got)
 	}
-	type settlementIdentity struct {
-		CheckRuns  []CheckRunRef `json:"check_runs"`
-		Generation uint64        `json:"generation"`
-		Snapshot   string        `json:"snapshot"`
+	var published Summary
+	if err := json.Unmarshal([]byte(pub.last().Payload), &published); err != nil {
+		t.Fatalf("decode settlement: %v", err)
 	}
-	seen := map[struct{ latestCheckRunID, generation uint64 }]string{}
-	for _, envelope := range pub.all() {
-		var settlement settlementIdentity
-		if err := json.Unmarshal([]byte(envelope.Payload), &settlement); err != nil {
-			t.Fatalf("decode settlement identity: %v", err)
-		}
-		if settlement.Snapshot == "" {
-			t.Fatal("settlement snapshot is empty")
-		}
-		pair := struct{ latestCheckRunID, generation uint64 }{maxCheckRunID(settlement.CheckRuns), settlement.Generation}
-		if previous, ok := seen[pair]; ok && previous != settlement.Snapshot {
-			t.Fatalf("settlements %v reused an identity for snapshots %q and %q", pair, previous, settlement.Snapshot)
-		}
-		seen[pair] = settlement.Snapshot
+	if published.Snapshot == "" || published.Failed.Count != 1 {
+		t.Fatalf("settlement = %+v, want the red snapshot with one failing check", published)
 	}
+	assertCheckRuns(t, published.CheckRuns, map[string]uint64{"build": 900})
 }
 
 func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {

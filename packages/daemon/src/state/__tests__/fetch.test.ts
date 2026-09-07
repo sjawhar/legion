@@ -482,6 +482,59 @@ describe("getCiStatusBatch", () => {
     });
   });
 
+  it("builds the attempt set from check names that collide with Object.prototype, keeping the highest id per name", async () => {
+    const runner: CommandRunner = async () => ({
+      stdout: JSON.stringify({
+        data: {
+          repo0: {
+            pr0: {
+              state: "OPEN",
+              updatedAt: "2026-08-24T00:00:00.000Z",
+              mergeable: "MERGEABLE",
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      oid: "head-1",
+                      statusCheckRollup: {
+                        state: "SUCCESS",
+                        contexts: {
+                          pageInfo: { hasNextPage: false, endCursor: null },
+                          nodes: [
+                            { name: "__proto__", conclusion: "SUCCESS", databaseId: 100 },
+                            { name: "constructor", conclusion: "SUCCESS", databaseId: 200 },
+                            { name: "__proto__", conclusion: "SUCCESS", databaseId: 150 },
+                            { name: "toString", conclusion: "SUCCESS", databaseId: 300 },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+
+    expect(result["ENG-21"]).toMatchObject({
+      ciStatus: "passing",
+      checkRuns: [
+        { name: "__proto__", id: 150 },
+        { name: "constructor", id: 200 },
+        { name: "toString", id: 300 },
+      ],
+    });
+  });
+
   it("pages a passing rollup for the fence but returns no failing names", async () => {
     const queries: string[][] = [];
     let calls = 0;

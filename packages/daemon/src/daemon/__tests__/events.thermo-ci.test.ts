@@ -1588,6 +1588,41 @@ it("check names that collide with Object.prototype are ordinary attempt-set memb
       { name: "constructor", id: 201 },
       { name: "toString", id: 300 },
     ]);
+
+    // A check GitHub has not shown before, named like a prototype member, is a new name: newer.
+    await resyncWith(
+      state,
+      rollup("failing", { __proto__: 100, constructor: 201, toString: 300 }, ["constructor"])
+    );
+    expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "red", ciReconciled: true });
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [
+            first[0],
+            { name: "constructor", id: 201 },
+            { name: "hasOwnProperty", id: 400 },
+            first[2],
+          ],
+          generation: 3,
+          snapshot: "hash-c",
+          settled_at: 3,
+        })
+      )
+    );
+    await pump.drain();
+    expect(state.prs["acme/widgets#7"]).toMatchObject({
+      verdict: "green",
+      ciSettlementGeneration: 3,
+      ciReconciled: false,
+    });
+    expect(storedSet()?.map((run) => run.name)).toEqual([
+      "__proto__",
+      "constructor",
+      "hasOwnProperty",
+      "toString",
+    ]);
   } finally {
     pump.stop();
   }
@@ -1762,7 +1797,7 @@ it("a same-head resync read at an equal attempt set never erases the known gener
     ciSettlementGeneration: 1,
   });
 
-  // Resync reads the same rollup (max id 900; GitHub has no generation).
+  // Resync reads the same attempt set {build: 900} (GitHub has no generation).
   await runResync({
     state,
     config,
