@@ -180,16 +180,16 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     const status = statuses[prKey];
     const snapshot = snapshots.get(prKey);
     if (!pr || !status || !snapshot) continue;
-    if (!ciSnapshotEquals(pr, snapshot)) {
-      console.debug(`[legion] skipped stale resync CI result ${prKey}`);
-      continue;
-    }
     if (isCiFetchFailure(status)) {
       const failureKey = `${status.owner}\u0000${status.error}`;
       if (!reportedFailures.has(failureKey)) {
         reportedFailures.add(failureKey);
         ciFetchFailures.push(status);
       }
+      continue;
+    }
+    if (!ciSnapshotEquals(pr, snapshot)) {
+      console.debug(`[legion] skipped stale resync CI result ${prKey}`);
       continue;
     }
     if (!status.isOpen || !status.headSha) continue;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { formatIssueKey, roleToken } from "@legion/contracts";
+import type { CiFetchResult } from "../../state/fetch";
 import { type LegionState, newLegionState } from "../legion-state";
 import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
@@ -1149,6 +1150,44 @@ describe("runResync", () => {
     });
 
     expect(state.prs["sjawhar/legion#7"]).toEqual(before);
+    expect(event).toMatchObject({
+      ciFetchFailures: 1,
+      ciFetchFailureDetails: [{ owner: "sjawhar", error: "GitHub App token request failed" }],
+    });
+  });
+  it("counts a CI fetch failure even when the PR changed while the fetch was in flight", async () => {
+    const state = newLegionState("omp", 1);
+    state.prs["sjawhar/legion#7"] = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-1",
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciLatestRunId: 900,
+      ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciLatestCompletedAt: null,
+      fixAttempts: 0,
+    };
+    const fetchStarted = Promise.withResolvers<void>();
+    const fetchedStatuses = Promise.withResolvers<Record<string, CiFetchResult>>();
+    const resync = runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => {
+        fetchStarted.resolve();
+        return fetchedStatuses.promise;
+      },
+    });
+    await fetchStarted.promise;
+    state.prs["sjawhar/legion#7"].ciSettledAt = 2_000;
+    fetchedStatuses.resolve({
+      "sjawhar/legion#7": { owner: "sjawhar", error: "GitHub App token request failed" },
+    });
+
+    const event = await resync;
+
     expect(event).toMatchObject({
       ciFetchFailures: 1,
       ciFetchFailureDetails: [{ owner: "sjawhar", error: "GitHub App token request failed" }],
