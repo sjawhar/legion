@@ -165,6 +165,30 @@ describe("legion state", () => {
     expect((await loadState(file, initialState)).prs[prKey]?.ciCheckRuns).toEqual(pr.ciCheckRuns);
   });
 
+  it("refuses a persisted attempt set that is unsorted or repeats a name", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-set-"));
+    const file = path.join(tempDir, "state.json");
+    const state = stateWithTree();
+    const pr = state.prs[prKey];
+    if (!pr) throw new Error("fixture PR missing");
+    for (const runs of [
+      [
+        { name: "lint", id: 900 },
+        { name: "build", id: 200 },
+      ],
+      [
+        { name: "build", id: 200 },
+        { name: "build", id: 100 },
+      ],
+    ]) {
+      pr.ciCheckRuns = runs;
+      await saveState(file, state);
+      await expect(loadState(file, initialState)).rejects.toThrow(
+        /sorted by name without duplicates/
+      );
+    }
+  });
+
   it("migrates v11 CI state by defaulting all ordering fence fields to null", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v11-"));
     const file = path.join(tempDir, "state.json");

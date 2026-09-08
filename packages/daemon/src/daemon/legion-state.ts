@@ -183,7 +183,18 @@ const TreeStateSchema = z
     recoveryEvents: z.array(RecoveryEventSchema).optional(),
   })
   .strict();
-const CheckRunRefSchema = z.object({ name: z.string().min(1), id: z.number().int().positive() });
+const CheckRunRefSchema = z
+  .object({ name: z.string().min(1), id: z.number().int().positive() })
+  .strict();
+/** The attempt set as persisted: strictly increasing names, so it is sorted and duplicate-free. */
+const CheckRunSetSchema = z
+  .array(CheckRunRefSchema)
+  .refine(
+    (runs) => runs.every((run, index) => index === 0 || (runs[index - 1]?.name ?? "") < run.name),
+    {
+      message: "ciCheckRuns must be sorted by name without duplicates",
+    }
+  );
 
 const PrStateSchema = z
   .object({
@@ -195,7 +206,7 @@ const PrStateSchema = z
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
     ciSettledAt: z.number().nullable(),
-    ciCheckRuns: z.array(CheckRunRefSchema).nullable(),
+    ciCheckRuns: CheckRunSetSchema.nullable(),
     ciSettlementGeneration: z.number().int().nonnegative().nullable(),
     ciSnapshot: z.string().nullable(),
     ciReconciled: z.boolean(),
