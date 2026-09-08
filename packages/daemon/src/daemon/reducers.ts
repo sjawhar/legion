@@ -1,5 +1,5 @@
 import { formatIssueKey, type IssueKey, roleToken } from "@legion/contracts";
-import type { CheckRunRef } from "../state/types";
+import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { IssueNode, LegionState, PrState, TreeState } from "./legion-state";
 
 export interface LegionEventPayload {
@@ -56,10 +56,11 @@ export type AttemptSetOrder = "newer" | "equal" | "older" | "mixed";
  * `equal` when every shared id matches and no name is new; `older` when no
  * shared id is higher and some is lower; `mixed` otherwise. Names only in the
  * stored set are ignored (a check can vanish from GitHub's view; a recreated
- * listener record starts sparse). Per-name ids never decrease within a head,
- * so the fence moves in one direction without clocks: a superseded attempt is
- * `newer` whatever its completion time; a delayed older observation is `equal`
- * or `older`.
+ * listener record starts sparse). Within one producer record per-name ids never
+ * decrease, and the stored fence is the per-name maximum over every accepted
+ * view (`mergeAttemptSets`), so the fence moves in one direction without
+ * clocks: a superseded attempt is `newer` whatever its completion time; a
+ * delayed older observation is `equal` or `older`.
  */
 export function compareAttemptSets(stored: AttemptSet, incoming: AttemptSet): AttemptSetOrder {
   const known = new Map(stored.map((run) => [run.name, run.id]));
@@ -93,10 +94,10 @@ export type SettlementClassification = "stale" | "duplicate" | "conflict" | "new
  * generation orders its own settlements (a GitHub-authored fence has no
  * generation and orders below every live one). When a terminal GitHub read
  * holds the tie at that set (`ciReconciled`), a higher generation is accepted
- * only when its verdict and failing multiset agree — a `refresh` of the
- * listener identity that leaves GitHub's authority in place; a disagreeing one
- * is stale until GitHub reads the set again. Authority clears only when the
- * set advances.
+ * only when its effective outcome (`effectiveOutcome`) agrees — a `refresh`
+ * of the listener identity that leaves GitHub's authority in place; a
+ * disagreeing one is stale until GitHub reads the set again. Authority is
+ * released when the set advances or a pending GitHub read clears it.
  */
 export function classifySettlement(
   pr: PrState,
@@ -120,9 +121,29 @@ export function classifySettlement(
     }
   }
   if (!pr.ciReconciled) return "newer";
-  return incoming.verdict === pr.verdict && sameStringMultiset(incoming.failing, pr.failing)
+  const effective = effectiveOutcome(pr, incoming);
+  return effective.verdict === pr.verdict && sameStringMultiset(effective.failing, pr.failing)
     ? "refresh"
     : "stale";
+}
+
+/**
+ * A live settlement's outcome covers only the names in its set; for every other
+ * name the last known outcome stands. A name the settlement reports — at any id
+ * the ordering accepted, including the same run observed in place — is decided
+ * by the settlement alone. Red whenever any failure remains; otherwise the
+ * settlement's own verdict (green, or null when it was cancelled-only).
+ */
+export function effectiveOutcome(
+  pr: PrState,
+  incoming: Pick<SettlementCandidate, "checkRuns" | "verdict" | "failing">
+): { verdict: PrState["verdict"]; failing: string[] } {
+  // A failing name without a check-run id (a legacy check, a status context) is
+  // reported by its failure alone; it is retained once, not duplicated.
+  const reported = new Set([...incoming.checkRuns.map((run) => run.name), ...incoming.failing]);
+  const failing = [...incoming.failing, ...pr.failing.filter((name) => !reported.has(name))];
+  if (failing.length > 0) return { verdict: "red", failing };
+  return { verdict: incoming.verdict, failing: [] };
 }
 
 export interface CiFence {
@@ -158,11 +179,27 @@ export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFen
   }
 }
 
-/** Writes a fence its caller already accepted (`classifySettlement` or `acceptGitHubFence`). */
+/**
+ * Writes a fence its caller already accepted (`classifySettlement` or
+ * `acceptGitHubFence`). The attempt set merges into the stored one — the
+ * per-name maximum over the union of names, nothing pruned — so the fence is
+ * the head's high-watermark across every accepted view and a name an
+ * incomplete view omits cannot later reappear as new.
+ */
 export function writeCiFence(pr: PrState, fence: CiFence): void {
-  pr.ciCheckRuns = fence.checkRuns.map((run) => ({ ...run }));
+  pr.ciCheckRuns = mergeAttemptSets(pr.ciCheckRuns ?? [], fence.checkRuns);
   pr.ciSettlementGeneration = fence.generation;
   pr.ciSnapshot = fence.snapshot;
+}
+
+/** Per-name maximum over the union of two attempt sets, in canonical name order. */
+export function mergeAttemptSets(stored: AttemptSet, incoming: AttemptSet): CheckRunRef[] {
+  const merged = new Map(stored.map((run) => [run.name, run.id]));
+  for (const run of incoming) {
+    const known = merged.get(run.name);
+    if (known === undefined || run.id > known) merged.set(run.name, run.id);
+  }
+  return sortedCheckRunRefs(merged);
 }
 
 /** Refreshes the listener identity at an unchanged attempt set (`classifySettlement` returned "refresh"). */
@@ -177,10 +214,11 @@ export function refreshCiIdentity(
   pr.ciSettledAt = settledAt;
 }
 
-/** The CI fields a reconciliation must find unchanged before it may apply: one definition for capture and comparison. */
+/** The head and CI fields a reconciliation must find unchanged before it may apply — every field the read may write, plus the head's lifecycle clock: one definition for capture and comparison. */
 export type CiSnapshot = Pick<
   PrState,
   | "headSha"
+  | "headUpdatedAt"
   | "verdict"
   | "failing"
   | "ciSettledAt"
@@ -193,6 +231,7 @@ export type CiSnapshot = Pick<
 export function ciSnapshot(pr: PrState): CiSnapshot {
   return {
     headSha: pr.headSha,
+    headUpdatedAt: pr.headUpdatedAt,
     verdict: pr.verdict,
     failing: [...pr.failing],
     ciSettledAt: pr.ciSettledAt,
@@ -214,6 +253,7 @@ function sameAttemptSet(left: AttemptSet | null, right: AttemptSet | null): bool
 export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
   return (
     pr.headSha === snapshot.headSha &&
+    pr.headUpdatedAt === snapshot.headUpdatedAt &&
     pr.verdict === snapshot.verdict &&
     pr.ciSettledAt === snapshot.ciSettledAt &&
     sameAttemptSet(pr.ciCheckRuns, snapshot.ciCheckRuns) &&

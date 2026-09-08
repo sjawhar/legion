@@ -588,7 +588,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
         "acme/widgets#7": {
           ciStatus: "failing",
           mergeableStatus: null,
-          failingChecks: ["unit"],
+          failingChecks: ["build"],
           headSha: "head-1",
           isOpen: true,
           updatedAt: "2026-09-07T00:00:00.000Z",
@@ -620,7 +620,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
     await pump.drain();
     expect(state.prs["acme/widgets#7"]).toEqual(afterGithub);
 
-    // Same set, agreeing (red on unit): the listener identity is adopted, authority kept.
+    // Same set, agreeing (red on build): the listener identity is adopted, authority kept.
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
       envelope(
@@ -628,7 +628,7 @@ it("against a GitHub-authored fence an equal attempt set defers to GitHub's verd
           check_runs: [{ name: "build", id: 900 }],
           generation: 5,
           snapshot: "red-hash",
-          failed: { count: 1, checks: ["unit"] },
+          failed: { count: 1, checks: ["build"] },
           passed: { count: 0, checks: [] },
         })
       )
@@ -1355,7 +1355,7 @@ it("a rollup whose highest check run is lower than the live fence is an older vi
   pump.stop();
 });
 
-it("GitHub's authority at an attempt set survives an agreeing live refresh and clears only when the set advances", async () => {
+it("GitHub's authority at an attempt set survives an agreeing live refresh and is released when the set advances", async () => {
   const { state } = stateForCi();
   const { nats, published, pump } = startCiPump(state);
   try {
@@ -1565,6 +1565,244 @@ for (const order of [
     }
   });
 }
+
+// Pass-7 must-fix 1: a live view that omits a name says nothing about it.
+for (const approved of [false, true]) {
+  it(`a partial live view cannot certify a head green over a failure it omits${approved ? " (approved PR stays blocked)" : ""}`, async () => {
+    const { state } = stateForCi();
+    const pr = state.prs["acme/widgets#7"];
+    if (!pr) throw new Error("fixture PR missing");
+    if (approved) pr.reviewDecision = "approved";
+    const { nats, published, pump } = startCiPump(state);
+    const applied: Effect[][] = [];
+    try {
+      // GitHub: build passed, lint failed. Red [lint], authority held.
+      await resyncWith(
+        state,
+        rollup(
+          "failing",
+          [
+            { name: "build", id: 100 },
+            { name: "lint", id: 900 },
+          ],
+          ["lint"]
+        ),
+        applied
+      );
+      expect(pr).toMatchObject({ verdict: "red", failing: ["lint"], ciReconciled: true });
+
+      // The listener missed lint's webhook: its record holds only build. Build reruns green.
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(
+          settledChecks({
+            check_runs: [{ name: "build", id: 200 }],
+            generation: 4,
+            snapshot: "hash-b",
+            settled_at: 2,
+          })
+        )
+      );
+      await pump.drain();
+      // Build advanced, lint is untouched: the fence merges, lint's failure stands, nothing is emitted.
+      expect(pr).toMatchObject({
+        verdict: "red",
+        failing: ["lint"],
+        ciCheckRuns: [
+          { name: "build", id: 200 },
+          { name: "lint", id: 900 },
+        ],
+        ciSettlementGeneration: 4,
+        ciReconciled: false,
+      });
+      // Nothing routed: no ci-green, and for an approved PR no pr-ready.
+      expect(published).toEqual([]);
+
+      // A view that covers lint (its rerun passed) certifies green.
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(
+          settledChecks({
+            check_runs: [
+              { name: "build", id: 200 },
+              { name: "lint", id: 901 },
+            ],
+            generation: 5,
+            snapshot: "hash-c",
+            settled_at: 3,
+          })
+        )
+      );
+      await pump.drain();
+      expect(pr).toMatchObject({
+        verdict: "green",
+        failing: [],
+        ciCheckRuns: [
+          { name: "build", id: 200 },
+          { name: "lint", id: 901 },
+        ],
+      });
+      expect(published).toEqual([
+        JSON.stringify({ type: "ci-green", sha: "head-1" }),
+        ...(approved ? [JSON.stringify({ type: "pr-ready", pr: 7 })] : []),
+      ]);
+    } finally {
+      pump.stop();
+    }
+  });
+}
+
+it("a TTL-recreated sparse record at generation 0 is ordering evidence for its names only", async () => {
+  const { state } = stateForCi();
+  const pr = state.prs["acme/widgets#7"];
+  if (!pr) throw new Error("fixture PR missing");
+  const { nats, published, pump } = startCiPump(state);
+  try {
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [
+            { name: "build", id: 100 },
+            { name: "lint", id: 900 },
+          ],
+          generation: 7,
+          snapshot: "hash-a",
+          settled_at: 1,
+          failed: { count: 1, checks: ["lint"] },
+          passed: { count: 1, checks: ["build"] },
+        })
+      )
+    );
+    await pump.drain();
+    expect(published).toEqual([
+      JSON.stringify({ type: "ci-settled-red", failing: ["lint"], sha: "head-1" }),
+    ]);
+
+    // The record expired; a fresh one saw only build's rerun. Generation restarts at 0.
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [{ name: "build", id: 200 }],
+          generation: 0,
+          snapshot: "hash-fresh",
+          settled_at: 2,
+        })
+      )
+    );
+    await pump.drain();
+    expect(pr).toMatchObject({
+      verdict: "red",
+      failing: ["lint"],
+      ciCheckRuns: [
+        { name: "build", id: 200 },
+        { name: "lint", id: 900 },
+      ],
+      ciSettlementGeneration: 0,
+    });
+    expect(published).toHaveLength(1);
+  } finally {
+    pump.stop();
+  }
+});
+
+it("a name an incomplete view omitted cannot reappear as new at a lower id", async () => {
+  const { state } = stateForCi();
+  const pr = state.prs["acme/widgets#7"];
+  if (!pr) throw new Error("fixture PR missing");
+  const { nats, pump } = startCiPump(state);
+  try {
+    const emit = (check_runs: CheckRunRef[], generation: number) =>
+      nats.emit(
+        "notifications.github.acme.widgets.pr.7.checks",
+        envelope(
+          settledChecks({
+            check_runs,
+            generation,
+            snapshot: `hash-${generation}`,
+            settled_at: generation,
+          })
+        )
+      );
+    emit(
+      [
+        { name: "a", id: 1 },
+        { name: "b", id: 2 },
+      ],
+      1
+    );
+    await pump.drain();
+    emit([{ name: "a", id: 2 }], 2);
+    await pump.drain();
+    expect(pr.ciCheckRuns).toEqual([
+      { name: "a", id: 2 },
+      { name: "b", id: 2 },
+    ]);
+    // b at 1 is older than the fence's b:2 — stale, not "new".
+    emit(
+      [
+        { name: "a", id: 2 },
+        { name: "b", id: 1 },
+      ],
+      3
+    );
+    await pump.drain();
+    expect(pr).toMatchObject({
+      ciCheckRuns: [
+        { name: "a", id: 2 },
+        { name: "b", id: 2 },
+      ],
+      ciSettlementGeneration: 2,
+    });
+  } finally {
+    pump.stop();
+  }
+});
+
+it("only GitHub's complete read retires a failure the listener cannot see", async () => {
+  const { state } = stateForCi();
+  const pr = state.prs["acme/widgets#7"];
+  if (!pr) throw new Error("fixture PR missing");
+  const { nats, published, pump } = startCiPump(state);
+  const applied: Effect[][] = [];
+  try {
+    // GitHub: the check run passed but a commit status "deploy-preview" (no run id) failed.
+    await resyncWith(
+      state,
+      rollup("failing", [{ name: "build", id: 100 }], ["deploy-preview"]),
+      applied
+    );
+    expect(pr).toMatchObject({ verdict: "red", failing: ["deploy-preview"] });
+
+    // The listener never sees statuses: its green over a newer build keeps the status failure.
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [{ name: "build", id: 200 }],
+          generation: 3,
+          snapshot: "hash-b",
+          settled_at: 2,
+        })
+      )
+    );
+    await pump.drain();
+    expect(pr).toMatchObject({
+      verdict: "red",
+      failing: ["deploy-preview"],
+      ciCheckRuns: [{ name: "build", id: 200 }],
+    });
+    expect(published).toEqual([]);
+
+    // GitHub reads the same set with the status now passing: green.
+    await resyncWith(state, rollup("passing", [{ name: "build", id: 200 }]), applied);
+    expect(pr).toMatchObject({ verdict: "green", failing: [], ciReconciled: true });
+    expect(publishedEmissions(applied).at(-1)).toEqual({ type: "ci-green", sha: "head-1" });
+  } finally {
+    pump.stop();
+  }
+});
 
 it("check names that collide with Object.prototype are ordinary attempt-set members", async () => {
   const { state } = stateForCi();
@@ -1979,7 +2217,10 @@ it("emits when a newer attempt set changes the failing set", async () => {
     "notifications.github.acme.widgets.pr.7.checks",
     envelope(
       settledChecks({
-        check_runs: [{ name: "build", id: 1 }],
+        check_runs: [
+          { name: "build", id: 1 },
+          { name: "unit", id: 1 },
+        ],
         settled_at: 2,
         failed: { count: 1, checks: ["unit"] },
         passed: { count: 0, checks: [] },
@@ -1991,7 +2232,11 @@ it("emits when a newer attempt set changes the failing set", async () => {
     "notifications.github.acme.widgets.pr.7.checks",
     envelope(
       settledChecks({
-        check_runs: [{ name: "build", id: 2 }],
+        check_runs: [
+          { name: "build", id: 2 },
+          { name: "lint", id: 2 },
+          { name: "unit", id: 2 },
+        ],
         settled_at: 1,
         failed: { count: 1, checks: ["lint"] },
         passed: { count: 0, checks: [] },
@@ -2003,7 +2248,11 @@ it("emits when a newer attempt set changes the failing set", async () => {
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["lint"],
-    ciCheckRuns: [{ name: "build", id: 2 }],
+    ciCheckRuns: [
+      { name: "build", id: 2 },
+      { name: "lint", id: 2 },
+      { name: "unit", id: 2 },
+    ],
   });
   expect(published).toEqual([
     JSON.stringify({ type: "ci-settled-red", failing: ["unit"], sha: "head-1" }),

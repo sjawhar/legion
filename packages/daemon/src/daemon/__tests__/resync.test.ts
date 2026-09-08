@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { formatIssueKey, roleToken } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
-import { type LegionState, newLegionState } from "../legion-state";
+import { type LegionState, newLegionState, type PrState } from "../legion-state";
 import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
 
@@ -621,6 +621,109 @@ describe("runResync", () => {
         },
       },
     ]);
+  });
+
+  // A -> B -> A: GitHub briefly had head B while the daemon read; A came back
+  // with a later lifecycle update. The fetched B view is stale either way.
+  function prAtHeadA(state: LegionState): PrState {
+    state.issues[issue] = {
+      key: issue,
+      title: "Resync this Legion tree",
+      state: "open",
+      children: [],
+      released: true,
+      labels: [],
+    };
+    const pr: PrState = {
+      key: issue,
+      repo: "sjawhar/legion",
+      number: 7,
+      headSha: "head-a",
+      headUpdatedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      verdict: "green",
+      failing: [],
+      ciSettledAt: 1_000,
+      ciCheckRuns: [{ name: "build", id: 900 }],
+      ciSettlementGeneration: 1,
+      ciSnapshot: "hash-a",
+      ciReconciled: false,
+      reviewDecision: "approved",
+      fixAttempts: 0,
+    };
+    state.prs["sjawhar/legion#7"] = pr;
+    return pr;
+  }
+  const fetchedHeadB = {
+    "sjawhar/legion#7": {
+      ciStatus: "failing" as const,
+      mergeableStatus: null,
+      failingChecks: ["build"],
+      headSha: "head-b",
+      updatedAt: "2026-08-24T00:00:02.000Z",
+      checkRuns: [{ name: "build", id: 950 }],
+      isOpen: true,
+    },
+  };
+  const synchronizeBackToA = (state: LegionState) =>
+    reduceGithubEvent(
+      state,
+      "notifications.github.sjawhar.legion.pull_request.synchronize",
+      {
+        event_id: "back-to-head-a",
+        issued_at: Date.parse("2026-08-24T00:00:03.000Z"),
+        payload: {
+          kind: "pr",
+          action: "synchronize",
+          repo: "sjawhar/legion",
+          number: "7",
+          head_sha: "head-a",
+          updated_at: "2026-08-24T00:00:03.000Z",
+        },
+      },
+      resyncDeps(state, []).config
+    );
+
+  it("skips a fetched head when a same-sha lifecycle update lands during the read", async () => {
+    const state = newLegionState("omp", 1);
+    const before = structuredClone(prAtHeadA(state));
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => {
+        // synchronize(A, t3) arrives while the fetch (which saw B at t2) is outstanding.
+        synchronizeBackToA(state);
+        return fetchedHeadB;
+      },
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toEqual({
+      ...before,
+      headUpdatedAt: Date.parse("2026-08-24T00:00:03.000Z"),
+    });
+    expect(dispatched).toEqual([]);
+  });
+
+  it("skips a fetched head older than a lifecycle update observed before the read", async () => {
+    const state = newLegionState("omp", 1);
+    prAtHeadA(state);
+    synchronizeBackToA(state);
+    const before = structuredClone(state.prs["sjawhar/legion#7"]);
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state, []),
+      fetchCiStatusBatch: async () => fetchedHeadB,
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toEqual(before);
+    expect(dispatched).toEqual([]);
   });
 
   it("fences a resynced head against a redelivered older synchronize", async () => {

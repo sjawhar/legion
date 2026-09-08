@@ -644,17 +644,27 @@ describe("core-NATS event pump", () => {
       "notifications.github.acme.widgets.pr.7.checks",
       envelope(
         settledChecks({
+          check_runs: [
+            { name: "build", id: 1 },
+            { name: "unit", id: 2 },
+          ],
           failed: { count: 1, checks: ["unit"] },
-          passed: { count: 0, checks: [] },
+          passed: { count: 1, checks: ["build"] },
           failing_checks: [{ name: "unit", url: "https://example.test/checks/unit" }],
         })
       )
     );
     await flush();
+    // unit reruns green: the re-settlement reports it, so its failure clears.
     nats.emit(
       "notifications.github.acme.widgets.pr.7.checks",
       envelope(
         settledChecks({
+          check_runs: [
+            { name: "build", id: 1 },
+            { name: "unit", id: 3 },
+          ],
+          passed: { count: 2, checks: ["build", "unit"] },
           generation: 1,
           snapshot: "state-hash-2",
           settled_at: 2_000,

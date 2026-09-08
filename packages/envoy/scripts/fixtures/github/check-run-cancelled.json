@@ -1,7 +1,7 @@
 {
   "action": "completed",
   "check_run": {
-    "id": 2003,
+    "id": 2005,
     "check_suite": {
       "id": 1002
     },
@@ -9,7 +9,7 @@
     "status": "completed",
     "conclusion": "cancelled",
     "head_sha": "2222222222222222222222222222222222222222",
-    "html_url": "https://example.invalid/example-org/example-repo/runs/2003",
+    "html_url": "https://example.invalid/example-org/example-repo/runs/2005",
     "app": {
       "id": 1
     },
@@ -18,8 +18,8 @@
         "number": 42
       }
     ],
-    "started_at": "2026-09-07T03:20:00Z",
-    "completed_at": "2026-09-07T03:21:00Z"
+    "started_at": "2026-09-07T03:14:00Z",
+    "completed_at": "2026-09-07T03:16:00Z"
   },
   "sender": {
     "login": "octocat",

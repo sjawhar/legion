@@ -343,10 +343,13 @@ wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks
 post_github check_run "${fixture_dir}/check-run-cancelled.json"
 wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks" 3
 
-# A newer build attempt (2004 > 2002) whose completion (03:19) predates the
-# cancelled integration run's (03:21): the attempt set advances while the
-# head's latest completion time falls. A consumer ordering by the set accepts
-# it; one ordering by a completion maximum would drop it forever.
+# The pass-6 trace. Before: build 2002 completed 03:17 (the head's latest
+# completion) and integration 2005 cancelled 03:16 (the head's highest run id).
+# A newer build attempt 2004 completed at 03:15 — created after 2002 yet
+# finished earlier — supersedes 2002: the attempt set advances while both the
+# head's highest run id (2005) and its latest completion (03:17 -> 03:16) do
+# not rise. A consumer ordering by the set accepts it; one ordering by scalar
+# maxima would drop it forever.
 post_github check_run "${fixture_dir}/check-run-superseding.json"
 wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks" 4
 
@@ -475,12 +478,17 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
         require(order === "advanced" || values[index].generation > values[index - 1].generation, `checks generation for ${sha} did not advance at an equal attempt set`);
       }
     }
-    // The superseding build attempt: the set advances (build 2002 -> 2004,
-    // integration unchanged) and the verdict turns red on the new attempt.
+    // The superseding build attempt: exact sets before and after. The set
+    // advances (build 2002 -> 2004) while integration 2005 keeps the highest
+    // id and the latest completion on the head falls (03:17 -> 03:16); the verdict
+    // turns red on the new attempt.
     const secondHead = checksBySHA.get(secondSHA);
+    const pairs = (data) => data.check_runs.map((run) => `${run.name}=${run.id}`).join(",");
+    require(pairs(secondHead[1]) === "build=2002,integration=2005", `settlement before supersession = ${pairs(secondHead[1])}`);
+    require(pairs(secondHead[2]) === "build=2004,integration=2005", `settlement after supersession = ${pairs(secondHead[2])}`);
     require(compareSets(attemptSet(secondHead[1]), attemptSet(secondHead[2])) === "advanced", "superseding attempt did not advance the attempt set");
-    require(attemptSet(secondHead[2]).get("build") === 2004 && attemptSet(secondHead[2]).get("integration") === 2003, `superseding settlement attempt set = ${JSON.stringify(secondHead[2].check_runs)}`);
     require(secondHead[2].failed.checks.join(",") === "build", `superseding settlement failed = ${JSON.stringify(secondHead[2].failed)}`);
+    require(secondHead[1].cancelled.checks.join(",") === "integration" && secondHead[2].cancelled.checks.join(",") === "integration", "integration must stay cancelled across the supersession");
     require(checksBySHA.get(secondSHA)?.filter((value) => value.superseded_settlement === "true").length === 2, "second head re-settlement flags are missing");
 
     const workflow = withTopic(topic("workflow.ci_yml.completed"));

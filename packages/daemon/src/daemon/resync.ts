@@ -203,6 +203,14 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       if (Number.isNaN(headUpdatedAt)) {
         throw new Error(`GitHub CI status has an invalid updatedAt for ${prKey}`);
       }
+      // A fetched head older than a lifecycle update already observed for this
+      // PR is a stale view (the head moved on and back while we read): skip it.
+      if (pr.headUpdatedAt !== undefined && headUpdatedAt < pr.headUpdatedAt) {
+        console.debug(
+          `[legion] ignored stale resync head for ${prKey} fetched=${status.headSha}@${status.updatedAt} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
+        );
+        continue;
+      }
       resetPrHead(pr, status.headSha);
       pr.headUpdatedAt = headUpdatedAt;
     }
@@ -219,9 +227,12 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     if (fenceEffect === "replace") {
       writeCiFence(pr, { checkRuns: status.checkRuns, generation: null, snapshot: null });
     }
+    // GitHub's read is a complete view: its failing set replaces the stored one
+    // wholesale (only GitHub can retire a failure the listener cannot see — a
+    // status context, a deleted check). Red only for actual failures; a
+    // cancelled-only failing rollup, like a pending one, uncertifies a green
+    // head and leaves a red one, failing names included, untouched.
     const failing = status.failingChecks ?? [];
-    // Mirror live intake: red only for actual failures; a cancelled-only
-    // failing rollup, like a pending one, uncertifies a green head.
     const verdict =
       status.ciStatus === "passing"
         ? "green"

@@ -12,6 +12,7 @@ import {
   classifySettlement,
   type Effect,
   type EnvelopeJson,
+  effectiveOutcome,
   type LegionEventPayload,
   reduceGithubEvent,
   refreshCiIdentity,
@@ -426,7 +427,13 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       return true;
     }
     // A newer attempt set, or a later generation at a set GitHub has not read:
-    // the listener's view is authoritative until GitHub reads this set.
+    // the listener's view is authoritative for the names it reports until
+    // GitHub reads this set; names it omits keep their last known outcome.
+    const outcome = effectiveOutcome(pr, {
+      checkRuns: input.checkRuns,
+      verdict,
+      failing: input.failed,
+    });
     writeCiFence(pr, {
       checkRuns: input.checkRuns,
       generation: input.generation,
@@ -437,7 +444,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       settleCiVerdict(
         deps.state,
         pr,
-        { verdict, failing: input.failed, settledAt: input.settledAt },
+        { verdict: outcome.verdict, failing: outcome.failing, settledAt: input.settledAt },
         deps.config
       ),
       envelope

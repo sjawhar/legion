@@ -65,7 +65,7 @@ export interface PrState {
   ciCheckRuns: CheckRunRef[] | null;
   ciSettlementGeneration: number | null;
   ciSnapshot: string | null;
-  /** True while a terminal GitHub read holds the tie at the stored attempt set; cleared only when the set advances. */
+  /** True while a terminal GitHub read holds the tie at the stored attempt set; released when the set advances or a pending read clears it. */
   ciReconciled: boolean;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
