@@ -126,6 +126,7 @@ function checkPr(issue: IssueKey, headSha = "head-1"): PrState {
     headSha,
     verdict: null,
     failing: [],
+    failingStatuses: [],
     ciSettledAt: null,
     ciCheckRuns: null,
     ciSettlementGeneration: null,
@@ -568,6 +569,7 @@ describe("core-NATS event pump", () => {
         headSha: "head-1",
         verdict: "green",
         failing: [],
+        failingStatuses: [],
         ciSettledAt: 2_000,
         ciCheckRuns: [{ name: "build", id: 2 }],
       });
@@ -624,6 +626,7 @@ describe("core-NATS event pump", () => {
       headUpdatedAt: 2_000,
       verdict: null,
       failing: [],
+      failingStatuses: [],
       ciSettledAt: null,
     });
     expect(published).toEqual([]);
@@ -678,6 +681,7 @@ describe("core-NATS event pump", () => {
       headSha: "head-1",
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 2_000,
       fixAttempts: 0,
     });
@@ -702,6 +706,7 @@ describe("core-NATS event pump", () => {
       headSha: "head-2",
       verdict: null,
       failing: [],
+      failingStatuses: [],
       ciSettledAt: null,
       fixAttempts: 0,
     });
@@ -751,6 +756,7 @@ describe("core-NATS event pump", () => {
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: null,
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1_000,
     });
     expect(published).toEqual([]);
@@ -763,6 +769,7 @@ describe("core-NATS event pump", () => {
       ...checkPr(issue),
       verdict: "red",
       failing: ["unit"],
+      failingStatuses: [],
       ciSettledAt: 500,
     };
     const nats = new FakeNats();
@@ -787,6 +794,7 @@ describe("core-NATS event pump", () => {
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
       failing: ["unit"],
+      failingStatuses: [],
       ciSettledAt: 1_000,
     });
     expect(published).toEqual([]);
@@ -812,6 +820,7 @@ describe("core-NATS event pump", () => {
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1_000,
     });
     expect(published).toEqual([
@@ -892,6 +901,7 @@ describe("core-NATS event pump", () => {
         headUpdatedAt: 2_000,
         verdict: "green",
         failing: [],
+        failingStatuses: [],
         ciSettledAt: 1_500,
       });
       expect(debug).toHaveBeenCalledWith(
@@ -931,6 +941,7 @@ describe("core-NATS event pump", () => {
       headSha: "head-1",
       verdict: "red",
       failing: ["unit"],
+      failingStatuses: [],
       ciSettledAt: 2_000,
     });
     pump.stop();

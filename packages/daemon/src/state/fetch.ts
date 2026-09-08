@@ -336,6 +336,8 @@ export interface CiAndMergeStatus {
   ciStatus: CiStatusLiteral | null;
   mergeableStatus: MergeableStatusLiteral | null;
   failingChecks?: string[];
+  /** Failing commit statuses (contexts without a check run); present with failingChecks when the rollup is failing. */
+  failingStatuses?: string[];
   /** Check runs GitHub reports as CANCELLED; present with failingChecks when the rollup is failing. */
   cancelledCount?: number;
   headSha: string | null;
@@ -370,27 +372,37 @@ const FAILING_CHECK_CONCLUSIONS: Record<string, true> = {
 
 interface RollupOutcome {
   readonly failingChecks: string[];
+  readonly failingStatuses: string[];
   readonly cancelledCount: number;
 }
 
 function rollupOutcome(nodes: readonly unknown[]): RollupOutcome {
-  const failing = new Set<string>();
+  const failingChecks = new Set<string>();
+  const failingStatuses = new Set<string>();
   let cancelledCount = 0;
   for (const node of nodes) {
     if (typeof node !== "object" || node === null || Array.isArray(node) || !("name" in node)) {
       continue;
     }
-    const conclusion =
-      "conclusion" in node
-        ? node.conclusion
-        : "statusConclusion" in node
-          ? node.statusConclusion
-          : undefined;
-    if (typeof node.name !== "string" || typeof conclusion !== "string") continue;
+    if (typeof node.name !== "string") continue;
+    // A check run carries `conclusion`; a commit status carries `statusConclusion`.
+    const isCheckRun = "conclusion" in node;
+    const conclusion = isCheckRun
+      ? node.conclusion
+      : "statusConclusion" in node
+        ? node.statusConclusion
+        : undefined;
+    if (typeof conclusion !== "string") continue;
     if (conclusion === "CANCELLED") cancelledCount += 1;
-    else if (FAILING_CHECK_CONCLUSIONS[conclusion]) failing.add(node.name);
+    else if (FAILING_CHECK_CONCLUSIONS[conclusion]) {
+      (isCheckRun ? failingChecks : failingStatuses).add(node.name);
+    }
   }
-  return { failingChecks: [...failing], cancelledCount };
+  return {
+    failingChecks: [...failingChecks],
+    failingStatuses: [...failingStatuses],
+    cancelledCount,
+  };
 }
 
 function checkRunSet(nodes: readonly unknown[]): CheckRunRef[] {

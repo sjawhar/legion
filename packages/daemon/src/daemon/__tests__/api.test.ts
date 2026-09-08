@@ -299,6 +299,7 @@ describe("Legion HTTP API", () => {
       headSha: "approved-head",
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 0,
       ciCheckRuns: null,
       ciSettlementGeneration: null,

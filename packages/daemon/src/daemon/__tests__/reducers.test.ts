@@ -97,6 +97,7 @@ function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
     headSha: "old-sha",
     verdict: null,
     failing: [],
+    failingStatuses: [],
     ciSettledAt: null,
     ciCheckRuns: null,
     ciSettlementGeneration,
@@ -728,6 +729,7 @@ describe("reduceGithubEvent", () => {
       headSha: "old-sha",
       verdict: "red",
       failing: ["unit"],
+      failingStatuses: [],
       ciSettledAt: 1,
       ciCheckRuns: [{ name: "build", id: 1 }],
       reviewDecision: "approved",
@@ -747,6 +749,7 @@ describe("reduceGithubEvent", () => {
       headSha: "new-sha",
       verdict: null,
       failing: [],
+      failingStatuses: [],
       ciSettledAt: null,
       ciCheckRuns: null,
       fixAttempts: 1,
@@ -775,6 +778,7 @@ describe("reduceGithubEvent", () => {
     Object.assign(state.prs[`${repo}#${prNumber}`], {
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1,
       reviewDecision: "approved",
     });
@@ -795,6 +799,7 @@ describe("reduceGithubEvent", () => {
       headUpdatedAt: Date.parse("2026-09-07T03:02:00Z"),
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1,
       reviewDecision: "approved",
       fixAttempts: 0,
@@ -1044,6 +1049,7 @@ describe("uncertifyCiVerdict", () => {
     addPr(state, {
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
     });
@@ -1053,6 +1059,7 @@ describe("uncertifyCiVerdict", () => {
     expect(state.prs[`${repo}#${prNumber}`]).toMatchObject({
       verdict: null,
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 4 }],
     });

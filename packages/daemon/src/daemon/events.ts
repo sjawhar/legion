@@ -444,7 +444,12 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       settleCiVerdict(
         deps.state,
         pr,
-        { verdict: outcome.verdict, failing: outcome.failing, settledAt: input.settledAt },
+        {
+          verdict: outcome.verdict,
+          failing: outcome.failing,
+          failingStatuses: pr.failingStatuses,
+          settledAt: input.settledAt,
+        },
         deps.config
       ),
       envelope

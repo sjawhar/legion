@@ -75,6 +75,7 @@ async function recoverPrForMergeGate(
     headSha: head.sha,
     verdict: null,
     failing: [],
+    failingStatuses: [],
     ciSettledAt: null,
     ciCheckRuns: null,
     ciSettlementGeneration: null,

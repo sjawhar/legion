@@ -127,7 +127,7 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
       issue: pr.key,
       sha: pr.headSha,
       ci: ciVerdict(pr),
-      ...(pr.verdict === "red" ? { failing: pr.failing } : {}),
+      ...(pr.verdict === "red" ? { failing: [...pr.failing, ...pr.failingStatuses] } : {}),
       review: pr.reviewDecision ?? "pending",
       fixAttempts: pr.fixAttempts,
     };

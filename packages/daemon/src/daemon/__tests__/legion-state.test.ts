@@ -55,6 +55,7 @@ function stateWithTree() {
     headSha: "abc123",
     verdict: "green",
     failing: [],
+    failingStatuses: [],
     ciSettledAt: 1_724_457_600_000,
     ciCheckRuns: null,
     ciSettlementGeneration: null,
@@ -75,6 +76,7 @@ function legacyV8State(pr: Record<string, unknown>) {
   const {
     verdict: _verdict,
     failing: _failing,
+    failingStatuses: _failingStatuses,
     ciSettledAt: _ciSettledAt,
     ciCheckRuns: _ciCheckRuns,
     ciSettlementGeneration: _ciSettlementGeneration,
@@ -95,6 +97,7 @@ function legacyV8State(pr: Record<string, unknown>) {
 function legacyV11State() {
   const current = stateWithTree();
   const {
+    failingStatuses: _failingStatuses,
     ciCheckRuns: _ciCheckRuns,
     ciSettlementGeneration: _ciSettlementGeneration,
     ciSnapshot: _ciSnapshot,

@@ -459,6 +459,7 @@ describe("startDaemon", () => {
       headSha: "head-1",
       verdict: "green",
       failing: [],
+      failingStatuses: [],
       ciSettledAt: 1_000,
       ciCheckRuns: [{ name: "build", id: 900 }],
       ciSettlementGeneration: null,

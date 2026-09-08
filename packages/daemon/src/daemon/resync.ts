@@ -195,17 +195,27 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     }
     if (!status.isOpen || !status.headSha) continue;
 
-    if (pr.headSha !== status.headSha) {
+    // The PR's lifecycle clock (GitHub's updatedAt) orders head observations.
+    // A same-head read advances it, so a delayed synchronize for an intervening
+    // head is later rejected as older; a different head is accepted only when
+    // the read is strictly newer than every lifecycle update already observed —
+    // an equal clock (second resolution) is not evidence of order.
+    const headUpdatedAt = status.updatedAt === null ? Number.NaN : Date.parse(status.updatedAt);
+    if (pr.headSha === status.headSha) {
+      if (
+        !Number.isNaN(headUpdatedAt) &&
+        (pr.headUpdatedAt === undefined || headUpdatedAt > pr.headUpdatedAt)
+      ) {
+        pr.headUpdatedAt = headUpdatedAt;
+      }
+    } else {
       if (!status.updatedAt) {
         throw new Error(`GitHub CI status is missing updatedAt for ${prKey}`);
       }
-      const headUpdatedAt = Date.parse(status.updatedAt);
       if (Number.isNaN(headUpdatedAt)) {
         throw new Error(`GitHub CI status has an invalid updatedAt for ${prKey}`);
       }
-      // A fetched head older than a lifecycle update already observed for this
-      // PR is a stale view (the head moved on and back while we read): skip it.
-      if (pr.headUpdatedAt !== undefined && headUpdatedAt < pr.headUpdatedAt) {
+      if (pr.headUpdatedAt !== undefined && headUpdatedAt <= pr.headUpdatedAt) {
         console.debug(
           `[legion] ignored stale resync head for ${prKey} fetched=${status.headSha}@${status.updatedAt} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
         );
@@ -227,16 +237,18 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     if (fenceEffect === "advance") {
       writeCiFence(pr, { checkRuns: status.checkRuns, generation: null, snapshot: null });
     }
-    // GitHub's read is a complete view: its failing set replaces the stored one
-    // wholesale (only GitHub can retire a failure the listener cannot see — a
-    // status context, a deleted check). Red only for actual failures; a
-    // cancelled-only failing rollup, like a pending one, uncertifies a green
-    // head and leaves a red one, failing names included, untouched.
+    // GitHub's read is a complete view: its failing check runs and failing
+    // statuses replace the stored ones wholesale (only GitHub can retire a
+    // failure the listener cannot see — a status context, a deleted check).
+    // Red only for actual failures; a cancelled-only failing rollup, like a
+    // pending one, uncertifies a green head and leaves a red one, failing
+    // names included, untouched.
     const failing = status.failingChecks ?? [];
+    const failingStatuses = status.failingStatuses ?? [];
     const verdict =
       status.ciStatus === "passing"
         ? "green"
-        : status.ciStatus === "failing" && failing.length > 0
+        : status.ciStatus === "failing" && failing.length + failingStatuses.length > 0
           ? "red"
           : null;
     // A terminal read holds the tie at this attempt set until the set advances;
@@ -249,7 +261,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     const effects = settleCiVerdict(
       deps.state,
       pr,
-      { verdict, failing, settledAt: now },
+      { verdict, failing, failingStatuses, settledAt: now },
       deps.config
     );
     if (effects.length === 0) continue;

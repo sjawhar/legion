@@ -303,6 +303,7 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: [],
+        failingStatuses: [],
 
         cancelledCount: 0,
         headSha: null,
@@ -373,6 +374,7 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: ["lint", "legacy"],
+        failingStatuses: [],
 
         cancelledCount: 0,
         headSha: null,
@@ -469,6 +471,7 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: ["lint", "unit"],
+        failingStatuses: [],
 
         cancelledCount: 0,
         headSha: "head-1",
@@ -479,6 +482,59 @@ describe("getCiStatusBatch", () => {
         ],
         isOpen: true,
       },
+    });
+  });
+
+  it("keeps failing commit statuses apart from failing check runs, even under one name", async () => {
+    const runner: CommandRunner = async () => ({
+      stdout: JSON.stringify({
+        data: {
+          repo0: {
+            pr0: {
+              state: "OPEN",
+              updatedAt: "2026-08-24T00:00:00.000Z",
+              mergeable: "MERGEABLE",
+              commits: {
+                nodes: [
+                  {
+                    commit: {
+                      oid: "head-1",
+                      statusCheckRollup: {
+                        state: "FAILURE",
+                        contexts: {
+                          pageInfo: { hasNextPage: false, endCursor: null },
+                          nodes: [
+                            { name: "deploy", conclusion: "SUCCESS", databaseId: 100 },
+                            { name: "deploy", statusConclusion: "FAILURE" },
+                            { name: "lint", conclusion: "FAILURE", databaseId: 101 },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      }),
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const result = await getCiStatusBatch(
+      { "ENG-21": { owner: "owner", repo: "repo", number: 1 } },
+      runner
+    );
+
+    expect(result["ENG-21"]).toMatchObject({
+      ciStatus: "failing",
+      failingChecks: ["lint"],
+      failingStatuses: ["deploy"],
+      checkRuns: [
+        { name: "deploy", id: 100 },
+        { name: "lint", id: 101 },
+      ],
     });
   });
 
@@ -637,6 +693,7 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "mergeable",
         failingChecks: [],
+        failingStatuses: [],
 
         cancelledCount: 0,
         headSha: null,
@@ -849,6 +906,7 @@ describe("getCiStatusBatch", () => {
         ciStatus: "failing",
         mergeableStatus: "conflicting",
         failingChecks: [],
+        failingStatuses: [],
 
         cancelledCount: 0,
         headSha: null,

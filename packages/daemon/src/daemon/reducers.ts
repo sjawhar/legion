@@ -35,7 +35,10 @@ export type CiEmission =
 
 export interface CiSettlementInput {
   verdict: PrState["verdict"];
+  /** Failing check runs. */
   failing: string[];
+  /** Failing commit statuses; a live settlement passes the stored ones through unchanged. */
+  failingStatuses: string[];
   settledAt: number;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
@@ -54,9 +57,11 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
  *   lists as failing (a legacy check or status context has no run id). Every
  *   other name keeps its last known outcome; the head is red while any failure
  *   remains (`effectiveOutcome`).
- * - A GitHub rollup read is a complete view: its failing set replaces the
- *   stored one wholesale — only GitHub retires a failure the listener cannot
- *   see (resync).
+ * - A GitHub rollup read is a complete view: its failing check runs and failing
+ *   commit statuses replace the stored ones wholesale. Statuses have no check
+ *   run and are invisible to the listener, so they are kept apart
+ *   (`failingStatuses`): a check run that shares a status's name cannot retire
+ *   it — only GitHub does (resync).
  *
  * An accepted attempt set from either source merges into the stored fence:
  * the per-name maximum over the union of names, nothing pruned
@@ -150,7 +155,8 @@ export function classifySettlement(
 /**
  * The outcome a live settlement establishes for the head (see the CI view
  * contract above): the names it reports — its attempt set plus its failing
- * names — take its outcome; every other name keeps its last known outcome.
+ * names — take its outcome; every other name keeps its last known outcome, and
+ * a failing commit status keeps the head red (`failing` here is check runs only).
  */
 export function effectiveOutcome(
   pr: PrState,
@@ -158,7 +164,7 @@ export function effectiveOutcome(
 ): { verdict: PrState["verdict"]; failing: string[] } {
   const reported = new Set([...incoming.checkRuns.map((run) => run.name), ...incoming.failing]);
   const failing = [...incoming.failing, ...pr.failing.filter((name) => !reported.has(name))];
-  if (failing.length > 0) return { verdict: "red", failing };
+  if (failing.length > 0 || pr.failingStatuses.length > 0) return { verdict: "red", failing };
   return { verdict: incoming.verdict, failing: [] };
 }
 
@@ -237,6 +243,7 @@ export type CiSnapshot = Pick<
   | "headUpdatedAt"
   | "verdict"
   | "failing"
+  | "failingStatuses"
   | "ciSettledAt"
   | "ciCheckRuns"
   | "ciSettlementGeneration"
@@ -250,6 +257,7 @@ export function ciSnapshot(pr: PrState): CiSnapshot {
     headUpdatedAt: pr.headUpdatedAt,
     verdict: pr.verdict,
     failing: [...pr.failing],
+    failingStatuses: [...pr.failingStatuses],
     ciSettledAt: pr.ciSettledAt,
     ciCheckRuns: pr.ciCheckRuns === null ? null : pr.ciCheckRuns.map((run) => ({ ...run })),
     ciSettlementGeneration: pr.ciSettlementGeneration,
@@ -277,7 +285,9 @@ export function ciSnapshotEquals(pr: PrState, snapshot: CiSnapshot): boolean {
     pr.ciSnapshot === snapshot.ciSnapshot &&
     pr.ciReconciled === snapshot.ciReconciled &&
     pr.failing.length === snapshot.failing.length &&
-    pr.failing.every((name, index) => name === snapshot.failing[index])
+    pr.failing.every((name, index) => name === snapshot.failing[index]) &&
+    pr.failingStatuses.length === snapshot.failingStatuses.length &&
+    pr.failingStatuses.every((name, index) => name === snapshot.failingStatuses[index])
   );
 }
 
@@ -286,12 +296,14 @@ export function uncertifyCiVerdict(pr: PrState): void {
   if (pr.verdict !== "green") return;
   pr.verdict = null;
   pr.failing = [];
+  pr.failingStatuses = [];
 }
 
 function ciVerdictEmissions(
   pr: PrState,
   verdict: PrState["verdict"],
-  failing: string[]
+  failing: string[],
+  failingStatuses: string[]
 ): CiEmission[] {
   if (verdict === null) {
     uncertifyCiVerdict(pr);
@@ -299,12 +311,14 @@ function ciVerdictEmissions(
   }
 
   const priorVerdict = pr.verdict;
-  const priorFailing = pr.failing;
+  const priorFailing = [...pr.failing, ...pr.failingStatuses];
   pr.verdict = verdict;
   pr.failing = verdict === "red" ? failing : [];
-  if (priorVerdict === verdict && sameStringMultiset(priorFailing, pr.failing)) return [];
+  pr.failingStatuses = verdict === "red" ? failingStatuses : [];
+  const nowFailing = [...pr.failing, ...pr.failingStatuses];
+  if (priorVerdict === verdict && sameStringMultiset(priorFailing, nowFailing)) return [];
   return verdict === "red"
-    ? [{ type: "ci-settled-red", failing, sha: pr.headSha }]
+    ? [{ type: "ci-settled-red", failing: nowFailing, sha: pr.headSha }]
     : [{ type: "ci-green", sha: pr.headSha }];
 }
 
@@ -315,14 +329,16 @@ export function settleCiVerdict(
   config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
-  return ciVerdictEmissions(pr, input.verdict, input.failing).flatMap((emission) => [
-    {
-      kind: "publish" as const,
-      role: roleToken(state.project, pr.key, "implementer"),
-      payload: emission,
-    },
-    ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
-  ]);
+  return ciVerdictEmissions(pr, input.verdict, input.failing, input.failingStatuses).flatMap(
+    (emission) => [
+      {
+        kind: "publish" as const,
+        role: roleToken(state.project, pr.key, "implementer"),
+        payload: emission,
+      },
+      ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
+    ]
+  );
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -545,6 +561,7 @@ function registerPr(
     ...(headUpdatedAt === undefined ? {} : { headUpdatedAt }),
     verdict: null,
     failing: [],
+    failingStatuses: [],
     ciSettledAt: null,
     ciCheckRuns: null,
     ciSettlementGeneration: null,
@@ -563,6 +580,7 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.headSha = headSha;
   pr.verdict = null;
   pr.failing = [];
+  pr.failingStatuses = [];
   pr.ciSettledAt = null;
   pr.ciCheckRuns = null;
   pr.ciSettlementGeneration = null;

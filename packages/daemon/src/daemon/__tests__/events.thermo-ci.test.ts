@@ -127,6 +127,7 @@ function stateForCi() {
     headSha: "head-1",
     verdict: null,
     failing: [],
+    failingStatuses: [],
     ciSettledAt: null,
     ciCheckRuns: null,
     ciSettlementGeneration: null,
@@ -294,6 +295,7 @@ it("emits settled-red when a green head re-settles red", async () => {
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["lint"],
+    failingStatuses: [],
     ciSettledAt: 2,
   });
   expect(published).toEqual([
@@ -308,6 +310,7 @@ it("emits settled-red when a red head re-settles with a changed failing set", as
     ...state.prs["acme/widgets#7"],
     verdict: "red",
     failing: ["unit"],
+    failingStatuses: [],
     ciSettledAt: 1,
   };
   const nats = new FakeNats();
@@ -350,6 +353,7 @@ it("emits settled-red when duplicate failing names change to a different multise
     ...state.prs["acme/widgets#7"],
     verdict: "red",
     failing: ["test", "test"],
+    failingStatuses: [],
     ciSettledAt: 1,
   };
   const nats = new FakeNats();
@@ -458,6 +462,7 @@ it("drops a lower-generation same-check-run settlement after a newer delivery", 
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["unit"],
+    failingStatuses: [],
     ciSettledAt: 2,
     ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
@@ -496,6 +501,7 @@ it("emits an in-order higher-generation settlement for the same check run", asyn
   expect(state.prs["acme/widgets#7"]).toMatchObject({
     verdict: "red",
     failing: ["unit"],
+    failingStatuses: [],
     ciSettledAt: 2,
     ciCheckRuns: [{ name: "build", id: 900 }],
     ciSettlementGeneration: 1,
@@ -1096,12 +1102,14 @@ it("preserves a live check-run fence through a same-head status-context resync",
 function rollup(
   ciStatus: "passing" | "failing" | "pending",
   checkRuns: CheckRunRef[],
-  failingChecks: string[] = []
+  failingChecks: string[] = [],
+  failingStatuses: string[] = []
 ) {
   return {
     "acme/widgets#7": {
       ciStatus,
       failingChecks,
+      failingStatuses,
       cancelledCount: 0,
       mergeableStatus: null,
       headSha: "head-1",
@@ -1770,10 +1778,13 @@ it("only GitHub's complete read retires a failure the listener cannot see", asyn
     // GitHub: the check run passed but a commit status "deploy-preview" (no run id) failed.
     await resyncWith(
       state,
-      rollup("failing", [{ name: "build", id: 100 }], ["deploy-preview"]),
+      rollup("failing", [{ name: "build", id: 100 }], [], ["deploy-preview"]),
       applied
     );
-    expect(pr).toMatchObject({ verdict: "red", failing: ["deploy-preview"] });
+    expect(pr).toMatchObject({ verdict: "red", failing: [], failingStatuses: ["deploy-preview"] });
+    expect(publishedEmissions(applied)).toEqual([
+      { type: "ci-settled-red", sha: "head-1", failing: ["deploy-preview"] },
+    ]);
 
     // The listener never sees statuses: its green over a newer build keeps the status failure.
     nats.emit(
@@ -1790,15 +1801,70 @@ it("only GitHub's complete read retires a failure the listener cannot see", asyn
     await pump.drain();
     expect(pr).toMatchObject({
       verdict: "red",
-      failing: ["deploy-preview"],
+      failing: [],
+      failingStatuses: ["deploy-preview"],
       ciCheckRuns: [{ name: "build", id: 200 }],
     });
     expect(published).toEqual([]);
 
     // GitHub reads the same set with the status now passing: green.
     await resyncWith(state, rollup("passing", [{ name: "build", id: 200 }]), applied);
-    expect(pr).toMatchObject({ verdict: "green", failing: [], ciReconciled: true });
+    expect(pr).toMatchObject({
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciReconciled: true,
+    });
     expect(publishedEmissions(applied).at(-1)).toEqual({ type: "ci-green", sha: "head-1" });
+  } finally {
+    pump.stop();
+  }
+});
+
+it("a check run that shares a failing commit status's name cannot retire the status", async () => {
+  const { state } = stateForCi();
+  const pr = state.prs["acme/widgets#7"];
+  if (!pr) throw new Error("fixture PR missing");
+  pr.reviewDecision = "approved";
+  const { nats, published, pump } = startCiPump(state);
+  const applied: Effect[][] = [];
+  try {
+    // GitHub: check run "deploy" 100 passed; commit status "deploy" failed.
+    await resyncWith(
+      state,
+      rollup("failing", [{ name: "deploy", id: 100 }], [], ["deploy"]),
+      applied
+    );
+    expect(pr).toMatchObject({ verdict: "red", failing: [], failingStatuses: ["deploy"] });
+
+    // The listener reports the check run "deploy" re-running green: it observed the run, not the status.
+    nats.emit(
+      "notifications.github.acme.widgets.pr.7.checks",
+      envelope(
+        settledChecks({
+          check_runs: [{ name: "deploy", id: 101 }],
+          generation: 2,
+          snapshot: "hash-b",
+          settled_at: 2,
+        })
+      )
+    );
+    await pump.drain();
+    expect(pr).toMatchObject({
+      verdict: "red",
+      failingStatuses: ["deploy"],
+      ciCheckRuns: [{ name: "deploy", id: 101 }],
+    });
+    expect(published).toEqual([]);
+
+    // GitHub reads the status passing: green, and only now pr-ready.
+    await resyncWith(state, rollup("passing", [{ name: "deploy", id: 101 }]), applied);
+    expect(pr).toMatchObject({ verdict: "green", failingStatuses: [] });
+    expect(
+      publishedEmissions(applied)
+        .slice(-2)
+        .map((emission) => emission.type)
+    ).toEqual(["ci-green", "pr-ready"]);
   } finally {
     pump.stop();
   }

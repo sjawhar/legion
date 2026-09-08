@@ -51,6 +51,7 @@ function prState(issue: IssueKey): PrState {
     headSha: "head-7",
     verdict: "green",
     failing: [],
+    failingStatuses: [],
     ciSettledAt: 3_000,
     ciCheckRuns: [{ name: "build", id: 3 }],
     ciSettlementGeneration: null,

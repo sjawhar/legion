@@ -44,6 +44,7 @@ describe("Envoy GitHub envelope goldens", () => {
     Object.assign(state.prs[prKey], {
       verdict: "red",
       failing: ["unit"],
+      failingStatuses: [],
       ciSettledAt: 1,
       ciCheckRuns: [{ name: "build", id: 1 }],
       reviewDecision: "approved",
@@ -66,6 +67,7 @@ describe("Envoy GitHub envelope goldens", () => {
       headUpdatedAt: Date.parse(synchronized.payload.updated_at),
       verdict: null,
       failing: [],
+      failingStatuses: [],
       ciSettledAt: null,
       ciCheckRuns: null,
       fixAttempts: 1,

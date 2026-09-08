@@ -59,7 +59,10 @@ export interface PrState {
   headUpdatedAt?: number;
   /** The last SETTLED verdict for this head; a rerun in flight makes it unknown at the next resync. */
   verdict: "green" | "red" | null;
+  /** Failing check runs: reported by the listener or by GitHub's rollup. */
   failing: string[];
+  /** Failing commit statuses (no check run): only GitHub's rollup reports or retires these. */
+  failingStatuses: string[];
   ciSettledAt: number | null;
   /** The settlement's attempt set: the latest check-run id per check name, sorted by name. Null until a settlement or a rollup with check runs is accepted. */
   ciCheckRuns: CheckRunRef[] | null;
@@ -205,6 +208,7 @@ const PrStateSchema = z
     headUpdatedAt: z.number().optional(),
     verdict: z.enum(["green", "red"]).nullable(),
     failing: z.array(z.string()),
+    failingStatuses: z.array(z.string()),
     ciSettledAt: z.number().nullable(),
     ciCheckRuns: CheckRunSetSchema.nullable(),
     ciSettlementGeneration: z.number().int().nonnegative().nullable(),
@@ -476,6 +480,7 @@ function migrateV11State(state: unknown): unknown {
             key,
             {
               ...pr,
+              failingStatuses: [],
               ciCheckRuns: null,
               ciSettlementGeneration: null,
               ciSnapshot: null,
