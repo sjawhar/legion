@@ -125,13 +125,21 @@ export async function handleMergeGate(
   if (pr.repo !== snapshot.repo) {
     throw new Error(`GitHub returned PR #${number} from an unexpected repository`);
   }
-  // GitHub's read is the head's current state: a different head replaces the
-  // stored one; the same head still advances the lifecycle clock, so a delayed
-  // synchronize for an intervening head is rejected as older (as resync does).
+  // GitHub's read orders against the PR's lifecycle clock as resync does: a
+  // different head replaces the stored one unless the read is strictly older
+  // than a lifecycle update already observed (one that landed before or while
+  // the read was in flight); the same head still advances the clock, so a
+  // delayed synchronize for an intervening head is rejected as older.
   if (pr.headSha !== snapshot.head.sha) {
-    resetPrHead(pr, snapshot.head.sha);
-    pr.headUpdatedAt = snapshot.updatedAt;
-    await ctx.save();
+    if (pr.headUpdatedAt !== undefined && snapshot.updatedAt < pr.headUpdatedAt) {
+      console.debug(
+        `[legion] ignored stale merge-gate head for ${pr.repo}#${pr.number} fetched=${snapshot.head.sha}@${new Date(snapshot.updatedAt).toISOString()} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
+      );
+    } else {
+      resetPrHead(pr, snapshot.head.sha);
+      pr.headUpdatedAt = snapshot.updatedAt;
+      await ctx.save();
+    }
   } else if (pr.headUpdatedAt === undefined || snapshot.updatedAt > pr.headUpdatedAt) {
     pr.headUpdatedAt = snapshot.updatedAt;
     await ctx.save();

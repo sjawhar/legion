@@ -282,6 +282,88 @@ describe("thermonuclear API regressions", () => {
     });
   });
 
+  it("a fetched head older than a lifecycle update that landed during the read does not rewind the PR", async () => {
+    // A -> B -> A: GitHub is briefly at B when the gate reads; A comes back at
+    // t3 and its synchronize lands while the read is outstanding.
+    const state = stateWithRoot();
+    state.prs["acme/widgets#17"] = {
+      key: root,
+      repo: "acme/widgets",
+      number: 17,
+      headSha: "head-a",
+      headUpdatedAt: Date.parse("2026-09-07T01:00:00Z"),
+      verdict: "green",
+      failing: [],
+      failingStatuses: [],
+      ciSettledAt: 1,
+      ciCheckRuns: [{ name: "build", id: 1 }],
+      ciSettlementGeneration: 1,
+      ciSnapshot: "hash-a",
+      ciReconciled: false,
+      reviewDecision: "approved",
+      fixAttempts: 0,
+    };
+    const before = structuredClone(state.prs["acme/widgets#17"]);
+    api = startApi(state, {
+      runner: async (command) => {
+        if (command.some((part) => part.endsWith("/pulls/17"))) {
+          reduceGithubEvent(
+            state,
+            "notifications.github.acme.widgets.pull_request.synchronize",
+            {
+              event_id: "back-to-a",
+              issued_at: Date.parse("2026-09-07T03:00:00Z"),
+              payload: {
+                kind: "pr",
+                action: "synchronize",
+                repo: "acme/widgets",
+                number: "17",
+                head_sha: "head-a",
+                updated_at: "2026-09-07T03:00:00Z",
+              },
+            },
+            config()
+          );
+          return {
+            stdout: JSON.stringify({
+              number: 17,
+              head: { ref: "legion/issue-1", sha: "head-b" },
+              updated_at: "2026-09-07T02:00:00Z",
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (command.some((part) => part.endsWith("/reviews"))) {
+          return {
+            stdout: JSON.stringify([
+              { user: { login: "sami" }, state: "APPROVED", commit_id: "head-a" },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      },
+    });
+    const rootSession = await startRoot(api);
+
+    const gate = await post(api, "/legion/v1/merge-gate", {
+      tree: root,
+      pr: 17,
+      sessionId: rootSession.sessionId,
+      secret: rootSession.secret,
+    });
+
+    // The older fetched head B is ignored; A's CI state and approval survive.
+    expect(gate.status).toBe(200);
+    expect(await gate.json()).toEqual({ approved: true, pr: 17, headSha: "head-a" });
+    expect(state.prs["acme/widgets#17"]).toEqual({
+      ...before,
+      headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
+    });
+  });
+
   it("rejects an invalid contract before process exit can mutate lifecycle state", async () => {
     const state = stateWithRoot();
     let markedDead = false;
