@@ -1198,7 +1198,7 @@ it("a pending GitHub read holds no tie: the terminal live settlement at the same
   }
 });
 
-it("a rollup with an older attempt set than a GitHub-authored fence is ignored; a newer one replaces it", async () => {
+it("a rollup with an older attempt set than a GitHub-authored fence is ignored; a newer one advances it", async () => {
   const { state } = stateForCi();
   const applied: Effect[][] = [];
 
@@ -1271,7 +1271,7 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
   });
   expect(publishedEmissions(applied)).toHaveLength(1);
 
-  // GitHub's newer read (build re-ran as 300, green) replaces the fence.
+  // GitHub's newer read (build re-ran as 300, green) advances the fence.
   await resyncWith(
     state,
     rollup("passing", [

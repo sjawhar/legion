@@ -45,6 +45,26 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
+/*
+ * CI view contract. Two sources describe a head's checks:
+ *
+ * - A live settlement (Envoy listener) is a possibly incomplete view — a missed
+ *   webhook, a record recreated after the KV TTL. It decides the outcome of
+ *   every name it reports: the names in its attempt set plus the names it
+ *   lists as failing (a legacy check or status context has no run id). Every
+ *   other name keeps its last known outcome; the head is red while any failure
+ *   remains (`effectiveOutcome`).
+ * - A GitHub rollup read is a complete view: its failing set replaces the
+ *   stored one wholesale — only GitHub retires a failure the listener cannot
+ *   see (resync).
+ *
+ * An accepted attempt set from either source merges into the stored fence:
+ * the per-name maximum over the union of names, nothing pruned
+ * (`writeCiFence`). The fence is the head's high-watermark, so a name an
+ * incomplete view omitted cannot later reappear as new. Ordering compares only
+ * the names the incoming view carries (`compareAttemptSets`).
+ */
+
 /** An attempt set: the latest GitHub check-run id per check name, sorted by name. */
 export type AttemptSet = readonly CheckRunRef[];
 
@@ -128,18 +148,14 @@ export function classifySettlement(
 }
 
 /**
- * A live settlement's outcome covers only the names in its set; for every other
- * name the last known outcome stands. A name the settlement reports — at any id
- * the ordering accepted, including the same run observed in place — is decided
- * by the settlement alone. Red whenever any failure remains; otherwise the
- * settlement's own verdict (green, or null when it was cancelled-only).
+ * The outcome a live settlement establishes for the head (see the CI view
+ * contract above): the names it reports — its attempt set plus its failing
+ * names — take its outcome; every other name keeps its last known outcome.
  */
 export function effectiveOutcome(
   pr: PrState,
   incoming: Pick<SettlementCandidate, "checkRuns" | "verdict" | "failing">
 ): { verdict: PrState["verdict"]; failing: string[] } {
-  // A failing name without a check-run id (a legacy check, a status context) is
-  // reported by its failure alone; it is retained once, not duplicated.
   const reported = new Set([...incoming.checkRuns.map((run) => run.name), ...incoming.failing]);
   const failing = [...incoming.failing, ...pr.failing.filter((name) => !reported.has(name))];
   if (failing.length > 0) return { verdict: "red", failing };
@@ -154,22 +170,24 @@ export interface CiFence {
 }
 
 /**
- * What a rollup read from GitHub may do to the stored fence: `replace` it (a
- * newer attempt set, or nothing fenced yet); `apply` its verdict at an equal
- * set, keeping the listener identity for duplicate detection; apply it
- * `unfenced` when neither the rollup nor the stored fence has a check run; or
- * be skipped as `stale` (an older set; or no check runs where some are fenced)
- * or a `conflict` (a mixed set). The live counterpart is `classifySettlement`.
+ * What a rollup read from GitHub may do to the stored fence: `advance` it (a
+ * newer attempt set, or nothing fenced yet — the set merges in and the
+ * identity becomes GitHub's, with no listener generation); `apply` its verdict
+ * at an equal set, keeping the listener identity for duplicate detection;
+ * apply it `unfenced` when neither the rollup nor the stored fence has a check
+ * run; or be skipped as `stale` (an older set; or no check runs where some are
+ * fenced) or a `conflict` (a mixed set). The live counterpart is
+ * `classifySettlement`.
  */
-export type GitHubFenceEffect = "replace" | "apply" | "unfenced" | "stale" | "conflict";
+export type GitHubFenceEffect = "advance" | "apply" | "unfenced" | "stale" | "conflict";
 
 export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFenceEffect {
   const fenced = pr.ciCheckRuns !== null && pr.ciCheckRuns.length > 0;
   if (checkRuns.length === 0) return fenced ? "stale" : "unfenced";
-  if (pr.ciCheckRuns === null) return "replace";
+  if (pr.ciCheckRuns === null) return "advance";
   switch (compareAttemptSets(pr.ciCheckRuns, checkRuns)) {
     case "newer":
-      return "replace";
+      return "advance";
     case "equal":
       return "apply";
     case "older":
@@ -181,10 +199,8 @@ export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFen
 
 /**
  * Writes a fence its caller already accepted (`classifySettlement` or
- * `acceptGitHubFence`). The attempt set merges into the stored one — the
- * per-name maximum over the union of names, nothing pruned — so the fence is
- * the head's high-watermark across every accepted view and a name an
- * incomplete view omits cannot later reappear as new.
+ * `acceptGitHubFence`): the attempt set merges into the stored one (see the
+ * CI view contract above); the identity is the caller's.
  */
 export function writeCiFence(pr: PrState, fence: CiFence): void {
   pr.ciCheckRuns = mergeAttemptSets(pr.ciCheckRuns ?? [], fence.checkRuns);
@@ -193,7 +209,7 @@ export function writeCiFence(pr: PrState, fence: CiFence): void {
 }
 
 /** Per-name maximum over the union of two attempt sets, in canonical name order. */
-export function mergeAttemptSets(stored: AttemptSet, incoming: AttemptSet): CheckRunRef[] {
+function mergeAttemptSets(stored: AttemptSet, incoming: AttemptSet): CheckRunRef[] {
   const merged = new Map(stored.map((run) => [run.name, run.id]));
   for (const run of incoming) {
     const known = merged.get(run.name);

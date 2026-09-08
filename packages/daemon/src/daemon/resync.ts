@@ -215,7 +215,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       pr.headUpdatedAt = headUpdatedAt;
     }
     // GitHub's rollup carries an attempt set with no listener identity. It
-    // replaces the stored fence, applies at an equal set, applies unfenced, or
+    // advances the stored fence, applies at an equal set, applies unfenced, or
     // is an older or inconsistent view and is skipped — acceptGitHubFence decides.
     const fenceEffect = acceptGitHubFence(pr, status.checkRuns);
     if (fenceEffect === "stale" || fenceEffect === "conflict") {
@@ -224,7 +224,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       );
       continue;
     }
-    if (fenceEffect === "replace") {
+    if (fenceEffect === "advance") {
       writeCiFence(pr, { checkRuns: status.checkRuns, generation: null, snapshot: null });
     }
     // GitHub's read is a complete view: its failing set replaces the stored one
