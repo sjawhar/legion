@@ -1102,14 +1102,13 @@ it("preserves a live check-run fence through a same-head status-context resync",
 function rollup(
   ciStatus: "passing" | "failing" | "pending",
   checkRuns: CheckRunRef[],
-  failingChecks: string[] = [],
-  failingStatuses: string[] = []
+  failures: { checks?: string[]; statuses?: string[] } = {}
 ) {
   return {
     "acme/widgets#7": {
       ciStatus,
-      failingChecks,
-      failingStatuses,
+      failingChecks: failures.checks ?? [],
+      failingStatuses: failures.statuses ?? [],
       cancelledCount: 0,
       mergeableStatus: null,
       headSha: "head-1",
@@ -1219,7 +1218,7 @@ it("a rollup with an older attempt set than a GitHub-authored fence is ignored; 
         { name: "build", id: 200 },
         { name: "lint", id: 900 },
       ],
-      ["build"]
+      { checks: ["build"] }
     ),
     applied
   );
@@ -1376,7 +1375,7 @@ it("GitHub's authority at an attempt set survives an agreeing live refresh and i
     expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "green", ciReconciled: false });
 
     // GitHub reads the same set red: it holds the tie there.
-    await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], ["build"]));
+    await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], { checks: ["build"] }));
     expect(state.prs["acme/widgets#7"]).toMatchObject({
       verdict: "red",
       ciSettlementGeneration: 1,
@@ -1489,7 +1488,7 @@ for (const order of orders) {
         if (step === "R") {
           await resyncWith(
             state,
-            rollup("failing", [{ name: "build", id: 900 }], ["build"]),
+            rollup("failing", [{ name: "build", id: 900 }], { checks: ["build"] }),
             applied
           );
           githubSeen = true;
@@ -1546,7 +1545,10 @@ for (const order of [
         envelope(settledChecks({ check_runs: set, generation: 1, settled_at: 1 }))
       );
       await pump.drain();
-      await resyncWith(state, rollup("failing", [{ name: "build", id: 900 }], ["build"]));
+      await resyncWith(
+        state,
+        rollup("failing", [{ name: "build", id: 900 }], { checks: ["build"] })
+      );
       const before = published.length;
       for (const step of order) {
         const generation = step === "L2" ? 2 : 3;
@@ -1593,7 +1595,7 @@ for (const approved of [false, true]) {
             { name: "build", id: 100 },
             { name: "lint", id: 900 },
           ],
-          ["lint"]
+          { checks: ["lint"] }
         ),
         applied
       );
@@ -1778,7 +1780,7 @@ it("only GitHub's complete read retires a failure the listener cannot see", asyn
     // GitHub: the check run passed but a commit status "deploy-preview" (no run id) failed.
     await resyncWith(
       state,
-      rollup("failing", [{ name: "build", id: 100 }], [], ["deploy-preview"]),
+      rollup("failing", [{ name: "build", id: 100 }], { statuses: ["deploy-preview"] }),
       applied
     );
     expect(pr).toMatchObject({ verdict: "red", failing: [], failingStatuses: ["deploy-preview"] });
@@ -1832,7 +1834,7 @@ it("a check run that shares a failing commit status's name cannot retire the sta
     // GitHub: check run "deploy" 100 passed; commit status "deploy" failed.
     await resyncWith(
       state,
-      rollup("failing", [{ name: "deploy", id: 100 }], [], ["deploy"]),
+      rollup("failing", [{ name: "deploy", id: 100 }], { statuses: ["deploy"] }),
       applied
     );
     expect(pr).toMatchObject({ verdict: "red", failing: [], failingStatuses: ["deploy"] });
@@ -1934,7 +1936,7 @@ it("check names that collide with Object.prototype are ordinary attempt-set memb
           { name: "constructor", id: 201 },
           { name: "toString", id: 300 },
         ],
-        ["constructor"]
+        { checks: ["constructor"] }
       )
     );
     expect(state.prs["acme/widgets#7"]).toMatchObject({ verdict: "red", ciReconciled: true });

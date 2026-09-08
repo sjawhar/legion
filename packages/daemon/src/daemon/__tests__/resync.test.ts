@@ -786,29 +786,62 @@ describe("runResync", () => {
     });
   });
 
-  it("a fetched head with a lifecycle clock equal to the stored one is not evidence of order", async () => {
+  it("out-of-order equal-clock synchronizes converge on GitHub's read of the current head", async () => {
+    // Two pushes within one second: B then C, delivered C first. The stale B
+    // arrives at the same clock and is accepted (a webhook cannot tell); the
+    // next read of the current head C, at that same clock, must win.
     const state = newLegionState("omp", 1);
     const pr = prAtHeadA(state);
-    const before = structuredClone(pr);
-    const dispatched: Effect[][] = [];
+    const T = "2026-08-24T00:00:05.000Z";
+    const synchronize = (sha: string) =>
+      reduceGithubEvent(
+        state,
+        "notifications.github.sjawhar.legion.pull_request.synchronize",
+        {
+          event_id: `sync-${sha}`,
+          issued_at: Date.parse(T),
+          payload: {
+            kind: "pr",
+            action: "synchronize",
+            repo: "sjawhar/legion",
+            number: "7",
+            head_sha: sha,
+            updated_at: T,
+          },
+        },
+        resyncDeps(state, []).config
+      );
+    synchronize("head-c");
+    synchronize("head-b");
+    expect(pr).toMatchObject({ headSha: "head-b", headUpdatedAt: Date.parse(T) });
 
+    const dispatched: Effect[][] = [];
     await runResync({
       ...resyncDeps(state, []),
       fetchCiStatusBatch: async () => ({
         "sjawhar/legion#7": {
-          ...fetchedHeadB["sjawhar/legion#7"],
-          updatedAt: "2026-08-24T00:00:00.000Z",
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-c",
+          updatedAt: T,
+          checkRuns: [{ name: "build", id: 990 }],
+          isOpen: true,
         },
       }),
       applyEffects: async (effects) => {
         dispatched.push(effects);
       },
     });
-
-    expect(pr).toEqual(before);
-    expect(dispatched).toEqual([]);
+    expect(pr).toMatchObject({
+      headSha: "head-c",
+      headUpdatedAt: Date.parse(T),
+      verdict: "green",
+      ciCheckRuns: [{ name: "build", id: 990 }],
+    });
+    expect(
+      dispatched.flat().map((effect) => (effect.kind === "publish" ? effect.payload : effect.kind))
+    ).toEqual([{ type: "ci-green", sha: "head-c" }]);
   });
-
   it("fences a resynced head against a redelivered older synchronize", async () => {
     const state = newLegionState("omp", 1);
     state.issues[issue] = {

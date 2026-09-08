@@ -197,9 +197,12 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
 
     // The PR's lifecycle clock (GitHub's updatedAt) orders head observations.
     // A same-head read advances it, so a delayed synchronize for an intervening
-    // head is later rejected as older; a different head is accepted only when
-    // the read is strictly newer than every lifecycle update already observed —
-    // an equal clock (second resolution) is not evidence of order.
+    // head is later rejected as older. A different fetched head is skipped only
+    // when its clock is strictly older than a lifecycle update already observed:
+    // the read is GitHub's current head, and at an equal clock (second
+    // resolution) it outranks a webhook — deliveries may arrive out of order, and
+    // a stale equal-clock synchronize must not block the read that corrects it.
+    // A head that moved during the read is caught by the snapshot guard above.
     const headUpdatedAt = status.updatedAt === null ? Number.NaN : Date.parse(status.updatedAt);
     if (pr.headSha === status.headSha) {
       if (
@@ -215,7 +218,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       if (Number.isNaN(headUpdatedAt)) {
         throw new Error(`GitHub CI status has an invalid updatedAt for ${prKey}`);
       }
-      if (pr.headUpdatedAt !== undefined && headUpdatedAt <= pr.headUpdatedAt) {
+      if (pr.headUpdatedAt !== undefined && headUpdatedAt < pr.headUpdatedAt) {
         console.debug(
           `[legion] ignored stale resync head for ${prKey} fetched=${status.headSha}@${status.updatedAt} known=${pr.headSha}@${new Date(pr.headUpdatedAt).toISOString()}`
         );

@@ -33,12 +33,14 @@ export type CiEmission =
   | { type: "ci-green"; sha: string }
   | { type: "ci-settled-red"; sha: string; failing: string[] };
 
-export interface CiSettlementInput {
+/** The head's CI outcome: failing check runs and failing commit statuses (see the CI view contract). */
+export interface CiOutcome {
   verdict: PrState["verdict"];
-  /** Failing check runs. */
   failing: string[];
-  /** Failing commit statuses; a live settlement passes the stored ones through unchanged. */
   failingStatuses: string[];
+}
+
+export interface CiSettlementInput extends CiOutcome {
   settledAt: number;
 }
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {
@@ -156,16 +158,19 @@ export function classifySettlement(
  * The outcome a live settlement establishes for the head (see the CI view
  * contract above): the names it reports — its attempt set plus its failing
  * names — take its outcome; every other name keeps its last known outcome, and
- * a failing commit status keeps the head red (`failing` here is check runs only).
+ * the stored commit-status failures stand, keeping the head red.
  */
 export function effectiveOutcome(
   pr: PrState,
   incoming: Pick<SettlementCandidate, "checkRuns" | "verdict" | "failing">
-): { verdict: PrState["verdict"]; failing: string[] } {
+): CiOutcome {
   const reported = new Set([...incoming.checkRuns.map((run) => run.name), ...incoming.failing]);
   const failing = [...incoming.failing, ...pr.failing.filter((name) => !reported.has(name))];
-  if (failing.length > 0 || pr.failingStatuses.length > 0) return { verdict: "red", failing };
-  return { verdict: incoming.verdict, failing: [] };
+  // Commit statuses are invisible to the listener: the stored ones stand as they are.
+  const failingStatuses = [...pr.failingStatuses];
+  if (failing.length > 0 || failingStatuses.length > 0)
+    return { verdict: "red", failing, failingStatuses };
+  return { verdict: incoming.verdict, failing: [], failingStatuses };
 }
 
 export interface CiFence {
